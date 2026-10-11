@@ -50,6 +50,8 @@ kargo new mylib --lib -t jvm,wasm,native
 kargo new api -w ktor,serialization --group io.acme
 ```
 
+The generated code lives in the package `<group>.<name>`, with the name lowercased and every character other than a letter or digit replaced by `_` (`my-app` becomes `com.example.my_app`). A segment that is a Kotlin or Java keyword gets a `_` suffix, so `kargo new class` uses `com.example.class_`.
+
 ## `kargo init`
 
 Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten.

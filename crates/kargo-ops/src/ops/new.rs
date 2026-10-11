@@ -39,9 +39,10 @@ impl NewOptions {
     }
 
     /// The Kotlin package of the generated code, e.g. `com.example.my_app`.
+    /// Segments that are Kotlin or Java keywords get a `_` suffix (`class` becomes `class_`).
     pub fn package(&self) -> String {
         let ident: String = self.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
-        format!("{}.{ident}", self.group)
+        self.group.split('.').chain([ident.as_str()]).map(package_segment).collect::<Vec<_>>().join(".")
     }
 
     fn validate(&self) -> Result<()> {
@@ -75,6 +76,79 @@ impl NewOptions {
         }
         Ok(())
     }
+}
+
+/// Kotlin hard keywords plus Java keywords and literals: none of them can be a
+/// package segment in the generated Kotlin (or, with Lombok and Android, Java) code.
+const RESERVED_WORDS: &[&str] = &[
+    "abstract",
+    "as",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "false",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "fun",
+    "goto",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "int",
+    "interface",
+    "is",
+    "long",
+    "native",
+    "new",
+    "null",
+    "object",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "strictfp",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "true",
+    "try",
+    "typealias",
+    "typeof",
+    "val",
+    "var",
+    "void",
+    "volatile",
+    "when",
+    "while",
+];
+
+/// Escapes a package segment that is a reserved word by appending `_`.
+fn package_segment(segment: &str) -> String {
+    if RESERVED_WORDS.contains(&segment) { format!("{segment}_") } else { segment.to_owned() }
 }
 
 /// A file to write, relative to the project root.
@@ -451,6 +525,20 @@ mod tests {
             let m = Manifest::parse(&files[0].contents).unwrap_or_else(|e| panic!("{targets:?} {frameworks:?}: {e:#}"));
             assert_eq!(m.targets.enabled(), *targets);
         }
+    }
+
+    #[test]
+    fn keyword_names_get_an_escaped_package() {
+        assert_eq!(opts("class").package(), "com.example.class_");
+        assert_eq!(opts("in").package(), "com.example.in_");
+        assert_eq!(opts("my-app").package(), "com.example.my_app");
+        assert_eq!(NewOptions { group: "org.package".into(), ..opts("fun") }.package(), "org.package_.fun_");
+        let files = template(&opts("object")).unwrap();
+        let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
+        assert!(main.starts_with(
+            "package com.example.object_
+"
+        ));
     }
 
     #[test]

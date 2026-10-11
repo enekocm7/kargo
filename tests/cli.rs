@@ -42,6 +42,14 @@ fn new_rejects_invalid_input() {
 }
 
 #[test]
+fn new_escapes_keyword_names_in_the_package() {
+    let p = Project::new();
+    p.kargo().args(["new", "class", "--no-vcs"]).assert().success();
+    let main = std::fs::read_to_string(p.path().join("class/src/Main.kt")).unwrap();
+    assert!(main.starts_with("package com.example.class_\n"), "{main}");
+}
+
+#[test]
 fn init_uses_directory_name_and_keeps_files() {
     let p = Project::new();
     let dir = p.path().join("existing-proj");
