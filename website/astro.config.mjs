@@ -10,7 +10,6 @@ export default defineConfig({
 		starlight({
 			title: 'Kargo',
 			description: 'Cargo for Kotlin: one kargo.toml, one CLI, for the JVM, WebAssembly, Kotlin/Native and Android.',
-			logo: { src: './src/assets/logo.svg', replacesTitle: false },
 			favicon: '/favicon.svg',
 			customCss: ['./src/styles/custom.css'],
 			components: {
