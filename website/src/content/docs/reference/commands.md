@@ -50,6 +50,8 @@ kargo new mylib --lib -t jvm,wasm,native
 kargo new api -w ktor,serialization --group io.acme
 ```
 
+The generated `kargo.toml` stays minimal: a `[package]` section, the `[target.*]` sections for any non-JVM targets (plus an empty `[target.jvm]` when JVM is one of several targets) and `[frameworks]` when you pass `--with`. It has no `[kotlin]` section unless `--kotlin` picks a non-default version, so the project uses Kargo's default Kotlin version and JVM target. Add `[dependencies]`, `[dev-dependencies]` and `[tasks]` when you need them; `kargo add` creates the dependency sections for you.
+
 The generated code lives in the package `<group>.<name>`, with the name lowercased and every character other than a letter or digit replaced by `_` (`my-app` becomes `com.example.my_app`). A segment that is a Kotlin or Java keyword gets a `_` suffix, so `kargo new class` uses `com.example.class_`.
 
 Kargo runs `git init` in the new directory when `git` is on the `PATH`, unless you pass `--no-vcs` or the directory is already inside a git repository (a monorepo or an `examples/` folder), in which case the project joins that repository instead of nesting a new one. A `.gitignore` is written either way, unless one already exists.
@@ -149,6 +151,34 @@ kargo doc [--open] [-t <target>]
 | `-t, --target <target>` | Only this target (repeatable); defaults to every enabled target |
 
 Configure it with [`[doc]`](../manifest/#doc). See [API documentation](../../guides/documentation/).
+
+## `kargo fmt`
+
+Format the Kotlin files in `src/`, `src-<target>/`, `tests/` and `tests-<target>/` with ktlint.
+
+```sh
+kargo fmt [--check]
+```
+
+| Option | Meaning |
+|---|---|
+| `--check` | Report unformatted code without changing files; exit with code 101 if there is any |
+
+Without `--check`, files are rewritten in place, and the command exits with code 101 if ktlint found problems it can't fix. ktlint reads `.editorconfig`; configure the rest with [`[fmt]`](../manifest/#fmt). See [Formatting and linting](../../guides/formatting-and-linting/).
+
+## `kargo lint`
+
+Analyze the Kotlin files in `src/`, `src-<target>/`, `tests/` and `tests-<target>/` with detekt. Exits with code 101 if detekt reports issues.
+
+```sh
+kargo lint [--create-baseline]
+```
+
+| Option | Meaning |
+|---|---|
+| `--create-baseline` | Record the current issues in the baseline file (`detekt-baseline.xml` by default) instead of reporting them |
+
+detekt reads `detekt.yml`; configure the rest with [`[lint]`](../manifest/#lint). See [Formatting and linting](../../guides/formatting-and-linting/).
 
 ## `kargo add`
 
@@ -304,9 +334,12 @@ List tasks, or run one. Extra arguments are appended to the task's last command.
 
 ```sh
 kargo task               # list
+kargo task --list        # the same
 kargo task <name> [args]
 kargo <name> [args]      # shorthand
 ```
+
+Inside a project, `kargo --help` also lists its tasks.
 
 ## `kargo plugins`
 
@@ -334,9 +367,26 @@ Manage JDKs and Kotlin/Native distributions.
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 
+## `kargo daemon`
+
+Show or stop the background compiler daemons that keep the Kotlin compiler warm between builds. See [Build performance](../../guides/build-performance/#the-compiler-daemon).
+
+| Subcommand | Meaning |
+|---|---|
+| `status` | List running daemons with their process ID and state directory |
+| `stop` | Stop every running daemon; the next build starts a new one |
+
 ## `kargo info`
 
 Print project information: package, targets, toolchains and paths.
+
+## `kargo completions`
+
+Print a shell completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish`. It completes commands, flags and targets, plus the current project's tasks, `kargo-*` plugins, framework names and installed toolchains. See [Shell completions](../../getting-started/installation/#4-shell-completions-optional) for how to load it.
+
+```sh
+kargo completions bash
+```
 
 ## `kargo <name>`
 

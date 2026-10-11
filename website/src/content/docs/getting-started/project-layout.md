@@ -116,6 +116,7 @@ target/
 │   ├── native/
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
+├── lint/                         Kargo's detekt settings for kargo lint
 └── android/                      the generated Gradle project
 ```
 

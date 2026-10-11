@@ -391,6 +391,48 @@ fn tasks_list_run_and_dependencies() {
 }
 
 #[test]
+fn help_and_task_list_show_project_tasks() {
+    let p = Project::new();
+    p.kargo().arg("--help").assert().success().stdout(predicate::str::contains("Tasks").not());
+    p.file("kargo.toml", &manifest("tasky", "[tasks]\ngen = { run = \"echo gen\", description = \"generate sources\" }\n"));
+    for args in [&["--help"][..], &["-h"], &["help"], &["-q", "--help"]] {
+        p.kargo().args(args).assert().success().stdout(predicate::str::contains("Tasks").and(predicate::str::contains("generate sources")));
+    }
+    p.kargo().args(["build", "--help"]).assert().success().stdout(predicate::str::contains("generate sources").not());
+    p.kargo().args(["task", "--list"]).assert().success().stdout(predicate::str::contains("gen  generate sources"));
+}
+
+#[test]
+fn completions() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        Project::new().kargo().args(["completions", shell]).assert().success().stdout(predicate::str::contains("COMPLETE"));
+    }
+    Project::new().kargo().args(["completions", "tcsh"]).assert().failure();
+
+    // What the scripts ask kargo for on <Tab> (fish's protocol: one `value\thelp` per line).
+    let p = Project::new();
+    let complete = |words: &[&str]| {
+        let out = p.kargo().env("COMPLETE", "fish").arg("--").arg("kargo").args(words).assert().success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+    let values = |out: &str| out.lines().map(|l| l.split('\t').next().unwrap().to_string()).collect::<Vec<_>>();
+
+    // Outside a project: built-in commands only.
+    assert!(values(&complete(&["bu"])).contains(&"build".to_string()));
+    assert!(!complete(&[""]).contains("generate sources"));
+
+    p.file(
+        "kargo.toml",
+        &manifest("tasky", "[tasks]\ngen = { run = \"echo gen\", description = \"generate sources\" }\nlint = \"echo lint\"\n"),
+    );
+    assert!(complete(&["g"]).contains("gen\tgenerate sources"));
+    assert_eq!(values(&complete(&["task", "l"])), ["lint"]);
+    assert_eq!(values(&complete(&["build", "-t", ""])), ["jvm", "wasm", "native", "android"]);
+    assert!(values(&complete(&["toolchain", ""])).contains(&"install".to_string()));
+    assert!(values(&complete(&["add", "--framework", "spr"])).contains(&"spring-boot".to_string()));
+}
+
+#[test]
 fn failing_task_propagates_error() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("failing", "[tasks]\nboom = \"exit 9\"\n"));
@@ -476,6 +518,39 @@ fn doc_section_is_validated() {
     p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("`source-link` must be an http(s):// URL"));
     p.file("kargo.toml", &manifest("docs", "[doc]\nformat = \"html\"\n"));
     p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("unknown field `format`"));
+}
+
+#[test]
+fn fmt_and_lint_need_kotlin_sources() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("empty", ""));
+    // `target/` is never formatted or linted.
+    p.file("target/debug/Generated.kt", "fun   generated( ) = 1\n");
+    for cmd in ["fmt", "lint"] {
+        p.kargo().arg(cmd).assert().failure().code(101).stderr(predicate::str::contains("no Kotlin sources found"));
+    }
+}
+
+#[test]
+fn fmt_and_lint_sections_are_validated() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("style", "[fmt]\nexclude = [\"!src/gen/**\"]\n"));
+    p.kargo().args(["fmt", "--check"]).assert().failure().stderr(predicate::str::contains("[fmt] `exclude` entries must be globs"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nconfig = [\"config/detekt.yml\"]\n"));
+    p.kargo()
+        .arg("lint")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("[lint] config file `config/detekt.yml` does not exist"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nbaseline = \"baseline.xml\"\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("kargo lint --create-baseline"));
+    // A task named like the command is reachable through `kargo task`.
+    p.file("kargo.toml", &manifest("style", "[tasks]\nlint = \"echo custom\"\n[lint]\nbaseline = \"baseline.xml\"\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("run the `lint` task with `kargo task lint`"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nmax-issues = 3\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("unknown field `max-issues`"));
 }
 
 #[test]
@@ -573,4 +648,17 @@ fn toolchain_install_requires_network_or_cache() {
     // A pinned JDK that is not installed cannot be provisioned offline.
     p.file("kargo.toml", &manifest("tc", "[toolchain]\njdk = \"21\"\n"));
     p.kargo().args(["toolchain", "which", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));
+}
+
+#[test]
+fn daemon_status_and_stop() {
+    let p = Project::new();
+    p.kargo().args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("No compiler daemons are running."));
+    // A leftover state file of a daemon that is gone (e.g. restored from a CI cache) is not a running daemon.
+    let dir = p.home.path().join("daemon").join("0123456789abcdef");
+    std::fs::create_dir_all(&dir).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::fs::write(dir.join("info"), format!("{port} token 1\n")).unwrap();
+    p.kargo().args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("No compiler daemons are running."));
+    p.kargo().args(["daemon", "stop"]).assert().success().stderr(predicate::str::contains("Stopped 0 compiler daemons"));
 }

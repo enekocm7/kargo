@@ -27,7 +27,7 @@ Cargo workspace (edition 2024, MSRV 1.85). Crates depend downward in roughly thi
 | `crates/kargo-maven`     | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, the resolver                                                                 |
 | `crates/kargo-manifest`  | The `kargo.toml` model (`raw.rs` is the serde layer, `lib.rs` the validated model), format-preserving edits (`edit.rs`)                                       |
 | `crates/kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, archives                                                                                 |
-| `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, jar packaging, entry-point detection, test reports                                                                      |
+| `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, the compiler daemon (`daemon.rs`, `daemon/KargoDaemon.java`), jar packaging, entry points, test reports        |
 | `crates/kargo-ops`       | The build engine: `workspace.rs`, `ops/` (one module per command), `builtins.rs` (frameworks), `lockfile.rs`, `gradle.rs` (Android), `tasks.rs`, `plugins.rs` |
 | `src/`                   | The `kargo` binary: `cli.rs` (clap definitions and dispatch), `main.rs`                                                                                       |
 | `tests/`                 | `cli.rs` offline CLI integration tests, `e2e.rs` real-compiler tests, `common/` shared helpers                                                                |
@@ -63,7 +63,7 @@ Match the surrounding code. In particular:
 - **Output**: user-facing status goes through `kargo_util::shell::Shell` (`status("Compiling", ...)`, `note`, `error`; stderr, honoring `-q`/`-v`). Only the program or test output of `kargo run` / `kargo test` goes to stdout. Don't `println!` from library crates.
 - **Docs in code**: every module starts with a `//!` comment; public items get `///` where the name alone is not enough.
 - **Cross-platform**: Kargo runs on Windows, macOS and Linux. Use `std::path`, the helpers in `kargo-util`, and avoid shell-specific assumptions. Files use LF line endings (`.gitattributes`).
-- **Pinned versions** live in constants (`DEFAULT_KOTLIN_VERSION`, `DEFAULT_JVM_TARGET` in `kargo-manifest`; the `*_VERSION` constants in `builtins.rs` and `gradle.rs`). Don't hard-code a version elsewhere in Rust code.
+- **Pinned versions** live in constants (`DEFAULT_KOTLIN_VERSION`, `DEFAULT_JVM_TARGET` in `kargo-manifest`; the `*_VERSION` constants in `builtins.rs` and `gradle.rs`; the tool versions `DOKKA_VERSION`, `KTLINT_VERSION` and `DETEKT_VERSION` in `ops/doc.rs`, `ops/fmt.rs` and `ops/lint.rs`). Don't hard-code a version elsewhere in Rust code.
 - **Unknown `kargo.toml` keys are errors**, by design. Keep it that way.
 
 ## Tests

@@ -357,6 +357,22 @@ jvm-target = \"21\"
 }
 
 #[test]
+fn default_jvm_target_follows_older_jdks() {
+    let jvm = |text: &str| parse(text).targets.jvm.unwrap();
+    // A pinned JDK older than the default lowers the default target.
+    assert_eq!(jvm(&format!("{MINIMAL}\n[toolchain]\njdk = \"17\"\n")).jvm_target, "17");
+    assert_eq!(jvm(&format!("{MINIMAL}\n[toolchain]\njdk = \"21\"\n[target.jvm]\n")).jvm_target, "21");
+    // So does an older system JDK at build time.
+    let default = jvm(MINIMAL);
+    assert_eq!(default.target_for(21), "21");
+    assert_eq!(default.target_for(99), DEFAULT_JVM_TARGET);
+    // An explicit target is kept as written.
+    let explicit = jvm(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"11\"\n"));
+    assert_eq!(explicit.target_for(21), "11");
+    assert_eq!(jvm(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"25\"\n")).target_for(21), "25");
+}
+
+#[test]
 fn jdk_request_display_round_trips() {
     for s in ["system", "21", "jdk-21.0.5+11", "jdk8u432-b06"] {
         assert_eq!(s.parse::<JdkRequest>().unwrap().to_string(), s);
@@ -394,4 +410,35 @@ external-links = [\"https://kotlinlang.org/api/kotlinx.coroutines/\"]
     assert!(parse_err(&with("source-link = \"git@github.com:me/lib\"")).contains("source-link"));
     assert!(parse_err(&with("external-links = [\"file:///docs\"]")).contains("external-links"));
     assert!(parse_err(&with("format = \"html\"")).contains("format"));
+}
+
+#[test]
+fn fmt_and_lint_sections() {
+    let m = parse(MINIMAL);
+    assert_eq!(m.fmt, FmtSettings::default());
+    assert_eq!(m.lint, LintSettings::default());
+    let m = parse(&format!(
+        "{MINIMAL}
+[fmt]
+ktlint = \"1.7.1\"
+exclude = [\"src/generated/**\"]
+
+[lint]
+detekt = \"1.23.7\"
+config = [\"config/detekt.yml\"]
+baseline = \"config/baseline.xml\"
+"
+    ));
+    assert_eq!(m.fmt.ktlint_version.as_deref(), Some("1.7.1"));
+    assert_eq!(m.fmt.exclude, ["src/generated/**"]);
+    assert_eq!(m.lint.detekt_version.as_deref(), Some("1.23.7"));
+    assert_eq!(m.lint.config, [PathBuf::from("config/detekt.yml")]);
+    assert_eq!(m.lint.baseline, Some(PathBuf::from("config/baseline.xml")));
+    let with = |section: &str, body: &str| format!("{MINIMAL}\n[{section}]\n{body}\n");
+    assert!(parse_err(&with("fmt", "ktlint = \"[1.0,2.0)\"")).contains("exact ktlint version"));
+    assert!(parse_err(&with("fmt", "exclude = [\"!src/**\"]")).contains("exclude"));
+    assert!(parse_err(&with("fmt", "exclude = [\"/abs/**\"]")).contains("exclude"));
+    assert!(parse_err(&with("fmt", "indent = 2")).contains("indent"));
+    assert!(parse_err(&with("lint", "detekt = \"\"")).contains("exact detekt version"));
+    assert!(parse_err(&with("lint", "max-issues = 3")).contains("max-issues"));
 }

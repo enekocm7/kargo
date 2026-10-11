@@ -10,12 +10,14 @@ description: Environment variables Kargo reads and sets.
 | `KARGO_HOME` | Where Kargo keeps its cache, toolchains and `bin/` (default `~/.kargo`) |
 | `KARGO_TARGET_DIR` | Build output directory (default `target/` in the project) |
 | `KARGO_OFFLINE` | Same as `--offline` |
-| `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler process, e.g. `-Xmx4g` |
+| `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon (or compiler process), e.g. `-Xmx4g` |
+| `KARGO_DAEMON` | `false` (or `0`, `no`, `off`) runs the Kotlin compiler as a separate process on every build instead of in the [compiler daemon](../../guides/build-performance/#the-compiler-daemon) |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME` | JDK to use when `[toolchain] jdk` is `system` |
 | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android SDK location |
 | `BROWSER` | Browser that `kargo doc --open` starts (default: the system's default browser) |
 | Names in `username-env` / `password-env` | Repository credentials |
+| `COMPLETE` | Set by the `kargo completions` scripts when they ask Kargo for candidates; don't set it yourself |
 
 ## Variables Kargo sets
 

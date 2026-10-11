@@ -36,6 +36,10 @@ pub(super) struct RawManifest {
     toolchain: RawToolchain,
     #[serde(default)]
     doc: RawDoc,
+    #[serde(default)]
+    fmt: RawFmt,
+    #[serde(default)]
+    lint: RawLint,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -53,6 +57,23 @@ struct RawDoc {
     source_link: Option<String>,
     #[serde(default)]
     external_links: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawFmt {
+    ktlint: Option<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawLint {
+    detekt: Option<String>,
+    #[serde(default)]
+    config: Vec<PathBuf>,
+    baseline: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -500,11 +521,12 @@ impl RawManifest {
         let kotlin_version = self.kotlin.version.unwrap_or_else(|| DEFAULT_KOTLIN_VERSION.to_owned());
         validate_version_string("Kotlin version", &kotlin_version)?;
 
-        let targets = match self.target {
+        let mut targets = match self.target {
             // No [target] section means a plain JVM project.
             None => Targets {
                 jvm: Some(JvmTarget {
                     jvm_target: DEFAULT_JVM_TARGET.to_owned(),
+                    jvm_target_set: false,
                     main_class: None,
                     jvm_args: Vec::new(),
                     dependencies: Vec::new(),
@@ -517,6 +539,7 @@ impl RawManifest {
                         .jvm
                         .map(|j| -> Result<JvmTarget> {
                             Ok(JvmTarget {
+                                jvm_target_set: j.jvm_target.is_some(),
                                 jvm_target: j.jvm_target.unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
                                 main_class: j.main_class,
                                 jvm_args: j.jvm_args,
@@ -746,7 +769,9 @@ impl RawManifest {
             }
             Some(_) => bail!("[toolchain] `jdk` must be a version like \"21\" or \"system\""),
         };
-        if let (Some(major), Some(jvm)) = (jdk.major(), &targets.jvm) {
+        if let (Some(major), Some(jvm)) = (jdk.major(), &mut targets.jvm) {
+            // The default target never exceeds the pinned JDK; an explicit one must not.
+            jvm.jvm_target = jvm.target_for(major);
             let target: u32 = jvm.jvm_target.strip_prefix("1.").unwrap_or(&jvm.jvm_target).parse().unwrap_or(0);
             if target > major {
                 bail!("[target.jvm] jvm-target {} is newer than the [toolchain] JDK {major}", jvm.jvm_target);
@@ -754,10 +779,14 @@ impl RawManifest {
         }
 
         let doc = self.doc.validate()?;
+        let fmt = self.fmt.validate()?;
+        let lint = self.lint.validate()?;
 
         Ok(Manifest {
             toolchain: ToolchainSettings { jdk },
             doc,
+            fmt,
+            lint,
             package: Package {
                 name: self.package.name,
                 version: self.package.version,
@@ -788,13 +817,39 @@ impl RawManifest {
     }
 }
 
+/// Fails unless `version` (a tool version from `[section] key`) is one exact version.
+fn validate_tool_version(section: &str, key: &str, tool: &str, example: &str, version: Option<&str>) -> Result<()> {
+    if let Some(v) = version
+        && (v.is_empty() || v.contains(|c: char| c.is_whitespace() || "[](),".contains(c)))
+    {
+        bail!("[{section}] `{key}` must be an exact {tool} version such as \"{example}\", got `{v}`");
+    }
+    Ok(())
+}
+
+impl RawFmt {
+    fn validate(self) -> Result<FmtSettings> {
+        validate_tool_version("fmt", "ktlint", "ktlint", "1.8.0", self.ktlint.as_deref())?;
+        for pattern in &self.exclude {
+            if pattern.is_empty() || pattern.starts_with('!') || pattern.starts_with('/') || pattern.contains('\\') || pattern.contains(':')
+            {
+                bail!("[fmt] `exclude` entries must be globs relative to the project root such as \"src/generated/**\", got `{pattern}`");
+            }
+        }
+        Ok(FmtSettings { ktlint_version: self.ktlint, exclude: self.exclude })
+    }
+}
+
+impl RawLint {
+    fn validate(self) -> Result<LintSettings> {
+        validate_tool_version("lint", "detekt", "detekt", "1.23.8", self.detekt.as_deref())?;
+        Ok(LintSettings { detekt_version: self.detekt, config: self.config, baseline: self.baseline })
+    }
+}
+
 impl RawDoc {
     fn validate(self) -> Result<DocSettings> {
-        if let Some(v) = &self.dokka
-            && (v.is_empty() || v.contains(|c: char| c.is_whitespace() || "[](),".contains(c)))
-        {
-            bail!("[doc] `dokka` must be an exact Dokka version such as \"2.2.0\", got `{v}`");
-        }
+        validate_tool_version("doc", "dokka", "Dokka", "2.2.0", self.dokka.as_deref())?;
         let is_web = |url: &str| url.starts_with("https://") || url.starts_with("http://");
         if let Some(url) = &self.source_link
             && !is_web(url)

@@ -5,7 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::{FreshnessCheck, Outcome, ResolvedPlugin, SourceSet, fingerprint, plugin_args, run_kotlin_compiler};
+use super::{FreshnessCheck, Outcome, ResolvedPlugin, SourceSet, daemon, fingerprint, plugin_args, run_kotlin_compiler};
 use kargo_toolchain::kotlin::JVM_COMPILER_MAIN;
 use kargo_toolchain::{Jdk, KotlinCompiler};
 use kargo_util::fs::{copy_dir, join_paths, remove_dir_all_if_exists};
@@ -146,14 +146,19 @@ impl JvmCompilation<'_> {
             }
             let argfile = fingerprint_dir.join(format!("{}.javac.args", self.name));
             process::write_argfile(&argfile, &javac_args)?;
-            let mut cmd = Command::new(jdk.javac());
-            if jdk.version >= 23 {
-                // Annotation processors such as Lombok still use sun.misc.Unsafe.
-                cmd.arg("-J--sun-misc-unsafe-memory-access=allow");
-            }
-            cmd.arg(format!("@{}", argfile.display()));
-            let status = process::status(shell, &mut cmd, "javac")?;
-            if !status.success() {
+            let success = match daemon::run(shell, jdk, &compiler.classpath, daemon::Tool::Javac, &javac_args) {
+                Some(code) => code == 0,
+                None => {
+                    let mut cmd = Command::new(jdk.javac());
+                    if jdk.version >= 23 {
+                        // Annotation processors such as Lombok still use sun.misc.Unsafe.
+                        cmd.arg("-J--sun-misc-unsafe-memory-access=allow");
+                    }
+                    cmd.arg(format!("@{}", argfile.display()));
+                    process::status(shell, &mut cmd, "javac")?.success()
+                }
+            };
+            if !success {
                 bail!("could not compile Java sources of `{}` due to previous errors", self.name);
             }
         }

@@ -1,6 +1,7 @@
 //! Drivers for the Kotlin compilers (JVM, Wasm, Native) plus helpers shared
 //! between them: source sets, compiler plugins and up-to-date checks.
 
+pub mod daemon;
 pub mod jar;
 pub mod jvm;
 pub mod mainclass;
@@ -180,15 +181,22 @@ pub fn run_kotlin_compiler(
     what: &str,
 ) -> Result<()> {
     process::write_argfile(argfile, args)?;
+    if shell.is_verbose() {
+        shell.verbose("Arguments", args.join(" "));
+    }
+    if let Some(code) = daemon::run(shell, jdk, compiler_classpath, daemon::Tool::Kotlin(main_class), args) {
+        if code != 0 {
+            bail!("could not compile `{what}` due to previous errors");
+        }
+        return Ok(());
+    }
     let mut cmd = Command::new(jdk.java());
-    cmd.args(compiler_jvm_options(jdk))
+    cmd.args(daemon::jvm_options(jdk, None))
+        .args(daemon::cds_options(jdk, "kotlinc", compiler_classpath))
         .arg("-cp")
         .arg(kargo_util::fs::join_paths(compiler_classpath))
         .arg(main_class)
         .arg(format!("@{}", argfile.display()));
-    if shell.is_verbose() {
-        shell.verbose("Arguments", args.join(" "));
-    }
     let status = process::status(shell, &mut cmd, "the Kotlin compiler")?;
     if !status.success() {
         bail!("could not compile `{what}` due to previous errors");

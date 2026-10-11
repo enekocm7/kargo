@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap_complete::engine::{ArgValueCandidates, SubcommandCandidates};
 
 use kargo_manifest::edit::DependencySection;
 use kargo_manifest::{Scope, TargetKind};
@@ -12,6 +13,8 @@ use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::check::CheckOptions;
 use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::doc::DocOptions;
+use kargo_ops::ops::fmt::FmtOptions;
+use kargo_ops::ops::lint::LintOptions;
 use kargo_ops::ops::run::RunOptions;
 use kargo_ops::ops::test::TestOptions;
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
@@ -20,8 +23,12 @@ use kargo_ops::workspace::{ProfileKind, Workspace};
 use kargo_util::config::Config;
 use kargo_util::shell::{Shell, Verbosity};
 
+use crate::complete::{self, ShellArg};
+
 /// Exit code for build and test failures (matches Cargo).
 const FAILURE: u8 = 101;
+
+const AFTER_HELP: &str = "See `kargo help <command>` for more information on a specific command.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,7 +36,8 @@ const FAILURE: u8 = 101;
     version,
     about = "Kotlin's package manager and build tool",
     long_about = "Kargo builds Kotlin projects for the JVM, WebAssembly, Kotlin/Native and Android,\nmanages Maven dependencies and runs tests, configured by a single kargo.toml.",
-    after_help = "See `kargo help <command>` for more information on a specific command."
+    after_help = AFTER_HELP,
+    add = SubcommandCandidates::new(complete::external_subcommands)
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -114,6 +122,14 @@ impl From<ToolArg> for ToolKind {
 }
 
 #[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// List running compiler daemons
+    Status,
+    /// Stop every running compiler daemon
+    Stop,
+}
+
+#[derive(Debug, Subcommand)]
 enum ToolchainCommand {
     /// List installed JDKs and Kotlin/Native distributions
     #[command(visible_alias = "ls")]
@@ -131,6 +147,7 @@ enum ToolchainCommand {
         #[arg(value_enum)]
         kind: ToolArg,
         /// JDK: a major version (removes all its releases) or a release; Native: a version
+        #[arg(add = ArgValueCandidates::new(complete::installed_toolchains))]
         version: String,
     },
     /// Show JDK versions available for download
@@ -171,7 +188,7 @@ struct NewArgs {
     #[arg(short, long = "target", value_enum, value_delimiter = ',', default_value = "jvm")]
     targets: Vec<TargetArg>,
     /// Built-in frameworks to enable: compose, serialization, coroutines, ktor, lombok, spring-boot
-    #[arg(short = 'w', long = "with", value_delimiter = ',')]
+    #[arg(short = 'w', long = "with", value_delimiter = ',', add = ArgValueCandidates::new(complete::frameworks))]
     frameworks: Vec<String>,
     /// Maven group / base package
     #[arg(long, default_value = "com.example")]
@@ -248,6 +265,18 @@ enum Command {
         #[arg(long)]
         open: bool,
     },
+    /// Format Kotlin sources with ktlint
+    Fmt {
+        /// Report unformatted files without changing them; fail if there are any
+        #[arg(long)]
+        check: bool,
+    },
+    /// Analyze Kotlin sources with detekt
+    Lint {
+        /// Record the current issues in the baseline file instead of reporting them
+        #[arg(long)]
+        create_baseline: bool,
+    },
     /// Add dependencies or built-in frameworks to kargo.toml
     Add {
         /// Coordinates: group:artifact[:version[:classifier]] (latest release if no version)
@@ -272,7 +301,13 @@ enum Command {
         #[arg(long)]
         no_verify: bool,
         /// Enable built-in frameworks instead (comma-separated)
-        #[arg(short = 'F', long = "framework", value_delimiter = ',', conflicts_with_all = ["dev", "target", "scope", "bom"])]
+        #[arg(
+            short = 'F',
+            long = "framework",
+            value_delimiter = ',',
+            conflicts_with_all = ["dev", "target", "scope", "bom"],
+            add = ArgValueCandidates::new(complete::frameworks)
+        )]
         frameworks: Vec<String>,
     },
     /// Remove dependencies from kargo.toml
@@ -354,7 +389,11 @@ enum Command {
     /// Run a task from [tasks], or list tasks
     Task {
         /// Task name (omit to list tasks)
+        #[arg(add = ArgValueCandidates::new(complete::tasks))]
         name: Option<String>,
+        /// List the tasks defined in kargo.toml
+        #[arg(short, long, conflicts_with = "name")]
+        list: bool,
         /// Extra arguments appended to the task's command
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -372,8 +411,23 @@ enum Command {
         #[command(subcommand)]
         command: ToolchainCommand,
     },
+    /// Show or stop the background compiler daemons that keep the Kotlin compiler warm
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     /// Print project information
     Info,
+    /// Print a shell completion script
+    #[command(long_about = "Print a shell completion script.
+
+The script completes commands, flags, targets and toolchain subcommands, and asks kargo for
+the current project's tasks, `kargo-*` plugins and installed toolchains as you type.")]
+    Completions {
+        /// The shell to generate the script for
+        #[arg(value_enum)]
+        shell: ShellArg,
+    },
     /// Run a task or a `kargo-<name>` plugin executable
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -381,7 +435,8 @@ enum Command {
 
 /// Entry point used by `main.rs`.
 pub fn main() -> ExitCode {
-    let cli = Cli::parse();
+    complete::complete_if_requested();
+    let cli = parse();
     let verbosity = if cli.global.verbose {
         Verbosity::Verbose
     } else if cli.global.quiet {
@@ -397,6 +452,61 @@ pub fn main() -> ExitCode {
             ExitCode::from(FAILURE)
         }
     }
+}
+
+/// Parses the command line. `kargo --help` also lists the current project's tasks.
+fn parse() -> Cli {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut cmd = Cli::command();
+    if wants_top_level_help(&args) {
+        if let Some(tasks) = tasks_help() {
+            cmd = cmd.after_help(format!(
+                "{tasks}
+{AFTER_HELP}"
+            ));
+        }
+    }
+    let matches = cmd.get_matches_from(args);
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
+/// `kargo -h`, `kargo --help` or `kargo help`, possibly with global flags.
+fn wants_top_level_help(args: &[std::ffi::OsString]) -> bool {
+    let mut words = args.iter().skip(1).filter_map(|a| a.to_str()).skip_while(|a| a.starts_with('-') && !matches!(*a, "-h" | "--help"));
+    matches!(words.next(), Some("-h" | "--help" | "help")) && words.next().is_none()
+}
+
+/// The "Tasks:" section of `kargo --help`, when run inside a project that defines tasks.
+fn tasks_help() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let ws = Workspace::discover(&cwd, None).ok()?;
+    let tasks = &ws.manifest().tasks;
+    if tasks.is_empty() {
+        return None;
+    }
+    let width = tasks.keys().map(String::len).max().unwrap_or(0);
+    let mut out = String::from(
+        "Tasks (from kargo.toml, run with `kargo <task>`):
+",
+    );
+    for task in tasks.values() {
+        out.push_str(&format!(
+            "  {:width$}  {}
+",
+            task.name,
+            task_description(task)
+        ));
+    }
+    Some(out)
+}
+
+fn task_description(task: &kargo_manifest::Task) -> String {
+    let mut desc = task.description.clone().unwrap_or_else(|| task.platform_run().join(" && "));
+    if !task.hooks.is_empty() {
+        let hooks: Vec<&str> = task.hooks.iter().map(|h| h.as_str()).collect();
+        desc.push_str(&format!(" [hooks: {}]", hooks.join(", ")));
+    }
+    desc
 }
 
 fn report_error(shell: &Shell, err: &anyhow::Error) {
@@ -523,6 +633,33 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             ops::doc::doc(&ctx, &DocOptions { targets, open })?;
             Ok(0)
         }
+        Command::Fmt { check } => {
+            let ws = load_workspace(&global)?;
+            note_shadowed_task(shell, &ws, "fmt");
+            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            if ops::fmt::fmt(&ctx, &FmtOptions { check })? {
+                Ok(0)
+            } else if check {
+                shell.error("formatting check failed; `kargo fmt` fixes what ktlint can correct automatically");
+                Ok(FAILURE)
+            } else {
+                shell.error("ktlint could not fix every problem; fix the ones listed above by hand");
+                Ok(FAILURE)
+            }
+        }
+        Command::Lint { create_baseline } => {
+            let ws = load_workspace(&global)?;
+            note_shadowed_task(shell, &ws, "lint");
+            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            if ops::lint::lint(&ctx, &LintOptions { create_baseline })? {
+                Ok(0)
+            } else {
+                shell.error(
+                    "detekt found issues; fix them, suppress them with `@Suppress`, or record them with `kargo lint --create-baseline`",
+                );
+                Ok(FAILURE)
+            }
+        }
         Command::Add { coordinates, dev, target, scope, bom, pre, no_verify, frameworks } => {
             let ws = load_workspace(&global)?;
             if !frameworks.is_empty() {
@@ -632,7 +769,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             println!("{}", jar.display());
             Ok(0)
         }
-        Command::Task { name, args } => {
+        Command::Task { name, list: _, args } => {
             let ws = load_workspace(&global)?;
             match name {
                 None => {
@@ -661,8 +798,37 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             print_info(&ws);
             Ok(0)
         }
+        Command::Completions { shell } => {
+            complete::write_script(shell, &mut std::io::stdout().lock())?;
+            Ok(0)
+        }
         Command::Toolchain { command } => toolchain(&config, &global, command),
+        Command::Daemon { command } => {
+            match command {
+                DaemonCommand::Status => {
+                    let running = kargo_compiler::daemon::running(config.home());
+                    if running.is_empty() {
+                        println!("No compiler daemons are running.");
+                    }
+                    for d in running {
+                        println!("pid {:<8} {}", d.pid, d.dir.display());
+                    }
+                }
+                DaemonCommand::Stop => {
+                    let stopped = kargo_compiler::daemon::stop_all(config.home());
+                    shell.status("Stopped", format!("{stopped} compiler daemon{}", if stopped == 1 { "" } else { "s" }));
+                }
+            }
+            Ok(0)
+        }
         Command::External(argv) => external(&config, &global, argv),
+    }
+}
+
+/// Built-in commands win over tasks of the same name; say how to reach the task.
+fn note_shadowed_task(shell: &Shell, ws: &Workspace, command: &str) {
+    if ws.manifest().tasks.contains_key(command) {
+        shell.note(format!("`kargo {command}` is a built-in command; run the `{command}` task with `kargo task {command}`"));
     }
 }
 
@@ -721,12 +887,7 @@ fn list_tasks(ws: &Workspace) {
     println!("Available tasks:");
     let width = tasks.keys().map(String::len).max().unwrap_or(0);
     for task in tasks.values() {
-        let mut desc = task.description.clone().unwrap_or_else(|| task.platform_run().join(" && "));
-        if !task.hooks.is_empty() {
-            let hooks: Vec<&str> = task.hooks.iter().map(|h| h.as_str()).collect();
-            desc.push_str(&format!(" [hooks: {}]", hooks.join(", ")));
-        }
-        println!("    {:width$}  {desc}", task.name);
+        println!("    {:width$}  {}", task.name, task_description(task));
     }
 }
 
@@ -864,6 +1025,10 @@ mod tests {
         assert!(matches!(cli.command, Command::Remove { target: Some(TargetArg::Wasm), .. }));
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
         assert!(matches!(cli.command, Command::Doc { ref targets, open: true } if matches!(targets[..], [TargetArg::Jvm])));
+        let cli = Cli::try_parse_from(["kargo", "fmt", "--check"]).unwrap();
+        assert!(matches!(cli.command, Command::Fmt { check: true }));
+        let cli = Cli::try_parse_from(["kargo", "lint", "--create-baseline"]).unwrap();
+        assert!(matches!(cli.command, Command::Lint { create_baseline: true }));
     }
 
     #[test]

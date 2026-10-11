@@ -40,15 +40,22 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let env = hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
 
+    // Compile every target's tests at the same time, then run them one target at a
+    // time so their output doesn't interleave.
+    let prepared = super::parallel_map(&targets, |&target| match target {
+        TargetKind::Jvm => test_jvm(ctx, opts),
+        TargetKind::Wasm => test_wasm(ctx, opts),
+        TargetKind::Native => test_native(ctx, opts),
+        TargetKind::Android => Ok(TestRun::Android),
+    });
     let mut ok = true;
-    for target in targets {
-        let passed = match target {
-            TargetKind::Jvm => test_jvm(ctx, opts)?,
-            TargetKind::Wasm => test_wasm(ctx, opts)?,
-            TargetKind::Native => test_native(ctx, opts)?,
-            TargetKind::Android => test_android(ctx, opts)?,
+    for run in prepared {
+        ok &= match run? {
+            TestRun::Done(passed) => passed,
+            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts.filter.as_deref())?,
+            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label)?,
+            TestRun::Android => test_android(ctx, opts)?,
         };
-        ok &= passed;
     }
     let mut env = env;
     env.push(("KARGO_TEST_RESULT".to_owned(), if ok { "success" } else { "failure" }.to_owned()));
@@ -59,25 +66,38 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     Ok(ok)
 }
 
-fn no_tests(ctx: &BuildContext, target: TargetKind) -> bool {
+/// A target's compiled tests, ready to run.
+enum TestRun {
+    /// Nothing (left) to run; whether the target passed.
+    Done(bool),
+    /// The JUnit console launcher.
+    Junit(Command),
+    /// A test executable reporting TeamCity messages, with its label.
+    Reported(Command, &'static str),
+    /// Gradle compiles and runs Android tests in one step.
+    Android,
+}
+
+fn no_tests(ctx: &BuildContext, target: TargetKind) -> TestRun {
     ctx.shell().note(format!("no tests found for the {target} target (put them in tests/ or tests-{target}/)"));
-    true
+    TestRun::Done(true)
 }
 
 fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     if sources(ctx, TargetKind::Android, true, &["kt", "java"]).is_empty() {
-        return Ok(no_tests(ctx, TargetKind::Android));
+        no_tests(ctx, TargetKind::Android);
+        return Ok(true);
     }
     crate::gradle::test(ctx, opts.filter.as_deref(), opts.no_run)
 }
 
-fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
+fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let main = build_jvm(ctx)?;
     let Some(JvmTestClasses { classes: test_classes, classpath }) = compile_jvm_tests(ctx, &main.classes, "Compiling")? else {
         return Ok(no_tests(ctx, TargetKind::Jvm));
     };
     if opts.no_run {
-        return Ok(true);
+        return Ok(TestRun::Done(true));
     }
 
     let jdk = ctx.compiler_jdk()?;
@@ -86,7 +106,9 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let mut run_cp = vec![test_classes.clone()];
     run_cp.extend(classpath);
     let mut cmd = Command::new(jdk.java());
-    cmd.args(&jvm.jvm_args)
+    // The launcher loads the tests in its own class loader, so its JVM classpath is just the launcher.
+    cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)))
+        .args(&jvm.jvm_args)
         .arg("-jar")
         .arg(&launcher)
         .arg("execute")
@@ -100,10 +122,14 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         .arg("--fail-if-no-tests")
         .args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&test_classes)))
         .current_dir(ctx.ws.root());
+    Ok(TestRun::Junit(cmd))
+}
+
+fn run_junit(ctx: &BuildContext, mut cmd: Command, filter: Option<&str>) -> Result<bool> {
     ctx.shell().status("Running", "JVM tests (JUnit Platform)");
     let status = process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?;
     if status.code() == Some(JUNIT_NO_TESTS) {
-        match &opts.filter {
+        match filter {
             Some(filter) => ctx.shell().error(format!("no JVM tests match `{filter}`; the filter matches `package.Class.method` names")),
             None => ctx.shell().error(
                 "no JVM tests found; mark test functions with `@Test` (kotlin.test or JUnit) or add your test framework's \
@@ -151,7 +177,7 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
         classpath: classpath.clone(),
         friend_paths: vec![main_classes.to_path_buf()],
         output: test_classes.clone(),
-        jvm_target: &jvm.jvm_target,
+        jvm_target: &jvm.target_for(jdk.version),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         javac_args: &setup.contributions.javac_args,
@@ -245,7 +271,7 @@ fn file_url(path: &Path) -> String {
     if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
 }
 
-fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
+fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
     let tests = sources(ctx, TargetKind::Wasm, true, &["kt"]);
@@ -281,17 +307,17 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         crate::npm::install(ctx, &unit.libraries, &unit.output)?;
     }
     if opts.no_run {
-        return Ok(true);
+        return Ok(TestRun::Done(true));
     }
     if opts.filter.is_some() {
         ctx.shell().warn("test filters are not supported for the wasm target; running all tests");
     }
     let mut cmd = Command::new(kargo_toolchain::node()?);
     cmd.arg("-e").arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path()))).current_dir(ctx.ws.root());
-    run_reported(ctx, cmd, "Wasm tests (Node.js)")
+    Ok(TestRun::Reported(cmd, "Wasm tests (Node.js)"))
 }
 
-fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
+fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let manifest = ctx.ws.manifest();
     let tests = sources(ctx, TargetKind::Native, true, &["kt"]);
     if tests.kotlin_files().is_empty() {
@@ -301,7 +327,7 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let platforms = native_platforms(ctx)?;
     if !platforms.iter().any(|p| p == host) {
         ctx.shell().warn(format!("skipping native tests: this host ({host}) is not in `platforms`"));
-        return Ok(true);
+        return Ok(TestRun::Done(true));
     }
     let setup = ctx.setup(TargetKind::Native)?;
     let _ = native_libraries(ctx, &setup, host, false)?;
@@ -331,14 +357,14 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let outcome =
         unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| compiling(ctx, TargetKind::Native, ", tests"))?;
     if opts.no_run || outcome == Outcome::Empty {
-        return Ok(true);
+        return Ok(TestRun::Done(true));
     }
     let mut cmd = Command::new(unit.artifact());
     cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root());
     if let Some(filter) = &opts.filter {
         cmd.arg(format!("--ktest_filter=*{filter}*"));
     }
-    run_reported(ctx, cmd, "native tests")
+    Ok(TestRun::Reported(cmd, "native tests"))
 }
 
 #[cfg(test)]

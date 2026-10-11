@@ -92,6 +92,12 @@ Run `kargo tree --duplicates` to see who asks for what. The highest requested ve
 export KARGO_COMPILER_JVM_OPTS="-Xmx4g"
 ```
 
+The next build starts a compiler daemon with the new options. See [Build performance](../../guides/build-performance/#memory).
+
+### The compiler daemon misbehaves
+
+Run `kargo daemon stop`; the next build starts a fresh daemon. To rule the daemon out, build with `KARGO_DAEMON=false`, which runs the compiler as a separate process. `-v` shows whether a build used the daemon, and its log is `daemon.log` in the directory `kargo daemon status` prints.
+
 ### Something is cached wrong
 
 ```sh

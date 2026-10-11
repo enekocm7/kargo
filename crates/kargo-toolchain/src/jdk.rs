@@ -37,12 +37,25 @@ impl Jdk {
             let home = PathBuf::from(home);
             let java = home.join("bin").join(exe("java"));
             if java.is_file() {
-                return Self::probe(&java).with_context(|| format!("JAVA_HOME points at an unusable JDK ({})", home.display()));
+                return Self::from_java(&java).with_context(|| format!("JAVA_HOME points at an unusable JDK ({})", home.display()));
             }
         }
         let java = find_on_path("java")
             .context("no Java installation found: install a JDK (17 or newer) and set JAVA_HOME or put `java` on PATH")?;
-        Self::probe(&java)
+        Self::from_java(&java)
+    }
+
+    /// Identifies the JDK of a `java` executable, from the `release` file next to its `bin`
+    /// directory when there is one (no JVM start), otherwise by asking `java` itself.
+    fn from_java(java: &Path) -> Result<Self> {
+        let real = std::fs::canonicalize(java).unwrap_or_else(|_| java.to_path_buf());
+        let home = real.parent().and_then(Path::parent);
+        if let Some((home, version)) =
+            home.and_then(|h| Some((h, std::fs::read_to_string(h.join("release")).ok().as_deref().and_then(parse_release)?)))
+        {
+            return Ok(Self { home: home.to_path_buf(), version });
+        }
+        Self::probe(java)
     }
 
     /// Asks `java` for its real home and specification version.
@@ -63,6 +76,15 @@ impl Jdk {
         }
         Ok(())
     }
+}
+
+/// The major version from the `JAVA_VERSION="..."` line of a JDK's `release` file.
+fn parse_release(text: &str) -> Option<u32> {
+    let line = text.lines().find_map(|l| l.trim().strip_prefix("JAVA_VERSION="))?;
+    let v = line.trim().trim_matches('"');
+    // Java 8 reports `1.8.0_392`; early-access builds `26-ea`.
+    let v = v.strip_prefix("1.").unwrap_or(v);
+    v.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
 
 /// Extracts `java.home` and `java.specification.version` from `-XshowSettings:properties`.
@@ -96,6 +118,15 @@ mod tests {
         let (_, legacy) = parse_properties("java.home = /j\njava.specification.version = 1.8\n").unwrap();
         assert_eq!(legacy, 8);
         assert!(parse_properties("nothing here").is_none());
+    }
+
+    #[test]
+    fn parses_release_file() {
+        assert_eq!(parse_release("IMPLEMENTOR=\"X\"\nJAVA_VERSION=\"21.0.12.1\"\nOS_NAME=\"Linux\"\n"), Some(21));
+        assert_eq!(parse_release("JAVA_VERSION=\"1.8.0_392\""), Some(8));
+        assert_eq!(parse_release("JAVA_VERSION=\"26-ea\""), Some(26));
+        assert_eq!(parse_release("JAVA_VERSION=\"25\""), Some(25));
+        assert_eq!(parse_release("JAVA_RUNTIME_VERSION=\"21\""), None);
     }
 
     #[test]

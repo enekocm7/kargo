@@ -70,6 +70,40 @@ dokka = "2.2.0"
 
 See [API documentation](../../guides/documentation/).
 
+## `[fmt]`
+
+Options for `kargo fmt`. Every key is optional. ktlint's style rules go in `.editorconfig`.
+
+```toml
+[fmt]
+exclude = ["src/generated/**"]
+ktlint = "1.8.0"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `exclude` | `[]` | Globs, relative to the project root, of files ktlint skips |
+| `ktlint` | `1.8.0` | Exact ktlint version |
+
+## `[lint]`
+
+Options for `kargo lint`. Every key is optional.
+
+```toml
+[lint]
+config = ["config/detekt.yml"]
+baseline = "config/detekt-baseline.xml"
+detekt = "1.23.8"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `config` | `["detekt.yml"]` if that file exists | detekt configuration files, relative to the project root, applied on top of detekt's defaults. Later files override earlier ones; each must exist |
+| `baseline` | `detekt-baseline.xml` | Baseline file, relative to the project root. The default is used only if the file exists; a file you set must exist |
+| `detekt` | `1.23.8` | Exact detekt version |
+
+See [Formatting and linting](../../guides/formatting-and-linting/).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.
@@ -78,10 +112,12 @@ With no `[target.*]` section, the project targets the JVM with default settings.
 
 ```toml
 [target.jvm]
-jvm-target = "17"                       # default "17"
+jvm-target = "25"                       # default "25", lowered to your JDK if it is older
 main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun main`; set it for a Java main
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 ```
+
+When you don't set `jvm-target`, Kargo targets Java 25, or the version of the JDK that builds the project if that JDK is older (a pinned `[toolchain] jdk`, else `JAVA_HOME` or `java` on `PATH`). The compiled classes then always run on the JDK you build with. Set `jvm-target` explicitly to support older Java runtimes than the one you build with.
 
 Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one.
 

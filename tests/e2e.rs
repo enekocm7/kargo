@@ -129,6 +129,32 @@ fn compile_errors_are_reported() {
 }
 
 #[test]
+fn daemon_matches_standalone_compiler() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["both"]);
+    let diagnostics = |daemon: &str| {
+        let out = t.kargo("both").arg("build").env("KARGO_DAEMON", daemon).assert().failure().code(101).get_output().stderr.clone();
+        String::from_utf8_lossy(&out).lines().filter(|l| l.contains("error")).map(str::to_owned).collect::<Vec<_>>()
+    };
+    t.write("both/src/Main.kt", "fun main() {\n    val x: Int = \"nope\"\n}\n");
+    let standalone = diagnostics("false");
+    assert!(standalone.iter().any(|l| l.starts_with("src/Main.kt:2:16: error:")), "{standalone:?}");
+    assert_eq!(diagnostics("true"), standalone, "the daemon reports the same Kotlin diagnostics, with relative paths");
+
+    t.write("both/src/Main.kt", "fun main() = println(J.s())\n");
+    t.write("both/src/J.java", "public class J { static String s() { return 1; } }\n");
+    let from_daemon = diagnostics("true");
+    assert!(from_daemon.iter().any(|l| l.starts_with("src/J.java:1: error:")), "{from_daemon:?}");
+
+    // Kotlin and Java sources compile and run through the daemon.
+    t.write("both/src/Main.kt", "fun main() = println(\"from \" + J.s())\n");
+    t.write("both/src/J.java", "public class J { static String s() { return \"java\"; } }\n");
+    t.kargo("both").arg("run").assert().success().stdout(predicate::str::contains("from java"));
+    t.kargo("both").args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("pid"));
+}
+
+#[test]
 fn dependencies_and_hooks() {
     require_e2e!();
     let t = E2e::new();
@@ -247,6 +273,45 @@ fn doc_generates_html_from_kdoc() {
     t.kargo("mpp-doc").arg("doc").assert().success().stderr(predicate::str::contains("(common, jvm, wasm)"));
     let index = std::fs::read_to_string(t.dir.path().join("mpp-doc/target/debug/doc/index.html")).unwrap();
     assert!(index.contains("Documented on every platform."));
+}
+
+#[test]
+fn fmt_and_lint_with_ktlint_and_detekt() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["style"]);
+    // A new project is already formatted and lint-free.
+    t.kargo("style").args(["fmt", "--check"]).assert().success().stderr(predicate::str::contains("Checking formatting of style v0.1.0"));
+    t.kargo("style").arg("lint").assert().success().stderr(predicate::str::contains("Linting style v0.1.0"));
+
+    t.write("style/src/Messy.kt", "package com.example.style\n\nfun   messy( ) =  listOf(1,2)\n");
+    t.write("style/src/gen/Generated.kt", "package com.example.style\n\nfun   generated( ) =  1\n");
+    let manifest = t.dir.path().join("style/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text}\n[fmt]\nexclude = [\"src/gen/**\"]\n")).unwrap();
+    t.kargo("style")
+        .args(["fmt", "--check"])
+        .assert()
+        .code(101)
+        .stdout(predicate::str::contains("src/Messy.kt:3"))
+        .stdout(predicate::str::contains("Generated.kt").not())
+        .stderr(predicate::str::contains("formatting check failed"));
+    t.kargo("style").arg("fmt").assert().success();
+    let messy = std::fs::read_to_string(t.dir.path().join("style/src/Messy.kt")).unwrap();
+    assert!(messy.contains("fun messy() = listOf(1, 2)"), "{messy}");
+    let generated = std::fs::read_to_string(t.dir.path().join("style/src/gen/Generated.kt")).unwrap();
+    assert!(generated.contains("fun   generated( )"), "excluded files are left alone: {generated}");
+    t.kargo("style").args(["fmt", "--check"]).assert().success();
+
+    // detekt issues fail `kargo lint`; detekt.yml and a baseline silence them.
+    t.write("style/src/gen/Generated.kt", "package com.example.style\n\nfun generated() = 1\n");
+    t.kargo("style").arg("lint").assert().code(101).stdout(predicate::str::contains("FunctionOnlyReturningConstant"));
+    t.write("style/detekt.yml", "style:\n  FunctionOnlyReturningConstant:\n    active: false\n");
+    t.kargo("style").arg("lint").assert().success();
+    std::fs::remove_file(t.dir.path().join("style/detekt.yml")).unwrap();
+    t.kargo("style").args(["lint", "--create-baseline"]).assert().success().stderr(predicate::str::contains("detekt-baseline.xml"));
+    assert!(t.dir.path().join("style/detekt-baseline.xml").is_file());
+    t.kargo("style").arg("lint").assert().success();
 }
 
 #[test]

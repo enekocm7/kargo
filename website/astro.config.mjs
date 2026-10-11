@@ -37,6 +37,7 @@ export default defineConfig({
 						{ label: 'Managing dependencies', slug: 'guides/dependencies' },
 						{ label: 'Testing', slug: 'guides/testing' },
 						{ label: 'API documentation', slug: 'guides/documentation' },
+						{ label: 'Formatting and linting', slug: 'guides/formatting-and-linting' },
 						{ label: 'Multiplatform projects', slug: 'guides/multiplatform' },
 						{ label: 'WebAssembly', slug: 'guides/wasm' },
 						{ label: 'Kotlin/Native', slug: 'guides/native' },
@@ -48,6 +49,7 @@ export default defineConfig({
 						{ label: 'Tasks and plugins', slug: 'guides/tasks-and-plugins' },
 						{ label: 'Managing JDKs', slug: 'guides/toolchains' },
 						{ label: 'Continuous integration', slug: 'guides/ci' },
+						{ label: 'Build performance', slug: 'guides/build-performance' },
 					],
 				},
 				{
