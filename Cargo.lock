@@ -483,6 +483,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "clap_complete",
+ "kargo-compiler",
  "kargo-manifest",
  "kargo-maven",
  "kargo-ops",

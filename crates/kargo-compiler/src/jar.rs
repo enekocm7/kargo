@@ -122,8 +122,8 @@ pub fn write_jar(dest: &Path, classes_dir: &Path, manifest: &JarManifest, merge:
         for jar in merge {
             let mut archive = zip::ZipArchive::new(File::open(jar)?).map_err(to_io)?;
             for i in 0..archive.len() {
-                let mut entry = archive.by_index(i).map_err(to_io)?;
-                let name = entry.name().map_err(to_io)?.into_owned();
+                let raw = archive.by_index_raw(i).map_err(to_io)?;
+                let name = raw.name().map_err(to_io)?.into_owned();
                 if name == "META-INF/MANIFEST.MF"
                     || is_signature(&name)
                     || name.starts_with("META-INF/versions/") && name.ends_with("module-info.class")
@@ -131,15 +131,16 @@ pub fn write_jar(dest: &Path, classes_dir: &Path, manifest: &JarManifest, merge:
                 {
                     continue;
                 }
-                if entry.is_dir() {
+                if raw.is_dir() {
                     if seen.insert(name.clone()) {
                         zip.add_directory(name, options()).map_err(to_io)?;
                     }
                     continue;
                 }
                 if is_mergeable(&name) {
+                    drop(raw);
                     let mut data = Vec::new();
-                    entry.read_to_end(&mut data)?;
+                    archive.by_index(i).map_err(to_io)?.read_to_end(&mut data)?;
                     let buf = merged.entry(name).or_default();
                     buf.extend_from_slice(&data);
                     if !data.ends_with(b"\n") {
@@ -147,9 +148,9 @@ pub fn write_jar(dest: &Path, classes_dir: &Path, manifest: &JarManifest, merge:
                     }
                     continue;
                 }
-                if seen.insert(name.clone()) {
-                    zip.start_file(name, options()).map_err(to_io)?;
-                    std::io::copy(&mut entry, &mut zip)?;
+                if seen.insert(name) {
+                    // Copy the compressed bytes as they are instead of inflating and deflating again.
+                    zip.raw_copy_file_touch(raw, zip::DateTime::default(), None).map_err(to_io)?;
                 }
             }
         }

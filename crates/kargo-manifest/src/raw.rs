@@ -500,11 +500,12 @@ impl RawManifest {
         let kotlin_version = self.kotlin.version.unwrap_or_else(|| DEFAULT_KOTLIN_VERSION.to_owned());
         validate_version_string("Kotlin version", &kotlin_version)?;
 
-        let targets = match self.target {
+        let mut targets = match self.target {
             // No [target] section means a plain JVM project.
             None => Targets {
                 jvm: Some(JvmTarget {
                     jvm_target: DEFAULT_JVM_TARGET.to_owned(),
+                    jvm_target_set: false,
                     main_class: None,
                     jvm_args: Vec::new(),
                     dependencies: Vec::new(),
@@ -517,6 +518,7 @@ impl RawManifest {
                         .jvm
                         .map(|j| -> Result<JvmTarget> {
                             Ok(JvmTarget {
+                                jvm_target_set: j.jvm_target.is_some(),
                                 jvm_target: j.jvm_target.unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
                                 main_class: j.main_class,
                                 jvm_args: j.jvm_args,
@@ -746,7 +748,9 @@ impl RawManifest {
             }
             Some(_) => bail!("[toolchain] `jdk` must be a version like \"21\" or \"system\""),
         };
-        if let (Some(major), Some(jvm)) = (jdk.major(), &targets.jvm) {
+        if let (Some(major), Some(jvm)) = (jdk.major(), &mut targets.jvm) {
+            // The default target never exceeds the pinned JDK; an explicit one must not.
+            jvm.jvm_target = jvm.target_for(major);
             let target: u32 = jvm.jvm_target.strip_prefix("1.").unwrap_or(&jvm.jvm_target).parse().unwrap_or(0);
             if target > major {
                 bail!("[target.jvm] jvm-target {} is newer than the [toolchain] JDK {major}", jvm.jvm_target);

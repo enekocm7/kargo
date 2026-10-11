@@ -168,11 +168,19 @@ pub fn manifest(opts: &NewOptions) -> String {
     let _ = writeln!(s, "name = \"{}\"", opts.name);
     let _ = writeln!(s, "version = \"0.1.0\"");
     let _ = writeln!(s, "group = \"{}\"", opts.group);
-    let _ = writeln!(s, "\n[kotlin]\nversion = \"{}\"", opts.kotlin_version);
+    // The Kotlin version and JVM target fall back to Kargo's defaults, so they are
+    // only written when the user asked for something else.
+    if opts.kotlin_version != DEFAULT_KOTLIN_VERSION {
+        let _ = writeln!(s, "\n[kotlin]\nversion = \"{}\"", opts.kotlin_version);
+    }
+    // No [target] section at all means a plain JVM project.
+    let jvm_only = opts.targets == [TargetKind::Jvm];
     for target in &opts.targets {
         match target {
             TargetKind::Jvm => {
-                let _ = writeln!(s, "\n[target.jvm]\njvm-target = \"{}\"", kargo_manifest::DEFAULT_JVM_TARGET);
+                if !jvm_only {
+                    let _ = writeln!(s, "\n[target.jvm]");
+                }
             }
             TargetKind::Wasm => {
                 let _ = writeln!(s, "\n[target.wasm]\nenvironment = \"js\"");
@@ -187,8 +195,6 @@ pub fn manifest(opts: &NewOptions) -> String {
             }
         }
     }
-    let _ = writeln!(s, "\n[dependencies]");
-    let _ = writeln!(s, "\n[dev-dependencies]");
     if !opts.frameworks.is_empty() {
         let _ = writeln!(s, "\n[frameworks]");
         for f in &opts.frameworks {
@@ -205,9 +211,6 @@ pub fn manifest(opts: &NewOptions) -> String {
             }
         }
     }
-    let _ = writeln!(s, "\n# Tasks run with `kargo task <name>`; they can also attach to hooks such as \"pre-build\".");
-    let _ = writeln!(s, "[tasks]");
-    let _ = writeln!(s, "hello = {{ run = \"echo Hello from {}\", description = \"An example task\" }}", opts.name);
     s
 }
 
@@ -501,7 +504,12 @@ mod tests {
         let m = Manifest::parse(manifest).unwrap();
         assert_eq!(m.package.name, "hello-world");
         assert_eq!(m.targets.enabled(), [TargetKind::Jvm]);
-        assert!(m.tasks.contains_key("hello"));
+        assert!(m.tasks.is_empty());
+        assert_eq!(m.kotlin.version, DEFAULT_KOTLIN_VERSION);
+        assert_eq!(m.targets.jvm.as_ref().unwrap().jvm_target, kargo_manifest::DEFAULT_JVM_TARGET);
+        for section in ["[kotlin]", "[target", "[dependencies]", "[dev-dependencies]", "[tasks]"] {
+            assert!(!manifest.contains(section), "default manifest should not contain {section}:\n{manifest}");
+        }
         let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
         assert!(main.contains("package com.example.hello_world"));
         assert!(main.contains("fun main()"));
@@ -529,6 +537,13 @@ mod tests {
             let m = Manifest::parse(&files[0].contents).unwrap_or_else(|e| panic!("{targets:?} {frameworks:?}: {e:#}"));
             assert_eq!(m.targets.enabled(), *targets);
         }
+    }
+
+    #[test]
+    fn non_default_kotlin_version_is_written() {
+        let o = NewOptions { kotlin_version: "2.1.0".into(), ..opts("demo") };
+        let m = Manifest::parse(&template(&o).unwrap()[0].contents).unwrap();
+        assert_eq!(m.kotlin.version, "2.1.0");
     }
 
     #[test]

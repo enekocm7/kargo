@@ -120,6 +120,14 @@ impl From<ToolArg> for ToolKind {
 }
 
 #[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// List running compiler daemons
+    Status,
+    /// Stop every running compiler daemon
+    Stop,
+}
+
+#[derive(Debug, Subcommand)]
 enum ToolchainCommand {
     /// List installed JDKs and Kotlin/Native distributions
     #[command(visible_alias = "ls")]
@@ -355,6 +363,11 @@ enum Command {
     Toolchain {
         #[command(subcommand)]
         command: ToolchainCommand,
+    },
+    /// Show or stop the background compiler daemons that keep the Kotlin compiler warm
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
     },
     /// Print project information
     Info,
@@ -684,6 +697,24 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Toolchain { command } => toolchain(&config, &global, command),
+        Command::Daemon { command } => {
+            match command {
+                DaemonCommand::Status => {
+                    let running = kargo_compiler::daemon::running(config.home());
+                    if running.is_empty() {
+                        println!("No compiler daemons are running.");
+                    }
+                    for d in running {
+                        println!("pid {:<8} {}", d.pid, d.dir.display());
+                    }
+                }
+                DaemonCommand::Stop => {
+                    let stopped = kargo_compiler::daemon::stop_all(config.home());
+                    shell.status("Stopped", format!("{stopped} compiler daemon{}", if stopped == 1 { "" } else { "s" }));
+                }
+            }
+            Ok(0)
+        }
         Command::External(argv) => external(&config, &global, argv),
     }
 }

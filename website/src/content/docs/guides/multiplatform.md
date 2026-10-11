@@ -17,11 +17,7 @@ name = "hello"
 version = "0.1.0"
 group = "com.example"
 
-[kotlin]
-version = "2.4.21"
-
 [target.jvm]
-jvm-target = "17"
 
 [target.wasm]
 environment = "js"

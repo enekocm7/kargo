@@ -49,6 +49,8 @@ kargo test --release       # with the release profile
 
 `kargo test` exits with status `101` if a test fails, so it works in scripts and CI.
 
+With several targets enabled, the tests of every target compile at the same time; they then run one target after another, so each target's results stay together. See [Build performance](../build-performance/).
+
 On the JVM every class in `tests/` and `tests-jvm/` is scanned, whatever its name: a class called `T` or a Kotest spec called `UserSpec` runs just like `UserTest`. If test sources compiled but no test was found, or the filter matched nothing, `kargo test` reports an error and exits with `101` instead of silently passing.
 
 ## Filtering tests

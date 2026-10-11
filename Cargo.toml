@@ -61,6 +61,7 @@ kargo-util.workspace = true
 kargo-maven.workspace = true
 kargo-manifest.workspace = true
 kargo-toolchain.workspace = true
+kargo-compiler.workspace = true
 kargo-ops.workspace = true
 anyhow.workspace = true
 clap.workspace = true

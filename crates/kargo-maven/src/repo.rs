@@ -21,6 +21,9 @@ pub const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
 /// How long `maven-metadata.xml` (the version list) is trusted before re-checking.
 const METADATA_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How many times a request that failed transiently (HTTP 429, 5xx, connection errors) is retried.
+const MAX_RETRIES: u32 = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credentials {
     pub username: String,
@@ -288,12 +291,32 @@ impl MavenClient {
     }
 
     fn get(&self, repo: &Repository, url: &str) -> Result<Option<ureq::http::Response<ureq::Body>>> {
-        let mut request = self.agent.get(url);
-        if let Some(creds) = &repo.credentials {
-            let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", creds.username, creds.password));
-            request = request.header("Authorization", format!("Basic {token}"));
-        }
-        let response = request.call().with_context(|| format!("failed to connect to {url}"))?;
+        let mut attempt = 0;
+        let response = loop {
+            let mut request = self.agent.get(url);
+            if let Some(creds) = &repo.credentials {
+                let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", creds.username, creds.password));
+                request = request.header("Authorization", format!("Basic {token}"));
+            }
+            let result = request.call();
+            // Rate limits, gateway hiccups and dropped connections are usually transient.
+            let transient = match &result {
+                Ok(r) => matches!(r.status().as_u16(), 408 | 429 | 500 | 502 | 503 | 504),
+                Err(_) => true,
+            };
+            if !transient || attempt >= MAX_RETRIES {
+                break result.with_context(|| format!("failed to connect to {url}"))?;
+            }
+            let delay = result
+                .as_ref()
+                .ok()
+                .and_then(|r| r.headers().get("retry-after")?.to_str().ok()?.trim().parse::<u64>().ok())
+                .map(|s| Duration::from_secs(s.min(30)))
+                .unwrap_or(Duration::from_millis(250 << attempt));
+            attempt += 1;
+            self.shell.verbose("Retrying", format!("{url} in {:.1}s", delay.as_secs_f64()));
+            std::thread::sleep(delay);
+        };
         match response.status().as_u16() {
             200..=299 => Ok(Some(response)),
             404 | 410 => Ok(None),
