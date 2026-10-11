@@ -34,6 +34,22 @@ fn new_creates_a_project() {
 }
 
 #[test]
+fn new_inside_a_git_repository_does_not_nest_one() {
+    let Some(git) = common::which("git") else { return };
+    let p = Project::new();
+    let status = std::process::Command::new(git).args(["init", "--quiet"]).current_dir(p.path()).status().unwrap();
+    assert!(status.success());
+    // Run from a subdirectory so the relative path never names the repository root.
+    let sub = p.path().join("examples");
+    std::fs::create_dir_all(&sub).unwrap();
+    p.kargo().current_dir(&sub).args(["new", "todo-cli"]).assert().success();
+    let root = sub.join("todo-cli");
+    assert!(root.join("kargo.toml").is_file());
+    assert!(root.join(".gitignore").is_file());
+    assert!(!root.join(".git").exists(), "nested repository created inside an existing one");
+}
+
+#[test]
 fn new_rejects_invalid_input() {
     let p = Project::new();
     p.kargo().args(["new", "9lives", "--no-vcs"]).assert().failure().stderr(predicate::str::contains("must start with a letter"));
