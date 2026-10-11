@@ -195,7 +195,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
         classpath: classpaths.compile.files(),
         friend_paths: Vec::new(),
         output: classes.clone(),
-        jvm_target: &jvm.jvm_target,
+        jvm_target: &jvm.target_for(jdk.version),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         javac_args: &setup.contributions.javac_args,

@@ -357,6 +357,22 @@ jvm-target = \"21\"
 }
 
 #[test]
+fn default_jvm_target_follows_older_jdks() {
+    let jvm = |text: &str| parse(text).targets.jvm.unwrap();
+    // A pinned JDK older than the default lowers the default target.
+    assert_eq!(jvm(&format!("{MINIMAL}\n[toolchain]\njdk = \"17\"\n")).jvm_target, "17");
+    assert_eq!(jvm(&format!("{MINIMAL}\n[toolchain]\njdk = \"21\"\n[target.jvm]\n")).jvm_target, "21");
+    // So does an older system JDK at build time.
+    let default = jvm(MINIMAL);
+    assert_eq!(default.target_for(21), "21");
+    assert_eq!(default.target_for(99), DEFAULT_JVM_TARGET);
+    // An explicit target is kept as written.
+    let explicit = jvm(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"11\"\n"));
+    assert_eq!(explicit.target_for(21), "11");
+    assert_eq!(jvm(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"25\"\n")).target_for(21), "25");
+}
+
+#[test]
 fn jdk_request_display_round_trips() {
     for s in ["system", "21", "jdk-21.0.5+11", "jdk8u432-b06"] {
         assert_eq!(s.parse::<JdkRequest>().unwrap().to_string(), s);

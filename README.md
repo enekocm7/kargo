@@ -78,7 +78,7 @@ compiler-args = ["-Xcontext-parameters"]
 
 # Targets: no [target] section means a JVM project.
 [target.jvm]
-jvm-target = "17"
+jvm-target = "25"                     # default: 25, or your JDK's version if it is older
 # main-class = "com.example.MainKt"   # detected from a top-level `fun main` or a `@JvmStatic fun main` in an object; set it for a Java main
 # jvm-args = ["-Xmx1g"]
 

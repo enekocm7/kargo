@@ -151,7 +151,7 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
         classpath: classpath.clone(),
         friend_paths: vec![main_classes.to_path_buf()],
         output: test_classes.clone(),
-        jvm_target: &jvm.jvm_target,
+        jvm_target: &jvm.target_for(jdk.version),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         javac_args: &setup.contributions.javac_args,
