@@ -111,7 +111,7 @@ pub struct AndroidConfig {
     pub min_sdk: u32,
     #[serde(default = "default_sdk")]
     pub target_sdk: u32,
-    #[serde(default = "default_sdk")]
+    #[serde(default = "default_compile_sdk")]
     pub compile_sdk: u32,
     #[serde(default = "default_version_code")]
     pub version_code: u32,
@@ -128,6 +128,9 @@ fn default_min_sdk() -> u32 {
 }
 fn default_sdk() -> u32 {
     36
+}
+fn default_compile_sdk() -> u32 {
+    37
 }
 fn default_version_code() -> u32 {
     1

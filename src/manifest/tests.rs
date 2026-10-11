@@ -127,7 +127,7 @@ optimize = true
     assert_eq!(native.kind, NativeKind::Shared);
     let android = m.targets.android.as_ref().unwrap();
     assert_eq!(android.config.min_sdk, 26);
-    assert_eq!(android.config.compile_sdk, 36);
+    assert_eq!(android.config.compile_sdk, 37);
     assert_eq!(android.config.kind, "application");
 
     assert_eq!(m.dependencies.len(), 5);
