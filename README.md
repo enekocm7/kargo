@@ -18,7 +18,7 @@ $ kargo test
 * **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you).
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
 * **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and before a cached artifact is first locked, and against the lockfile on re-download.
-* **Incremental:** compilation is skipped when sources, classpath and flags are unchanged.
+* **Fast rebuilds:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, the whole target is recompiled (no per-file incremental compilation yet), but in a warm compiler daemon, so a small project rebuilds in well under a second.
 * **Android** is built by the Android Gradle Plugin. Kargo generates the Gradle project under `target/android` from `kargo.toml`, so you never edit Gradle files.
 
 ## Commands
