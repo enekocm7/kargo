@@ -111,7 +111,7 @@ impl MavenClient {
     }
 
     fn cache_path(&self, rel: &str) -> PathBuf {
-        self.cache.join(rel)
+        rel.split('/').fold(self.cache.clone(), |path, seg| path.join(seg))
     }
 
     /// Fetches a repository-relative path, returning the cached file or `None`
