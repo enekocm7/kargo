@@ -37,14 +37,14 @@ Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.
 
 ### `could not determine the main class`
 
-Kargo looks for a top-level Kotlin `fun main`. If there's more than one, or none, set it explicitly:
+Kargo looks for a top-level Kotlin `fun main`, or a `@JvmStatic fun main` in an `object` or `companion object`. The message says why detection failed: ``no `main` function found``, or ``found multiple `main` functions`` followed by the classes it found. Set the main class explicitly:
 
 ```toml
 [target.jvm]
 main-class = "com.example.app.MainKt"
 ```
 
-The class of a top-level function in `Main.kt` is `MainKt`. If your `main` is in a Java class, give its fully qualified name, such as `com.example.app.App`. Kargo doesn't look for `main` in Java files.
+The class of a top-level function in `Main.kt` is `MainKt`; for `object Cli { @JvmStatic fun main(...) }` it is `Cli`. If your `main` is in a Java class, give its fully qualified name, such as `com.example.app.App`. Kargo doesn't look for `main` in Java files.
 
 ### `Node.js is required to run Kotlin/Wasm programs`
 

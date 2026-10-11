@@ -93,6 +93,33 @@ fn jvm_lifecycle() {
 }
 
 #[test]
+fn main_class_detection() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["mains"]);
+    // `@JvmStatic fun main` in an object or companion object.
+    t.write("mains/src/Main.kt", "package m\nobject Cli { @JvmStatic fun main(args: Array<String>) { println(\"object main\") } }\n");
+    t.kargo("mains").arg("run").assert().success().stdout(predicate::str::contains("object main"));
+    t.write(
+        "mains/src/Main.kt",
+        "package m\nclass App { companion object { @JvmStatic fun main(args: Array<String>) = println(\"companion main\") } }\n",
+    );
+    t.kargo("mains").arg("run").assert().success().stdout(predicate::str::contains("companion main"));
+
+    // Several mains are reported by name.
+    t.write("mains/src/Main.kt", "package m\nfun main() {}\n");
+    t.write("mains/src/Other.kt", "package m.other\nfun main() {}\n");
+    t.kargo("mains")
+        .arg("run")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("found multiple `main` functions"))
+        .stderr(predicate::str::contains("m.MainKt"))
+        .stderr(predicate::str::contains("m.other.OtherKt"));
+}
+
+#[test]
 fn compile_errors_are_reported() {
     require_e2e!();
     let t = E2e::new();

@@ -44,10 +44,10 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     let mut cmd = match target {
         TargetKind::Jvm => {
             let jvm = results.jvm.context("JVM build produced no output")?;
-            let main = jvm
-                .main_class
-                .clone()
-                .context("could not determine the main class: add a top-level `fun main` or set `main-class` in [target.jvm]")?;
+            let Some(main) = jvm.main_class.clone() else {
+                let reason = jvm.main_class_error.as_deref().unwrap_or("set `[target.jvm] main-class` in kargo.toml");
+                bail!("could not determine the main class: {reason}");
+            };
             let jdk = ctx.jdk()?;
             let mut classpath = vec![jvm.classes.clone()];
             classpath.extend(jvm.runtime_classpath.iter().cloned());

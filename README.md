@@ -77,7 +77,7 @@ compiler-args = ["-Xcontext-parameters"]
 # Targets: no [target] section means a JVM project.
 [target.jvm]
 jvm-target = "17"
-# main-class = "com.example.MainKt"   # detected from a Kotlin `fun main`; set it for a Java main
+# main-class = "com.example.MainKt"   # detected from a top-level `fun main` or a `@JvmStatic fun main` in an object; set it for a Java main
 # jvm-args = ["-Xmx1g"]
 
 [target.wasm]

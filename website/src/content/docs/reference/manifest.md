@@ -62,6 +62,8 @@ main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun m
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 ```
 
+Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one.
+
 ### `[target.wasm]`
 
 ```toml
