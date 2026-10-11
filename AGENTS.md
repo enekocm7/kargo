@@ -149,5 +149,5 @@ Fix any build error (bad frontmatter, a sidebar slug that doesn't match a file) 
 Before reporting a task as done:
 
 1. `cargo fmt --all` and `cargo test --workspace` pass (run the e2e tests too when you touched compiler drivers, frameworks or toolchains).
-2. The docs are updated per the section above, and `npm run build` in `website/` passes if you touched `website/`.
+2. The docs are updated per the section above, and `bun run build` in `website/` passes if you touched `website/`.
 3. Your summary lists which docs pages you changed or created, or states why none were needed.
