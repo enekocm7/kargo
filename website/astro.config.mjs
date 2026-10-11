@@ -2,7 +2,12 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
+// The Pages workflow sets SITE and BASE_PATH from actions/configure-pages: on
+// enekocm7.github.io the site lives under /kargo, while a custom domain (or a
+// local build) serves it from the root.
 export default defineConfig({
+	site: process.env.SITE || undefined,
+	base: process.env.BASE_PATH || undefined,
 	integrations: [
 		starlight({
 			title: 'Kargo',
