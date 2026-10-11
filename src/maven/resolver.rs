@@ -19,7 +19,7 @@ use super::repo::{MavenClient, resolve_relative};
 use super::version::{Version, VersionReq};
 
 /// Bumped whenever resolution semantics change, invalidating locked results.
-pub const RESOLVER_VERSION: &str = "2";
+pub const RESOLVER_VERSION: &str = "3";
 
 /// An exclusion pattern; `*` matches anything.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -249,7 +249,9 @@ impl<'a> Resolver<'a> {
             return Ok(Some(NodeInfo {
                 edges: vec![Edge {
                     module: ModuleId::new(&at.group, &at.module),
-                    version: Some(format!("[{}]", at.version)),
+                    // A redirect is an ordinary requirement: conflict resolution may
+                    // still pick a newer version of the target (as Gradle does).
+                    version: Some(at.version.clone()),
                     exclusions: Vec::new(),
                 }],
                 files: Vec::new(),
@@ -369,12 +371,11 @@ impl<'a> Resolver<'a> {
     }
 
     /// Chooses the version for a module given everything that asked for it.
-    fn choose(&self, module: &ModuleId, requests: &Requests, previous: Option<&Version>) -> Result<Version> {
+    fn choose(&self, module: &ModuleId, requests: &Requests) -> Result<Version> {
         if let Some(forced) = &requests.forced {
             return Ok(forced.clone());
         }
         let mut softs: Vec<Version> = requests.soft.clone();
-        softs.extend(previous.cloned());
         if let Some(managed) = self.constraints.get(module) {
             softs.push(Version::parse(managed));
         }
@@ -424,21 +425,27 @@ impl<'a> Resolver<'a> {
             let (order, used, requests, edges_by_module) = self.traverse(&roots, &root_requests, &selected)?;
             let mut next: HashMap<ModuleId, Version> = HashMap::new();
             for module in &order {
-                let chosen = self.choose(module, &requests[module], selected.get(module))?;
+                let chosen = self.choose(module, &requests[module])?;
                 next.insert(module.clone(), chosen);
             }
             let stable = order.iter().all(|m| next.get(m) == used.get(m));
             if stable {
                 return self.finish(&roots, order, &used, &edges_by_module);
             }
-            for (module, version) in next {
-                let entry = selected.entry(module).or_insert_with(|| version.clone());
-                if version > *entry {
-                    *entry = version;
-                }
-            }
+            selected.extend(next);
         }
-        bail!("dependency resolution did not converge after {MAX_ITERATIONS} iterations")
+        let (order, used, requests, _) = self.traverse(&roots, &root_requests, &selected)?;
+        let unstable: Vec<String> = order
+            .iter()
+            .filter_map(|m| {
+                let next = self.choose(m, &requests[m]).ok()?;
+                (Some(&next) != used.get(m)).then(|| format!("{m} ({} vs {next})", used.get(m).map(Version::as_str).unwrap_or("?")))
+            })
+            .collect();
+        bail!(
+            "dependency resolution did not converge after {MAX_ITERATIONS} iterations; conflicting modules: {}",
+            unstable.join(", ")
+        )
     }
 
     #[allow(clippy::type_complexity)]
@@ -480,7 +487,12 @@ impl<'a> Resolver<'a> {
             let version = match used.get(&module) {
                 Some(v) => v.clone(),
                 None => {
-                    let v = self.choose(&module, &requests[&module], selected.get(&module))?;
+                    // Reuse the previous iteration's decision: it was made with
+                    // complete information, unlike the partial requests seen so far.
+                    let v = match selected.get(&module) {
+                        Some(v) => v.clone(),
+                        None => self.choose(&module, &requests[&module])?,
+                    };
                     used.insert(module.clone(), v.clone());
                     v
                 }

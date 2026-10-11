@@ -160,8 +160,7 @@ mod tests {
     #[test]
     fn appends_arguments_to_last_command() {
         let dir = tempfile::tempdir().unwrap();
-        let script = if cfg!(windows) { "echo" } else { "echo" };
-        let t = tasks(&format!("say = \"{script}\"\n"));
+        let t = tasks("say = \"echo\"\n");
         // Only checks that it runs successfully with arguments that need quoting.
         run(&Shell::new(crate::shell::Verbosity::Quiet), dir.path(), &t, "say", &["hello world".into(), "x".into()], &[]).unwrap();
         assert_eq!(quote_for_shell("plain-arg"), "plain-arg");

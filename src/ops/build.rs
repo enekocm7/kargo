@@ -46,6 +46,7 @@ pub struct JvmBuild {
 #[derive(Debug, Clone)]
 pub struct WasmBuild {
     pub module: PathBuf,
+    pub klib: PathBuf,
     pub environment: WasmEnvironment,
 }
 
@@ -260,6 +261,7 @@ pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
         environment: wasm.environment,
         sources: sources(ctx, TargetKind::Wasm, false, &["kt"]),
         libraries,
+        friends: Vec::new(),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(ctx.profile, TargetKind::Wasm),
@@ -268,7 +270,7 @@ pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     let fp_dir = ctx.fingerprint_dir(TargetKind::Wasm);
     match unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Wasm, ""))? {
         Outcome::Empty => Ok(None),
-        _ => Ok(Some(WasmBuild { module: unit.module_path(), environment: wasm.environment })),
+        _ => Ok(Some(WasmBuild { module: unit.module_path(), klib: unit.klib_path(), environment: wasm.environment })),
     }
 }
 

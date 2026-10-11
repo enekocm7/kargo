@@ -32,6 +32,8 @@ pub struct WasmCompilation<'a> {
     pub sources: SourceSet,
     /// Dependency klibs.
     pub libraries: Vec<PathBuf>,
+    /// Klibs whose `internal` declarations are visible (tests -> main).
+    pub friends: Vec<PathBuf>,
     pub plugins: &'a [ResolvedPlugin],
     pub kotlin_args: &'a [String],
     /// Directory receiving `<name>.klib` and the linked `<name>.mjs`/`.wasm`.
@@ -51,9 +53,14 @@ impl WasmCompilation<'_> {
             WasmEnvironment::Wasi => "wasm-wasi",
         };
         args.push(format!("-Xwasm-target={target}"));
-        if !self.libraries.is_empty() {
+        let mut libraries = self.libraries.clone();
+        libraries.extend(self.friends.iter().cloned());
+        if !libraries.is_empty() {
             args.push("-libraries".to_owned());
-            args.push(join_paths(&self.libraries));
+            args.push(join_paths(&libraries));
+        }
+        if !self.friends.is_empty() {
+            args.push(format!("-Xfriend-modules={}", join_paths(&self.friends)));
         }
         args
     }
@@ -104,7 +111,9 @@ impl WasmCompilation<'_> {
         let mut all = klib_args.clone();
         all.extend(link_args.iter().cloned());
         all.push(version.to_owned());
-        let fp = fingerprint(&self.sources, &self.libraries, self.plugins, &all);
+        let mut inputs = self.libraries.clone();
+        inputs.extend(self.friends.iter().cloned());
+        let fp = fingerprint(&self.sources, &inputs, self.plugins, &all);
         let check = FreshnessCheck::new(fingerprint_dir.join(format!("{}.fingerprint", self.name)), &fp);
         if check.is_fresh() && self.module_path().is_file() {
             return Ok(Outcome::Fresh);
@@ -140,6 +149,7 @@ mod tests {
             environment: WasmEnvironment::Wasi,
             sources: SourceSet::new(vec!["a.kt".into()], vec![], "wasm"),
             libraries: vec!["std.klib".into()],
+            friends: vec!["main.klib".into()],
             plugins: &[],
             kotlin_args: &[],
             output: "out".into(),
@@ -148,7 +158,8 @@ mod tests {
         let args = unit.base_args("2.3.0");
         assert_eq!(args[0], "-Xwasm");
         assert_eq!(args[1], "-Xwasm-target=wasm-wasi");
-        assert_eq!(args[3], "std.klib");
+        assert_eq!(args[3], crate::util::fs::join_paths(&["std.klib".into(), "main.klib".into()]));
+        assert_eq!(args[4], "-Xfriend-modules=main.klib");
         assert!(unit.klib_path().ends_with("klib/app.klib") || unit.klib_path().ends_with("klib\\app.klib"));
     }
 }

@@ -176,23 +176,23 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     if tests.kotlin_files().is_empty() {
         return Ok(no_tests(ctx, TargetKind::Wasm));
     }
+    // Tests link against the main klib as a friend module, so the program's
+    // `main` is not part of the test binary.
+    let main = super::build::build_wasm(ctx)?;
     let setup = ctx.setup(TargetKind::Wasm)?;
-    let _ = wasm_libraries(ctx, &setup, false)?;
     let libraries = wasm_libraries(ctx, &setup, true)?;
     let jdk = ctx.jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
-    // Main and test sources are compiled together so tests see `internal` declarations.
-    let mut all = sources(ctx, TargetKind::Wasm, false, &["kt"]);
-    all.extend(&tests);
     let name = format!("{}-test", manifest.package.name);
     let unit = WasmCompilation {
         name: &name,
         environment: wasm.environment,
-        sources: all,
+        sources: tests,
         libraries,
+        friends: main.map(|m| vec![m.klib]).unwrap_or_default(),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(ctx.profile, TargetKind::Wasm).join("test"),
