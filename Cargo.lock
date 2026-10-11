@@ -482,6 +482,7 @@ dependencies = [
  "kargo-toolchain",
  "kargo-util",
  "roxmltree",
+ "serde_json",
  "tempfile",
  "walkdir",
  "zip",

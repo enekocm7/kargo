@@ -56,6 +56,7 @@ jvm-args = ["-Xmx1g"]
 
 [target.wasm]
 environment = "wasi"
+package-manager = "pnpm"
 
 [target.native]
 platforms = ["linuxX64", "mingw_x64", "host"]
@@ -125,6 +126,7 @@ optimize = true
     assert_eq!(jvm.dependencies[0].scope, Scope::Runtime);
 
     assert_eq!(m.targets.wasm.as_ref().unwrap().environment, WasmEnvironment::Wasi);
+    assert_eq!(m.targets.wasm.as_ref().unwrap().package_manager, Some(PackageManager::Pnpm));
     let native = m.targets.native.as_ref().unwrap();
     assert_eq!(native.platforms, ["linux_x64", "mingw_x64", "host"]);
     assert_eq!(native.kind, NativeKind::Shared);
@@ -223,6 +225,7 @@ fn target_errors() {
     let with = |t: &str| format!("{MINIMAL}\n{t}\n");
     assert!(parse_err(&with("[target]")).contains("no target is enabled"));
     assert!(parse_err(&with("[target.wasm]\nenvironment = \"node\"")).contains("wasm environment"));
+    assert!(parse_err(&with("[target.wasm]\npackage-manager = \"yarn\"")).contains("expected `npm`, `pnpm` or `bun`"));
     assert!(parse_err(&with("[target.native]\nplatforms = [\"plan9\"]")).contains("Kotlin/Native platform"));
     assert!(parse_err(&with("[target.native]\nkind = \"weird\"")).contains("native kind"));
     assert!(parse_err(&with("[target.android]\nnamespace = \"\"")).contains("namespace"));

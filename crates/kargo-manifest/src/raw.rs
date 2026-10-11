@@ -105,6 +105,7 @@ struct RawJvm {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawWasm {
     environment: Option<String>,
+    package_manager: Option<String>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -531,7 +532,12 @@ impl RawManifest {
                                 Some("wasi") => WasmEnvironment::Wasi,
                                 Some(other) => bail!("unknown wasm environment `{other}` (expected `js` or `wasi`)"),
                             };
-                            Ok(WasmTarget { environment, dependencies: parse_dependencies(&w.dependencies, "target.wasm.dependencies")? })
+                            let package_manager = w.package_manager.as_deref().map(str::parse).transpose()?;
+                            Ok(WasmTarget {
+                                environment,
+                                package_manager,
+                                dependencies: parse_dependencies(&w.dependencies, "target.wasm.dependencies")?,
+                            })
                         })
                         .transpose()?,
                     native: raw

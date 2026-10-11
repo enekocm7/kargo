@@ -63,7 +63,7 @@ You only need these for some targets:
 
 | You want to... | You need |
 |---|---|
-| Run or test **WebAssembly** programs | [Node.js](https://nodejs.org) (`node` on `PATH`). Compiling Wasm doesn't need it. |
+| Run or test **WebAssembly** programs | [Node.js](https://nodejs.org) (`node` on `PATH`). Compiling Wasm doesn't need it, unless a dependency needs [npm packages](../../guides/wasm/#npm-packages); then npm, pnpm or bun must be on `PATH` too. |
 | Build for **Android** | The [Android SDK](https://developer.android.com/studio) (set `ANDROID_HOME`) and [Gradle](https://gradle.org/install), or a `gradlew` wrapper in the project |
 | Run on an **Android** device | `adb` from the SDK platform-tools, plus a device or emulator |
 | Build **Kotlin/Native** | Nothing. Kargo downloads Kotlin/Native and its LLVM toolchain on the first native build. |

@@ -1,8 +1,11 @@
 //! Kotlin/Wasm compilation: sources -> klib -> `.mjs` + `.wasm`.
 
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::{FreshnessCheck, Outcome, ResolvedPlugin, SourceSet, fingerprint, plugin_args, run_kotlin_compiler};
 use kargo_manifest::WasmEnvironment;
@@ -153,9 +156,97 @@ impl WasmCompilation<'_> {
     }
 }
 
+/// The npm packages the given klibs need at runtime, as `name -> version`.
+///
+/// Kotlin/JS and Kotlin/Wasm libraries declare them (`npm("@js-joda/core", ...)`
+/// in Gradle) in a `package.json` at the root of the klib. When two libraries
+/// ask for different versions of a package, the highest one wins.
+pub fn npm_dependencies(libraries: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for klib in libraries {
+        let Some(json) = read_package_json(klib).with_context(|| format!("failed to read {}", klib.display()))? else {
+            continue;
+        };
+        let Ok(package) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        let Some(deps) = package.get("dependencies").and_then(|d| d.as_object()) else {
+            continue;
+        };
+        for (name, version) in deps {
+            let Some(version) = version.as_str() else { continue };
+            match out.get(name) {
+                Some(existing) if npm_version(existing) >= npm_version(version) => {}
+                _ => {
+                    out.insert(name.clone(), version.to_owned());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Compares npm versions and simple ranges (`3.2.0`, `^3.2.0`, `~3.2`) by their lower bound.
+fn npm_version(spec: &str) -> Version {
+    Version::parse(spec.trim().trim_start_matches(['^', '~', '=', '>', 'v']).trim())
+}
+
+/// Reads `package.json` from a klib, which is a zip file or an unpacked directory.
+fn read_package_json(klib: &Path) -> Result<Option<String>> {
+    if klib.is_dir() {
+        let path = klib.join("package.json");
+        return Ok(path.is_file().then(|| std::fs::read_to_string(&path)).transpose()?);
+    }
+    if !klib.extension().is_some_and(|e| e == "klib") {
+        return Ok(None);
+    }
+    let mut archive = zip::ZipArchive::new(File::open(klib)?)?;
+    let Ok(mut entry) = archive.by_name("package.json") else {
+        return Ok(None);
+    };
+    let mut json = String::new();
+    entry.read_to_string(&mut json)?;
+    Ok(Some(json))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn klib_with_package_json(dir: &Path, name: &str, json: &str) -> PathBuf {
+        use std::io::Write;
+        let path = dir.join(format!("{name}.klib"));
+        let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file("default/manifest", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"unique_name=x").unwrap();
+        if !json.is_empty() {
+            zip.start_file("package.json", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(json.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn reads_npm_dependencies_from_klibs() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = klib_with_package_json(dir.path(), "a", r#"{"name":"a","dependencies":{"@js-joda/core":"3.2.0","left-pad":"^1.1.0"}}"#);
+        let b = klib_with_package_json(
+            dir.path(),
+            "b",
+            r#"{"name":"b","dependencies":{"@js-joda/core":"3.10.1"},"devDependencies":{"x":"1"}}"#,
+        );
+        let c = klib_with_package_json(dir.path(), "c", "");
+        let unpacked = dir.path().join("d");
+        std::fs::create_dir(&unpacked).unwrap();
+        std::fs::write(unpacked.join("package.json"), r#"{"dependencies":{"left-pad":"1.0.0"}}"#).unwrap();
+        let jar = dir.path().join("e.jar");
+        std::fs::write(&jar, "not a zip").unwrap();
+
+        let deps = npm_dependencies(&[a, b, c, unpacked, jar]).unwrap();
+        let deps: Vec<_> = deps.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(deps, [("@js-joda/core", "3.10.1"), ("left-pad", "^1.1.0")]);
+    }
 
     #[test]
     fn compiler_selection_by_version() {

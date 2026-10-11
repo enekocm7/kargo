@@ -12,11 +12,18 @@ pub struct TestSummary {
     pub failed: usize,
     pub ignored: usize,
     pub failures: Vec<(String, String)>,
+    /// The test process failed without reporting a failed test (it crashed).
+    pub crashed: bool,
 }
 
 impl TestSummary {
     pub fn success(&self) -> bool {
-        self.failed == 0
+        self.failed == 0 && !self.crashed
+    }
+
+    /// Whether the runner reported any test at all.
+    pub fn ran_tests(&self) -> bool {
+        self.passed + self.failed + self.ignored > 0
     }
 
     pub fn merge(&mut self, other: TestSummary) {
@@ -24,6 +31,7 @@ impl TestSummary {
         self.failed += other.failed;
         self.ignored += other.ignored;
         self.failures.extend(other.failures);
+        self.crashed |= other.crashed;
     }
 }
 
@@ -220,6 +228,13 @@ hello from test
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("---- MathTest.fails ----"));
         assert!(text.contains("1 passed; 1 failed; 1 ignored"));
+
+        let crashed = TestSummary { passed: 2, crashed: true, ..TestSummary::default() };
+        assert!(!crashed.success());
+        let mut out = Vec::new();
+        print_summary(&crashed, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("FAILED"));
+        assert!(!TestSummary::default().ran_tests());
 
         let mut total = TestSummary::default();
         total.merge(summary);
