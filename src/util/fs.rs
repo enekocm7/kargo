@@ -1,0 +1,162 @@
+//! Filesystem helpers.
+
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+/// Creates a temporary sibling file, lets `write` fill it, then renames it into
+/// place so readers never observe a partially written file.
+pub fn write_atomic(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> Result<()> {
+    let dir = path.parent().context("path has no parent directory")?;
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let file_name = path.file_name().context("path has no file name")?.to_string_lossy();
+    let tmp = dir.join(format!(".{file_name}.{}.{}.part", std::process::id(), unique_suffix()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::File::create(&tmp).with_context(|| format!("failed to create {}", tmp.display()))?;
+        write(&mut file).with_context(|| format!("failed to write {}", tmp.display()))?;
+        file.flush()?;
+        drop(file);
+        rename_replacing(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+pub fn write_string_atomic(path: &Path, contents: &str) -> Result<()> {
+    write_atomic(path, |f| f.write_all(contents.as_bytes()))
+}
+
+fn rename_replacing(from: &Path, to: &Path) -> Result<()> {
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        // On Windows a concurrent process may hold or have produced the same
+        // file; if it now exists, theirs is as good as ours.
+        Err(_) if to.exists() => {
+            let _ = fs::remove_file(from);
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to move {} to {}", from.display(), to.display())),
+    }
+}
+
+fn unique_suffix() -> u128 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    nanos ^ u128::from(COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Recursively collects files under `root` whose extension is in `extensions`,
+/// sorted for deterministic compiler invocations.
+pub fn collect_files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| extensions.contains(&e)))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Copies a directory tree, creating destination directories as needed.
+pub fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    for entry in walkdir::WalkDir::new(from) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(from)?;
+        let dest = to.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest)?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), &dest).with_context(|| format!("failed to copy {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes a directory tree if it exists.
+pub fn remove_dir_all_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+/// Joins classpath entries with the platform separator.
+pub fn join_paths(paths: &[PathBuf]) -> String {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join(sep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_creates_parents_and_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b/c.txt");
+        write_string_atomic(&path, "one").unwrap();
+        write_string_atomic(&path, "two").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
+        let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap()).unwrap().collect();
+        assert_eq!(leftovers.len(), 1, "no temporary files left behind");
+    }
+
+    #[test]
+    fn failed_write_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.txt");
+        let err = write_atomic(&path, |_| Err(io::Error::other("boom")));
+        assert!(err.is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn collects_sorted_files_by_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["b.kt", "a/c.kt", "a/d.java", "e.txt"] {
+            let p = dir.path().join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, "").unwrap();
+        }
+        let files = collect_files(dir.path(), &["kt", "java"]);
+        let names: Vec<_> =
+            files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/")).collect();
+        assert_eq!(names, ["a/c.kt", "a/d.java", "b.kt"]);
+        assert!(collect_files(&dir.path().join("missing"), &["kt"]).is_empty());
+    }
+
+    #[test]
+    fn copies_trees() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("x")).unwrap();
+        fs::write(src.join("x/y.txt"), "hi").unwrap();
+        copy_dir(&src, &dir.path().join("dst")).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("dst/x/y.txt")).unwrap(), "hi");
+        remove_dir_all_if_exists(&dir.path().join("dst")).unwrap();
+        remove_dir_all_if_exists(&dir.path().join("dst")).unwrap();
+        assert!(!dir.path().join("dst").exists());
+    }
+
+    #[test]
+    fn joins_classpaths() {
+        let joined = join_paths(&[PathBuf::from("a.jar"), PathBuf::from("b.jar")]);
+        assert!(joined == "a.jar;b.jar" || joined == "a.jar:b.jar");
+        assert_eq!(join_paths(&[]), "");
+    }
+}
