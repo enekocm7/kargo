@@ -16,6 +16,7 @@ description: Environment variables Kargo reads and sets.
 | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android SDK location |
 | `BROWSER` | Browser that `kargo doc --open` starts (default: the system's default browser) |
 | Names in `username-env` / `password-env` | Repository credentials |
+| `COMPLETE` | Set by the `kargo completions` scripts when they ask Kargo for candidates; don't set it yourself |
 
 ## Variables Kargo sets
 

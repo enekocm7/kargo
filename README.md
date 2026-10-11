@@ -38,11 +38,12 @@ $ kargo test
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates]` | Show the dependency graph |
 | `kargo package [--release]` | Build a self-contained fat jar (JVM) |
 | `kargo fetch` / `kargo update` | Pre-download everything / re-resolve `kargo.lock` |
-| `kargo task [name] [args]`, `kargo <task>` | List or run tasks |
+| `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs and Kotlin/Native distributions |
 | `kargo clean`, `kargo info` | Remove `target/`, show project information |
+| `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
 
@@ -200,6 +201,7 @@ Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cy
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
 | `BROWSER` | Browser for `kargo doc --open` |
+| `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
 
 ## Development
 

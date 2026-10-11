@@ -264,6 +264,48 @@ fn tasks_list_run_and_dependencies() {
 }
 
 #[test]
+fn help_and_task_list_show_project_tasks() {
+    let p = Project::new();
+    p.kargo().arg("--help").assert().success().stdout(predicate::str::contains("Tasks").not());
+    p.file("kargo.toml", &manifest("tasky", "[tasks]\ngen = { run = \"echo gen\", description = \"generate sources\" }\n"));
+    for args in [&["--help"][..], &["-h"], &["help"], &["-q", "--help"]] {
+        p.kargo().args(args).assert().success().stdout(predicate::str::contains("Tasks").and(predicate::str::contains("generate sources")));
+    }
+    p.kargo().args(["build", "--help"]).assert().success().stdout(predicate::str::contains("generate sources").not());
+    p.kargo().args(["task", "--list"]).assert().success().stdout(predicate::str::contains("gen  generate sources"));
+}
+
+#[test]
+fn completions() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        Project::new().kargo().args(["completions", shell]).assert().success().stdout(predicate::str::contains("COMPLETE"));
+    }
+    Project::new().kargo().args(["completions", "tcsh"]).assert().failure();
+
+    // What the scripts ask kargo for on <Tab> (fish's protocol: one `value\thelp` per line).
+    let p = Project::new();
+    let complete = |words: &[&str]| {
+        let out = p.kargo().env("COMPLETE", "fish").arg("--").arg("kargo").args(words).assert().success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+    let values = |out: &str| out.lines().map(|l| l.split('\t').next().unwrap().to_string()).collect::<Vec<_>>();
+
+    // Outside a project: built-in commands only.
+    assert!(values(&complete(&["bu"])).contains(&"build".to_string()));
+    assert!(!complete(&[""]).contains("generate sources"));
+
+    p.file(
+        "kargo.toml",
+        &manifest("tasky", "[tasks]\ngen = { run = \"echo gen\", description = \"generate sources\" }\nlint = \"echo lint\"\n"),
+    );
+    assert!(complete(&["g"]).contains("gen\tgenerate sources"));
+    assert_eq!(values(&complete(&["task", "l"])), ["lint"]);
+    assert_eq!(values(&complete(&["build", "-t", ""])), ["jvm", "wasm", "native", "android"]);
+    assert!(values(&complete(&["toolchain", ""])).contains(&"install".to_string()));
+    assert!(values(&complete(&["add", "--framework", "spr"])).contains(&"spring-boot".to_string()));
+}
+
+#[test]
 fn failing_task_propagates_error() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("failing", "[tasks]\nboom = \"exit 9\"\n"));

@@ -69,6 +69,20 @@ You only need these for some targets:
 | Build **Kotlin/Native** | Nothing. Kargo downloads Kotlin/Native and its LLVM toolchain on the first native build. |
 | `kargo new` creating a git repository | `git` (optional; pass `--no-vcs` to skip) |
 
+## 4. Shell completions (optional)
+
+`kargo completions <shell>` prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish`. Load it from your shell's startup file:
+
+| Shell | Add to | Line |
+|---|---|---|
+| bash | `~/.bashrc` | `source <(kargo completions bash)` |
+| zsh | `~/.zshrc` | `source <(kargo completions zsh)` |
+| fish | `~/.config/fish/config.fish` | `kargo completions fish \| source` |
+| PowerShell | `$PROFILE` | `kargo completions powershell \| Out-String \| Invoke-Expression` |
+| elvish | `~/.config/elvish/rc.elv` | `eval (kargo completions elvish \| slurp)` |
+
+Besides commands and flags, <kbd>Tab</kbd> completes values that depend on where you are: the current project's [tasks](../../guides/tasks-and-plugins/#tasks), `kargo-*` plugins, targets for `-t`, framework names for `--with` and `--framework`, and installed toolchains for `kargo toolchain remove`. The script asks the `kargo` on your `PATH` for them, so it keeps working when you update Kargo.
+
 ## Where Kargo stores things
 
 Everything Kargo downloads goes to `~/.kargo` (override with `KARGO_HOME`):
