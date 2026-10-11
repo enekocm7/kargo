@@ -70,6 +70,14 @@ fn jvm_lifecycle() {
     t.kargo("app").arg("test").assert().failure().code(101);
     std::fs::remove_file(t.dir.path().join("app/tests/FailTest.kt")).unwrap();
 
+    // Test classes run whatever their name, and filters match `Class.method`.
+    t.write("app/tests/T.kt", "import kotlin.test.*\nclass T {\n    @Test fun ok() {}\n    @Test fun bad() = assertEquals(1, 2)\n}\n");
+    t.kargo("app").arg("test").assert().code(101).stdout(predicate::str::contains("bad()"));
+    t.kargo("app").args(["test", "T.ok"]).assert().success().stdout(predicate::str::contains("1 tests successful"));
+    t.kargo("app").args(["test", "T.bad"]).assert().code(101);
+    t.kargo("app").args(["test", "nothing_matches"]).assert().code(101).stderr(predicate::str::contains("no JVM tests match"));
+    std::fs::remove_file(t.dir.path().join("app/tests/T.kt")).unwrap();
+
     // The thin jar runs with its lib/ directory, the fat jar on its own.
     let jar = t.dir.path().join("app/target/debug/jvm/app-0.1.0.jar");
     let out = StdCommand::new("java").arg("-jar").arg(&jar).output().unwrap();

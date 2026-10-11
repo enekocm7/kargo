@@ -50,6 +50,19 @@ fn new_escapes_keyword_names_in_the_package() {
 }
 
 #[test]
+fn new_with_invalid_input_leaves_nothing_behind() {
+    let p = Project::new();
+    for name in ["9lives", "Bad Name", "ünï"] {
+        p.kargo().args(["new", name, "--no-vcs"]).assert().failure().code(101);
+        assert!(!p.path().join(name).exists(), "`kargo new {name}` left a directory behind");
+    }
+    p.kargo().args(["new", "x", "--no-vcs", "--with", "rails"]).assert().failure().stderr(predicate::str::contains("unknown framework"));
+    assert!(!p.path().join("x").exists());
+    p.kargo().args(["new", "9lives", "--no-vcs", "--name", "lives"]).assert().success();
+    assert!(p.path().join("9lives/kargo.toml").is_file());
+}
+
+#[test]
 fn init_uses_directory_name_and_keeps_files() {
     let p = Project::new();
     let dir = p.path().join("existing-proj");
