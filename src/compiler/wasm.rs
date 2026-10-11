@@ -66,7 +66,7 @@ impl WasmCompilation<'_> {
         self.output.join(format!("{}.mjs", self.name))
     }
 
-    pub fn compile(&self, shell: &Shell, jdk: &Jdk, compiler: &KotlinCompiler, fingerprint_dir: &Path) -> Result<Outcome> {
+    pub fn compile(&self, shell: &Shell, jdk: &Jdk, compiler: &KotlinCompiler, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
         if self.sources.kotlin_files().is_empty() {
             return Ok(Outcome::Empty);
         }
@@ -110,6 +110,7 @@ impl WasmCompilation<'_> {
             return Ok(Outcome::Fresh);
         }
         check.invalidate();
+        announce();
         remove_dir_all_if_exists(&self.output)?;
         std::fs::create_dir_all(&self.output)?;
 

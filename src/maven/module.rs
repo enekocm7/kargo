@@ -30,6 +30,24 @@ pub struct Variant {
     pub files: Vec<VariantFile>,
     #[serde(rename = "available-at")]
     pub available_at: Option<AvailableAt>,
+    /// Explicit capabilities; empty means the module's own coordinates.
+    #[serde(default)]
+    pub capabilities: Vec<Capability>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Capability {
+    pub group: String,
+    pub name: String,
+}
+
+impl Variant {
+    /// Whether this variant provides the module's default capability. Variants
+    /// with other capabilities (e.g. kotlin-test's per-framework variants) are
+    /// only selected when explicitly requested.
+    fn provides_default_capability(&self, module: &ModuleId) -> bool {
+        self.capabilities.is_empty() || self.capabilities.iter().any(|c| c.group == module.group && c.name == module.artifact)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,10 +225,11 @@ fn score(variant: &Variant, platform: &Platform) -> Option<u32> {
     }
 }
 
-/// Picks the best variant for `platform`.
-pub fn select_variant<'a>(meta: &'a ModuleMetadata, platform: &Platform) -> Option<&'a Variant> {
+/// Picks the best variant of `module` for `platform`.
+pub fn select_variant<'a>(meta: &'a ModuleMetadata, module: &ModuleId, platform: &Platform) -> Option<&'a Variant> {
     meta.variants
         .iter()
+        .filter(|v| v.provides_default_capability(module))
         .filter_map(|v| score(v, platform).map(|s| (s, v)))
         .max_by_key(|(s, _)| *s)
         .map(|(_, v)| v)
@@ -238,10 +257,30 @@ mod tests {
       ]
     }"#;
 
+    fn id() -> ModuleId {
+        ModuleId::new("org.x", "lib")
+    }
+
+    #[test]
+    fn skips_variants_with_foreign_capabilities() {
+        let json = r#"{"formatVersion": "1.1", "variants": [
+            {"name": "jvmRuntimeElements", "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime", "org.jetbrains.kotlin.platform.type": "jvm"},
+             "files": [{"name": "lib.jar", "url": "lib.jar"}]},
+            {"name": "jvmTestNGRuntimeElements", "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime", "org.jetbrains.kotlin.platform.type": "jvm"},
+             "capabilities": [{"group": "org.x", "name": "lib-framework-testng", "version": "1"}]}
+        ]}"#;
+        let meta = ModuleMetadata::parse(json).unwrap();
+        assert_eq!(select_variant(&meta, &id(), &Platform::Jvm).unwrap().name, "jvmRuntimeElements");
+        let own = r#"{"formatVersion": "1.1", "variants": [
+            {"name": "v", "attributes": {"org.gradle.usage": "java-runtime"}, "capabilities": [{"group": "org.x", "name": "lib", "version": "1"}]}
+        ]}"#;
+        assert!(select_variant(&ModuleMetadata::parse(own).unwrap(), &id(), &Platform::Jvm).is_some());
+    }
+
     #[test]
     fn selects_jvm_runtime_variant() {
         let meta = ModuleMetadata::parse(KMP).unwrap();
-        let v = select_variant(&meta, &Platform::Jvm).unwrap();
+        let v = select_variant(&meta, &id(), &Platform::Jvm).unwrap();
         assert_eq!(v.name, "jvmRuntimeElements-published");
         assert_eq!(v.available_at.as_ref().unwrap().module, "lib-jvm");
     }
@@ -249,10 +288,10 @@ mod tests {
     #[test]
     fn selects_wasm_and_native_variants() {
         let meta = ModuleMetadata::parse(KMP).unwrap();
-        assert_eq!(select_variant(&meta, &Platform::Wasm("js".into())).unwrap().name, "wasmJsApiElements");
-        assert!(select_variant(&meta, &Platform::Wasm("wasi".into())).is_none());
-        assert_eq!(select_variant(&meta, &Platform::Native("linux_x64".into())).unwrap().name, "linuxX64ApiElements");
-        assert!(select_variant(&meta, &Platform::Native("macos_arm64".into())).is_none());
+        assert_eq!(select_variant(&meta, &id(), &Platform::Wasm("js".into())).unwrap().name, "wasmJsApiElements");
+        assert!(select_variant(&meta, &id(), &Platform::Wasm("wasi".into())).is_none());
+        assert_eq!(select_variant(&meta, &id(), &Platform::Native("linux_x64".into())).unwrap().name, "linuxX64ApiElements");
+        assert!(select_variant(&meta, &id(), &Platform::Native("macos_arm64".into())).is_none());
     }
 
     #[test]
@@ -266,13 +305,13 @@ mod tests {
             {"name": "platform", "attributes": {"org.gradle.category": "platform"}}
         ]}"#;
         let meta = ModuleMetadata::parse(json).unwrap();
-        let v = select_variant(&meta, &Platform::Jvm).unwrap();
+        let v = select_variant(&meta, &id(), &Platform::Jvm).unwrap();
         assert_eq!(v.name, "runtimeElements");
         assert_eq!(v.dependencies[0].version.as_ref().unwrap().preferred(), Some("1.1"));
         assert!(!v.dependencies[0].is_platform());
         assert!(v.dependencies[1].is_platform());
         assert_eq!(v.files[0].sha256.as_deref(), Some("abc"));
-        assert!(select_variant(&meta, &Platform::Native("linux_x64".into())).is_none());
+        assert!(select_variant(&meta, &id(), &Platform::Native("linux_x64".into())).is_none());
     }
 
     #[test]

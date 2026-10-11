@@ -102,6 +102,10 @@ impl MavenClient {
         }
     }
 
+    pub fn shell(&self) -> &Shell {
+        &self.shell
+    }
+
     pub fn repositories(&self) -> &[Repository] {
         &self.repos
     }

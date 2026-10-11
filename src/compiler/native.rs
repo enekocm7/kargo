@@ -100,7 +100,7 @@ impl NativeCompilation<'_> {
         args
     }
 
-    pub fn compile(&self, shell: &Shell, toolchain: &NativeToolchain, fingerprint_dir: &Path) -> Result<Outcome> {
+    pub fn compile(&self, shell: &Shell, toolchain: &NativeToolchain, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
         if self.sources.kotlin_files().is_empty() {
             return Ok(Outcome::Empty);
         }
@@ -114,6 +114,7 @@ impl NativeCompilation<'_> {
             return Ok(Outcome::Fresh);
         }
         check.invalidate();
+        announce();
         std::fs::create_dir_all(&self.output_dir)?;
 
         let argfile = fingerprint_dir.join(format!("{}-{}-{tag}.konanc.args", self.name, self.konan_target));

@@ -18,6 +18,9 @@ use super::pom::{EffectivePom, Pom, PomSource, effective_pom};
 use super::repo::{MavenClient, resolve_relative};
 use super::version::{Version, VersionReq};
 
+/// Bumped whenever resolution semantics change, invalidating locked results.
+pub const RESOLVER_VERSION: &str = "2";
+
 /// An exclusion pattern; `*` matches anything.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Exclusion {
@@ -87,6 +90,9 @@ impl Resolution {
     }
 }
 
+/// `(module, version)` pairs that align versions without adding modules.
+type Constraints = Vec<(ModuleId, String)>;
+
 /// A transitive edge discovered in metadata.
 #[derive(Debug, Clone)]
 struct Edge {
@@ -101,6 +107,9 @@ struct NodeInfo {
     edges: Vec<Edge>,
     /// Repository-relative artifact paths.
     files: Vec<String>,
+    /// Version constraints that apply only if the module is otherwise in the
+    /// graph (Gradle `dependencyConstraints` and platform/BOM alignment).
+    constraints: Vec<(ModuleId, String)>,
 }
 
 /// Modules provided by the Kotlin/Native distribution rather than Maven.
@@ -121,6 +130,7 @@ pub struct Resolver<'a> {
     infos: Mutex<HashMap<(ModuleId, String), NodeInfo>>,
     poms: Mutex<HashMap<(ModuleId, String), Pom>>,
     effective: Mutex<HashMap<(ModuleId, String), EffectivePom>>,
+    platforms: Mutex<HashMap<(ModuleId, String), Constraints>>,
 }
 
 struct ClientPomSource<'a, 'b>(&'b Resolver<'a>);
@@ -150,6 +160,7 @@ impl<'a> Resolver<'a> {
             infos: Mutex::new(HashMap::new()),
             poms: Mutex::new(HashMap::new()),
             effective: Mutex::new(HashMap::new()),
+            platforms: Mutex::new(HashMap::new()),
         }
     }
 
@@ -226,7 +237,7 @@ impl<'a> Resolver<'a> {
         let artifact = Artifact::new(module.clone(), version).with_extension("module");
         let Some(json) = self.client.fetch_text(&artifact.repo_path())? else { return Ok(None) };
         let meta = ModuleMetadata::parse(&json)?;
-        let Some(variant) = select_variant(&meta, &self.platform) else {
+        let Some(variant) = select_variant(&meta, module, &self.platform) else {
             if has_pom && self.platform == Platform::Jvm {
                 return Ok(None);
             }
@@ -242,12 +253,25 @@ impl<'a> Resolver<'a> {
                     exclusions: Vec::new(),
                 }],
                 files: Vec::new(),
+                constraints: Vec::new(),
             }));
         }
 
+        let mut constraints: Vec<(ModuleId, String)> = variant
+            .dependency_constraints
+            .iter()
+            .filter_map(|c| Some((c.module_id(), c.version.as_ref()?.preferred()?.to_owned())))
+            .collect();
         let mut edges: Vec<Edge> = Vec::new();
         for dep in &variant.dependencies {
             if dep.is_platform() {
+                // A platform (BOM) aligns versions without adding modules.
+                if let Some(v) = dep.version.as_ref().and_then(|v| v.preferred()) {
+                    match self.platform_constraints(&dep.module_id(), v) {
+                        Ok(c) => constraints.extend(c),
+                        Err(e) => self.client.shell().verbose("Ignoring", format!("platform {}:{v}: {e:#}", dep.module_id())),
+                    }
+                }
                 continue;
             }
             let id = dep.module_id();
@@ -262,8 +286,43 @@ impl<'a> Resolver<'a> {
         }
         let files =
             variant.files.iter().map(|f| resolve_relative(&base_dir, &f.url)).collect::<Result<Vec<_>>>()?;
-        Ok(Some(NodeInfo { edges, files }))
+        Ok(Some(NodeInfo { edges, files, constraints }))
     }
+
+    /// Constraints published by a platform module (Gradle platform variant or Maven BOM).
+    fn platform_constraints(&self, module: &ModuleId, version: &str) -> Result<Vec<(ModuleId, String)>> {
+        let key = (module.clone(), version.to_owned());
+        if let Some(cached) = self.platforms.lock().expect("lock poisoned").get(&key) {
+            return Ok(cached.clone());
+        }
+        let artifact = Artifact::new(module.clone(), version).with_extension("module");
+        let mut constraints = Vec::new();
+        let from_metadata = match self.client.fetch_text(&artifact.repo_path())? {
+            Some(json) => {
+                let meta = ModuleMetadata::parse(&json)?;
+                meta.variants
+                    .iter()
+                    .find(|v| v.attributes.get("org.gradle.category").and_then(|c| c.as_str()) == Some("platform"))
+                    .map(|v| {
+                        v.dependency_constraints
+                            .iter()
+                            .filter_map(|c| Some((c.module_id(), c.version.as_ref()?.preferred()?.to_owned())))
+                            .collect::<Vec<_>>()
+                    })
+            }
+            None => None,
+        };
+        match from_metadata {
+            Some(c) => constraints.extend(c),
+            None => {
+                let pom = self.effective_pom(module, version)?;
+                constraints.extend(pom.dependency_management.iter().filter_map(|d| Some((d.module(), d.version.clone()?))));
+            }
+        }
+        self.platforms.lock().expect("lock poisoned").insert(key, constraints.clone());
+        Ok(constraints)
+    }
+
 
     fn info_from_pom(&self, module: &ModuleId, version: &str) -> Result<NodeInfo> {
         let pom = self.effective_pom(module, version)?;
@@ -277,6 +336,7 @@ impl<'a> Resolver<'a> {
                 return Ok(NodeInfo {
                     edges: vec![Edge { module: target, version: Some(target_version), exclusions: Vec::new() }],
                     files: Vec::new(),
+                    constraints: Vec::new(),
                 });
             }
         }
@@ -305,7 +365,7 @@ impl<'a> Resolver<'a> {
         let files = extension
             .map(|ext| vec![Artifact::new(module.clone(), version).with_extension(ext).repo_path()])
             .unwrap_or_default();
-        Ok(NodeInfo { edges, files })
+        Ok(NodeInfo { edges, files, constraints: Vec::new() })
     }
 
     /// Chooses the version for a module given everything that asked for it.
@@ -430,6 +490,11 @@ impl<'a> Resolver<'a> {
                 continue;
             }
             let info = self.node_info(&module, version.as_str())?;
+            for (target, v) in &info.constraints {
+                if let Ok(VersionReq::Soft(v)) = v.parse::<VersionReq>() {
+                    requests.entry(target.clone()).or_default().soft.push(v);
+                }
+            }
             let mut kept = Vec::new();
             for edge in info.edges {
                 if excl.iter().any(|e| e.matches(&edge.module)) || provided_by_toolchain(&self.platform, &edge.module) {
@@ -794,6 +859,44 @@ mod tests {
 
         let err = Resolver::new(&client, Platform::Native("linux_x64".into())).resolve(&[req("k:dep", "1.0")]).unwrap_err();
         assert!(format!("{err:#}").contains("JVM-only"), "{err:#}");
+    }
+
+    #[test]
+    fn platform_dependencies_align_versions_without_adding_modules() {
+        let repo = TestRepo::new();
+        let marker = "<!-- do_not_remove: published-with-gradle-metadata -->";
+        repo.write("j/api/2.0/api-2.0.pom", &format!("<project>{marker}<groupId>j</groupId><artifactId>api</artifactId><version>2.0</version></project>"));
+        repo.write(
+            "j/api/2.0/api-2.0.module",
+            r#"{"formatVersion": "1.1", "variants": [
+              {"name": "runtimeElements", "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime"},
+               "dependencies": [{"group": "j", "module": "bom", "version": {"requires": "2.0"}, "attributes": {"org.gradle.category": "platform"}}],
+               "dependencyConstraints": [{"group": "j", "module": "extra", "version": {"requires": "2.0"}}],
+               "files": [{"name": "api-2.0.jar", "url": "api-2.0.jar"}]}
+            ]}"#,
+        );
+        repo.write("j/api/2.0/api-2.0.jar", "jar");
+        repo.write("j/bom/2.0/bom-2.0.pom", &format!("<project>{marker}<groupId>j</groupId><artifactId>bom</artifactId><version>2.0</version><packaging>pom</packaging></project>"));
+        repo.write(
+            "j/bom/2.0/bom-2.0.module",
+            r#"{"formatVersion": "1.1", "variants": [
+              {"name": "apiElements", "attributes": {"org.gradle.category": "platform", "org.gradle.usage": "java-api"},
+               "dependencyConstraints": [{"group": "j", "module": "launcher", "version": {"requires": "2.0"}}]}
+            ]}"#,
+        );
+        repo.publish("old:runner", "1.0", &[("j:launcher", "1.0", ""), ("j:extra", "1.0", "")]);
+        repo.publish("j:launcher", "1.0", &[]);
+        repo.publish("j:launcher", "2.0", &[]);
+        repo.publish("j:extra", "1.0", &[]);
+        repo.publish("j:extra", "2.0", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("j:api", "2.0"), req("old:runner", "1.0")]).unwrap();
+        assert_eq!(versions(&res), ["api:2.0", "runner:1.0", "launcher:2.0", "extra:2.0"]);
+        assert!(res.node(&"j:bom".parse().unwrap()).is_none(), "platforms are not part of the graph");
+
+        // Without anything depending on them, constrained modules are not added.
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("j:api", "2.0")]).unwrap();
+        assert_eq!(versions(&res), ["api:2.0"]);
     }
 
     #[test]

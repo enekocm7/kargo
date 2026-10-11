@@ -91,7 +91,8 @@ impl JvmCompilation<'_> {
     }
 
     /// Compiles if inputs changed; outputs go to a fresh `output` directory.
-    pub fn compile(&self, shell: &Shell, jdk: &Jdk, compiler: &KotlinCompiler, fingerprint_dir: &Path) -> Result<Outcome> {
+    /// `announce` is called right before real work starts.
+    pub fn compile(&self, shell: &Shell, jdk: &Jdk, compiler: &KotlinCompiler, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
         let resource_files: Vec<PathBuf> = self.resources.iter().flat_map(|d| all_files(d)).collect();
         if self.sources.is_empty() && resource_files.is_empty() {
             remove_dir_all_if_exists(&self.output)?;
@@ -115,6 +116,7 @@ impl JvmCompilation<'_> {
             return Ok(Outcome::Fresh);
         }
         check.invalidate();
+        announce();
 
         remove_dir_all_if_exists(&self.output)?;
         std::fs::create_dir_all(&self.output).with_context(|| format!("failed to create {}", self.output.display()))?;
