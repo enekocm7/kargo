@@ -76,6 +76,8 @@ pub struct MavenClient {
     shell: Shell,
     /// Paths known to be missing from every repository during this run.
     missing: Mutex<HashSet<String>>,
+    /// Cached paths checked against a repository's published checksum during this run.
+    verified: Mutex<HashSet<String>>,
 }
 
 impl MavenClient {
@@ -95,6 +97,7 @@ impl MavenClient {
             agent,
             shell: config.shell().clone(),
             missing: Mutex::new(HashSet::new()),
+            verified: Mutex::new(HashSet::new()),
         }
     }
 
@@ -146,6 +149,55 @@ impl MavenClient {
         })
     }
 
+    /// Like [`MavenClient::fetch_required`], but a file that was already in the cache is first
+    /// checked against the checksum its repository publishes. A corrupt cached file (for example
+    /// a truncated download) is replaced with a fresh download. Used before an artifact's hash is
+    /// written to `kargo.lock`, so a bad file is never locked.
+    pub fn fetch_verified(&self, rel: &str) -> Result<PathBuf> {
+        validate_rel_path(rel)?;
+        let cached = self.cache_path(rel);
+        if cached.is_file() && !self.is_verified(rel) {
+            match self.check_cached(rel, &cached)? {
+                CacheCheck::Matches => self.mark_verified(rel),
+                CacheCheck::Unknown => self.shell.verbose("Unverified", format!("{rel} (no checksum published)")),
+                CacheCheck::Mismatch { repo, expected, actual } => {
+                    self.shell.warn(format!(
+                        "cached {rel} does not match the checksum published by `{repo}` (expected sha1 {expected}, got {actual}); downloading it again"
+                    ));
+                    std::fs::remove_file(&cached).with_context(|| format!("failed to remove corrupt {}", cached.display()))?;
+                }
+            }
+        }
+        self.fetch_required(rel)
+    }
+
+    /// Whether `rel` was checked against a checksum published by its repository during this run,
+    /// either when it was downloaded or by [`MavenClient::fetch_verified`].
+    pub fn is_verified(&self, rel: &str) -> bool {
+        self.verified.lock().expect("lock poisoned").contains(rel)
+    }
+
+    fn mark_verified(&self, rel: &str) {
+        self.verified.lock().expect("lock poisoned").insert(rel.to_owned());
+    }
+
+    /// Compares a cached file with the checksum of the first repository that publishes one.
+    fn check_cached(&self, rel: &str, cached: &Path) -> Result<CacheCheck> {
+        for repo in &self.repos {
+            if self.offline && !repo.is_local() {
+                continue;
+            }
+            let Some(expected) = self.published_sha1(repo, rel)? else { continue };
+            let actual = hash::sha1_file(cached).with_context(|| format!("failed to hash {}", cached.display()))?;
+            return Ok(if actual == expected {
+                CacheCheck::Matches
+            } else {
+                CacheCheck::Mismatch { repo: repo.name.clone(), expected, actual }
+            });
+        }
+        Ok(CacheCheck::Unknown)
+    }
+
     pub fn fetch_text(&self, rel: &str) -> Result<Option<String>> {
         match self.fetch(rel)? {
             Some(path) => Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?)),
@@ -160,6 +212,7 @@ impl MavenClient {
                 return Ok(Fetch::Missing);
             }
             kfs::write_atomic(dest, |f| io::copy(&mut std::fs::File::open(&src)?, f).map(|_| ()))?;
+            self.mark_verified(rel);
             return Ok(Fetch::Found);
         }
         if self.offline {
@@ -174,40 +227,64 @@ impl MavenClient {
         let mut reader = response.into_body().into_reader();
         kfs::write_atomic(dest, |f| io::copy(&mut reader, f).map(|_| ())).with_context(|| format!("failed to download {url}"))?;
 
-        if let Err(e) = self.verify_checksum(repo, rel, dest) {
-            let _ = std::fs::remove_file(dest);
-            return Err(e);
+        match self.verify_checksum(repo, rel, dest) {
+            Ok(true) => self.mark_verified(rel),
+            Ok(false) => {}
+            Err(e) => {
+                let _ = std::fs::remove_file(dest);
+                return Err(e);
+            }
         }
         Ok(Fetch::Found)
     }
 
-    /// Verifies the `.sha1` published next to the file, when there is one.
-    fn verify_checksum(&self, repo: &Repository, rel: &str, file: &Path) -> Result<()> {
-        if rel.ends_with(".sha1") || rel.ends_with(".md5") || rel.ends_with(".asc") {
-            return Ok(());
-        }
-        let url = format!("{}/{rel}.sha1", repo.url);
-        let Some(response) = self.get(repo, &url)? else {
+    /// Verifies the `.sha1` published next to the file, returning whether there was one to check.
+    fn verify_checksum(&self, repo: &Repository, rel: &str, file: &Path) -> Result<bool> {
+        let Some(expected) = self.published_sha1(repo, rel)? else {
             self.shell.verbose("Unverified", format!("{rel} (no checksum published)"));
-            return Ok(());
+            return Ok(false);
         };
-        let mut body = String::new();
-        response
-            .into_body()
-            .into_reader()
-            .take(1024)
-            .read_to_string(&mut body)
-            .with_context(|| format!("failed to read checksum {url}"))?;
+        let actual = hash::sha1_file(file)?;
+        if actual != expected {
+            bail!("checksum mismatch for {}/{rel}: expected sha1 {expected}, got {actual}", repo.url);
+        }
+        Ok(true)
+    }
+
+    /// The SHA-1 a repository publishes for `rel`, or `None` if it has none (or a malformed one).
+    /// A local repository without a `.sha1` file vouches for the file it holds, so that file's hash is used.
+    fn published_sha1(&self, repo: &Repository, rel: &str) -> Result<Option<String>> {
+        if rel.ends_with(".sha1") || rel.ends_with(".md5") || rel.ends_with(".asc") {
+            return Ok(None);
+        }
+        let body = if repo.is_local() {
+            let src = repo.local_root().join(rel);
+            let sidecar = repo.local_root().join(format!("{rel}.sha1"));
+            if sidecar.is_file() {
+                std::fs::read_to_string(&sidecar).with_context(|| format!("failed to read {}", sidecar.display()))?
+            } else if src.is_file() {
+                return Ok(Some(hash::sha1_file(&src).with_context(|| format!("failed to hash {}", src.display()))?));
+            } else {
+                return Ok(None);
+            }
+        } else {
+            let url = format!("{}/{rel}.sha1", repo.url);
+            let Some(response) = self.get(repo, &url)? else { return Ok(None) };
+            let mut body = String::new();
+            response
+                .into_body()
+                .into_reader()
+                .take(1024)
+                .read_to_string(&mut body)
+                .with_context(|| format!("failed to read checksum {url}"))?;
+            body
+        };
         let expected = body.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
         if expected.len() != 40 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
             self.shell.verbose("Unverified", format!("{rel} (malformed checksum)"));
-            return Ok(());
+            return Ok(None);
         }
-        let actual = hash::sha1_file(file)?;
-        if actual != expected {
-            bail!("checksum mismatch for {url}: expected sha1 {expected}, got {actual}");
-        }
-        Ok(())
+        Ok(Some(expected))
     }
 
     fn get(&self, repo: &Repository, url: &str) -> Result<Option<ureq::http::Response<ureq::Body>>> {
@@ -265,6 +342,18 @@ impl MavenClient {
             .find(|v| allow_prerelease || !v.is_prerelease())
             .with_context(|| format!("no published versions found for `{module}`"))
     }
+}
+
+/// Outcome of checking a cached file against its repository.
+enum CacheCheck {
+    Matches,
+    /// No repository publishes a checksum (or none is reachable offline).
+    Unknown,
+    Mismatch {
+        repo: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 fn sanitize(name: &str) -> String {
@@ -372,6 +461,33 @@ mod tests {
         assert_eq!(versions, ["1.0", "1.1-SNAPSHOT"]);
         assert_eq!(client.latest_version(&module, false).unwrap().as_str(), "1.0");
         assert_eq!(client.latest_version(&module, true).unwrap().as_str(), "1.1-SNAPSHOT");
+    }
+
+    #[test]
+    fn fetch_verified_replaces_corrupt_cached_files() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let rel = "com/acme/lib/1.0/lib-1.0.jar";
+        std::fs::create_dir_all(repo.path().join("com/acme/lib/1.0")).unwrap();
+        std::fs::write(repo.path().join(rel), "good").unwrap();
+
+        let client = local_client(repo.path(), home.path());
+        let cached = client.cache_path(rel);
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, "garbage").unwrap();
+        assert_eq!(std::fs::read_to_string(client.fetch(rel).unwrap().unwrap()).unwrap(), "garbage", "plain fetch trusts the cache");
+        assert!(!client.is_verified(rel));
+
+        let fetched = client.fetch_verified(rel).unwrap();
+        assert_eq!(std::fs::read_to_string(&fetched).unwrap(), "good");
+        assert!(client.is_verified(rel));
+
+        // A published `.sha1` takes precedence over hashing the repository's copy.
+        let fresh = local_client(repo.path(), home.path());
+        std::fs::write(repo.path().join(format!("{rel}.sha1")), format!("{}  lib-1.0.jar\n", hash::sha1_file(&fetched).unwrap())).unwrap();
+        std::fs::write(repo.path().join(rel), "changed upstream").unwrap();
+        assert_eq!(std::fs::read_to_string(fresh.fetch_verified(rel).unwrap()).unwrap(), "good");
+        assert!(fresh.is_verified(rel));
     }
 
     #[test]

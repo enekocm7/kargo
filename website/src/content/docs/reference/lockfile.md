@@ -38,8 +38,16 @@ sha256 = "b3a1..."
 - If the inputs of a resolution haven't changed, Kargo reuses the locked result without touching the network for metadata.
 - Missing files are re-downloaded and **checked against the locked SHA-256**. A mismatch is an error.
 - Downloads are also checked against the repository's `.sha1` files.
+- Before an artifact's hash is written to the lockfile, a file that was already in `~/.kargo/cache/maven` is checked against the repository's `.sha1` too. A corrupt cached file (for example, left by an interrupted download) is downloaded again, so a bad file is never locked.
 - When you change dependencies in `kargo.toml`, only the affected resolutions are recomputed.
 - The file is only rewritten when its content changes.
+
+### Checksum mismatches
+
+When a re-downloaded file doesn't match `kargo.lock`, the error says which side is suspect:
+
+- If the downloaded file matches the checksum the repository publishes, the **lockfile entry** is likely wrong, for example because it was recorded from a corrupt cached file. If you trust the repository, run `kargo update` to re-lock it.
+- If the repository publishes no checksum, Kargo can't tell: the artifact may have changed upstream or been tampered with, or the lockfile entry may be wrong. Investigate before running `kargo update`.
 
 ## Commands
 
@@ -47,6 +55,6 @@ sha256 = "b3a1..."
 |---|---|
 | `kargo update` | Re-resolve everything and rewrite the lockfile (picks up new versions within ranges) |
 | `--locked` | Fail if the lockfile would change. Use it in CI. |
-| `--refresh` | Ignore the lockfile and cached metadata for this run |
+| `--refresh` | Ignore the lockfile and cached metadata for this run, and re-verify cached artifacts against the repository (re-downloading corrupt ones) |
 
 If the lockfile is corrupt or from an unsupported version, delete it; Kargo regenerates it on the next build.

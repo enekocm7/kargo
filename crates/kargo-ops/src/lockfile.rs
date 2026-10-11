@@ -77,8 +77,11 @@ impl Lockfile {
         Ok(true)
     }
 
-    /// Records a fresh resolution, hashing each artifact.
-    pub fn record(&mut self, key: &str, inputs: &str, resolution: &Resolution, cache_dir: &Path) -> Result<()> {
+    /// Records a fresh resolution, hashing each artifact. Artifacts that were already cached are
+    /// first checked against their repository's checksum (and re-downloaded if corrupt), so a bad
+    /// cached file is never pinned.
+    pub fn record(&mut self, key: &str, inputs: &str, resolution: &Resolution, client: &MavenClient) -> Result<()> {
+        let cache_dir = client.cache_dir();
         let packages = resolution
             .nodes
             .iter()
@@ -91,7 +94,8 @@ impl Lockfile {
                             .strip_prefix(cache_dir)
                             .map(|p| p.to_string_lossy().replace('\\', "/"))
                             .with_context(|| format!("{} is outside the Kargo cache", file.display()))?;
-                        let sha256 = hash::sha256_file(file).with_context(|| format!("failed to hash {}", file.display()))?;
+                        let file = client.fetch_verified(&rel)?;
+                        let sha256 = hash::sha256_file(&file).with_context(|| format!("failed to hash {}", file.display()))?;
                         Ok(LockedFile { path: rel, sha256 })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -141,12 +145,14 @@ impl Lockfile {
                 let fetched = client.fetch_required(&file.path)?;
                 let actual = hash::sha256_file(&fetched)?;
                 if actual != file.sha256 {
+                    let verified = client.is_verified(&file.path);
                     let _ = std::fs::remove_file(&fetched);
-                    bail!(
-                        "checksum mismatch for {} (locked sha256 {}, downloaded {actual}); the artifact changed upstream or was tampered with",
-                        file.path,
-                        file.sha256
-                    );
+                    let cause = if verified {
+                        "the downloaded file matches the checksum its repository publishes, so the kargo.lock entry is likely wrong                          (for example, it was recorded from a corrupt cached file); if you trust the repository, run `kargo update` to re-lock it"
+                    } else {
+                        "the repository publishes no checksum to tell which side is wrong: either the artifact changed upstream or was                          tampered with, or the kargo.lock entry is wrong; run `kargo update` to re-lock it only if you trust the repository"
+                    };
+                    bail!("checksum mismatch for {} (locked sha256 {}, downloaded {actual}); {cause}", file.path, file.sha256);
                 }
                 files.push(fetched);
             }
@@ -210,7 +216,7 @@ mod tests {
     fn round_trip_and_restore() {
         let (_repo, _home, client, resolution) = setup();
         let mut lock = Lockfile { version: LOCKFILE_VERSION, ..Default::default() };
-        lock.record("jvm/runtime", "abc", &resolution, client.cache_dir()).unwrap();
+        lock.record("jvm/runtime", "abc", &resolution, &client).unwrap();
         let text = lock.to_toml().unwrap();
         assert!(text.starts_with(HEADER));
         assert!(text.contains("g/a/1.0/a-1.0.jar"), "{text}");
@@ -233,7 +239,7 @@ mod tests {
     fn detects_tampered_artifacts() {
         let (repo, _home, client, resolution) = setup();
         let mut lock = Lockfile::default();
-        lock.record("k", "i", &resolution, client.cache_dir()).unwrap();
+        lock.record("k", "i", &resolution, &client).unwrap();
         // Remove from cache and change upstream content.
         std::fs::remove_file(&resolution.nodes[0].files[0]).unwrap();
         std::fs::write(repo.path().join("g/a/1.0/a-1.0.jar"), "evil").unwrap();
@@ -244,6 +250,25 @@ mod tests {
         };
         let err = lock.restore("k", "i", &fresh_client).unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        assert!(err.to_string().contains("kargo.lock entry is likely wrong"), "{err}");
+    }
+
+    #[test]
+    fn record_does_not_lock_corrupt_cached_files() {
+        let (_repo, _home, client, resolution) = setup();
+        let mut good = Lockfile::default();
+        good.record("k", "i", &resolution, &client).unwrap();
+
+        let fresh_client = {
+            let home = client.cache_dir().parent().unwrap().parent().unwrap().to_path_buf();
+            let config = Config::new(home, Shell::new(Verbosity::Quiet));
+            MavenClient::new(&config, client.repositories().to_vec())
+        };
+        std::fs::write(&resolution.nodes[0].files[0], "truncated").unwrap();
+        let mut lock = Lockfile::default();
+        lock.record("k", "i", &resolution, &fresh_client).unwrap();
+        assert_eq!(lock, good);
+        assert_eq!(std::fs::read_to_string(&resolution.nodes[0].files[0]).unwrap(), "jar-bytes");
     }
 
     #[test]

@@ -50,7 +50,7 @@ struct GlobalArgs {
     /// Require kargo.lock to be up to date
     #[arg(long, global = true)]
     locked: bool,
-    /// Ignore cached metadata and kargo.lock, re-checking repositories
+    /// Ignore cached metadata and kargo.lock, re-checking repositories and re-verifying cached artifacts
     #[arg(long, global = true)]
     refresh: bool,
     /// Path to kargo.toml

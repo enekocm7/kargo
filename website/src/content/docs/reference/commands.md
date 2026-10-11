@@ -15,7 +15,7 @@ These work with every command.
 | `-q`, `--quiet` | Don't print Kargo's status messages |
 | `--offline` | Never use the network (also `KARGO_OFFLINE=1`) |
 | `--locked` | Fail if `kargo.lock` would need to change |
-| `--refresh` | Ignore cached metadata and `kargo.lock`, and re-check repositories |
+| `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
 | `-V`, `--version` | Print the version |
 | `-h`, `--help` | Print help |
