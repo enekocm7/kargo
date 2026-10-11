@@ -84,7 +84,7 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let test_cp = ctx
         .resolve("jvm/test", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true), &setup.boms)?
         .files();
-    let jdk = ctx.jdk()?;
+    let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
@@ -128,13 +128,64 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         .arg(join_paths(&run_cp))
         .arg("--scan-class-path")
         .arg(&test_classes)
+        .arg("--fail-if-no-tests")
+        .args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&test_classes)))
         .current_dir(ctx.ws.root());
-    if let Some(filter) = &opts.filter {
-        cmd.arg(format!("--include-classname=.*{}.*", regex_escape(filter)));
-    }
     ctx.shell().status("Running", "JVM tests (JUnit Platform)");
     let status = process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?;
+    if status.code() == Some(JUNIT_NO_TESTS) {
+        match &opts.filter {
+            Some(filter) => ctx.shell().error(format!("no JVM tests match `{filter}`; the filter matches `package.Class.method` names")),
+            None => ctx.shell().error(
+                "no JVM tests found; mark test functions with `@Test` (kotlin.test or JUnit) or add your test framework's \
+                 JUnit Platform engine to [dev-dependencies]",
+            ),
+        }
+    }
     Ok(status.success())
+}
+
+/// Exit code of the JUnit console launcher when `--fail-if-no-tests` found nothing to run.
+const JUNIT_NO_TESTS: i32 = 2;
+
+/// The JUnit console launcher arguments that select the tests to run.
+///
+/// Without a filter every class is scanned: JUnit's default only includes
+/// classes named `Test*`, `*Test` or `*Tests`, which silently skips a class
+/// such as `KSpec`. A filter matches tests whose `package.Class.method`
+/// contains it (`#` may separate class and method). When it names a test
+/// class, a class filter is used, which works for every test engine
+/// (Kotest included); otherwise it is matched against method names, which
+/// needs a method-based engine such as JUnit Jupiter (used by kotlin.test).
+fn junit_filter_args(filter: Option<&str>, classes: &[String]) -> Vec<String> {
+    let all_classes = "--include-classname=.*".to_owned();
+    let Some(filter) = filter else {
+        return vec![all_classes];
+    };
+    let filter = filter.replace('#', ".");
+    if classes.iter().any(|c| c.replace('$', ".").contains(&filter)) {
+        vec![format!("--include-classname=.*{}.*", filter_regex(&filter, "[.$]"))]
+    } else {
+        vec![all_classes, format!("--include-methodname=.*{}.*", filter_regex(&filter, "[.$#]"))]
+    }
+}
+
+/// Escapes `filter` as a Java regex in which each `.` matches any of `separators`.
+fn filter_regex(filter: &str, separators: &str) -> String {
+    filter.split('.').map(regex_escape).collect::<Vec<_>>().join(separators)
+}
+
+/// The binary names (`pkg.Outer$Inner`) of the classes compiled into `dir`,
+/// leaving out lambdas and other synthetic classes.
+fn test_class_names(dir: &Path) -> Vec<String> {
+    kargo_util::fs::collect_files(dir, &["class"])
+        .iter()
+        .filter_map(|file| {
+            let name = process::slash(&file.strip_prefix(dir).ok()?.with_extension("")).replace('/', ".");
+            let named = name.split('$').skip(1).all(|part| part.starts_with(char::is_uppercase));
+            named.then_some(name)
+        })
+        .collect()
 }
 
 fn regex_escape(s: &str) -> String {
@@ -183,7 +234,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let main = super::build::build_wasm(ctx)?;
     let setup = ctx.setup(TargetKind::Wasm)?;
     let libraries = wasm_libraries(ctx, &setup, true)?;
-    let jdk = ctx.jdk()?;
+    let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
@@ -270,6 +321,31 @@ mod tests {
     fn escapes_regex() {
         assert_eq!(regex_escape("a.b*c"), "a\\.b\\*c");
         assert_eq!(regex_escape("Plain"), "Plain");
+    }
+
+    #[test]
+    fn junit_filters() {
+        let classes = ["app.MyTest", "app.MyTest$Nested", "app.KSpec"].map(String::from);
+        // Without a filter every class is scanned, not only `*Test`.
+        assert_eq!(junit_filter_args(None, &classes), ["--include-classname=.*"]);
+        // A class name, or part of one, selects classes, which works for every engine.
+        assert_eq!(junit_filter_args(Some("KSpec"), &classes), ["--include-classname=.*KSpec.*"]);
+        assert_eq!(junit_filter_args(Some("MyTest.Nested"), &classes), ["--include-classname=.*MyTest[.$]Nested.*"]);
+        // Anything else is matched against `package.Class#method`.
+        assert_eq!(junit_filter_args(Some("MyTest.b"), &classes), ["--include-classname=.*", "--include-methodname=.*MyTest[.$#]b.*"]);
+        assert_eq!(junit_filter_args(Some("MyTest#b"), &classes)[1], "--include-methodname=.*MyTest[.$#]b.*");
+        assert_eq!(junit_filter_args(Some("adds"), &classes)[1], "--include-methodname=.*adds.*");
+    }
+
+    #[test]
+    fn named_test_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["app/MyTest.class", "app/MyTest$Nested.class", "app/MyTest$b$1.class", "META-INF/test.kotlin_module", "TopKt.class"] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        assert_eq!(test_class_names(dir.path()), ["TopKt", "app.MyTest$Nested", "app.MyTest"]);
     }
 
     #[test]

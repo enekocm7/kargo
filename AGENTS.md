@@ -137,9 +137,9 @@ Follow the existing pages:
 
 ```sh
 cd website
-pnpm install          # first time only
-pnpm run build        # must succeed; output goes to website/dist
-pnpm run dev          # optional: preview at http://localhost:4321/
+bun install          # first time only
+bun run build        # must succeed; output goes to website/dist
+bun run dev          # optional: preview at http://localhost:4321/
 ```
 
 Fix any build error (bad frontmatter, a sidebar slug that doesn't match a file) before finishing. `website/dist`, `.astro` and `node_modules` are gitignored.

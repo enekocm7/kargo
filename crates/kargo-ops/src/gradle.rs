@@ -377,7 +377,8 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool) -> Result<bo
     }
     let mut args = vec![task.clone()];
     if let Some(filter) = filter {
-        args.extend(["--tests".to_owned(), format!("*{filter}*")]);
+        // Gradle matches `package.Class.method`; accept `Class#method` too.
+        args.extend(["--tests".to_owned(), format!("*{}*", filter.replace('#', "."))]);
     }
     ctx.shell().status("Running", "Android unit tests (Gradle)");
     let gradle_ok = gradle(ctx, &args)?;

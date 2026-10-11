@@ -70,7 +70,7 @@ Kargo runs the Kotlin compiler first, with the Java sources on its input so Kotl
 
 ### Java entry points
 
-Kargo only looks for a Kotlin `fun main`. If your `main` is in a Java class, name it in the manifest, otherwise `kargo run` stops with `could not determine the main class`:
+Kargo only looks for a Kotlin `fun main` (top-level, or `@JvmStatic` in an object or companion object). If your `main` is in a Java class, name it in the manifest, otherwise `kargo run` stops with `could not determine the main class`:
 
 ```toml title="kargo.toml"
 [target.jvm]

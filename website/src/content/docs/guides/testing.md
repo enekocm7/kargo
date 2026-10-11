@@ -40,12 +40,28 @@ class CalculatorTest {
 ```sh
 kargo test                 # all enabled targets
 kargo test -t jvm          # one target
-kargo test Calculator      # only tests whose class (JVM) or name (Native) contains "Calculator"
+kargo test Calculator      # only tests whose package.Class.method contains "Calculator"
+kargo test Calculator.adds # one test
 kargo test --no-run        # compile tests without running them
 kargo test --release       # with the release profile
 ```
 
 `kargo test` exits with status `101` if a test fails, so it works in scripts and CI.
+
+On the JVM every class in `tests/` and `tests-jvm/` is scanned, whatever its name: a class called `T` or a Kotest spec called `UserSpec` runs just like `UserTest`. If test sources compiled but no test was found, or the filter matched nothing, `kargo test` reports an error and exits with `101` instead of silently passing.
+
+## Filtering tests
+
+The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on the JVM, Native and Android:
+
+| Filter | Runs |
+|---|---|
+| `CalculatorTest` | every test in classes whose name contains `CalculatorTest` |
+| `com.example.calc` | every test in that package |
+| `CalculatorTest.adds` (or `CalculatorTest#adds`) | that test method |
+| `adds` | every test method whose name contains `adds` |
+
+On the JVM, a filter that matches a test class name selects whole classes, which works with every JUnit Platform engine. A filter that matches no class name is matched against method names, which only finds tests of method-based engines such as JUnit Jupiter (what `kotlin.test` uses), not Kotest specs.
 
 ## What runs where
 

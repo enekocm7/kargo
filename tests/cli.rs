@@ -42,6 +42,27 @@ fn new_rejects_invalid_input() {
 }
 
 #[test]
+fn new_escapes_keyword_names_in_the_package() {
+    let p = Project::new();
+    p.kargo().args(["new", "class", "--no-vcs"]).assert().success();
+    let main = std::fs::read_to_string(p.path().join("class/src/Main.kt")).unwrap();
+    assert!(main.starts_with("package com.example.class_\n"), "{main}");
+}
+
+#[test]
+fn new_with_invalid_input_leaves_nothing_behind() {
+    let p = Project::new();
+    for name in ["9lives", "Bad Name", "ünï"] {
+        p.kargo().args(["new", name, "--no-vcs"]).assert().failure().code(101);
+        assert!(!p.path().join(name).exists(), "`kargo new {name}` left a directory behind");
+    }
+    p.kargo().args(["new", "x", "--no-vcs", "--with", "rails"]).assert().failure().stderr(predicate::str::contains("unknown framework"));
+    assert!(!p.path().join("x").exists());
+    p.kargo().args(["new", "9lives", "--no-vcs", "--name", "lives"]).assert().success();
+    assert!(p.path().join("9lives/kargo.toml").is_file());
+}
+
+#[test]
 fn init_uses_directory_name_and_keeps_files() {
     let p = Project::new();
     let dir = p.path().join("existing-proj");
@@ -288,6 +309,36 @@ fn toolchain_list_and_remove() {
     p.kargo().args(["toolchain", "remove", "native", "2.4.21"]).assert().failure().stderr(predicate::str::contains("not installed"));
     let out = String::from_utf8(p.kargo().args(["toolchain", "ls"]).assert().success().get_output().stdout.clone()).unwrap();
     assert!(!out.contains("jdk-17.0.12+7") && !out.contains("2.4.21"), "{out}");
+}
+
+#[test]
+fn old_kotlin_on_new_jdk_fails_early() {
+    let p = Project::new();
+    fake_jdk(p.home.path(), "jdk-25.0.1+8", 25);
+    p.file(
+        "src/Main.kt",
+        "fun main() {}
+",
+    );
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "old",
+            "[kotlin]
+version = \"2.1.0\"
+
+[toolchain]
+jdk = \"25\"
+",
+        ),
+    );
+    p.kargo()
+        .args(["build", "--offline"])
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("Kotlin 2.1.0 cannot run on JDK 25"))
+        .stderr(predicate::str::contains("[toolchain] jdk = \"21\""))
+        .stderr(predicate::str::contains("Compiling").not());
 }
 
 #[test]

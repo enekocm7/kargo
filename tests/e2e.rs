@@ -70,6 +70,14 @@ fn jvm_lifecycle() {
     t.kargo("app").arg("test").assert().failure().code(101);
     std::fs::remove_file(t.dir.path().join("app/tests/FailTest.kt")).unwrap();
 
+    // Test classes run whatever their name, and filters match `Class.method`.
+    t.write("app/tests/T.kt", "import kotlin.test.*\nclass T {\n    @Test fun ok() {}\n    @Test fun bad() = assertEquals(1, 2)\n}\n");
+    t.kargo("app").arg("test").assert().code(101).stdout(predicate::str::contains("bad()"));
+    t.kargo("app").args(["test", "T.ok"]).assert().success().stdout(predicate::str::contains("1 tests successful"));
+    t.kargo("app").args(["test", "T.bad"]).assert().code(101);
+    t.kargo("app").args(["test", "nothing_matches"]).assert().code(101).stderr(predicate::str::contains("no JVM tests match"));
+    std::fs::remove_file(t.dir.path().join("app/tests/T.kt")).unwrap();
+
     // The thin jar runs with its lib/ directory, the fat jar on its own.
     let jar = t.dir.path().join("app/target/debug/jvm/app-0.1.0.jar");
     let out = StdCommand::new("java").arg("-jar").arg(&jar).output().unwrap();
@@ -82,6 +90,33 @@ fn jvm_lifecycle() {
     // Program arguments and exit codes are forwarded.
     t.write("app/src/Main.kt", "fun main(args: Array<String>) { println(args.joinToString(\"|\")); kotlin.system.exitProcess(7) }\n");
     t.kargo("app").args(["run", "--", "a b", "c"]).assert().code(7).stdout(predicate::str::contains("a b|c"));
+}
+
+#[test]
+fn main_class_detection() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["mains"]);
+    // `@JvmStatic fun main` in an object or companion object.
+    t.write("mains/src/Main.kt", "package m\nobject Cli { @JvmStatic fun main(args: Array<String>) { println(\"object main\") } }\n");
+    t.kargo("mains").arg("run").assert().success().stdout(predicate::str::contains("object main"));
+    t.write(
+        "mains/src/Main.kt",
+        "package m\nclass App { companion object { @JvmStatic fun main(args: Array<String>) = println(\"companion main\") } }\n",
+    );
+    t.kargo("mains").arg("run").assert().success().stdout(predicate::str::contains("companion main"));
+
+    // Several mains are reported by name.
+    t.write("mains/src/Main.kt", "package m\nfun main() {}\n");
+    t.write("mains/src/Other.kt", "package m.other\nfun main() {}\n");
+    t.kargo("mains")
+        .arg("run")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("found multiple `main` functions"))
+        .stderr(predicate::str::contains("m.MainKt"))
+        .stderr(predicate::str::contains("m.other.OtherKt"));
 }
 
 #[test]
