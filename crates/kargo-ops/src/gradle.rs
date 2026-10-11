@@ -17,7 +17,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::builtins;
-use crate::ops::build::compiling;
+use crate::ops::build::{announce, compiling};
 use crate::ops::context::BuildContext;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::testreport::{self, TestSummary};
@@ -361,6 +361,20 @@ pub fn build(ctx: &BuildContext) -> Result<PathBuf> {
     let lower = variant(ctx.profile).to_lowercase();
     let out = if android.config.kind == "application" { dir.join("apk").join(&lower) } else { dir.join("aar") };
     Ok(out)
+}
+
+/// `kargo check --target android`: compiles the Kotlin and Java sources (and,
+/// with `tests`, the unit tests) without dexing or packaging an APK/AAR.
+pub fn check(ctx: &BuildContext, tests: bool) -> Result<()> {
+    announce(ctx, "Checking", TargetKind::Android, if tests { ", gradle, tests" } else { ", gradle" });
+    let mut tasks = vec![format!("compile{}Sources", variant(ctx.profile))];
+    if tests {
+        tasks.push(format!("compile{}UnitTestSources", variant(ctx.profile)));
+    }
+    if !gradle(ctx, &tasks)? {
+        bail!("Gradle `{}` failed", tasks.join("`, `"));
+    }
+    Ok(())
 }
 
 /// `kargo test --target android`: runs local unit tests and reports the

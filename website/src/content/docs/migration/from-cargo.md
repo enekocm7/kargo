@@ -12,6 +12,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo new foo [--lib]` | `kargo new foo [--lib]` | Add `-t jvm,wasm,native,android` and `-w <frameworks>` |
 | `cargo init` | `kargo init` | |
 | `cargo build [--release]` | `kargo build [--release]` | `-t` picks targets |
+| `cargo check [--tests]` | `kargo check [--tests]` | Skips packaging and linking; JVM still writes classes |
 | `cargo run -- args` | `kargo run -- args` | |
 | `cargo test [filter]` | `kargo test [filter]` | |
 | `cargo add serde` | `kargo add group:artifact` | Maven coordinates instead of crate names |

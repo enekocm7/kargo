@@ -189,6 +189,39 @@ fn multiplatform_expect_actual_on_wasm() {
 }
 
 #[test]
+fn check_type_checks_without_packaging() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["chk", "--target", "jvm,wasm"]);
+    t.kargo("chk")
+        .arg("check")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Checking chk v0.1.0 (jvm)"))
+        .stderr(predicate::str::contains("Checking chk v0.1.0 (wasm)"));
+    let target = t.dir.path().join("chk/target/debug");
+    assert!(!target.join("jvm/chk-0.1.0.jar").exists(), "check does not package a jar");
+    assert!(!target.join("wasm/chk.mjs").exists() && !target.join("check/wasm/chk.mjs").exists(), "check does not link Wasm");
+    assert!(target.join("check/wasm/klib/chk.klib").is_file());
+    // Unchanged sources are not checked again, and the JVM classes are shared with `kargo build`.
+    t.kargo("chk").arg("check").assert().success().stderr(predicate::str::contains("Checking").not());
+    t.kargo("chk").args(["build", "-t", "jvm"]).assert().success().stderr(predicate::str::contains("Compiling").not());
+    assert!(target.join("jvm/chk-0.1.0.jar").is_file());
+
+    // Tests are only checked with --tests.
+    t.write("chk/tests/Broken.kt", "class Broken { val x: Int = \"no\" }\n");
+    t.kargo("chk").arg("check").assert().success();
+    t.kargo("chk").args(["check", "--tests", "-t", "jvm"]).assert().failure().code(101).stderr(predicate::str::contains("Broken.kt"));
+    t.kargo("chk").args(["check", "--tests", "-t", "wasm"]).assert().failure().code(101).stderr(predicate::str::contains("Broken.kt"));
+    std::fs::remove_file(t.dir.path().join("chk/tests/Broken.kt")).unwrap();
+    t.kargo("chk").args(["check", "--tests"]).assert().success().stderr(predicate::str::contains("(jvm, tests)"));
+
+    // Type errors in the main sources fail the check.
+    t.write("chk/src/Bad.kt", "val bad: String = 1\n");
+    t.kargo("chk").args(["check", "-t", "wasm"]).assert().failure().code(101).stderr(predicate::str::contains("Bad.kt"));
+}
+
+#[test]
 fn spring_boot_with_lombok() {
     require_e2e!();
     let t = E2e::new();
@@ -219,6 +252,8 @@ fn native_executable_and_tests() {
     }
     let t = E2e::new();
     t.create(&["nat", "--target", "native", "--with", "coroutines"]);
+    t.kargo("nat").args(["check", "--tests"]).assert().success().stderr(predicate::str::contains("Checking nat v0.1.0 (native, "));
+    assert!(!t.dir.path().join("nat/target/debug/native").exists(), "check does not link an executable");
     t.kargo("nat").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
     t.kargo("nat").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
 }
@@ -232,6 +267,12 @@ fn android_app_with_compose() {
     }
     let t = E2e::new();
     t.create(&["droid", "--target", "android", "--with", "compose"]);
+    t.kargo("droid")
+        .args(["check", "--tests"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Checking droid v0.1.0 (android, gradle, tests)"));
+    assert!(!t.dir.path().join("droid/target/android/build/outputs/apk").exists(), "check does not package an APK");
     t.kargo("droid").arg("build").assert().success();
     let apk = t.dir.path().join("droid/target/android/build/outputs/apk/debug/droid-debug.apk");
     assert!(apk.is_file());
@@ -251,6 +292,10 @@ fn android_app_with_compose() {
     let source = std::fs::read_to_string(&test).unwrap();
     std::fs::write(&test, source.replace("\"Hello, Kargo!\"", "\"WRONG\"")).unwrap();
     t.kargo("droid").arg("test").assert().code(101).stdout(predicate::str::contains("1 failed"));
+
+    // Type errors fail `kargo check`.
+    t.write("droid/src/Bad.kt", "val bad: String = 1\n");
+    t.kargo("droid").arg("check").assert().failure().code(101);
 }
 
 #[test]

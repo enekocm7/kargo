@@ -68,7 +68,7 @@ On Windows Kargo runs `windows-run` if it is set and `run` otherwise; on every o
 
 ## Hooks
 
-Hooks are lifecycle points: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run` and `post-package`. Attach tasks with `hooks = [...]` (see above), or attach any executable as a **hook plugin**:
+Hooks are lifecycle points: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run` and `post-package`. `kargo check` runs `pre-build` hooks too, so generated sources get checked, but not `post-build`. Attach tasks with `hooks = [...]` (see above), or attach any executable as a **hook plugin**:
 
 ```toml title="kargo.toml"
 [plugins.notify]

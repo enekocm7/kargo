@@ -1,15 +1,15 @@
 //! `kargo test`: compiles and runs tests for each target.
 
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, build_jvm, compiling, finished, hook_env, jvm_classpaths, native_libraries, native_platforms, select_targets, sources,
-    wasm_libraries,
+    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, native_libraries, native_platforms, select_targets,
+    sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
@@ -73,46 +73,15 @@ fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
 
 fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let main = build_jvm(ctx)?;
-    let manifest = ctx.ws.manifest();
-    let test_sources = sources(ctx, TargetKind::Jvm, true, &["kt", "java"]);
-    if test_sources.is_empty() {
+    let Some(JvmTestClasses { classes: test_classes, classpath }) = compile_jvm_tests(ctx, &main.classes, "Compiling")? else {
         return Ok(no_tests(ctx, TargetKind::Jvm));
-    }
-    let setup = ctx.setup(TargetKind::Jvm)?;
-    // Make sure the main classpaths are locked too.
-    let _ = jvm_classpaths(ctx, &setup)?;
-    let test_cp = ctx
-        .resolve("jvm/test", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true), &setup.boms)?
-        .files();
-    let jdk = ctx.compiler_jdk()?;
-    let compiler = ctx.kotlin_compiler()?;
-    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
-    let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
-    let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
-    let test_classes = out.join("test-classes");
-
-    let mut classpath = vec![main.classes.clone()];
-    classpath.extend(test_cp.iter().cloned());
-    let name = format!("{}-test", manifest.package.name);
-    let unit = JvmCompilation {
-        name: &name,
-        sources: test_sources,
-        classpath: classpath.clone(),
-        friend_paths: vec![main.classes.clone()],
-        output: test_classes.clone(),
-        jvm_target: &jvm.jvm_target,
-        plugins: &plugins,
-        kotlin_args: &kotlin_args,
-        javac_args: &setup.contributions.javac_args,
-        processor_path: &[],
-        resources: vec![ctx.ws.test_resources()],
     };
-    unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Jvm), &|| compiling(ctx, TargetKind::Jvm, ", tests"))?;
     if opts.no_run {
         return Ok(true);
     }
 
+    let jdk = ctx.compiler_jdk()?;
+    let jvm = ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")?;
     let launcher = ctx.tool_jar("org.junit.platform", "junit-platform-console-standalone", JUNIT_VERSION)?;
     let mut run_cp = vec![test_classes.clone()];
     run_cp.extend(classpath);
@@ -143,6 +112,55 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         }
     }
     Ok(status.success())
+}
+
+/// Compiled JVM test classes and the classpath they were compiled against.
+pub(crate) struct JvmTestClasses {
+    pub classes: PathBuf,
+    /// Main classes followed by the test classpath.
+    pub classpath: Vec<PathBuf>,
+}
+
+/// Compiles the JVM tests against `main_classes` into `target/<profile>/jvm/test-classes`.
+/// Returns `None` when there are no test sources.
+pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &str) -> Result<Option<JvmTestClasses>> {
+    let manifest = ctx.ws.manifest();
+    let test_sources = sources(ctx, TargetKind::Jvm, true, &["kt", "java"]);
+    if test_sources.is_empty() {
+        return Ok(None);
+    }
+    let setup = ctx.setup(TargetKind::Jvm)?;
+    // Make sure the main classpaths are locked too.
+    let _ = jvm_classpaths(ctx, &setup)?;
+    let test_cp = ctx
+        .resolve("jvm/test", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true), &setup.boms)?
+        .files();
+    let jdk = ctx.compiler_jdk()?;
+    let compiler = ctx.kotlin_compiler()?;
+    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
+    let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
+    let test_classes = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-classes");
+
+    let mut classpath = vec![main_classes.to_path_buf()];
+    classpath.extend(test_cp);
+    let name = format!("{}-test", manifest.package.name);
+    let unit = JvmCompilation {
+        name: &name,
+        sources: test_sources,
+        classpath: classpath.clone(),
+        friend_paths: vec![main_classes.to_path_buf()],
+        output: test_classes.clone(),
+        jvm_target: &jvm.jvm_target,
+        plugins: &plugins,
+        kotlin_args: &kotlin_args,
+        javac_args: &setup.contributions.javac_args,
+        processor_path: &[],
+        resources: vec![ctx.ws.test_resources()],
+    };
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
+    unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, verb, TargetKind::Jvm, ", tests"))?;
+    Ok(Some(JvmTestClasses { classes: test_classes, classpath }))
 }
 
 /// Exit code of the JUnit console launcher when `--fail-if-no-tests` found nothing to run.

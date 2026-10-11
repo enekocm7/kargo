@@ -73,37 +73,24 @@ impl WasmCompilation<'_> {
         self.output.join(format!("{}.mjs", self.name))
     }
 
-    pub fn compile(
-        &self,
-        shell: &Shell,
-        jdk: &Jdk,
-        compiler: &KotlinCompiler,
-        fingerprint_dir: &Path,
-        announce: &dyn Fn(),
-    ) -> Result<Outcome> {
-        if self.sources.kotlin_files().is_empty() {
-            return Ok(Outcome::Empty);
-        }
-        let version = compiler.version.as_str();
-        let (main, _) = compiler_main(version);
-
-        let mut klib_args = self.base_args(version);
-        klib_args.extend([
-            "-ir-output-dir".to_owned(),
-            slash(&self.output.join("klib")),
-            "-ir-output-name".to_owned(),
-            self.name.to_owned(),
-        ]);
+    /// Arguments of the first step: sources -> `klib/<name>.klib`.
+    fn klib_args(&self, version: &str) -> Vec<String> {
+        let mut args = self.base_args(version);
+        args.extend(["-ir-output-dir".to_owned(), slash(&self.output.join("klib")), "-ir-output-name".to_owned(), self.name.to_owned()]);
         if needs_klib_flag(version) {
-            klib_args.push("-Xir-produce-klib-file".to_owned());
+            args.push("-Xir-produce-klib-file".to_owned());
         }
-        klib_args.extend(plugin_args(self.plugins));
-        klib_args.extend(self.sources.fragment_args());
-        klib_args.extend(self.kotlin_args.iter().cloned());
-        klib_args.extend(self.sources.kotlin_files().iter().map(|p| slash(p)));
+        args.extend(plugin_args(self.plugins));
+        args.extend(self.sources.fragment_args());
+        args.extend(self.kotlin_args.iter().cloned());
+        args.extend(self.sources.kotlin_files().iter().map(|p| slash(p)));
+        args
+    }
 
-        let mut link_args = self.base_args(version);
-        link_args.extend([
+    /// Arguments of the second step: klib -> `<name>.mjs` + `.wasm`.
+    fn link_args(&self, version: &str) -> Vec<String> {
+        let mut args = self.base_args(version);
+        args.extend([
             "-ir-output-dir".to_owned(),
             slash(&self.output),
             "-ir-output-name".to_owned(),
@@ -112,8 +99,51 @@ impl WasmCompilation<'_> {
             format!("-Xinclude={}", slash(&self.klib_path())),
         ]);
         if self.debug {
-            link_args.push("-Xwasm-debug-info".to_owned());
+            args.push("-Xwasm-debug-info".to_owned());
         }
+        args
+    }
+
+    pub fn compile(
+        &self,
+        shell: &Shell,
+        jdk: &Jdk,
+        compiler: &KotlinCompiler,
+        fingerprint_dir: &Path,
+        announce: &dyn Fn(),
+    ) -> Result<Outcome> {
+        self.run(shell, jdk, compiler, fingerprint_dir, announce, true)
+    }
+
+    /// Type-checks the sources: produces only the klib and skips linking the
+    /// `.mjs`/`.wasm` module, the expensive Wasm backend step.
+    pub fn check(
+        &self,
+        shell: &Shell,
+        jdk: &Jdk,
+        compiler: &KotlinCompiler,
+        fingerprint_dir: &Path,
+        announce: &dyn Fn(),
+    ) -> Result<Outcome> {
+        self.run(shell, jdk, compiler, fingerprint_dir, announce, false)
+    }
+
+    fn run(
+        &self,
+        shell: &Shell,
+        jdk: &Jdk,
+        compiler: &KotlinCompiler,
+        fingerprint_dir: &Path,
+        announce: &dyn Fn(),
+        link: bool,
+    ) -> Result<Outcome> {
+        if self.sources.kotlin_files().is_empty() {
+            return Ok(Outcome::Empty);
+        }
+        let version = compiler.version.as_str();
+        let (main, _) = compiler_main(version);
+        let klib_args = self.klib_args(version);
+        let link_args = if link { self.link_args(version) } else { Vec::new() };
 
         let mut all = klib_args.clone();
         all.extend(link_args.iter().cloned());
@@ -122,7 +152,8 @@ impl WasmCompilation<'_> {
         inputs.extend(self.friends.iter().cloned());
         let fp = fingerprint(&self.sources, &inputs, self.plugins, &all);
         let check = FreshnessCheck::new(fingerprint_dir.join(format!("{}.fingerprint", self.name)), &fp);
-        if check.is_fresh() && self.module_path().is_file() {
+        let output = if link { self.module_path() } else { self.klib_path() };
+        if check.is_fresh() && output.is_file() {
             return Ok(Outcome::Fresh);
         }
         check.invalidate();
@@ -139,15 +170,17 @@ impl WasmCompilation<'_> {
             &fingerprint_dir.join(format!("{}.klib.args", self.name)),
             self.name,
         )?;
-        run_kotlin_compiler(
-            shell,
-            jdk,
-            &compiler.classpath,
-            main,
-            &link_args,
-            &fingerprint_dir.join(format!("{}.link.args", self.name)),
-            self.name,
-        )?;
+        if link {
+            run_kotlin_compiler(
+                shell,
+                jdk,
+                &compiler.classpath,
+                main,
+                &link_args,
+                &fingerprint_dir.join(format!("{}.link.args", self.name)),
+                self.name,
+            )?;
+        }
         check.record()?;
         Ok(Outcome::Compiled)
     }
@@ -184,5 +217,11 @@ mod tests {
         assert_eq!(args[3], kargo_util::fs::join_paths(&["std.klib".into(), "main.klib".into()]));
         assert_eq!(args[4], "-Xfriend-modules=main.klib");
         assert!(unit.klib_path().ends_with("klib/app.klib") || unit.klib_path().ends_with("klib\\app.klib"));
+        let klib = unit.klib_args("2.4.21");
+        assert!(klib.contains(&"a.kt".to_owned()));
+        assert!(!klib.contains(&"-Xir-produce-js".to_owned()), "the klib step does not link");
+        let link = unit.link_args("2.4.21");
+        assert!(link.contains(&"-Xir-produce-js".to_owned()));
+        assert!(link.contains(&"-Xwasm-debug-info".to_owned()));
     }
 }
