@@ -109,6 +109,21 @@ kargo test [filter] [options]
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
+## `kargo doc` (`d`)
+
+Generate HTML API documentation from KDoc comments with Dokka, into `target/debug/doc/`.
+
+```sh
+kargo doc [--open] [-t <target>]
+```
+
+| Option | Meaning |
+|---|---|
+| `--open` | Open the documentation in a browser when it is generated (the browser in `BROWSER`, else the system default) |
+| `-t, --target <target>` | Only this target (repeatable); defaults to every enabled target |
+
+Configure it with [`[doc]`](../manifest/#doc). See [API documentation](../../guides/documentation/).
+
 ## `kargo add`
 
 Add dependencies to `kargo.toml`, or enable frameworks.

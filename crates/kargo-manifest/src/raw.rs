@@ -34,12 +34,25 @@ pub(super) struct RawManifest {
     profile: RawProfiles,
     #[serde(default)]
     toolchain: RawToolchain,
+    #[serde(default)]
+    doc: RawDoc,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawToolchain {
     jdk: Option<Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawDoc {
+    dokka: Option<String>,
+    #[serde(default)]
+    includes: Vec<PathBuf>,
+    source_link: Option<String>,
+    #[serde(default)]
+    external_links: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -740,8 +753,11 @@ impl RawManifest {
             }
         }
 
+        let doc = self.doc.validate()?;
+
         Ok(Manifest {
             toolchain: ToolchainSettings { jdk },
+            doc,
             package: Package {
                 name: self.package.name,
                 version: self.package.version,
@@ -768,6 +784,33 @@ impl RawManifest {
             tasks,
             dev_profile: self.profile.dev.unwrap_or_default().apply(Profile::dev()),
             release_profile: self.profile.release.unwrap_or_default().apply(Profile::release()),
+        })
+    }
+}
+
+impl RawDoc {
+    fn validate(self) -> Result<DocSettings> {
+        if let Some(v) = &self.dokka
+            && (v.is_empty() || v.contains(|c: char| c.is_whitespace() || "[](),".contains(c)))
+        {
+            bail!("[doc] `dokka` must be an exact Dokka version such as \"2.2.0\", got `{v}`");
+        }
+        let is_web = |url: &str| url.starts_with("https://") || url.starts_with("http://");
+        if let Some(url) = &self.source_link
+            && !is_web(url)
+        {
+            bail!("[doc] `source-link` must be an http(s):// URL, got `{url}`");
+        }
+        for url in &self.external_links {
+            if !is_web(url) {
+                bail!("[doc] `external-links` entries must be http(s):// URLs, got `{url}`");
+            }
+        }
+        Ok(DocSettings {
+            dokka_version: self.dokka,
+            includes: self.includes,
+            source_link: self.source_link.map(|u| u.trim_end_matches('/').to_owned()),
+            external_links: self.external_links,
         })
     }
 }

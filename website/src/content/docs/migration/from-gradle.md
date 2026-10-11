@@ -177,5 +177,6 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `./gradlew run --args="a b"` | `kargo run -- a b` |
 | `./gradlew test --tests "*Foo*"` | `kargo test Foo` |
 | `./gradlew dependencies` | `kargo tree` |
+| `./gradlew dokkaGenerate` (Dokka plugin) | `kargo doc` |
 | `--offline` | `--offline` |
 | `gradle.lockfile` | `kargo.lock` (always on) |

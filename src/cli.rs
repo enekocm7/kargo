@@ -10,6 +10,7 @@ use kargo_manifest::edit::DependencySection;
 use kargo_manifest::{Scope, TargetKind};
 use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::context::BuildContext;
+use kargo_ops::ops::doc::DocOptions;
 use kargo_ops::ops::run::RunOptions;
 use kargo_ops::ops::test::TestOptions;
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
@@ -226,6 +227,16 @@ enum Command {
         /// Compile tests but do not run them
         #[arg(long)]
         no_run: bool,
+    },
+    /// Generate API documentation from KDoc with Dokka
+    #[command(visible_alias = "d")]
+    Doc {
+        /// Only this target (repeatable); defaults to all enabled targets
+        #[arg(short, long = "target", value_enum)]
+        targets: Vec<TargetArg>,
+        /// Open the documentation in a browser when it is generated
+        #[arg(long)]
+        open: bool,
     },
     /// Add dependencies or built-in frameworks to kargo.toml
     Add {
@@ -454,6 +465,13 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                 shell.error("test failed");
                 Ok(FAILURE)
             }
+        }
+        Command::Doc { targets, open } => {
+            let ws = load_workspace(&global)?;
+            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            let targets = targets.into_iter().map(Into::into).collect();
+            ops::doc::doc(&ctx, &DocOptions { targets, open })?;
+            Ok(0)
         }
         Command::Add { coordinates, dev, target, scope, bom, pre, no_verify, frameworks } => {
             let ws = load_workspace(&global)?;
@@ -749,6 +767,8 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "-v", "test", "MathTest", "--no-run"]).unwrap();
         assert!(cli.global.verbose);
         assert!(matches!(cli.command, Command::Test { ref filter, no_run: true, .. } if filter.as_deref() == Some("MathTest")));
+        let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
+        assert!(matches!(cli.command, Command::Doc { ref targets, open: true } if matches!(targets[..], [TargetArg::Jvm])));
     }
 
     #[test]

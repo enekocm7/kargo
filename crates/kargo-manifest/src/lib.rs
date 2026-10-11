@@ -549,6 +549,19 @@ pub struct ToolchainSettings {
     pub jdk: JdkRequest,
 }
 
+/// `[doc]`: options for `kargo doc` (Dokka).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DocSettings {
+    /// Dokka version; `None` uses Kargo's pinned default.
+    pub dokka_version: Option<String>,
+    /// Markdown files with module and package documentation, relative to the project root.
+    pub includes: Vec<PathBuf>,
+    /// Base URL of the source tree (e.g. `https://github.com/me/repo/blob/main`), without a trailing slash.
+    pub source_link: Option<String>,
+    /// Documentation sites of dependencies to link to.
+    pub external_links: Vec<String>,
+}
+
 /// A fully validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -565,6 +578,7 @@ pub struct Manifest {
     pub dev_profile: Profile,
     pub release_profile: Profile,
     pub toolchain: ToolchainSettings,
+    pub doc: DocSettings,
 }
 
 impl Manifest {

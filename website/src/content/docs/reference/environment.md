@@ -14,6 +14,7 @@ description: Environment variables Kargo reads and sets.
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME` | JDK to use when `[toolchain] jdk` is `system` |
 | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android SDK location |
+| `BROWSER` | Browser that `kargo doc --open` starts (default: the system's default browser) |
 | Names in `username-env` / `password-env` | Repository credentials |
 
 ## Variables Kargo sets

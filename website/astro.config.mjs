@@ -36,6 +36,7 @@ export default defineConfig({
 						{ label: 'Your first Kotlin app', slug: 'guides/first-app' },
 						{ label: 'Managing dependencies', slug: 'guides/dependencies' },
 						{ label: 'Testing', slug: 'guides/testing' },
+						{ label: 'API documentation', slug: 'guides/documentation' },
 						{ label: 'Multiplatform projects', slug: 'guides/multiplatform' },
 						{ label: 'WebAssembly', slug: 'guides/wasm' },
 						{ label: 'Kotlin/Native', slug: 'guides/native' },
