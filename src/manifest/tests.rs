@@ -247,6 +247,8 @@ fn framework_toggles() {
     let with = |f: &str| format!("{MINIMAL}\n[frameworks]\n{f}\n");
     let off = parse(&with("compose = false\nserialization = false\ncoroutines = false"));
     assert_eq!(off.frameworks, Frameworks::default());
+    let compose = parse(&with("compose = true"));
+    assert_eq!(compose.repositories[1].url, crate::maven::repo::GOOGLE, "compose needs Google Maven");
     let on = parse(&with("coroutines = true"));
     assert_eq!(on.frameworks.coroutines.unwrap().version, None);
     assert!(parse_err(&with("coroutines = 3")).contains("coroutines"));

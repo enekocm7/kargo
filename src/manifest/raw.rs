@@ -568,6 +568,10 @@ impl RawManifest {
             lombok: self.frameworks.lombok.and_then(Toggle::into_option),
             spring_boot: self.frameworks.spring_boot.and_then(Toggle::into_option),
         };
+        // Compose Multiplatform depends on androidx artifacts hosted by Google.
+        if frameworks.compose.is_some() && !repositories.iter().any(|r| r.url == crate::maven::repo::GOOGLE) {
+            repositories.insert(1, Repository::google());
+        }
         if let Some(ktor) = &frameworks.ktor {
             if ktor.server.is_none() && ktor.client.is_none() {
                 bail!("[frameworks.ktor] enable at least one of `server = \"netty\"` or `client = \"cio\"`");

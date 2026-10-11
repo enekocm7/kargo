@@ -140,6 +140,10 @@ impl JvmCompilation<'_> {
             let argfile = fingerprint_dir.join(format!("{}.javac.args", self.name));
             process::write_argfile(&argfile, &javac_args)?;
             let mut cmd = Command::new(jdk.javac());
+            if jdk.version >= 23 {
+                // Annotation processors such as Lombok still use sun.misc.Unsafe.
+                cmd.arg("-J--sun-misc-unsafe-memory-access=allow");
+            }
             cmd.arg(format!("@{}", argfile.display()));
             let status = process::status(shell, &mut cmd, "javac")?;
             if !status.success() {

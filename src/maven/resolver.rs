@@ -149,6 +149,12 @@ struct Requests {
     forced: Option<Version>,
 }
 
+impl Requests {
+    fn is_empty(&self) -> bool {
+        self.soft.is_empty() && self.ranges.is_empty() && self.forced.is_none()
+    }
+}
+
 const MAX_ITERATIONS: usize = 64;
 
 impl<'a> Resolver<'a> {
@@ -467,7 +473,24 @@ impl<'a> Resolver<'a> {
             queue.push_back((root.module.clone(), excl, root.transitive));
         }
 
+        // Consecutive deferrals of modules whose version is not known yet.
+        let mut stalled = 0usize;
         while let Some((module, excl, transitive)) = queue.pop_front() {
+            // A module reached only through version-less edges waits until
+            // another path requests a version (Gradle semantics).
+            let decidable = used.contains_key(&module)
+                || selected.contains_key(&module)
+                || requests.get(&module).is_some_and(|r| !r.is_empty());
+            if !decidable {
+                stalled += 1;
+                if stalled > queue.len() {
+                    bail!("{module} is required without a version and nothing else in the graph requests one; declare it with a version");
+                }
+                queue.push_back((module, excl, transitive));
+                continue;
+            }
+            stalled = 0;
+
             // Revisit only if this path excludes less than every previous one.
             match exclusions_seen.get_mut(&module) {
                 Some(prev) => {
@@ -513,15 +536,14 @@ impl<'a> Resolver<'a> {
                     continue;
                 }
                 let edge_version = edge.version.clone().or_else(|| self.constraints.get(&edge.module).cloned());
-                let Some(raw) = edge_version else {
-                    bail!("{module}:{version} depends on {} without specifying a version", edge.module);
-                };
-                let req: VersionReq =
-                    raw.parse().with_context(|| format!("{module}:{version} has an invalid version for {}", edge.module))?;
                 let entry = requests.entry(edge.module.clone()).or_default();
-                match req {
-                    VersionReq::Soft(v) => entry.soft.push(v),
-                    ranges => entry.ranges.push(ranges),
+                if let Some(raw) = edge_version {
+                    let req: VersionReq =
+                        raw.parse().with_context(|| format!("{module}:{version} has an invalid version for {}", edge.module))?;
+                    match req {
+                        VersionReq::Soft(v) => entry.soft.push(v),
+                        ranges => entry.ranges.push(ranges),
+                    }
                 }
                 let mut child_excl = excl.clone();
                 child_excl.extend(edge.exclusions.iter().cloned());
@@ -909,6 +931,29 @@ mod tests {
         // Without anything depending on them, constrained modules are not added.
         let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("j:api", "2.0")]).unwrap();
         assert_eq!(versions(&res), ["api:2.0"]);
+    }
+
+    #[test]
+    fn versionless_module_metadata_edges_take_versions_from_elsewhere() {
+        let repo = TestRepo::new();
+        let marker = "<!-- do_not_remove: published-with-gradle-metadata -->";
+        repo.write("m/ui/1.0/ui-1.0.pom", &format!("<project>{marker}<groupId>m</groupId><artifactId>ui</artifactId><version>1.0</version></project>"));
+        repo.write(
+            "m/ui/1.0/ui-1.0.module",
+            r#"{"formatVersion": "1.1", "variants": [
+              {"name": "runtimeElements", "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime"},
+               "dependencies": [{"group": "m", "module": "std"}],
+               "files": [{"name": "ui-1.0.jar", "url": "ui-1.0.jar"}]}
+            ]}"#,
+        );
+        repo.write("m/ui/1.0/ui-1.0.jar", "jar");
+        repo.publish("m:std", "3.0", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("m:ui", "1.0"), req("m:std", "3.0")]).unwrap();
+        assert_eq!(versions(&res), ["ui:1.0", "std:3.0"]);
+
+        let err = Resolver::new(&client, Platform::Jvm).resolve(&[req("m:ui", "1.0")]).unwrap_err();
+        assert!(err.to_string().contains("without a version"), "{err}");
     }
 
     #[test]
