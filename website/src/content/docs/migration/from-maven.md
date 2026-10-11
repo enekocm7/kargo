@@ -140,7 +140,8 @@ Credentials that lived in `~/.m2/settings.xml` become environment variables name
 | `mvn dependency:tree` | `kargo tree` |
 | `dokka-maven-plugin` / `mvn javadoc:javadoc` | `kargo doc` |
 | `mvn -o` | `kargo --offline` |
-| `mvn versions:display-dependency-updates` | `kargo add group:artifact` (writes the latest release) |
+| `mvn versions:display-dependency-updates` | `kargo outdated` |
+| `mvn versions:use-latest-releases` | `kargo upgrade --incompatible` |
 
 ## What's different
 

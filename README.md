@@ -34,10 +34,13 @@ $ kargo test
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
-| `kargo remove <group:artifact>...` | Remove dependencies |
+| `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
+| `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
+| `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates]` | Show the dependency graph |
 | `kargo package [--release]` | Build a self-contained fat jar (JVM) |
-| `kargo fetch` / `kargo update` | Pre-download everything / re-resolve `kargo.lock` |
+| `kargo fetch` | Pre-download everything |
+| `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |

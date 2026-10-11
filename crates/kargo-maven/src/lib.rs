@@ -12,4 +12,4 @@ pub use coord::{Artifact, CoordSpec, ModuleId};
 pub use module::Platform;
 pub use repo::{MavenClient, Repository};
 pub use resolver::{DependencyRequest, Exclusion, Resolution, Resolver};
-pub use version::{Version, VersionReq};
+pub use version::{Version, VersionReq, select_latest};

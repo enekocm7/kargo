@@ -19,12 +19,36 @@ kargo add org.jetbrains.kotlinx:kotlinx-io-core --pre   # allow a pre-release as
 
 Kargo checks that the artifact exists before editing `kargo.toml` (skip that with `--no-verify`), and it keeps your file's comments and formatting.
 
-To remove one:
+Without a version, Kargo picks the newest release. Some libraries publish variants next to their plain versions (`0.8.0-0.6.x-compat`, `33.0.0-jre`); Kargo prefers the plain version and prints a note naming the variant it skipped. Pass the full coordinates to pick a variant.
+
+To remove one, name the table it is in the same way as for `kargo add`:
 
 ```sh
 kargo remove com.squareup.okio:okio
 kargo rm io.mockk:mockk --dev
+kargo rm com.google.guava:guava -t jvm
 ```
+
+## Keeping dependencies up to date
+
+`kargo outdated` lists the dependencies in `kargo.toml` that have newer versions, and `kargo upgrade` raises them:
+
+```console
+$ kargo outdated
+name                                    current  compatible  latest   kind
+org.jetbrains.kotlinx:kotlinx-datetime  0.6.0    0.6.2       0.8.0    dependencies
+io.mockk:mockk                          1.13.0   1.14.11     1.14.11  dev-dependencies
+```
+
+```sh
+kargo upgrade --dry-run                  # preview
+kargo upgrade                            # newest compatible versions
+kargo upgrade -i io.mockk:mockk          # newest version of one dependency, even a new major version
+```
+
+A compatible version has the same major version as the current one (for `0.x`, the same minor version), like Cargo's default requirements. `kargo upgrade` edits only the version strings, so your comments and layout stay as they are. Dependencies declared with a range or managed by a BOM are skipped.
+
+`kargo upgrade` changes what you declared in `kargo.toml`. To move versions in `kargo.lock` only, for example a transitive dependency, use `kargo update` (see [The lockfile](#the-lockfile)).
 
 ## Writing dependencies by hand
 
@@ -144,6 +168,9 @@ Credentials are never written in `kargo.toml`; Kargo reads them from the named e
 
 ```sh
 kargo update        # re-resolve everything and rewrite kargo.lock
+kargo update g:a    # re-resolve one module; everything else keeps its locked version
+kargo update g:a --precise 1.2.3   # lock one module, even a transitive one, at an exact version
+kargo update --dry-run  # show what would change without writing kargo.lock
 kargo fetch         # download everything now (useful before going offline)
 kargo build --locked    # fail if kargo.lock would change (use this in CI)
 kargo build --offline   # never touch the network

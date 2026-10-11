@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use crate::workspace::Workspace;
 use kargo_manifest::edit::{DependencySection, ManifestEditor, NewDependency};
 use kargo_manifest::{Manifest, Scope};
-use kargo_maven::{Artifact, CoordSpec, MavenClient, VersionReq};
+use kargo_maven::{Artifact, CoordSpec, MavenClient, VersionReq, select_latest};
 use kargo_util::config::Config;
 
 #[derive(Debug, Clone)]
@@ -40,9 +40,19 @@ pub fn add(config: &Config, ws: &Workspace, opts: &AddOptions) -> Result<Vec<Str
                 v.clone()
             }
             None => {
-                let latest = client
-                    .latest_version(&spec.module, opts.prerelease)
+                let versions = client
+                    .versions(&spec.module)
                     .with_context(|| format!("could not determine the latest version of `{}`", spec.module))?;
+                let latest = select_latest(&versions, "", opts.prerelease)
+                    .with_context(|| format!("could not determine the latest version of `{}`: no published releases", spec.module))?;
+                // Variants such as `0.8.0-0.6.x-compat` can sort above the plain release; say which one was skipped.
+                let newest = versions.iter().filter(|v| opts.prerelease || !v.is_prerelease()).max();
+                if let Some(skipped) = newest.filter(|n| n.as_str() != latest.as_str() && *n >= latest) {
+                    config.shell().note(format!(
+                        "picked {latest} for `{}` over the variant {skipped}; pass `{}:{skipped}` to use the variant",
+                        spec.module, spec.module
+                    ));
+                }
                 latest.to_string()
             }
         };

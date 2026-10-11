@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 
 use super::coord::ModuleId;
-use super::version::Version;
+use super::version::{Version, select_latest};
 use kargo_util::config::Config;
 use kargo_util::shell::Shell;
 use kargo_util::{fs as kfs, hash};
@@ -333,14 +333,11 @@ impl MavenClient {
         Ok(versions)
     }
 
-    /// The newest version, ignoring pre-releases unless `allow_prerelease`.
+    /// The newest version, ignoring pre-releases unless `allow_prerelease` and preferring plain
+    /// versions over variants such as `-jre` or `-compat` (see [`select_latest`]).
     pub fn latest_version(&self, module: &ModuleId, allow_prerelease: bool) -> Result<Version> {
         let versions = self.versions(module)?;
-        versions
-            .into_iter()
-            .rev()
-            .find(|v| allow_prerelease || !v.is_prerelease())
-            .with_context(|| format!("no published versions found for `{module}`"))
+        select_latest(&versions, "", allow_prerelease).cloned().with_context(|| format!("no published versions found for `{module}`"))
     }
 }
 

@@ -21,7 +21,10 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo add -F derive serde` | `kargo add -F serialization` | Kargo's `-F` enables built-in **frameworks** |
 | `cargo remove` | `kargo remove` / `kargo rm` | |
 | `cargo tree [-d]` | `kargo tree [--duplicates]` | |
-| `cargo fetch` / `cargo update` | `kargo fetch` / `kargo update` | |
+| `cargo fetch` | `kargo fetch` | |
+| `cargo update [-p foo] [--precise v] [--dry-run]` | `kargo update [group:artifact] [--precise v] [--dry-run]` | |
+| `cargo outdated` (plugin) | `kargo outdated` | Built in |
+| `cargo upgrade [--incompatible]` (cargo-edit) | `kargo upgrade [--incompatible]` | Built in; "compatible" means the same major version (minor for `0.x`) |
 | `cargo clean` | `kargo clean` | |
 | `cargo install` → `cargo foo` | `kargo-foo` on `PATH` → `kargo foo` | Same external subcommand convention |
 | `rustup toolchain install` | `kargo toolchain install` | Manages JDKs and Kotlin/Native |
