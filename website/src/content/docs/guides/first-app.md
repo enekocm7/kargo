@@ -28,16 +28,20 @@ Open `kargo.toml`. This file describes your project:
 name = "wordcount"        # the project name
 version = "0.1.0"
 group = "com.example"     # your organisation; also the start of the Kotlin package name
+```
 
+That is all a JVM project needs. Kargo fills in the rest with defaults: Kotlin 2.4.21 and JVM bytecode target 17. To change them, or to add libraries, add the matching sections:
+
+```toml title="kargo.toml"
 [kotlin]
 version = "2.4.21"        # which Kotlin compiler to use
 
 [target.jvm]
 jvm-target = "17"         # the Java version the compiled code runs on
 
-[dependencies]            # libraries your code uses
+[dependencies]            # libraries your code uses (`kargo add` creates this)
 
-[dev-dependencies]        # libraries only your tests use
+[dev-dependencies]        # libraries only your tests use (`kargo add --dev`)
 ```
 
 ## Step 2: Kotlin in five minutes
