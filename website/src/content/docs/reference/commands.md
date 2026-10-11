@@ -76,6 +76,32 @@ kargo build
 kargo build --release -t jvm -t native
 ```
 
+## `kargo check` (`c`)
+
+Type-check all enabled targets, or the ones you name, and report compiler errors and warnings without packaging or linking. It is the fastest feedback loop for editors and CI lint stages.
+
+| Option | Meaning |
+|---|---|
+| `--tests` | Also check the test sources (`tests/`, `tests-<target>/`) |
+| `-r, --release` | Use the release profile |
+| `-t, --target <target>` | Only this target (repeatable) |
+
+```sh
+kargo check
+kargo check --tests -t native
+```
+
+What each target skips:
+
+| Target | `kargo check` does | Output |
+|---|---|---|
+| JVM | Compiles Kotlin and Java, but writes no jar and no `lib/`. Kotlin has no analysis-only mode on the JVM, so the classes go to the same place as `kargo build`'s, and a later build reuses them. | `target/<profile>/jvm/classes` |
+| Wasm | Produces only the klib; skips linking the `.mjs`/`.wasm` module | `target/<profile>/check/wasm` |
+| Native | Produces a klib for each platform; skips code generation and linking | `target/<profile>/check/native/<platform>` |
+| Android | Runs Gradle's `compileDebugSources` (`compileReleaseSources` with `--release`), plus `compileDebugUnitTestSources` with `--tests`. Skips dexing and APK/AAR packaging | `target/android/build` |
+
+`pre-build` [hooks](../../guides/tasks-and-plugins/#hooks) run first, so generated sources are checked too. `post-build` hooks don't run. `[kotlin] warnings-as-errors`, `--locked` and `--offline` behave as they do for `kargo build`, and a failed check exits with code 101.
+
 ## `kargo run` (`r`)
 
 Build and run the program. Arguments after `--` go to the program.

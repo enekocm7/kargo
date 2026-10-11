@@ -28,6 +28,7 @@ $ kargo test
 | `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...]` | Create a project |
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo build [--release] [-t <target>]` | Compile all (or selected) targets |
+| `kargo check [--tests] [--release] [-t <target>]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [-- args]` | Build and run |
 | `kargo test [filter] [--no-run] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native) |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |

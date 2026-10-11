@@ -133,8 +133,13 @@ pub fn finished(ctx: &BuildContext, start: Instant) {
 }
 
 pub fn compiling(ctx: &BuildContext, target: TargetKind, what: &str) {
+    announce(ctx, "Compiling", target, what);
+}
+
+/// Prints the status line shown right before a compiler runs, e.g. `Compiling app v0.1.0 (jvm)`.
+pub fn announce(ctx: &BuildContext, verb: &str, target: TargetKind, what: &str) {
     let pkg = &ctx.ws.manifest().package;
-    ctx.shell().status("Compiling", format!("{} v{} ({target}{what})", pkg.name, pkg.version));
+    ctx.shell().status(verb, format!("{} v{} ({target}{what})", pkg.name, pkg.version));
 }
 
 /// JVM classpaths for one setup.
@@ -153,7 +158,17 @@ fn jvm_settings<'a>(ctx: &BuildContext<'a>) -> Result<&'a kargo_manifest::JvmTar
     ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")
 }
 
-pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
+/// Compiled JVM main classes, before packaging.
+pub struct JvmClasses {
+    pub classes: PathBuf,
+    pub sources: SourceSet,
+    pub classpaths: JvmClasspaths,
+    pub outcome: Outcome,
+}
+
+/// Compiles the JVM main sources into `target/<profile>/jvm/classes`; `verb` is
+/// the status shown when the compiler runs (`Compiling` or `Checking`).
+pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let manifest = ctx.ws.manifest();
     let jvm = jvm_settings(ctx)?;
     let jdk = ctx.compiler_jdk()?;
@@ -187,8 +202,16 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
         processor_path: &processor_path,
         resources: vec![ctx.ws.resources()],
     };
-    let outcome = unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Jvm, ""))?;
+    let outcome = unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, verb, TargetKind::Jvm, ""))?;
+    Ok(JvmClasses { classes, sources: srcs, classpaths, outcome })
+}
+
+pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
+    let manifest = ctx.ws.manifest();
+    let jvm = jvm_settings(ctx)?;
+    let JvmClasses { classes, sources: srcs, classpaths, outcome } = compile_jvm(ctx, "Compiling")?;
     let changed = outcome == Outcome::Compiled;
+    let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
 
     // A library has no main class, so a failed detection only matters to `kargo run`.
     let (main_class, main_class_error) = match &jvm.main_class {
@@ -301,6 +324,17 @@ pub fn native_libraries(ctx: &BuildContext, setup: &TargetSetup, konan_target: &
     Ok(ctx.resolve(&key, Platform::Native(konan_target.to_owned()), &requests, &setup.boms)?.files())
 }
 
+/// The `-entry` of a native executable: `entry-point` from kargo.toml, or the single `main` in the sources.
+pub fn native_entry_point(native: &kargo_manifest::NativeTarget, srcs: &SourceSet) -> Result<Option<String>> {
+    Ok(match (&native.entry_point, native.kind) {
+        (Some(e), _) => Some(e.clone()),
+        (None, NativeKind::Executable) => {
+            Some(find_single_entry_point(&srcs.kotlin_files(), "[target.native] entry-point")?.native_entry())
+        }
+        (None, _) => None,
+    })
+}
+
 pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
@@ -309,13 +343,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     if srcs.kotlin_files().is_empty() {
         return Ok(Vec::new());
     }
-    let entry_point = match (&native.entry_point, native.kind) {
-        (Some(e), _) => Some(e.clone()),
-        (None, NativeKind::Executable) => {
-            Some(find_single_entry_point(&srcs.kotlin_files(), "[target.native] entry-point")?.native_entry())
-        }
-        (None, _) => None,
-    };
+    let entry_point = native_entry_point(native, &srcs)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);

@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use kargo_manifest::edit::DependencySection;
 use kargo_manifest::{Scope, TargetKind};
 use kargo_ops::ops::build::BuildOptions;
+use kargo_ops::ops::check::CheckOptions;
 use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::doc::DocOptions;
 use kargo_ops::ops::run::RunOptions;
@@ -205,6 +206,15 @@ enum Command {
     /// Compile the project
     #[command(visible_alias = "b")]
     Build(BuildArgs),
+    /// Type-check the project without packaging or linking
+    #[command(visible_alias = "c")]
+    Check {
+        #[command(flatten)]
+        build: BuildArgs,
+        /// Also check the test sources
+        #[arg(long)]
+        tests: bool,
+    },
     /// Build and run the program
     #[command(visible_alias = "r")]
     Run {
@@ -447,6 +457,13 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             let opts = args.options();
             let ctx = context(&config, &ws, &global, opts.profile())?;
             ops::build::build(&ctx, &opts)?;
+            Ok(0)
+        }
+        Command::Check { build, tests } => {
+            let ws = load_workspace(&global)?;
+            let opts = CheckOptions { build: build.options(), tests };
+            let ctx = context(&config, &ws, &global, opts.build.profile())?;
+            ops::check::check(&ctx, &opts)?;
             Ok(0)
         }
         Command::Run { release, target, args } => {
@@ -767,6 +784,10 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "-v", "test", "MathTest", "--no-run"]).unwrap();
         assert!(cli.global.verbose);
         assert!(matches!(cli.command, Command::Test { ref filter, no_run: true, .. } if filter.as_deref() == Some("MathTest")));
+        let cli = Cli::try_parse_from(["kargo", "c", "--tests", "-r", "-t", "native"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Check { ref build, tests: true } if build.release && build.options().targets == [TargetKind::Native])
+        );
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
         assert!(matches!(cli.command, Command::Doc { ref targets, open: true } if matches!(targets[..], [TargetArg::Jvm])));
     }

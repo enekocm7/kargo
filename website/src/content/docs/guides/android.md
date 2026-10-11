@@ -45,6 +45,7 @@ myapp/
 ## Build, run, test
 
 ```sh
+kargo check -t android --tests      # compile sources and unit tests without packaging an APK
 kargo build -t android              # debug APK in target/android/build/outputs/apk/debug/
 kargo build -t android --release    # release APK (or AAR for libraries)
 kargo run -t android                # install on the connected device and launch

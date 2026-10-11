@@ -43,6 +43,7 @@ kargo test -t jvm          # one target
 kargo test Calculator      # only tests whose package.Class.method contains "Calculator"
 kargo test Calculator.adds # one test
 kargo test --no-run        # compile tests without running them
+kargo check --tests        # type-check tests without linking (fastest; see kargo check)
 kargo test --release       # with the release profile
 ```
 

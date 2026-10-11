@@ -358,6 +358,23 @@ fn disabled_target_is_rejected() {
     p.kargo().args(["build", "--target", "native"]).assert().failure().stderr(predicate::str::contains("not enabled"));
 }
 
+#[test]
+fn check_runs_pre_build_hooks_then_checks_android() {
+    let p = Project::new();
+    let hook = if cfg!(windows) { "echo gen>> log.txt" } else { "echo gen >> log.txt" };
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "droid",
+            &format!("[target.android]\nnamespace = \"com.example.droid\"\n[tasks]\ngen = {{ run = '{hook}', hooks = [\"pre-build\"] }}\n"),
+        ),
+    );
+    // Android is checked through the generated Gradle project, which needs the manifest file.
+    p.kargo().arg("check").assert().failure().code(101).stderr(predicate::str::contains("AndroidManifest.xml"));
+    assert_eq!(p.read("log.txt").trim(), "gen");
+    p.kargo().args(["c", "--tests", "-t", "native"]).assert().failure().stderr(predicate::str::contains("not enabled"));
+}
+
 fn fake_jdk(home: &std::path::Path, release: &str, major: u32) {
     let dir = home.join("toolchains/jdk").join(release);
     std::fs::create_dir_all(dir.join("bin")).unwrap();

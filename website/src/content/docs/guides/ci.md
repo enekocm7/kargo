@@ -34,6 +34,7 @@ jobs:
       - name: Install Kargo
         run: command -v kargo || cargo install --locked --git https://github.com/enekocm7/kargo kargo
 
+      - run: kargo check --tests --locked
       - run: kargo build --locked
       - run: kargo test --locked
       - run: kargo package --release --locked
