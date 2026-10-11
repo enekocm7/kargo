@@ -221,7 +221,7 @@ enum Command {
     Test {
         #[command(flatten)]
         build: BuildArgs,
-        /// Only run tests whose name contains this string
+        /// Only run tests whose `package.Class.method` name contains this string
         filter: Option<String>,
         /// Compile tests but do not run them
         #[arg(long)]
