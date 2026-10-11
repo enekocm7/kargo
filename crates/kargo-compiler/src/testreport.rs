@@ -1,5 +1,6 @@
 //! Parses TeamCity service messages (emitted by the Kotlin/Wasm and
-//! Kotlin/Native test runners) into a Cargo-style test report.
+//! Kotlin/Native test runners) and JUnit XML reports (written by Gradle for
+//! Android unit tests) into a Cargo-style test report.
 
 use std::io::{BufRead, Write};
 
@@ -128,6 +129,36 @@ pub fn report(input: impl BufRead, mut out: impl Write) -> std::io::Result<TestS
     Ok(summary)
 }
 
+/// Reads one JUnit XML report (`<testsuite>` or `<testsuites>`), printing a
+/// `test Class.name ... ok` line per test case.
+pub fn report_junit_xml(xml: &str, mut out: impl Write) -> std::io::Result<TestSummary> {
+    let ok = AnsiColor::Green.on_default();
+    let failed_style: Style = AnsiColor::Red.on_default();
+    let ignored_style: Style = AnsiColor::Yellow.on_default();
+
+    let doc = roxmltree::Document::parse(xml).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut summary = TestSummary::default();
+    for case in doc.descendants().filter(|n| n.has_tag_name("testcase")) {
+        let class = case.attribute("classname").unwrap_or_default();
+        let name = case.attribute("name").unwrap_or_default();
+        let full = if class.is_empty() { name.to_owned() } else { format!("{class}.{name}") };
+        let failure = case.children().find(|c| c.has_tag_name("failure") || c.has_tag_name("error"));
+        if let Some(failure) = failure {
+            summary.failed += 1;
+            let text = failure.text().map(str::trim).filter(|t| !t.is_empty()).or(failure.attribute("message")).unwrap_or_default();
+            summary.failures.push((full.clone(), text.to_owned()));
+            writeln!(out, "test {full} ... {failed_style}FAILED{failed_style:#}")?;
+        } else if case.children().any(|c| c.has_tag_name("skipped")) {
+            summary.ignored += 1;
+            writeln!(out, "test {full} ... {ignored_style}ignored{ignored_style:#}")?;
+        } else {
+            summary.passed += 1;
+            writeln!(out, "test {full} ... {ok}ok{ok:#}")?;
+        }
+    }
+    Ok(summary)
+}
+
 /// Prints failure details and the final `test result:` line.
 pub fn print_summary(summary: &TestSummary, mut out: impl Write) -> std::io::Result<()> {
     if !summary.failures.is_empty() {
@@ -193,5 +224,29 @@ hello from test
         let mut total = TestSummary::default();
         total.merge(summary);
         assert_eq!(total.failed, 1);
+    }
+
+    #[test]
+    fn reads_junit_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="GreetingTest" tests="3" skipped="1" failures="1" errors="0">
+  <testcase name="greets" classname="GreetingTest" time="0.01"/>
+  <testcase name="fails" classname="GreetingTest" time="0.01">
+    <failure message="expected:&lt;a&gt; but was:&lt;b&gt;" type="java.lang.AssertionError">java.lang.AssertionError: expected
+	at GreetingTest.fails(GreetingTest.kt:9)</failure>
+  </testcase>
+  <testcase name="later" classname="GreetingTest" time="0">
+    <skipped/>
+  </testcase>
+  <system-out><![CDATA[]]></system-out>
+</testsuite>"#;
+        let mut out = Vec::new();
+        let summary = report_junit_xml(xml, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!((summary.passed, summary.failed, summary.ignored), (1, 1, 1));
+        assert!(text.contains("test GreetingTest.greets ... "), "{text}");
+        assert_eq!(summary.failures[0].0, "GreetingTest.fails");
+        assert!(summary.failures[0].1.contains("GreetingTest.kt:9"));
+        assert!(report_junit_xml("<testsuite", Vec::new()).is_err());
     }
 }

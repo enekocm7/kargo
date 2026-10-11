@@ -46,7 +46,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
             TargetKind::Jvm => test_jvm(ctx, opts)?,
             TargetKind::Wasm => test_wasm(ctx, opts)?,
             TargetKind::Native => test_native(ctx, opts)?,
-            TargetKind::Android => crate::gradle::test(ctx)?,
+            TargetKind::Android => test_android(ctx, opts)?,
         };
         ok &= passed;
     }
@@ -62,6 +62,13 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
 fn no_tests(ctx: &BuildContext, target: TargetKind) -> bool {
     ctx.shell().note(format!("no tests found for the {target} target (put them in tests/ or tests-{target}/)"));
     true
+}
+
+fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
+    if sources(ctx, TargetKind::Android, true, &["kt", "java"]).is_empty() {
+        return Ok(no_tests(ctx, TargetKind::Android));
+    }
+    crate::gradle::test(ctx, opts.filter.as_deref(), opts.no_run)
 }
 
 fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {

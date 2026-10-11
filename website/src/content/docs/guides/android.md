@@ -51,6 +51,10 @@ kargo run -t android                # install on the connected device and launch
 kargo test -t android               # local unit tests (testDebugUnitTest)
 ```
 
+`kargo test -t android` compiles `tests/` and `tests-android/`, runs them with Gradle and prints one `test ... ok` line per test and a `test result:` summary, like the other targets. A failing test makes it exit with status `101`. If the project has test sources but Gradle runs no tests, Kargo reports an error instead of passing silently.
+
+The generated project compiles Kotlin with the Kotlin Gradle plugin at your `[kotlin] version`, so Android code is compiled with the same Kotlin version as your other targets rather than the version bundled with AGP.
+
 ## Running any Gradle task
 
 `kargo android` passes its arguments to Gradle in the generated project:
