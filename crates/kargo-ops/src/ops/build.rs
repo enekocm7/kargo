@@ -154,9 +154,9 @@ fn jvm_settings<'a>(ctx: &BuildContext<'a>) -> Result<&'a kargo_manifest::JvmTar
 pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
     let manifest = ctx.ws.manifest();
     let jvm = jvm_settings(ctx)?;
+    let jdk = ctx.compiler_jdk()?;
     let setup = ctx.setup(TargetKind::Jvm)?;
     let classpaths = jvm_classpaths(ctx, &setup)?;
-    let jdk = ctx.jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let processor_path: Vec<PathBuf> = if setup.contributions.annotation_processors.is_empty() {
@@ -249,9 +249,9 @@ pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool
 pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    let jdk = ctx.compiler_jdk()?;
     let setup = ctx.setup(TargetKind::Wasm)?;
     let libraries = wasm_libraries(ctx, &setup, false)?;
-    let jdk = ctx.jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);

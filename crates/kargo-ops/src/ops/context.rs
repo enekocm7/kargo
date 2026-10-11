@@ -117,6 +117,15 @@ impl<'a> BuildContext<'a> {
         Ok(self.jdk.get_or_init(|| jdk))
     }
 
+    /// The JDK that runs the Kotlin compiler, checked against the Kotlin version
+    /// so an unsupported combination fails with a clear message instead of a
+    /// compiler stack trace.
+    pub fn compiler_jdk(&self) -> Result<&Jdk> {
+        let jdk = self.jdk()?;
+        kargo_toolchain::kotlin::check_compiler_jdk(&self.ws.manifest().kotlin.version, jdk)?;
+        Ok(jdk)
+    }
+
     pub fn kotlin_compiler(&self) -> Result<&KotlinCompiler> {
         if let Some(c) = self.compiler.get() {
             return Ok(c);

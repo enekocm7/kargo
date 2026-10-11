@@ -31,6 +31,10 @@ Not yet. Each `kargo.toml` describes one package.
 
 Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one.
 
+### `Kotlin ... cannot run on JDK ...`
+
+Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.10 or newer, or add `[toolchain] jdk = "21"` so Kargo builds with JDK 21. See [Older Kotlin versions on new JDKs](../../guides/toolchains/#older-kotlin-versions-on-new-jdks).
+
 ### `could not determine the main class`
 
 Kargo looks for a top-level Kotlin `fun main`. If there's more than one, or none, set it explicitly:
