@@ -42,6 +42,14 @@ fn new_rejects_invalid_input() {
 }
 
 #[test]
+fn new_escapes_keyword_names_in_the_package() {
+    let p = Project::new();
+    p.kargo().args(["new", "class", "--no-vcs"]).assert().success();
+    let main = std::fs::read_to_string(p.path().join("class/src/Main.kt")).unwrap();
+    assert!(main.starts_with("package com.example.class_\n"), "{main}");
+}
+
+#[test]
 fn new_with_invalid_input_leaves_nothing_behind() {
     let p = Project::new();
     for name in ["9lives", "Bad Name", "ünï"] {
