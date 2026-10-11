@@ -38,7 +38,7 @@ The docs are an [Astro](https://astro.build) + [Starlight](https://starlight.ast
 ```sh
 cd website
 npm install
-npm run dev        # http://localhost:4321/kargo/
+npm run dev        # http://localhost:4321/
 npm run build      # static site in website/dist
 ```
 

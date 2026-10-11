@@ -2,10 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
-// Published on GitHub Pages at https://enekocm7.github.io/kargo/
 export default defineConfig({
-	site: 'https://enekocm7.github.io',
-	base: '/kargo',
 	integrations: [
 		starlight({
 			title: 'Kargo',
