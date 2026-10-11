@@ -254,9 +254,12 @@ List tasks, or run one. Extra arguments are appended to the task's last command.
 
 ```sh
 kargo task               # list
+kargo task --list        # the same
 kargo task <name> [args]
 kargo <name> [args]      # shorthand
 ```
+
+Inside a project, `kargo --help` also lists its tasks.
 
 ## `kargo plugins`
 
@@ -296,6 +299,14 @@ Show or stop the background compiler daemons that keep the Kotlin compiler warm 
 ## `kargo info`
 
 Print project information: package, targets, toolchains and paths.
+
+## `kargo completions`
+
+Print a shell completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish`. It completes commands, flags and targets, plus the current project's tasks, `kargo-*` plugins, framework names and installed toolchains. See [Shell completions](../../getting-started/installation/#4-shell-completions-optional) for how to load it.
+
+```sh
+kargo completions bash
+```
 
 ## `kargo <name>`
 

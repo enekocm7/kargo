@@ -27,6 +27,10 @@ kargo task              # list tasks with their descriptions
 kargo task proto        # run one
 kargo proto             # shorthand: any task name works as a subcommand
 kargo proto --verbose   # extra arguments are appended to the task's last command
+kargo task            # list tasks with their descriptions (or `kargo task --list`)
+kargo task fmt        # run one
+kargo fmt             # shorthand: any task name works as a subcommand
+kargo fmt --dry-run   # extra arguments are appended to the task's last command
 ```
 
 Built-in commands take precedence: a task named `fmt` or `lint` runs only as `kargo task fmt`, since `kargo fmt` and `kargo lint` [format and lint your code](../formatting-and-linting/).
@@ -36,7 +40,7 @@ Built-in commands take precedence: a task named `fmt` or `lint` runs only as `ka
 | `run` | A command or a list of commands, run in order |
 | `windows-run` | Replaces `run` on Windows; when it is not set, `run` is used everywhere |
 | `shell` | The shell to run the commands in: `sh`, `bash`, `cmd`, `powershell` or `pwsh` (default: `sh` on Unix, `cmd` on Windows) |
-| `description` | Shown by `kargo task` |
+| `description` | Shown by `kargo task`, `kargo --help` and [shell completions](../../getting-started/installation/#4-shell-completions-optional) |
 | `depends-on` | Tasks to run first (cycles are rejected) |
 | `env` | Extra environment variables |
 | `cwd` | Working directory, relative to the project root |
