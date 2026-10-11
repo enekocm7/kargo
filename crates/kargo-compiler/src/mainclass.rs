@@ -1,18 +1,29 @@
 //! Finding a program's entry point by scanning Kotlin sources for a
-//! top-level `fun main`.
+//! top-level `fun main`, or (on the JVM) a `@JvmStatic fun main` in an
+//! `object` or `companion object`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-/// A top-level `main` function found in a source file.
+/// How a `main` function is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A top-level `fun main`; usable on every target.
+    TopLevel,
+    /// A `@JvmStatic fun main` in an `object` or `companion object`; JVM only.
+    JvmStatic,
+}
+
+/// A `main` function found in a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPoint {
     pub file: PathBuf,
     /// Package of the file (empty for the default package).
     pub package: String,
-    /// JVM facade class holding `main`, e.g. `com.example.MainKt`.
+    /// JVM class holding `main`, e.g. `com.example.MainKt` or `com.example.Cli`.
     pub jvm_class: String,
+    pub kind: EntryKind,
 }
 
 impl EntryPoint {
@@ -22,38 +33,68 @@ impl EntryPoint {
     }
 }
 
-/// Strips `//` line comments and `/* */` block comments (good enough for
-/// locating declarations; string literals containing comment markers are rare
-/// at the top level).
-fn strip_comments(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
-    let mut depth = 0usize;
-    while let Some(c) = chars.next() {
-        if depth > 0 {
-            if c == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                depth -= 1;
-            } else if c == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                depth += 1;
-            } else if c == '\n' {
-                out.push('\n');
+/// Length in chars of the string or char literal starting at `i`, or 0 if
+/// none starts there. String templates are not parsed.
+fn literal_len(s: &[char], i: usize) -> usize {
+    const RAW: [char; 3] = ['"', '"', '"'];
+    let end = match s[i] {
+        '"' if s[i..].starts_with(&RAW) => {
+            let mut j = i + 3;
+            while j < s.len() && !s[j..].starts_with(&RAW) {
+                j += 1;
             }
-            continue;
+            j = (j + 3).min(s.len());
+            while j < s.len() && s[j] == '"' {
+                j += 1;
+            }
+            j
         }
-        if c == '/' && chars.peek() == Some(&'/') {
-            for c in chars.by_ref() {
-                if c == '\n' {
-                    out.push('\n');
-                    break;
+        q @ ('"' | '\'') => {
+            let mut j = i + 1;
+            while j < s.len() && s[j] != q && s[j] != '\n' {
+                j += if s[j] == '\\' { 2 } else { 1 };
+            }
+            if j < s.len() && s[j] == q { j + 1 } else { j.min(s.len()) }
+        }
+        _ => return 0,
+    };
+    end - i
+}
+
+/// Strips `//` line comments and `/* */` block comments, leaving string and
+/// char literals intact.
+fn strip_comments(src: &str) -> String {
+    let s: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with(&['/', '/']) {
+            while i < s.len() && s[i] != '\n' {
+                i += 1;
+            }
+        } else if s[i..].starts_with(&['/', '*']) {
+            let mut depth = 0usize;
+            while i < s.len() {
+                if s[i..].starts_with(&['/', '*']) {
+                    depth += 1;
+                    i += 2;
+                } else if s[i..].starts_with(&['*', '/']) {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    if s[i] == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
                 }
             }
-        } else if c == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            depth = 1;
         } else {
-            out.push(c);
+            let n = literal_len(&s, i).max(1);
+            out.extend(&s[i..i + n]);
+            i += n;
         }
     }
     out
@@ -89,31 +130,156 @@ fn package_of(src: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Whether the source declares a top-level `main` function.
-fn has_top_level_main(src: &str) -> bool {
-    let mut depth: i32 = 0;
-    for line in src.lines() {
-        if depth == 0 {
-            let trimmed = line.trim_start();
-            // Allow modifiers like `suspend` or annotations on the same line.
-            let words: Vec<&str> = trimmed.split_whitespace().collect();
-            if let Some(pos) = words.iter().position(|w| *w == "fun") {
-                let before_ok = words[..pos].iter().all(|w| w.starts_with('@') || matches!(*w, "suspend" | "public" | "internal"));
-                let after = words[pos + 1..].join(" ");
-                if before_ok && (after.starts_with("main(") || after.starts_with("main (")) {
-                    return true;
-                }
-            }
+/// What a `{ ... }` block is, as far as finding `main` is concerned.
+enum Scope {
+    /// The top level of the file.
+    File,
+    /// A class, interface or object body; `binary` is its JVM binary name
+    /// relative to the package, e.g. `Outer$Inner`.
+    Type { binary: String, object: bool },
+    /// A companion object body; its static members go to the enclosing class.
+    Companion { owner: String },
+    /// Anything else: function bodies, lambdas, local or anonymous classes.
+    Other,
+}
+
+/// A block being scanned.
+struct Body {
+    scope: Scope,
+    /// The block's own text without nested blocks; block boundaries and `;` become newlines.
+    direct: String,
+    /// The text since the last block boundary or `;`, i.e. the header of the next nested block.
+    header: String,
+}
+
+impl Body {
+    fn new(scope: Scope) -> Self {
+        Body { scope, direct: String::new(), header: String::new() }
+    }
+
+    fn push(&mut self, text: &str) {
+        self.direct.push_str(text);
+        self.header.push_str(text);
+    }
+
+    fn boundary(&mut self) {
+        self.direct.push('\n');
+        self.header.clear();
+    }
+}
+
+/// Decides what the block opened after `header` is, given its parent.
+fn classify(header: &str, parent: &Scope) -> Scope {
+    let parent_binary = match parent {
+        Scope::File => "",
+        Scope::Type { binary, .. } => binary.as_str(),
+        _ => return Scope::Other,
+    };
+    let words: Vec<&str> = header.split_whitespace().collect();
+    let Some(i) = words.iter().rposition(|w| matches!(*w, "object" | "class" | "interface")) else {
+        return Scope::Other;
+    };
+    // A body-less declaration such as `data object Empty`, followed by a function.
+    if words[i + 1..].iter().any(|w| matches!(*w, "fun" | "init")) {
+        return Scope::Other;
+    }
+    if words[i] == "object" && i > 0 && words[i - 1] == "companion" {
+        return match parent {
+            Scope::Type { binary, object: false } => Scope::Companion { owner: binary.clone() },
+            _ => Scope::Other,
+        };
+    }
+    let name: String = words
+        .get(i + 1)
+        .map(|w| w.chars().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '`')).filter(|c| *c != '`').collect())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return Scope::Other; // `object : Runnable { ... }`
+    }
+    let binary = if parent_binary.is_empty() { name } else { format!("{parent_binary}${name}") };
+    Scope::Type { binary, object: words[i] == "object" }
+}
+
+/// Whether a block's own text declares `fun main`; with `jvm_static`, only an
+/// `@JvmStatic` one counts.
+fn declares_main(direct: &str, jvm_static: bool) -> bool {
+    let mut annotations: Vec<&str> = Vec::new();
+    for line in direct.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
         }
-        for c in line.chars() {
-            match c {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
+        // Annotations on lines of their own apply to the next declaration.
+        if words.iter().all(|w| w.starts_with('@')) {
+            annotations.extend(&words);
+            continue;
+        }
+        let modifiers = std::mem::take(&mut annotations);
+        let Some(pos) = words.iter().position(|w| *w == "fun") else { continue };
+        let after = words[pos + 1..].join(" ");
+        if !(after.starts_with("main(") || after.starts_with("main (")) {
+            continue;
+        }
+        let mut before = modifiers.iter().chain(&words[..pos]);
+        if !before.clone().all(|w| w.starts_with('@') || matches!(*w, "suspend" | "public" | "internal")) {
+            continue;
+        }
+        if !jvm_static || before.any(|w| matches!(w.split('(').next(), Some("@JvmStatic" | "@kotlin.jvm.JvmStatic"))) {
+            return true;
         }
     }
     false
+}
+
+/// Finds the `main` functions in comment-stripped source. The class is `None`
+/// for a top-level `main` (it lives in the file facade) and otherwise the JVM
+/// binary name relative to the package.
+fn scan_mains(src: &str) -> Vec<(EntryKind, Option<String>)> {
+    fn collect(body: &Body, found: &mut Vec<(EntryKind, Option<String>)>) {
+        match &body.scope {
+            Scope::File if declares_main(&body.direct, false) => found.push((EntryKind::TopLevel, None)),
+            Scope::Type { binary: class, object: true } | Scope::Companion { owner: class } if declares_main(&body.direct, true) => {
+                found.push((EntryKind::JvmStatic, Some(class.clone())))
+            }
+            _ => {}
+        }
+    }
+
+    let s: Vec<char> = src.chars().collect();
+    let mut stack = vec![Body::new(Scope::File)];
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        let top = stack.last_mut().expect("the file body is never popped");
+        let n = literal_len(&s, i);
+        if n > 0 {
+            top.push("\"\"");
+            i += n;
+            continue;
+        }
+        match s[i] {
+            '{' => {
+                let scope = classify(&top.header, &top.scope);
+                top.boundary();
+                stack.push(Body::new(scope));
+            }
+            '}' => {
+                if stack.len() > 1 {
+                    let body = stack.pop().expect("checked above");
+                    collect(&body, &mut found);
+                }
+                stack.last_mut().expect("the file body is never popped").boundary();
+            }
+            ';' => top.boundary(),
+            c => top.push(c.encode_utf8(&mut [0; 4])),
+        }
+        i += 1;
+    }
+    // Unbalanced braces leave blocks open; still look at them.
+    for body in stack.iter().rev() {
+        collect(body, &mut found);
+    }
+    found
 }
 
 /// Scans `files` for entry points.
@@ -121,30 +287,46 @@ pub fn find_entry_points(files: &[PathBuf]) -> Vec<EntryPoint> {
     files
         .iter()
         .filter(|f| f.extension().is_some_and(|e| e == "kt"))
-        .filter_map(|f| {
-            let raw = std::fs::read_to_string(f).ok()?;
+        .flat_map(|f| {
+            let Ok(raw) = std::fs::read_to_string(f) else { return Vec::new() };
             let src = strip_comments(&raw);
-            has_top_level_main(&src).then(|| {
-                let package = package_of(&src);
-                let class = facade_class_name(f, &src);
-                let jvm_class = if package.is_empty() { class } else { format!("{package}.{class}") };
-                EntryPoint { file: f.clone(), package, jvm_class }
-            })
+            let package = package_of(&src);
+            scan_mains(&src)
+                .into_iter()
+                .map(|(kind, class)| {
+                    let class = class.unwrap_or_else(|| facade_class_name(f, &src));
+                    let jvm_class = if package.is_empty() { class } else { format!("{package}.{class}") };
+                    EntryPoint { file: f.clone(), package: package.clone(), jvm_class, kind }
+                })
+                .collect()
         })
         .collect()
 }
 
-/// Finds exactly one entry point or explains how to choose.
-pub fn find_single_entry_point(files: &[PathBuf], setting: &str) -> Result<EntryPoint> {
-    let mut found = find_entry_points(files);
+/// Picks the only entry point or explains how to choose one.
+fn single(mut found: Vec<EntryPoint>, setting: &str, none: &str) -> Result<EntryPoint> {
     match found.len() {
-        0 => bail!("no `fun main` found in the sources; add one or set `{setting}` in kargo.toml"),
+        0 => bail!("{none}, or set `{setting}` in kargo.toml"),
         1 => Ok(found.remove(0)),
         _ => {
             let list: Vec<String> = found.iter().map(|e| format!("  {} ({})", e.jvm_class, e.file.display())).collect();
-            bail!("multiple `fun main` found; set `{setting}` in kargo.toml to pick one:\n{}", list.join("\n"))
+            bail!("found multiple `main` functions; set `{setting}` in kargo.toml to pick one:\n{}", list.join("\n"))
         }
     }
+}
+
+/// Finds exactly one top-level `fun main` (the only kind Kotlin/Native can
+/// use) or explains how to choose.
+pub fn find_single_entry_point(files: &[PathBuf], setting: &str) -> Result<EntryPoint> {
+    let found = find_entry_points(files).into_iter().filter(|e| e.kind == EntryKind::TopLevel).collect();
+    single(found, setting, "no top-level `fun main` found in the sources; add one")
+}
+
+/// Finds the JVM main class: the class of exactly one top-level `fun main` or
+/// `@JvmStatic fun main` in an object or companion object.
+pub fn find_jvm_main_class(files: &[PathBuf], setting: &str) -> Result<String> {
+    let none = "no `main` function found in the sources; add a top-level `fun main` or a `@JvmStatic fun main` in an object";
+    Ok(single(find_entry_points(files), setting, none)?.jvm_class)
 }
 
 #[cfg(test)]
@@ -155,6 +337,10 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, src).unwrap();
         p
+    }
+
+    fn classes(src: &str) -> Vec<(EntryKind, Option<String>)> {
+        scan_mains(&strip_comments(src))
     }
 
     #[test]
@@ -169,17 +355,47 @@ mod tests {
     fn finds_main_with_package() {
         let dir = tempfile::tempdir().unwrap();
         let f = write(dir.path(), "Main.kt", "package com.example.app\n\nfun main(args: Array<String>) {\n  println(1)\n}\n");
-        let e = find_single_entry_point(&[f], "main-class").unwrap();
+        let e = find_single_entry_point(std::slice::from_ref(&f), "main-class").unwrap();
         assert_eq!(e.jvm_class, "com.example.app.MainKt");
         assert_eq!(e.native_entry(), "com.example.app.main");
+        assert_eq!(find_jvm_main_class(&[f], "main-class").unwrap(), "com.example.app.MainKt");
     }
 
     #[test]
     fn ignores_non_top_level_and_commented_mains() {
         let dir = tempfile::tempdir().unwrap();
         let a = write(dir.path(), "a.kt", "class A {\n    fun main() {}\n}\n// fun main() {}\n/* fun main() {} */\nfun mainly() {}\n");
-        let b = write(dir.path(), "b.kt", "object B { @JvmStatic fun main(args: Array<String>) {} }\n");
+        let b = write(
+            dir.path(),
+            "b.kt",
+            "object B { fun main(args: Array<String>) {} }\nfun f() { val o = object { @JvmStatic fun main() {} } }\n",
+        );
         assert!(find_entry_points(&[a, b]).is_empty());
+    }
+
+    #[test]
+    fn jvm_static_main_in_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = write(
+            dir.path(),
+            "Cli.kt",
+            "package m\nobject Cli { @JvmStatic fun main(args: Array<String>) { println(\"object main\") } }\n",
+        );
+        assert_eq!(find_jvm_main_class(std::slice::from_ref(&f), "main-class").unwrap(), "m.Cli");
+        // Kotlin/Native can't use it.
+        let err = find_single_entry_point(&[f], "entry-point").unwrap_err().to_string();
+        assert!(err.contains("no top-level `fun main`"), "{err}");
+    }
+
+    #[test]
+    fn jvm_static_main_in_companion_and_nested_object() {
+        let companion =
+            "class App(val x: Int) {\n  companion object {\n    @JvmStatic\n    fun main(args: Array<String>) = println(\"}\")\n  }\n}\n";
+        assert_eq!(classes(companion), vec![(EntryKind::JvmStatic, Some("App".to_owned()))]);
+        let named = "class App { companion object Factory { @kotlin.jvm.JvmStatic fun main(args: Array<String>) {} } }";
+        assert_eq!(classes(named), vec![(EntryKind::JvmStatic, Some("App".to_owned()))]);
+        let nested = "class Outer {\n  object Inner : Runnable {\n    override fun run() {}\n    @JvmStatic fun main(args: Array<String>) {}\n  }\n}";
+        assert_eq!(classes(nested), vec![(EntryKind::JvmStatic, Some("Outer$Inner".to_owned()))]);
     }
 
     #[test]
@@ -192,19 +408,30 @@ mod tests {
     }
 
     #[test]
+    fn braces_and_comment_markers_in_strings() {
+        let src = "val url = \"http://x/{\"\nval c = '{'\nval raw = \"\"\"\n}\n\"\"\"\nfun main() {}\n";
+        assert_eq!(classes(src), vec![(EntryKind::TopLevel, None)]);
+    }
+
+    #[test]
     fn ambiguity_and_absence_are_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let a = write(dir.path(), "a.kt", "fun main() {}\n");
-        let b = write(dir.path(), "b.kt", "fun main() {}\n");
-        let err = find_single_entry_point(&[a, b], "main-class").unwrap_err().to_string();
-        assert!(err.contains("multiple"), "{err}");
+        std::fs::create_dir(dir.path().join("other")).unwrap();
+        let a = write(dir.path(), "Main.kt", "package m\nfun main() {}\n");
+        let b = write(dir.path(), "other/Other.kt", "package m.other\nfun main() {}\n");
+        let err = find_jvm_main_class(&[a, b], "[target.jvm] main-class").unwrap_err().to_string();
+        assert!(err.starts_with("found multiple `main` functions; set `[target.jvm] main-class`"), "{err}");
+        assert!(err.contains("m.MainKt") && err.contains("m.other.OtherKt"), "{err}");
+        let err = find_jvm_main_class(&[], "main-class").unwrap_err().to_string();
+        assert!(err.contains("no `main` function found"), "{err}");
         let err = find_single_entry_point(&[], "main-class").unwrap_err().to_string();
-        assert!(err.contains("no `fun main`"), "{err}");
+        assert!(err.contains("no top-level `fun main`"), "{err}");
     }
 
     #[test]
     fn nested_block_comments() {
         assert_eq!(strip_comments("a /* x /* y */ z */ b"), "a  b");
         assert_eq!(strip_comments("a // c\nb"), "a \nb");
+        assert_eq!(strip_comments("\"a // b\" // c"), "\"a // b\" ");
     }
 }
