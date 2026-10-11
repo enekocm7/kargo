@@ -268,10 +268,13 @@ pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
         debug: profile.debug,
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Wasm);
-    match unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Wasm, ""))? {
-        Outcome::Empty => Ok(None),
-        _ => Ok(Some(WasmBuild { module: unit.module_path(), klib: unit.klib_path(), environment: wasm.environment })),
+    if unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Wasm, ""))? == Outcome::Empty {
+        return Ok(None);
     }
+    // Outside the Wasm output directory, which is wiped on every recompile;
+    // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
+    crate::npm::install(ctx, &unit.libraries, &ctx.ws.target_dir().join(ctx.profile.dir_name()))?;
+    Ok(Some(WasmBuild { module: unit.module_path(), klib: unit.klib_path(), environment: wasm.environment }))
 }
 
 pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {

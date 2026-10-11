@@ -67,7 +67,13 @@ jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 ```toml
 [target.wasm]
 environment = "js"      # "js" (default) or "wasi"
+package-manager = "pnpm" # "npm", "pnpm" or "bun"; default: the first one found on PATH
 ```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `environment` | `"js"` | `"js"` for Node.js and browsers, `"wasi"` for WASI runtimes |
+| `package-manager` | first of `npm`, `pnpm`, `bun` on `PATH` | The tool that installs the [npm packages](../../guides/wasm/#npm-packages) your Wasm libraries need |
 
 ### `[target.native]`
 

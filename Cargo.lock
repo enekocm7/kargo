@@ -480,6 +480,7 @@ dependencies = [
  "kargo-maven",
  "kargo-toolchain",
  "kargo-util",
+ "serde_json",
  "tempfile",
  "walkdir",
  "zip",
@@ -527,6 +528,7 @@ dependencies = [
  "kargo-toolchain",
  "kargo-util",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

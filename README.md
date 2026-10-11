@@ -15,7 +15,7 @@ $ kargo test
 
 ## How it works
 
-* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs.
+* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you).
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
 * **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and against the lockfile on re-download.
 * **Incremental:** compilation is skipped when sources, classpath and flags are unchanged.
@@ -82,6 +82,7 @@ jvm-target = "17"
 
 [target.wasm]
 environment = "js"          # or "wasi"
+# package-manager = "pnpm"  # npm, pnpm or bun for npm packages of Wasm libraries; default: first on PATH
 
 [target.native]
 platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...

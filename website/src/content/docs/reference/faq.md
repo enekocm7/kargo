@@ -46,6 +46,14 @@ The class of a top-level function in `Main.kt` is `MainKt`. If your `main` is in
 
 Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Building Wasm doesn't need it; running and testing do.
 
+### `your Wasm dependencies need the npm packages ...`
+
+A Wasm dependency, such as `kotlinx-datetime`, imports npm packages at runtime, and Kargo installs them with npm, pnpm or bun. Install [Node.js](https://nodejs.org), which includes npm, or install [pnpm](https://pnpm.io) or [bun](https://bun.sh), and make sure it is on your `PATH`. If you set `package-manager` in `[target.wasm]`, that tool must be on your `PATH`. See [npm packages](../../guides/wasm/#npm-packages).
+
+### `Cannot find package '...'` when running Wasm
+
+Node.js can't find an npm package that a library imports. Kargo installs these packages into `target/<profile>/node_modules` when it builds. If you deleted part of that directory, run `kargo clean` and build again.
+
 ### `Android SDK not found; set ANDROID_HOME`
 
 Install the Android SDK (Android Studio installs it to `~/Android/Sdk` on Linux and `~/Library/Android/sdk` on macOS) and set `ANDROID_HOME`.

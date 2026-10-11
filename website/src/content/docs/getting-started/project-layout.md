@@ -112,6 +112,7 @@ target/
 │   │   ├── lib/                  runtime dependency jars
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/
+│   ├── node_modules/             npm packages of Wasm dependencies, if any
 │   └── native/
 ├── release/                      same layout, built with --release
 └── android/                      the generated Gradle project
