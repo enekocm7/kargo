@@ -1,5 +1,6 @@
 //! Kargo
 pub mod builtins;
+pub mod compiler;
 pub mod config;
 pub mod lockfile;
 pub mod manifest;
