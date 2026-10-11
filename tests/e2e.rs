@@ -139,7 +139,10 @@ fn multiplatform_expect_actual_on_wasm() {
     t.write("mpp/src/Platform.kt", "package com.example.mpp\n\nexpect fun platform(): String\n");
     t.write("mpp/src-jvm/Platform.kt", "package com.example.mpp\n\nactual fun platform() = \"jvm\"\n");
     t.write("mpp/src-wasm/Platform.kt", "package com.example.mpp\n\nactual fun platform() = \"wasm\"\n");
-    t.write("mpp/src/Main.kt", "package com.example.mpp\n\nfun greeting(n: String) = \"Hello, $n!\"\n\nfun main() = println(greeting(platform()))\n");
+    t.write(
+        "mpp/src/Main.kt",
+        "package com.example.mpp\n\nfun greeting(n: String) = \"Hello, $n!\"\n\nfun main() = println(greeting(platform()))\n",
+    );
     t.kargo("mpp").arg("run").assert().success().stdout(predicate::str::contains("Hello, jvm!"));
     t.kargo("mpp").args(["run", "--target", "wasm"]).assert().success().stdout(predicate::str::contains("Hello, wasm!"));
     t.kargo("mpp")

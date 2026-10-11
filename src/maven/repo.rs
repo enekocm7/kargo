@@ -55,11 +55,7 @@ impl Repository {
     fn local_root(&self) -> PathBuf {
         let path = self.url.strip_prefix("file://").or_else(|| self.url.strip_prefix("file:")).unwrap_or(&self.url);
         // `file:///C:/x` -> `/C:/x`; strip the leading slash before a drive letter.
-        let path = if cfg!(windows) && path.len() > 2 && path.starts_with('/') && path.as_bytes()[2] == b':' {
-            &path[1..]
-        } else {
-            path
-        };
+        let path = if cfg!(windows) && path.len() > 2 && path.starts_with('/') && path.as_bytes()[2] == b':' { &path[1..] } else { path };
         PathBuf::from(path)
     }
 }
@@ -152,9 +148,7 @@ impl MavenClient {
 
     pub fn fetch_text(&self, rel: &str) -> Result<Option<String>> {
         match self.fetch(rel)? {
-            Some(path) => {
-                Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?))
-            }
+            Some(path) => Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?)),
             None => Ok(None),
         }
     }
@@ -178,8 +172,7 @@ impl MavenClient {
             self.shell.status("Downloading", file_name);
         }
         let mut reader = response.into_body().into_reader();
-        kfs::write_atomic(dest, |f| io::copy(&mut reader, f).map(|_| ()))
-            .with_context(|| format!("failed to download {url}"))?;
+        kfs::write_atomic(dest, |f| io::copy(&mut reader, f).map(|_| ())).with_context(|| format!("failed to download {url}"))?;
 
         if let Err(e) = self.verify_checksum(repo, rel, dest) {
             let _ = std::fs::remove_file(dest);

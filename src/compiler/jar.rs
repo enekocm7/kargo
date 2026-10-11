@@ -60,9 +60,7 @@ impl JarManifest {
 
 fn options() -> SimpleFileOptions {
     // A fixed timestamp keeps jars reproducible.
-    SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::default())
+    SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).last_modified_time(zip::DateTime::default())
 }
 
 /// Files whose contents must be concatenated when merging jars.
@@ -126,7 +124,11 @@ pub fn write_jar(dest: &Path, classes_dir: &Path, manifest: &JarManifest, merge:
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i).map_err(to_io)?;
                 let name = entry.name().map_err(to_io)?.into_owned();
-                if name == "META-INF/MANIFEST.MF" || is_signature(&name) || name.starts_with("META-INF/versions/") && name.ends_with("module-info.class") || name == "module-info.class" {
+                if name == "META-INF/MANIFEST.MF"
+                    || is_signature(&name)
+                    || name.starts_with("META-INF/versions/") && name.ends_with("module-info.class")
+                    || name == "module-info.class"
+                {
                     continue;
                 }
                 if entry.is_dir() {

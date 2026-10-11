@@ -37,11 +37,7 @@ fn new_creates_a_project() {
 fn new_rejects_invalid_input() {
     let p = Project::new();
     p.kargo().args(["new", "9lives", "--no-vcs"]).assert().failure().stderr(predicate::str::contains("must start with a letter"));
-    p.kargo()
-        .args(["new", "x", "--no-vcs", "--with", "rails"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("unknown framework"));
+    p.kargo().args(["new", "x", "--no-vcs", "--with", "rails"]).assert().failure().stderr(predicate::str::contains("unknown framework"));
     p.kargo().args(["new", "y", "--target", "ios"]).assert().failure().stderr(predicate::str::contains("invalid value"));
 }
 
@@ -174,7 +170,12 @@ fn tasks_list_run_and_dependencies() {
     };
     p.file(
         "kargo.toml",
-        &manifest("tasky", &format!("[tasks]\nfirst = {{ run = '{a}', description = \"first step\" }}\nsecond = {{ run = '{b}', depends-on = [\"first\"] }}\n")),
+        &manifest(
+            "tasky",
+            &format!(
+                "[tasks]\nfirst = {{ run = '{a}', description = \"first step\" }}\nsecond = {{ run = '{b}', depends-on = [\"first\"] }}\n"
+            ),
+        ),
     );
     p.kargo().arg("task").assert().success().stdout(predicate::str::contains("first step")).stdout(predicate::str::contains("second"));
     p.kargo().args(["task", "second"]).assert().success();
@@ -235,7 +236,12 @@ fn clean_removes_target_dir() {
 fn manifest_path_flag() {
     let p = Project::new();
     p.file("nested/kargo.toml", &manifest("nested", ""));
-    p.kargo().args(["info", "--manifest-path"]).arg(p.path().join("nested/kargo.toml")).assert().success().stdout(predicate::str::contains("nested v0.1.0"));
+    p.kargo()
+        .args(["info", "--manifest-path"])
+        .arg(p.path().join("nested/kargo.toml"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nested v0.1.0"));
 }
 
 #[test]

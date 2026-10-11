@@ -98,9 +98,10 @@ impl ManifestEditor {
                 let mut parts = c.split(':');
                 format!("{}:{}", parts.next().unwrap_or(""), parts.next().unwrap_or(""))
             });
-            let grouped = item.get("group").and_then(|g| g.as_str()).map(|g| {
-                format!("{g}:{}", item.get("artifact").and_then(|a| a.as_str()).unwrap_or(key))
-            });
+            let grouped = item
+                .get("group")
+                .and_then(|g| g.as_str())
+                .map(|g| format!("{g}:{}", item.get("artifact").and_then(|a| a.as_str()).unwrap_or(key)));
             (coords.as_deref() == Some(target.as_str()) || grouped.as_deref() == Some(target.as_str())).then(|| key.to_owned())
         })
     }
@@ -202,7 +203,11 @@ alias = { coords = "com.b:y", version = "2.0" }
     fn adds_simple_dependency_preserving_format() {
         let mut ed = editor();
         let replaced = ed
-            .add_dependency(DependencySection::Main, &"com.c:z".parse().unwrap(), &NewDependency { version: Some("3.0".into()), ..Default::default() })
+            .add_dependency(
+                DependencySection::Main,
+                &"com.c:z".parse().unwrap(),
+                &NewDependency { version: Some("3.0".into()), ..Default::default() },
+            )
             .unwrap();
         assert!(!replaced);
         let out = ed.contents();
@@ -214,16 +219,22 @@ alias = { coords = "com.b:y", version = "2.0" }
     #[test]
     fn updates_existing_and_alias_entries() {
         let mut ed = editor();
-        assert!(ed
-            .add_dependency(DependencySection::Main, &"com.a:x".parse().unwrap(), &NewDependency { version: Some("1.1".into()), ..Default::default() })
-            .unwrap());
-        assert!(ed
-            .add_dependency(
+        assert!(
+            ed.add_dependency(
+                DependencySection::Main,
+                &"com.a:x".parse().unwrap(),
+                &NewDependency { version: Some("1.1".into()), ..Default::default() }
+            )
+            .unwrap()
+        );
+        assert!(
+            ed.add_dependency(
                 DependencySection::Main,
                 &"com.b:y".parse().unwrap(),
                 &NewDependency { version: Some("2.1".into()), scope: Some(Scope::Runtime), ..Default::default() }
             )
-            .unwrap());
+            .unwrap()
+        );
         let out = ed.contents();
         assert!(out.contains(r#""com.a:x" = "1.1""#), "{out}");
         assert!(out.contains(r#"alias = { coords = "com.b:y", version = "2.1", scope = "runtime" }"#), "{out}");
@@ -234,8 +245,12 @@ alias = { coords = "com.b:y", version = "2.0" }
     #[test]
     fn adds_to_dev_and_target_sections() {
         let mut ed = editor();
-        ed.add_dependency(DependencySection::Dev, &"t:t".parse().unwrap(), &NewDependency { version: Some("1".into()), ..Default::default() })
-            .unwrap();
+        ed.add_dependency(
+            DependencySection::Dev,
+            &"t:t".parse().unwrap(),
+            &NewDependency { version: Some("1".into()), ..Default::default() },
+        )
+        .unwrap();
         ed.add_dependency(
             DependencySection::Target(TargetKind::Jvm),
             &"j:j".parse().unwrap(),

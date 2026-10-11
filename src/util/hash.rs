@@ -56,12 +56,8 @@ impl Fingerprint {
         match std::fs::metadata(path) {
             Ok(meta) => {
                 self.hasher.update(meta.len().to_le_bytes());
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
+                let mtime =
+                    meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
                 self.hasher.update(mtime.to_le_bytes());
             }
             Err(_) => {

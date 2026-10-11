@@ -55,7 +55,8 @@ impl Lockfile {
             return Ok(Self { version: LOCKFILE_VERSION, ..Default::default() });
         }
         let text = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let lock: Lockfile = toml::from_str(&text).with_context(|| format!("failed to parse {}; delete it to regenerate", path.display()))?;
+        let lock: Lockfile =
+            toml::from_str(&text).with_context(|| format!("failed to parse {}; delete it to regenerate", path.display()))?;
         if lock.version != LOCKFILE_VERSION {
             bail!("{} has unsupported version {}; delete it to regenerate", path.display(), lock.version);
         }
@@ -157,12 +158,7 @@ impl Lockfile {
                 .with_context(|| format!("corrupt lockfile dependencies for `{}`", pkg.module))?;
             nodes.push(ResolvedNode { module, version: pkg.version.clone(), files, dependencies });
         }
-        let roots = locked
-            .roots
-            .iter()
-            .map(|r| r.parse())
-            .collect::<Result<Vec<ModuleId>, _>>()
-            .context("corrupt lockfile roots")?;
+        let roots = locked.roots.iter().map(|r| r.parse()).collect::<Result<Vec<ModuleId>, _>>().context("corrupt lockfile roots")?;
         Ok(Some(Resolution { roots, nodes }))
     }
 

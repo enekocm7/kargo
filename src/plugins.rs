@@ -49,11 +49,7 @@ pub fn run_hook(shell: &Shell, ws: &Workspace, hook: Hook, env: &[(String, Strin
         shell.status("Plugin", format!("{} ({hook})", plugin.name));
         let program = resolve_command(ws.root(), &plugin.command);
         let mut cmd = Command::new(&program);
-        cmd.args(&plugin.args)
-            .arg(hook.as_str())
-            .current_dir(ws.root())
-            .envs(env.iter().map(|(k, v)| (k, v)))
-            .envs(plugin.env.iter());
+        cmd.args(&plugin.args).arg(hook.as_str()).current_dir(ws.root()).envs(env.iter().map(|(k, v)| (k, v))).envs(plugin.env.iter());
         let status = process::status(shell, &mut cmd, &format!("plugin `{}`", plugin.name))?;
         if !status.success() {
             bail!("plugin `{}` failed at {hook} ({})", plugin.name, process::describe_status(status));

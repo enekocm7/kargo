@@ -40,9 +40,8 @@ impl Jdk {
                 return Self::probe(&java).with_context(|| format!("JAVA_HOME points at an unusable JDK ({})", home.display()));
             }
         }
-        let java = find_on_path("java").context(
-            "no Java installation found: install a JDK (17 or newer) and set JAVA_HOME or put `java` on PATH",
-        )?;
+        let java = find_on_path("java")
+            .context("no Java installation found: install a JDK (17 or newer) and set JAVA_HOME or put `java` on PATH")?;
         Self::probe(&java)
     }
 
@@ -53,7 +52,8 @@ impl Jdk {
             .output()
             .with_context(|| format!("failed to run {}", java.display()))?;
         let text = String::from_utf8_lossy(&output.stderr);
-        let (home, version) = parse_properties(&text).with_context(|| format!("could not determine the JDK version of {}", java.display()))?;
+        let (home, version) =
+            parse_properties(&text).with_context(|| format!("could not determine the JDK version of {}", java.display()))?;
         Ok(Self { home, version })
     }
 

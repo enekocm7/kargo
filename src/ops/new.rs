@@ -240,9 +240,13 @@ fun main() = application {{
     }
     let serializable = if opts.has("serialization") { "@Serializable\ndata class Greeting(val name: String)\n\n" } else { "" };
     if opts.lib {
-        format!("package {pkg}\n\n{imports}{serializable}/** Returns a friendly greeting. */\nfun greeting(name: String): String = \"Hello, $name!\"\n")
+        format!(
+            "package {pkg}\n\n{imports}{serializable}/** Returns a friendly greeting. */\nfun greeting(name: String): String = \"Hello, $name!\"\n"
+        )
     } else {
-        format!("package {pkg}\n\n{imports}{serializable}fun greeting(name: String): String = \"Hello, $name!\"\n\nfun main() {{\n{body}}}\n")
+        format!(
+            "package {pkg}\n\n{imports}{serializable}fun greeting(name: String): String = \"Hello, $name!\"\n\nfun main() {{\n{body}}}\n"
+        )
     }
 }
 
@@ -268,7 +272,10 @@ fn android_files(opts: &NewOptions) -> Vec<TemplateFile> {
     let pkg = opts.package();
     let mut files = Vec::new();
     if opts.lib {
-        files.push(file("android/AndroidManifest.xml", "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" />\n"));
+        files.push(file(
+            "android/AndroidManifest.xml",
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" />\n",
+        ));
         return files;
     }
     files.push(file(

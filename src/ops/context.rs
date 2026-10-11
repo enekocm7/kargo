@@ -248,7 +248,8 @@ mod tests {
     #[test]
     fn user_dependencies_override_framework_ones() {
         let user = vec![Dependency::new("a:b".parse().unwrap(), Some("2".into()))];
-        let extra = vec![Dependency::new("a:b".parse().unwrap(), Some("1".into())), Dependency::new("c:d".parse().unwrap(), Some("1".into()))];
+        let extra =
+            vec![Dependency::new("a:b".parse().unwrap(), Some("1".into())), Dependency::new("c:d".parse().unwrap(), Some("1".into()))];
         let merged = merge_deps(&user, &extra);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].version.as_deref(), Some("2"));

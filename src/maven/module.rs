@@ -69,10 +69,7 @@ impl ModuleDependency {
 
     /// A dependency on a platform (BOM) rather than a library.
     pub fn is_platform(&self) -> bool {
-        matches!(
-            self.attributes.get("org.gradle.category").and_then(|v| v.as_str()),
-            Some("platform" | "enforced-platform")
-        )
+        matches!(self.attributes.get("org.gradle.category").and_then(|v| v.as_str()), Some("platform" | "enforced-platform"))
     }
 }
 

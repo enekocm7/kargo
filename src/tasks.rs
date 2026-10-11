@@ -83,7 +83,14 @@ pub fn run_script(shell: &Shell, script: &str, cwd: &Path, env: &[(String, Strin
 
 /// Runs a task (and its dependencies). `args` are appended to the last command
 /// of the requested task.
-pub fn run(shell: &Shell, root: &Path, tasks: &BTreeMap<String, Task>, name: &str, args: &[String], env: &[(String, String)]) -> Result<()> {
+pub fn run(
+    shell: &Shell,
+    root: &Path,
+    tasks: &BTreeMap<String, Task>,
+    name: &str,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<()> {
     let order = plan(tasks, name)?;
     for task in order {
         shell.status("Running", format!("task `{}`", task.name));
@@ -128,7 +135,9 @@ mod tests {
 
     #[test]
     fn plans_in_dependency_order() {
-        let t = tasks("a = { run = \"echo a\", depends-on = [\"b\", \"c\"] }\nb = { run = \"echo b\", depends-on = [\"c\"] }\nc = \"echo c\"\n");
+        let t = tasks(
+            "a = { run = \"echo a\", depends-on = [\"b\", \"c\"] }\nb = { run = \"echo b\", depends-on = [\"c\"] }\nc = \"echo c\"\n",
+        );
         let order: Vec<_> = plan(&t, "a").unwrap().iter().map(|t| t.name.as_str()).collect();
         assert_eq!(order, ["c", "b", "a"]);
     }

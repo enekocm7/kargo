@@ -29,8 +29,8 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 
-use crate::maven::{CoordSpec, ModuleId, Repository, VersionReq};
 use crate::maven::repo::Credentials;
+use crate::maven::{CoordSpec, ModuleId, Repository, VersionReq};
 
 pub use raw::{AndroidConfig, ComposeConfig, KtorConfig, LombokConfig, SerializationConfig, SpringBootConfig};
 

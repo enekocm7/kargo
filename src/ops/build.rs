@@ -302,7 +302,9 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     }
     let entry_point = match (&native.entry_point, native.kind) {
         (Some(e), _) => Some(e.clone()),
-        (None, NativeKind::Executable) => Some(find_single_entry_point(&srcs.kotlin_files(), "[target.native] entry-point")?.native_entry()),
+        (None, NativeKind::Executable) => {
+            Some(find_single_entry_point(&srcs.kotlin_files(), "[target.native] entry-point")?.native_entry())
+        }
         (None, _) => None,
     };
     let toolchain = ctx.native_toolchain()?;

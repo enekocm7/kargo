@@ -292,8 +292,7 @@ impl<'a> Resolver<'a> {
                 exclusions: dep.excludes.iter().map(|e| Exclusion::new(&e.group, &e.module)).collect(),
             });
         }
-        let files =
-            variant.files.iter().map(|f| resolve_relative(&base_dir, &f.url)).collect::<Result<Vec<_>>>()?;
+        let files = variant.files.iter().map(|f| resolve_relative(&base_dir, &f.url)).collect::<Result<Vec<_>>>()?;
         Ok(Some(NodeInfo { edges, files, constraints }))
     }
 
@@ -308,15 +307,14 @@ impl<'a> Resolver<'a> {
         let from_metadata = match self.client.fetch_text(&artifact.repo_path())? {
             Some(json) => {
                 let meta = ModuleMetadata::parse(&json)?;
-                meta.variants
-                    .iter()
-                    .find(|v| v.attributes.get("org.gradle.category").and_then(|c| c.as_str()) == Some("platform"))
-                    .map(|v| {
+                meta.variants.iter().find(|v| v.attributes.get("org.gradle.category").and_then(|c| c.as_str()) == Some("platform")).map(
+                    |v| {
                         v.dependency_constraints
                             .iter()
                             .filter_map(|c| Some((c.module_id(), c.version.as_ref()?.preferred()?.to_owned())))
                             .collect::<Vec<_>>()
-                    })
+                    },
+                )
             }
             None => None,
         };
@@ -330,7 +328,6 @@ impl<'a> Resolver<'a> {
         self.platforms.lock().expect("lock poisoned").insert(key, constraints.clone());
         Ok(constraints)
     }
-
 
     fn info_from_pom(&self, module: &ModuleId, version: &str) -> Result<NodeInfo> {
         let pom = self.effective_pom(module, version)?;
@@ -357,11 +354,7 @@ impl<'a> Resolver<'a> {
             }
             let id = dep.module();
             let version = dep.version.clone().or_else(|| self.constraints.get(&id).cloned());
-            edges.push(Edge {
-                module: id,
-                version,
-                exclusions: dep.exclusions.iter().map(|(g, a)| Exclusion::new(g, a)).collect(),
-            });
+            edges.push(Edge { module: id, version, exclusions: dep.exclusions.iter().map(|(g, a)| Exclusion::new(g, a)).collect() });
         }
 
         let extension = match pom.packaging.as_str() {
@@ -370,9 +363,7 @@ impl<'a> Resolver<'a> {
             "klib" => Some("klib"),
             _ => Some("jar"),
         };
-        let files = extension
-            .map(|ext| vec![Artifact::new(module.clone(), version).with_extension(ext).repo_path()])
-            .unwrap_or_default();
+        let files = extension.map(|ext| vec![Artifact::new(module.clone(), version).with_extension(ext).repo_path()]).unwrap_or_default();
         Ok(NodeInfo { edges, files, constraints: Vec::new() })
     }
 
@@ -403,16 +394,17 @@ impl<'a> Resolver<'a> {
 
     /// Resolves the dependency graph and downloads all artifacts.
     pub fn resolve(&self, roots: &[DependencyRequest]) -> Result<Resolution> {
-        let roots: Vec<&DependencyRequest> =
-            roots.iter().filter(|r| !provided_by_toolchain(&self.platform, &r.module)).collect();
+        let roots: Vec<&DependencyRequest> = roots.iter().filter(|r| !provided_by_toolchain(&self.platform, &r.module)).collect();
 
         let mut root_requests: HashMap<ModuleId, Requests> = HashMap::new();
         for root in &roots {
             let raw = match &root.version {
                 Some(v) => v.clone(),
-                None => self.constraints.get(&root.module).cloned().with_context(|| {
-                    format!("dependency `{}` has no version and no BOM manages it", root.module)
-                })?,
+                None => self
+                    .constraints
+                    .get(&root.module)
+                    .cloned()
+                    .with_context(|| format!("dependency `{}` has no version and no BOM manages it", root.module))?,
             };
             let req: VersionReq = raw.parse().with_context(|| format!("invalid version for `{}`", root.module))?;
             let entry = root_requests.entry(root.module.clone()).or_default();
@@ -448,10 +440,7 @@ impl<'a> Resolver<'a> {
                 (Some(&next) != used.get(m)).then(|| format!("{m} ({} vs {next})", used.get(m).map(Version::as_str).unwrap_or("?")))
             })
             .collect();
-        bail!(
-            "dependency resolution did not converge after {MAX_ITERATIONS} iterations; conflicting modules: {}",
-            unstable.join(", ")
-        )
+        bail!("dependency resolution did not converge after {MAX_ITERATIONS} iterations; conflicting modules: {}", unstable.join(", "))
     }
 
     #[allow(clippy::type_complexity)]
@@ -478,9 +467,8 @@ impl<'a> Resolver<'a> {
         while let Some((module, excl, transitive)) = queue.pop_front() {
             // A module reached only through version-less edges waits until
             // another path requests a version (Gradle semantics).
-            let decidable = used.contains_key(&module)
-                || selected.contains_key(&module)
-                || requests.get(&module).is_some_and(|r| !r.is_empty());
+            let decidable =
+                used.contains_key(&module) || selected.contains_key(&module) || requests.get(&module).is_some_and(|r| !r.is_empty());
             if !decidable {
                 stalled += 1;
                 if stalled > queue.len() {
@@ -654,9 +642,7 @@ mod tests {
             let path = self.dir.path().join(&rel);
             let mut versions: Vec<String> = fs::read_to_string(&path)
                 .ok()
-                .map(|s| {
-                    s.split("<version>").skip(1).map(|p| p.split('<').next().unwrap().to_owned()).collect()
-                })
+                .map(|s| s.split("<version>").skip(1).map(|p| p.split('<').next().unwrap().to_owned()).collect())
                 .unwrap_or_default();
             versions.push(version.to_owned());
             let body: String = versions.iter().map(|v| format!("<version>{v}</version>")).collect();
@@ -808,9 +794,7 @@ mod tests {
         let res = resolver.resolve(&[DependencyRequest::new("g:lib".parse().unwrap(), None)]).unwrap();
         assert_eq!(versions(&res), ["lib:3.0"]);
 
-        let err = Resolver::new(&client, Platform::Jvm)
-            .resolve(&[DependencyRequest::new("g:lib".parse().unwrap(), None)])
-            .unwrap_err();
+        let err = Resolver::new(&client, Platform::Jvm).resolve(&[DependencyRequest::new("g:lib".parse().unwrap(), None)]).unwrap_err();
         assert!(err.to_string().contains("no BOM manages it"), "{err}");
     }
 
@@ -899,7 +883,10 @@ mod tests {
     fn platform_dependencies_align_versions_without_adding_modules() {
         let repo = TestRepo::new();
         let marker = "<!-- do_not_remove: published-with-gradle-metadata -->";
-        repo.write("j/api/2.0/api-2.0.pom", &format!("<project>{marker}<groupId>j</groupId><artifactId>api</artifactId><version>2.0</version></project>"));
+        repo.write(
+            "j/api/2.0/api-2.0.pom",
+            &format!("<project>{marker}<groupId>j</groupId><artifactId>api</artifactId><version>2.0</version></project>"),
+        );
         repo.write(
             "j/api/2.0/api-2.0.module",
             r#"{"formatVersion": "1.1", "variants": [
@@ -937,7 +924,10 @@ mod tests {
     fn versionless_module_metadata_edges_take_versions_from_elsewhere() {
         let repo = TestRepo::new();
         let marker = "<!-- do_not_remove: published-with-gradle-metadata -->";
-        repo.write("m/ui/1.0/ui-1.0.pom", &format!("<project>{marker}<groupId>m</groupId><artifactId>ui</artifactId><version>1.0</version></project>"));
+        repo.write(
+            "m/ui/1.0/ui-1.0.pom",
+            &format!("<project>{marker}<groupId>m</groupId><artifactId>ui</artifactId><version>1.0</version></project>"),
+        );
         repo.write(
             "m/ui/1.0/ui-1.0.module",
             r#"{"formatVersion": "1.1", "variants": [

@@ -64,11 +64,8 @@ impl SourceSet {
             return Vec::new();
         }
         let name = &self.platform_name;
-        let sources: Vec<String> = common
-            .iter()
-            .map(|p| format!("common:{}", slash(p)))
-            .chain(platform.iter().map(|p| format!("{name}:{}", slash(p))))
-            .collect();
+        let sources: Vec<String> =
+            common.iter().map(|p| format!("common:{}", slash(p))).chain(platform.iter().map(|p| format!("{name}:{}", slash(p)))).collect();
         vec![
             "-Xmulti-platform".to_owned(),
             format!("-Xfragments=common,{name}"),

@@ -84,7 +84,10 @@ impl LocalRepo {
             .unwrap_or_default();
         versions.push(version.to_owned());
         let body: String = versions.iter().map(|v| format!("<version>{v}</version>")).collect();
-        self.write(&format!("{dir}/maven-metadata.xml"), &format!("<metadata><versioning><versions>{body}</versions></versioning></metadata>"));
+        self.write(
+            &format!("{dir}/maven-metadata.xml"),
+            &format!("<metadata><versioning><versions>{body}</versions></versioning></metadata>"),
+        );
         self
     }
 }

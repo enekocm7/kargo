@@ -207,12 +207,9 @@ impl Version {
         if lower.ends_with("-snapshot") {
             return true;
         }
-        lower
-            .split(|c: char| c == '-' || c == '.' || c.is_ascii_digit())
-            .filter(|s| !s.is_empty())
-            .any(|tok| {
-                matches!(tok, "alpha" | "a" | "beta" | "b" | "milestone" | "m" | "rc" | "cr" | "dev" | "eap" | "snapshot" | "pre" | "preview")
-            })
+        lower.split(|c: char| c == '-' || c == '.' || c.is_ascii_digit()).filter(|s| !s.is_empty()).any(|tok| {
+            matches!(tok, "alpha" | "a" | "beta" | "b" | "milestone" | "m" | "rc" | "cr" | "dev" | "eap" | "snapshot" | "pre" | "preview")
+        })
     }
 }
 
@@ -383,10 +380,7 @@ impl FromStr for VersionReq {
                     return Err(err());
                 }
                 let v = Version::parse(body.trim());
-                Interval {
-                    lower: Some(Bound { version: v.clone(), inclusive: true }),
-                    upper: Some(Bound { version: v, inclusive: true }),
-                }
+                Interval { lower: Some(Bound { version: v.clone(), inclusive: true }), upper: Some(Bound { version: v, inclusive: true }) }
             };
             intervals.push(interval);
             rest = rest[close_idx + 1..].trim_start();
@@ -422,8 +416,19 @@ mod tests {
     #[test]
     fn maven_ordering() {
         assert_ascending(&[
-            "1", "1.1", "1.2-alpha1", "1.2-alpha2", "1.2-beta-1", "1.2-milestone-1", "1.2-rc1", "1.2-SNAPSHOT", "1.2",
-            "1.2-sp", "1.2.1", "1.10", "2.0",
+            "1",
+            "1.1",
+            "1.2-alpha1",
+            "1.2-alpha2",
+            "1.2-beta-1",
+            "1.2-milestone-1",
+            "1.2-rc1",
+            "1.2-SNAPSHOT",
+            "1.2",
+            "1.2-sp",
+            "1.2.1",
+            "1.10",
+            "2.0",
         ]);
         assert_ascending(&["2.4.0-Beta1", "2.4.0-Beta2", "2.4.0-RC", "2.4.0", "2.4.10", "2.4.20", "2.4.21"]);
         assert_ascending(&["1.0-alpha", "1.0-a1", "1.0-b1", "1.0-m1", "1.0-cr1", "1.0"]);
@@ -431,7 +436,9 @@ mod tests {
 
     #[test]
     fn maven_equality() {
-        for (a, b) in [("1", "1.0"), ("1.0", "1.0.0"), ("1-ga", "1"), ("1.0-final", "1"), ("1.0-release", "1"), ("1cr", "1rc"), ("1.0.0-0", "1")] {
+        for (a, b) in
+            [("1", "1.0"), ("1.0", "1.0.0"), ("1-ga", "1"), ("1.0-final", "1"), ("1.0-release", "1"), ("1cr", "1rc"), ("1.0.0-0", "1")]
+        {
             assert_eq!(v(a), v(b), "{a} == {b}");
         }
     }

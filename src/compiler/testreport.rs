@@ -136,8 +136,7 @@ pub fn print_summary(summary: &TestSummary, mut out: impl Write) -> std::io::Res
             writeln!(out, "---- {name} ----\n{text}\n")?;
         }
     }
-    let (style, verdict) =
-        if summary.success() { (AnsiColor::Green.on_default(), "ok") } else { (AnsiColor::Red.on_default(), "FAILED") };
+    let (style, verdict) = if summary.success() { (AnsiColor::Green.on_default(), "ok") } else { (AnsiColor::Red.on_default(), "FAILED") };
     writeln!(
         out,
         "\ntest result: {style}{verdict}{style:#}. {} passed; {} failed; {} ignored",

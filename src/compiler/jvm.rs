@@ -92,7 +92,14 @@ impl JvmCompilation<'_> {
 
     /// Compiles if inputs changed; outputs go to a fresh `output` directory.
     /// `announce` is called right before real work starts.
-    pub fn compile(&self, shell: &Shell, jdk: &Jdk, compiler: &KotlinCompiler, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
+    pub fn compile(
+        &self,
+        shell: &Shell,
+        jdk: &Jdk,
+        compiler: &KotlinCompiler,
+        fingerprint_dir: &Path,
+        announce: &dyn Fn(),
+    ) -> Result<Outcome> {
         let resource_files: Vec<PathBuf> = self.resources.iter().flat_map(|d| all_files(d)).collect();
         if self.sources.is_empty() && resource_files.is_empty() {
             remove_dir_all_if_exists(&self.output)?;
@@ -165,12 +172,8 @@ fn all_files(dir: &Path) -> Vec<PathBuf> {
     if !dir.is_dir() {
         return Vec::new();
     }
-    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .collect();
+    let mut files: Vec<PathBuf> =
+        walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).map(|e| e.into_path()).collect();
     files.sort();
     files
 }

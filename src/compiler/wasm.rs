@@ -73,7 +73,14 @@ impl WasmCompilation<'_> {
         self.output.join(format!("{}.mjs", self.name))
     }
 
-    pub fn compile(&self, shell: &Shell, jdk: &Jdk, compiler: &KotlinCompiler, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
+    pub fn compile(
+        &self,
+        shell: &Shell,
+        jdk: &Jdk,
+        compiler: &KotlinCompiler,
+        fingerprint_dir: &Path,
+        announce: &dyn Fn(),
+    ) -> Result<Outcome> {
         if self.sources.kotlin_files().is_empty() {
             return Ok(Outcome::Empty);
         }
@@ -123,8 +130,24 @@ impl WasmCompilation<'_> {
         remove_dir_all_if_exists(&self.output)?;
         std::fs::create_dir_all(&self.output)?;
 
-        run_kotlin_compiler(shell, jdk, &compiler.classpath, main, &klib_args, &fingerprint_dir.join(format!("{}.klib.args", self.name)), self.name)?;
-        run_kotlin_compiler(shell, jdk, &compiler.classpath, main, &link_args, &fingerprint_dir.join(format!("{}.link.args", self.name)), self.name)?;
+        run_kotlin_compiler(
+            shell,
+            jdk,
+            &compiler.classpath,
+            main,
+            &klib_args,
+            &fingerprint_dir.join(format!("{}.klib.args", self.name)),
+            self.name,
+        )?;
+        run_kotlin_compiler(
+            shell,
+            jdk,
+            &compiler.classpath,
+            main,
+            &link_args,
+            &fingerprint_dir.join(format!("{}.link.args", self.name)),
+            self.name,
+        )?;
         check.record()?;
         Ok(Outcome::Compiled)
     }

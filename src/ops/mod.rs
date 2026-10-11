@@ -108,8 +108,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
 /// `kargo update`: re-resolves every dependency, ignoring `kargo.lock`.
 pub fn update(ctx: &BuildContext) -> Result<()> {
     ctx.reset_lockfile(None);
-    let targets: Vec<TargetKind> =
-        ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
+    let targets: Vec<TargetKind> = ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
     for target in targets {
         for configuration in [Configuration::Compile, Configuration::Runtime, Configuration::Test] {
             if target != TargetKind::Jvm && configuration == Configuration::Compile {

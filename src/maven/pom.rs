@@ -36,12 +36,7 @@ impl PomDependency {
 
     /// Key used to match dependency management entries.
     fn management_key(&self) -> (String, String, Option<String>, String) {
-        (
-            self.group.clone(),
-            self.artifact.clone(),
-            self.classifier.clone(),
-            self.kind.clone().unwrap_or_else(|| "jar".to_owned()),
-        )
+        (self.group.clone(), self.artifact.clone(), self.classifier.clone(), self.kind.clone().unwrap_or_else(|| "jar".to_owned()))
     }
 
     pub fn is_bom_import(&self) -> bool {
@@ -95,10 +90,7 @@ fn parse_dependency(node: roxmltree::Node<'_, '_>) -> Option<PomDependency> {
 
 fn parse_dependency_list(node: Option<roxmltree::Node<'_, '_>>) -> Vec<PomDependency> {
     node.map(|deps| {
-        deps.children()
-            .filter(|n| n.is_element() && n.tag_name().name() == "dependency")
-            .filter_map(parse_dependency)
-            .collect()
+        deps.children().filter(|n| n.is_element() && n.tag_name().name() == "dependency").filter_map(parse_dependency).collect()
     })
     .unwrap_or_default()
 }
@@ -113,9 +105,8 @@ impl Pom {
             bail!("POM root element is `{}`, expected `project`", project.tag_name().name());
         }
 
-        let parent = child(project, "parent").and_then(|p| {
-            Some(ParentRef { group: text(p, "groupId")?, artifact: text(p, "artifactId")?, version: text(p, "version")? })
-        });
+        let parent = child(project, "parent")
+            .and_then(|p| Some(ParentRef { group: text(p, "groupId")?, artifact: text(p, "artifactId")?, version: text(p, "version")? }));
 
         let properties = child(project, "properties")
             .map(|props| {
@@ -127,8 +118,7 @@ impl Pom {
             })
             .unwrap_or_default();
 
-        let dependency_management =
-            parse_dependency_list(child(project, "dependencyManagement").and_then(|dm| child(dm, "dependencies")));
+        let dependency_management = parse_dependency_list(child(project, "dependencyManagement").and_then(|dm| child(dm, "dependencies")));
 
         let relocation = child(project, "distributionManagement")
             .and_then(|dm| child(dm, "relocation"))

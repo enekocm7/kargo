@@ -134,8 +134,7 @@ mod tests {
             fs::write(p, "").unwrap();
         }
         let files = collect_files(dir.path(), &["kt", "java"]);
-        let names: Vec<_> =
-            files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/")).collect();
+        let names: Vec<_> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/")).collect();
         assert_eq!(names, ["a/c.kt", "a/d.java", "b.kt"]);
         assert!(collect_files(&dir.path().join("missing"), &["kt"]).is_empty());
     }

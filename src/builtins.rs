@@ -149,7 +149,9 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
             TargetKind::Wasm => bail!(
                 "Compose for Web (Wasm) needs the Compose Gradle plugin's resource pipeline and is not supported by Kargo's direct Wasm backend; use the JVM (desktop) or Android target for Compose"
             ),
-            TargetKind::Native => bail!("Compose is not available for Kotlin/Native console targets; use the JVM (desktop) or Android target"),
+            TargetKind::Native => {
+                bail!("Compose is not available for Kotlin/Native console targets; use the JVM (desktop) or Android target")
+            }
             TargetKind::Android => {}
         }
     }
@@ -230,9 +232,12 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
             c.dependencies.push(dep("tools.jackson.module:jackson-module-kotlin", None));
         }
         c.dev_dependencies.push(dep("org.springframework.boot:spring-boot-starter-test", None));
-        c.plugins.push(PluginSpec::kotlin("kotlin-allopen-compiler-plugin-embeddable", "org.jetbrains.kotlin.allopen").option("preset", "spring"));
+        c.plugins.push(
+            PluginSpec::kotlin("kotlin-allopen-compiler-plugin-embeddable", "org.jetbrains.kotlin.allopen").option("preset", "spring"),
+        );
         if spring.jpa.unwrap_or_else(|| starters.iter().any(|s| s == "data-jpa")) {
-            c.plugins.push(PluginSpec::kotlin("kotlin-noarg-compiler-plugin-embeddable", "org.jetbrains.kotlin.noarg").option("preset", "jpa"));
+            c.plugins
+                .push(PluginSpec::kotlin("kotlin-noarg-compiler-plugin-embeddable", "org.jetbrains.kotlin.noarg").option("preset", "jpa"));
             c.plugins.push(
                 PluginSpec::kotlin("kotlin-allopen-compiler-plugin-embeddable", "org.jetbrains.kotlin.allopen")
                     .option("annotation", "jakarta.persistence.Entity")
@@ -349,7 +354,8 @@ mod tests {
 
     #[test]
     fn ktor_server_and_client() {
-        let m = manifest("[frameworks]\nserialization = true\nktor = { server = \"netty\", client = \"cio\", server-plugins = [\"cors\"] }\n");
+        let m =
+            manifest("[frameworks]\nserialization = true\nktor = { server = \"netty\", client = \"cio\", server-plugins = [\"cors\"] }\n");
         let c = contributions(&m, TargetKind::Jvm, Path::new(".")).unwrap();
         let deps = coords(&c.dependencies);
         for expected in [

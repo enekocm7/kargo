@@ -332,10 +332,7 @@ fn parse_dependency(name: &str, value: &Value, section: &str) -> Result<Dependen
         let version = spec.version.clone().or(detailed.version.clone());
         return finish_dependency(name, spec.module, version, detailed, section);
     } else if let Some(group) = &detailed.group {
-        ModuleId::new(group, detailed.artifact.clone().unwrap_or_else(|| name.to_owned()))
-            .to_string()
-            .parse()
-            .with_context(ctx)?
+        ModuleId::new(group, detailed.artifact.clone().unwrap_or_else(|| name.to_owned())).to_string().parse().with_context(ctx)?
     } else {
         bail!("{}: the key must be `group:artifact`, or the table must specify `coords` or `group`", ctx());
     };
@@ -449,7 +446,9 @@ impl RawManifest {
         validate_package_name(&self.package.name)?;
         validate_version_string("package version", &self.package.version)?;
         if let Some(group) = &self.package.group {
-            if group.is_empty() || group.split('.').any(|seg| seg.is_empty() || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
+            if group.is_empty()
+                || group.split('.').any(|seg| seg.is_empty() || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            {
                 bail!("invalid package group `{group}` (expected something like `com.example`)");
             }
         }
@@ -470,62 +469,73 @@ impl RawManifest {
             },
             Some(raw) => {
                 let targets = Targets {
-                    jvm: raw.jvm.map(|j| -> Result<JvmTarget> {
-                        Ok(JvmTarget {
-                            jvm_target: j.jvm_target.unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
-                            main_class: j.main_class,
-                            jvm_args: j.jvm_args,
-                            dependencies: parse_dependencies(&j.dependencies, "target.jvm.dependencies")?,
+                    jvm: raw
+                        .jvm
+                        .map(|j| -> Result<JvmTarget> {
+                            Ok(JvmTarget {
+                                jvm_target: j.jvm_target.unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
+                                main_class: j.main_class,
+                                jvm_args: j.jvm_args,
+                                dependencies: parse_dependencies(&j.dependencies, "target.jvm.dependencies")?,
+                            })
                         })
-                    }).transpose()?,
-                    wasm: raw.wasm.map(|w| -> Result<WasmTarget> {
-                        let environment = match w.environment.as_deref() {
-                            None | Some("js") => WasmEnvironment::Js,
-                            Some("wasi") => WasmEnvironment::Wasi,
-                            Some(other) => bail!("unknown wasm environment `{other}` (expected `js` or `wasi`)"),
-                        };
-                        Ok(WasmTarget { environment, dependencies: parse_dependencies(&w.dependencies, "target.wasm.dependencies")? })
-                    }).transpose()?,
-                    native: raw.native.map(|n| -> Result<NativeTarget> {
-                        let platforms = if n.platforms.is_empty() {
-                            vec!["host".to_owned()]
-                        } else {
-                            n.platforms.iter().map(|p| normalize_konan_target(p)).collect::<Result<Vec<_>>>()?
-                        };
-                        let kind = match n.kind.as_deref() {
-                            None | Some("executable") | Some("program") => NativeKind::Executable,
-                            Some("library") | Some("klib") => NativeKind::Library,
-                            Some("shared") | Some("dynamic") => NativeKind::Shared,
-                            Some("static") => NativeKind::Static,
-                            Some(other) => bail!("unknown native kind `{other}` (expected executable, library, shared or static)"),
-                        };
-                        Ok(NativeTarget {
-                            platforms,
-                            kind,
-                            entry_point: n.entry_point,
-                            linker_options: n.linker_options,
-                            dependencies: parse_dependencies(&n.dependencies, "target.native.dependencies")?,
+                        .transpose()?,
+                    wasm: raw
+                        .wasm
+                        .map(|w| -> Result<WasmTarget> {
+                            let environment = match w.environment.as_deref() {
+                                None | Some("js") => WasmEnvironment::Js,
+                                Some("wasi") => WasmEnvironment::Wasi,
+                                Some(other) => bail!("unknown wasm environment `{other}` (expected `js` or `wasi`)"),
+                            };
+                            Ok(WasmTarget { environment, dependencies: parse_dependencies(&w.dependencies, "target.wasm.dependencies")? })
                         })
-                    }).transpose()?,
-                    android: raw.android.map(|mut table| -> Result<AndroidTarget> {
-                        let dependencies = match table.remove("dependencies") {
-                            None => toml::Table::new(),
-                            Some(Value::Table(t)) => t,
-                            Some(_) => bail!("[target.android.dependencies] must be a table"),
-                        };
-                        let config: AndroidConfig =
-                            Value::Table(table).try_into().context("invalid [target.android] section")?;
-                        if config.namespace.trim().is_empty() {
-                            bail!("[target.android] `namespace` must not be empty");
-                        }
-                        if !matches!(config.kind.as_str(), "application" | "library") {
-                            bail!("[target.android] `kind` must be `application` or `library`");
-                        }
-                        if config.min_sdk > config.target_sdk || config.target_sdk > config.compile_sdk {
-                            bail!("[target.android] expected min-sdk <= target-sdk <= compile-sdk");
-                        }
-                        Ok(AndroidTarget { config, dependencies: parse_dependencies(&dependencies, "target.android.dependencies")? })
-                    }).transpose()?,
+                        .transpose()?,
+                    native: raw
+                        .native
+                        .map(|n| -> Result<NativeTarget> {
+                            let platforms = if n.platforms.is_empty() {
+                                vec!["host".to_owned()]
+                            } else {
+                                n.platforms.iter().map(|p| normalize_konan_target(p)).collect::<Result<Vec<_>>>()?
+                            };
+                            let kind = match n.kind.as_deref() {
+                                None | Some("executable") | Some("program") => NativeKind::Executable,
+                                Some("library") | Some("klib") => NativeKind::Library,
+                                Some("shared") | Some("dynamic") => NativeKind::Shared,
+                                Some("static") => NativeKind::Static,
+                                Some(other) => bail!("unknown native kind `{other}` (expected executable, library, shared or static)"),
+                            };
+                            Ok(NativeTarget {
+                                platforms,
+                                kind,
+                                entry_point: n.entry_point,
+                                linker_options: n.linker_options,
+                                dependencies: parse_dependencies(&n.dependencies, "target.native.dependencies")?,
+                            })
+                        })
+                        .transpose()?,
+                    android: raw
+                        .android
+                        .map(|mut table| -> Result<AndroidTarget> {
+                            let dependencies = match table.remove("dependencies") {
+                                None => toml::Table::new(),
+                                Some(Value::Table(t)) => t,
+                                Some(_) => bail!("[target.android.dependencies] must be a table"),
+                            };
+                            let config: AndroidConfig = Value::Table(table).try_into().context("invalid [target.android] section")?;
+                            if config.namespace.trim().is_empty() {
+                                bail!("[target.android] `namespace` must not be empty");
+                            }
+                            if !matches!(config.kind.as_str(), "application" | "library") {
+                                bail!("[target.android] `kind` must be `application` or `library`");
+                            }
+                            if config.min_sdk > config.target_sdk || config.target_sdk > config.compile_sdk {
+                                bail!("[target.android] expected min-sdk <= target-sdk <= compile-sdk");
+                            }
+                            Ok(AndroidTarget { config, dependencies: parse_dependencies(&dependencies, "target.android.dependencies")? })
+                        })
+                        .transpose()?,
                 };
                 if targets.enabled().is_empty() {
                     bail!("[target] is present but no target is enabled; add e.g. [target.jvm]");

@@ -75,12 +75,7 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     // Make sure the main classpaths are locked too.
     let _ = jvm_classpaths(ctx, &setup)?;
     let test_cp = ctx
-        .resolve(
-            "jvm/test",
-            Platform::Jvm,
-            &setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true),
-            &setup.boms,
-        )?
+        .resolve("jvm/test", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true), &setup.boms)?
         .files();
     let jdk = ctx.jdk()?;
     let compiler = ctx.kotlin_compiler()?;
@@ -206,9 +201,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         ctx.shell().warn("test filters are not supported for the wasm target; running all tests");
     }
     let mut cmd = Command::new(crate::toolchain::node()?);
-    cmd.arg("-e")
-        .arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path())))
-        .current_dir(ctx.ws.root());
+    cmd.arg("-e").arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path()))).current_dir(ctx.ws.root());
     run_reported(ctx, cmd, "Wasm tests (Node.js)")
 }
 
@@ -249,9 +242,8 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         optimize: false,
         test_runner: true,
     };
-    let outcome = unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| {
-        compiling(ctx, TargetKind::Native, ", tests")
-    })?;
+    let outcome =
+        unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| compiling(ctx, TargetKind::Native, ", tests"))?;
     if opts.no_run || outcome == Outcome::Empty {
         return Ok(true);
     }

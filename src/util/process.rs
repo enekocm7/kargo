@@ -88,9 +88,8 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
     } else {
         vec![String::new()]
     };
-    std::env::split_paths(&path).find_map(|dir| {
-        exts.iter().map(|ext| dir.join(format!("{name}{ext}"))).find(|candidate| is_executable(candidate))
-    })
+    std::env::split_paths(&path)
+        .find_map(|dir| exts.iter().map(|ext| dir.join(format!("{name}{ext}"))).find(|candidate| is_executable(candidate)))
 }
 
 fn is_executable(path: &Path) -> bool {
