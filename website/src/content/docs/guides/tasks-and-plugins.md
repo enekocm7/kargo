@@ -32,6 +32,8 @@ kargo fmt --dry-run   # extra arguments are appended to the task's last command
 | Key | Meaning |
 |---|---|
 | `run` | A command or a list of commands, run in order |
+| `windows-run` | Replaces `run` on Windows; when it is not set, `run` is used everywhere |
+| `shell` | The shell to run the commands in: `sh`, `bash`, `cmd`, `powershell` or `pwsh` (default: `sh` on Unix, `cmd` on Windows) |
 | `description` | Shown by `kargo task` |
 | `depends-on` | Tasks to run first (cycles are rejected) |
 | `env` | Extra environment variables |
@@ -39,6 +41,30 @@ kargo fmt --dry-run   # extra arguments are appended to the task's last command
 | `hooks` | Lifecycle hooks that run this task automatically |
 
 Commands run with `sh -c` on Unix and `cmd /C` on Windows. They receive `KARGO_TASK` plus the `KARGO_*` variables listed below.
+
+### Windows
+
+By default tasks run in `cmd` on Windows, so Unix syntax such as `$KARGO_PKG_NAME`, `mkdir -p` or `./gen.sh` doesn't work there: `cmd` expands `%KARGO_PKG_NAME%` instead. You have two ways to write tasks that work everywhere.
+
+**Use one shell on every platform.** Set `shell = "sh"` and write POSIX commands once:
+
+```toml title="kargo.toml"
+[tasks]
+envs = { run = "echo $KARGO_PKG_NAME $KARGO_PROFILE", shell = "sh" }
+gen = { run = ["mkdir -p build", "./gen.sh"], shell = "sh" }
+```
+
+On Windows Kargo uses the `sh` from [Git for Windows](https://gitforwindows.org/), even when only `git` is on your `PATH`, or any other `sh` on `PATH` (MSYS2, Cygwin). If none is found, the task fails and tells you so. `shell = "pwsh"` works the same way for PowerShell 7, which also runs on macOS and Linux.
+
+**Give Windows its own commands.** When there is no shared shell, put the Windows version in `windows-run`:
+
+```toml title="kargo.toml"
+[tasks]
+envs = { run = "echo $KARGO_PKG_NAME $KARGO_PROFILE", windows-run = "echo %KARGO_PKG_NAME% %KARGO_PROFILE%" }
+gen = { run = ["mkdir -p build", "./gen.sh"], windows-run = ["if not exist build mkdir build", "gen.bat"] }
+```
+
+On Windows Kargo runs `windows-run` if it is set and `run` otherwise; on every other platform it always runs `run`. Commands that work in both shells, such as `ktlint -F`, need only `run`.
 
 ## Hooks
 
@@ -53,6 +79,26 @@ env = { CHANNEL = "builds" }
 ```
 
 A failing hook fails the build.
+
+| Key | Meaning |
+|---|---|
+| `command` | The executable to run |
+| `windows-command` | Replaces `command` on Windows; when it is not set, `command` is used everywhere |
+| `args` | Arguments passed before the hook name |
+| `windows-args` | Replaces `args` on Windows; when it is not set, `args` is used everywhere |
+| `hooks` | Lifecycle hooks that run the plugin |
+| `env` | Extra environment variables |
+
+`command` is started directly, not through a shell. On Windows a `command` ending in `.sh` runs through `sh` (from Git for Windows or on `PATH`), so the example above works on every platform. Other commands must be real executables there (`.exe`, `.bat` or `.cmd`).
+
+To run something else on Windows, set `windows-command` (and `windows-args` if the arguments differ):
+
+```toml title="kargo.toml"
+[plugins.notify]
+command = "./scripts/notify.sh"
+windows-command = "./scripts/notify.bat"
+hooks = ["post-build"]
+```
 
 Hooks receive these environment variables:
 

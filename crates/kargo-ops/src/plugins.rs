@@ -14,7 +14,7 @@ use anyhow::{Result, bail};
 
 use crate::tasks;
 use crate::workspace::Workspace;
-use kargo_manifest::Hook;
+use kargo_manifest::{Hook, ProcessPlugin};
 use kargo_util::config::Config;
 use kargo_util::process;
 use kargo_util::shell::Shell;
@@ -47,15 +47,38 @@ pub fn run_hook(shell: &Shell, ws: &Workspace, hook: Hook, env: &[(String, Strin
 
     for plugin in manifest.process_plugins.iter().filter(|p| p.hooks.contains(&hook)) {
         shell.status("Plugin", format!("{} ({hook})", plugin.name));
-        let program = resolve_command(ws.root(), &plugin.command);
-        let mut cmd = Command::new(&program);
-        cmd.args(&plugin.args).arg(hook.as_str()).current_dir(ws.root()).envs(env.iter().map(|(k, v)| (k, v))).envs(plugin.env.iter());
+        let mut cmd = plugin_command(ws.root(), plugin)?;
+        cmd.args(plugin.platform_args())
+            .arg(hook.as_str())
+            .current_dir(ws.root())
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .envs(plugin.env.iter());
         let status = process::status(shell, &mut cmd, &format!("plugin `{}`", plugin.name))?;
         if !status.success() {
             bail!("plugin `{}` failed at {hook} ({})", plugin.name, process::describe_status(status));
         }
     }
     Ok(())
+}
+
+/// Builds the command for a hook plugin. Windows can't start a `.sh` script
+/// directly, so there it runs through `sh` (from Git for Windows, for example).
+fn plugin_command(root: &Path, plugin: &ProcessPlugin) -> Result<Command> {
+    let program = resolve_command(root, plugin.platform_command());
+    let is_sh_script = program.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("sh"));
+    if !cfg!(windows) || !is_sh_script {
+        return Ok(Command::new(program));
+    }
+    let Some(sh) = process::find_posix_shell("sh") else {
+        bail!(
+            "plugin `{}`: `{}` is a shell script and Windows has no `sh` to run it; install Git for Windows or set `windows-command`",
+            plugin.name,
+            plugin.platform_command()
+        );
+    };
+    let mut cmd = Command::new(sh);
+    cmd.arg(process::slash(&program));
+    Ok(cmd)
 }
 
 /// Commands containing a path separator are relative to the project root.
@@ -178,6 +201,73 @@ mod tests {
         let ws = workspace(dir.path(), &format!("[plugins.bad]\ncommand = \"./{cmd}\"\nhooks = [\"pre-test\"]\n"));
         let err = run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PreTest, &[]).unwrap_err();
         assert!(err.to_string().contains("plugin `bad` failed"), "{err}");
+    }
+
+    #[test]
+    fn windows_command_replaces_command_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let unix = dir.path().join("plugin.sh");
+        std::fs::write(
+            &unix,
+            "#!/bin/sh
+echo unix $1 > plugin.txt
+",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&unix, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join("plugin.bat"),
+            "@echo windows %1> plugin.txt
+",
+        )
+        .unwrap();
+        let ws = workspace(
+            dir.path(),
+            "[plugins.notify]
+command = \"./plugin.sh\"
+windows-command = \"./plugin.bat\"
+hooks = [\"post-build\"]
+",
+        );
+        run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &[]).unwrap();
+        let expected = if cfg!(windows) { "windows post-build" } else { "unix post-build" };
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugin.txt")).unwrap().trim(), expected);
+    }
+
+    #[test]
+    fn shell_script_plugins_run_on_every_platform() {
+        if process::find_posix_shell("sh").is_none() {
+            eprintln!("skipping: no sh available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("notify.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh
+echo \"$1 $KARGO_HOOK\" > plugin.txt
+",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let ws = workspace(
+            dir.path(),
+            "[plugins.notify]
+command = \"./notify.sh\"
+hooks = [\"post-build\"]
+",
+        );
+        let env = [("KARGO_HOOK".to_owned(), "post-build".to_owned())];
+        run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &env).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugin.txt")).unwrap().trim(), "post-build post-build");
     }
 
     #[test]

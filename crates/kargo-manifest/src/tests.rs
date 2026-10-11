@@ -96,12 +96,15 @@ options = { function = "kotlin.assert" }
 [plugins.notify]
 command = "notify-send"
 args = ["built"]
+windows-command = "notify.cmd"
 hooks = ["post-build", "post-test"]
 
 [tasks]
 fmt = "ktlint -F"
 gen = { run = ["echo a", "echo b"], description = "generate", env = { A = "1" }, hooks = ["pre-build"] }
 all = { depends-on = ["fmt", "gen"] }
+envs = { run = "echo $KARGO_PKG_NAME", windows-run = ["echo %KARGO_PKG_NAME%"] }
+posix = { run = "mkdir -p build", shell = "sh" }
 
 [profile.release]
 compiler-args = ["-Xno-call-assertions"]
@@ -158,9 +161,18 @@ optimize = true
 
     assert_eq!(m.compiler_plugins.len(), 1);
     assert_eq!(m.compiler_plugins[0].options["function"], "kotlin.assert");
-    assert_eq!(m.process_plugins[0].hooks, [Hook::PostBuild, Hook::PostTest]);
+    let notify = &m.process_plugins[0];
+    assert_eq!(notify.hooks, [Hook::PostBuild, Hook::PostTest]);
+    assert_eq!(notify.windows_command.as_deref(), Some("notify.cmd"));
+    assert_eq!(notify.platform_command(), if cfg!(windows) { "notify.cmd" } else { "notify-send" });
+    assert_eq!(notify.platform_args(), ["built"], "`args` is used when `windows-args` is not set");
 
-    assert_eq!(m.tasks.len(), 3);
+    assert_eq!(m.tasks.len(), 5);
+    assert_eq!(m.tasks["posix"].shell, Some(TaskShell::Sh));
+    assert_eq!(m.tasks["fmt"].shell, None);
+    assert_eq!(m.tasks["fmt"].platform_run(), ["ktlint -F"], "`run` is used when `windows-run` is not set");
+    let envs = &m.tasks["envs"];
+    assert_eq!(envs.platform_run(), if cfg!(windows) { ["echo %KARGO_PKG_NAME%"] } else { ["echo $KARGO_PKG_NAME"] });
     assert_eq!(m.tasks["gen"].run, ["echo a", "echo b"]);
     assert_eq!(m.tasks["gen"].hooks, [Hook::PreBuild]);
     assert_eq!(m.tasks["all"].depends_on, ["fmt", "gen"]);
