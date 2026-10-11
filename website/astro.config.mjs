@@ -48,6 +48,7 @@ export default defineConfig({
 						{ label: 'Tasks and plugins', slug: 'guides/tasks-and-plugins' },
 						{ label: 'Managing JDKs', slug: 'guides/toolchains' },
 						{ label: 'Continuous integration', slug: 'guides/ci' },
+						{ label: 'Build performance', slug: 'guides/build-performance' },
 					],
 				},
 				{

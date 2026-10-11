@@ -42,6 +42,7 @@ $ kargo test
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs and Kotlin/Native distributions |
+| `kargo daemon status\|stop` | Show or stop the background compiler daemons |
 | `kargo clean`, `kargo info` | Remove `target/`, show project information |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
@@ -196,7 +197,8 @@ Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cy
 | `KARGO_HOME` | Cache and toolchains (default `~/.kargo`) |
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
-| `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler |
+| `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
+| `KARGO_DAEMON` | `false` turns off the compiler daemon |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
 | `BROWSER` | Browser for `kargo doc --open` |
@@ -211,7 +213,7 @@ Kargo is a Cargo workspace:
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, archives |
-| `kargo-compiler` | JVM/Wasm/Native compiler drivers, jar packaging, entry points, test reports |
+| `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, jar packaging, entry points, test reports |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, commands |
 | `kargo` | The CLI binary |
 

@@ -222,6 +222,26 @@ impl<'a> Resolver<'a> {
         Ok(info)
     }
 
+    fn has_info(&self, module: &ModuleId, version: &str) -> bool {
+        self.infos.lock().expect("lock poisoned").contains_key(&(module.clone(), version.to_owned()))
+    }
+
+    /// Loads node infos concurrently; errors are ignored here and reported when the
+    /// traversal itself asks for that node.
+    fn prefetch(&self, mut batch: Vec<(ModuleId, String)>) {
+        batch.sort();
+        batch.dedup();
+        batch.retain(|(m, v)| !self.has_info(m, v));
+        if batch.len() < 2 {
+            return;
+        }
+        crate::io_pool().install(|| {
+            batch.par_iter().for_each(|(m, v)| {
+                let _ = self.node_info(m, v);
+            })
+        });
+    }
+
     fn load_node_info(&self, module: &ModuleId, version: &str) -> Result<NodeInfo> {
         let pom = self.raw_pom(module, version)?;
         let wants_metadata = pom.as_ref().is_none_or(|p| p.has_gradle_metadata);
@@ -512,6 +532,23 @@ impl<'a> Resolver<'a> {
                 edges_by_module.entry(module.clone()).or_default();
                 continue;
             }
+            if !self.has_info(&module, version.as_str()) {
+                // Fetch the metadata of everything queued whose version is already known in
+                // parallel, instead of one network round-trip per module.
+                let mut batch = vec![(module.clone(), version.to_string())];
+                for (m, _, t) in &queue {
+                    let guess = used.get(m).or_else(|| selected.get(m)).cloned().or_else(|| {
+                        requests
+                            .get(m)
+                            .filter(|r| r.ranges.is_empty())
+                            .and_then(|r| r.forced.clone().or_else(|| r.soft.iter().max().cloned()))
+                    });
+                    if let (true, Some(v)) = (*t, guess) {
+                        batch.push((m.clone(), v.to_string()));
+                    }
+                }
+                self.prefetch(batch);
+            }
             let info = self.node_info(&module, version.as_str())?;
             for (target, v) in &info.constraints {
                 if let Ok(VersionReq::Soft(v)) = v.parse::<VersionReq>() {
@@ -567,10 +604,12 @@ impl<'a> Resolver<'a> {
             })
             .collect::<Result<_>>()?;
 
-        let downloaded: Vec<Vec<PathBuf>> = file_lists
-            .par_iter()
-            .map(|files| files.iter().map(|rel| self.client.fetch_required(rel)).collect::<Result<Vec<_>>>())
-            .collect::<Result<_>>()?;
+        let downloaded: Vec<Vec<PathBuf>> = crate::io_pool().install(|| {
+            file_lists
+                .par_iter()
+                .map(|files| files.iter().map(|rel| self.client.fetch_required(rel)).collect::<Result<Vec<_>>>())
+                .collect::<Result<_>>()
+        })?;
 
         let nodes = order
             .iter()

@@ -95,13 +95,23 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
 
     let mut results = BuildResults::default();
-    for target in targets {
+    // Targets don't depend on each other, so they build at the same time.
+    let built = super::parallel_map(&targets, |&target| -> Result<BuildResults> {
+        let mut r = BuildResults::default();
         match target {
-            TargetKind::Jvm => results.jvm = Some(build_jvm(ctx)?),
-            TargetKind::Wasm => results.wasm = build_wasm(ctx)?,
-            TargetKind::Native => results.native = build_native(ctx)?,
-            TargetKind::Android => results.android = Some(crate::gradle::build(ctx)?),
+            TargetKind::Jvm => r.jvm = Some(build_jvm(ctx)?),
+            TargetKind::Wasm => r.wasm = build_wasm(ctx)?,
+            TargetKind::Native => r.native = build_native(ctx)?,
+            TargetKind::Android => r.android = Some(crate::gradle::build(ctx)?),
         }
+        Ok(r)
+    });
+    for r in built {
+        let r = r?;
+        results.jvm = results.jvm.or(r.jvm);
+        results.wasm = results.wasm.or(r.wasm);
+        results.native.extend(r.native);
+        results.android = results.android.or(r.android);
     }
 
     let mut env = env;
@@ -149,9 +159,11 @@ pub struct JvmClasspaths {
 }
 
 pub fn jvm_classpaths(ctx: &BuildContext, setup: &TargetSetup) -> Result<JvmClasspaths> {
-    let compile = ctx.resolve("jvm/compile", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Provided], false), &setup.boms)?;
-    let runtime = ctx.resolve("jvm/runtime", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime], false), &setup.boms)?;
-    Ok(JvmClasspaths { compile, runtime })
+    let (compile, runtime) = super::join(
+        || ctx.resolve("jvm/compile", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Provided], false), &setup.boms),
+        || ctx.resolve("jvm/runtime", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime], false), &setup.boms),
+    );
+    Ok(JvmClasspaths { compile: compile?, runtime: runtime? })
 }
 
 fn jvm_settings<'a>(ctx: &BuildContext<'a>) -> Result<&'a kargo_manifest::JvmTarget> {
@@ -171,11 +183,14 @@ pub struct JvmClasses {
 pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let manifest = ctx.ws.manifest();
     let jvm = jvm_settings(ctx)?;
-    let jdk = ctx.compiler_jdk()?;
     let setup = ctx.setup(TargetKind::Jvm)?;
-    let classpaths = jvm_classpaths(ctx, &setup)?;
-    let compiler = ctx.kotlin_compiler()?;
-    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    // On a cold cache the JDK, the compiler and the dependencies all download at once.
+    let (toolchain, classpaths) = super::join(
+        || -> Result<_> { Ok((ctx.compiler_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
+        || jvm_classpaths(ctx, &setup),
+    );
+    let (jdk, compiler, plugins) = toolchain?;
+    let classpaths = classpaths?;
     let processor_path: Vec<PathBuf> = if setup.contributions.annotation_processors.is_empty() {
         Vec::new()
     } else {
@@ -278,11 +293,13 @@ pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool
 pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
-    let jdk = ctx.compiler_jdk()?;
     let setup = ctx.setup(TargetKind::Wasm)?;
-    let libraries = wasm_libraries(ctx, &setup, false)?;
-    let compiler = ctx.kotlin_compiler()?;
-    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    let (toolchain, libraries) = super::join(
+        || -> Result<_> { Ok((ctx.compiler_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
+        || wasm_libraries(ctx, &setup, false),
+    );
+    let (jdk, compiler, plugins) = toolchain?;
+    let libraries = libraries?;
     let profile = ctx.ws.profile(ctx.profile);
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let unit = WasmCompilation {
@@ -349,8 +366,10 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     let profile = ctx.ws.profile(ctx.profile);
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
 
-    let mut builds = Vec::new();
-    for konan_target in native_platforms(ctx)? {
+    let platforms = native_platforms(ctx)?;
+    // Each platform is a separate Kotlin/Native compiler process.
+    super::parallel_map(&platforms, |konan_target| -> Result<NativeBuild> {
+        let konan_target = konan_target.clone();
         let libraries = native_libraries(ctx, &setup, &konan_target, false)?;
         let unit = NativeCompilation {
             name: &manifest.package.name,
@@ -370,7 +389,8 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
         let what = format!(", {konan_target}");
         let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
         unit.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
-        builds.push(NativeBuild { konan_target, artifact: unit.artifact(), kind: native.kind });
-    }
-    Ok(builds)
+        Ok(NativeBuild { konan_target, artifact: unit.artifact(), kind: native.kind })
+    })
+    .into_iter()
+    .collect()
 }

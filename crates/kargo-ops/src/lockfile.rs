@@ -129,28 +129,43 @@ impl Lockfile {
         if locked.inputs != inputs {
             return Ok(None);
         }
+        for pkg in &locked.packages {
+            for file in &pkg.files {
+                if kargo_maven::repo::resolve_relative("", &file.path).ok().as_deref() != Some(file.path.as_str()) {
+                    bail!("corrupt lockfile: suspicious artifact path `{}`", file.path);
+                }
+            }
+        }
+        let local = |path: &str| path.split('/').fold(client.cache_dir().to_path_buf(), |p, seg| p.join(seg));
+        // Download whatever is missing from the cache in parallel (a fresh CI machine has nothing).
+        let missing: Vec<&LockedFile> = locked.packages.iter().flat_map(|p| &p.files).filter(|f| !local(&f.path).is_file()).collect();
+        let downloaded: Vec<Result<(PathBuf, String)>> = kargo_maven::par_map_io(&missing, |file| {
+            let fetched = client.fetch_required(&file.path)?;
+            let actual = hash::sha256_file(&fetched)?;
+            Ok((fetched, actual))
+        });
+        let mut downloaded: std::collections::HashMap<&str, Result<(PathBuf, String)>> =
+            missing.iter().map(|f| f.path.as_str()).zip(downloaded).collect();
+
         let mut nodes = Vec::with_capacity(locked.packages.len());
         for pkg in &locked.packages {
             let module: ModuleId = pkg.module.parse().with_context(|| format!("corrupt lockfile entry `{}`", pkg.module))?;
             let mut files: Vec<PathBuf> = Vec::new();
             for file in &pkg.files {
-                if kargo_maven::repo::resolve_relative("", &file.path).ok().as_deref() != Some(file.path.as_str()) {
-                    bail!("corrupt lockfile: suspicious artifact path `{}`", file.path);
-                }
-                let local = file.path.split('/').fold(client.cache_dir().to_path_buf(), |p, seg| p.join(seg));
-                if local.is_file() {
-                    files.push(local);
+                let Some(result) = downloaded.remove(file.path.as_str()) else {
+                    files.push(local(&file.path));
                     continue;
-                }
-                let fetched = client.fetch_required(&file.path)?;
-                let actual = hash::sha256_file(&fetched)?;
+                };
+                let (fetched, actual) = result?;
                 if actual != file.sha256 {
                     let verified = client.is_verified(&file.path);
                     let _ = std::fs::remove_file(&fetched);
                     let cause = if verified {
-                        "the downloaded file matches the checksum its repository publishes, so the kargo.lock entry is likely wrong                          (for example, it was recorded from a corrupt cached file); if you trust the repository, run `kargo update` to re-lock it"
+                        "the downloaded file matches the checksum its repository publishes, so the kargo.lock entry is likely wrong \
+                         (for example, it was recorded from a corrupt cached file); if you trust the repository, run `kargo update` to re-lock it"
                     } else {
-                        "the repository publishes no checksum to tell which side is wrong: either the artifact changed upstream or was                          tampered with, or the kargo.lock entry is wrong; run `kargo update` to re-lock it only if you trust the repository"
+                        "the repository publishes no checksum to tell which side is wrong: either the artifact changed upstream or was \
+                         tampered with, or the kargo.lock entry is wrong; run `kargo update` to re-lock it only if you trust the repository"
                     };
                     bail!("checksum mismatch for {} (locked sha256 {}, downloaded {actual}); {cause}", file.path, file.sha256);
                 }

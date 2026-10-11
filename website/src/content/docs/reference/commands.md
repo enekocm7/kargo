@@ -256,6 +256,15 @@ Manage JDKs and Kotlin/Native distributions.
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 
+## `kargo daemon`
+
+Show or stop the background compiler daemons that keep the Kotlin compiler warm between builds. See [Build performance](../../guides/build-performance/#the-compiler-daemon).
+
+| Subcommand | Meaning |
+|---|---|
+| `status` | List running daemons with their process ID and state directory |
+| `stop` | Stop every running daemon; the next build starts a new one |
+
 ## `kargo info`
 
 Print project information: package, targets, toolchains and paths.
