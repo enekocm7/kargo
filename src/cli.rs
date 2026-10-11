@@ -316,10 +316,34 @@ enum Command {
         /// group:artifact or the manifest key
         #[arg(required = true)]
         names: Vec<String>,
+        /// Remove from [dev-dependencies]
         #[arg(long, conflicts_with = "target")]
         dev: bool,
+        /// Remove from [target.<target>.dependencies]
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
+    },
+    /// Show dependencies in kargo.toml that have newer versions
+    Outdated {
+        /// Only these dependencies (group:artifact or the manifest key)
+        names: Vec<String>,
+        /// Consider pre-release versions
+        #[arg(long)]
+        pre: bool,
+    },
+    /// Raise the versions in kargo.toml to the newest compatible releases
+    Upgrade {
+        /// Only these dependencies (group:artifact or the manifest key)
+        names: Vec<String>,
+        /// Upgrade to the newest version even if it is not compatible (a new major version)
+        #[arg(short, long)]
+        incompatible: bool,
+        /// Consider pre-release versions
+        #[arg(long)]
+        pre: bool,
+        /// Show what would change without writing kargo.toml
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Display the dependency tree
     Tree {
@@ -341,7 +365,16 @@ enum Command {
         targets: Vec<TargetArg>,
     },
     /// Re-resolve dependencies and rewrite kargo.lock
-    Update,
+    Update {
+        /// Only update these locked modules (group:artifact); everything else keeps its locked version
+        modules: Vec<String>,
+        /// Lock the given module at exactly this version
+        #[arg(long, value_name = "VERSION", requires = "modules")]
+        precise: Option<String>,
+        /// Show what would change without writing kargo.lock
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Remove build output
     Clean {
         /// Only remove the release profile output
@@ -683,12 +716,44 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             ops::fetch(&ctx, &targets)?;
             Ok(0)
         }
-        Command::Update => {
+        Command::Outdated { names, pre } => {
+            let ws = load_workspace(&global)?;
+            let rows = ops::upgrade::outdated(&config, &ws, &names, pre)?;
+            if rows.is_empty() {
+                shell.status("Fresh", "every dependency in kargo.toml is on its newest version");
+            } else {
+                print!("{}", ops::upgrade::render(&rows));
+            }
+            Ok(0)
+        }
+        Command::Upgrade { names, incompatible, pre, dry_run } => {
+            let ws = load_workspace(&global)?;
+            let opts = ops::upgrade::UpgradeOptions { names, incompatible, prerelease: pre, dry_run };
+            if ops::upgrade::upgrade(&config, &ws, &opts)?.is_empty() {
+                shell.status("Fresh", "no dependency in kargo.toml has a newer version to upgrade to");
+            }
+            Ok(0)
+        }
+        Command::Update { modules, precise, dry_run } => {
             let ws = load_workspace(&global)?;
             let config = config.with_refresh(true);
-            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
-            ops::update(&ctx)?;
-            shell.status("Updated", "kargo.lock");
+            let mut ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            let modules = modules
+                .iter()
+                .map(|m| m.parse().with_context(|| format!("`{m}` is not a `group:artifact` module")))
+                .collect::<Result<Vec<_>>>()?;
+            let changes = ops::update::update(&mut ctx, &ops::update::UpdateOptions { modules, precise, dry_run })?;
+            for change in &changes {
+                let (verb, what) = ops::update::describe(change);
+                shell.status(verb, what);
+            }
+            if dry_run {
+                shell.warn("not updating kargo.lock due to dry run");
+            } else if changes.is_empty() {
+                shell.status("Fresh", "kargo.lock is up to date");
+            } else {
+                shell.status("Updated", "kargo.lock");
+            }
             Ok(0)
         }
         Command::Clean { release } => {
@@ -949,6 +1014,15 @@ mod tests {
         assert!(
             matches!(cli.command, Command::Check { ref build, tests: true } if build.release && build.options().targets == [TargetKind::Native])
         );
+        let cli = Cli::try_parse_from(["kargo", "update", "g:a", "--precise", "1.2", "--dry-run"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Update { ref modules, ref precise, dry_run: true } if modules == &["g:a"] && precise.as_deref() == Some("1.2"))
+        );
+        assert!(Cli::try_parse_from(["kargo", "update", "--precise", "1.2"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "upgrade", "-i", "g:a", "--dry-run"]).unwrap();
+        assert!(matches!(cli.command, Command::Upgrade { ref names, incompatible: true, dry_run: true, .. } if names == &["g:a"]));
+        let cli = Cli::try_parse_from(["kargo", "rm", "g:a", "-t", "wasm"]).unwrap();
+        assert!(matches!(cli.command, Command::Remove { target: Some(TargetArg::Wasm), .. }));
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
         assert!(matches!(cli.command, Command::Doc { ref targets, open: true } if matches!(targets[..], [TargetArg::Jvm])));
         let cli = Cli::try_parse_from(["kargo", "fmt", "--check"]).unwrap();

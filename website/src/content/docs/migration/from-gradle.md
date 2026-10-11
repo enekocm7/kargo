@@ -177,6 +177,8 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `./gradlew run --args="a b"` | `kargo run -- a b` |
 | `./gradlew test --tests "*Foo*"` | `kargo test Foo` |
 | `./gradlew dependencies` | `kargo tree` |
+| `./gradlew dependencyUpdates` (Versions plugin) | `kargo outdated`, then `kargo upgrade` |
+| `./gradlew dependencies --update-locks g:a` | `kargo update g:a` |
 | `./gradlew dokkaGenerate` (Dokka plugin) | `kargo doc` |
 | `./gradlew ktlintFormat` / `ktlintCheck` (ktlint plugins, Spotless) | `kargo fmt` / `kargo fmt --check` |
 | `./gradlew detekt` (detekt plugin) | `kargo lint`; keep your config with `[lint] config = ["config/detekt/detekt.yml"]` |

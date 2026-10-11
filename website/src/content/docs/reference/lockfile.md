@@ -54,6 +54,9 @@ When a re-downloaded file doesn't match `kargo.lock`, the error says which side 
 | Command | Effect |
 |---|---|
 | `kargo update` | Re-resolve everything and rewrite the lockfile (picks up new versions within ranges) |
+| `kargo update <group:artifact>...` | Re-resolve only these modules; every other module keeps its locked version |
+| `kargo update <group:artifact> --precise <version>` | Lock one module at exactly this version. It stays locked until `kargo.toml` changes or you update that module again |
+| `kargo update --dry-run` | Print what would change (`Updating`, `Adding`, `Removing`) without writing the lockfile |
 | `--locked` | Fail if the lockfile would change. Use it in CI. |
 | `--refresh` | Ignore the lockfile and cached metadata for this run, and re-verify cached artifacts against the repository (re-downloading corrupt ones) |
 

@@ -1,7 +1,7 @@
 //! `kargo.lock`: pins every resolved module version and artifact checksum so
 //! builds are reproducible and tampered downloads are detected.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -187,6 +187,42 @@ impl Lockfile {
     pub fn retain(&mut self, keep: &[String]) {
         self.resolutions.retain(|k, _| keep.contains(k));
     }
+
+    /// Every locked version of each module, across all resolutions.
+    pub fn module_versions(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for pkg in self.resolutions.values().flat_map(|r| &r.packages) {
+            out.entry(pkg.module.clone()).or_default().insert(pkg.version.clone());
+        }
+        out
+    }
+
+    /// Whether any resolution locks `module` (`group:artifact`).
+    pub fn contains_module(&self, module: &str) -> bool {
+        self.resolutions.values().flat_map(|r| &r.packages).any(|p| p.module == module)
+    }
+
+    /// The modules whose locked versions differ between `self` and `newer`.
+    pub fn diff(&self, newer: &Lockfile) -> Vec<LockChange> {
+        let (old, new) = (self.module_versions(), newer.module_versions());
+        let modules: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+        modules
+            .into_iter()
+            .filter_map(|module| {
+                let before: Vec<String> = old.get(module).map(|v| v.iter().cloned().collect()).unwrap_or_default();
+                let after: Vec<String> = new.get(module).map(|v| v.iter().cloned().collect()).unwrap_or_default();
+                (before != after).then(|| LockChange { module: module.clone(), before, after })
+            })
+            .collect()
+    }
+}
+
+/// One module whose locked versions changed (empty `before`: added; empty `after`: removed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockChange {
+    pub module: String,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
 }
 
 /// Parses `group:artifact[:requested-version]`; versions may contain `:` only in ranges, which never do.
@@ -302,6 +338,29 @@ mod tests {
         assert_eq!(parse_locked_dependency("a:b").unwrap(), ("a:b".parse().unwrap(), None));
         assert_eq!(parse_locked_dependency("a:b:[1.0,2.0)").unwrap().1.as_deref(), Some("[1.0,2.0)"));
         assert!(parse_locked_dependency("nonsense").is_err());
+    }
+
+    #[test]
+    fn diff_lists_changed_modules() {
+        let pkg = |m: &str, v: &str| LockedPackage { module: m.into(), version: v.into(), ..Default::default() };
+        let lock = |pkgs: Vec<LockedPackage>| {
+            let mut l = Lockfile::default();
+            l.resolutions.insert("jvm/runtime".into(), LockedResolution { packages: pkgs, ..Default::default() });
+            l
+        };
+        let old = lock(vec![pkg("g:a", "1.0"), pkg("g:b", "1.0"), pkg("g:gone", "1.0")]);
+        let new = lock(vec![pkg("g:a", "1.1"), pkg("g:b", "1.0"), pkg("g:new", "2.0")]);
+        assert!(old.contains_module("g:gone") && !new.contains_module("g:gone"));
+        let changes = old.diff(&new);
+        assert_eq!(
+            changes,
+            [
+                LockChange { module: "g:a".into(), before: vec!["1.0".into()], after: vec!["1.1".into()] },
+                LockChange { module: "g:gone".into(), before: vec!["1.0".into()], after: vec![] },
+                LockChange { module: "g:new".into(), before: vec![], after: vec!["2.0".into()] },
+            ]
+        );
+        assert!(new.diff(&new).is_empty());
     }
 
     #[test]

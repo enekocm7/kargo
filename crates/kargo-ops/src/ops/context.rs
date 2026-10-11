@@ -11,7 +11,7 @@ use crate::lockfile::Lockfile;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::ResolvedPlugin;
 use kargo_manifest::{Dependency, Scope, TargetKind};
-use kargo_maven::{DependencyRequest, Exclusion, MavenClient, Platform, Resolution, Resolver};
+use kargo_maven::{DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
 use kargo_util::hash::Fingerprint;
@@ -27,6 +27,10 @@ pub struct BuildContext<'a> {
     pub client: MavenClient,
     /// Fail instead of updating `kargo.lock` (`--locked`).
     pub locked: bool,
+    /// Never write `kargo.lock` (`kargo update --dry-run`).
+    pub dry_run: bool,
+    /// Set by a selective `kargo update`: which locked versions to keep.
+    pub update: Option<UpdatePlan>,
     lock: Mutex<Lockfile>,
     lock_dirty: AtomicBool,
     jdk: Lazy<Jdk>,
@@ -56,6 +60,37 @@ impl<T> Lazy<T> {
         }
         let value = init()?;
         Ok(self.cell.get_or_init(|| value))
+    }
+}
+
+/// A selective `kargo update`: every module keeps its locked version except `modules`, which are
+/// re-resolved, or set to `precise` when given.
+#[derive(Debug, Clone)]
+pub struct UpdatePlan {
+    /// The lockfile before the update.
+    pub previous: Lockfile,
+    pub modules: Vec<ModuleId>,
+    pub precise: Option<String>,
+}
+
+impl UpdatePlan {
+    /// The versions to pin in the resolution `key`. Locked versions are kept only while the
+    /// resolution's inputs are unchanged; otherwise the manifest changed and it resolves afresh.
+    fn pins(&self, key: &str, inputs: &str) -> Vec<(ModuleId, String)> {
+        let mut pins: Vec<(ModuleId, String)> = Vec::new();
+        if let Some(locked) = self.previous.resolutions.get(key).filter(|r| r.inputs == inputs) {
+            for pkg in &locked.packages {
+                if let Ok(module) = pkg.module.parse::<ModuleId>() {
+                    if !self.modules.contains(&module) {
+                        pins.push((module, pkg.version.clone()));
+                    }
+                }
+            }
+        }
+        if let Some(precise) = &self.precise {
+            pins.extend(self.modules.iter().map(|m| (m.clone(), precise.clone())));
+        }
+        pins
     }
 }
 
@@ -120,6 +155,8 @@ impl<'a> BuildContext<'a> {
             profile,
             client: MavenClient::new(config, ws.manifest().repositories.clone()),
             locked: false,
+            dry_run: false,
+            update: None,
             lock: Mutex::new(lock),
             lock_dirty: AtomicBool::new(false),
             jdk: Lazy::new(),
@@ -204,6 +241,11 @@ impl<'a> BuildContext<'a> {
         }
         self.shell().verbose("Resolving", key);
         let mut resolver = Resolver::new(&self.client, platform);
+        if let Some(plan) = &self.update {
+            for (module, version) in plan.pins(key, &inputs) {
+                resolver.pin(module, &version);
+            }
+        }
         for bom in boms {
             let version = bom.version.as_deref().context("BOM without version")?;
             resolver.import_bom(&bom.module, version)?;
@@ -233,6 +275,9 @@ impl<'a> BuildContext<'a> {
         kargo_toolchain::kotlin::fetch_jar(&self.client, group, artifact, version)
     }
 
+    /// A copy of the lockfile as currently resolved.
+    pub fn lockfile(&self) -> Lockfile {
+        self.lock.lock().expect("lock poisoned").clone()
     /// Fetches the self-contained (`-all` classifier) jar of a command-line tool such as ktlint or detekt.
     pub fn tool_fat_jar(&self, group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
         let jar = kargo_maven::Artifact::new(kargo_maven::ModuleId::new(group, artifact), version).with_classifier(Some("all".to_owned()));
@@ -241,7 +286,7 @@ impl<'a> BuildContext<'a> {
 
     /// Persists `kargo.lock` if any resolution changed it.
     pub fn save_lockfile(&self) -> Result<()> {
-        if self.lock_dirty.load(Ordering::SeqCst) {
+        if self.lock_dirty.load(Ordering::SeqCst) && !self.dry_run {
             let lock = self.lock.lock().expect("lock poisoned");
             if lock.save(&self.ws.lockfile_path())? {
                 self.shell().verbose("Updated", "kargo.lock");
