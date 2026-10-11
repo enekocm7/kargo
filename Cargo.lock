@@ -529,6 +529,7 @@ dependencies = [
  "kargo-toolchain",
  "kargo-util",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

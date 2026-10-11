@@ -112,7 +112,8 @@ target/
 │   │   ├── lib/                  runtime dependency jars
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/
-│   └── native/
+│   ├── native/
+│   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
 └── android/                      the generated Gradle project
 ```

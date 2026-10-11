@@ -361,3 +361,34 @@ fn jdk_request_display_round_trips() {
     assert_eq!(release_major("jdk-25.0.1+8"), Some(25));
     assert_eq!(release_major("nonsense"), None);
 }
+
+#[test]
+fn doc_section() {
+    assert_eq!(parse(MINIMAL).doc, DocSettings::default());
+    let m = parse(&format!(
+        "{MINIMAL}
+[doc]
+dokka = \"2.1.0\"
+includes = [\"docs/module.md\"]
+source-link = \"https://github.com/me/lib/blob/main/\"
+external-links = [\"https://kotlinlang.org/api/kotlinx.coroutines/\"]
+"
+    ));
+    assert_eq!(m.doc.dokka_version.as_deref(), Some("2.1.0"));
+    assert_eq!(m.doc.includes, [PathBuf::from("docs/module.md")]);
+    assert_eq!(m.doc.source_link.as_deref(), Some("https://github.com/me/lib/blob/main"));
+    assert_eq!(m.doc.external_links, ["https://kotlinlang.org/api/kotlinx.coroutines/"]);
+    let with = |body: &str| {
+        format!(
+            "{MINIMAL}
+[doc]
+{body}
+"
+        )
+    };
+    assert!(parse_err(&with("dokka = \"[2.0,3.0)\"")).contains("exact Dokka version"));
+    assert!(parse_err(&with("dokka = \"\"")).contains("exact Dokka version"));
+    assert!(parse_err(&with("source-link = \"git@github.com:me/lib\"")).contains("source-link"));
+    assert!(parse_err(&with("external-links = [\"file:///docs\"]")).contains("external-links"));
+    assert!(parse_err(&with("format = \"html\"")).contains("format"));
+}

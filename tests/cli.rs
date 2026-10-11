@@ -309,6 +309,33 @@ fn android_requires_manifest_file() {
 }
 
 #[test]
+fn doc_reports_what_it_cannot_document() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("nodocs", "[target.jvm]\n"));
+    p.kargo().arg("doc").assert().failure().code(101).stderr(predicate::str::contains("no Kotlin or Java sources to document"));
+    p.kargo().args(["doc", "--target", "native"]).assert().failure().stderr(predicate::str::contains("not enabled"));
+}
+
+#[test]
+fn doc_android_uses_the_generated_gradle_project() {
+    // Android's classpath comes from Gradle, so the usual Android checks apply first.
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.kargo().arg("doc").assert().failure().code(101).stderr(predicate::str::contains("AndroidManifest.xml"));
+}
+
+#[test]
+fn doc_section_is_validated() {
+    let p = Project::new();
+    p.file("src/Lib.kt", "fun f() = 1\n");
+    p.file("kargo.toml", &manifest("docs", "[doc]\nsource-link = \"github.com/me/docs\"\n"));
+    p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("`source-link` must be an http(s):// URL"));
+    p.file("kargo.toml", &manifest("docs", "[doc]\nformat = \"html\"\n"));
+    p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("unknown field `format`"));
+}
+
+#[test]
 fn disabled_target_is_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("jvmonly", ""));

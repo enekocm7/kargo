@@ -49,6 +49,27 @@ jdk = "21"     # "system" (default), a major version, or an exact release like "
 
 See [Managing JDKs](../../guides/toolchains/).
 
+## `[doc]`
+
+Options for `kargo doc`. Every key is optional.
+
+```toml
+[doc]
+includes = ["docs/module.md"]
+source-link = "https://github.com/me/mylib/blob/main"
+external-links = ["https://kotlinlang.org/api/kotlinx.coroutines/"]
+dokka = "2.2.0"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `includes` | `[]` | Markdown files with module and package documentation, relative to the project root |
+| `source-link` | none | `http(s)://` URL of the project root in a code browser; declarations link to their source lines |
+| `external-links` | `[]` | `http(s)://` roots of Dokka or Javadoc sites (with a `package-list`) to link dependency types to |
+| `dokka` | `2.2.0` | Exact Dokka version |
+
+See [API documentation](../../guides/documentation/).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.

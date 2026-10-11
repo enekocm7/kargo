@@ -30,6 +30,7 @@ $ kargo test
 | `kargo build [--release] [-t <target>]` | Compile all (or selected) targets |
 | `kargo run [-t <target>] [-- args]` | Build and run |
 | `kargo test [filter] [--no-run] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native) |
+| `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>...` | Remove dependencies |
@@ -108,6 +109,11 @@ company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", 
 
 [profile.release]
 compiler-args = []          # also: debug, optimize
+
+[doc]                       # kargo doc (Dokka); every key is optional
+includes = ["docs/module.md"]
+source-link = "https://github.com/me/my-app/blob/main"
+external-links = ["https://kotlinlang.org/api/kotlinx.coroutines/"]
 ```
 
 ### Toolchains
@@ -191,6 +197,7 @@ Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cy
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
+| `BROWSER` | Browser for `kargo doc --open` |
 
 ## Development
 
