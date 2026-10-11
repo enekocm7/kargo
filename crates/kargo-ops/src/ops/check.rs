@@ -46,14 +46,13 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     // Pre-build hooks may generate sources, so they run before checking.
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx))?;
 
-    for target in targets {
-        match target {
-            TargetKind::Jvm => check_jvm(ctx, opts.tests)?,
-            TargetKind::Wasm => check_wasm(ctx, opts.tests)?,
-            TargetKind::Native => check_native(ctx, opts.tests)?,
-            TargetKind::Android => crate::gradle::check(ctx, opts.tests)?,
-        }
-    }
+    let checked = super::parallel_map(&targets, |&target| match target {
+        TargetKind::Jvm => check_jvm(ctx, opts.tests),
+        TargetKind::Wasm => check_wasm(ctx, opts.tests),
+        TargetKind::Native => check_native(ctx, opts.tests),
+        TargetKind::Android => crate::gradle::check(ctx, opts.tests),
+    });
+    checked.into_iter().collect::<Result<()>>()?;
     finished(ctx, start);
     Ok(())
 }
@@ -131,7 +130,8 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     let out = check_dir(ctx, TargetKind::Native);
     let fp_dir = out.join(".fingerprint");
 
-    for konan_target in native_platforms(ctx)? {
+    let platforms = native_platforms(ctx)?;
+    let checked = super::parallel_map(&platforms, |konan_target| -> Result<()> {
         let what = format!(", {konan_target}");
         // A klib holds the analyzed IR; producing one skips code generation and linking.
         let unit = |name, sources, libraries| NativeCompilation {
@@ -144,12 +144,12 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
             kotlin_args: &kotlin_args,
             entry_point: None,
             linker_options: &[],
-            output_dir: out.join(&konan_target),
+            output_dir: out.join(konan_target),
             debug: false,
             optimize: false,
             test_runner: false,
         };
-        let main = unit(&manifest.package.name, main_sources.clone(), native_libraries(ctx, &setup, &konan_target, false)?);
+        let main = unit(&manifest.package.name, main_sources.clone(), native_libraries(ctx, &setup, konan_target, false)?);
         main.compile(ctx.shell(), toolchain, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Native, &what))?;
 
         if tests && !test_sources.kotlin_files().is_empty() {
@@ -157,10 +157,11 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
             let mut all = main_sources.clone();
             all.extend(&test_sources);
             let name = format!("{}-test", manifest.package.name);
-            let test = unit(&name, all, native_libraries(ctx, &setup, &konan_target, true)?);
+            let test = unit(&name, all, native_libraries(ctx, &setup, konan_target, true)?);
             let what = format!("{what}, tests");
             test.compile(ctx.shell(), toolchain, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Native, &what))?;
         }
-    }
-    Ok(())
+        Ok(())
+    });
+    checked.into_iter().collect()
 }

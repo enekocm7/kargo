@@ -29,9 +29,34 @@ pub struct BuildContext<'a> {
     pub locked: bool,
     lock: Mutex<Lockfile>,
     lock_dirty: AtomicBool,
-    jdk: OnceLock<Jdk>,
-    compiler: OnceLock<KotlinCompiler>,
-    native: OnceLock<NativeToolchain>,
+    jdk: Lazy<Jdk>,
+    compiler: Lazy<KotlinCompiler>,
+    native: Lazy<NativeToolchain>,
+}
+
+/// A value initialized at most once even when targets build in parallel, so two
+/// threads never download or install the same toolchain at the same time.
+struct Lazy<T> {
+    cell: OnceLock<T>,
+    init: Mutex<()>,
+}
+
+impl<T> Lazy<T> {
+    fn new() -> Self {
+        Self { cell: OnceLock::new(), init: Mutex::new(()) }
+    }
+
+    fn get_or_try_init(&self, init: impl FnOnce() -> Result<T>) -> Result<&T> {
+        if let Some(v) = self.cell.get() {
+            return Ok(v);
+        }
+        let _guard = self.init.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = self.cell.get() {
+            return Ok(v);
+        }
+        let value = init()?;
+        Ok(self.cell.get_or_init(|| value))
+    }
 }
 
 /// The dependency configuration of one target.
@@ -87,6 +112,7 @@ fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
 
 impl<'a> BuildContext<'a> {
     pub fn new(config: &'a Config, ws: &'a Workspace, profile: ProfileKind) -> Result<Self> {
+        kargo_compiler::daemon::configure(config.home());
         let lock = Lockfile::load(&ws.lockfile_path())?;
         Ok(Self {
             config,
@@ -96,9 +122,9 @@ impl<'a> BuildContext<'a> {
             locked: false,
             lock: Mutex::new(lock),
             lock_dirty: AtomicBool::new(false),
-            jdk: OnceLock::new(),
-            compiler: OnceLock::new(),
-            native: OnceLock::new(),
+            jdk: Lazy::new(),
+            compiler: Lazy::new(),
+            native: Lazy::new(),
         })
     }
 
@@ -107,14 +133,13 @@ impl<'a> BuildContext<'a> {
     }
 
     pub fn jdk(&self) -> Result<&Jdk> {
-        if let Some(jdk) = self.jdk.get() {
-            return Ok(jdk);
-        }
-        let request = &self.ws.manifest().toolchain.jdk;
-        let jdk = kargo_toolchain::jdks::resolve(self.config, request)?;
-        jdk.require_version(MIN_JDK)?;
-        self.shell().verbose("Using", format!("JDK {} at {}", jdk.version, jdk.home.display()));
-        Ok(self.jdk.get_or_init(|| jdk))
+        self.jdk.get_or_try_init(|| {
+            let request = &self.ws.manifest().toolchain.jdk;
+            let jdk = kargo_toolchain::jdks::resolve(self.config, request)?;
+            jdk.require_version(MIN_JDK)?;
+            self.shell().verbose("Using", format!("JDK {} at {}", jdk.version, jdk.home.display()));
+            Ok(jdk)
+        })
     }
 
     /// The JDK that runs the Kotlin compiler, checked against the Kotlin version
@@ -127,19 +152,11 @@ impl<'a> BuildContext<'a> {
     }
 
     pub fn kotlin_compiler(&self) -> Result<&KotlinCompiler> {
-        if let Some(c) = self.compiler.get() {
-            return Ok(c);
-        }
-        let compiler = KotlinCompiler::resolve(&self.client, &self.ws.manifest().kotlin.version)?;
-        Ok(self.compiler.get_or_init(|| compiler))
+        self.compiler.get_or_try_init(|| KotlinCompiler::resolve(&self.client, &self.ws.manifest().kotlin.version))
     }
 
     pub fn native_toolchain(&self) -> Result<&NativeToolchain> {
-        if let Some(t) = self.native.get() {
-            return Ok(t);
-        }
-        let toolchain = NativeToolchain::ensure(self.config, &self.client, &self.ws.manifest().kotlin.version)?;
-        Ok(self.native.get_or_init(|| toolchain))
+        self.native.get_or_try_init(|| NativeToolchain::ensure(self.config, &self.client, &self.ws.manifest().kotlin.version))
     }
 
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {

@@ -23,6 +23,29 @@ use kargo_manifest::{Hook, Scope, TargetKind};
 use kargo_maven::{Platform, Resolution};
 use kargo_util::fs::remove_dir_all_if_exists;
 
+/// Runs `f` on every item on its own thread and returns the results in item order.
+/// A single item runs inline. Used to build independent targets (and Native platforms)
+/// at the same time: their compilers are separate processes or daemon requests.
+pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    if items.len() <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let f = &f;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items.iter().map(|item| s.spawn(move || f(item))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))).collect()
+    })
+}
+
+/// Runs `a` and `b` at the same time, e.g. fetching the compiler while dependencies resolve.
+pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) {
+    std::thread::scope(|s| {
+        let handle = s.spawn(a);
+        let b = b();
+        (handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)), b)
+    })
+}
+
 /// `kargo clean`: removes the build directory (or one profile of it).
 pub fn clean(ws: &Workspace, profile: Option<crate::workspace::ProfileKind>) -> Result<PathBuf> {
     let dir = match profile {
@@ -77,20 +100,26 @@ pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Con
 /// `kargo fetch`: downloads every dependency (and the compiler) so later builds work offline.
 pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
     let targets = select_targets(ctx, targets)?;
-    for target in targets {
+    let fetched = parallel_map(&targets, |&target| -> Result<()> {
         match target {
             TargetKind::Jvm => {
                 let setup = ctx.setup(target)?;
-                jvm_classpaths(ctx, &setup)?;
-                resolution_for(ctx, target, Configuration::Test)?;
-                ctx.plugin_jars(&setup.contributions.plugins)?;
-                ctx.kotlin_compiler()?;
+                let (toolchain, (main, test)) = join(
+                    || ctx.kotlin_compiler().and_then(|_| ctx.plugin_jars(&setup.contributions.plugins)),
+                    || join(|| jvm_classpaths(ctx, &setup), || resolution_for(ctx, target, Configuration::Test)),
+                );
+                toolchain?;
+                main?;
+                test?;
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
-                wasm_libraries(ctx, &setup, false)?;
-                wasm_libraries(ctx, &setup, true)?;
-                ctx.kotlin_compiler()?;
+                let (compiler, deps) = join(
+                    || ctx.kotlin_compiler().map(|_| ()),
+                    || wasm_libraries(ctx, &setup, false).and(wasm_libraries(ctx, &setup, true)),
+                );
+                compiler?;
+                deps?;
             }
             TargetKind::Native => {
                 let setup = ctx.setup(target)?;
@@ -104,8 +133,9 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
                 ctx.shell().note("Android dependencies are fetched by Gradle during `kargo build --target android`");
             }
         }
-    }
-    Ok(())
+        Ok(())
+    });
+    fetched.into_iter().collect()
 }
 
 /// `kargo update`: re-resolves every dependency, ignoring `kargo.lock`.

@@ -447,3 +447,16 @@ fn toolchain_install_requires_network_or_cache() {
     p.file("kargo.toml", &manifest("tc", "[toolchain]\njdk = \"21\"\n"));
     p.kargo().args(["toolchain", "which", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));
 }
+
+#[test]
+fn daemon_status_and_stop() {
+    let p = Project::new();
+    p.kargo().args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("No compiler daemons are running."));
+    // A leftover state file of a daemon that is gone (e.g. restored from a CI cache) is not a running daemon.
+    let dir = p.home.path().join("daemon").join("0123456789abcdef");
+    std::fs::create_dir_all(&dir).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::fs::write(dir.join("info"), format!("{port} token 1\n")).unwrap();
+    p.kargo().args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("No compiler daemons are running."));
+    p.kargo().args(["daemon", "stop"]).assert().success().stderr(predicate::str::contains("Stopped 0 compiler daemons"));
+}

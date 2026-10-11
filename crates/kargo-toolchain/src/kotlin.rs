@@ -28,11 +28,28 @@ pub struct KotlinCompiler {
 }
 
 impl KotlinCompiler {
+    /// Resolves the compiler's classpath. The result for a version never changes, so it is
+    /// remembered in the download cache and later runs skip dependency resolution entirely.
     pub fn resolve(client: &MavenClient, version: &str) -> Result<Self> {
+        let cache = client.cache_dir();
+        let memo = cache.join(".classpaths").join(format!("kotlin-compiler-embeddable-{version}.txt"));
+        if let Ok(text) = std::fs::read_to_string(&memo) {
+            let classpath: Vec<PathBuf> = text.lines().filter(|l| !l.is_empty()).map(|l| cache.join(l)).collect();
+            if !classpath.is_empty() && classpath.iter().all(|p| p.is_file()) {
+                return Ok(Self { version: version.to_owned(), classpath });
+            }
+        }
         let resolver = Resolver::new(client, Platform::Jvm);
         let root = DependencyRequest::new(ModuleId::new(KOTLIN_GROUP, "kotlin-compiler-embeddable"), Some(version.to_owned()));
         let resolution = resolver.resolve(&[root]).with_context(|| format!("failed to obtain the Kotlin {version} compiler"))?;
-        Ok(Self { version: version.to_owned(), classpath: resolution.files() })
+        let classpath = resolution.files();
+        let rel: Option<Vec<String>> =
+            classpath.iter().map(|p| p.strip_prefix(cache).ok().map(|r| r.to_string_lossy().into_owned())).collect();
+        if let Some(rel) = rel {
+            // Only a speed-up: a failed write just means resolving again next time.
+            let _ = kargo_util::fs::write_string_atomic(&memo, &(rel.join("\n") + "\n"));
+        }
+        Ok(Self { version: version.to_owned(), classpath })
     }
 }
 
