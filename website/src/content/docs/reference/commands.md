@@ -100,7 +100,7 @@ kargo test [filter] [options]
 
 | Option | Meaning |
 |---|---|
-| `filter` | Only run tests whose class name (JVM) or test name (Native) contains this string. Ignored on Wasm. |
+| `filter` | Only run tests whose class name (JVM), test name (Native) or fully qualified test name (Android) contains this string. Ignored on Wasm. |
 | `--no-run` | Compile tests but don't run them |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |

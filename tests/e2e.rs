@@ -198,8 +198,24 @@ fn android_app_with_compose() {
     let t = E2e::new();
     t.create(&["droid", "--target", "android", "--with", "compose"]);
     t.kargo("droid").arg("build").assert().success();
-    assert!(t.dir.path().join("droid/target/android/build/outputs/apk/debug/droid-debug.apk").is_file());
-    t.kargo("droid").arg("test").assert().success();
+    let apk = t.dir.path().join("droid/target/android/build/outputs/apk/debug/droid-debug.apk");
+    assert!(apk.is_file());
+    // The app's own code must be dexed into the APK, not only the libraries.
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&apk).unwrap()).unwrap();
+    let names: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).filter(|n| n.ends_with(".dex")).collect();
+    let dexed = names.iter().any(|name| {
+        let mut dex = Vec::new();
+        std::io::Read::read_to_end(&mut zip.by_name(name).unwrap(), &mut dex).unwrap();
+        dex.windows(b"MainActivity".len()).any(|w| w == b"MainActivity")
+    });
+    assert!(dexed, "MainActivity is missing from {}", apk.display());
+
+    t.kargo("droid").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
+    // A failing test must fail `kargo test`.
+    let test = t.dir.path().join("droid/tests/GreetingTest.kt");
+    let source = std::fs::read_to_string(&test).unwrap();
+    std::fs::write(&test, source.replace("\"Hello, Kargo!\"", "\"WRONG\"")).unwrap();
+    t.kargo("droid").arg("test").assert().code(101).stdout(predicate::str::contains("1 failed"));
 }
 
 #[test]

@@ -20,6 +20,7 @@ use crate::builtins;
 use crate::ops::build::compiling;
 use crate::ops::context::BuildContext;
 use crate::workspace::{ProfileKind, Workspace};
+use kargo_compiler::testreport::{self, TestSummary};
 use kargo_manifest::{AndroidTarget, Dependency, Manifest, Scope, TargetKind};
 use kargo_util::process;
 
@@ -148,6 +149,9 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
         kts_string(if is_app { "com.android.application" } else { "com.android.library" }),
         kts_string(agp)
     )];
+    // AGP's built-in Kotlin compiles with the Kotlin Gradle plugin on the
+    // build classpath; pin it to `[kotlin] version` instead of AGP's default.
+    plugins.push(format!("    id(\"org.jetbrains.kotlin.android\") version {} apply false", kts_string(kotlin)));
     if fw.compose.is_some() {
         plugins.push(format!("    id(\"org.jetbrains.kotlin.plugin.compose\") version {}", kts_string(kotlin)));
     }
@@ -179,9 +183,17 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     let src_dirs = [root.join("src"), root.join(TargetKind::Android.source_dir_name())];
     let test_dirs = [root.join("tests"), root.join("tests-android")];
     let dirs = |ds: &[PathBuf]| ds.iter().map(|d| kts_path(d)).collect::<Vec<_>>().join(", ");
+    // AGP's built-in Kotlin does not compile Kotlin files found through the
+    // Java source directories, so the Kotlin directories are registered too.
+    let kotlin_dirs = |s: &mut String, ds: &[PathBuf]| {
+        for d in ds {
+            let _ = writeln!(s, "            kotlin.directories.add({})", kts_path(d));
+        }
+    };
     let _ = writeln!(s, "\n    sourceSets {{");
     let _ = writeln!(s, "        getByName(\"main\") {{");
     let _ = writeln!(s, "            java.setSrcDirs(listOf({}))", dirs(&src_dirs));
+    kotlin_dirs(&mut s, &src_dirs);
     let _ = writeln!(s, "            manifest.srcFile({})", kts_path(&root.join("android/AndroidManifest.xml")));
     let _ = writeln!(s, "            res.setSrcDirs(listOf({}))", kts_path(&root.join("android/res")));
     let _ = writeln!(s, "            assets.setSrcDirs(listOf({}))", kts_path(&root.join("android/assets")));
@@ -189,9 +201,12 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     let _ = writeln!(s, "        }}");
     let _ = writeln!(s, "        getByName(\"test\") {{");
     let _ = writeln!(s, "            java.setSrcDirs(listOf({}))", dirs(&test_dirs));
+    kotlin_dirs(&mut s, &test_dirs);
     let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", kts_path(&ws.test_resources()));
     let _ = writeln!(s, "        }}");
     let _ = writeln!(s, "    }}");
+    // Like the other targets, a test filter that matches nothing is not an error.
+    let _ = writeln!(s, "\n    testOptions {{\n        unitTests.all {{ it.filter.isFailOnNoMatchingTests = false }}\n    }}");
     let _ = writeln!(s, "}}\n");
 
     // Compiler options.
@@ -348,10 +363,51 @@ pub fn build(ctx: &BuildContext) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// `kargo test --target android`: runs local unit tests.
-pub fn test(ctx: &BuildContext) -> Result<bool> {
+/// `kargo test --target android`: runs local unit tests and reports the
+/// results Gradle writes as JUnit XML.
+pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool) -> Result<bool> {
     compiling(ctx, TargetKind::Android, ", gradle tests");
-    gradle(ctx, &[format!("test{}UnitTest", variant(ctx.profile))])
+    let task = format!("test{}UnitTest", variant(ctx.profile));
+    if no_run {
+        return gradle(ctx, &[format!("compile{}UnitTestSources", variant(ctx.profile))]);
+    }
+    let results = ctx.ws.target_dir().join("android/build/test-results").join(&task);
+    if results.exists() {
+        std::fs::remove_dir_all(&results).with_context(|| format!("failed to clear {}", results.display()))?;
+    }
+    let mut args = vec![task.clone()];
+    if let Some(filter) = filter {
+        args.extend(["--tests".to_owned(), format!("*{filter}*")]);
+    }
+    ctx.shell().status("Running", "Android unit tests (Gradle)");
+    let gradle_ok = gradle(ctx, &args)?;
+
+    let mut summary = TestSummary::default();
+    let mut reports: Vec<PathBuf> = match std::fs::read_dir(&results) {
+        Ok(entries) => entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "xml")).collect(),
+        Err(_) => Vec::new(),
+    };
+    reports.sort();
+    for report in &reports {
+        let xml = std::fs::read_to_string(report).with_context(|| format!("failed to read {}", report.display()))?;
+        let part =
+            testreport::report_junit_xml(&xml, anstream::stdout()).with_context(|| format!("failed to parse {}", report.display()))?;
+        summary.merge(part);
+    }
+    if summary == TestSummary::default() && (filter.is_none() || !gradle_ok) {
+        if gradle_ok {
+            // Guards against Gradle silently skipping the sources (`NO-SOURCE`).
+            ctx.shell().error(format!("Gradle `{task}` ran no tests although the project has test sources"));
+        } else {
+            ctx.shell().error(format!("Gradle `{task}` failed"));
+        }
+        return Ok(false);
+    }
+    testreport::print_summary(&summary, anstream::stdout())?;
+    if !gradle_ok && summary.success() {
+        ctx.shell().error(format!("Gradle `{task}` failed"));
+    }
+    Ok(gradle_ok && summary.success())
 }
 
 /// `kargo run --target android`: installs on a connected device and launches.
@@ -420,6 +476,24 @@ mod tests {
         assert!(text.contains("testImplementation(\"junit:junit:4.13.2\")"));
         assert!(text.contains("optIn.addAll(\"kotlin.RequiresOptIn\")"));
         assert!(!text.contains("kotlin-stdlib:"), "AGP adds the stdlib itself");
+        let kotlin = &ws.manifest().kotlin.version;
+        assert!(text.contains(&format!("id(\"org.jetbrains.kotlin.android\") version \"{kotlin}\" apply false")), "{text}");
+    }
+
+    #[test]
+    fn registers_kotlin_source_dirs() {
+        // AGP's built-in Kotlin ignores Kotlin files in the Java source dirs.
+        let (_d, ws) = workspace("");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        let main = text.split("getByName(\"main\")").nth(1).unwrap().split("getByName(\"test\")").next().unwrap();
+        let test = text.split("getByName(\"test\")").nth(1).unwrap();
+        for (block, names) in [(main, ["src", "src-android"]), (test, ["tests", "tests-android"])] {
+            for name in names {
+                let line = format!("kotlin.directories.add({})", kts_path(&ws.root().join(name)));
+                assert!(block.contains(&line), "missing {line} in\n{text}");
+            }
+        }
     }
 
     #[test]
