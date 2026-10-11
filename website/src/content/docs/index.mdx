@@ -1,0 +1,51 @@
+---
+title: Kargo
+description: Cargo for Kotlin. One kargo.toml, one CLI, for the JVM, WebAssembly, Kotlin/Native and Android.
+template: splash
+hero:
+  tagline: Cargo for Kotlin. Create, build, run and test Kotlin projects for the JVM, WebAssembly, Kotlin/Native and Android from a single <code>kargo.toml</code>, with no Gradle files to write.
+  actions:
+    - text: Get started
+      link: getting-started/installation/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/enekocm7/kargo
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+```console
+$ kargo new hello && cd hello
+     Created application `hello` package
+$ kargo run
+   Compiling hello v0.1.0 (jvm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.47s
+     Running `java com.example.hello.MainKt`
+Hello, Kotlin!
+```
+
+<CardGrid>
+	<Card title="One file" icon="document">
+		Package, Kotlin version, targets, dependencies, frameworks and tasks all go in `kargo.toml`.
+	</Card>
+	<Card title="Every target" icon="puzzle">
+		JVM, WebAssembly (JS and WASI), Kotlin/Native and Android, with `expect`/`actual` across them.
+	</Card>
+	<Card title="Real Maven" icon="seti:config">
+		POMs, BOMs, exclusions, version ranges and Gradle module metadata. Builds are pinned by `kargo.lock` with SHA-256 checksums.
+	</Card>
+	<Card title="Batteries included" icon="rocket">
+		Compose, Ktor, Spring Boot, kotlinx.serialization, coroutines and Lombok, each turned on with one line.
+	</Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+	<LinkCard title="Install Kargo" href="getting-started/installation/" description="Get the CLI and the toolchains it needs." />
+	<LinkCard title="Your first Kotlin app" href="guides/first-app/" description="A step-by-step tutorial for people new to Kotlin." />
+	<LinkCard title="Migrate from Gradle" href="migration/from-gradle/" description="Translate build.gradle.kts into kargo.toml." />
+	<LinkCard title="kargo.toml reference" href="reference/manifest/" description="Every section and key, with defaults." />
+</CardGrid>

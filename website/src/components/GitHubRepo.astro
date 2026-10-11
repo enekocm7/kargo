@@ -1,0 +1,188 @@
+---
+/**
+ * A small GitHub repository card for the header: owner/repo, latest version,
+ * stars and forks. Values are fetched at build time (so the page works without
+ * JavaScript) and refreshed in the browser, cached for an hour to stay well
+ * under GitHub's unauthenticated API rate limit.
+ */
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+const owner = 'enekocm7';
+const repo = 'kargo';
+const url = `https://github.com/${owner}/${repo}`;
+
+async function fetchJson(path: string) {
+	try {
+		const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
+			headers: { Accept: 'application/vnd.github+json' },
+			signal: AbortSignal.timeout(5000),
+		});
+		return res.ok ? await res.json() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Falls back to the workspace version in Cargo.toml when the repository has no tags yet. */
+async function cargoVersion() {
+	try {
+		const toml = await readFile(join(process.cwd(), '..', 'Cargo.toml'), 'utf8');
+		const match = toml.match(/^\s*version\s*=\s*"([^"]+)"/m);
+		return match ? `v${match[1]}` : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+const [info, tags] = await Promise.all([fetchJson(''), fetchJson('/tags?per_page=1')]);
+const version: string | undefined = tags?.[0]?.name ?? (await cargoVersion());
+const stars: number | undefined = info?.stargazers_count;
+const forks: number | undefined = info?.forks_count;
+
+const compact = (n: number | undefined) =>
+	n === undefined ? '–' : new Intl.NumberFormat('en', { notation: 'compact' }).format(n);
+---
+
+<a
+	class="gh-repo"
+	href={url}
+	rel="me noopener"
+	aria-label={`${owner}/${repo} on GitHub`}
+	data-owner={owner}
+	data-repo={repo}
+>
+	<svg class="gh-logo" viewBox="0 0 16 16" aria-hidden="true">
+		<path
+			fill="currentColor"
+			d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
+		></path>
+	</svg>
+	<span class="gh-text">
+		<span class="gh-name">{owner}/{repo}</span>
+		<span class="gh-stats">
+			<span class="gh-stat" title="Latest version">
+				<svg viewBox="0 0 16 16" aria-hidden="true"
+					><path
+						fill="currentColor"
+						d="M1 7.775V2.75C1 1.784 1.784 1 2.75 1h5.025c.464 0 .91.184 1.238.513l6.25 6.25a1.75 1.75 0 010 2.474l-5.026 5.026a1.75 1.75 0 01-2.474 0l-6.25-6.25A1.752 1.752 0 011 7.775zm1.5 0c0 .066.026.13.073.177l6.25 6.25a.25.25 0 00.354 0l5.025-5.025a.25.25 0 000-.354l-6.25-6.25a.25.25 0 00-.177-.073H2.75a.25.25 0 00-.25.25zM6 5a1 1 0 110 2 1 1 0 010-2z"
+					></path></svg
+				>
+				<span data-gh="version">{version ?? '–'}</span>
+			</span>
+			<span class="gh-stat" title="Stars">
+				<svg viewBox="0 0 16 16" aria-hidden="true"
+					><path
+						fill="currentColor"
+						d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.751.751 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25zm0 2.445L6.615 5.5a.75.75 0 01-.564.41l-3.097.45 2.24 2.184a.75.75 0 01.216.664l-.528 3.084 2.769-1.456a.75.75 0 01.698 0l2.77 1.456-.53-3.084a.75.75 0 01.216-.664l2.24-2.183-3.096-.45a.75.75 0 01-.564-.41L8 2.694z"
+					></path></svg
+				>
+				<span data-gh="stars">{compact(stars)}</span>
+			</span>
+			<span class="gh-stat" title="Forks">
+				<svg viewBox="0 0 16 16" aria-hidden="true"
+					><path
+						fill="currentColor"
+						d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75v-.878a2.25 2.25 0 111.5 0v.878a2.25 2.25 0 01-2.25 2.25h-1.5v2.128a2.251 2.251 0 11-1.5 0V8.5h-1.5A2.25 2.25 0 013.5 6.25v-.878a2.25 2.25 0 111.5 0zM5 3.25a.75.75 0 10-1.5 0 .75.75 0 001.5 0zm6.75.75a.75.75 0 100-1.5.75.75 0 000 1.5zm-3 8.75a.75.75 0 10-1.5 0 .75.75 0 001.5 0z"
+					></path></svg
+				>
+				<span data-gh="forks">{compact(forks)}</span>
+			</span>
+		</span>
+	</span>
+</a>
+
+<script>
+	const CACHE_KEY = 'kargo-gh-repo';
+	const TTL = 60 * 60 * 1000;
+
+	type Stats = { version?: string; stars?: number; forks?: number; at: number };
+
+	const compact = (n: number) => new Intl.NumberFormat('en', { notation: 'compact' }).format(n);
+
+	function render(stats: Stats) {
+		for (const el of document.querySelectorAll<HTMLElement>('[data-gh]')) {
+			const key = el.dataset.gh as 'version' | 'stars' | 'forks';
+			const value = stats[key];
+			if (value !== undefined) el.textContent = typeof value === 'number' ? compact(value) : value;
+		}
+	}
+
+	async function load(): Promise<Stats | undefined> {
+		try {
+			const cached: Stats = JSON.parse(localStorage.getItem(CACHE_KEY) ?? 'null');
+			if (cached && Date.now() - cached.at < TTL) return cached;
+		} catch {}
+		const card = document.querySelector<HTMLElement>('.gh-repo');
+		if (!card) return;
+		const api = `https://api.github.com/repos/${card.dataset.owner}/${card.dataset.repo}`;
+		try {
+			const [info, tags] = await Promise.all([
+				fetch(api).then((r) => (r.ok ? r.json() : undefined)),
+				fetch(`${api}/tags?per_page=1`).then((r) => (r.ok ? r.json() : undefined)),
+			]);
+			if (!info) return;
+			const stats: Stats = {
+				version: tags?.[0]?.name,
+				stars: info.stargazers_count,
+				forks: info.forks_count,
+				at: Date.now(),
+			};
+			try {
+				localStorage.setItem(CACHE_KEY, JSON.stringify(stats));
+			} catch {}
+			return stats;
+		} catch {
+			return;
+		}
+	}
+
+	load().then((stats) => stats && render(stats));
+</script>
+
+<style>
+	.gh-repo {
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		padding: 0.25rem 0.5rem;
+		border-radius: 0.4rem;
+		color: var(--sl-color-gray-2);
+		text-decoration: none;
+		line-height: 1.15;
+		transition: background-color 0.15s;
+	}
+	.gh-repo:hover {
+		background: var(--sl-color-gray-6);
+		color: var(--sl-color-white);
+	}
+	.gh-logo {
+		width: 1.6rem;
+		height: 1.6rem;
+		flex: none;
+	}
+	.gh-text {
+		display: flex;
+		flex-direction: column;
+	}
+	.gh-name {
+		font-size: var(--sl-text-sm);
+		font-weight: 600;
+		color: var(--sl-color-white);
+	}
+	.gh-stats {
+		display: flex;
+		gap: 0.6rem;
+		font-size: var(--sl-text-xs);
+	}
+	.gh-stat {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.2rem;
+		white-space: nowrap;
+	}
+	.gh-stat svg {
+		width: 0.75rem;
+		height: 0.75rem;
+	}
+</style>
