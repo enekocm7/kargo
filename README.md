@@ -154,9 +154,11 @@ Each framework adds its libraries, compiler plugin and compiler flags for every 
 fmt = "ktlint -F \"src/**/*.kt\""
 gen = { run = ["mkdir -p build", "./gen.sh"], description = "Generate code", hooks = ["pre-build"] }
 ci = { depends-on = ["fmt", "gen"] }
+envs = { run = "echo $KARGO_PKG_NAME", shell = "sh" }                  # POSIX on every OS
+dirs = { run = "ls", windows-run = "dir" }                               # per-OS commands
 ```
 
-Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cycles are rejected. Tasks run in the platform shell with `KARGO_*` variables set.
+Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
 
 ### Plugins
 
@@ -172,8 +174,10 @@ Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cy
   [plugins.notify]
   command = "./scripts/notify.sh"   # paths are relative to the project; bare names use PATH
   args = ["--quiet"]                # the hook name is appended as the last argument
+  windows-command = "./scripts/notify.bat"   # optional: used instead of `command` on Windows
   hooks = ["post-build"]
   ```
+  `command` is run directly, not through a shell. On Windows a `.sh` script runs through `sh` (from Git for Windows); anything else must be a real executable (`.exe`, `.bat`, `.cmd`). `windows-command` and `windows-args` replace `command` and `args` on Windows; when they are not set, `command` and `args` are used everywhere.
   Hooks receive `KARGO_HOOK`, `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PROFILE`, `KARGO_TARGET_DIR` and `KARGO_KOTLIN_VERSION`. After a JVM build they also get `KARGO_CLASSPATH` and `KARGO_JVM_JAR`, after `kargo package` they get `KARGO_PACKAGE`, and after tests they get `KARGO_TEST_RESULT`.
 * **Subcommands**: an executable named `kargo-<name>` in `~/.kargo/bin` or on `PATH` becomes `kargo <name>`, just like Cargo.
 

@@ -621,7 +621,7 @@ fn list_tasks(ws: &Workspace) {
     println!("Available tasks:");
     let width = tasks.keys().map(String::len).max().unwrap_or(0);
     for task in tasks.values() {
-        let mut desc = task.description.clone().unwrap_or_else(|| task.run.join(" && "));
+        let mut desc = task.description.clone().unwrap_or_else(|| task.platform_run().join(" && "));
         if !task.hooks.is_empty() {
             let hooks: Vec<&str> = task.hooks.iter().map(|h| h.as_str()).collect();
             desc.push_str(&format!(" [hooks: {}]", hooks.join(", ")));
@@ -643,7 +643,7 @@ fn list_plugins(config: &Config, global: &GlobalArgs) {
             println!("Hook plugins:");
             for p in &m.process_plugins {
                 let hooks: Vec<&str> = p.hooks.iter().map(|h| h.as_str()).collect();
-                println!("    {:16} {} [{}]", p.name, p.command, hooks.join(", "));
+                println!("    {:16} {} [{}]", p.name, p.platform_command(), hooks.join(", "));
             }
         }
     }
