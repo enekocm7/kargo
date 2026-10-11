@@ -62,6 +62,10 @@ You changed `kargo.toml` without committing the updated lockfile. Run `kargo bui
 
 Add `"host"` to `[target.native] platforms` to run locally.
 
+### `no JVM tests found` or `no JVM tests match ...`
+
+`kargo test` compiled your JVM tests but the JUnit Platform found nothing to run. Without a filter, check that test functions carry `@Test` (from `kotlin.test` or JUnit) and that the engine of any other framework (for example `io.kotest:kotest-runner-junit5`) is in `[dev-dependencies]`. With a filter, remember that it matches `package.Class.method` names; see [Filtering tests](../../guides/testing/#filtering-tests).
+
 ### A dependency has the wrong version
 
 Run `kargo tree --duplicates` to see who asks for what. The highest requested version wins; add `force = true` to your own declaration to pin one.
