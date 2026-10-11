@@ -16,6 +16,8 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo run -- args` | `kargo run -- args` | |
 | `cargo test [filter]` | `kargo test [filter]` | |
 | `cargo doc [--open]` | `kargo doc [--open]` | Runs Dokka on your KDoc comments |
+| `cargo fmt [--check]` | `kargo fmt [--check]` | Runs ktlint; configured by `.editorconfig` |
+| `cargo clippy` | `kargo lint` | Runs detekt; configured by `detekt.yml` |
 | `cargo add serde` | `kargo add group:artifact` | Maven coordinates instead of crate names |
 | `cargo add --dev` | `kargo add --dev` | |
 | `cargo add -F derive serde` | `kargo add -F serialization` | Kargo's `-F` enables built-in **frameworks** |

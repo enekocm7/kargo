@@ -218,6 +218,18 @@ fn gitignore() -> String {
     "/target\n/.kotlin\n/.gradle\n*.iml\n.idea/\n".to_owned()
 }
 
+/// Whether `src/Main.kt` comes from a framework's own template rather than the plain one.
+fn framework_main(opts: &NewOptions) -> bool {
+    opts.has("spring-boot") || opts.has("ktor") || (opts.has("compose") && opts.targets.contains(&TargetKind::Jvm))
+}
+
+/// The `@Serializable` class of the serialization template, in its own file so
+/// the file name matches the class (as detekt and the Kotlin conventions expect).
+fn serializable_source(opts: &NewOptions) -> String {
+    let pkg = opts.package();
+    format!("package {pkg}\n\nimport kotlinx.serialization.Serializable\n\n@Serializable\ndata class Greeting(\n    val name: String,\n)\n")
+}
+
 fn main_source(opts: &NewOptions) -> String {
     let pkg = opts.package();
     if opts.has("spring-boot") {
@@ -236,13 +248,15 @@ class Application
 @RestController
 class GreetingController {{
     @GetMapping("/")
-    fun greet(@RequestParam(defaultValue = "World") name: String) = greeting(name)
+    fun greet(
+        @RequestParam(defaultValue = "World") name: String,
+    ) = greeting(name)
 }}
 
 fun greeting(name: String) = "Hello, $name!"
 
 fun main(args: Array<String>) {{
-    runApplication<Application>(*args)
+    runApplication<Application>(args = args)
 }}
 "#
         );
@@ -290,41 +304,36 @@ import androidx.compose.ui.window.application
 
 fun greeting(name: String) = "Hello, $name!"
 
-fun main() = application {{
-    Window(onCloseRequest = ::exitApplication, title = "{name}") {{
-        MaterialTheme {{
-            var clicks by remember {{ mutableStateOf(0) }}
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {{
-                Text(greeting("Compose"))
-                Button(onClick = {{ clicks++ }}) {{ Text("Clicked $clicks times") }}
+fun main() =
+    application {{
+        Window(onCloseRequest = ::exitApplication, title = "{name}") {{
+            MaterialTheme {{
+                var clicks by remember {{ mutableStateOf(0) }}
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {{
+                    Text(greeting("Compose"))
+                    Button(onClick = {{ clicks++ }}) {{ Text("Clicked $clicks times") }}
+                }}
             }}
         }}
     }}
-}}
 "#,
             name = opts.name
         );
     }
+    if opts.lib {
+        return format!("package {pkg}\n\n/** Returns a friendly greeting. */\nfun greeting(name: String): String = \"Hello, $name!\"\n");
+    }
     let mut imports = String::new();
     let mut body = String::from("    println(greeting(\"Kotlin\"))\n");
     if opts.has("serialization") {
-        imports.push_str("import kotlinx.serialization.Serializable\nimport kotlinx.serialization.encodeToString\nimport kotlinx.serialization.json.Json\n\n");
+        imports.push_str("import kotlinx.serialization.encodeToString\nimport kotlinx.serialization.json.Json\n\n");
         body.push_str("    println(Json.encodeToString(Greeting(\"Kotlin\")))\n");
     }
-    let serializable = if opts.has("serialization") { "@Serializable\ndata class Greeting(val name: String)\n\n" } else { "" };
-    if opts.lib {
-        format!(
-            "package {pkg}\n\n{imports}{serializable}/** Returns a friendly greeting. */\nfun greeting(name: String): String = \"Hello, $name!\"\n"
-        )
-    } else {
-        format!(
-            "package {pkg}\n\n{imports}{serializable}fun greeting(name: String): String = \"Hello, $name!\"\n\nfun main() {{\n{body}}}\n"
-        )
-    }
+    format!("package {pkg}\n\n{imports}fun greeting(name: String): String = \"Hello, $name!\"\n\nfun main() {{\n{body}}}\n")
 }
 
 fn test_source(opts: &NewOptions) -> String {
@@ -431,6 +440,9 @@ pub fn template(opts: &NewOptions) -> Result<Vec<TemplateFile>> {
         main = main_source(&lib_opts);
     }
     files.push(file("src/Main.kt", main));
+    if opts.has("serialization") && !framework_main(opts) {
+        files.push(file("src/Greeting.kt", serializable_source(opts)));
+    }
     files.push(file("tests/GreetingTest.kt", test_source(opts)));
     if opts.targets.contains(&TargetKind::Android) {
         files.extend(android_files(opts));
@@ -537,6 +549,20 @@ mod tests {
             let m = Manifest::parse(&files[0].contents).unwrap_or_else(|e| panic!("{targets:?} {frameworks:?}: {e:#}"));
             assert_eq!(m.targets.enabled(), *targets);
         }
+    }
+
+    #[test]
+    fn serializable_class_gets_its_own_file() {
+        for lib in [false, true] {
+            let files = template(&NewOptions { frameworks: vec!["serialization".into()], lib, ..opts("ser") }).unwrap();
+            let class = &files.iter().find(|f| f.path == Path::new("src/Greeting.kt")).unwrap().contents;
+            assert!(class.contains("@Serializable\ndata class Greeting("), "{class}");
+            let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
+            assert!(!main.contains("class Greeting"), "{main}");
+            assert_eq!(main.contains("Json.encodeToString(Greeting"), !lib, "{main}");
+        }
+        let ktor = template(&NewOptions { frameworks: vec!["ktor".into(), "serialization".into()], ..opts("k") }).unwrap();
+        assert!(!ktor.iter().any(|f| f.path == Path::new("src/Greeting.kt")));
     }
 
     #[test]

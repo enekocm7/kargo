@@ -63,7 +63,7 @@ Match the surrounding code. In particular:
 - **Output**: user-facing status goes through `kargo_util::shell::Shell` (`status("Compiling", ...)`, `note`, `error`; stderr, honoring `-q`/`-v`). Only the program or test output of `kargo run` / `kargo test` goes to stdout. Don't `println!` from library crates.
 - **Docs in code**: every module starts with a `//!` comment; public items get `///` where the name alone is not enough.
 - **Cross-platform**: Kargo runs on Windows, macOS and Linux. Use `std::path`, the helpers in `kargo-util`, and avoid shell-specific assumptions. Files use LF line endings (`.gitattributes`).
-- **Pinned versions** live in constants (`DEFAULT_KOTLIN_VERSION`, `DEFAULT_JVM_TARGET` in `kargo-manifest`; the `*_VERSION` constants in `builtins.rs` and `gradle.rs`). Don't hard-code a version elsewhere in Rust code.
+- **Pinned versions** live in constants (`DEFAULT_KOTLIN_VERSION`, `DEFAULT_JVM_TARGET` in `kargo-manifest`; the `*_VERSION` constants in `builtins.rs` and `gradle.rs`; the tool versions `DOKKA_VERSION`, `KTLINT_VERSION` and `DETEKT_VERSION` in `ops/doc.rs`, `ops/fmt.rs` and `ops/lint.rs`). Don't hard-code a version elsewhere in Rust code.
 - **Unknown `kargo.toml` keys are errors**, by design. Keep it that way.
 
 ## Tests
