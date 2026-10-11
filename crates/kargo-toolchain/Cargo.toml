@@ -1,0 +1,18 @@
+[package]
+name = "kargo-toolchain"
+description = "JDK, Kotlin compiler and Kotlin/Native toolchain management for Kargo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kargo-util.workspace = true
+kargo-maven.workspace = true
+anyhow.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

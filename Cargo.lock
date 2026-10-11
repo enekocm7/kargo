@@ -458,30 +458,105 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "kargo"
 version = "0.1.0"
 dependencies = [
- "anstream",
- "anstyle",
  "anyhow",
  "assert_cmd",
- "base64",
  "clap",
- "dirs",
- "flate2",
- "hex",
+ "kargo-manifest",
+ "kargo-maven",
+ "kargo-ops",
+ "kargo-toolchain",
+ "kargo-util",
  "predicates",
+ "tempfile",
+]
+
+[[package]]
+name = "kargo-compiler"
+version = "0.1.0"
+dependencies = [
+ "anstyle",
+ "anyhow",
+ "kargo-manifest",
+ "kargo-maven",
+ "kargo-toolchain",
+ "kargo-util",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "kargo-manifest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kargo-maven",
+ "kargo-util",
+ "serde",
+ "tempfile",
+ "toml",
+ "toml_edit",
+]
+
+[[package]]
+name = "kargo-maven"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "kargo-util",
  "rayon",
  "roxmltree",
  "serde",
  "serde_json",
- "sha1",
- "sha2",
- "tar",
  "tempfile",
  "thiserror",
- "toml",
- "toml_edit",
  "ureq",
- "walkdir",
+]
+
+[[package]]
+name = "kargo-ops"
+version = "0.1.0"
+dependencies = [
+ "anstream",
+ "anyhow",
+ "dirs",
+ "kargo-compiler",
+ "kargo-manifest",
+ "kargo-maven",
+ "kargo-toolchain",
+ "kargo-util",
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "kargo-toolchain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "kargo-maven",
+ "kargo-util",
+ "tar",
+ "tempfile",
  "zip",
+]
+
+[[package]]
+name = "kargo-util"
+version = "0.1.0"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "anyhow",
+ "dirs",
+ "hex",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

@@ -1,16 +1,21 @@
-[package]
-name = "kargo"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A Cargo-like build tool and package manager for Kotlin"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 
-[[bin]]
-name = "kargo"
-path = "src/main.rs"
+[workspace.dependencies]
+kargo-util = { path = "crates/kargo-util" }
+kargo-maven = { path = "crates/kargo-maven" }
+kargo-manifest = { path = "crates/kargo-manifest" }
+kargo-toolchain = { path = "crates/kargo-toolchain" }
+kargo-compiler = { path = "crates/kargo-compiler" }
+kargo-ops = { path = "crates/kargo-ops" }
 
-[dependencies]
 anstream = "1.0.0"
 anstyle = "1.0.14"
 anyhow = "1"
@@ -33,7 +38,32 @@ ureq = "3.4.2"
 walkdir = "2.5.0"
 zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
 
-[dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"
+
+[package]
+name = "kargo"
+description = "A Cargo-like build tool and package manager for Kotlin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kargo"
+path = "src/main.rs"
+
+[dependencies]
+kargo-util.workspace = true
+kargo-maven.workspace = true
+kargo-manifest.workspace = true
+kargo-toolchain.workspace = true
+kargo-ops.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

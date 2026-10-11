@@ -1,0 +1,20 @@
+[package]
+name = "kargo-util"
+description = "Shared terminal, configuration and filesystem utilities for Kargo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anstream.workspace = true
+anstyle.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+hex.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

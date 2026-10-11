@@ -1,0 +1,22 @@
+[package]
+name = "kargo-ops"
+description = "Build engine and command implementations for Kargo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kargo-util.workspace = true
+kargo-maven.workspace = true
+kargo-manifest.workspace = true
+kargo-toolchain.workspace = true
+kargo-compiler.workspace = true
+anstream.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
