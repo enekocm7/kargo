@@ -70,6 +70,40 @@ dokka = "2.2.0"
 
 See [API documentation](../../guides/documentation/).
 
+## `[fmt]`
+
+Options for `kargo fmt`. Every key is optional. ktlint's style rules go in `.editorconfig`.
+
+```toml
+[fmt]
+exclude = ["src/generated/**"]
+ktlint = "1.8.0"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `exclude` | `[]` | Globs, relative to the project root, of files ktlint skips |
+| `ktlint` | `1.8.0` | Exact ktlint version |
+
+## `[lint]`
+
+Options for `kargo lint`. Every key is optional.
+
+```toml
+[lint]
+config = ["config/detekt.yml"]
+baseline = "config/detekt-baseline.xml"
+detekt = "1.23.8"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `config` | `["detekt.yml"]` if that file exists | detekt configuration files, relative to the project root, applied on top of detekt's defaults. Later files override earlier ones; each must exist |
+| `baseline` | `detekt-baseline.xml` | Baseline file, relative to the project root. The default is used only if the file exists; a file you set must exist |
+| `detekt` | `1.23.8` | Exact detekt version |
+
+See [Formatting and linting](../../guides/formatting-and-linting/).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.

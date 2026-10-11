@@ -12,6 +12,8 @@ use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::check::CheckOptions;
 use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::doc::DocOptions;
+use kargo_ops::ops::fmt::FmtOptions;
+use kargo_ops::ops::lint::LintOptions;
 use kargo_ops::ops::run::RunOptions;
 use kargo_ops::ops::test::TestOptions;
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
@@ -255,6 +257,18 @@ enum Command {
         /// Open the documentation in a browser when it is generated
         #[arg(long)]
         open: bool,
+    },
+    /// Format Kotlin sources with ktlint
+    Fmt {
+        /// Report unformatted files without changing them; fail if there are any
+        #[arg(long)]
+        check: bool,
+    },
+    /// Analyze Kotlin sources with detekt
+    Lint {
+        /// Record the current issues in the baseline file instead of reporting them
+        #[arg(long)]
+        create_baseline: bool,
     },
     /// Add dependencies or built-in frameworks to kargo.toml
     Add {
@@ -503,6 +517,33 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             ops::doc::doc(&ctx, &DocOptions { targets, open })?;
             Ok(0)
         }
+        Command::Fmt { check } => {
+            let ws = load_workspace(&global)?;
+            note_shadowed_task(shell, &ws, "fmt");
+            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            if ops::fmt::fmt(&ctx, &FmtOptions { check })? {
+                Ok(0)
+            } else if check {
+                shell.error("formatting check failed; `kargo fmt` fixes what ktlint can correct automatically");
+                Ok(FAILURE)
+            } else {
+                shell.error("ktlint could not fix every problem; fix the ones listed above by hand");
+                Ok(FAILURE)
+            }
+        }
+        Command::Lint { create_baseline } => {
+            let ws = load_workspace(&global)?;
+            note_shadowed_task(shell, &ws, "lint");
+            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            if ops::lint::lint(&ctx, &LintOptions { create_baseline })? {
+                Ok(0)
+            } else {
+                shell.error(
+                    "detekt found issues; fix them, suppress them with `@Suppress`, or record them with `kargo lint --create-baseline`",
+                );
+                Ok(FAILURE)
+            }
+        }
         Command::Add { coordinates, dev, target, scope, bom, pre, no_verify, frameworks } => {
             let ws = load_workspace(&global)?;
             if !frameworks.is_empty() {
@@ -629,6 +670,13 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::External(argv) => external(&config, &global, argv),
+    }
+}
+
+/// Built-in commands win over tasks of the same name; say how to reach the task.
+fn note_shadowed_task(shell: &Shell, ws: &Workspace, command: &str) {
+    if ws.manifest().tasks.contains_key(command) {
+        shell.note(format!("`kargo {command}` is a built-in command; run the `{command}` task with `kargo task {command}`"));
     }
 }
 
@@ -821,6 +869,10 @@ mod tests {
         );
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
         assert!(matches!(cli.command, Command::Doc { ref targets, open: true } if matches!(targets[..], [TargetArg::Jvm])));
+        let cli = Cli::try_parse_from(["kargo", "fmt", "--check"]).unwrap();
+        assert!(matches!(cli.command, Command::Fmt { check: true }));
+        let cli = Cli::try_parse_from(["kargo", "lint", "--create-baseline"]).unwrap();
+        assert!(matches!(cli.command, Command::Lint { create_baseline: true }));
     }
 
     #[test]

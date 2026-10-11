@@ -5,6 +5,8 @@ pub mod build;
 pub mod check;
 pub mod context;
 pub mod doc;
+pub mod fmt;
+pub mod lint;
 pub mod new;
 pub mod run;
 pub mod test;

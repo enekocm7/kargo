@@ -35,6 +35,8 @@ jobs:
       - name: Install Kargo
         run: command -v kargo || cargo install --locked --git https://github.com/enekocm7/kargo kargo
 
+      - run: kargo fmt --check
+      - run: kargo lint
       - run: kargo check --tests --locked
       - run: kargo build --locked
       - run: kargo test --locked
@@ -46,7 +48,7 @@ jobs:
           path: target/release/jvm/*-all.jar
 ```
 
-`--locked` makes the build fail if `kargo.lock` is out of date, so nobody forgets to commit it.
+`--locked` makes the build fail if `kargo.lock` is out of date, so nobody forgets to commit it. `kargo fmt --check` and `kargo lint` fail the job on unformatted code and detekt issues; see [Formatting and linting](../formatting-and-linting/).
 
 The first build of the job starts a [compiler daemon](../build-performance/#the-compiler-daemon) that the later steps reuse, so `check`, `build`, `test` and `package` each skip JVM startup. Leave `~/.kargo/daemon` out of the cache: it only holds that run's daemon state and large class-data archives. Set `KARGO_DAEMON=false` if your CI doesn't allow background processes.
 

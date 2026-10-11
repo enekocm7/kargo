@@ -35,13 +35,15 @@ class Application
 @RestController
 class GreetingController {
     @GetMapping("/")
-    fun greet(@RequestParam(defaultValue = "World") name: String) = greeting(name)
+    fun greet(
+        @RequestParam(defaultValue = "World") name: String,
+    ) = greeting(name)
 }
 
 fun greeting(name: String) = "Hello, $name!"
 
 fun main(args: Array<String>) {
-    runApplication<Application>(*args)
+    runApplication<Application>(args = args)
 }
 ```
 

@@ -35,21 +35,22 @@ import androidx.compose.ui.window.application
 
 fun greeting(name: String) = "Hello, $name!"
 
-fun main() = application {
-    Window(onCloseRequest = ::exitApplication, title = "counter") {
-        MaterialTheme {
-            var clicks by remember { mutableStateOf(0) }
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(greeting("Compose"))
-                Button(onClick = { clicks++ }) { Text("Clicked $clicks times") }
+fun main() =
+    application {
+        Window(onCloseRequest = ::exitApplication, title = "counter") {
+            MaterialTheme {
+                var clicks by remember { mutableStateOf(0) }
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(greeting("Compose"))
+                    Button(onClick = { clicks++ }) { Text("Clicked $clicks times") }
+                }
             }
         }
     }
-}
 ```
 
 ## How state works

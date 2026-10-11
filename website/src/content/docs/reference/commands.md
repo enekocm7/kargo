@@ -152,6 +152,34 @@ kargo doc [--open] [-t <target>]
 
 Configure it with [`[doc]`](../manifest/#doc). See [API documentation](../../guides/documentation/).
 
+## `kargo fmt`
+
+Format the Kotlin files in `src/`, `src-<target>/`, `tests/` and `tests-<target>/` with ktlint.
+
+```sh
+kargo fmt [--check]
+```
+
+| Option | Meaning |
+|---|---|
+| `--check` | Report unformatted code without changing files; exit with code 101 if there is any |
+
+Without `--check`, files are rewritten in place, and the command exits with code 101 if ktlint found problems it can't fix. ktlint reads `.editorconfig`; configure the rest with [`[fmt]`](../manifest/#fmt). See [Formatting and linting](../../guides/formatting-and-linting/).
+
+## `kargo lint`
+
+Analyze the Kotlin files in `src/`, `src-<target>/`, `tests/` and `tests-<target>/` with detekt. Exits with code 101 if detekt reports issues.
+
+```sh
+kargo lint [--create-baseline]
+```
+
+| Option | Meaning |
+|---|---|
+| `--create-baseline` | Record the current issues in the baseline file (`detekt-baseline.xml` by default) instead of reporting them |
+
+detekt reads `detekt.yml`; configure the rest with [`[lint]`](../manifest/#lint). See [Formatting and linting](../../guides/formatting-and-linting/).
+
 ## `kargo add`
 
 Add dependencies to `kargo.toml`, or enable frameworks.

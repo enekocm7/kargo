@@ -16,18 +16,20 @@ Kargo has four extension points:
 
 ```toml title="kargo.toml"
 [tasks]
-fmt = "ktlint -F \"src/**/*.kt\""
+proto = "protoc --kotlin_out=src-jvm proto/*.proto"
 gen = { run = ["mkdir -p build", "./gen.sh"], description = "Generate code", hooks = ["pre-build"] }
 site = { run = "mkdocs build", cwd = "website", env = { SITE_URL = "https://example.com" } }
-ci = { depends-on = ["fmt", "gen"], run = "kargo test --locked" }
+ci = { depends-on = ["proto", "gen"], run = "kargo test --locked" }
 ```
 
 ```sh
-kargo task            # list tasks with their descriptions
-kargo task fmt        # run one
-kargo fmt             # shorthand: any task name works as a subcommand
-kargo fmt --dry-run   # extra arguments are appended to the task's last command
+kargo task              # list tasks with their descriptions
+kargo task proto        # run one
+kargo proto             # shorthand: any task name works as a subcommand
+kargo proto --verbose   # extra arguments are appended to the task's last command
 ```
+
+Built-in commands take precedence: a task named `fmt` or `lint` runs only as `kargo task fmt`, since `kargo fmt` and `kargo lint` [format and lint your code](../formatting-and-linting/).
 
 | Key | Meaning |
 |---|---|
@@ -64,7 +66,7 @@ envs = { run = "echo $KARGO_PKG_NAME $KARGO_PROFILE", windows-run = "echo %KARGO
 gen = { run = ["mkdir -p build", "./gen.sh"], windows-run = ["if not exist build mkdir build", "gen.bat"] }
 ```
 
-On Windows Kargo runs `windows-run` if it is set and `run` otherwise; on every other platform it always runs `run`. Commands that work in both shells, such as `ktlint -F`, need only `run`.
+On Windows Kargo runs `windows-run` if it is set and `run` otherwise; on every other platform it always runs `run`. Commands that work in both shells, such as `protoc`, need only `run`.
 
 ## Hooks
 

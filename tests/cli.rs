@@ -352,6 +352,39 @@ fn doc_section_is_validated() {
 }
 
 #[test]
+fn fmt_and_lint_need_kotlin_sources() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("empty", ""));
+    // `target/` is never formatted or linted.
+    p.file("target/debug/Generated.kt", "fun   generated( ) = 1\n");
+    for cmd in ["fmt", "lint"] {
+        p.kargo().arg(cmd).assert().failure().code(101).stderr(predicate::str::contains("no Kotlin sources found"));
+    }
+}
+
+#[test]
+fn fmt_and_lint_sections_are_validated() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("style", "[fmt]\nexclude = [\"!src/gen/**\"]\n"));
+    p.kargo().args(["fmt", "--check"]).assert().failure().stderr(predicate::str::contains("[fmt] `exclude` entries must be globs"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nconfig = [\"config/detekt.yml\"]\n"));
+    p.kargo()
+        .arg("lint")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("[lint] config file `config/detekt.yml` does not exist"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nbaseline = \"baseline.xml\"\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("kargo lint --create-baseline"));
+    // A task named like the command is reachable through `kargo task`.
+    p.file("kargo.toml", &manifest("style", "[tasks]\nlint = \"echo custom\"\n[lint]\nbaseline = \"baseline.xml\"\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("run the `lint` task with `kargo task lint`"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nmax-issues = 3\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("unknown field `max-issues`"));
+}
+
+#[test]
 fn disabled_target_is_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("jvmonly", ""));

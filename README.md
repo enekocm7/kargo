@@ -32,6 +32,8 @@ $ kargo test
 | `kargo run [-t <target>] [-- args]` | Build and run |
 | `kargo test [filter] [--no-run] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native) |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
+| `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
+| `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>...` | Remove dependencies |
@@ -117,6 +119,13 @@ compiler-args = []          # also: debug, optimize
 includes = ["docs/module.md"]
 source-link = "https://github.com/me/my-app/blob/main"
 external-links = ["https://kotlinlang.org/api/kotlinx.coroutines/"]
+
+[fmt]                       # kargo fmt (ktlint); style rules go in .editorconfig
+exclude = ["src/generated/**"]
+
+[lint]                      # kargo lint (detekt); detekt.yml is picked up when present
+config = ["config/detekt.yml"]
+baseline = "detekt-baseline.xml"
 ```
 
 ### Toolchains
@@ -160,14 +169,14 @@ Each framework adds its libraries, compiler plugin and compiler flags for every 
 
 ```toml
 [tasks]
-fmt = "ktlint -F \"src/**/*.kt\""
+proto = "protoc --kotlin_out=src-jvm proto/*.proto"
 gen = { run = ["mkdir -p build", "./gen.sh"], description = "Generate code", hooks = ["pre-build"] }
-ci = { depends-on = ["fmt", "gen"] }
+ci = { depends-on = ["proto", "gen"], run = "kargo fmt --check" }
 envs = { run = "echo $KARGO_PKG_NAME", shell = "sh" }                  # POSIX on every OS
 dirs = { run = "ls", windows-run = "dir" }                               # per-OS commands
 ```
 
-Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
+Run them with `kargo task ci` or just `kargo ci` (built-in commands such as `kargo fmt` take precedence over a task of the same name). Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
 
 ### Plugins
 
