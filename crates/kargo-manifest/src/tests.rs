@@ -307,3 +307,45 @@ fn parses_enums() {
     assert_eq!("post-package".parse::<Hook>().unwrap(), Hook::PostPackage);
     assert_eq!(TargetKind::Native.source_dir_name(), "src-native");
 }
+
+#[test]
+fn toolchain_jdk_requests() {
+    assert_eq!(parse(MINIMAL).toolchain.jdk, JdkRequest::System);
+    let with = |t: &str| {
+        format!(
+            "{MINIMAL}
+[toolchain]
+{t}
+"
+        )
+    };
+    assert_eq!(parse(&with("jdk = \"21\"")).toolchain.jdk, JdkRequest::Major(21));
+    assert_eq!(parse(&with("jdk = 17")).toolchain.jdk, JdkRequest::Major(17));
+    assert_eq!(parse(&with("jdk = \"system\"")).toolchain.jdk, JdkRequest::System);
+    assert_eq!(parse(&with("jdk = \"21.0.5+11\"")).toolchain.jdk, JdkRequest::Release("jdk-21.0.5+11".into()));
+    assert_eq!("jdk8u432-b06".parse::<JdkRequest>().unwrap().major(), Some(8));
+    assert!(parse_err(&with("jdk = \"seven\"")).contains("JDK"));
+    assert!(parse_err(&with("jdk = 6")).contains("not supported"));
+    assert!(parse_err(&with("jdk = true")).contains("jdk"));
+    assert!(parse_err(&with("jdk = \"21 0\"")).contains("invalid JDK"));
+    assert!(parse_err(&with("vendor = \"x\"")).contains("vendor"));
+    // jvm-target must not exceed the pinned JDK.
+    let err = parse_err(&format!(
+        "{MINIMAL}
+[toolchain]
+jdk = \"17\"
+[target.jvm]
+jvm-target = \"21\"
+"
+    ));
+    assert!(err.contains("newer than"), "{err}");
+}
+
+#[test]
+fn jdk_request_display_round_trips() {
+    for s in ["system", "21", "jdk-21.0.5+11", "jdk8u432-b06"] {
+        assert_eq!(s.parse::<JdkRequest>().unwrap().to_string(), s);
+    }
+    assert_eq!(release_major("jdk-25.0.1+8"), Some(25));
+    assert_eq!(release_major("nonsense"), None);
+}

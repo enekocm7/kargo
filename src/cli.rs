@@ -12,6 +12,7 @@ use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::run::RunOptions;
 use kargo_ops::ops::test::TestOptions;
+use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
 use kargo_ops::workspace::{ProfileKind, Workspace};
 use kargo_util::config::Config;
@@ -91,6 +92,49 @@ impl From<ScopeArg> for Scope {
             ScopeArg::Provided => Scope::Provided,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ToolArg {
+    /// A Temurin JDK
+    Jdk,
+    /// A Kotlin/Native distribution
+    Native,
+}
+
+impl From<ToolArg> for ToolKind {
+    fn from(t: ToolArg) -> Self {
+        match t {
+            ToolArg::Jdk => ToolKind::Jdk,
+            ToolArg::Native => ToolKind::Native,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum ToolchainCommand {
+    /// List installed JDKs and Kotlin/Native distributions
+    #[command(visible_alias = "ls")]
+    List,
+    /// Install a toolchain (without arguments: everything this project needs)
+    Install {
+        #[arg(value_enum)]
+        kind: Option<ToolArg>,
+        /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version (default: the project's)
+        version: Option<String>,
+    },
+    /// Remove an installed toolchain
+    #[command(visible_alias = "rm")]
+    Remove {
+        #[arg(value_enum)]
+        kind: ToolArg,
+        /// JDK: a major version (removes all its releases) or a release; Native: a version
+        version: String,
+    },
+    /// Show JDK versions available for download
+    Available,
+    /// Show which toolchains this project uses
+    Which,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -268,6 +312,11 @@ enum Command {
         /// Arguments passed to Gradle
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Manage JDKs and Kotlin/Native distributions
+    Toolchain {
+        #[command(subcommand)]
+        command: ToolchainCommand,
     },
     /// Print project information
     Info,
@@ -512,8 +561,55 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             print_info(&ws);
             Ok(0)
         }
+        Command::Toolchain { command } => toolchain(&config, &global, command),
         Command::External(argv) => external(&config, &global, argv),
     }
+}
+
+fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) -> Result<u8> {
+    // Toolchain commands also work outside a project.
+    let ws = load_workspace(global).ok();
+    let manifest = ws.as_ref().map(Workspace::manifest);
+    let shell = config.shell();
+    match command {
+        ToolchainCommand::List => print!("{}", toolchain_ops::list(config, manifest)?),
+        ToolchainCommand::Install { kind: Some(kind), version } => {
+            let what = toolchain_ops::install(config, manifest, kind.into(), version.as_deref())?;
+            shell.status("Installed", what);
+        }
+        ToolchainCommand::Install { kind: None, version: Some(_) } => bail!("specify what to install: `jdk` or `native`"),
+        ToolchainCommand::Install { kind: None, version: None } => {
+            let manifest = manifest.context("not in a Kargo project; use `kargo toolchain install jdk <version>` or `native <version>`")?;
+            let done = toolchain_ops::install_for_project(config, manifest)?;
+            if done.is_empty() {
+                shell.status("Fresh", "this project uses the system JDK and no Kotlin/Native target");
+            }
+            for what in done {
+                shell.status("Installed", what);
+            }
+        }
+        ToolchainCommand::Remove { kind, version } => {
+            for what in toolchain_ops::remove(config, kind.into(), &version)? {
+                shell.status("Removed", what);
+            }
+        }
+        ToolchainCommand::Available => print!("{}", toolchain_ops::available(config)?),
+        ToolchainCommand::Which => {
+            let ws = ws.context("`kargo toolchain which` must run inside a Kargo project")?;
+            let ctx = context(config, &ws, global, ProfileKind::Dev)?;
+            let m = ws.manifest();
+            let jdk = ctx.jdk()?;
+            println!("jdk:           {} (JDK {} at {})", m.toolchain.jdk, jdk.version, jdk.home.display());
+            println!("kotlin:        {}", m.kotlin.version);
+            if m.targets.is_enabled(TargetKind::Native) {
+                match kargo_toolchain::NativeToolchain::find(config, &m.kotlin.version)? {
+                    Some(t) => println!("kotlin-native: {} at {}", t.version, t.home.display()),
+                    None => println!("kotlin-native: {} (not installed yet; installed on first native build)", m.kotlin.version),
+                }
+            }
+        }
+    }
+    Ok(0)
 }
 
 fn list_tasks(ws: &Workspace) {
@@ -644,6 +740,12 @@ mod tests {
         assert!(matches!(cli.command, Command::External(ref v) if v == &["my-plugin", "--x"]));
         let cli = Cli::try_parse_from(["kargo", "task", "gen", "--watch"]).unwrap();
         assert!(matches!(cli.command, Command::Task { ref args, .. } if args == &["--watch"]));
+        let cli = Cli::try_parse_from(["kargo", "toolchain", "install", "jdk", "21"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::Jdk), ref version } } if version.as_deref() == Some("21")
+        ));
+        assert!(Cli::try_parse_from(["kargo", "toolchain", "remove", "native"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "-v", "test", "MathTest", "--no-run"]).unwrap();
         assert!(cli.global.verbose);
         assert!(matches!(cli.command, Command::Test { ref filter, no_run: true, .. } if filter.as_deref() == Some("MathTest")));

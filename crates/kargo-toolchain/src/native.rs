@@ -1,13 +1,19 @@
 //! The Kotlin/Native distribution (`kotlin-native-prebuilt`), downloaded from
-//! Maven Central and extracted under `~/.kargo/toolchains`.
+//! Maven Central into `~/.kargo/toolchains/kotlin-native/<version>`.
+//!
+//! Kotlin/Native downloads further dependencies (LLVM, sysroots) on first use.
+//! Kargo points `KONAN_DATA_DIR` at `~/.kargo/toolchains/konan` so those are
+//! managed alongside the distributions instead of living in `~/.konan`.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use kargo_maven::{Artifact, MavenClient, ModuleId};
+use kargo_maven::{Artifact, MavenClient, ModuleId, Version};
 use kargo_util::config::Config;
+
+use crate::archive::{self, ArchiveKind};
 
 /// The host as Kotlin/Native names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +40,10 @@ impl Host {
             _ => bail!("Kotlin/Native does not support {os}/{arch} as a build host"),
         })
     }
+
+    fn archive_kind(&self) -> ArchiveKind {
+        if self.extension == "zip" { ArchiveKind::Zip } else { ArchiveKind::TarGz }
+    }
 }
 
 /// Resolves `host` in a platform list to the concrete Konan target.
@@ -46,119 +56,146 @@ pub fn executable_extension(konan_target: &str) -> &'static str {
     if konan_target == "mingw_x64" { "exe" } else { "kexe" }
 }
 
-#[derive(Debug, Clone)]
+fn konanc_in(home: &Path) -> PathBuf {
+    home.join("bin").join(if cfg!(windows) { "konanc.bat" } else { "konanc" })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeToolchain {
     pub home: PathBuf,
     pub version: String,
+    /// `KONAN_DATA_DIR` used when running the compiler.
+    pub data_dir: PathBuf,
 }
 
 impl NativeToolchain {
     pub fn konanc(&self) -> PathBuf {
-        let name = if cfg!(windows) { "konanc.bat" } else { "konanc" };
-        self.home.join("bin").join(name)
+        konanc_in(&self.home)
+    }
+
+    /// A `konanc` command with Kargo's Kotlin/Native data directory.
+    pub fn command(&self) -> Command {
+        let mut cmd = Command::new(self.konanc());
+        cmd.env("KONAN_DATA_DIR", &self.data_dir);
+        cmd
+    }
+
+    fn at(config: &Config, version: &str) -> Result<Self> {
+        if version.is_empty() || version.contains(['/', '\\', ':']) || version.starts_with('.') {
+            bail!("invalid Kotlin/Native version `{version}`");
+        }
+        Ok(Self { home: config.native_dir().join(version), version: version.to_owned(), data_dir: config.konan_data_dir() })
+    }
+
+    /// The installed distribution for `version`, if present.
+    pub fn find(config: &Config, version: &str) -> Result<Option<Self>> {
+        let toolchain = Self::at(config, version)?;
+        migrate_legacy(config, &toolchain);
+        Ok(toolchain.konanc().is_file().then_some(toolchain))
     }
 
     /// Ensures the distribution for `version` is installed, downloading it if needed.
     pub fn ensure(config: &Config, client: &MavenClient, version: &str) -> Result<Self> {
-        let host = Host::current()?;
-        let home = config.toolchains_dir().join(format!("kotlin-native-{version}-{}", host.classifier));
-        let toolchain = Self { home: home.clone(), version: version.to_owned() };
-        if toolchain.konanc().is_file() {
-            return Ok(toolchain);
+        if let Some(found) = Self::find(config, version)? {
+            return Ok(found);
         }
-
+        let toolchain = Self::at(config, version)?;
+        let host = Host::current()?;
         let artifact = Artifact::new(ModuleId::new("org.jetbrains.kotlin", "kotlin-native-prebuilt"), version)
             .with_classifier(Some(host.classifier.to_owned()))
             .with_extension(host.extension);
-        let archive = client
+        let archive_path = client
             .fetch_required(&artifact.repo_path())
             .with_context(|| format!("failed to download Kotlin/Native {version} for {}", host.classifier))?;
 
         config.shell().status("Installing", format!("Kotlin/Native {version} ({})", host.classifier));
-        let staging = config.toolchains_dir().join(format!(".staging-{}-{}", version, std::process::id()));
-        kargo_util::fs::remove_dir_all_if_exists(&staging)?;
-        fs::create_dir_all(&staging)?;
-        let result = (|| -> Result<()> {
-            if host.extension == "zip" {
-                extract_zip(&archive, &staging)?;
-            } else {
-                extract_tar_gz(&archive, &staging)?;
-            }
-            let root = single_child_dir(&staging)?.unwrap_or_else(|| staging.clone());
-            if let Some(parent) = home.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            kargo_util::fs::remove_dir_all_if_exists(&home)?;
-            fs::rename(&root, &home).with_context(|| format!("failed to install toolchain into {}", home.display()))?;
-            Ok(())
-        })();
-        let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
-        result?;
-
+        kargo_util::fs::remove_dir_all_if_exists(&toolchain.home)?;
+        archive::install(&archive_path, host.archive_kind(), &toolchain.home)?;
+        // The archive is large and no longer needed once extracted.
+        let _ = std::fs::remove_file(&archive_path);
         if !toolchain.konanc().is_file() {
-            bail!("the Kotlin/Native distribution at {} has no konanc", home.display());
+            bail!("the Kotlin/Native distribution at {} has no konanc", toolchain.home.display());
         }
+        Ok(toolchain)
+    }
+
+    /// Installed Kotlin/Native versions, oldest first.
+    pub fn installed(config: &Config) -> Result<Vec<Self>> {
+        migrate_all_legacy(config);
+        let Ok(entries) = std::fs::read_dir(config.native_dir()) else { return Ok(Vec::new()) };
+        let mut out: Vec<Self> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    return None;
+                }
+                let t = Self::at(config, &name).ok()?;
+                t.konanc().is_file().then_some(t)
+            })
+            .collect();
+        out.sort_by(|a, b| Version::parse(&a.version).cmp(&Version::parse(&b.version)));
+        Ok(out)
+    }
+
+    /// Removes an installed distribution.
+    pub fn remove(config: &Config, version: &str) -> Result<Self> {
+        let Some(toolchain) = Self::find(config, version)? else {
+            bail!("Kotlin/Native {version} is not installed; see `kargo toolchain list`");
+        };
+        kargo_util::fs::remove_dir_all_if_exists(&toolchain.home)?;
         Ok(toolchain)
     }
 }
 
-fn single_child_dir(dir: &Path) -> Result<Option<PathBuf>> {
-    let entries: Vec<_> = fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
-    match entries.as_slice() {
-        [only] if only.file_type()?.is_dir() => Ok(Some(only.path())),
-        _ => Ok(None),
+/// Migrates every legacy `toolchains/kotlin-native-<version>-<host>` directory.
+fn migrate_all_legacy(config: &Config) {
+    let Ok(host) = Host::current() else { return };
+    let Ok(entries) = std::fs::read_dir(config.toolchains_dir()) else { return };
+    let suffix = format!("-{}", host.classifier);
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(version) = name.strip_prefix("kotlin-native-").and_then(|r| r.strip_suffix(&suffix)) {
+            if let Ok(toolchain) = NativeToolchain::at(config, version) {
+                migrate_legacy(config, &toolchain);
+            }
+        }
     }
 }
 
-/// Extracts a zip archive, rejecting entries that would escape `dest`.
-pub fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
-    let file = fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
-    let mut zip = zip::ZipArchive::new(file).with_context(|| format!("{} is not a valid zip archive", archive.display()))?;
-    for i in 0..zip.len() {
-        let mut entry = zip.by_index(i)?;
-        let Some(rel) = entry.enclosed_name() else {
-            bail!("archive {} contains an unsafe path `{}`", archive.display(), entry.name().unwrap_or_default());
-        };
-        let out = dest.join(rel);
-        if entry.is_dir() {
-            fs::create_dir_all(&out)?;
-            continue;
-        }
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut target = fs::File::create(&out).with_context(|| format!("failed to create {}", out.display()))?;
-        std::io::copy(&mut entry, &mut target)?;
-        #[cfg(unix)]
-        if let Some(mode) = entry.unix_mode() {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&out, fs::Permissions::from_mode(mode))?;
-        }
+/// Moves a distribution installed by older Kargo versions
+/// (`toolchains/kotlin-native-<version>-<host>`) to the current layout.
+fn migrate_legacy(config: &Config, toolchain: &NativeToolchain) {
+    if toolchain.konanc().is_file() {
+        return;
     }
-    Ok(())
-}
-
-/// Extracts a `.tar.gz` archive; `tar` refuses entries escaping `dest`.
-pub fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
-    let file = fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
-    tar.set_preserve_permissions(true);
-    tar.unpack(dest).with_context(|| format!("failed to extract {}", archive.display()))
+    let Ok(host) = Host::current() else { return };
+    let legacy = config.toolchains_dir().join(format!("kotlin-native-{}-{}", toolchain.version, host.classifier));
+    if konanc_in(&legacy).is_file() {
+        if let Some(parent) = toolchain.home.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::rename(&legacy, &toolchain.home);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
     use super::*;
+    use kargo_util::shell::{Shell, Verbosity};
+
+    fn fake_dist(home: &Path) {
+        let konanc = konanc_in(home);
+        std::fs::create_dir_all(konanc.parent().unwrap()).unwrap();
+        std::fs::write(konanc, "").unwrap();
+    }
 
     #[test]
     fn host_mapping() {
         assert_eq!(Host::for_platform("windows", "x86_64").unwrap().konan_target, "mingw_x64");
         assert_eq!(Host::for_platform("macos", "aarch64").unwrap().classifier, "macos-aarch64");
-        assert_eq!(Host::for_platform("linux", "x86_64").unwrap().extension, "tar.gz");
+        assert_eq!(Host::for_platform("linux", "x86_64").unwrap().archive_kind(), ArchiveKind::TarGz);
         assert!(Host::for_platform("freebsd", "x86_64").is_err());
-        assert!(Host::current().is_ok() || cfg!(not(any(target_os = "windows", target_os = "linux", target_os = "macos"))));
     }
 
     #[test]
@@ -169,53 +206,41 @@ mod tests {
     }
 
     #[test]
-    fn zip_extraction() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("a.zip");
-        {
-            let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
-            let opts = zip::write::SimpleFileOptions::default();
-            zip.add_directory("root/bin/", opts).unwrap();
-            zip.start_file("root/bin/tool", opts).unwrap();
-            zip.write_all(b"hi").unwrap();
-            zip.finish().unwrap();
-        }
-        let out = dir.path().join("out");
-        extract_zip(&archive, &out).unwrap();
-        assert_eq!(fs::read_to_string(out.join("root/bin/tool")).unwrap(), "hi");
-        assert_eq!(single_child_dir(&out).unwrap(), Some(out.join("root")));
+    fn lists_finds_and_removes_installations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config::new(tmp.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        assert!(NativeToolchain::installed(&config).unwrap().is_empty());
+        fake_dist(&config.native_dir().join("2.4.21"));
+        fake_dist(&config.native_dir().join("2.4.3"));
+        std::fs::create_dir_all(config.native_dir().join("2.0.0")).unwrap(); // incomplete
+        let versions: Vec<_> = NativeToolchain::installed(&config).unwrap().into_iter().map(|t| t.version).collect();
+        assert_eq!(versions, ["2.4.3", "2.4.21"]);
+
+        let found = NativeToolchain::find(&config, "2.4.21").unwrap().unwrap();
+        assert_eq!(found.data_dir, config.konan_data_dir());
+        let cmd = found.command();
+        assert!(cmd.get_envs().any(|(k, _)| k == "KONAN_DATA_DIR"));
+        assert!(NativeToolchain::find(&config, "9.9.9").unwrap().is_none());
+        assert!(NativeToolchain::find(&config, "../x").is_err());
+
+        NativeToolchain::remove(&config, "2.4.3").unwrap();
+        assert!(NativeToolchain::remove(&config, "2.4.3").is_err());
+        assert_eq!(NativeToolchain::installed(&config).unwrap().len(), 1);
     }
 
     #[test]
-    fn zip_rejects_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("evil.zip");
-        {
-            let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
-            zip.start_file("../evil.txt", zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(b"x").unwrap();
-            zip.finish().unwrap();
-        }
-        assert!(extract_zip(&archive, &dir.path().join("out")).is_err());
-        assert!(!dir.path().join("evil.txt").exists());
-    }
-
-    #[test]
-    fn tar_gz_extraction() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("a.tar.gz");
-        {
-            let enc = flate2::write::GzEncoder::new(fs::File::create(&archive).unwrap(), flate2::Compression::fast());
-            let mut builder = tar::Builder::new(enc);
-            let mut header = tar::Header::new_gnu();
-            header.set_size(2);
-            header.set_mode(0o755);
-            header.set_cksum();
-            builder.append_data(&mut header, "dist/bin/konanc", &b"ok"[..]).unwrap();
-            builder.into_inner().unwrap().finish().unwrap();
-        }
-        let out = dir.path().join("out");
-        extract_tar_gz(&archive, &out).unwrap();
-        assert_eq!(fs::read_to_string(out.join("dist/bin/konanc")).unwrap(), "ok");
+    fn migrates_legacy_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config::new(tmp.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let host = Host::current().unwrap();
+        let legacy = config.toolchains_dir().join(format!("kotlin-native-2.4.0-{}", host.classifier));
+        fake_dist(&legacy);
+        let other = config.toolchains_dir().join(format!("kotlin-native-2.3.0-{}", host.classifier));
+        fake_dist(&other);
+        let versions: Vec<_> = NativeToolchain::installed(&config).unwrap().into_iter().map(|t| t.version).collect();
+        assert_eq!(versions, ["2.3.0", "2.4.0"]);
+        let found = NativeToolchain::find(&config, "2.4.0").unwrap().unwrap();
+        assert!(found.konanc().is_file());
+        assert!(!legacy.exists() && !other.exists());
     }
 }

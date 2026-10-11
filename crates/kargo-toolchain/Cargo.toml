@@ -9,7 +9,11 @@ rust-version.workspace = true
 [dependencies]
 kargo-util.workspace = true
 kargo-maven.workspace = true
+kargo-manifest.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
 flate2.workspace = true
 tar.workspace = true
 zip.workspace = true

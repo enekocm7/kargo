@@ -6,6 +6,7 @@ pub mod context;
 pub mod new;
 pub mod run;
 pub mod test;
+pub mod toolchain;
 pub mod tree;
 
 use std::path::PathBuf;

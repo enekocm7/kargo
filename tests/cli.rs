@@ -257,3 +257,46 @@ fn disabled_target_is_rejected() {
     p.file("kargo.toml", &manifest("jvmonly", ""));
     p.kargo().args(["build", "--target", "native"]).assert().failure().stderr(predicate::str::contains("not enabled"));
 }
+
+fn fake_jdk(home: &std::path::Path, release: &str, major: u32) {
+    let dir = home.join("toolchains/jdk").join(release);
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("kargo-jdk.json"), format!(r#"{{"release": "{release}", "major": {major}, "vendor": "temurin", "home": ""}}"#))
+        .unwrap();
+}
+
+#[test]
+fn toolchain_list_and_remove() {
+    let p = Project::new();
+    fake_jdk(p.home.path(), "jdk-21.0.4+7", 21);
+    fake_jdk(p.home.path(), "jdk-17.0.12+7", 17);
+    let konanc = p.home.path().join("toolchains/kotlin-native/2.4.21/bin").join(if cfg!(windows) { "konanc.bat" } else { "konanc" });
+    std::fs::create_dir_all(konanc.parent().unwrap()).unwrap();
+    std::fs::write(&konanc, "").unwrap();
+    p.file("kargo.toml", &manifest("tc", "[toolchain]\njdk = \"21\"\n"));
+
+    p.kargo()
+        .args(["toolchain", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("jdk-17.0.12+7"))
+        .stdout(predicate::str::is_match(r"jdk-21\.0\.4\+7.*used by this project").unwrap())
+        .stdout(predicate::str::contains("2.4.21"));
+
+    p.kargo().args(["toolchain", "remove", "jdk", "17"]).assert().success().stderr(predicate::str::contains("Removed JDK jdk-17.0.12+7"));
+    p.kargo().args(["toolchain", "remove", "native", "2.4.21"]).assert().success();
+    p.kargo().args(["toolchain", "remove", "native", "2.4.21"]).assert().failure().stderr(predicate::str::contains("not installed"));
+    let out = String::from_utf8(p.kargo().args(["toolchain", "ls"]).assert().success().get_output().stdout.clone()).unwrap();
+    assert!(!out.contains("jdk-17.0.12+7") && !out.contains("2.4.21"), "{out}");
+}
+
+#[test]
+fn toolchain_install_requires_network_or_cache() {
+    let p = Project::new();
+    p.kargo().args(["toolchain", "install", "jdk", "21", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));
+    p.kargo().args(["toolchain", "install"]).assert().failure().stderr(predicate::str::contains("not in a Kargo project"));
+    p.kargo().args(["toolchain", "install", "jdk", "seven"]).assert().failure().stderr(predicate::str::contains("invalid JDK"));
+    // A pinned JDK that is not installed cannot be provisioned offline.
+    p.file("kargo.toml", &manifest("tc", "[toolchain]\njdk = \"21\"\n"));
+    p.kargo().args(["toolchain", "which", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));
+}

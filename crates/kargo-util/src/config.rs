@@ -55,6 +55,24 @@ impl Config {
         self.home.join("toolchains")
     }
 
+    /// Kargo-managed JDKs, one directory per release.
+    pub fn jdks_dir(&self) -> PathBuf {
+        self.toolchains_dir().join("jdk")
+    }
+
+    /// Kotlin/Native distributions, one directory per version.
+    pub fn native_dir(&self) -> PathBuf {
+        self.toolchains_dir().join("kotlin-native")
+    }
+
+    /// Kotlin/Native's own dependency cache (LLVM, sysroots), normally `~/.konan`.
+    pub fn konan_data_dir(&self) -> PathBuf {
+        match std::env::var_os("KONAN_DATA_DIR") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+            _ => self.toolchains_dir().join("konan"),
+        }
+    }
+
     /// Directory searched for `kargo-<name>` plugin executables.
     pub fn bin_dir(&self) -> PathBuf {
         self.home.join("bin")

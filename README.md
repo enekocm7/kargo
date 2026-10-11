@@ -15,7 +15,7 @@ $ kargo test
 
 ## How it works
 
-* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. All you need is a JDK (17+), plus Node.js to run Wasm programs.
+* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs.
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
 * **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and against the lockfile on re-download.
 * **Incremental:** compilation is skipped when sources, classpath and flags are unchanged.
@@ -39,6 +39,7 @@ $ kargo test
 | `kargo task [name] [args]`, `kargo <task>` | List or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
+| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs and Kotlin/Native distributions |
 | `kargo clean`, `kargo info` | Remove `target/`, show project information |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
@@ -109,6 +110,27 @@ company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", 
 compiler-args = []          # also: debug, optimize
 ```
 
+### Toolchains
+
+```toml
+[toolchain]
+jdk = "21"            # newest Temurin 21; or an exact release like "21.0.5+11"; default "system"
+```
+
+With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`. Any other value makes Kargo download that Temurin JDK from Adoptium on first use. The download is verified against the published SHA-256 and installed under `~/.kargo/toolchains/jdk/<release>`; it is then used for compiling, running and testing, and passed to Gradle for Android builds. A major version picks the newest installed release of it. Kargo also checks that `jvm-target` is not newer than the pinned JDK.
+
+Kotlin/Native distributions are tied to `[kotlin] version`. They are installed under `~/.kargo/toolchains/kotlin-native/<version>` on the first native build. Their LLVM and sysroot dependencies go to `~/.kargo/toolchains/konan` instead of `~/.konan` (override with `KONAN_DATA_DIR`).
+
+```console
+$ kargo toolchain available          # JDK versions you can install (LTS marked)
+$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21
+$ kargo toolchain install            # whatever the current project needs
+$ kargo toolchain list               # installed JDKs/Kotlin/Native, disk usage, what the project uses
+$ kargo toolchain which              # toolchains resolved for this project
+$ kargo toolchain remove jdk 17      # all JDK 17 releases (or one release)
+$ kargo toolchain remove native 2.4.10
+```
+
 ### Built-in frameworks
 
 ```toml
@@ -163,12 +185,25 @@ Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cy
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler |
+| `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
 
 ## Development
 
+Kargo is a Cargo workspace:
+
+| Crate | Responsibility |
+|---|---|
+| `kargo-util` | Terminal output, configuration, filesystem/hash/process helpers |
+| `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver |
+| `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
+| `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, archives |
+| `kargo-compiler` | JVM/Wasm/Native compiler drivers, jar packaging, entry points, test reports |
+| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, commands |
+| `kargo` | The CLI binary |
+
 ```bash
-cargo test                                   # unit + CLI integration tests (offline)
-KARGO_E2E=1 cargo test --test e2e            # end-to-end: JVM, Wasm, Spring, Ktor, Compose
+cargo test --workspace                       # unit + CLI integration tests (offline)
+KARGO_E2E=1 cargo test --test e2e            # end-to-end: JVM, Wasm, Spring, Ktor, Compose, pinned JDK
 KARGO_E2E=1 KARGO_E2E_NATIVE=1 KARGO_E2E_ANDROID=1 cargo test --test e2e
 ```

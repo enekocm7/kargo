@@ -375,6 +375,78 @@ pub struct Package {
     pub license: Option<String>,
 }
 
+/// Which JDK builds and runs the project (`[toolchain] jdk = ...`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum JdkRequest {
+    /// Use `JAVA_HOME` or `java` on `PATH` (the default).
+    #[default]
+    System,
+    /// The newest Temurin release of a feature version, e.g. `21`.
+    Major(u32),
+    /// An exact Temurin release such as `jdk-21.0.5+11` (also accepted as `21.0.5+11`).
+    Release(String),
+}
+
+impl JdkRequest {
+    /// The Java feature version this request implies, if known.
+    pub fn major(&self) -> Option<u32> {
+        match self {
+            JdkRequest::System => None,
+            JdkRequest::Major(m) => Some(*m),
+            JdkRequest::Release(r) => release_major(r),
+        }
+    }
+}
+
+/// Extracts the feature version from a release name: `jdk-21.0.5+11` -> 21, `jdk8u432-b06` -> 8.
+pub fn release_major(release: &str) -> Option<u32> {
+    let rest = release.strip_prefix("jdk-").or_else(|| release.strip_prefix("jdk"))?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+impl FromStr for JdkRequest {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if s == "system" {
+            return Ok(JdkRequest::System);
+        }
+        if let Ok(major) = s.parse::<u32>() {
+            if major < 8 {
+                bail!("JDK {major} is not supported; use 8 or newer");
+            }
+            return Ok(JdkRequest::Major(major));
+        }
+        let valid = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-' | '_');
+        if s.is_empty() || !s.chars().all(valid) {
+            bail!("invalid JDK `{s}` (expected `system`, a major version like `21`, or a release like `21.0.5+11`)");
+        }
+        let release = if s.starts_with("jdk") { s.to_owned() } else { format!("jdk-{s}") };
+        match release_major(&release) {
+            Some(m) if m >= 8 => Ok(JdkRequest::Release(release)),
+            _ => bail!("invalid JDK release `{s}` (expected something like `21.0.5+11` or `jdk8u432-b06`)"),
+        }
+    }
+}
+
+impl fmt::Display for JdkRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JdkRequest::System => f.write_str("system"),
+            JdkRequest::Major(m) => write!(f, "{m}"),
+            JdkRequest::Release(r) => f.write_str(r),
+        }
+    }
+}
+
+/// `[toolchain]`: toolchains Kargo should provision for this project.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ToolchainSettings {
+    pub jdk: JdkRequest,
+}
+
 /// A fully validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -390,6 +462,7 @@ pub struct Manifest {
     pub tasks: BTreeMap<String, Task>,
     pub dev_profile: Profile,
     pub release_profile: Profile,
+    pub toolchain: ToolchainSettings,
 }
 
 impl Manifest {

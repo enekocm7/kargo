@@ -110,7 +110,8 @@ impl<'a> BuildContext<'a> {
         if let Some(jdk) = self.jdk.get() {
             return Ok(jdk);
         }
-        let jdk = Jdk::detect()?;
+        let request = &self.ws.manifest().toolchain.jdk;
+        let jdk = kargo_toolchain::jdks::resolve(self.config, request)?;
         jdk.require_version(MIN_JDK)?;
         self.shell().verbose("Using", format!("JDK {} at {}", jdk.version, jdk.home.display()));
         Ok(self.jdk.get_or_init(|| jdk))

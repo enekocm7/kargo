@@ -201,3 +201,15 @@ fn android_app_with_compose() {
     assert!(t.dir.path().join("droid/target/android/build/outputs/apk/debug/droid-debug.apk").is_file());
     t.kargo("droid").arg("test").assert().success();
 }
+
+#[test]
+fn pinned_jdk_is_downloaded_and_used() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["pinned"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("pinned/kargo.toml")).unwrap();
+    t.write("pinned/kargo.toml", &format!("{manifest}\n[toolchain]\njdk = \"17\"\n"));
+    t.write("pinned/src/Main.kt", "fun main() = println(\"java \" + System.getProperty(\"java.specification.version\"))\n");
+    t.kargo("pinned").arg("run").assert().success().stdout(predicate::str::contains("java 17"));
+    t.kargo("pinned").args(["toolchain", "which"]).assert().success().stdout(predicate::str::contains("JDK 17"));
+}

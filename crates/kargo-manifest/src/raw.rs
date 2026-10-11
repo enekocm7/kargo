@@ -32,6 +32,14 @@ pub(super) struct RawManifest {
     tasks: toml::Table,
     #[serde(default)]
     profile: RawProfiles,
+    #[serde(default)]
+    toolchain: RawToolchain,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawToolchain {
+    jdk: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -675,7 +683,23 @@ impl RawManifest {
             }
         }
 
+        let jdk = match self.toolchain.jdk {
+            None => JdkRequest::System,
+            Some(Value::String(s)) => s.parse().context("invalid [toolchain] `jdk`")?,
+            Some(Value::Integer(i)) => {
+                u32::try_from(i).ok().map(|m| m.to_string()).unwrap_or_default().parse().context("invalid [toolchain] `jdk`")?
+            }
+            Some(_) => bail!("[toolchain] `jdk` must be a version like \"21\" or \"system\""),
+        };
+        if let (Some(major), Some(jvm)) = (jdk.major(), &targets.jvm) {
+            let target: u32 = jvm.jvm_target.strip_prefix("1.").unwrap_or(&jvm.jvm_target).parse().unwrap_or(0);
+            if target > major {
+                bail!("[target.jvm] jvm-target {} is newer than the [toolchain] JDK {major}", jvm.jvm_target);
+            }
+        }
+
         Ok(Manifest {
+            toolchain: ToolchainSettings { jdk },
             package: Package {
                 name: self.package.name,
                 version: self.package.version,

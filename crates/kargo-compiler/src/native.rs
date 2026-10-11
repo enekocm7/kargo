@@ -1,7 +1,6 @@
 //! Kotlin/Native compilation with `konanc`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Result, bail};
 
@@ -119,7 +118,7 @@ impl NativeCompilation<'_> {
 
         let argfile = fingerprint_dir.join(format!("{}-{}-{tag}.konanc.args", self.name, self.konan_target));
         process::write_argfile(&argfile, &args)?;
-        let mut cmd = Command::new(toolchain.konanc());
+        let mut cmd = toolchain.command();
         cmd.arg(format!("@{}", argfile.display()));
         let status = process::status(shell, &mut cmd, "the Kotlin/Native compiler")?;
         if !status.success() {
