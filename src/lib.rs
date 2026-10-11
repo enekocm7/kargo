@@ -1,5 +1,6 @@
 //! Kargo
 pub mod config;
+pub mod manifest;
 pub mod maven;
 pub mod shell;
 pub mod util;
