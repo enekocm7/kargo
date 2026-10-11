@@ -87,4 +87,8 @@ kargo clean                 # remove build output
 kargo build --refresh       # re-check repositories, ignoring cached metadata and kargo.lock
 ```
 
-Use `-v` to see the exact commands Kargo runs.
+`--refresh` also re-verifies cached artifacts against the repository's checksums and downloads corrupt ones again. Use `-v` to see the exact commands Kargo runs.
+
+### "checksum mismatch" for a locked artifact
+
+A re-downloaded file doesn't match the SHA-256 in `kargo.lock`. Read the rest of the message: if the download matches the checksum the repository publishes, the lockfile entry is the suspect and `kargo update` re-locks it. If the repository publishes no checksum, find out why the artifact changed before you re-lock. See [Checksum mismatches](../lockfile/#checksum-mismatches).

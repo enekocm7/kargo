@@ -192,7 +192,7 @@ impl<'a> BuildContext<'a> {
             resolver.import_bom(&bom.module, version)?;
         }
         let resolution = resolver.resolve(roots).with_context(|| format!("failed to resolve dependencies for `{key}`"))?;
-        self.lock.lock().expect("lock poisoned").record(key, &inputs, &resolution, self.client.cache_dir())?;
+        self.lock.lock().expect("lock poisoned").record(key, &inputs, &resolution, &self.client)?;
         self.lock_dirty.store(true, Ordering::SeqCst);
         Ok(resolution)
     }

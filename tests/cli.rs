@@ -175,6 +175,42 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
 }
 
 #[test]
+fn corrupt_cached_artifact_is_redownloaded_before_locking() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "corrupt",
+            &format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url()),
+        ),
+    );
+    let cached = p.home.path().join("cache/maven/g/lib/1.0/lib-1.0.jar");
+    let corrupt = || {
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, "truncated garbage").unwrap();
+    };
+
+    // A garbage jar already in the cache is replaced before its hash is locked.
+    corrupt();
+    p.kargo().args(["tree", "--offline"]).assert().success().stderr(predicate::str::contains("downloading it again"));
+    assert_eq!(std::fs::read_to_string(&cached).unwrap(), "jar g:lib 1.0");
+    let lock = p.read("kargo.lock");
+
+    // Re-downloading from the lockfile matches the recorded hash.
+    std::fs::remove_file(&cached).unwrap();
+    p.kargo().args(["tree", "--offline"]).assert().success();
+    assert_eq!(p.read("kargo.lock"), lock);
+
+    // --refresh heals a cached file that went bad after locking.
+    corrupt();
+    p.kargo().args(["tree", "--offline", "--refresh"]).assert().success();
+    assert_eq!(std::fs::read_to_string(&cached).unwrap(), "jar g:lib 1.0");
+    assert_eq!(p.read("kargo.lock"), lock);
+}
+
+#[test]
 fn offline_mode_reports_missing_artifacts() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("off", "[dependencies]\n\"never:seen\" = \"1.0\"\n"));
