@@ -20,6 +20,25 @@ A major version like `"21"` uses the newest release of 21 you have installed, an
 
 Kargo also checks that `[target.jvm] jvm-target` is not newer than the pinned JDK, so you get a clear error instead of a confusing compiler failure.
 
+### Older Kotlin versions on new JDKs
+
+The Kotlin compiler runs on the same JDK, and compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Kargo checks this before building and stops with an error instead of the compiler's stack trace:
+
+```console
+$ kargo build
+error: Kotlin 2.1.0 cannot run on JDK 25 (at /usr/lib/jvm/jdk-25): its compiler supports up to JDK 24; set `[toolchain] jdk = "21"` in kargo.toml, or use Kotlin 2.1.10 or newer
+```
+
+Either upgrade `[kotlin] version`, or pin an older JDK for the project:
+
+```toml title="kargo.toml"
+[kotlin]
+version = "2.1.0"
+
+[toolchain]
+jdk = "21"
+```
+
 :::tip[Why pin?]
 Everyone on the team, and CI, builds with the same JDK, without anyone having to install it first.
 :::

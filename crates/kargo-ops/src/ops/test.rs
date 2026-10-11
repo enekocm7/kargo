@@ -77,7 +77,7 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let test_cp = ctx
         .resolve("jvm/test", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true), &setup.boms)?
         .files();
-    let jdk = ctx.jdk()?;
+    let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
@@ -176,7 +176,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let main = super::build::build_wasm(ctx)?;
     let setup = ctx.setup(TargetKind::Wasm)?;
     let libraries = wasm_libraries(ctx, &setup, true)?;
-    let jdk = ctx.jdk()?;
+    let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);

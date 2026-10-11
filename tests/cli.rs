@@ -291,6 +291,36 @@ fn toolchain_list_and_remove() {
 }
 
 #[test]
+fn old_kotlin_on_new_jdk_fails_early() {
+    let p = Project::new();
+    fake_jdk(p.home.path(), "jdk-25.0.1+8", 25);
+    p.file(
+        "src/Main.kt",
+        "fun main() {}
+",
+    );
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "old",
+            "[kotlin]
+version = \"2.1.0\"
+
+[toolchain]
+jdk = \"25\"
+",
+        ),
+    );
+    p.kargo()
+        .args(["build", "--offline"])
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("Kotlin 2.1.0 cannot run on JDK 25"))
+        .stderr(predicate::str::contains("[toolchain] jdk = \"21\""))
+        .stderr(predicate::str::contains("Compiling").not());
+}
+
+#[test]
 fn toolchain_install_requires_network_or_cache() {
     let p = Project::new();
     p.kargo().args(["toolchain", "install", "jdk", "21", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));
