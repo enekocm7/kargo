@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
-use kargo_manifest::{Hook, Task};
+use kargo_manifest::{Hook, Task, TaskShell};
 use kargo_util::process;
 use kargo_util::shell::Shell;
 
@@ -51,27 +51,41 @@ pub fn plan<'a>(tasks: &'a BTreeMap<String, Task>, name: &str) -> Result<Vec<&'a
     Ok(order)
 }
 
-/// Builds a command that runs `script` through the platform shell.
-pub fn shell_command(script: &str) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = Command::new("cmd");
-        // Pass the script verbatim; cmd.exe does its own parsing.
-        cmd.raw_arg("/D /S /C \"").raw_arg(script).raw_arg("\"");
-        cmd
-    }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(script);
-        cmd
-    }
+/// Builds a command that runs `script` in `shell`.
+pub fn shell_command(shell: TaskShell, script: &str) -> Result<Command> {
+    Ok(match shell {
+        TaskShell::Cmd => {
+            let mut cmd = Command::new("cmd");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                // Pass the script verbatim; cmd.exe does its own parsing.
+                cmd.raw_arg("/D /S /C \"").raw_arg(script).raw_arg("\"");
+            }
+            #[cfg(not(windows))]
+            cmd.args(["/D", "/S", "/C", script]);
+            cmd
+        }
+        TaskShell::Sh | TaskShell::Bash => {
+            let name = shell.as_str();
+            let Some(program) = process::find_posix_shell(name) else {
+                bail!("`{name}` was not found; install it (on Windows, Git for Windows includes it) or use `windows-run`");
+            };
+            let mut cmd = Command::new(program);
+            cmd.arg("-c").arg(script);
+            cmd
+        }
+        TaskShell::PowerShell | TaskShell::Pwsh => {
+            let mut cmd = Command::new(shell.as_str());
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+            cmd
+        }
+    })
 }
 
 /// Runs a single shell command with extra environment variables.
-pub fn run_script(shell: &Shell, script: &str, cwd: &Path, env: &[(String, String)], what: &str) -> Result<()> {
-    let mut cmd = shell_command(script);
+pub fn run_script(shell: &Shell, task_shell: TaskShell, script: &str, cwd: &Path, env: &[(String, String)], what: &str) -> Result<()> {
+    let mut cmd = shell_command(task_shell, script).with_context(|| format!("cannot run {what}"))?;
     cmd.current_dir(cwd).envs(env.iter().map(|(k, v)| (k, v)));
     shell.verbose("Running", format!("`{script}`"));
     let status = process::status(shell, &mut cmd, what)?;
@@ -98,14 +112,16 @@ pub fn run(
         let mut task_env: Vec<(String, String)> = env.to_vec();
         task_env.push(("KARGO_TASK".to_owned(), task.name.clone()));
         task_env.extend(task.env.iter().map(|(k, v)| (k.clone(), v.clone())));
-        let last = task.run.len().saturating_sub(1);
-        for (i, script) in task.run.iter().enumerate() {
+        let task_shell = task.shell.unwrap_or_else(TaskShell::platform_default);
+        let commands = task.platform_run();
+        let last = commands.len().saturating_sub(1);
+        for (i, script) in commands.iter().enumerate() {
             let script = if task.name == name && i == last && !args.is_empty() {
-                format!("{script} {}", args.iter().map(|a| quote_for_shell(a)).collect::<Vec<_>>().join(" "))
+                format!("{script} {}", args.iter().map(|a| quote_for_shell(task_shell, a)).collect::<Vec<_>>().join(" "))
             } else {
                 script.clone()
             };
-            run_script(shell, &script, &cwd, &task_env, &format!("task `{}`", task.name))?;
+            run_script(shell, task_shell, &script, &cwd, &task_env, &format!("task `{}`", task.name))?;
         }
     }
     Ok(())
@@ -116,12 +132,16 @@ pub fn tasks_for_hook(tasks: &BTreeMap<String, Task>, hook: Hook) -> Vec<&Task> 
     tasks.values().filter(|t| t.hooks.contains(&hook)).collect()
 }
 
-fn quote_for_shell(arg: &str) -> String {
+fn quote_for_shell(shell: TaskShell, arg: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c);
     if !arg.is_empty() && arg.chars().all(safe) {
         return arg.to_owned();
     }
-    if cfg!(windows) { format!("\"{}\"", arg.replace('"', "\"\"")) } else { format!("'{}'", arg.replace('\'', "'\\''")) }
+    match shell {
+        TaskShell::Cmd => format!("\"{}\"", arg.replace('"', "\"\"")),
+        TaskShell::PowerShell | TaskShell::Pwsh => format!("'{}'", arg.replace('\'', "''")),
+        TaskShell::Sh | TaskShell::Bash => format!("'{}'", arg.replace('\'', "'\\''")),
+    }
 }
 
 #[cfg(test)]
@@ -167,13 +187,42 @@ mod tests {
     }
 
     #[test]
+    fn uses_windows_run_on_windows_and_run_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tasks(
+            "pick = { run = \"echo unix> out.txt\", windows-run = \"echo windows> out.txt\" }
+",
+        );
+        run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &t, "pick", &[], &[]).unwrap();
+        let expected = if cfg!(windows) { "windows" } else { "unix" };
+        assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap().trim(), expected);
+    }
+
+    #[test]
+    fn shell_sh_runs_posix_commands_on_every_platform() {
+        if process::find_posix_shell("sh").is_none() {
+            eprintln!("skipping: no sh available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let t = tasks(
+            "posix = { run = 'echo \"$GREETING $KARGO_TASK\" > out.txt', shell = \"sh\", env = { GREETING = \"hi\" } }
+",
+        );
+        run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &t, "posix", &["it's".into()], &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap().trim(), "hi posix it's");
+    }
+
+    #[test]
     fn appends_arguments_to_last_command() {
         let dir = tempfile::tempdir().unwrap();
         let t = tasks("say = \"echo\"\n");
         // Only checks that it runs successfully with arguments that need quoting.
         run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &t, "say", &["hello world".into(), "x".into()], &[]).unwrap();
-        assert_eq!(quote_for_shell("plain-arg"), "plain-arg");
-        assert_ne!(quote_for_shell("has space"), "has space");
+        assert_eq!(quote_for_shell(TaskShell::Sh, "plain-arg"), "plain-arg");
+        assert_eq!(quote_for_shell(TaskShell::Sh, "it's"), r"'it'\''s'");
+        assert_eq!(quote_for_shell(TaskShell::Cmd, "a \"b\""), "\"a \"\"b\"\"\"");
+        assert_eq!(quote_for_shell(TaskShell::PowerShell, "it's"), "'it''s'");
     }
 
     #[test]

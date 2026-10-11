@@ -9,7 +9,7 @@ use super::context::{BuildContext, TargetSetup};
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
-use kargo_compiler::mainclass::find_single_entry_point;
+use kargo_compiler::mainclass::{find_jvm_main_class, find_single_entry_point};
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
@@ -40,6 +40,8 @@ pub struct JvmBuild {
     /// Runtime classpath of dependencies (not including `classes`).
     pub runtime_classpath: Vec<PathBuf>,
     pub main_class: Option<String>,
+    /// Why no main class was detected, when `main_class` is `None`.
+    pub main_class_error: Option<String>,
     pub jvm_args: Vec<String>,
 }
 
@@ -154,9 +156,9 @@ fn jvm_settings<'a>(ctx: &BuildContext<'a>) -> Result<&'a kargo_manifest::JvmTar
 pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
     let manifest = ctx.ws.manifest();
     let jvm = jvm_settings(ctx)?;
+    let jdk = ctx.compiler_jdk()?;
     let setup = ctx.setup(TargetKind::Jvm)?;
     let classpaths = jvm_classpaths(ctx, &setup)?;
-    let jdk = ctx.jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let processor_path: Vec<PathBuf> = if setup.contributions.annotation_processors.is_empty() {
@@ -188,9 +190,13 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
     let outcome = unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Jvm, ""))?;
     let changed = outcome == Outcome::Compiled;
 
-    let main_class = match &jvm.main_class {
-        Some(m) => Some(m.clone()),
-        None => find_single_entry_point(&srcs.kotlin_files(), "[target.jvm] main-class").ok().map(|e| e.jvm_class),
+    // A library has no main class, so a failed detection only matters to `kargo run`.
+    let (main_class, main_class_error) = match &jvm.main_class {
+        Some(m) => (Some(m.clone()), None),
+        None => match find_jvm_main_class(&srcs.kotlin_files(), "[target.jvm] main-class") {
+            Ok(m) => (Some(m), None),
+            Err(e) => (None, Some(e.to_string())),
+        },
     };
 
     // Thin jar plus dependencies in lib/.
@@ -208,7 +214,7 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
         write_jar(&jar, &classes, &jar_manifest, &[])?;
     }
 
-    Ok(JvmBuild { classes, jar, lib_dir, runtime_classpath, main_class, jvm_args: jvm.jvm_args.clone() })
+    Ok(JvmBuild { classes, jar, lib_dir, runtime_classpath, main_class, main_class_error, jvm_args: jvm.jvm_args.clone() })
 }
 
 /// Copies runtime dependencies into `lib/`, returning their file names in classpath order.
@@ -249,9 +255,9 @@ pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool
 pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    let jdk = ctx.compiler_jdk()?;
     let setup = ctx.setup(TargetKind::Wasm)?;
     let libraries = wasm_libraries(ctx, &setup, false)?;
-    let jdk = ctx.jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);

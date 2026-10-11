@@ -477,8 +477,12 @@ pub fn create(dir: &Path, opts: &NewOptions) -> Result<Vec<PathBuf>> {
     Ok(written)
 }
 
+/// Whether `dir` is inside an existing git work tree, so `kargo new` does not
+/// create a nested repository. `dir` may be relative (`kargo new app` run from a
+/// subdirectory of a repository), so the check walks the absolute path.
 fn inside_git_repo(dir: &Path) -> bool {
-    dir.ancestors().any(|d| d.join(".git").exists())
+    let abs = dir.canonicalize().or_else(|_| std::path::absolute(dir)).unwrap_or_else(|_| dir.to_path_buf());
+    abs.ancestors().any(|d| d.join(".git").exists())
 }
 
 #[cfg(test)]

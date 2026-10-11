@@ -62,6 +62,8 @@ main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun m
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 ```
 
+Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one.
+
 ### `[target.wasm]`
 
 ```toml
@@ -191,11 +193,13 @@ A hook plugin:
 [plugins.notify]
 command = "./scripts/notify.sh"
 args = ["--quiet"]
+windows-command = "./scripts/notify.bat"   # optional: used instead of `command` on Windows
+windows-args = ["--quiet"]                 # optional: used instead of `args` on Windows
 hooks = ["post-build"]
 env = { KEY = "value" }
 ```
 
-Hooks: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run`, `post-package`.
+Hooks: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run`, `post-package`. On Windows a `command` ending in `.sh` runs through `sh`.
 
 ## `[tasks]`
 
@@ -203,7 +207,11 @@ Hooks: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run`, `post-pack
 [tasks]
 simple = "echo hi"
 full = { run = ["cmd1", "cmd2"], description = "...", depends-on = ["simple"], env = { K = "v" }, cwd = "sub", hooks = ["pre-build"] }
+posix = { run = "echo $KARGO_PKG_NAME", shell = "sh" }
+portable = { run = "echo $KARGO_PKG_NAME", windows-run = "echo %KARGO_PKG_NAME%" }
 ```
+
+`shell` picks the shell the commands run in: `sh`, `bash`, `cmd`, `powershell` or `pwsh`. The default is `sh` on Unix and `cmd` on Windows. `windows-run` (a command or a list) replaces `run` on Windows. When it is not set, `run` is used on every platform.
 
 See [Tasks and plugins](../../guides/tasks-and-plugins/).
 

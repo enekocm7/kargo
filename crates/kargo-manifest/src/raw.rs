@@ -295,8 +295,10 @@ struct RawPlugin {
     #[serde(default)]
     options: BTreeMap<String, String>,
     command: Option<String>,
+    windows_command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    windows_args: Option<Vec<String>>,
     #[serde(default)]
     hooks: Vec<String>,
     #[serde(default)]
@@ -308,6 +310,8 @@ struct RawPlugin {
 struct RawTask {
     description: Option<String>,
     run: Option<Value>,
+    windows_run: Option<Value>,
+    shell: Option<String>,
     #[serde(default)]
     depends_on: Vec<String>,
     #[serde(default)]
@@ -315,6 +319,24 @@ struct RawTask {
     cwd: Option<PathBuf>,
     #[serde(default)]
     hooks: Vec<String>,
+}
+
+/// Parses a task's `run` or `windows-run`: a string or an array of strings.
+fn parse_run(task: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<String>>> {
+    Ok(match value {
+        None => None,
+        Some(Value::String(s)) => Some(vec![s]),
+        Some(Value::Array(items)) => Some(
+            items
+                .into_iter()
+                .map(|v| match v {
+                    Value::String(s) => Ok(s),
+                    _ => bail!("task `{task}`: `{key}` entries must be strings"),
+                })
+                .collect::<Result<_>>()?,
+        ),
+        Some(_) => bail!("task `{task}`: `{key}` must be a string or an array of strings"),
+    })
 }
 
 fn parse_dependency(name: &str, value: &Value, section: &str) -> Result<Dependency> {
@@ -611,8 +633,15 @@ impl RawManifest {
             let raw: RawPlugin = value.clone().try_into().with_context(|| format!("invalid plugin `{name}`"))?;
             match (&raw.maven, &raw.command) {
                 (Some(maven), None) => {
-                    if !raw.hooks.is_empty() || !raw.args.is_empty() || !raw.env.is_empty() {
-                        bail!("plugin `{name}`: `hooks`, `args` and `env` only apply to `command` plugins");
+                    if !raw.hooks.is_empty()
+                        || !raw.args.is_empty()
+                        || !raw.env.is_empty()
+                        || raw.windows_command.is_some()
+                        || raw.windows_args.is_some()
+                    {
+                        bail!(
+                            "plugin `{name}`: `hooks`, `args`, `env`, `windows-command` and `windows-args` only apply to `command` plugins"
+                        );
                     }
                     let artifact: CoordSpec = maven.parse().with_context(|| format!("invalid plugin `{name}`"))?;
                     if artifact.version.is_none() {
@@ -633,12 +662,17 @@ impl RawManifest {
                     process_plugins.push(ProcessPlugin {
                         name: name.clone(),
                         command: command.clone(),
+                        windows_command: raw.windows_command,
                         args: raw.args,
+                        windows_args: raw.windows_args,
                         hooks: parse_hooks(&raw.hooks, &format!("plugin `{name}`"))?,
                         env: raw.env,
                     });
                 }
                 (Some(_), Some(_)) => bail!("plugin `{name}`: specify either `maven` or `command`, not both"),
+                (None, None) if raw.windows_command.is_some() => {
+                    bail!("plugin `{name}`: `windows-command` needs a `command` to use on other platforms")
+                }
                 (None, None) => bail!("plugin `{name}`: specify `maven = \"group:artifact:version\"` or `command = \"...\"`"),
             }
         }
@@ -653,17 +687,17 @@ impl RawManifest {
                 Value::Table(_) => value.clone().try_into().with_context(|| format!("invalid task `{name}`"))?,
                 _ => bail!("invalid task `{name}`: expected a command string or a table"),
             };
-            let run = match raw.run {
-                None => Vec::new(),
-                Some(Value::String(s)) => vec![s],
-                Some(Value::Array(items)) => items
-                    .into_iter()
-                    .map(|v| match v {
-                        Value::String(s) => Ok(s),
-                        _ => bail!("task `{name}`: `run` entries must be strings"),
-                    })
-                    .collect::<Result<_>>()?,
-                Some(_) => bail!("task `{name}`: `run` must be a string or an array of strings"),
+            let run = parse_run(name, "run", raw.run)?.unwrap_or_default();
+            let windows_run = parse_run(name, "windows-run", raw.windows_run)?;
+            if windows_run.is_some() && run.is_empty() {
+                bail!("task `{name}`: `windows-run` needs a `run` to use on other platforms");
+            }
+            let shell = match raw.shell.as_deref() {
+                None => None,
+                Some(s) => Some(TaskShell::parse(s).with_context(|| {
+                    let known: Vec<_> = TaskShell::ALL.iter().map(|s| s.as_str()).collect();
+                    format!("task `{name}`: unknown shell `{s}`; expected one of {}", known.join(", "))
+                })?),
             };
             if run.is_empty() && raw.depends_on.is_empty() {
                 bail!("task `{name}` has nothing to do: add `run` or `depends-on`");
@@ -674,6 +708,8 @@ impl RawManifest {
                     name: name.clone(),
                     description: raw.description,
                     run,
+                    windows_run,
+                    shell,
                     depends_on: raw.depends_on,
                     env: raw.env,
                     cwd: raw.cwd,

@@ -13,6 +13,7 @@ kargo-manifest.workspace = true
 kargo-toolchain.workspace = true
 anyhow.workspace = true
 anstyle.workspace = true
+roxmltree.workspace = true
 walkdir.workspace = true
 serde_json.workspace = true
 zip.workspace = true

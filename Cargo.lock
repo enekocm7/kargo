@@ -468,6 +468,7 @@ dependencies = [
  "kargo-util",
  "predicates",
  "tempfile",
+ "zip",
 ]
 
 [[package]]
@@ -480,6 +481,7 @@ dependencies = [
  "kargo-maven",
  "kargo-toolchain",
  "kargo-util",
+ "roxmltree",
  "serde_json",
  "tempfile",
  "walkdir",

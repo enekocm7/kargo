@@ -15,7 +15,7 @@ These work with every command.
 | `-q`, `--quiet` | Don't print Kargo's status messages |
 | `--offline` | Never use the network (also `KARGO_OFFLINE=1`) |
 | `--locked` | Fail if `kargo.lock` would need to change |
-| `--refresh` | Ignore cached metadata and `kargo.lock`, and re-check repositories |
+| `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
 | `-V`, `--version` | Print the version |
 | `-h`, `--help` | Print help |
@@ -51,6 +51,8 @@ kargo new api -w ktor,serialization --group io.acme
 ```
 
 The generated code lives in the package `<group>.<name>`, with the name lowercased and every character other than a letter or digit replaced by `_` (`my-app` becomes `com.example.my_app`). A segment that is a Kotlin or Java keyword gets a `_` suffix, so `kargo new class` uses `com.example.class_`.
+
+Kargo runs `git init` in the new directory when `git` is on the `PATH`, unless you pass `--no-vcs` or the directory is already inside a git repository (a monorepo or an `examples/` folder), in which case the project joins that repository instead of nesting a new one. A `.gitignore` is written either way, unless one already exists.
 
 ## `kargo init`
 

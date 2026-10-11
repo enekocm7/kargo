@@ -11,7 +11,7 @@ Kotlin/Native compiles Kotlin to machine code. The result is a self-contained ex
 [target.native]
 platforms = ["host"]       # the machine you're building on
 kind = "executable"        # or "library", "shared", "static"
-# entry-point = "com.example.app.main"   # defaults to `main`
+# entry-point = "com.example.app.main"   # defaults to the top-level `fun main`
 # linker-options = ["-lcurl"]
 ```
 

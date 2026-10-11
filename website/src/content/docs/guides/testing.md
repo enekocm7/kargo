@@ -52,7 +52,7 @@ On the JVM every class in `tests/` and `tests-jvm/` is scanned, whatever its nam
 
 ## Filtering tests
 
-The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on the JVM and on Native:
+The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on the JVM, Native and Android:
 
 | Filter | Runs |
 |---|---|

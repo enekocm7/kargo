@@ -74,6 +74,36 @@ pub fn slash(path: &Path) -> String {
     if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
 }
 
+/// Finds a POSIX shell (`sh` or `bash`) to run scripts with. On Windows this
+/// skips the WSL launcher and falls back to the shell bundled with Git for
+/// Windows, which is usually not on `PATH`.
+pub fn find_posix_shell(name: &str) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return find_on_path(name);
+    }
+    let is_wsl_launcher = |p: &Path| {
+        let p = p.to_string_lossy().to_lowercase();
+        p.contains("\\system32\\") || p.contains("\\windowsapps\\")
+    };
+    if let Some(found) = find_on_path(name).filter(|p| !is_wsl_launcher(p)) {
+        return Some(found);
+    }
+    // git.exe lives in Git\cmd, Git\bin or Git\mingw64\bin; sh.exe in Git\bin or Git\usr\bin.
+    let mut roots: Vec<PathBuf> =
+        find_on_path("git").map(|git| git.ancestors().skip(1).take(3).map(Path::to_path_buf).collect()).unwrap_or_default();
+    for var in ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"] {
+        if let Some(dir) = std::env::var_os(var).map(PathBuf::from) {
+            roots.push(dir.join("Git"));
+            roots.push(dir.join("Programs").join("Git"));
+        }
+    }
+    roots
+        .iter()
+        .flat_map(|root| [root.join("bin"), root.join("usr").join("bin")])
+        .map(|dir| dir.join(format!("{name}.exe")))
+        .find(|p| p.is_file())
+}
+
 /// Finds an executable on `PATH`, honoring `PATHEXT` on Windows.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;

@@ -34,6 +34,22 @@ fn new_creates_a_project() {
 }
 
 #[test]
+fn new_inside_a_git_repository_does_not_nest_one() {
+    let Some(git) = common::which("git") else { return };
+    let p = Project::new();
+    let status = std::process::Command::new(git).args(["init", "--quiet"]).current_dir(p.path()).status().unwrap();
+    assert!(status.success());
+    // Run from a subdirectory so the relative path never names the repository root.
+    let sub = p.path().join("examples");
+    std::fs::create_dir_all(&sub).unwrap();
+    p.kargo().current_dir(&sub).args(["new", "todo-cli"]).assert().success();
+    let root = sub.join("todo-cli");
+    assert!(root.join("kargo.toml").is_file());
+    assert!(root.join(".gitignore").is_file());
+    assert!(!root.join(".git").exists(), "nested repository created inside an existing one");
+}
+
+#[test]
 fn new_rejects_invalid_input() {
     let p = Project::new();
     p.kargo().args(["new", "9lives", "--no-vcs"]).assert().failure().stderr(predicate::str::contains("must start with a letter"));
@@ -175,6 +191,42 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
 }
 
 #[test]
+fn corrupt_cached_artifact_is_redownloaded_before_locking() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "corrupt",
+            &format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url()),
+        ),
+    );
+    let cached = p.home.path().join("cache/maven/g/lib/1.0/lib-1.0.jar");
+    let corrupt = || {
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, "truncated garbage").unwrap();
+    };
+
+    // A garbage jar already in the cache is replaced before its hash is locked.
+    corrupt();
+    p.kargo().args(["tree", "--offline"]).assert().success().stderr(predicate::str::contains("downloading it again"));
+    assert_eq!(std::fs::read_to_string(&cached).unwrap(), "jar g:lib 1.0");
+    let lock = p.read("kargo.lock");
+
+    // Re-downloading from the lockfile matches the recorded hash.
+    std::fs::remove_file(&cached).unwrap();
+    p.kargo().args(["tree", "--offline"]).assert().success();
+    assert_eq!(p.read("kargo.lock"), lock);
+
+    // --refresh heals a cached file that went bad after locking.
+    corrupt();
+    p.kargo().args(["tree", "--offline", "--refresh"]).assert().success();
+    assert_eq!(std::fs::read_to_string(&cached).unwrap(), "jar g:lib 1.0");
+    assert_eq!(p.read("kargo.lock"), lock);
+}
+
+#[test]
 fn offline_mode_reports_missing_artifacts() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("off", "[dependencies]\n\"never:seen\" = \"1.0\"\n"));
@@ -309,6 +361,36 @@ fn toolchain_list_and_remove() {
     p.kargo().args(["toolchain", "remove", "native", "2.4.21"]).assert().failure().stderr(predicate::str::contains("not installed"));
     let out = String::from_utf8(p.kargo().args(["toolchain", "ls"]).assert().success().get_output().stdout.clone()).unwrap();
     assert!(!out.contains("jdk-17.0.12+7") && !out.contains("2.4.21"), "{out}");
+}
+
+#[test]
+fn old_kotlin_on_new_jdk_fails_early() {
+    let p = Project::new();
+    fake_jdk(p.home.path(), "jdk-25.0.1+8", 25);
+    p.file(
+        "src/Main.kt",
+        "fun main() {}
+",
+    );
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "old",
+            "[kotlin]
+version = \"2.1.0\"
+
+[toolchain]
+jdk = \"25\"
+",
+        ),
+    );
+    p.kargo()
+        .args(["build", "--offline"])
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("Kotlin 2.1.0 cannot run on JDK 25"))
+        .stderr(predicate::str::contains("[toolchain] jdk = \"21\""))
+        .stderr(predicate::str::contains("Compiling").not());
 }
 
 #[test]

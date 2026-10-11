@@ -67,3 +67,4 @@ clap.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
+zip.workspace = true

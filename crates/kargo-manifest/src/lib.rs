@@ -371,9 +371,25 @@ impl FromStr for Hook {
 pub struct ProcessPlugin {
     pub name: String,
     pub command: String,
+    /// Replaces `command` on Windows when set.
+    pub windows_command: Option<String>,
     pub args: Vec<String>,
+    /// Replaces `args` on Windows when set.
+    pub windows_args: Option<Vec<String>>,
     pub hooks: Vec<Hook>,
     pub env: BTreeMap<String, String>,
+}
+
+impl ProcessPlugin {
+    /// The command for the current platform: `windows-command` on Windows if set, else `command`.
+    pub fn platform_command(&self) -> &str {
+        self.windows_command.as_deref().filter(|_| cfg!(windows)).unwrap_or(&self.command)
+    }
+
+    /// The arguments for the current platform: `windows-args` on Windows if set, else `args`.
+    pub fn platform_args(&self) -> &[String] {
+        self.windows_args.as_deref().filter(|_| cfg!(windows)).unwrap_or(&self.args)
+    }
 }
 
 /// A user-defined task.
@@ -383,11 +399,55 @@ pub struct Task {
     pub description: Option<String>,
     /// Shell commands, run in order.
     pub run: Vec<String>,
+    /// Replaces `run` on Windows when set.
+    pub windows_run: Option<Vec<String>>,
+    /// The shell the commands run in; `None` is the platform shell (`sh` on Unix, `cmd` on Windows).
+    pub shell: Option<TaskShell>,
     pub depends_on: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<PathBuf>,
     /// Built-in hooks this task attaches to.
     pub hooks: Vec<Hook>,
+}
+
+/// A shell a task can choose with `shell = "..."`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskShell {
+    Sh,
+    Bash,
+    Cmd,
+    PowerShell,
+    Pwsh,
+}
+
+impl TaskShell {
+    pub const ALL: [TaskShell; 5] = [TaskShell::Sh, TaskShell::Bash, TaskShell::Cmd, TaskShell::PowerShell, TaskShell::Pwsh];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskShell::Sh => "sh",
+            TaskShell::Bash => "bash",
+            TaskShell::Cmd => "cmd",
+            TaskShell::PowerShell => "powershell",
+            TaskShell::Pwsh => "pwsh",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|shell| shell.as_str() == s)
+    }
+
+    /// The shell used when a task doesn't set one.
+    pub fn platform_default() -> Self {
+        if cfg!(windows) { TaskShell::Cmd } else { TaskShell::Sh }
+    }
+}
+
+impl Task {
+    /// The commands for the current platform: `windows-run` on Windows if set, else `run`.
+    pub fn platform_run(&self) -> &[String] {
+        self.windows_run.as_deref().filter(|_| cfg!(windows)).unwrap_or(&self.run)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

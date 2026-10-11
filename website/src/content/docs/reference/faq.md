@@ -31,16 +31,20 @@ Not yet. Each `kargo.toml` describes one package.
 
 Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one.
 
+### `Kotlin ... cannot run on JDK ...`
+
+Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.10 or newer, or add `[toolchain] jdk = "21"` so Kargo builds with JDK 21. See [Older Kotlin versions on new JDKs](../../guides/toolchains/#older-kotlin-versions-on-new-jdks).
+
 ### `could not determine the main class`
 
-Kargo looks for a top-level Kotlin `fun main`. If there's more than one, or none, set it explicitly:
+Kargo looks for a top-level Kotlin `fun main`, or a `@JvmStatic fun main` in an `object` or `companion object`. The message says why detection failed: ``no `main` function found``, or ``found multiple `main` functions`` followed by the classes it found. Set the main class explicitly:
 
 ```toml
 [target.jvm]
 main-class = "com.example.app.MainKt"
 ```
 
-The class of a top-level function in `Main.kt` is `MainKt`. If your `main` is in a Java class, give its fully qualified name, such as `com.example.app.App`. Kargo doesn't look for `main` in Java files.
+The class of a top-level function in `Main.kt` is `MainKt`; for `object Cli { @JvmStatic fun main(...) }` it is `Cli`. If your `main` is in a Java class, give its fully qualified name, such as `com.example.app.App`. Kargo doesn't look for `main` in Java files.
 
 ### `Node.js is required to run Kotlin/Wasm programs`
 
@@ -74,6 +78,10 @@ Add `"host"` to `[target.native] platforms` to run locally.
 
 `kargo test` compiled your JVM tests but the JUnit Platform found nothing to run. Without a filter, check that test functions carry `@Test` (from `kotlin.test` or JUnit) and that the engine of any other framework (for example `io.kotest:kotest-runner-junit5`) is in `[dev-dependencies]`. With a filter, remember that it matches `package.Class.method` names; see [Filtering tests](../../guides/testing/#filtering-tests).
 
+### A task prints `$KARGO_PKG_NAME` literally on Windows, or a plugin fails with `not a valid Win32 application`
+
+Tasks run in `cmd` on Windows, which doesn't understand `$VAR`, `mkdir -p` or `./script.sh`. Add `shell = "sh"` to the task to run it in Git for Windows' `sh` everywhere, or give Windows its own commands with `windows-run`. A hook plugin's `.sh` script runs through `sh` automatically; for any other non-executable `command`, set `windows-command`. See [Tasks and plugins](../../guides/tasks-and-plugins/#windows).
+
 ### A dependency has the wrong version
 
 Run `kargo tree --duplicates` to see who asks for what. The highest requested version wins; add `force = true` to your own declaration to pin one.
@@ -91,4 +99,8 @@ kargo clean                 # remove build output
 kargo build --refresh       # re-check repositories, ignoring cached metadata and kargo.lock
 ```
 
-Use `-v` to see the exact commands Kargo runs.
+`--refresh` also re-verifies cached artifacts against the repository's checksums and downloads corrupt ones again. Use `-v` to see the exact commands Kargo runs.
+
+### "checksum mismatch" for a locked artifact
+
+A re-downloaded file doesn't match the SHA-256 in `kargo.lock`. Read the rest of the message: if the download matches the checksum the repository publishes, the lockfile entry is the suspect and `kargo update` re-locks it. If the repository publishes no checksum, find out why the artifact changed before you re-lock. See [Checksum mismatches](../lockfile/#checksum-mismatches).
