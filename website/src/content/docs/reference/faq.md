@@ -17,6 +17,10 @@ Yes. Anything on Maven Central or in a repository you add in `[repositories]`, i
 
 There's no IDE plugin yet. IntelliJ IDEA and VS Code still highlight Kotlin files, but dependency-aware completion needs a build model the IDE understands. For Android, you can open the generated `target/android` project in Android Studio.
 
+### Can I use Java?
+
+Yes, on the JVM and Android. `.java` files next to your Kotlin files are compiled together with them, and Kotlin and Java can call each other. Java isn't compiled for Wasm or Native. See [Java interop](../../getting-started/project-layout/#java-interop).
+
 ### Are multi-module projects supported?
 
 Not yet. Each `kargo.toml` describes one package.
@@ -29,14 +33,14 @@ Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` an
 
 ### `could not determine the main class`
 
-Kargo looks for a top-level `fun main`. If there's more than one, or none, set it explicitly:
+Kargo looks for a top-level Kotlin `fun main`. If there's more than one, or none, set it explicitly:
 
 ```toml
 [target.jvm]
 main-class = "com.example.app.MainKt"
 ```
 
-The class of a top-level function in `Main.kt` is `MainKt`.
+The class of a top-level function in `Main.kt` is `MainKt`. If your `main` is in a Java class, give its fully qualified name, such as `com.example.app.App`. Kargo doesn't look for `main` in Java files.
 
 ### `Node.js is required to run Kotlin/Wasm programs`
 

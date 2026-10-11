@@ -58,7 +58,7 @@ android/             AndroidManifest.xml, res/, assets/
 target/              build output: target/<debug|release>/<target>/
 ```
 
-`expect` declarations in `src/` can have `actual` implementations in `src-<target>/`.
+`expect` declarations in `src/` can have `actual` implementations in `src-<target>/`. On the JVM, `.java` files next to your Kotlin files are compiled together with them (set `[target.jvm] main-class` if your `main` is in Java).
 
 ## `kargo.toml`
 
@@ -77,7 +77,7 @@ compiler-args = ["-Xcontext-parameters"]
 # Targets: no [target] section means a JVM project.
 [target.jvm]
 jvm-target = "17"
-# main-class = "com.example.MainKt"   # detected from `fun main` when omitted
+# main-class = "com.example.MainKt"   # detected from a Kotlin `fun main`; set it for a Java main
 # jvm-args = ["-Xmx1g"]
 
 [target.wasm]

@@ -44,9 +44,63 @@ See [Multiplatform projects](../../guides/multiplatform/) for a complete example
 
 Subdirectories are fine. You don't need to mirror the package name in the folder structure, but it's a good habit.
 
-## Java sources
+## Java interop
 
-On the JVM, `.java` files in `src/` and `src-jvm/` are compiled together with Kotlin, so Kotlin can call Java and Java can call Kotlin.
+On the JVM, `.java` files in `src/` and `src-jvm/` are compiled together with Kotlin. Kotlin can call Java and Java can call Kotlin, and there is nothing to configure.
+
+```java title="src/com/example/app/Greeter.java"
+package com.example.app;
+
+public class Greeter {
+    public static String greet(String name) {
+        return "Hello from Java, " + name + "!";
+    }
+}
+```
+
+```kotlin title="src/Main.kt"
+package com.example.app
+
+fun main() {
+    println(Greeter.greet("Kotlin"))
+}
+```
+
+Kargo runs the Kotlin compiler first, with the Java sources on its input so Kotlin can see them. Then it runs `javac` on the Java files with the Kotlin output and your dependencies on the classpath. `javac` compiles with `--release` set to your `jvm-target`, so Java and Kotlin always agree on the bytecode level.
+
+### Java entry points
+
+Kargo only looks for a Kotlin `fun main`. If your `main` is in a Java class, name it in the manifest, otherwise `kargo run` stops with `could not determine the main class`:
+
+```toml title="kargo.toml"
+[target.jvm]
+main-class = "com.example.app.App"
+```
+
+### Java tests
+
+`.java` files in `tests/` and `tests-jvm/` are compiled and run on the JUnit Platform, so JUnit 5 tests work as they are:
+
+```java title="tests/GreeterTest.java"
+import com.example.app.Greeter;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class GreeterTest {
+    @Test
+    void greets() {
+        assertEquals("Hello from Java, Kargo!", Greeter.greet("Kargo"));
+    }
+}
+```
+
+### Good to know
+
+- **A full JDK is required.** If the JDK has no `javac` (a JRE-only install, for example), the build fails and tells you to install a full JDK. Pin one with `[toolchain] jdk = "21"` and Kargo downloads a Temurin JDK, which includes `javac`.
+- **Java is for the JVM and Android.** The Wasm and Native targets only compile `.kt` files and ignore `.java` files. In a multiplatform project, keep Java in `src-jvm/` so that common code in `src/` doesn't depend on it. On Android, the generated Gradle project compiles the Java files in `src/` and `src-android/`.
+- **Annotation processing is off by default.** `javac` runs with `-proc:none`. The `lombok` [framework](../../guides/frameworks/) turns annotation processing on for the main sources. You can't register your own processors yet, and processors don't run for tests.
+- **Java-only projects work.** The Kotlin compiler step is skipped when there are no `.kt` files. But `kargo new` always creates Kotlin templates, and you must set `main-class` yourself.
+- **Compile errors** come straight from `javac`, followed by `could not compile Java sources of ... due to previous errors`.
 
 ## Output
 

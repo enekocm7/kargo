@@ -58,7 +58,7 @@ With no `[target.*]` section, the project targets the JVM with default settings.
 ```toml
 [target.jvm]
 jvm-target = "17"                       # default "17"
-main-class = "com.example.app.MainKt"   # default: detected from `fun main`
+main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun main`; set it for a Java main
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 ```
 
