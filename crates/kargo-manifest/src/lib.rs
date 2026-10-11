@@ -39,8 +39,9 @@ pub const LOCKFILE_NAME: &str = "kargo.lock";
 
 /// Default Kotlin version for new projects.
 pub const DEFAULT_KOTLIN_VERSION: &str = "2.4.21";
-/// Default JVM bytecode target.
-pub const DEFAULT_JVM_TARGET: &str = "17";
+/// Default JVM bytecode target. When `jvm-target` is not set, it is lowered to
+/// the version of the JDK that builds the project if that JDK is older.
+pub const DEFAULT_JVM_TARGET: &str = "25";
 
 /// A compilation target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -162,9 +163,22 @@ pub struct KotlinSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JvmTarget {
     pub jvm_target: String,
+    /// Whether `jvm-target` was written in `kargo.toml` (otherwise it is the default).
+    pub jvm_target_set: bool,
     pub main_class: Option<String>,
     pub jvm_args: Vec<String>,
     pub dependencies: Vec<Dependency>,
+}
+
+impl JvmTarget {
+    /// The bytecode target to compile for with a JDK of major version `jdk`: the
+    /// configured `jvm-target`, or the default lowered to `jdk` when that JDK is older.
+    pub fn target_for(&self, jdk: u32) -> String {
+        match self.jvm_target.parse::<u32>() {
+            Ok(default) if !self.jvm_target_set && jdk < default => jdk.to_string(),
+            _ => self.jvm_target.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
