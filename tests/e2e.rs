@@ -222,6 +222,82 @@ fn check_type_checks_without_packaging() {
 }
 
 #[test]
+fn doc_generates_html_from_kdoc() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["lib", "--lib"]);
+    t.kargo("lib")
+        .arg("doc")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Documenting lib v0.1.0 (jvm)"))
+        .stderr(predicate::str::contains("Generated"));
+    let page = std::fs::read_to_string(t.dir.path().join("lib/target/debug/doc/lib/com.example.lib/greeting.html")).unwrap();
+    assert!(page.contains("Returns a friendly greeting."));
+
+    // Several targets: `src/` becomes a common source set, `src-<target>/` the platform ones.
+    t.create(&["mpp-doc", "--lib", "--target", "jvm,wasm"]);
+    t.write("mpp-doc/src/Platform.kt", "package com.example.mpp_doc\n\n/** The platform name. */\nexpect fun platform(): String\n");
+    t.write("mpp-doc/src-jvm/Platform.kt", "package com.example.mpp_doc\n\nactual fun platform() = \"jvm\"\n");
+    t.write("mpp-doc/src-wasm/Platform.kt", "package com.example.mpp_doc\n\nactual fun platform() = \"wasm\"\n");
+    t.write("mpp-doc/docs/module.md", "# Module mpp-doc\n\nDocumented on every platform.\n");
+    let manifest = t.dir.path().join("mpp-doc/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text}\n[doc]\nincludes = [\"docs/module.md\"]\n")).unwrap();
+    t.kargo("mpp-doc").arg("doc").assert().success().stderr(predicate::str::contains("(common, jvm, wasm)"));
+    let index = std::fs::read_to_string(t.dir.path().join("mpp-doc/target/debug/doc/index.html")).unwrap();
+    assert!(index.contains("Documented on every platform."));
+}
+
+#[test]
+fn doc_android_library() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs Gradle and the Android SDK)");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["droid-doc", "--lib", "--target", "android"]);
+    t.write(
+        "droid-doc/src-android/Toasts.kt",
+        "package com.example.droid_doc\n\nimport android.content.Context\n\n/** Shows [text] in a toast. */\nfun toast(context: Context, text: String) =\n    android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()\n",
+    );
+    t.kargo("droid-doc").arg("doc").assert().success().stderr(predicate::str::contains("Documenting droid-doc v0.1.0 (android)"));
+    let page = std::fs::read_to_string(t.dir.path().join("droid-doc/target/debug/doc/droid-doc/com.example.droid_doc/toast.html")).unwrap();
+    assert!(page.contains("Shows"));
+    // `android.jar` is on the classpath, so `Context` resolves and links to the Android reference.
+    assert!(page.contains("developer.android.com/reference/kotlin/android/content/Context"), "{page}");
+}
+
+#[test]
+fn wasm_installs_npm_packages_of_dependencies() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["dt", "--target", "wasm"]);
+    // kotlinx-datetime imports the npm package @js-joda/core on Wasm.
+    t.kargo("dt").args(["add", "org.jetbrains.kotlinx:kotlinx-datetime:0.7.1"]).assert().success();
+    t.kargo("dt").args(["add", "org.jetbrains.kotlinx:kotlinx-serialization-core:1.9.0"]).assert().success();
+    t.write(
+        "dt/src/Main.kt",
+        "package com.example.dt\n\nimport kotlinx.datetime.*\n\nfun greeting(n: String) = \"Hello, $n!\"\n\n\
+         fun main() = println(LocalDate(2024, 1, 31).plus(1, DateTimeUnit.MONTH))\n",
+    );
+    t.kargo("dt")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installing npm packages @js-joda/core@"))
+        .stdout(predicate::str::contains("2024-02-29"));
+    assert!(t.dir.path().join("dt/target/debug/node_modules/@js-joda/core").is_dir());
+    // Already installed: no second `npm install`.
+    t.kargo("dt").arg("run").assert().success().stderr(predicate::str::contains("Installing").not());
+}
+
+#[test]
 fn spring_boot_with_lombok() {
     require_e2e!();
     let t = E2e::new();

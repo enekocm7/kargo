@@ -62,7 +62,7 @@ jobs:
 
 ### Wasm
 
-Add Node.js so Wasm tests can run:
+Add Node.js so Wasm tests can run. It also provides npm, which Kargo uses to install [npm packages](../wasm/#npm-packages) for Wasm dependencies (pnpm and bun work too):
 
 ```yaml
       - uses: actions/setup-node@v4

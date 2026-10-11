@@ -15,6 +15,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo check [--tests]` | `kargo check [--tests]` | Skips packaging and linking; JVM still writes classes |
 | `cargo run -- args` | `kargo run -- args` | |
 | `cargo test [filter]` | `kargo test [filter]` | |
+| `cargo doc [--open]` | `kargo doc [--open]` | Runs Dokka on your KDoc comments |
 | `cargo add serde` | `kargo add group:artifact` | Maven coordinates instead of crate names |
 | `cargo add --dev` | `kargo add --dev` | |
 | `cargo add -F derive serde` | `kargo add -F serialization` | Kargo's `-F` enables built-in **frameworks** |

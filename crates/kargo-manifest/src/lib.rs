@@ -183,9 +183,51 @@ impl WasmEnvironment {
     }
 }
 
+/// The tool that installs the npm packages Wasm libraries need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageManager {
+    Npm,
+    Pnpm,
+    Bun,
+}
+
+impl PackageManager {
+    /// Tried in this order when `package-manager` is not set.
+    pub const ALL: [PackageManager; 3] = [PackageManager::Npm, PackageManager::Pnpm, PackageManager::Bun];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PackageManager::Npm => "npm",
+            PackageManager::Pnpm => "pnpm",
+            PackageManager::Bun => "bun",
+        }
+    }
+}
+
+impl fmt::Display for PackageManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PackageManager {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "npm" => Ok(PackageManager::Npm),
+            "pnpm" => Ok(PackageManager::Pnpm),
+            "bun" => Ok(PackageManager::Bun),
+            other => bail!("unknown wasm package-manager `{other}` (expected `npm`, `pnpm` or `bun`)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmTarget {
     pub environment: WasmEnvironment,
+    /// `None` picks the first of npm, pnpm and bun found on `PATH`.
+    pub package_manager: Option<PackageManager>,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -507,6 +549,19 @@ pub struct ToolchainSettings {
     pub jdk: JdkRequest,
 }
 
+/// `[doc]`: options for `kargo doc` (Dokka).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DocSettings {
+    /// Dokka version; `None` uses Kargo's pinned default.
+    pub dokka_version: Option<String>,
+    /// Markdown files with module and package documentation, relative to the project root.
+    pub includes: Vec<PathBuf>,
+    /// Base URL of the source tree (e.g. `https://github.com/me/repo/blob/main`), without a trailing slash.
+    pub source_link: Option<String>,
+    /// Documentation sites of dependencies to link to.
+    pub external_links: Vec<String>,
+}
+
 /// A fully validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -523,6 +578,7 @@ pub struct Manifest {
     pub dev_profile: Profile,
     pub release_profile: Profile,
     pub toolchain: ToolchainSettings,
+    pub doc: DocSettings,
 }
 
 impl Manifest {

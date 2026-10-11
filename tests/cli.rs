@@ -34,6 +34,22 @@ fn new_creates_a_project() {
 }
 
 #[test]
+fn new_inside_a_git_repository_does_not_nest_one() {
+    let Some(git) = common::which("git") else { return };
+    let p = Project::new();
+    let status = std::process::Command::new(git).args(["init", "--quiet"]).current_dir(p.path()).status().unwrap();
+    assert!(status.success());
+    // Run from a subdirectory so the relative path never names the repository root.
+    let sub = p.path().join("examples");
+    std::fs::create_dir_all(&sub).unwrap();
+    p.kargo().current_dir(&sub).args(["new", "todo-cli"]).assert().success();
+    let root = sub.join("todo-cli");
+    assert!(root.join("kargo.toml").is_file());
+    assert!(root.join(".gitignore").is_file());
+    assert!(!root.join(".git").exists(), "nested repository created inside an existing one");
+}
+
+#[test]
 fn new_rejects_invalid_input() {
     let p = Project::new();
     p.kargo().args(["new", "9lives", "--no-vcs"]).assert().failure().stderr(predicate::str::contains("must start with a letter"));
@@ -306,6 +322,33 @@ fn android_requires_manifest_file() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\n"));
     p.kargo().args(["build", "--target", "android"]).assert().failure().stderr(predicate::str::contains("AndroidManifest.xml"));
+}
+
+#[test]
+fn doc_reports_what_it_cannot_document() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("nodocs", "[target.jvm]\n"));
+    p.kargo().arg("doc").assert().failure().code(101).stderr(predicate::str::contains("no Kotlin or Java sources to document"));
+    p.kargo().args(["doc", "--target", "native"]).assert().failure().stderr(predicate::str::contains("not enabled"));
+}
+
+#[test]
+fn doc_android_uses_the_generated_gradle_project() {
+    // Android's classpath comes from Gradle, so the usual Android checks apply first.
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.kargo().arg("doc").assert().failure().code(101).stderr(predicate::str::contains("AndroidManifest.xml"));
+}
+
+#[test]
+fn doc_section_is_validated() {
+    let p = Project::new();
+    p.file("src/Lib.kt", "fun f() = 1\n");
+    p.file("kargo.toml", &manifest("docs", "[doc]\nsource-link = \"github.com/me/docs\"\n"));
+    p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("`source-link` must be an http(s):// URL"));
+    p.file("kargo.toml", &manifest("docs", "[doc]\nformat = \"html\"\n"));
+    p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("unknown field `format`"));
 }
 
 #[test]

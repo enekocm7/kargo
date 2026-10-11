@@ -108,3 +108,4 @@ Using a JVM-only library in `src/` fails to compile on the other targets. That's
 - Keep business logic in `src/` and put only the thin platform layer in `src-<target>/`.
 - Prefer multiplatform libraries ([klibs.io](https://klibs.io) lists them) over `java.*` APIs in common code. For example, use `kotlinx-datetime` instead of `java.time`, and `okio` or `kotlinx-io` for files.
 - Tests in `tests/` run on every target, which is a cheap way to catch platform differences.
+- `kargo doc` documents `src/` as common code and shows which platforms each declaration is available on. See [API documentation](../documentation/).

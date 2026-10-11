@@ -18,7 +18,7 @@ Kargo has four extension points:
 [tasks]
 fmt = "ktlint -F \"src/**/*.kt\""
 gen = { run = ["mkdir -p build", "./gen.sh"], description = "Generate code", hooks = ["pre-build"] }
-docs = { run = "dokka-cli ...", cwd = "docs", env = { DOKKA_OUTPUT = "out" } }
+site = { run = "mkdocs build", cwd = "website", env = { SITE_URL = "https://example.com" } }
 ci = { depends-on = ["fmt", "gen"], run = "kargo test --locked" }
 ```
 

@@ -15,8 +15,8 @@ use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
-use kargo_compiler::testreport::{self, TestSummary};
-use kargo_compiler::wasm::WasmCompilation;
+use kargo_compiler::testreport;
+use kargo_compiler::wasm::{WasmCompilation, npm_dependencies};
 use kargo_compiler::{Outcome, common_kotlin_args};
 use kargo_manifest::{Hook, NativeKind, Scope, TargetKind};
 use kargo_maven::Platform;
@@ -216,14 +216,19 @@ fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str) -> Result<boo
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.stdout(Stdio::piped()).spawn().with_context(|| format!("failed to start {label}"))?;
     let stdout = child.stdout.take().context("missing test stdout")?;
-    let summary = testreport::report(BufReader::new(stdout), anstream::stdout())?;
+    let mut summary = testreport::report(BufReader::new(stdout), anstream::stdout())?;
     let status = child.wait()?;
+    // Runners exit non-zero when a test failed; without a failed test that means a crash.
+    summary.crashed = !status.success() && summary.failed == 0;
+    if summary.crashed && !summary.ran_tests() {
+        ctx.shell().error(format!("{label} exited with {} before running any tests", process::describe_status(status)));
+        return Ok(false);
+    }
     testreport::print_summary(&summary, anstream::stdout())?;
-    let crashed = !status.success() && summary.success();
-    if crashed {
+    if summary.crashed {
         ctx.shell().error(format!("{label} exited with {}", process::describe_status(status)));
     }
-    Ok(summary.success() && !crashed && !(summary == TestSummary::default() && !status.success()))
+    Ok(summary.success())
 }
 
 fn file_url(path: &Path) -> String {
@@ -270,6 +275,11 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         debug: true,
     };
     unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Wasm), &|| compiling(ctx, TargetKind::Wasm, ", tests"))?;
+    // `build_wasm` installed the main npm packages one level up; dev-dependencies
+    // that need more get their own `node_modules` next to the test module.
+    if npm_dependencies(&unit.libraries)? != npm_dependencies(&wasm_libraries(ctx, &setup, false)?)? {
+        crate::npm::install(ctx, &unit.libraries, &unit.output)?;
+    }
     if opts.no_run {
         return Ok(true);
     }

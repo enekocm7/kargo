@@ -4,6 +4,7 @@ pub mod add;
 pub mod build;
 pub mod check;
 pub mod context;
+pub mod doc;
 pub mod new;
 pub mod run;
 pub mod test;

@@ -52,6 +52,8 @@ kargo new api -w ktor,serialization --group io.acme
 
 The generated code lives in the package `<group>.<name>`, with the name lowercased and every character other than a letter or digit replaced by `_` (`my-app` becomes `com.example.my_app`). A segment that is a Kotlin or Java keyword gets a `_` suffix, so `kargo new class` uses `com.example.class_`.
 
+Kargo runs `git init` in the new directory when `git` is on the `PATH`, unless you pass `--no-vcs` or the directory is already inside a git repository (a monorepo or an `examples/` folder), in which case the project joins that repository instead of nesting a new one. A `.gitignore` is written either way, unless one already exists.
+
 ## `kargo init`
 
 Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten.
@@ -132,6 +134,21 @@ kargo test [filter] [options]
 | `--no-run` | Compile tests but don't run them |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
+
+## `kargo doc` (`d`)
+
+Generate HTML API documentation from KDoc comments with Dokka, into `target/debug/doc/`.
+
+```sh
+kargo doc [--open] [-t <target>]
+```
+
+| Option | Meaning |
+|---|---|
+| `--open` | Open the documentation in a browser when it is generated (the browser in `BROWSER`, else the system default) |
+| `-t, --target <target>` | Only this target (repeatable); defaults to every enabled target |
+
+Configure it with [`[doc]`](../manifest/#doc). See [API documentation](../../guides/documentation/).
 
 ## `kargo add`
 

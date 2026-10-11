@@ -50,9 +50,12 @@ kargo build -t android              # debug APK in target/android/build/outputs/
 kargo build -t android --release    # release APK (or AAR for libraries)
 kargo run -t android                # install on the connected device and launch
 kargo test -t android               # local unit tests (testDebugUnitTest)
+kargo doc -t android                # API documentation in target/debug/doc/
 ```
 
 `kargo test -t android` compiles `tests/` and `tests-android/`, runs them with Gradle and prints one `test ... ok` line per test and a `test result:` summary, like the other targets. A failing test makes it exit with status `101`. If the project has test sources but Gradle runs no tests, Kargo reports an error instead of passing silently.
+
+`kargo doc -t android` documents `src/` and `src-android/` with Dokka, using the classpath Gradle resolves for the debug variant. See [API documentation](../documentation/#android).
 
 The generated project compiles Kotlin with the Kotlin Gradle plugin at your `[kotlin] version`, so Android code is compiled with the same Kotlin version as your other targets rather than the version bundled with AGP.
 

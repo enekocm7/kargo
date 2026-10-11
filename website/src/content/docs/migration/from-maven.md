@@ -138,6 +138,7 @@ Credentials that lived in `~/.m2/settings.xml` become environment variables name
 | `exec-maven-plugin` | `kargo run` or `[tasks]` |
 | `maven-surefire-plugin` | `kargo test` (JUnit Platform) |
 | `mvn dependency:tree` | `kargo tree` |
+| `dokka-maven-plugin` / `mvn javadoc:javadoc` | `kargo doc` |
 | `mvn -o` | `kargo --offline` |
 | `mvn versions:display-dependency-updates` | `kargo add group:artifact` (writes the latest release) |
 
