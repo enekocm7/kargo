@@ -19,7 +19,7 @@ use super::repo::{MavenClient, resolve_relative};
 use super::version::{Version, VersionReq};
 
 /// Bumped whenever resolution semantics change, invalidating locked results.
-pub const RESOLVER_VERSION: &str = "3";
+pub const RESOLVER_VERSION: &str = "4";
 
 /// An exclusion pattern; `*` matches anything.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

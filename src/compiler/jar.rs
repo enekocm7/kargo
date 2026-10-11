@@ -125,7 +125,7 @@ pub fn write_jar(dest: &Path, classes_dir: &Path, manifest: &JarManifest, merge:
             let mut archive = zip::ZipArchive::new(File::open(jar)?).map_err(to_io)?;
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i).map_err(to_io)?;
-                let name = entry.name().to_owned();
+                let name = entry.name().map_err(to_io)?.into_owned();
                 if name == "META-INF/MANIFEST.MF" || is_signature(&name) || name.starts_with("META-INF/versions/") && name.ends_with("module-info.class") || name == "module-info.class" {
                     continue;
                 }

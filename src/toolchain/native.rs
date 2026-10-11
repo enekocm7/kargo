@@ -117,7 +117,7 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
         let Some(rel) = entry.enclosed_name() else {
-            bail!("archive {} contains an unsafe path `{}`", archive.display(), entry.name());
+            bail!("archive {} contains an unsafe path `{}`", archive.display(), entry.name().unwrap_or_default());
         };
         let out = dest.join(rel);
         if entry.is_dir() {

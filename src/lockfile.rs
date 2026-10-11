@@ -97,7 +97,15 @@ impl Lockfile {
                 Ok(LockedPackage {
                     module: node.module.to_string(),
                     version: node.version.clone(),
-                    dependencies: node.dependencies.iter().map(|(m, _)| m.to_string()).collect(),
+                    // `group:artifact[:requested-version]`
+                    dependencies: node
+                        .dependencies
+                        .iter()
+                        .map(|(m, req)| match req {
+                            Some(v) => format!("{m}:{v}"),
+                            None => m.to_string(),
+                        })
+                        .collect(),
                     files,
                 })
             })
@@ -144,8 +152,8 @@ impl Lockfile {
             let dependencies = pkg
                 .dependencies
                 .iter()
-                .map(|d| d.parse().map(|m| (m, None)))
-                .collect::<Result<Vec<_>, _>>()
+                .map(|d| parse_locked_dependency(d))
+                .collect::<Result<Vec<_>>>()
                 .with_context(|| format!("corrupt lockfile dependencies for `{}`", pkg.module))?;
             nodes.push(ResolvedNode { module, version: pkg.version.clone(), files, dependencies });
         }
@@ -162,6 +170,16 @@ impl Lockfile {
     pub fn retain(&mut self, keep: &[String]) {
         self.resolutions.retain(|k, _| keep.contains(k));
     }
+}
+
+/// Parses `group:artifact[:requested-version]`; versions may contain `:` only in ranges, which never do.
+fn parse_locked_dependency(entry: &str) -> Result<(ModuleId, Option<String>)> {
+    let mut parts = entry.splitn(3, ':');
+    let (Some(group), Some(artifact)) = (parts.next(), parts.next()) else {
+        bail!("invalid dependency entry `{entry}`");
+    };
+    let module: ModuleId = format!("{group}:{artifact}").parse()?;
+    Ok((module, parts.next().map(str::to_owned)))
 }
 
 #[cfg(test)]
@@ -210,7 +228,7 @@ mod tests {
 
         let restored = loaded.restore("jvm/runtime", "abc", &client).unwrap().unwrap();
         assert_eq!(restored.nodes[0].files, resolution.nodes[0].files);
-        assert_eq!(restored.nodes[0].dependencies[0].0.to_string(), "g:b");
+        assert_eq!(restored.nodes[0].dependencies[0], ("g:b".parse().unwrap(), Some("2".to_owned())));
         assert!(loaded.restore("jvm/runtime", "different", &client).unwrap().is_none());
         assert!(loaded.restore("missing", "abc", &client).unwrap().is_none());
     }
@@ -241,6 +259,13 @@ mod tests {
         assert!(Lockfile::load(&path).is_err());
         std::fs::write(&path, "garbage =").unwrap();
         assert!(Lockfile::load(&path).is_err());
+    }
+
+    #[test]
+    fn locked_dependency_entries() {
+        assert_eq!(parse_locked_dependency("a:b").unwrap(), ("a:b".parse().unwrap(), None));
+        assert_eq!(parse_locked_dependency("a:b:[1.0,2.0)").unwrap().1.as_deref(), Some("[1.0,2.0)"));
+        assert!(parse_locked_dependency("nonsense").is_err());
     }
 
     #[test]
