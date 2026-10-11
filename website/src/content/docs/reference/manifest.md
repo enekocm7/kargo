@@ -1,0 +1,217 @@
+---
+title: kargo.toml
+description: The complete reference for kargo.toml.
+---
+
+`kargo.toml` is the only configuration file. Kargo looks for it in the current directory and its parents (or use `--manifest-path`). Unknown keys are errors, so typos are caught early.
+
+Only `[package]` with `name` and `version` is required.
+
+## `[package]`
+
+```toml
+[package]
+name = "my-app"                # required
+version = "0.1.0"              # required
+group = "com.example"          # Maven group; also the base Kotlin package in templates
+description = "Does things"
+authors = ["Ada <ada@example.com>"]
+license = "MIT"
+```
+
+## `[kotlin]`
+
+```toml
+[kotlin]
+version = "2.4.21"                        # default 2.4.21
+language-version = "2.4"
+api-version = "2.4"
+opt-in = ["kotlin.ExperimentalStdlibApi"]
+compiler-args = ["-Xcontext-parameters"]
+warnings-as-errors = false
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `version` | `2.4.21` | Kotlin compiler and standard library version |
+| `language-version` | | `-language-version` |
+| `api-version` | | `-api-version` |
+| `opt-in` | `[]` | Annotations to opt in to everywhere |
+| `compiler-args` | `[]` | Extra arguments for every compilation |
+| `warnings-as-errors` | `false` | Fail on warnings |
+
+## `[toolchain]`
+
+```toml
+[toolchain]
+jdk = "21"     # "system" (default), a major version, or an exact release like "21.0.5+11"
+```
+
+See [Managing JDKs](../../guides/toolchains/).
+
+## Targets
+
+With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.
+
+### `[target.jvm]`
+
+```toml
+[target.jvm]
+jvm-target = "17"                       # default "17"
+main-class = "com.example.app.MainKt"   # default: detected from `fun main`
+jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
+```
+
+### `[target.wasm]`
+
+```toml
+[target.wasm]
+environment = "js"      # "js" (default) or "wasi"
+```
+
+### `[target.native]`
+
+```toml
+[target.native]
+platforms = ["host"]               # default ["host"]
+kind = "executable"                # "executable" (default), "library", "shared" or "static"
+entry-point = "com.example.main"
+linker-options = ["-lcurl"]
+```
+
+Valid platforms: `host`, `linux_x64`, `linux_arm64`, `mingw_x64`, `macos_x64`, `macos_arm64`, `ios_arm64`, `ios_x64`, `ios_simulator_arm64`, `watchos_arm64`, `watchos_simulator_arm64`, `tvos_arm64`, `tvos_simulator_arm64`, `android_arm64`, `android_arm32`, `android_x64`. Gradle-style names like `linuxX64` are accepted too.
+
+### `[target.android]`
+
+```toml
+[target.android]
+namespace = "com.example.app"    # required
+application-id = "com.example.app"
+kind = "application"             # or "library"
+min-sdk = 24
+target-sdk = 36
+compile-sdk = 37
+version-code = 1
+version-name = "0.1.0"
+agp-version = "..."              # Android Gradle Plugin version
+```
+
+| Key | Default |
+|---|---|
+| `application-id` | `namespace` |
+| `kind` | `application` |
+| `min-sdk` | `24` |
+| `target-sdk` | `36` |
+| `compile-sdk` | `37` |
+| `version-code` | `1` |
+
+### Per-target dependencies
+
+Every target table can have a `dependencies` sub-table:
+
+```toml
+[target.jvm.dependencies]
+"com.zaxxer:HikariCP" = "6.2.1"
+```
+
+## `[dependencies]` and `[dev-dependencies]`
+
+```toml
+[dependencies]
+"group:artifact" = "1.0.0"
+short-name = { group = "g", artifact = "a", version = "1.0" }   # artifact defaults to the key
+other = { coords = "g:a:1.0" }
+full = { version = "1.0", scope = "runtime", classifier = "x", extension = "jar", exclude = ["g:a", "g2:*"], force = true, transitive = false }
+platform = { coords = "g:bom", version = "1.0", bom = true }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `version` | | Version or Maven range. Optional when a BOM manages it. Required for BOMs. |
+| `group`, `artifact` | | Coordinates when the key isn't `group:artifact` |
+| `coords` | | `group:artifact[:version]` in one string |
+| `scope` | `compile` | `compile`, `runtime` or `provided` |
+| `classifier` | | Artifact classifier |
+| `extension` (alias `type`) | `jar` | Artifact extension |
+| `exclude` | `[]` | `group:artifact` or `group:*` to exclude transitively |
+| `force` | `false` | Use this version even if a newer one is requested |
+| `transitive` | `true` | Include this dependency's dependencies |
+| `bom` | `false` | Import as a BOM |
+
+`[dev-dependencies]` are only used to compile and run tests.
+
+See [Managing dependencies](../../guides/dependencies/).
+
+## `[repositories]`
+
+```toml
+[repositories]
+jitpack = "https://jitpack.io"
+company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
+```
+
+Maven Central is always used. Google Maven is added automatically for Android and Compose.
+
+## `[frameworks]`
+
+```toml
+[frameworks]
+serialization = true      # or { version, formats = ["json", "cbor", "protobuf", "properties", "hocon", "core"] }
+coroutines = true         # or a version string: "1.11.0"
+compose = true            # or { version, material3 = true }
+ktor = { server = "netty", client = "cio", server-plugins = [], client-plugins = [], json = true, version = "3.6.0" }
+spring-boot = true        # or { version, starters = ["web"], jpa = false }
+lombok = true             # or { version, config = "lombok.config" }
+```
+
+Each can also be `false`. Default versions: serialization 1.11.0, coroutines 1.11.0, Compose 1.12.1 (Material 3 1.9.0), Ktor 3.6.0, Spring Boot 4.1.1, Lombok 1.18.48.
+
+See [Built-in frameworks](../../guides/frameworks/).
+
+## `[plugins.<name>]`
+
+A compiler plugin:
+
+```toml
+[plugins.power-assert]
+maven = "org.jetbrains.kotlin:kotlin-power-assert-compiler-plugin-embeddable:2.4.21"
+id = "org.jetbrains.kotlin.powerassert"
+options = { function = "kotlin.assert" }
+```
+
+A hook plugin:
+
+```toml
+[plugins.notify]
+command = "./scripts/notify.sh"
+args = ["--quiet"]
+hooks = ["post-build"]
+env = { KEY = "value" }
+```
+
+Hooks: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run`, `post-package`.
+
+## `[tasks]`
+
+```toml
+[tasks]
+simple = "echo hi"
+full = { run = ["cmd1", "cmd2"], description = "...", depends-on = ["simple"], env = { K = "v" }, cwd = "sub", hooks = ["pre-build"] }
+```
+
+See [Tasks and plugins](../../guides/tasks-and-plugins/).
+
+## `[profile.dev]` and `[profile.release]`
+
+```toml
+[profile.release]
+debug = false
+optimize = true
+compiler-args = ["-Xno-call-assertions"]
+```
+
+| Key | `dev` default | `release` default | Meaning |
+|---|---|---|---|
+| `debug` | `true` | `false` | Include debug information |
+| `optimize` | `false` | `true` | Optimize (mainly affects Native and Wasm) |
+| `compiler-args` | `[]` | `[]` | Extra compiler arguments for this profile |

@@ -2,6 +2,8 @@
 
 **Kargo is Cargo for Kotlin**: one `kargo.toml`, one CLI, to create, build, run and test Kotlin projects for the **JVM**, **WebAssembly**, **Kotlin/Native** and **Android**, with Maven dependencies, a lockfile, built-in frameworks, tasks and plugins.
 
+**Documentation:** [enekocm7.github.io/kargo](https://enekocm7.github.io/kargo/)
+
 ```console
 $ kargo new hello && cd hello
      Created application `hello` package
