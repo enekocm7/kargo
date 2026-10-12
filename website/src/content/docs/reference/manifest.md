@@ -17,9 +17,24 @@ group = "com.example"          # Maven group; also the base Kotlin package in te
 description = "Does things"
 authors = ["Ada <ada@example.com>"]
 license = "MIT"
+homepage = "https://example.com/my-app"
+repository = "https://github.com/me/my-app"
+publish = true
 ```
 
 `version` names the jar and is the version in its Maven coordinates. Any string is accepted, but Kargo [warns](../warnings/#odd-package-versions) about one that doesn't start with a digit or that uses anything besides letters, digits and `.`, `-`, `_`, `+`.
+
+The other keys describe the package when it is [published](../../guides/publishing/) and fill in its POM:
+
+| Key | POM | Meaning |
+|---|---|---|
+| `group` | `<groupId>` | Required to publish |
+| `description` | `<description>` | Required by Maven Central |
+| `authors` | `<developers>` | `Name <email>` entries; required by Maven Central |
+| `license` | `<licenses>` | An SPDX expression such as `MIT` or `MIT OR Apache-2.0`; each license links to its page on spdx.org. Required by Maven Central |
+| `homepage` | `<url>` | An http(s) URL; defaults to `repository` |
+| `repository` | `<scm>` | The source repository, an http(s) URL. The SCM connection is `scm:git:<repository>`. Required by Maven Central |
+| `publish` | | `false` makes `kargo publish` refuse the package (default `true`) |
 
 ## `[kotlin]`
 
@@ -122,6 +137,29 @@ fail-fast = false
 | `fail-fast` | `true` | Stop at the first target whose tests fail or don't compile. `false` tests every target and prints a result per target, like `kargo test --no-fail-fast` |
 
 See [Testing every target](../../guides/testing/#testing-every-target).
+
+## `[publish]`
+
+Options for `kargo publish`. Every key is optional.
+
+```toml
+[publish]
+repository = "maven-central"
+sign = true
+sources = true
+javadoc = "dokka"
+central-publishing = "manual"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `repository` | none | Where `kargo publish` publishes without `--repository`: `maven-central`, `maven-local` or a [`[repositories]`](#repositories) entry |
+| `sign` | `true` for Maven Central, else `false` | Sign every file with GnuPG (`.asc`). Maven Central requires it |
+| `sources` | `true` | Publish `-sources.jar` files |
+| `javadoc` | `true` (`"dokka"`) | The `-javadoc.jar`: `"dokka"` (or `true`) holds the HTML that [Dokka](../../guides/documentation/) generates, `"empty"` only a manifest (enough for Maven Central), `false` none |
+| `central-publishing` | `"manual"` | What Maven Central does with a validated upload: `"manual"` waits for you to release it in the Central Portal, `"automatic"` releases it |
+
+See [Publishing a library](../../guides/publishing/).
 
 ## Targets
 
@@ -311,6 +349,15 @@ company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", 
 ```
 
 Maven Central is always used. Google Maven is added automatically for Android and Compose.
+
+The value `"maven-local"` stands for the local Maven repository, `~/.m2/repository` (or `$KARGO_MAVEN_LOCAL`), where `kargo publish --local`, `mvn install` and Gradle's `publishToMavenLocal` put libraries:
+
+```toml
+[repositories]
+local = "maven-local"
+```
+
+`kargo publish --repository <name>` uploads to a repository listed here, with the same credentials.
 
 ## `[frameworks]`
 

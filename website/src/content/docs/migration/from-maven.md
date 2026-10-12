@@ -146,6 +146,10 @@ Credentials that lived in `~/.m2/settings.xml` become environment variables name
 | `mvn -o` | `kargo --offline` |
 | `mvn versions:display-dependency-updates` | `kargo outdated` |
 | `mvn versions:use-latest-releases` | `kargo upgrade --incompatible` |
+| `mvn install` | `kargo publish --local`; other projects read it with `[repositories] local = "maven-local"` |
+| `mvn deploy` (`<distributionManagement>`) | `kargo publish --repository <name>`, a `[repositories]` entry |
+| `maven-source-plugin`, `maven-javadoc-plugin`, `maven-gpg-plugin`, `central-publishing-maven-plugin` | built into `kargo publish`; see [Publishing a library](../../guides/publishing/) |
+| `<name>`, `<description>`, `<url>`, `<licenses>`, `<developers>`, `<scm>` | `name`, `description`, `homepage`, `license`, `authors`, `repository` in `[package]` |
 
 ## What's different
 

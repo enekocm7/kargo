@@ -31,7 +31,7 @@ In a [workspace](../../guides/workspaces/), commands apply to every member at th
 
 | Option | Commands | Meaning |
 |---|---|---|
-| `-p, --package <name>` | `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` | Only this package (repeatable) |
+| `-p, --package <name>` | `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `publish` | Only this package (repeatable) |
 | `--workspace` | the same | Every member of the workspace |
 | `-p, --package <name>` | `run`, `package`, `add`, `remove`, `outdated`, `upgrade` | The one package to work on; required at the root of a workspace with several members |
 
@@ -39,7 +39,7 @@ In a [workspace](../../guides/workspaces/), commands apply to every member at th
 
 ### Concurrent commands
 
-Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `package`, `update`, `clean`, `android` and `toolchain which`) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
+Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `package`, `publish`, `update`, `clean`, `android` and `toolchain which`) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
 
 ```console
 $ kargo build
@@ -403,11 +403,33 @@ Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`; their Mav
 
 Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). JVM only. The path of the jar is printed on stdout.
 
+A library (a project without a `main` function or `main-class`) gets what you would publish instead: `target/<profile>/package/<name>-<version>.jar` with only its own classes (no Kotlin standard library, no `Class-Path`) and `<name>-<version>-sources.jar` next to it. Pass `--fat` for the fat jar anyway. `kargo publish --dry-run` shows everything a [publication](../../guides/publishing/) holds, POM included.
+
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Use the release profile |
 | `-p, --package <name>` | The package to build the jar for; required at the root of a workspace with several members |
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` |
+| `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library |
+
+## `kargo publish`
+
+Build a library with the release profile and publish it to a Maven repository: the local one (`~/.m2/repository`), a [`[repositories]`](../manifest/#repositories) entry, or Maven Central. See [Publishing a library](../../guides/publishing/).
+
+```sh
+kargo publish [--repository <name> | --local] [--dry-run]
+```
+
+Every target except Android is published: a JVM-only library as one Maven module (`<name>.jar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-wasm-js`, `<name>-linuxx64`, ...). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first.
+
+| Option | Meaning |
+|---|---|
+| `--repository <name>` | Where to publish: a `[repositories]` entry, `maven-central` or `maven-local`. Defaults to `repository` in [`[publish]`](../manifest/#publish) |
+| `--local` | Publish to the local Maven repository, like `--repository maven-local` |
+| `--dry-run` | Build, stage and sign everything, but upload nothing |
+| `-p, --package <name>`, `--workspace` | Which packages to publish. Path dependencies are published before the packages that use them; members with `publish = false` are skipped when the whole workspace is published |
+
+The package needs a `group` in `[package]`. Maven Central also needs `description`, `license`, `authors` and `repository`, a release (non-SNAPSHOT) version, and signatures; Kargo checks them before building.
 
 ## `kargo fetch`
 

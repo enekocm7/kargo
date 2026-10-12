@@ -1665,3 +1665,89 @@ fn target_add_edits_the_selected_workspace_member() {
     assert!(!p.read("app/kargo.toml").contains("[target"));
     assert!(p.path().join("lib/src-wasm/.gitkeep").is_file());
 }
+
+#[test]
+fn publish_checks_where_and_what_before_building() {
+    let p = Project::new();
+    let maven_local = tempfile::tempdir().unwrap();
+    let kargo = || {
+        let mut cmd = p.kargo();
+        cmd.env("KARGO_MAVEN_LOCAL", maven_local.path());
+        cmd
+    };
+    p.file("kargo.toml", &manifest("mathlib", ""));
+    kargo().args(["publish", "--local"]).assert().failure().code(101).stderr(predicate::str::contains("set `group` in [package]"));
+
+    p.file("kargo.toml", &manifest("mathlib", "group = \"com.acme\"\n"));
+    kargo()
+        .arg("publish")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pass `--repository <name>`").and(predicate::str::contains("--local")));
+    kargo()
+        .args(["publish", "--repository", "nowhere"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no repository named `nowhere`").and(predicate::str::contains("maven-central, maven-local")));
+    kargo().args(["publish", "--local", "--repository", "x"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+
+    // Maven Central needs complete POM metadata, a release version and signatures.
+    kargo().args(["publish", "--repository", "maven-central"]).assert().failure().stderr(
+        predicate::str::contains("Maven Central requires `description`")
+            .and(predicate::str::contains("`license`"))
+            .and(predicate::str::contains("`authors`"))
+            .and(predicate::str::contains("`repository`")),
+    );
+    let complete = "group = \"com.acme\"\ndescription = \"Math\"\nlicense = \"MIT\"\nauthors = [\"Ada <ada@example.com>\"]\nrepository = \"https://github.com/acme/mathlib\"\n";
+    p.file("kargo.toml", &manifest("mathlib", complete).replace("0.1.0", "0.1.0-SNAPSHOT"));
+    kargo().args(["publish", "--repository", "maven-central"]).assert().failure().stderr(predicate::str::contains("SNAPSHOT"));
+    p.file("kargo.toml", &format!("{}\n[publish]\nsign = false\n", manifest("mathlib", complete)));
+    kargo().args(["publish", "--repository", "maven-central"]).assert().failure().stderr(predicate::str::contains("requires signed files"));
+    p.file("kargo.toml", &format!("{}\n[publish]\nrepository = \"maven-central\"\nsign = true\n", manifest("mathlib", complete)));
+    kargo()
+        .arg("publish")
+        .env_remove("KARGO_MAVEN_CENTRAL_USERNAME")
+        .env_remove("KARGO_MAVEN_CENTRAL_PASSWORD")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("KARGO_MAVEN_CENTRAL_USERNAME"));
+
+    p.file("kargo.toml", &manifest("mathlib", "group = \"com.acme\"\npublish = false\n"));
+    kargo().args(["publish", "--local"]).assert().failure().stderr(predicate::str::contains("`publish = false`"));
+    assert!(std::fs::read_dir(maven_local.path()).unwrap().next().is_none(), "nothing was published");
+}
+
+#[test]
+fn publish_skips_unpublishable_workspace_members() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"tool\"]\n");
+    p.file("app/kargo.toml", &manifest("app", "publish = false\n"));
+    p.file("tool/kargo.toml", &manifest("tool", "publish = false\n"));
+    p.kargo()
+        .args(["publish", "--workspace", "--local"])
+        .env("KARGO_MAVEN_LOCAL", p.path().join("m2"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("skipping `app`").and(predicate::str::contains("they all have `publish = false`")));
+    // At the workspace root every member is selected, so the same applies without `--workspace`.
+    p.kargo()
+        .args(["publish", "--local"])
+        .env("KARGO_MAVEN_LOCAL", p.path().join("m2"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("skipping `tool`"));
+}
+
+#[test]
+fn publish_requires_published_path_dependencies() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"core\", \"api\"]\n");
+    p.file("core/kargo.toml", &manifest("core", "publish = false\n"));
+    p.file("api/kargo.toml", &manifest("api", "group = \"com.acme\"\n\n[dependencies]\ncore = { path = \"../core\" }\n"));
+    p.kargo()
+        .args(["publish", "-p", "api", "--local"])
+        .env("KARGO_MAVEN_LOCAL", p.path().join("m2"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("depends on `core`, which has `publish = false`"));
+}

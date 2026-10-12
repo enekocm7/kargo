@@ -22,7 +22,14 @@ description: Environment variables Kargo reads and sets.
 | `KARGO_BROWSER` | Browser that runs [Wasm browser tests](../../guides/wasm/#testing-in-a-browser): the path of an executable, or a command on `PATH`. Default: Chrome, Chromium, Edge, Brave or Firefox, whichever Kargo finds first |
 | `KARGO_BROWSER_ARGS` | Extra arguments for that browser, separated by spaces, e.g. `--no-sandbox` for Chrome in a container |
 | `KARGO_BROWSER_TIMEOUT` | Seconds a browser running Wasm tests may stay silent before they count as hung (default `120`) |
-| Names in `username-env` / `password-env` | Repository credentials |
+| Names in `username-env` / `password-env` | Repository credentials, for downloads and for `kargo publish` |
+| `KARGO_MAVEN_LOCAL` | The local Maven repository that `kargo publish --local` writes and `"maven-local"` in `[repositories]` reads (default `~/.m2/repository`) |
+| `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | The two parts of a Central Portal user token, for [publishing to Maven Central](../../guides/publishing/#maven-central) |
+| `KARGO_MAVEN_CENTRAL_URL` | The Central Portal to publish to (default `https://central.sonatype.com`) |
+| `KARGO_SIGNING_KEY` | An ASCII-armored secret key (`gpg --export-secret-keys --armor <id>`), as is or base64-encoded, that `kargo publish` [signs with](../../guides/publishing/#signing). Without it, GnuPG's own keyring is used |
+| `KARGO_SIGNING_KEY_ID` | The key to sign with (`gpg --local-user`); default: GnuPG's default key |
+| `KARGO_SIGNING_KEY_PASSPHRASE` | The signing key's passphrase |
+| `KARGO_GPG` | The `gpg` executable (default: `gpg` on `PATH`) |
 | `COMPLETE` | Set by the `kargo completions` scripts when they ask Kargo for candidates; don't set it yourself |
 
 ## Variables Kargo sets
@@ -40,5 +47,5 @@ For tasks, hook plugins and `kargo-*` subcommands:
 | `KARGO_HOOK` | The hook being run (hooks only) |
 | `KARGO_BUILD_LOCK` | The build-directory lock this Kargo process holds (hooks only); a `kargo` command the hook runs on the same project uses that lock instead of waiting for it |
 | `KARGO_CLASSPATH`, `KARGO_JVM_JAR` | After a JVM build |
-| `KARGO_PACKAGE` | After `kargo package` |
+| `KARGO_PACKAGE` | After `kargo package`: the fat jar, or a library's jar |
 | `KARGO_TEST_RESULT` | After tests |

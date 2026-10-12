@@ -44,6 +44,8 @@ pub(super) struct RawManifest {
     lint: RawLint,
     #[serde(default)]
     test: RawTest,
+    #[serde(default)]
+    publish: RawPublish,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +107,19 @@ struct RawPackage {
     #[serde(default)]
     authors: Vec<String>,
     license: Option<String>,
+    homepage: Option<String>,
+    repository: Option<String>,
+    publish: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawPublish {
+    repository: Option<String>,
+    sign: Option<bool>,
+    sources: Option<bool>,
+    javadoc: Option<Value>,
+    central_publishing: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -841,10 +856,13 @@ impl RawManifest {
                 _ => bail!("invalid repository `{name}`: expected a URL or a table"),
             };
             let url = raw.url.trim();
-            if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("file:")) {
-                bail!("repository `{name}` must have an http(s):// or file: URL, got `{url}`");
-            }
-            let mut repo = Repository::new(name.clone(), url);
+            let mut repo = if url == kargo_maven::repo::MAVEN_LOCAL {
+                Repository { name: name.clone(), ..Repository::maven_local()? }
+            } else if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("file:") {
+                Repository::new(name.clone(), url)
+            } else {
+                bail!("repository `{name}` must have an http(s):// or file: URL, or be \"maven-local\", got `{url}`");
+            };
             repo.credentials = credentials_from_env(name, raw.username_env.as_deref(), raw.password_env.as_deref())?;
             if !repositories.iter().any(|r| r.url == repo.url) {
                 repositories.push(repo);
@@ -1003,7 +1021,17 @@ impl RawManifest {
         let fmt = self.fmt.validate()?;
         let lint = self.lint.validate()?;
 
+        let publish = self.publish.validate(&repositories)?;
+        for (key, url) in [("homepage", &self.package.homepage), ("repository", &self.package.repository)] {
+            if let Some(url) = url
+                && !(url.starts_with("https://") || url.starts_with("http://"))
+            {
+                bail!("[package] `{key}` must be an http(s):// URL, got `{url}`");
+            }
+        }
+
         Ok(Manifest {
+            publish,
             toolchain: ToolchainSettings { jdk },
             doc,
             fmt,
@@ -1016,6 +1044,9 @@ impl RawManifest {
                 description: self.package.description,
                 authors: self.package.authors,
                 license: self.package.license,
+                homepage: self.package.homepage,
+                repository: self.package.repository,
+                publish: self.package.publish.unwrap_or(true),
             },
             kotlin: KotlinSettings {
                 version: kotlin_version,
@@ -1148,6 +1179,40 @@ impl RawWorkspaceManifest {
             parse_dependency(name, value, "workspace.dependencies", None)?;
         }
         Ok(workspace)
+    }
+}
+
+impl RawPublish {
+    fn validate(self, repositories: &[Repository]) -> Result<PublishSettings> {
+        if let Some(name) = &self.repository
+            && !is_publish_destination(name, repositories)
+        {
+            let mut names: Vec<&str> = vec![MAVEN_CENTRAL_DESTINATION, kargo_maven::repo::MAVEN_LOCAL];
+            names.extend(repositories.iter().map(|r| r.name.as_str()).filter(|n| *n != MAVEN_CENTRAL_DESTINATION));
+            bail!(
+                "[publish] repository `{name}` is not a repository (expected one of: {}); declare it in [repositories]",
+                names.join(", ")
+            );
+        }
+        let javadoc = match self.javadoc {
+            None | Some(Value::Boolean(true)) => Javadoc::Dokka,
+            Some(Value::Boolean(false)) => Javadoc::Off,
+            Some(Value::String(s)) if s == "dokka" => Javadoc::Dokka,
+            Some(Value::String(s)) if s == "empty" => Javadoc::Empty,
+            Some(other) => bail!("[publish] `javadoc` must be true, false, \"dokka\" or \"empty\", got {other}"),
+        };
+        let central_publishing = match self.central_publishing.as_deref() {
+            None | Some("manual") => CentralPublishing::Manual,
+            Some("automatic") => CentralPublishing::Automatic,
+            Some(other) => bail!("[publish] `central-publishing` must be \"manual\" or \"automatic\", got `{other}`"),
+        };
+        Ok(PublishSettings {
+            repository: self.repository,
+            sign: self.sign,
+            sources: self.sources.unwrap_or(true),
+            javadoc,
+            central_publishing,
+        })
     }
 }
 

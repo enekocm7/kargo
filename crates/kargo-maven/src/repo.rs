@@ -19,6 +19,21 @@ use kargo_util::{fs as kfs, hash};
 pub const MAVEN_CENTRAL: &str = "https://repo.maven.apache.org/maven2";
 pub const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
 
+/// The name of the local Maven repository (`~/.m2/repository`) in `[repositories]` and `kargo publish`.
+pub const MAVEN_LOCAL: &str = "maven-local";
+
+/// Environment variable overriding the local Maven repository directory.
+pub const MAVEN_LOCAL_ENV: &str = "KARGO_MAVEN_LOCAL";
+
+/// The local Maven repository that `mvn install` and Gradle's `publishToMavenLocal` write:
+/// `$KARGO_MAVEN_LOCAL`, else `~/.m2/repository`.
+pub fn maven_local_dir() -> Result<PathBuf> {
+    match std::env::var_os(MAVEN_LOCAL_ENV) {
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
+        _ => Ok(dirs::home_dir().context("could not determine the home directory; set KARGO_MAVEN_LOCAL")?.join(".m2").join("repository")),
+    }
+}
+
 /// How long `maven-metadata.xml` (the version list, or the builds of a SNAPSHOT) is trusted before re-checking.
 const METADATA_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -52,16 +67,28 @@ impl Repository {
         Self::new("google", GOOGLE)
     }
 
-    fn is_local(&self) -> bool {
+    /// The local Maven repository, `~/.m2/repository` (see [`maven_local_dir`]).
+    pub fn maven_local() -> Result<Self> {
+        Ok(Self::new(MAVEN_LOCAL, maven_local_dir()?.to_string_lossy().into_owned()))
+    }
+
+    /// Whether the repository is a directory on this machine (a `file:` URL or a plain path).
+    pub fn is_local(&self) -> bool {
         self.url.starts_with("file:") || !self.url.contains("://")
     }
 
-    fn local_root(&self) -> PathBuf {
+    /// The directory of a local repository.
+    pub fn local_root(&self) -> PathBuf {
         let path = self.url.strip_prefix("file://").or_else(|| self.url.strip_prefix("file:")).unwrap_or(&self.url);
         // `file:///C:/x` -> `/C:/x`; strip the leading slash before a drive letter.
         let path = if cfg!(windows) && path.len() > 2 && path.starts_with('/') && path.as_bytes()[2] == b':' { &path[1..] } else { path };
         PathBuf::from(path)
     }
+}
+
+/// The `Authorization` header value for HTTP basic authentication.
+fn basic_auth(creds: &Credentials) -> String {
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", creds.username, creds.password)))
 }
 
 /// Outcome of looking for a single remote file.
@@ -340,8 +367,7 @@ impl MavenClient {
         let response = loop {
             let mut request = self.agent.get(url);
             if let Some(creds) = &repo.credentials {
-                let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", creds.username, creds.password));
-                request = request.header("Authorization", format!("Basic {token}"));
+                request = request.header("Authorization", basic_auth(creds));
             }
             let result = request.call();
             // Rate limits, gateway hiccups and dropped connections are usually transient.
@@ -368,6 +394,91 @@ impl MavenClient {
             401 | 403 => bail!("access denied to {url} (HTTP {}); check repository credentials", response.status().as_u16()),
             status => bail!("unexpected HTTP {status} from {url}"),
         }
+    }
+
+    /// Reads `rel` straight from `repo`, bypassing the cache (for metadata that is about to change).
+    pub fn read_text_from(&self, repo: &Repository, rel: &str) -> Result<Option<String>> {
+        validate_rel_path(rel)?;
+        if repo.is_local() {
+            let path = repo.local_root().join(rel);
+            return match std::fs::read_to_string(&path) {
+                Ok(text) => Ok(Some(text)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+            };
+        }
+        let url = format!("{}/{rel}", repo.url);
+        let Some(response) = self.get(repo, &url)? else { return Ok(None) };
+        let mut body = String::new();
+        response.into_body().into_reader().read_to_string(&mut body).with_context(|| format!("failed to read {url}"))?;
+        Ok(Some(body))
+    }
+
+    /// Stores `data` at `rel` in `repo`: written into a local repository, or sent with an HTTP `PUT`
+    /// (with the repository's credentials) like `mvn deploy` does.
+    pub fn upload(&self, repo: &Repository, rel: &str, data: &[u8]) -> Result<()> {
+        validate_rel_path(rel)?;
+        if repo.is_local() {
+            let path = rel.split('/').fold(repo.local_root(), |path, seg| path.join(seg));
+            return kfs::write_atomic(&path, |f| io::Write::write_all(f, data));
+        }
+        if self.offline {
+            bail!("cannot upload to `{}` in offline mode", repo.name);
+        }
+        let url = format!("{}/{rel}", repo.url);
+        let mut attempt = 0;
+        loop {
+            let mut request = self.agent.put(&url);
+            if let Some(creds) = &repo.credentials {
+                request = request.header("Authorization", basic_auth(creds));
+            }
+            let result = request.send(data);
+            let transient = match &result {
+                Ok(r) => matches!(r.status().as_u16(), 408 | 429 | 500 | 502 | 503 | 504),
+                Err(_) => true,
+            };
+            if transient && attempt < MAX_RETRIES {
+                attempt += 1;
+                let delay = Duration::from_millis(250 << attempt);
+                self.shell.verbose("Retrying", format!("{url} in {:.1}s", delay.as_secs_f64()));
+                std::thread::sleep(delay);
+                continue;
+            }
+            let response = result.with_context(|| format!("failed to upload to {url}"))?;
+            return match response.status().as_u16() {
+                200..=299 => Ok(()),
+                401 | 403 if repo.credentials.is_none() => bail!(
+                    "`{}` refused the upload of {url} (HTTP {}); set `username-env` and `password-env` for [repositories.{}] in kargo.toml and export those variables",
+                    repo.name,
+                    response.status().as_u16(),
+                    repo.name
+                ),
+                401 | 403 => bail!(
+                    "`{}` refused the upload of {url} (HTTP {}); check the repository credentials",
+                    repo.name,
+                    response.status().as_u16()
+                ),
+                status => {
+                    let mut body = String::new();
+                    let _ = response.into_body().into_reader().take(2048).read_to_string(&mut body);
+                    let body = body.trim();
+                    if body.is_empty() {
+                        bail!("`{}` rejected the upload of {url} (HTTP {status})", repo.name)
+                    }
+                    bail!("`{}` rejected the upload of {url} (HTTP {status}): {body}", repo.name)
+                }
+            };
+        }
+    }
+
+    /// The HTTP client, for services other than Maven repositories (the Maven Central Portal).
+    pub fn agent(&self) -> &ureq::Agent {
+        &self.agent
+    }
+
+    /// Whether the client may use the network.
+    pub fn offline(&self) -> bool {
+        self.offline
     }
 
     /// Lists all versions of a module known to any repository (`maven-metadata.xml`).
@@ -493,7 +604,7 @@ fn validate_rel_path(rel: &str) -> Result<()> {
         || rel.contains(':')
         || rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..")
     {
-        bail!("refusing to fetch suspicious repository path `{rel}`");
+        bail!("refusing to use the suspicious repository path `{rel}`");
     }
     Ok(())
 }

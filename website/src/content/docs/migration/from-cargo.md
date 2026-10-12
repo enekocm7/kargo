@@ -29,6 +29,8 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo outdated` (plugin) | `kargo outdated` | Built in |
 | `cargo upgrade [--incompatible]` (cargo-edit) | `kargo upgrade [--incompatible]` | Built in; "compatible" means the same major version (minor for `0.x`) |
 | `cargo clean` | `kargo clean` | |
+| `cargo package` | `kargo package` | A library gets its own jar and sources jar; an application a runnable fat jar |
+| `cargo publish [--dry-run]` | `kargo publish [--dry-run]` | To Maven Central, a Maven repository or `~/.m2` (`--local`); see [Publishing a library](../../guides/publishing/) |
 | `cargo install` → `cargo foo` | `kargo-foo` on `PATH` → `kargo foo` | Same external subcommand convention |
 | `rustup toolchain install` | `kargo toolchain install` | Manages JDKs and Kotlin/Native |
 | `--locked`, `--offline`, `-v`, `-q`, `--manifest-path` | same | |

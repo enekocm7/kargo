@@ -287,10 +287,15 @@ jitpack = "https://jitpack.io"
 company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
 
 # A local directory
-local = "file:///home/me/.m2/repository"
+libs = "file:///home/me/libs"
+
+# The local Maven repository (~/.m2/repository)
+local = "maven-local"
 ```
 
 Credentials are never written in `kargo.toml`; Kargo reads them from the named environment variables.
+
+`maven-local` holds what `kargo publish --local`, `mvn install` and Gradle's `publishToMavenLocal` install, so a library you publish locally can be used by your other projects right away. See [Publishing a library](../publishing/).
 
 ## SNAPSHOT versions
 
