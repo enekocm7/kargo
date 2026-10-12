@@ -28,6 +28,7 @@ use anyhow::{Context, Result, bail};
 use kargo_manifest::{JdkRequest, LOCKFILE_NAME, MANIFEST_NAME, Manifest, PathDependency, Profile, TargetKind, WorkspaceManifest};
 use kargo_maven::Repository;
 use kargo_util::flock::FileLock;
+pub use kargo_util::fs::dunce_canonicalize;
 use kargo_util::shell::Shell;
 
 /// Environment variable overriding the build output directory.
@@ -570,21 +571,6 @@ fn unify_toolchains(packages: &mut [Workspace], workspace: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Canonicalizes without Windows' `\\?\` prefix, which confuses many tools.
-pub fn dunce_canonicalize(path: &Path) -> PathBuf {
-    let Ok(canonical) = path.canonicalize() else { return path.to_path_buf() };
-    #[cfg(windows)]
-    {
-        let s = canonical.to_string_lossy();
-        if let Some(stripped) = s.strip_prefix(r"\\?\")
-            && !stripped.starts_with("UNC\\")
-        {
-            return PathBuf::from(stripped);
-        }
-    }
-    canonical
 }
 
 #[cfg(test)]

@@ -26,6 +26,15 @@ macro_rules! require_e2e {
     };
 }
 
+macro_rules! require_native {
+    () => {
+        if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
+            eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
+            return;
+        }
+    };
+}
+
 struct E2e {
     dir: tempfile::TempDir,
 }
@@ -68,19 +77,6 @@ fn jvm_lifecycle() {
     let report = std::fs::read_to_string(t.dir.path().join("app/target/debug/jvm/test-reports/TEST-junit-jupiter.xml")).unwrap();
     assert!(report.contains("<testcase") && report.contains("GreetingTest"), "{report}");
 
-    // A failing test fails the command.
-    t.write("app/tests/FailTest.kt", "import kotlin.test.*\nclass FailTest { @Test fun nope() = assertEquals(1, 2) }\n");
-    t.kargo("app").arg("test").assert().failure().code(101);
-    std::fs::remove_file(t.dir.path().join("app/tests/FailTest.kt")).unwrap();
-
-    // Test classes run whatever their name, and filters match `Class.method`.
-    t.write("app/tests/T.kt", "import kotlin.test.*\nclass T {\n    @Test fun ok() {}\n    @Test fun bad() = assertEquals(1, 2)\n}\n");
-    t.kargo("app").arg("test").assert().code(101).stdout(predicate::str::contains("bad()"));
-    t.kargo("app").args(["test", "T.ok"]).assert().success().stdout(predicate::str::contains("1 tests successful"));
-    t.kargo("app").args(["test", "T.bad"]).assert().code(101);
-    t.kargo("app").args(["test", "nothing_matches"]).assert().code(101).stderr(predicate::str::contains("no JVM tests match"));
-    std::fs::remove_file(t.dir.path().join("app/tests/T.kt")).unwrap();
-
     // The thin jar runs with its lib/ directory, the fat jar on its own.
     let jar = t.dir.path().join("app/target/debug/jvm/app-0.1.0.jar");
     let out = StdCommand::new("java").arg("-jar").arg(&jar).output().unwrap();
@@ -93,6 +89,25 @@ fn jvm_lifecycle() {
     // Program arguments and exit codes are forwarded.
     t.write("app/src/Main.kt", "fun main(args: Array<String>) { println(args.joinToString(\"|\")); kotlin.system.exitProcess(7) }\n");
     t.kargo("app").args(["run", "--", "a b", "c"]).assert().code(7).stdout(predicate::str::contains("a b|c"));
+}
+
+#[test]
+fn jvm_test_failures_and_filters() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+
+    // A failing test fails the command.
+    t.write("app/tests/FailTest.kt", "import kotlin.test.*\nclass FailTest { @Test fun nope() = assertEquals(1, 2) }\n");
+    t.kargo("app").arg("test").assert().failure().code(101);
+    std::fs::remove_file(t.dir.path().join("app/tests/FailTest.kt")).unwrap();
+
+    // Test classes run whatever their name, and filters match `Class.method`.
+    t.write("app/tests/T.kt", "import kotlin.test.*\nclass T {\n    @Test fun ok() {}\n    @Test fun bad() = assertEquals(1, 2)\n}\n");
+    t.kargo("app").arg("test").assert().code(101).stdout(predicate::str::contains("bad()"));
+    t.kargo("app").args(["test", "T.ok"]).assert().success().stdout(predicate::str::contains("1 tests successful"));
+    t.kargo("app").args(["test", "T.bad"]).assert().code(101);
+    t.kargo("app").args(["test", "nothing_matches"]).assert().code(101).stderr(predicate::str::contains("no JVM tests match"));
 }
 
 #[test]
@@ -238,7 +253,7 @@ fn dependencies_and_hooks() {
     t.kargo("deps").args(["add", "org.jetbrains.kotlinx:kotlinx-datetime:0.7.1"]).assert().success();
     let hook = if cfg!(windows) { "echo %KARGO_HOOK% > hook.txt" } else { "echo $KARGO_HOOK > hook.txt" };
     let manifest = std::fs::read_to_string(t.dir.path().join("deps/kargo.toml")).unwrap();
-    t.write("deps/kargo.toml", &format!("{manifest}\nafter = {{ run = '{hook}', hooks = [\"post-build\"] }}\n"));
+    t.write("deps/kargo.toml", &format!("{manifest}\n[tasks]\nafter = {{ run = '{hook}', hooks = [\"post-build\"] }}\n"));
     t.write(
         "deps/src/Main.kt",
         r#"package com.example.deps
@@ -339,7 +354,12 @@ fn doc_generates_html_from_kdoc() {
         .stderr(predicate::str::contains("Generated"));
     let page = std::fs::read_to_string(t.dir.path().join("lib/target/debug/doc/lib/com.example.lib/greeting.html")).unwrap();
     assert!(page.contains("Returns a friendly greeting."));
+}
 
+#[test]
+fn doc_multiplatform() {
+    require_e2e!();
+    let t = E2e::new();
     // Several targets: `src/` becomes a common source set, `src-<target>/` the platform ones.
     t.create(&["mpp-doc", "--lib", "--target", "jvm,wasm"]);
     t.write("mpp-doc/src/Platform.kt", "package com.example.mpp_doc\n\n/** The platform name. */\nexpect fun platform(): String\n");
@@ -355,13 +375,12 @@ fn doc_generates_html_from_kdoc() {
 }
 
 #[test]
-fn fmt_and_lint_with_ktlint_and_detekt() {
+fn fmt_with_ktlint() {
     require_e2e!();
     let t = E2e::new();
     t.create(&["style"]);
-    // A new project is already formatted and lint-free.
+    // A new project is already formatted.
     t.kargo("style").args(["fmt", "--check"]).assert().success().stderr(predicate::str::contains("Checking formatting of style v0.1.0"));
-    t.kargo("style").arg("lint").assert().success().stderr(predicate::str::contains("Linting style v0.1.0"));
 
     t.write("style/src/Messy.kt", "package com.example.style\n\nfun   messy( ) =  listOf(1,2)\n");
     t.write("style/src/gen/Generated.kt", "package com.example.style\n\nfun   generated( ) =  1\n");
@@ -381,6 +400,15 @@ fn fmt_and_lint_with_ktlint_and_detekt() {
     let generated = std::fs::read_to_string(t.dir.path().join("style/src/gen/Generated.kt")).unwrap();
     assert!(generated.contains("fun   generated( )"), "excluded files are left alone: {generated}");
     t.kargo("style").args(["fmt", "--check"]).assert().success();
+}
+
+#[test]
+fn lint_with_detekt() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["style"]);
+    // A new project is lint-free.
+    t.kargo("style").arg("lint").assert().success().stderr(predicate::str::contains("Linting style v0.1.0"));
 
     // detekt issues fail `kargo lint`; detekt.yml and a baseline silence them.
     t.write("style/src/gen/Generated.kt", "package com.example.style\n\nfun generated() = 1\n");
@@ -496,39 +524,55 @@ fun main() = println(Person.create(\"Ada\"))
 }
 
 #[test]
-fn ktor_and_compose_compile() {
+fn ktor_compiles() {
     require_e2e!();
     let t = E2e::new();
     t.create(&["kt", "--with", "ktor,serialization"]);
     t.kargo("kt").arg("test").assert().success();
+}
+
+#[test]
+fn compose_compiles() {
+    require_e2e!();
+    let t = E2e::new();
     t.create(&["ui", "--with", "compose"]);
     t.kargo("ui").arg("build").assert().success();
 }
 
+// Kotlin/Native links slowly, so each link gets its own test and they run in parallel.
+
 #[test]
-fn native_executable_and_tests() {
+fn native_check() {
     require_e2e!();
-    if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
-        eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
-        return;
-    }
+    require_native!();
     let t = E2e::new();
     t.create(&["nat", "--target", "native", "--with", "coroutines"]);
     t.kargo("nat").args(["check", "--tests"]).assert().success().stderr(predicate::str::contains("Checking nat v0.1.0 (native, "));
     assert!(!t.dir.path().join("nat/target/debug/native").exists(), "check does not link an executable");
+}
+
+#[test]
+fn native_executable() {
+    require_e2e!();
+    require_native!();
+    let t = E2e::new();
+    t.create(&["nat", "--target", "native", "--with", "coroutines"]);
     t.kargo("nat").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
+}
+
+#[test]
+fn native_tests() {
+    require_e2e!();
+    require_native!();
+    let t = E2e::new();
+    t.create(&["nat", "--target", "native", "--with", "coroutines"]);
     t.kargo("nat").args(["test", "--report", "junit"]).assert().success().stdout(predicate::str::contains("1 passed"));
     let report = std::fs::read_to_string(t.dir.path().join("nat/target/debug/native/test-reports/TEST-native.xml")).unwrap();
     assert!(report.contains("<testcase") && report.contains(r#"failures="0""#), "{report}");
 }
 
-#[test]
-fn native_cinterop() {
-    require_e2e!();
-    if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
-        eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
-        return;
-    }
+/// A native project that binds a C header and a function defined in its `.def` file.
+fn cinterop_project() -> E2e {
     let t = E2e::new();
     t.create(&["cin", "--target", "native"]);
     let manifest = std::fs::read_to_string(t.dir.path().join("cin/kargo.toml")).unwrap();
@@ -547,6 +591,14 @@ fn native_cinterop() {
         "import kotlinx.cinterop.ExperimentalForeignApi\nimport kotlin.test.Test\nimport kotlin.test.assertEquals\n\n\
          @OptIn(ExperimentalForeignApi::class)\nclass InteropTest {\n    @Test\n    fun callsC() = assertEquals(4, mathx.add(2, 2))\n}\n",
     );
+    t
+}
+
+#[test]
+fn native_cinterop() {
+    require_e2e!();
+    require_native!();
+    let t = cinterop_project();
     t.kargo("cin")
         .arg("run")
         .assert()
@@ -555,6 +607,13 @@ fn native_cinterop() {
         .stdout(predicate::str::contains("answer 42"));
     // Up to date: the bindings are not regenerated.
     t.kargo("cin").arg("build").assert().success().stderr(predicate::str::contains("Generating").not());
+}
+
+#[test]
+fn native_cinterop_tests() {
+    require_e2e!();
+    require_native!();
+    let t = cinterop_project();
     t.kargo("cin").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
 }
 
@@ -613,24 +672,9 @@ fn pinned_jdk_is_downloaded_and_used() {
 }
 
 #[test]
-fn path_dependencies_and_workspaces() {
+fn path_dependencies() {
     require_e2e!();
-    let t = E2e::new();
-    let package = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[target.jvm]\n\n[target.wasm]\n");
-    t.write("mathlib/kargo.toml", &format!("{}\n[frameworks]\ncoroutines = true\n", package("mathlib")));
-    t.write(
-        "mathlib/src/Lib.kt",
-        "package mathlib\n\nimport kotlinx.coroutines.Dispatchers\n\nfun add(a: Int, b: Int): Int = a + b\n\nfun dispatcher(): String = Dispatchers.Default.toString()\n",
-    );
-    t.write("calc/kargo.toml", &package("calc"));
-    t.write(
-        "calc/src/Main.kt",
-        "import mathlib.add\nimport mathlib.dispatcher\n\nfun main() {\n    dispatcher()\n    println(\"2 + 3 = ${add(2, 3)}\")\n}\n",
-    );
-    t.write(
-        "calc/tests/CalcTest.kt",
-        "import kotlin.test.*\n\nclass CalcTest {\n    @Test fun adds() = assertEquals(5, mathlib.add(2, 3))\n}\n",
-    );
+    let t = calc_with_mathlib();
 
     // A single package with a path dependency: the dependency builds first, under target/<profile>/deps/.
     t.kargo("calc").args(["add", "--path", "../mathlib"]).assert().success();
@@ -653,14 +697,30 @@ fn path_dependencies_and_workspaces() {
         .success()
         .stderr(predicate::str::contains("Compiling mathlib v0.1.0 (jvm)").and(predicate::str::contains("Compiling calc v0.1.0 (jvm)")));
 
-    // Wasm links the dependency's klib; tests and the fat jar see it too.
-    t.kargo("calc").args(["run", "-t", "wasm"]).assert().success().stdout(predicate::str::contains("2 + 3 = 5"));
-    t.kargo("calc").arg("test").assert().success();
+    // Tests and the fat jar see it too.
+    t.kargo("calc").args(["test", "-t", "jvm"]).assert().success();
     let fat = t.kargo("calc").args(["package", "-q"]).assert().success().get_output().stdout.clone();
     let out = StdCommand::new("java").arg("-jar").arg(String::from_utf8(fat).unwrap().trim()).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("2 + 3 = 5"));
+}
 
-    // The same packages as a workspace: one kargo.lock and one target/ at the root.
+#[test]
+fn path_dependencies_on_wasm() {
+    require_e2e!();
+    let t = calc_with_mathlib();
+    t.kargo("calc").args(["add", "--path", "../mathlib"]).assert().success();
+    // Wasm links the dependency's klib.
+    t.kargo("calc").args(["run", "-t", "wasm"]).assert().success().stdout(predicate::str::contains("2 + 3 = 5"));
+    t.kargo("calc").args(["test", "-t", "wasm"]).assert().success();
+}
+
+#[test]
+fn workspaces() {
+    require_e2e!();
+    let t = calc_with_mathlib();
+    t.kargo("calc").args(["add", "--path", "../mathlib"]).assert().success();
+
+    // The packages as a workspace: one kargo.lock and one target/ at the root.
     t.write("kargo.toml", "[workspace]\nmembers = [\"mathlib\", \"calc\"]\n");
     t.kargo("").args(["build", "-t", "jvm"]).assert().success();
     assert!(t.dir.path().join("target/debug/mathlib/jvm/mathlib-0.1.0.jar").is_file());
@@ -670,13 +730,32 @@ fn path_dependencies_and_workspaces() {
     t.kargo("").args(["test", "--workspace", "-t", "jvm"]).assert().success();
 }
 
+/// A `mathlib` library and a `calc` application that uses it, both for the JVM and Wasm.
+/// `calc` does not depend on `mathlib` yet.
+fn calc_with_mathlib() -> E2e {
+    let t = E2e::new();
+    let package = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[target.jvm]\n\n[target.wasm]\n");
+    t.write("mathlib/kargo.toml", &format!("{}\n[frameworks]\ncoroutines = true\n", package("mathlib")));
+    t.write(
+        "mathlib/src/Lib.kt",
+        "package mathlib\n\nimport kotlinx.coroutines.Dispatchers\n\nfun add(a: Int, b: Int): Int = a + b\n\nfun dispatcher(): String = Dispatchers.Default.toString()\n",
+    );
+    t.write("calc/kargo.toml", &package("calc"));
+    t.write(
+        "calc/src/Main.kt",
+        "import mathlib.add\nimport mathlib.dispatcher\n\nfun main() {\n    dispatcher()\n    println(\"2 + 3 = ${add(2, 3)}\")\n}\n",
+    );
+    t.write(
+        "calc/tests/CalcTest.kt",
+        "import kotlin.test.*\n\nclass CalcTest {\n    @Test fun adds() = assertEquals(5, mathlib.add(2, 3))\n}\n",
+    );
+    t
+}
+
 #[test]
 fn native_path_dependency() {
     require_e2e!();
-    if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
-        eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
-        return;
-    }
+    require_native!();
     let t = E2e::new();
     // The dependency's own kind is an executable; consumers still link a klib of it.
     t.write("nlib/kargo.toml", "[package]\nname = \"nlib\"\nversion = \"0.1.0\"\n\n[target.native]\n");

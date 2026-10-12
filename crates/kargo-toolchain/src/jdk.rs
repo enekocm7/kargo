@@ -5,6 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use kargo_util::fs::dunce_canonicalize;
 use kargo_util::process::find_on_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +49,8 @@ impl Jdk {
     /// Identifies the JDK of a `java` executable, from the `release` file next to its `bin`
     /// directory when there is one (no JVM start), otherwise by asking `java` itself.
     fn from_java(java: &Path) -> Result<Self> {
-        let real = std::fs::canonicalize(java).unwrap_or_else(|_| java.to_path_buf());
+        // Without Windows' `\\?\` prefix: the home is passed to the Kotlin compiler, which rejects it.
+        let real = dunce_canonicalize(java);
         let home = real.parent().and_then(Path::parent);
         if let Some((home, version)) =
             home.and_then(|h| Some((h, std::fs::read_to_string(h.join("release")).ok().as_deref().and_then(parse_release)?)))
