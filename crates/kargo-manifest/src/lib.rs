@@ -267,7 +267,30 @@ pub struct NativeTarget {
     pub kind: NativeKind,
     pub entry_point: Option<String>,
     pub linker_options: Vec<String>,
+    /// C libraries bound with `cinterop`, from `[target.native.cinterop.<name>]`, by name.
+    pub cinterop: Vec<Cinterop>,
     pub dependencies: Vec<Dependency>,
+}
+
+/// A C library bound to Kotlin with the Kotlin/Native `cinterop` tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cinterop {
+    pub name: String,
+    /// The `.def` file, relative to the project root, when set explicitly.
+    pub def: Option<PathBuf>,
+    /// Kotlin package of the bindings; `None` keeps the one in the `.def` file.
+    pub package: Option<String>,
+    /// Extra headers to bind, as named in `#include`.
+    pub headers: Vec<String>,
+    pub compiler_options: Vec<String>,
+    pub linker_options: Vec<String>,
+}
+
+impl Cinterop {
+    /// The `.def` file: `def` if set, otherwise `interop/<name>.def`.
+    pub fn def_path(&self) -> PathBuf {
+        self.def.clone().unwrap_or_else(|| Path::new("interop").join(format!("{}.def", self.name)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

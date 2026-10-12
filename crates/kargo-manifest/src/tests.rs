@@ -225,6 +225,34 @@ fn dependency_errors() {
 }
 
 #[test]
+fn native_cinterop() {
+    let m = parse(&format!(
+        "{MINIMAL}
+[target.native.cinterop.sqlite]
+package = \"sqlite3\"
+compiler-options = [\"-I/usr/include\"]
+linker-options = [\"-lsqlite3\"]
+
+[target.native.cinterop.curl]
+def = \"c/curl.def\"
+headers = [\"curl/curl.h\"]
+"
+    ));
+    let native = m.targets.native.as_ref().unwrap();
+    let names: Vec<_> = native.cinterop.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["curl", "sqlite"]);
+    let curl = &native.cinterop[0];
+    assert_eq!(curl.def_path(), Path::new("c/curl.def"));
+    assert_eq!(curl.headers, ["curl/curl.h"]);
+    assert!(curl.package.is_none());
+    let sqlite = &native.cinterop[1];
+    assert_eq!(sqlite.def_path(), Path::new("interop").join("sqlite.def"));
+    assert_eq!(sqlite.package.as_deref(), Some("sqlite3"));
+    assert_eq!(sqlite.compiler_options, ["-I/usr/include"]);
+    assert_eq!(sqlite.linker_options, ["-lsqlite3"]);
+}
+
+#[test]
 fn target_errors() {
     let with = |t: &str| format!("{MINIMAL}\n{t}\n");
     assert!(parse_err(&with("[target]")).contains("no target is enabled"));
@@ -232,6 +260,9 @@ fn target_errors() {
     assert!(parse_err(&with("[target.wasm]\npackage-manager = \"yarn\"")).contains("expected `npm`, `pnpm` or `bun`"));
     assert!(parse_err(&with("[target.native]\nplatforms = [\"plan9\"]")).contains("Kotlin/Native platform"));
     assert!(parse_err(&with("[target.native]\nkind = \"weird\"")).contains("native kind"));
+    assert!(parse_err(&with("[target.native.cinterop.\"a/b\"]")).contains("invalid cinterop name"));
+    assert!(parse_err(&with("[target.native.cinterop.x]\npackage = \"a..b\"")).contains("invalid package"));
+    assert!(parse_err(&with("[target.native.cinterop.x]\nlibs = []")).contains("unknown field"));
     assert!(parse_err(&with("[target.android]\nnamespace = \"\"")).contains("namespace"));
     assert!(parse_err(&with("[target.android]\nnamespace = \"a\"\nmin-sdk = 40")).contains("min-sdk"));
     assert!(parse_err(&with("[target.android]\nnamespace = \"a\"\nkind = \"game\"")).contains("kind"));

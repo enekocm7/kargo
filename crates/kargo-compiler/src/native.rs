@@ -1,11 +1,11 @@
-//! Kotlin/Native compilation with `konanc`.
+//! Kotlin/Native compilation with `konanc`, and C library bindings with `cinterop`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
 use super::{FreshnessCheck, Outcome, ResolvedPlugin, SourceSet, fingerprint, plugin_args};
-use kargo_manifest::NativeKind;
+use kargo_manifest::{Cinterop, NativeKind};
 use kargo_toolchain::NativeToolchain;
 use kargo_toolchain::native::executable_extension;
 use kargo_util::process::{self, slash};
@@ -129,9 +129,124 @@ impl NativeCompilation<'_> {
     }
 }
 
+/// One `cinterop` run: a C library bound to a klib for one Konan target.
+#[derive(Debug, Clone)]
+pub struct CinteropUnit<'a> {
+    pub interop: &'a Cinterop,
+    pub konan_target: String,
+    /// The project root; relative paths (`def`, `-I` options) resolve against it.
+    pub root: &'a Path,
+    /// The `.def` file, or `None` when only `headers` describe the library.
+    pub def: Option<PathBuf>,
+    pub output_dir: PathBuf,
+}
+
+impl CinteropUnit<'_> {
+    /// The klib holding the bindings.
+    pub fn artifact(&self) -> PathBuf {
+        self.output_dir.join(format!("{}.klib", self.interop.name))
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        let mut args = vec!["-target".to_owned(), self.konan_target.clone(), "-o".to_owned(), slash(&self.artifact())];
+        if let Some(def) = &self.def {
+            args.push("-def".to_owned());
+            args.push(slash(def));
+        }
+        if let Some(pkg) = &self.interop.package {
+            args.push("-pkg".to_owned());
+            args.push(pkg.clone());
+        }
+        for header in &self.interop.headers {
+            args.push("-header".to_owned());
+            args.push(header.clone());
+        }
+        for opt in &self.interop.compiler_options {
+            args.push("-compiler-option".to_owned());
+            args.push(opt.clone());
+        }
+        // Recorded in the klib, so every program linking it gets them.
+        for opt in &self.interop.linker_options {
+            args.push("-linker-option".to_owned());
+            args.push(opt.clone());
+        }
+        args
+    }
+
+    /// Runs `cinterop` unless the klib is up to date. Changes to the `.def` file, the
+    /// options and the files under project-relative `-I` directories trigger a rerun.
+    pub fn generate(&self, shell: &Shell, toolchain: &NativeToolchain, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
+        let args = self.args();
+        let mut fp = kargo_util::hash::Fingerprint::new();
+        fp.str(env!("CARGO_PKG_VERSION")).str(&toolchain.version);
+        for a in &args {
+            fp.str(a);
+        }
+        if let Some(def) = &self.def {
+            fp.file_stamp(def);
+        }
+        for dir in self.interop.compiler_options.iter().filter_map(|o| o.strip_prefix("-I")) {
+            let dir = Path::new(dir);
+            if dir.is_relative() {
+                fp.file_stamp(&self.root.join(dir));
+            }
+        }
+        let check =
+            FreshnessCheck::new(fingerprint_dir.join(format!("cinterop-{}-{}.fingerprint", self.interop.name, self.konan_target)), &fp);
+        if check.is_fresh() && self.artifact().is_file() {
+            return Ok(Outcome::Fresh);
+        }
+        check.invalidate();
+        announce();
+        std::fs::create_dir_all(&self.output_dir)?;
+        std::fs::create_dir_all(fingerprint_dir)?;
+        let mut cmd = toolchain.cinterop_command();
+        cmd.args(&args).current_dir(self.root);
+        let status = process::status(shell, &mut cmd, "the Kotlin/Native cinterop tool")?;
+        if !status.success() {
+            bail!("could not generate the `{}` C bindings for {} due to previous errors", self.interop.name, self.konan_target);
+        }
+        if !self.artifact().is_file() {
+            bail!("cinterop did not produce {}", self.artifact().display());
+        }
+        check.record()?;
+        Ok(Outcome::Compiled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cinterop_args() {
+        let interop = Cinterop {
+            name: "sqlite".into(),
+            def: None,
+            package: Some("sqlite3".into()),
+            headers: vec!["sqlite3.h".into()],
+            compiler_options: vec!["-Iinclude".into()],
+            linker_options: vec!["-lsqlite3".into()],
+        };
+        let unit = CinteropUnit {
+            interop: &interop,
+            konan_target: "linux_x64".into(),
+            root: Path::new("."),
+            def: Some(PathBuf::from("interop/sqlite.def")),
+            output_dir: PathBuf::from("out"),
+        };
+        assert!(unit.artifact().ends_with("sqlite.klib"));
+        let args = unit.args();
+        assert!(args.windows(2).any(|w| w == ["-target", "linux_x64"]));
+        assert!(args.windows(2).any(|w| w == ["-o", "out/sqlite.klib"]));
+        assert!(args.windows(2).any(|w| w == ["-def", "interop/sqlite.def"]));
+        assert!(args.windows(2).any(|w| w == ["-pkg", "sqlite3"]));
+        assert!(args.windows(2).any(|w| w == ["-header", "sqlite3.h"]));
+        assert!(args.windows(2).any(|w| w == ["-compiler-option", "-Iinclude"]));
+        assert!(args.windows(2).any(|w| w == ["-linker-option", "-lsqlite3"]));
+        let headers_only = CinteropUnit { def: None, ..unit };
+        assert!(!headers_only.args().contains(&"-def".to_owned()));
+    }
 
     fn unit(kind: NativeKind, target: &str) -> NativeCompilation<'static> {
         NativeCompilation {

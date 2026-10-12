@@ -493,6 +493,42 @@ fn native_executable_and_tests() {
 }
 
 #[test]
+fn native_cinterop() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
+        eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["cin", "--target", "native"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("cin/kargo.toml")).unwrap();
+    t.write(
+        "cin/kargo.toml",
+        &format!("{manifest}\n[target.native.cinterop.mathx]\npackage = \"mathx\"\ncompiler-options = [\"-Iinclude\"]\n"),
+    );
+    t.write("cin/include/twice.h", "static inline int twice(int x) { return 2 * x; }\n");
+    t.write("cin/interop/mathx.def", "headers = twice.h\n---\nstatic int add(int a, int b) { return a + b; }\n");
+    t.write(
+        "cin/src/Main.kt",
+        "import kotlinx.cinterop.ExperimentalForeignApi\n\n@OptIn(ExperimentalForeignApi::class)\nfun main() = println(\"answer \" + mathx.twice(mathx.add(20, 1)))\n",
+    );
+    t.write(
+        "cin/tests/GreetingTest.kt",
+        "import kotlinx.cinterop.ExperimentalForeignApi\nimport kotlin.test.Test\nimport kotlin.test.assertEquals\n\n\
+         @OptIn(ExperimentalForeignApi::class)\nclass InteropTest {\n    @Test\n    fun callsC() = assertEquals(4, mathx.add(2, 2))\n}\n",
+    );
+    t.kargo("cin")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating mathx C bindings"))
+        .stdout(predicate::str::contains("answer 42"));
+    // Up to date: the bindings are not regenerated.
+    t.kargo("cin").arg("build").assert().success().stderr(predicate::str::contains("Generating").not());
+    t.kargo("cin").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
+}
+
+#[test]
 fn android_app_with_compose() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {

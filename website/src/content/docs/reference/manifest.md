@@ -160,9 +160,26 @@ platforms = ["host"]               # default ["host"]
 kind = "executable"                # "executable" (default), "library", "shared" or "static"
 entry-point = "com.example.main"
 linker-options = ["-lcurl"]
+
+[target.native.cinterop.sqlite]    # a C library bound with cinterop; one table per library
+def = "interop/sqlite.def"         # default: interop/<name>.def
+package = "sqlite3"
+headers = ["sqlite3.h"]
+compiler-options = ["-I/usr/include"]
+linker-options = ["-lsqlite3"]
 ```
 
 Valid platforms: `host`, `linux_x64`, `linux_arm64`, `mingw_x64`, `macos_x64`, `macos_arm64`, `ios_arm64`, `ios_x64`, `ios_simulator_arm64`, `watchos_arm64`, `watchos_simulator_arm64`, `tvos_arm64`, `tvos_simulator_arm64`, `android_arm64`, `android_arm32`, `android_x64`. Gradle-style names like `linuxX64` are accepted too.
+
+| `[target.native.cinterop.<name>]` key | Default | Meaning |
+|---|---|---|
+| `def` | `interop/<name>.def` | The `.def` file, relative to the project root. It must exist unless only `headers` are given |
+| `package` | the `.def` file's `package` | Kotlin package of the generated bindings |
+| `headers` | `[]` | Extra headers to bind |
+| `compiler-options` | `[]` | clang options for reading the headers (`-I`, `-D`, ...) |
+| `linker-options` | `[]` | Linker options recorded in the bindings and used by every program that links them |
+
+The name may contain letters, digits, `_` and `-`. See [Using C libraries](../../guides/native/#using-c-libraries).
 
 ### `[target.android]`
 

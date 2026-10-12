@@ -146,6 +146,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 |---|---|
 | `kotlin("jvm") version "X"` | `[kotlin] version = "X"` and `[target.jvm]` |
 | `kotlin("multiplatform")` with `jvm()`, `wasmJs()`, `linuxX64()` | `[target.jvm]`, `[target.wasm]`, `[target.native] platforms = ["linux_x64"]` |
+| `compilations["main"].cinterops { create("sqlite") { ... } }` | `[target.native.cinterop.sqlite]`, with the `.def` file in `interop/sqlite.def` |
 | `wasmWasi()` | `[target.wasm] environment = "wasi"` |
 | `com.android.application` + `android { ... }` | `[target.android]` |
 | `implementation(...)` | `[dependencies]` |
