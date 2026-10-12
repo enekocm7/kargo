@@ -102,6 +102,10 @@ Tasks run in `cmd` on Windows, which doesn't understand `$VAR`, `mkdir -p` or `.
 
 Run `kargo tree --duplicates` to see who asks for what. The highest requested version wins; add `force = true` to your own declaration to pin one.
 
+### A SNAPSHOT dependency isn't found, or doesn't update
+
+Add the repository that holds the SNAPSHOT to `[repositories]`; Maven Central doesn't accept them. Kargo finds timestamped builds (`lib-1.0-20240101.120000-1.jar`) through the `1.0-SNAPSHOT/maven-metadata.xml` in that repository. A build stays locked in `kargo.lock`, so to get a newer one run `kargo update`. If it fails with `could not find`, the repository probably deleted the locked build; `kargo update` locks the current one. See [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions).
+
 ### The compiler runs out of memory
 
 ```sh

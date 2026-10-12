@@ -56,6 +56,11 @@ impl FromStr for ModuleId {
     }
 }
 
+/// Whether `version` names a SNAPSHOT (`1.0-SNAPSHOT`), which repositories may store as timestamped builds.
+pub fn is_snapshot(version: &str) -> bool {
+    version.ends_with("-SNAPSHOT")
+}
+
 fn validate_part(input: &str, part: &str) -> Result<(), CoordError> {
     if part.is_empty() {
         return Err(CoordError::new(input, "empty coordinate component"));
@@ -103,6 +108,13 @@ impl Artifact {
     /// Repository-relative path of the artifact file.
     pub fn repo_path(&self) -> String {
         format!("{}/{}/{}", self.module.repo_dir(), self.version, self.file_name())
+    }
+
+    /// Repository-relative path of a SNAPSHOT's file as repositories store it: in the `1.0-SNAPSHOT`
+    /// directory, but named after the build that was deployed (`file_version` is `1.0-20240101.120000-1`).
+    pub fn repo_path_for_build(&self, file_version: &str) -> String {
+        let stamped = Self { version: file_version.to_owned(), ..self.clone() };
+        format!("{}/{}/{}", self.module.repo_dir(), self.version, stamped.file_name())
     }
 
     /// Path of a sibling file in the same version directory (e.g. the `.pom`).
@@ -200,5 +212,14 @@ mod tests {
         assert_eq!(k.file_name(), "ktor-io-3.0.0-cinterop.klib");
         assert_eq!(k.to_string(), "io.ktor:ktor-io:3.0.0:cinterop@klib");
         assert_eq!(a.sibling_path("ktor-io-3.0.0.pom"), "io/ktor/ktor-io/3.0.0/ktor-io-3.0.0.pom");
+    }
+
+    #[test]
+    fn snapshot_builds_live_in_the_snapshot_directory() {
+        assert!(is_snapshot("1.0-SNAPSHOT") && !is_snapshot("1.0") && !is_snapshot("1.0-SNAPSHOT-1"));
+        let a =
+            Artifact::new(ModuleId::new("com.acme", "lib"), "1.0-SNAPSHOT").with_classifier(Some("natives".into())).with_extension("zip");
+        assert_eq!(a.repo_path_for_build("1.0-20240101.120000-1"), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1-natives.zip");
+        assert_eq!(a.repo_path(), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-SNAPSHOT-natives.zip");
     }
 }

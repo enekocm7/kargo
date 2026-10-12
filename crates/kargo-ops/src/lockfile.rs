@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use kargo_maven::coord::ModuleId;
 use kargo_maven::repo::MavenClient;
 use kargo_maven::resolver::{Resolution, ResolvedNode};
+use kargo_maven::snapshot::build_stamp;
 use kargo_util::hash;
 
 const LOCKFILE_VERSION: u32 = 1;
@@ -40,6 +41,27 @@ pub struct LockedPackage {
     pub dependencies: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<LockedFile>,
+}
+
+impl LockedPackage {
+    /// For a SNAPSHOT, the build its files were taken from, such as `20240101.120000-1`.
+    fn build(&self) -> Option<&str> {
+        let artifact = self.module.rsplit(':').next()?;
+        self.files.iter().find_map(|f| build_stamp(f.path.rsplit('/').next()?, artifact, &self.version))
+    }
+
+    /// The version, followed for a SNAPSHOT by its build: `1.0-SNAPSHOT (20240101.120000-1)`.
+    fn version_and_build(&self) -> String {
+        match self.build() {
+            Some(build) => format!("{} ({build})", self.version),
+            None => self.version.clone(),
+        }
+    }
+
+    /// For a SNAPSHOT, the name its files carry in place of the version, such as `1.0-20240101.120000-1`.
+    pub fn build_file_version(&self) -> Option<String> {
+        Some(format!("{}-{}", self.version.strip_suffix("-SNAPSHOT")?, self.build()?))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,9 +212,13 @@ impl Lockfile {
 
     /// Every locked version of each module, across all resolutions.
     pub fn module_versions(&self) -> BTreeMap<String, BTreeSet<String>> {
+        self.versions_by(|pkg| pkg.version.clone())
+    }
+
+    fn versions_by(&self, label: impl Fn(&LockedPackage) -> String) -> BTreeMap<String, BTreeSet<String>> {
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for pkg in self.resolutions.values().flat_map(|r| &r.packages) {
-            out.entry(pkg.module.clone()).or_default().insert(pkg.version.clone());
+            out.entry(pkg.module.clone()).or_default().insert(label(pkg));
         }
         out
     }
@@ -202,9 +228,10 @@ impl Lockfile {
         self.resolutions.values().flat_map(|r| &r.packages).any(|p| p.module == module)
     }
 
-    /// The modules whose locked versions differ between `self` and `newer`.
+    /// The modules whose locked versions differ between `self` and `newer`. A SNAPSHOT counts as
+    /// changed when it is locked to a different build.
     pub fn diff(&self, newer: &Lockfile) -> Vec<LockChange> {
-        let (old, new) = (self.module_versions(), newer.module_versions());
+        let (old, new) = (self.versions_by(LockedPackage::version_and_build), newer.versions_by(LockedPackage::version_and_build));
         let modules: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
         modules
             .into_iter()
@@ -361,6 +388,29 @@ mod tests {
             ]
         );
         assert!(new.diff(&new).is_empty());
+    }
+
+    #[test]
+    fn diff_sees_a_new_snapshot_build() {
+        let lock = |stamp: &str| {
+            let file = LockedFile { path: format!("g/lib/1.0-SNAPSHOT/lib-1.0-{stamp}.jar"), sha256: "x".into() };
+            let pkg = LockedPackage { module: "g:lib".into(), version: "1.0-SNAPSHOT".into(), files: vec![file], ..Default::default() };
+            let mut l = Lockfile::default();
+            l.resolutions.insert("jvm/runtime".into(), LockedResolution { packages: vec![pkg], ..Default::default() });
+            l
+        };
+        let (old, new) = (lock("20240101.120000-1"), lock("20240102.080000-2"));
+        assert!(old.diff(&old).is_empty());
+        assert_eq!(
+            old.diff(&new),
+            [LockChange {
+                module: "g:lib".into(),
+                before: vec!["1.0-SNAPSHOT (20240101.120000-1)".into()],
+                after: vec!["1.0-SNAPSHOT (20240102.080000-2)".into()],
+            }]
+        );
+        // The locked version itself is still the plain SNAPSHOT version.
+        assert_eq!(new.module_versions()["g:lib"], BTreeSet::from(["1.0-SNAPSHOT".to_owned()]));
     }
 
     #[test]

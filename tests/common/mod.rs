@@ -64,25 +64,49 @@ impl LocalRepo {
     pub fn publish(&self, coord: &str, version: &str, deps: &[(&str, &str)]) -> &Self {
         let (group, artifact) = coord.split_once(':').unwrap();
         let dir = format!("{}/{artifact}", group.replace('.', "/"));
-        let deps_xml: String = deps
-            .iter()
-            .map(|(c, v)| {
-                let (g, a) = c.split_once(':').unwrap();
-                format!("<dependency><groupId>{g}</groupId><artifactId>{a}</artifactId><version>{v}</version></dependency>")
-            })
-            .collect();
+        self.write(&format!("{dir}/{version}/{artifact}-{version}.pom"), &pom(group, artifact, version, deps));
+        self.write(&format!("{dir}/{version}/{artifact}-{version}.jar"), &format!("jar {coord} {version}"));
+        self.list_version(&dir, version)
+    }
+
+    /// Publishes a SNAPSHOT the way `mvn deploy` stores it: timestamped files in the `1.0-SNAPSHOT`
+    /// directory (`stamp` is `20240101.120000-1`) and the `maven-metadata.xml` that points at them.
+    /// Publishing again moves the metadata to the new build and leaves the old files in place.
+    pub fn publish_snapshot(&self, coord: &str, version: &str, stamp: &str, deps: &[(&str, &str)]) -> &Self {
+        let (group, artifact) = coord.split_once(':').unwrap();
+        let dir = format!("{}/{artifact}", group.replace('.', "/"));
+        let file_version = format!("{}-{stamp}", version.strip_suffix("-SNAPSHOT").unwrap());
+        let (timestamp, number) = stamp.split_once('-').unwrap();
+        let updated = timestamp.replace('.', "");
+        self.write(&format!("{dir}/{version}/{artifact}-{file_version}.pom"), &pom(group, artifact, version, deps));
+        self.write(&format!("{dir}/{version}/{artifact}-{file_version}.jar"), &format!("jar {coord} {file_version}"));
+        let entry = |extension: &str| {
+            format!(
+                "<snapshotVersion><extension>{extension}</extension><value>{file_version}</value><updated>{updated}</updated></snapshotVersion>"
+            )
+        };
         self.write(
-            &format!("{dir}/{version}/{artifact}-{version}.pom"),
+            &format!("{dir}/{version}/maven-metadata.xml"),
             &format!(
-                "<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><dependencies>{deps_xml}</dependencies></project>"
+                "<metadata><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><versioning>\
+                 <snapshot><timestamp>{timestamp}</timestamp><buildNumber>{number}</buildNumber></snapshot><lastUpdated>{updated}</lastUpdated>\
+                 <snapshotVersions>{}{}</snapshotVersions></versioning></metadata>",
+                entry("jar"),
+                entry("pom")
             ),
         );
-        self.write(&format!("{dir}/{version}/{artifact}-{version}.jar"), &format!("jar {coord} {version}"));
+        self.list_version(&dir, version)
+    }
+
+    /// Adds `version` to the module's version list.
+    fn list_version(&self, dir: &str, version: &str) -> &Self {
         let meta_path = self.dir.path().join(format!("{dir}/maven-metadata.xml"));
         let mut versions: Vec<String> = std::fs::read_to_string(&meta_path)
             .map(|s| s.split("<version>").skip(1).map(|p| p.split('<').next().unwrap().to_owned()).collect())
             .unwrap_or_default();
-        versions.push(version.to_owned());
+        if !versions.iter().any(|v| v == version) {
+            versions.push(version.to_owned());
+        }
         let body: String = versions.iter().map(|v| format!("<version>{v}</version>")).collect();
         self.write(
             &format!("{dir}/maven-metadata.xml"),
@@ -90,6 +114,19 @@ impl LocalRepo {
         );
         self
     }
+}
+
+fn pom(group: &str, artifact: &str, version: &str, deps: &[(&str, &str)]) -> String {
+    let deps_xml: String = deps
+        .iter()
+        .map(|(c, v)| {
+            let (g, a) = c.split_once(':').unwrap();
+            format!("<dependency><groupId>{g}</groupId><artifactId>{a}</artifactId><version>{v}</version></dependency>")
+        })
+        .collect();
+    format!(
+        "<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><dependencies>{deps_xml}</dependencies></project>"
+    )
 }
 
 pub fn manifest(name: &str, extra: &str) -> String {

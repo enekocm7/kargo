@@ -272,6 +272,38 @@ local = "file:///home/me/.m2/repository"
 
 Credentials are never written in `kargo.toml`; Kargo reads them from the named environment variables.
 
+## SNAPSHOT versions
+
+A version that ends in `-SNAPSHOT` is a library's work in progress, redeployed over and over. Declare it like any other version and add the repository that holds it:
+
+```toml title="kargo.toml"
+[dependencies]
+"com.acme:lib" = "1.0-SNAPSHOT"
+
+[repositories]
+snapshots = "https://repo.example.com/snapshots"
+```
+
+Repositories such as Nexus, Artifactory and GitHub Packages (and `mvn deploy`) don't store a file called `lib-1.0-SNAPSHOT.jar`. Each deployment is a **timestamped build**, `lib-1.0-20240101.120000-1.jar`, and `1.0-SNAPSHOT/maven-metadata.xml` says which build is the newest of each file (the jar, the POM, the Gradle module metadata, and each classifier). Kargo reads that file and downloads the newest build. A repository without that metadata, or one that keeps the plain `lib-1.0-SNAPSHOT.jar` name (what `mvn install` writes into `~/.m2/repository`), is used as it is.
+
+Builds don't move under you:
+
+- **`kargo.lock` records the build.** The locked path is the timestamped file, so every build and every machine uses the same one until you decide otherwise. `kargo build --locked` in CI stays reproducible.
+- **`kargo update` moves to the newest build**, and prints which one:
+
+  ```console
+  $ kargo update
+      Updating com.acme:lib v1.0-SNAPSHOT (20240101.120000-1) -> v1.0-SNAPSHOT (20240102.080000-2)
+       Updated kargo.lock
+  ```
+
+  `kargo update com.acme:other` leaves the SNAPSHOTs it wasn't asked about on their locked builds. `kargo build --refresh` ignores the lockfile for one run and picks the newest build as well.
+- **Metadata is re-checked daily.** Without a lockfile entry (a new dependency, say), Kargo reuses a remote repository's SNAPSHOT metadata for up to 24 hours. `file:` repositories are read every time, so a snapshot you just published to a local directory is seen immediately. A SNAPSHOT stored under its plain name is compared with the repository's checksum on the same schedule, and downloaded again if it changed.
+
+:::caution
+Repositories often delete old snapshot builds. If a locked build is gone, the build fails with `could not find ...`; run `kargo update` to lock the current one.
+:::
+
 ## The lockfile
 
 `kargo.lock` records the exact version of every resolved module and the SHA-256 of every downloaded file. Commit it, so everyone builds with the same dependencies.
