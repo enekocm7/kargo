@@ -371,7 +371,7 @@ Download all dependencies and toolchains so later builds can run offline.
 
 ## `kargo update`
 
-Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges are picked up.
+Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges and new builds of [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) are picked up.
 
 ```sh
 kargo update [group:artifact]... [--precise <version>] [--dry-run]
@@ -379,7 +379,7 @@ kargo update [group:artifact]... [--precise <version>] [--dry-run]
 
 | Option | Meaning |
 |---|---|
-| `modules` | Only update these locked modules (direct or transitive). Every other module keeps its locked version |
+| `modules` | Only update these locked modules (direct or transitive). Every other module keeps its locked version (a SNAPSHOT, its locked build) |
 | `--precise <version>` | Lock the one given module at exactly this version, for example to pick up a security fix in a transitive dependency or to step back from a broken release |
 | `--dry-run` | Print the changes without writing `kargo.lock` |
 

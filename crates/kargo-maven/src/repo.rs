@@ -1,15 +1,16 @@
 //! Remote Maven repositories and the local download cache.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 
-use super::coord::ModuleId;
+use super::coord::{Artifact, ModuleId, is_snapshot};
+use super::snapshot::SnapshotMetadata;
 use super::version::{Version, select_latest};
 use kargo_util::config::Config;
 use kargo_util::shell::Shell;
@@ -18,7 +19,7 @@ use kargo_util::{fs as kfs, hash};
 pub const MAVEN_CENTRAL: &str = "https://repo.maven.apache.org/maven2";
 pub const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
 
-/// How long `maven-metadata.xml` (the version list) is trusted before re-checking.
+/// How long `maven-metadata.xml` (the version list, or the builds of a SNAPSHOT) is trusted before re-checking.
 const METADATA_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How many times a request that failed transiently (HTTP 429, 5xx, connection errors) is retried.
@@ -81,6 +82,12 @@ pub struct MavenClient {
     missing: Mutex<HashSet<String>>,
     /// Cached paths checked against a repository's published checksum during this run.
     verified: Mutex<HashSet<String>>,
+    /// SNAPSHOT metadata already read during this run, keyed by repository and version directory.
+    snapshots: Mutex<HashMap<String, Option<Arc<SnapshotMetadata>>>>,
+    /// Cached SNAPSHOT files under their plain name that were compared with their repository during this run.
+    rechecked: Mutex<HashSet<String>>,
+    /// SNAPSHOTs fixed at a build (`1.0-20240101.120000-1`) instead of the newest one.
+    snapshot_builds: Mutex<HashMap<(ModuleId, String), String>>,
 }
 
 impl MavenClient {
@@ -101,6 +108,9 @@ impl MavenClient {
             shell: config.shell().clone(),
             missing: Mutex::new(HashSet::new()),
             verified: Mutex::new(HashSet::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            rechecked: Mutex::new(HashSet::new()),
+            snapshot_builds: Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,6 +136,9 @@ impl MavenClient {
         validate_rel_path(rel)?;
         let cached = self.cache_path(rel);
         if cached.is_file() {
+            self.recheck_plain_snapshot(rel, &cached);
+        }
+        if cached.is_file() {
             return Ok(Some(cached));
         }
         if self.missing.lock().expect("lock poisoned").contains(rel) {
@@ -142,6 +155,38 @@ impl MavenClient {
         }
         self.missing.lock().expect("lock poisoned").insert(rel.to_owned());
         Ok(None)
+    }
+
+    /// A SNAPSHOT that a repository stores under its plain name (`lib-1.0-SNAPSHOT.jar`, as `mvn install`
+    /// leaves it) is overwritten whenever the library is built again, so a cached copy goes stale. Once
+    /// per run, the copy is compared with the repository's checksum, and deleted (to be downloaded again)
+    /// if it changed. Remote repositories are only asked when the copy is older than [`METADATA_TTL`] or
+    /// after `--refresh`; local ones every time.
+    fn recheck_plain_snapshot(&self, rel: &str, cached: &Path) {
+        let mut segments = rel.rsplit('/');
+        let (Some(name), Some(dir)) = (segments.next(), segments.next()) else { return };
+        let is_plain_snapshot = dir.ends_with("-SNAPSHOT") && name.contains("-SNAPSHOT");
+        // A file downloaded or checked during this run is current.
+        if !is_plain_snapshot || self.is_verified(rel) || !self.rechecked.lock().expect("lock poisoned").insert(rel.to_owned()) {
+            return;
+        }
+        let modified = std::fs::metadata(cached).and_then(|m| m.modified()).ok();
+        let due = self.refresh || modified.and_then(|t| SystemTime::now().duration_since(t).ok()).is_none_or(|age| age >= METADATA_TTL);
+        for repo in &self.repos {
+            if !repo.is_local() && (self.offline || !due) {
+                continue;
+            }
+            let Ok(Some(expected)) = self.published_sha1(repo, rel) else { continue };
+            if hash::sha1_file(cached).is_ok_and(|actual| actual == expected) {
+                // Up to date: restart the clock for remote repositories.
+                let _ = std::fs::File::options().write(true).open(cached).and_then(|f| f.set_modified(SystemTime::now()));
+                self.mark_verified(rel);
+            } else {
+                self.shell.verbose("Updating", format!("{rel} (changed in {})", repo.name));
+                let _ = std::fs::remove_file(cached);
+            }
+            return;
+        }
     }
 
     /// Like [`MavenClient::fetch`] but fails with a helpful error if missing.
@@ -331,36 +376,89 @@ impl MavenClient {
         let rel = format!("{}/maven-metadata.xml", module.repo_dir());
         for repo in &self.repos {
             let cached = self.cache.join(module.repo_dir()).join(format!("maven-metadata-{}.xml", sanitize(&repo.name)));
-            let fresh = !self.refresh
-                && std::fs::metadata(&cached)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| SystemTime::now().duration_since(t).ok())
-                    .is_some_and(|age| age < METADATA_TTL);
-            if !fresh && !(self.offline && !repo.is_local()) {
-                // The download replaces the cached copy atomically, so a concurrent resolution of the same
-                // module never sees it missing. A failure just means this repository doesn't know the module.
-                match self.fetch_from(repo, &rel, &cached) {
-                    Ok(Fetch::Found) => {}
-                    Ok(_) => {
-                        let _ = std::fs::remove_file(&cached);
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&cached);
-                        self.shell.verbose("Skipping", format!("{} metadata from {}: {e:#}", module, repo.name));
-                    }
-                }
-            }
-            if let Ok(xml) = std::fs::read_to_string(&cached) {
-                for v in parse_metadata_versions(&xml) {
-                    if !versions.iter().any(|existing| existing.as_str() == v) {
-                        versions.push(Version::parse(&v));
-                    }
+            let Some(xml) = self.repo_metadata(repo, &rel, &cached, module) else { continue };
+            for v in parse_metadata_versions(&xml) {
+                if !versions.iter().any(|existing| existing.as_str() == v) {
+                    versions.push(Version::parse(&v));
                 }
             }
         }
         versions.sort();
         Ok(versions)
+    }
+
+    /// The text of `repo`'s `maven-metadata.xml` at `rel`, kept in `cached` and re-checked when older
+    /// than [`METADATA_TTL`] or after `--refresh`. `subject` names what the metadata is about.
+    fn repo_metadata(&self, repo: &Repository, rel: &str, cached: &Path, subject: &dyn std::fmt::Display) -> Option<String> {
+        // A local repository is a plain directory, so its metadata is always read afresh: whatever was
+        // just published into it must be seen, not hidden behind a day-old copy.
+        let fresh = !repo.is_local()
+            && !self.refresh
+            && std::fs::metadata(cached)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| SystemTime::now().duration_since(t).ok())
+                .is_some_and(|age| age < METADATA_TTL);
+        if !fresh && !(self.offline && !repo.is_local()) {
+            // The download replaces the cached copy atomically, so a concurrent resolution of the same
+            // module never sees it missing. A failure just means this repository doesn't know the module.
+            match self.fetch_from(repo, rel, cached) {
+                Ok(Fetch::Found) => {}
+                Ok(_) => {
+                    let _ = std::fs::remove_file(cached);
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(cached);
+                    self.shell.verbose("Skipping", format!("{subject} metadata from {}: {e:#}", repo.name));
+                }
+            }
+        }
+        std::fs::read_to_string(cached).ok()
+    }
+
+    /// The repository-relative path of `artifact`. A SNAPSHOT is deployed as timestamped builds
+    /// (`lib-1.0-20240101.120000-1.jar` in the `1.0-SNAPSHOT` directory) that its `maven-metadata.xml`
+    /// lists, so this returns the file of the newest build. A repository without such metadata, or
+    /// one that stores the file under the plain `-SNAPSHOT` name, keeps `artifact.repo_path()`.
+    pub fn artifact_path(&self, artifact: &Artifact) -> Result<String> {
+        if is_snapshot(&artifact.version) {
+            let pinned =
+                self.snapshot_builds.lock().expect("lock poisoned").get(&(artifact.module.clone(), artifact.version.clone())).cloned();
+            if let Some(build) = pinned {
+                return Ok(artifact.repo_path_for_build(&build));
+            }
+            for repo in &self.repos {
+                let Some(meta) = self.snapshot_metadata(repo, &artifact.module, &artifact.version)? else { continue };
+                if let Some(build) = meta.file_version(&artifact.version, artifact.classifier.as_deref(), &artifact.extension) {
+                    return Ok(artifact.repo_path_for_build(&build));
+                }
+            }
+        }
+        Ok(artifact.repo_path())
+    }
+
+    /// Fixes SNAPSHOT `module:version` at the build whose files are named `build` (`1.0-20240101.120000-1`),
+    /// so a locked build is kept while the repository moves on.
+    pub fn pin_snapshot_build(&self, module: &ModuleId, version: &str, build: &str) {
+        self.snapshot_builds.lock().expect("lock poisoned").insert((module.clone(), version.to_owned()), build.to_owned());
+    }
+
+    /// What `repo` knows about the builds of SNAPSHOT `module:version`, read once per run.
+    fn snapshot_metadata(&self, repo: &Repository, module: &ModuleId, version: &str) -> Result<Option<Arc<SnapshotMetadata>>> {
+        let dir = format!("{}/{version}", module.repo_dir());
+        let rel = format!("{dir}/maven-metadata.xml");
+        validate_rel_path(&rel)?;
+        let key = format!("{}|{rel}", repo.url);
+        if let Some(known) = self.snapshots.lock().expect("lock poisoned").get(&key) {
+            return Ok(known.clone());
+        }
+        let cached = self.cache_path(&format!("{dir}/maven-metadata-{}.xml", sanitize(&repo.name)));
+        let meta = self
+            .repo_metadata(repo, &rel, &cached, &format_args!("{module}:{version}"))
+            .and_then(|xml| SnapshotMetadata::parse(&xml))
+            .map(Arc::new);
+        self.snapshots.lock().expect("lock poisoned").insert(key, meta.clone());
+        Ok(meta)
     }
 
     /// The newest version, ignoring pre-releases unless `allow_prerelease` and preferring plain
@@ -488,6 +586,90 @@ mod tests {
         assert_eq!(versions, ["1.0", "1.1-SNAPSHOT"]);
         assert_eq!(client.latest_version(&module, false).unwrap().as_str(), "1.0");
         assert_eq!(client.latest_version(&module, true).unwrap().as_str(), "1.1-SNAPSHOT");
+    }
+
+    fn deploy_snapshot(repo_dir: &Path, timestamp: &str, build: u32) {
+        let dir = repo_dir.join("com/acme/lib/1.0-SNAPSHOT");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_version = format!("1.0-{timestamp}-{build}");
+        let updated = timestamp.replace('.', "");
+        let entry = |ext: &str| {
+            format!(
+                "<snapshotVersion><extension>{ext}</extension><value>{file_version}</value><updated>{updated}</updated></snapshotVersion>"
+            )
+        };
+        std::fs::write(
+            dir.join("maven-metadata.xml"),
+            format!("<metadata><versioning><snapshotVersions>{}{}</snapshotVersions></versioning></metadata>", entry("jar"), entry("pom")),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("lib-{file_version}.jar")), format!("jar {build}")).unwrap();
+    }
+
+    #[test]
+    fn snapshots_resolve_to_the_newest_timestamped_build() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let module = ModuleId::new("com.acme", "lib");
+        let jar = Artifact::new(module.clone(), "1.0-SNAPSHOT");
+        let path = |client: &MavenClient, artifact: &Artifact| client.artifact_path(artifact).unwrap();
+
+        // Without metadata the plain `-SNAPSHOT` name is used, as is the case for releases.
+        let client = local_client(repo.path(), home.path());
+        assert_eq!(path(&client, &jar), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-SNAPSHOT.jar");
+        assert_eq!(path(&client, &Artifact::new(module.clone(), "1.0")), "com/acme/lib/1.0/lib-1.0.jar");
+
+        deploy_snapshot(repo.path(), "20240101.120000", 1);
+        let client = local_client(repo.path(), home.path());
+        assert_eq!(path(&client, &jar), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar");
+        assert_eq!(path(&client, &jar.clone().with_extension("pom")), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.pom");
+        assert_eq!(path(&client, &jar.clone().with_extension("module")), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-SNAPSHOT.module");
+        let fetched = client.fetch_required(&path(&client, &jar)).unwrap();
+        assert_eq!(std::fs::read_to_string(fetched).unwrap(), "jar 1");
+
+        // A local repository is never read from a stale copy: the next run sees the new build,
+        // while this run keeps the answer it already gave.
+        deploy_snapshot(repo.path(), "20240102.080000", 2);
+        assert_eq!(path(&client, &jar), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar");
+        let client = local_client(repo.path(), home.path());
+        assert_eq!(path(&client, &jar), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240102.080000-2.jar");
+
+        // A build can be pinned, to keep a locked one while the repository moves on.
+        client.pin_snapshot_build(&module, "1.0-SNAPSHOT", "1.0-20240101.120000-1");
+        assert_eq!(path(&client, &jar), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar");
+        assert_eq!(path(&client, &jar.with_extension("pom")), "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.pom");
+    }
+
+    #[test]
+    fn plain_snapshot_files_follow_their_repository_but_releases_do_not() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let snapshot = "com/acme/lib/2.0-SNAPSHOT/lib-2.0-SNAPSHOT.jar";
+        let release = "com/acme/lib/1.0/lib-1.0.jar";
+        let publish = |rel: &str, contents: &str| {
+            let path = repo.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        let read = |client: &MavenClient, rel: &str| std::fs::read_to_string(client.fetch(rel).unwrap().unwrap()).unwrap();
+
+        publish(snapshot, "one");
+        publish(release, "one");
+        let client = local_client(repo.path(), home.path());
+        assert_eq!((read(&client, snapshot), read(&client, release)), ("one".to_owned(), "one".to_owned()));
+
+        // `mvn install` overwrote both files. A run notices that for the SNAPSHOT only, and keeps its answer.
+        publish(snapshot, "two");
+        publish(release, "two");
+        assert_eq!(read(&client, snapshot), "one");
+        let client = local_client(repo.path(), home.path());
+        assert_eq!((read(&client, snapshot), read(&client, release)), ("two".to_owned(), "one".to_owned()));
+        assert!(client.is_verified(snapshot));
+
+        // A file that is gone upstream stays in the cache.
+        std::fs::remove_file(repo.path().join(snapshot)).unwrap();
+        let client = local_client(repo.path(), home.path());
+        assert_eq!(read(&client, snapshot), "two");
     }
 
     #[test]

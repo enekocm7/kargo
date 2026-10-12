@@ -115,21 +115,22 @@ pub struct UpdatePlan {
 }
 
 impl UpdatePlan {
-    /// The versions to pin in the resolution `key`. Locked versions are kept only while the
-    /// resolution's inputs are unchanged; otherwise the manifest changed and it resolves afresh.
-    fn pins(&self, key: &str, inputs: &str) -> Vec<(ModuleId, String)> {
-        let mut pins: Vec<(ModuleId, String)> = Vec::new();
+    /// The versions to pin in the resolution `key`, each with the locked build when it is a SNAPSHOT
+    /// (`1.0-20240101.120000-1`). Locked versions are kept only while the resolution's inputs are
+    /// unchanged; otherwise the manifest changed and it resolves afresh.
+    fn pins(&self, key: &str, inputs: &str) -> Vec<(ModuleId, String, Option<String>)> {
+        let mut pins: Vec<(ModuleId, String, Option<String>)> = Vec::new();
         if let Some(locked) = self.previous.resolutions.get(key).filter(|r| r.inputs == inputs) {
             for pkg in &locked.packages {
                 if let Ok(module) = pkg.module.parse::<ModuleId>()
                     && !self.modules.contains(&module)
                 {
-                    pins.push((module, pkg.version.clone()));
+                    pins.push((module, pkg.version.clone(), pkg.build_file_version()));
                 }
             }
         }
         if let Some(precise) = &self.precise {
-            pins.extend(self.modules.iter().map(|m| (m.clone(), precise.clone())));
+            pins.extend(self.modules.iter().map(|m| (m.clone(), precise.clone(), None)));
         }
         pins
     }
@@ -409,8 +410,11 @@ impl<'a> BuildContext<'a> {
         self.shell().verbose("Resolving", key);
         let mut resolver = Resolver::new(&self.client, platform);
         if let Some(plan) = &self.update {
-            for (module, version) in plan.pins(key, &inputs) {
-                resolver.pin(module, &version);
+            for (module, version, build) in plan.pins(key, &inputs) {
+                match build {
+                    Some(build) => resolver.pin_build(module, &version, &build),
+                    None => resolver.pin(module, &version),
+                }
             }
         }
         for bom in boms {

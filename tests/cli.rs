@@ -432,6 +432,109 @@ fn corrupt_cached_artifact_is_redownloaded_before_locking() {
 }
 
 #[test]
+fn timestamped_snapshots_resolve_through_maven_metadata() {
+    let repo = LocalRepo::new();
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[("com.acme:util", "2.0-SNAPSHOT")])
+        .publish_snapshot("com.acme:util", "2.0-SNAPSHOT", "20240101.110000-4", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("snap", &format!("[kotlin]\nversion = \"2.4.21\"\n[repositories]\nlocal = \"{}\"\n", repo.url())));
+
+    // `kargo add` finds a SNAPSHOT that only exists under its timestamped names.
+    p.kargo().args(["add", "com.acme:lib:1.0-SNAPSHOT"]).assert().success();
+    assert!(p.read("kargo.toml").contains("\"com.acme:lib\" = \"1.0-SNAPSHOT\""));
+
+    p.kargo()
+        .args(["tree", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("com.acme:lib:1.0-SNAPSHOT"))
+        .stdout(predicate::str::contains("com.acme:util:2.0-SNAPSHOT"));
+    let cached = |rel: &str| p.home.path().join("cache/maven").join(rel);
+    assert_eq!(
+        std::fs::read_to_string(cached("com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar")).unwrap(),
+        "jar com.acme:lib 1.0-20240101.120000-1"
+    );
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar"), "{lock}");
+    assert!(lock.contains("com/acme/util/2.0-SNAPSHOT/util-2.0-20240101.110000-4.jar"), "{lock}");
+
+    // A newer build is not picked up while kargo.lock pins the old one.
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240102.080000-2", &[("com.acme:util", "2.0-SNAPSHOT")]);
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
+    assert_eq!(p.read("kargo.lock"), lock);
+
+    // `kargo update` moves to it, and says so.
+    p.kargo()
+        .args(["update", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating com.acme:lib v1.0-SNAPSHOT (20240101.120000-1) -> v1.0-SNAPSHOT (20240102.080000-2)"))
+        .stderr(predicate::str::contains("com.acme:util").not());
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240102.080000-2.jar"), "{lock}");
+    assert!(!lock.contains("lib-1.0-20240101.120000-1.jar"), "{lock}");
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("up to date"));
+}
+
+#[test]
+fn selective_update_keeps_locked_snapshot_builds() {
+    let repo = LocalRepo::new();
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[])
+        .publish("com.acme:other", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "snap",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"com.acme:lib\" = \"1.0-SNAPSHOT\"\n\"com.acme:other\" = \"[1.0,2.0)\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["update", "--offline"]).assert().success();
+
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240102.080000-2", &[]).publish("com.acme:other", "1.1", &[]);
+    p.kargo()
+        .args(["update", "com.acme:other", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating com.acme:other v1.0 -> v1.1"))
+        .stderr(predicate::str::contains("com.acme:lib").not());
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("lib-1.0-20240101.120000-1.jar") && !lock.contains("20240102.080000-2"), "{lock}");
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
+
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("v1.0-SNAPSHOT (20240102.080000-2)"));
+    assert!(p.read("kargo.lock").contains("lib-1.0-20240102.080000-2.jar"));
+}
+
+#[test]
+fn snapshots_stored_under_their_plain_name_still_resolve() {
+    let repo = LocalRepo::new();
+    repo.publish("com.acme:lib", "2.0-SNAPSHOT", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "plain",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"com.acme:lib\" = \"2.0-SNAPSHOT\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["tree", "--offline"]).assert().success();
+    assert!(p.read("kargo.lock").contains("com/acme/lib/2.0-SNAPSHOT/lib-2.0-SNAPSHOT.jar"));
+}
+
+#[test]
 fn offline_mode_reports_missing_artifacts() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("off", "[dependencies]\n\"never:seen\" = \"1.0\"\n"));
