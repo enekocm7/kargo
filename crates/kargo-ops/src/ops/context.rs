@@ -109,7 +109,7 @@ impl TargetSetup {
     pub fn requests(&self, scopes: &[Scope], include_dev: bool) -> Vec<DependencyRequest> {
         let mut deps: Vec<&Dependency> = self.main.iter().filter(|d| scopes.contains(&d.scope)).collect();
         if include_dev {
-            deps.extend(self.dev.iter());
+            deps.extend(self.dev.iter().filter(|d| scopes.contains(&d.scope)));
         }
         let mut out: Vec<DependencyRequest> = Vec::new();
         for d in deps {
@@ -341,16 +341,23 @@ mod tests {
         provided.scope = Scope::Provided;
         let mut runtime = Dependency::new("r:r".parse().unwrap(), Some("1".into()));
         runtime.scope = Scope::Runtime;
+        let mut processor = Dependency::new("ap:ap".parse().unwrap(), Some("1".into()));
+        processor.scope = Scope::Processor;
+        let mut test_processor = Dependency::new("tp:tp".parse().unwrap(), Some("1".into()));
+        test_processor.scope = Scope::Processor;
         let setup = TargetSetup {
             target: TargetKind::Jvm,
             contributions: Contributions::default(),
-            main: vec![Dependency::new("c:c".parse().unwrap(), Some("1".into())), provided, runtime],
-            dev: vec![Dependency::new("t:t".parse().unwrap(), Some("1".into()))],
+            main: vec![Dependency::new("c:c".parse().unwrap(), Some("1".into())), provided, runtime, processor],
+            dev: vec![Dependency::new("t:t".parse().unwrap(), Some("1".into())), test_processor],
             boms: vec![],
         };
         let names = |r: Vec<DependencyRequest>| r.into_iter().map(|r| r.module.artifact).collect::<Vec<_>>();
         assert_eq!(names(setup.requests(&[Scope::Compile, Scope::Provided], false)), ["c", "p"]);
         assert_eq!(names(setup.requests(&[Scope::Compile, Scope::Runtime], false)), ["c", "r"]);
         assert_eq!(names(setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true)), ["c", "p", "r", "t"]);
+        // Processors never land on a classpath, only on the processor path.
+        assert_eq!(names(setup.requests(&[Scope::Processor], false)), ["ap"]);
+        assert_eq!(names(setup.requests(&[Scope::Processor], true)), ["ap", "tp"]);
     }
 }

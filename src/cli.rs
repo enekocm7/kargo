@@ -92,6 +92,8 @@ enum ScopeArg {
     Compile,
     Runtime,
     Provided,
+    /// A Java annotation processor (javac -processorpath)
+    Processor,
 }
 
 impl From<ScopeArg> for Scope {
@@ -100,6 +102,7 @@ impl From<ScopeArg> for Scope {
             ScopeArg::Compile => Scope::Compile,
             ScopeArg::Runtime => Scope::Runtime,
             ScopeArg::Provided => Scope::Provided,
+            ScopeArg::Processor => Scope::Processor,
         }
     }
 }

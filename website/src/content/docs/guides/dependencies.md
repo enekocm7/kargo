@@ -13,6 +13,7 @@ kargo add com.squareup.okio:okio:3.10.2          # an exact version
 kargo add io.mockk:mockk --dev                   # test-only
 kargo add org.slf4j:slf4j-simple --scope runtime # only needed at runtime
 kargo add jakarta.servlet:jakarta.servlet-api --scope provided
+kargo add com.google.auto.value:auto-value:1.11.0 --scope processor # a javac annotation processor
 kargo add com.google.guava:guava -t jvm          # only for the JVM target
 kargo add org.jetbrains.kotlinx:kotlinx-io-core --pre   # allow a pre-release as "latest"
 ```
@@ -82,7 +83,7 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 |---|---|
 | `version` | A version or Maven range. Required unless a BOM manages it. |
 | `group`, `artifact`, `coords` | Alternatives to writing `"group:artifact"` as the key. |
-| `scope` | `compile` (default), `runtime` or `provided`. |
+| `scope` | `compile` (default), `runtime`, `provided` or `processor`. |
 | `exclude` | `group:artifact` (or `group:*`) entries to drop from this dependency's tree. |
 | `transitive` | `false` to ignore this dependency's own dependencies. |
 | `force` | `true` to pin this version even if something else asks for a newer one. |
@@ -96,6 +97,45 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 | `compile` | yes | yes | yes |
 | `runtime` | no | yes | yes |
 | `provided` | yes | no | no |
+| `processor` | no (`javac -processorpath` only) | no | no |
+
+## Annotation processors
+
+Java annotation processors such as [AutoValue](https://github.com/google/auto/tree/main/value), [MapStruct](https://mapstruct.org) or [Immutables](https://immutables.github.io) generate code while `javac` compiles your Java sources. Declare the processor with `scope = "processor"` and its annotations as a normal (usually `provided`) dependency:
+
+```toml title="kargo.toml"
+[target.jvm.dependencies]
+"com.google.auto.value:auto-value-annotations" = { version = "1.11.0", scope = "provided" }
+"com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }
+```
+
+```java title="src/Person.java"
+package com.example.app;
+
+import com.google.auto.value.AutoValue;
+
+@AutoValue
+public abstract class Person {
+    public abstract String name();
+
+    public static Person create(String name) {
+        return new AutoValue_Person(name);
+    }
+}
+```
+
+Processor dependencies and their own dependencies go on `javac`'s `-processorpath`, and Kargo passes `-proc:full` so they run on every JDK (JDK 23 and newer no longer run processors found on the classpath). They never reach the compile or runtime classpath and are not packaged. Processors declared in `[dependencies]` or `[target.jvm.dependencies]` run for the main and test sources; a processor in `[dev-dependencies]` runs for the tests only. Like everything else, processors are pinned in `kargo.lock`. When no processor is declared, `javac` runs with `-proc:none`.
+
+Pass processor options and other `javac` flags with `[target.jvm] javac-args`:
+
+```toml title="kargo.toml"
+[target.jvm]
+javac-args = ["-Amapstruct.defaultComponentModel=spring", "-Xlint:all"]
+```
+
+:::note
+Processors only see Java sources. Kotlin annotation processing (KSP or kapt, which Room, Dagger/Hilt and Moshi codegen use) is not supported yet. The [Lombok framework](../frameworks/#lombok) is the exception: it adds a Kotlin compiler plugin so Kotlin code can use what Lombok generates.
+:::
 
 ## BOMs (platforms)
 

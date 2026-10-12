@@ -34,7 +34,7 @@ $ kargo test
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
-| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided] [--bom]` | Add dependencies (latest release when no version is given) |
+| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
@@ -89,6 +89,7 @@ compiler-args = ["-Xcontext-parameters"]
 jvm-target = "25"                     # default: 25, or your JDK's version if it is older
 # main-class = "com.example.MainKt"   # detected from a top-level `fun main` or a `@JvmStatic fun main` in an object; set it for a Java main
 # jvm-args = ["-Xmx1g"]
+# javac-args = ["-Xlint:all"]         # extra javac options for Java sources
 
 [target.wasm]
 environment = "js"          # or "wasi"
@@ -111,7 +112,8 @@ min-sdk = 24                # target-sdk = 36, compile-sdk = 37, kind = "applica
 guava = { group = "com.google.guava", version = "33.4.0-jre", exclude = ["com.google.code.findbugs:jsr305"] }
 logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" }
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
-# Other keys: classifier, extension, force, transitive
+"com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
+# Scopes: compile (default), runtime, provided, processor. Other keys: classifier, extension, force, transitive
 
 [target.jvm.dependencies]   # per-target dependencies
 

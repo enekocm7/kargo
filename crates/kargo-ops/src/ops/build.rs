@@ -167,6 +167,33 @@ pub fn jvm_classpaths(ctx: &BuildContext, setup: &TargetSetup) -> Result<JvmClas
     Ok(JvmClasspaths { compile: compile?, runtime: runtime? })
 }
 
+/// The javac `-processorpath`: framework processors (e.g. Lombok) followed by
+/// `scope = "processor"` dependencies; `test` adds processor dev-dependencies.
+pub fn jvm_processor_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -> Result<Vec<PathBuf>> {
+    let mut requests: Vec<_> = setup.contributions.annotation_processors.iter().map(super::context::to_request).collect();
+    let declared = setup.requests(&[Scope::Processor], test);
+    // BOMs only apply to declared processors, so framework-only setups keep their lockfile entry.
+    let boms: &[_] = if declared.is_empty() { &[] } else { &setup.boms };
+    for r in declared {
+        if !requests.iter().any(|q| q.module == r.module && q.classifier == r.classifier) {
+            requests.push(r);
+        }
+    }
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dev_processors = test && setup.dev.iter().any(|d| d.scope == Scope::Processor);
+    let key = if dev_processors { "jvm/test-annotation-processors" } else { "jvm/annotation-processors" };
+    Ok(ctx.resolve(key, Platform::Jvm, &requests, boms)?.files())
+}
+
+/// `javac` arguments: framework-provided ones, then `[target.jvm] javac-args`.
+pub fn jvm_javac_args(setup: &TargetSetup, jvm: &kargo_manifest::JvmTarget) -> Vec<String> {
+    let mut args = setup.contributions.javac_args.clone();
+    args.extend(jvm.javac_args.iter().cloned());
+    args
+}
+
 fn jvm_settings<'a>(ctx: &BuildContext<'a>) -> Result<&'a kargo_manifest::JvmTarget> {
     ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")
 }
@@ -192,12 +219,8 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     );
     let (jdk, compiler, plugins) = toolchain?;
     let classpaths = classpaths?;
-    let processor_path: Vec<PathBuf> = if setup.contributions.annotation_processors.is_empty() {
-        Vec::new()
-    } else {
-        let requests: Vec<_> = setup.contributions.annotation_processors.iter().map(super::context::to_request).collect();
-        ctx.resolve("jvm/annotation-processors", Platform::Jvm, &requests, &[])?.files()
-    };
+    let processor_path = jvm_processor_path(ctx, &setup, false)?;
+    let javac_args = jvm_javac_args(&setup, jvm);
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
 
     let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
@@ -214,7 +237,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
         jvm_target: &jvm.target_for(jdk.version),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
-        javac_args: &setup.contributions.javac_args,
+        javac_args: &javac_args,
         processor_path: &processor_path,
         resources: vec![ctx.ws.resources()],
     };

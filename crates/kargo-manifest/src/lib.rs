@@ -100,6 +100,9 @@ pub enum Scope {
     Runtime,
     /// Only needed to compile; not packaged (e.g. Lombok, annotations).
     Provided,
+    /// A Java annotation processor: goes on javac's `-processorpath` only,
+    /// never on the compile or runtime classpath (e.g. AutoValue, MapStruct).
+    Processor,
 }
 
 impl FromStr for Scope {
@@ -110,7 +113,8 @@ impl FromStr for Scope {
             "compile" | "implementation" | "api" => Ok(Scope::Compile),
             "runtime" | "runtime-only" => Ok(Scope::Runtime),
             "provided" | "compile-only" => Ok(Scope::Provided),
-            other => bail!("unknown dependency scope `{other}` (expected compile, runtime or provided)"),
+            "processor" | "annotation-processor" => Ok(Scope::Processor),
+            other => bail!("unknown dependency scope `{other}` (expected compile, runtime, provided or processor)"),
         }
     }
 }
@@ -167,6 +171,8 @@ pub struct JvmTarget {
     pub jvm_target_set: bool,
     pub main_class: Option<String>,
     pub jvm_args: Vec<String>,
+    /// Extra `javac` arguments for Java sources (`javac-args`).
+    pub javac_args: Vec<String>,
     pub dependencies: Vec<Dependency>,
 }
 

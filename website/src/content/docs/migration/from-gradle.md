@@ -153,6 +153,9 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `api(...)` | `[dependencies]` |
 | `runtimeOnly(...)` | `scope = "runtime"` |
 | `compileOnly(...)` | `scope = "provided"` |
+| `annotationProcessor(...)` | `scope = "processor"` |
+| `options.compilerArgs` (`JavaCompile`) | `[target.jvm] javac-args` |
+| `ksp(...)`, `kapt(...)` | not supported yet |
 | `testImplementation(...)` | `[dev-dependencies]` |
 | `jvmMainImplementation(...)` / `sourceSets.jvmMain.dependencies` | `[target.jvm.dependencies]` |
 | `platform(...)` / `enforcedPlatform(...)` | `bom = true` |
