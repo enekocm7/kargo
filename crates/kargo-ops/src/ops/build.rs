@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::context::{BuildContext, TargetSetup};
 use super::local::{self, LocalTarget};
+use crate::warnings;
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
@@ -103,11 +104,20 @@ pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: 
     SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str())
 }
 
+/// Warns about sources that are missing for `targets` or that Kargo ignores. Call it after the
+/// pre-build hooks, which may generate sources.
+pub fn warn_about_sources(ctx: &BuildContext, targets: &[TargetKind]) {
+    let mut messages = warnings::missing_sources(ctx.ws, targets);
+    messages.extend(warnings::ignored_files(ctx.ws));
+    warnings::emit(ctx.shell(), ctx.project, ctx.ws, messages);
+}
+
 pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.targets)?;
     let env = hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    warn_about_sources(ctx, &targets);
 
     let mut results = BuildResults::default();
     // Targets don't depend on each other, so they build at the same time.
@@ -207,7 +217,7 @@ pub fn jvm_processor_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -
     // BOMs only apply to declared processors, so framework-only setups keep their lockfile entry.
     let boms: &[_] = if declared.is_empty() { &[] } else { &setup.boms };
     for r in declared {
-        if !requests.iter().any(|q| q.module == r.module && q.classifier == r.classifier) {
+        if !requests.iter().any(|q| q.same_artifact(&r)) {
             requests.push(r);
         }
     }
@@ -316,7 +326,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let setup = ctx.setup(TargetKind::Jvm)?;
     // On a cold cache the JDK, the compiler and the dependencies all download at once.
     let (toolchain, classpaths) = super::join(
-        || -> Result<_> { Ok((ctx.compiler_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
+        || -> Result<_> { Ok((ctx.jvm_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
         || jvm_classpaths(ctx, &setup),
     );
     let (jdk, compiler, plugins) = toolchain?;
@@ -329,7 +339,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     let classes = out.join("classes");
-    let jvm_target = jvm.target_for(jdk.version);
+    let jvm_target = jvm.target_for(jdk.version)?;
     let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"]);
     let mut resources = vec![ctx.ws.resources()];
     let ksp = JvmKspUnit {

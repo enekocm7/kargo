@@ -146,5 +146,5 @@ ktlint and detekt are downloaded on first use (the `ktlint-cli` and `detekt-cli`
 Run `kargo fmt -v` or `kargo lint -v` to see the exact command line. Kargo's own detekt settings are written to `target/lint/kargo-detekt.yml`.
 
 :::note
-`kargo fmt` and `kargo lint` are built-in commands, so a [task](../tasks-and-plugins/) named `fmt` or `lint` no longer runs as `kargo fmt` or `kargo lint`. Run it with `kargo task fmt` instead; Kargo reminds you when such a task exists.
+`kargo fmt` and `kargo lint` are built-in commands, so a [task](../tasks-and-plugins/) named `fmt` or `lint` no longer runs as `kargo fmt` or `kargo lint`. Run it with `kargo task fmt` instead; Kargo [warns you](../../reference/warnings/#tasks-hidden-by-built-in-commands) when such a task exists.
 :::

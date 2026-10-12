@@ -28,7 +28,7 @@ Cargo workspace (edition 2024, MSRV 1.89). Crates depend downward in roughly thi
 | `crates/kargo-manifest`  | The `kargo.toml` model (`raw.rs` is the serde layer, `lib.rs` the validated model), format-preserving edits (`edit.rs`)                                       |
 | `crates/kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, browsers, archives                                                                       |
 | `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, the compiler daemon (`daemon.rs`, `daemon/KargoDaemon.java`), incremental compilation (`incremental.rs`, `daemon/KargoIc.java`), jar packaging, entry points, test reports (`testreport.rs`), compiler diagnostics (`diagnostics.rs`) |
-| `crates/kargo-ops`       | The build engine: `workspace.rs`, `ops/` (one module per command), `builtins.rs` (frameworks), `lockfile.rs`, `gradle.rs` (Android), `tasks.rs`, `plugins.rs` |
+| `crates/kargo-ops`       | The build engine: `workspace.rs`, `ops/` (one module per command), `builtins.rs` (frameworks), `lockfile.rs`, `gradle.rs` (Android), `tasks.rs`, `plugins.rs`, `warnings.rs` (warnings about valid but suspicious projects) |
 | `src/`                   | The `kargo` binary: `cli.rs` (clap definitions and dispatch), `main.rs`                                                                                       |
 | `tests/`                 | `cli.rs` offline CLI integration tests, `e2e.rs` real-compiler tests, `common/` shared helpers                                                                |
 | `website/`               | The documentation site (Astro + Starlight), deployed to GitHub Pages by `.github/workflows/website.yml`                                                       |
@@ -41,6 +41,8 @@ Where things live when you need to change them:
 - **A built-in framework**: `crates/kargo-ops/src/builtins.rs`; project templates for `kargo new` are in `crates/kargo-ops/src/ops/new.rs`.
 - **Dependency resolution**: `crates/kargo-maven/src/resolver.rs`; locking in `crates/kargo-ops/src/lockfile.rs`.
 - **Source-layout conventions** (`src/`, `src-<target>/`, `tests-<target>/`, `resources/`, `android/`): `crates/kargo-ops/src/workspace.rs`.
+- **A warning about a valid but suspicious project** (no sources, ignored `.kts`, a task hidden by a built-in command, an odd version): `crates/kargo-ops/src/warnings.rs`. Source checks run from `ops/build.rs` (`warn_about_sources`, also used by `check` and `package`; `test` reports only ignored files), manifest checks from `warn_manifest` in `src/cli.rs`. List each warning in `website/src/content/docs/reference/warnings.md`.
+- **Compiler output** (relaying, `--message-format json`, the order of the `-Werror` summary): `crates/kargo-compiler/src/diagnostics.rs`.
 - **Workspaces and path dependencies**: `Project` in `crates/kargo-ops/src/workspace.rs` loads members and path dependencies (a `Workspace` there is one package); `BuildContext::for_package` and `local_dependencies` in `ops/context.rs` share state between packages; `ops/local.rs` builds dependency jars and klibs.
 
 ## Build, test, format

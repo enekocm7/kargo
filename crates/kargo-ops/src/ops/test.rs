@@ -15,6 +15,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
+use crate::warnings;
 use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
@@ -60,6 +61,8 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let targets = select_targets(ctx, &opts.build.targets)?;
     let env = hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
+    // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
+    warnings::emit(ctx.shell(), ctx.project, ctx.ws, warnings::ignored_files(ctx.ws));
 
     // Compile every target's tests at the same time, then run them one target at a
     // time so their output doesn't interleave.
@@ -274,7 +277,7 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
     let mut test_cp = super::local::artifacts(ctx, super::local::LocalTarget::Jvm, &all_scopes, true)?;
     test_cp.extend(ctx.resolve("jvm/test", Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?.files());
-    let jdk = ctx.compiler_jdk()?;
+    let jdk = ctx.jvm_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
@@ -282,7 +285,7 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let test_classes = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-classes");
     let processor_path = jvm_processor_path(ctx, &setup, true)?;
     let javac_args = jvm_javac_args(&setup, jvm);
-    let jvm_target = jvm.target_for(jdk.version);
+    let jvm_target = jvm.target_for(jdk.version)?;
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(test_cp);

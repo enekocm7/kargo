@@ -33,7 +33,7 @@ kargo fmt             # shorthand: any task name works as a subcommand
 kargo fmt --dry-run   # extra arguments are appended to the task's last command
 ```
 
-Built-in commands take precedence: a task named `fmt` or `lint` runs only as `kargo task fmt`, since `kargo fmt` and `kargo lint` [format and lint your code](../formatting-and-linting/).
+Built-in commands take precedence: a task named `build`, `test` or `fmt` runs only as `kargo task build`, since `kargo build` compiles your project and `kargo fmt` and `kargo lint` [format and lint your code](../formatting-and-linting/). Kargo [warns](../../reference/warnings/#tasks-hidden-by-built-in-commands) about such a task whenever you build, and `kargo task` and `kargo --help` mark it. Hooks don't care about the name, so a hidden task still runs as a hook.
 
 | Key | Meaning |
 |---|---|

@@ -239,7 +239,7 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     let _ = writeln!(s, "dependencies {{");
     let mut seen = Vec::new();
     let mut push = |s: &mut String, d: &Dependency, test: bool| {
-        let key = (d.module.clone(), d.classifier.clone(), test);
+        let key = (d.module.clone(), d.classifier.clone(), d.extension.clone(), test);
         if !seen.contains(&key) {
             seen.push(key);
             let _ = writeln!(s, "{}", dependency_line(d, test));

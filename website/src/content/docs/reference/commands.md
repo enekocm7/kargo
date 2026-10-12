@@ -102,6 +102,8 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 
 [Path dependencies](../../guides/workspaces/) are built first, for the same targets.
 
+Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
+
 For Wasm, a release build removes dead code, runs `wasm-opt` when it is installed and prints the size of the module. A `kind = "library"` project also gets a `package.json` and TypeScript declarations. See [WebAssembly](../../guides/wasm/).
 
 ```sh
@@ -379,7 +381,7 @@ Download all dependencies and toolchains so later builds can run offline.
 
 ## `kargo update`
 
-Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges are picked up.
+Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges and new builds of [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) are picked up.
 
 ```sh
 kargo update [group:artifact]... [--precise <version>] [--dry-run]
@@ -387,7 +389,7 @@ kargo update [group:artifact]... [--precise <version>] [--dry-run]
 
 | Option | Meaning |
 |---|---|
-| `modules` | Only update these locked modules (direct or transitive). Every other module keeps its locked version |
+| `modules` | Only update these locked modules (direct or transitive). Every other module keeps its locked version (a SNAPSHOT, its locked build) |
 | `--precise <version>` | Lock the one given module at exactly this version, for example to pick up a security fix in a transitive dependency or to step back from a broken release |
 | `--dry-run` | Print the changes without writing `kargo.lock` |
 
@@ -420,7 +422,7 @@ kargo task <name> [args]
 kargo <name> [args]      # shorthand
 ```
 
-Inside a project, `kargo --help` also lists its tasks.
+Inside a project, `kargo --help` also lists its tasks. A task named like a built-in command, such as `build` or `test`, can only run as `kargo task <name>`; the listing marks it and the commands that work on a package [warn about it](../warnings/#tasks-hidden-by-built-in-commands).
 
 ## `kargo plugins`
 

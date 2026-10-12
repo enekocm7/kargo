@@ -73,8 +73,8 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 # Don't pull in any transitive dependencies
 "com.example:standalone" = { version = "1.0", transitive = false }
 
-# Classifier and extension (type)
-"org.lwjgl:lwjgl" = { version = "3.3.6", classifier = "natives-linux" }
+# A specific file of a module: a classifier and/or an extension (type)
+"com.example:tool" = { version = "1.0", classifier = "all" }
 
 # Version ranges use Maven syntax
 "com.example:ranged" = "[1.2,2.0)"
@@ -88,8 +88,28 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 | `exclude` | `group:artifact` (or `group:*`) entries to drop from this dependency's tree. |
 | `transitive` | `false` to ignore this dependency's own dependencies. |
 | `force` | `true` to pin this version even if something else asks for a newer one. |
-| `classifier`, `extension` | Select a specific file, such as `natives-linux` or `aar`. |
+| `classifier`, `extension` | Select a specific file, such as `natives-linux` or `aar` (see [Classifiers and native libraries](#classifiers-and-native-libraries)). |
 | `bom` | `true` to import this POM as a BOM (see below). |
+
+### Classifiers and native libraries
+
+A dependency with a `classifier` or `extension` selects one file of a module, such as `lwjgl-3.3.6-natives-windows.jar`. Libraries with native code publish those files next to their main jar, so you declare the module twice: once for its classes, and once for each native classifier. TOML keys are unique, so give the second declaration a key of your own and spell out the coordinates:
+
+```toml title="kargo.toml"
+[dependencies]
+"org.lwjgl:lwjgl" = "3.3.6"
+lwjgl-natives = { coords = "org.lwjgl:lwjgl:3.3.6", classifier = "natives-windows", scope = "runtime" }
+```
+
+Both jars are on the runtime classpath, in the [`kargo package`](../../reference/commands/) jar and in [`kargo.lock`](../../reference/lockfile/). The natives are only needed at runtime, so `scope = "runtime"` keeps their jar off the compile classpath. Every dependency is identified by `group:artifact:classifier:extension`; declaring the same one twice is an error.
+
+A module still has **one version**, however many classifiers you declare. If the declarations, or other libraries, ask for different versions, the highest wins (or the one with `force = true`), and every classifier uses it.
+
+:::note
+A module that you only declare with a `classifier` gets just that file, as in Gradle. Its main jar is added when you also declare the module without a classifier, or when another dependency needs it.
+:::
+
+`transitive = false` on the classifier declaration only affects that declaration: the plain one still brings in the module's own dependencies. `kargo tree` lists the module once, and `kargo tree --format json` lists every file it contributes.
 
 ### Scopes
 
@@ -271,6 +291,38 @@ local = "file:///home/me/.m2/repository"
 ```
 
 Credentials are never written in `kargo.toml`; Kargo reads them from the named environment variables.
+
+## SNAPSHOT versions
+
+A version that ends in `-SNAPSHOT` is a library's work in progress, redeployed over and over. Declare it like any other version and add the repository that holds it:
+
+```toml title="kargo.toml"
+[dependencies]
+"com.acme:lib" = "1.0-SNAPSHOT"
+
+[repositories]
+snapshots = "https://repo.example.com/snapshots"
+```
+
+Repositories such as Nexus, Artifactory and GitHub Packages (and `mvn deploy`) don't store a file called `lib-1.0-SNAPSHOT.jar`. Each deployment is a **timestamped build**, `lib-1.0-20240101.120000-1.jar`, and `1.0-SNAPSHOT/maven-metadata.xml` says which build is the newest of each file (the jar, the POM, the Gradle module metadata, and each classifier). Kargo reads that file and downloads the newest build. A repository without that metadata, or one that keeps the plain `lib-1.0-SNAPSHOT.jar` name (what `mvn install` writes into `~/.m2/repository`), is used as it is.
+
+Builds don't move under you:
+
+- **`kargo.lock` records the build.** The locked path is the timestamped file, so every build and every machine uses the same one until you decide otherwise. `kargo build --locked` in CI stays reproducible.
+- **`kargo update` moves to the newest build**, and prints which one:
+
+  ```console
+  $ kargo update
+      Updating com.acme:lib v1.0-SNAPSHOT (20240101.120000-1) -> v1.0-SNAPSHOT (20240102.080000-2)
+       Updated kargo.lock
+  ```
+
+  `kargo update com.acme:other` leaves the SNAPSHOTs it wasn't asked about on their locked builds. `kargo build --refresh` ignores the lockfile for one run and picks the newest build as well.
+- **Metadata is re-checked daily.** Without a lockfile entry (a new dependency, say), Kargo reuses a remote repository's SNAPSHOT metadata for up to 24 hours. `file:` repositories are read every time, so a snapshot you just published to a local directory is seen immediately. A SNAPSHOT stored under its plain name is compared with the repository's checksum on the same schedule, and downloaded again if it changed.
+
+:::caution
+Repositories often delete old snapshot builds. If a locked build is gone, the build fails with `could not find ...`; run `kargo update` to lock the current one.
+:::
 
 ## The lockfile
 

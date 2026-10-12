@@ -396,6 +396,68 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
 }
 
 #[test]
+fn classifier_dependencies_keep_both_jars() {
+    // Native libraries are declared twice: the module, and its classifier jar. Both belong on the
+    // runtime classpath and in kargo.lock, and neither may replace the other.
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[("g:util", "1.0")])
+        .publish_classifier("g:lib", "1.0", "natives-windows")
+        .publish("g:util", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    // The classifier dependency's key sorts before the module's, and it does not follow dependencies.
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "natives",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n\
+                 a-natives = {{ coords = \"g:lib:1.0\", classifier = \"natives-windows\", scope = \"runtime\", transitive = false }}\n\
+                 [repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+
+    let tree = |args: &[&str]| -> serde_json::Value {
+        let out =
+            p.kargo().arg("tree").args(args).arg("--offline").args(["--format", "json"]).assert().success().get_output().stdout.clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let files_of = |tree: &serde_json::Value, id: &str| -> Vec<String> {
+        let module =
+            tree["trees"][0]["modules"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("{id}: {tree}"));
+        let mut files: Vec<String> = module["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap().rsplit(['/', '\\']).next().unwrap().to_owned())
+            .collect();
+        files.sort();
+        files
+    };
+
+    let runtime = tree(&[]);
+    let roots = runtime["trees"][0]["roots"].as_array().unwrap();
+    assert_eq!(roots.iter().filter(|r| *r == "g:lib").count(), 1, "one module, not one root per classifier: {roots:?}");
+    assert_eq!(files_of(&runtime, "g:lib"), ["lib-1.0-natives-windows.jar", "lib-1.0.jar"]);
+    assert_eq!(files_of(&runtime, "g:util"), ["util-1.0.jar"], "the module's own dependencies are kept");
+    // The classifier jar is a runtime dependency, so the compile classpath has the main jar only.
+    assert_eq!(files_of(&tree(&["--configuration", "compile"]), "g:lib"), ["lib-1.0.jar"]);
+
+    let lock = kargo_ops::lockfile::Lockfile::load(&p.path().join("kargo.lock")).unwrap();
+    let locked: Vec<_> = lock.resolutions["jvm/runtime"].packages.iter().filter(|pkg| pkg.module == "g:lib").collect();
+    assert_eq!(locked.len(), 1, "{lock:?}");
+    let paths: Vec<&str> = locked[0].files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["g/lib/1.0/lib-1.0.jar", "g/lib/1.0/lib-1.0-natives-windows.jar"]);
+    assert!(locked[0].files.iter().all(|f| !f.sha256.is_empty()));
+
+    // The lockfile restores to the same classpath.
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
+    assert_eq!(files_of(&tree(&[]), "g:lib"), ["lib-1.0-natives-windows.jar", "lib-1.0.jar"]);
+}
+
+#[test]
 fn corrupt_cached_artifact_is_redownloaded_before_locking() {
     let repo = LocalRepo::new();
     repo.publish("g:lib", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
@@ -429,6 +491,109 @@ fn corrupt_cached_artifact_is_redownloaded_before_locking() {
     p.kargo().args(["tree", "--offline", "--refresh"]).assert().success();
     assert_eq!(std::fs::read_to_string(&cached).unwrap(), "jar g:lib 1.0");
     assert_eq!(p.read("kargo.lock"), lock);
+}
+
+#[test]
+fn timestamped_snapshots_resolve_through_maven_metadata() {
+    let repo = LocalRepo::new();
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[("com.acme:util", "2.0-SNAPSHOT")])
+        .publish_snapshot("com.acme:util", "2.0-SNAPSHOT", "20240101.110000-4", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("snap", &format!("[kotlin]\nversion = \"2.4.21\"\n[repositories]\nlocal = \"{}\"\n", repo.url())));
+
+    // `kargo add` finds a SNAPSHOT that only exists under its timestamped names.
+    p.kargo().args(["add", "com.acme:lib:1.0-SNAPSHOT"]).assert().success();
+    assert!(p.read("kargo.toml").contains("\"com.acme:lib\" = \"1.0-SNAPSHOT\""));
+
+    p.kargo()
+        .args(["tree", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("com.acme:lib:1.0-SNAPSHOT"))
+        .stdout(predicate::str::contains("com.acme:util:2.0-SNAPSHOT"));
+    let cached = |rel: &str| p.home.path().join("cache/maven").join(rel);
+    assert_eq!(
+        std::fs::read_to_string(cached("com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar")).unwrap(),
+        "jar com.acme:lib 1.0-20240101.120000-1"
+    );
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar"), "{lock}");
+    assert!(lock.contains("com/acme/util/2.0-SNAPSHOT/util-2.0-20240101.110000-4.jar"), "{lock}");
+
+    // A newer build is not picked up while kargo.lock pins the old one.
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240102.080000-2", &[("com.acme:util", "2.0-SNAPSHOT")]);
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
+    assert_eq!(p.read("kargo.lock"), lock);
+
+    // `kargo update` moves to it, and says so.
+    p.kargo()
+        .args(["update", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating com.acme:lib v1.0-SNAPSHOT (20240101.120000-1) -> v1.0-SNAPSHOT (20240102.080000-2)"))
+        .stderr(predicate::str::contains("com.acme:util").not());
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240102.080000-2.jar"), "{lock}");
+    assert!(!lock.contains("lib-1.0-20240101.120000-1.jar"), "{lock}");
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("up to date"));
+}
+
+#[test]
+fn selective_update_keeps_locked_snapshot_builds() {
+    let repo = LocalRepo::new();
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[])
+        .publish("com.acme:other", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "snap",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"com.acme:lib\" = \"1.0-SNAPSHOT\"\n\"com.acme:other\" = \"[1.0,2.0)\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["update", "--offline"]).assert().success();
+
+    repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240102.080000-2", &[]).publish("com.acme:other", "1.1", &[]);
+    p.kargo()
+        .args(["update", "com.acme:other", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating com.acme:other v1.0 -> v1.1"))
+        .stderr(predicate::str::contains("com.acme:lib").not());
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("lib-1.0-20240101.120000-1.jar") && !lock.contains("20240102.080000-2"), "{lock}");
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
+
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("v1.0-SNAPSHOT (20240102.080000-2)"));
+    assert!(p.read("kargo.lock").contains("lib-1.0-20240102.080000-2.jar"));
+}
+
+#[test]
+fn snapshots_stored_under_their_plain_name_still_resolve() {
+    let repo = LocalRepo::new();
+    repo.publish("com.acme:lib", "2.0-SNAPSHOT", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "plain",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"com.acme:lib\" = \"2.0-SNAPSHOT\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["tree", "--offline"]).assert().success();
+    assert!(p.read("kargo.lock").contains("com/acme/lib/2.0-SNAPSHOT/lib-2.0-SNAPSHOT.jar"));
 }
 
 #[test]
@@ -675,7 +840,9 @@ fn fmt_and_lint_sections_are_validated() {
     p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("kargo lint --create-baseline"));
     // A task named like the command is reachable through `kargo task`.
     p.file("kargo.toml", &manifest("style", "[tasks]\nlint = \"echo custom\"\n[lint]\nbaseline = \"baseline.xml\"\n"));
-    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("run the `lint` task with `kargo task lint`"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains(
+        "warning: task `lint` is hidden by the built-in `kargo lint` command; run the task with `kargo task lint`",
+    ));
     p.file("kargo.toml", &manifest("style", "[lint]\nmax-issues = 3\n"));
     p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("unknown field `max-issues`"));
 }
@@ -761,6 +928,54 @@ fn toolchain_list_and_remove() {
     assert!(!out.contains("jdk-17.0.12+7") && !out.contains("2.4.21"), "{out}");
 }
 
+/// A Kotlin/Native 2.4.21 distribution with a standard library whose `konanc` always fails,
+/// which leaves the arguments Kargo passed in the `.konanc.args` file for the test to read.
+fn fake_native(home: &std::path::Path) -> std::path::PathBuf {
+    let dist = home.join("toolchains/kotlin-native/2.4.21");
+    let konanc = dist.join("bin").join(if cfg!(windows) { "konanc.bat" } else { "konanc" });
+    std::fs::create_dir_all(konanc.parent().unwrap()).unwrap();
+    std::fs::write(&konanc, if cfg!(windows) { "@exit /b 1\r\n" } else { "#!/bin/sh\nexit 1\n" }).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&konanc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::create_dir_all(dist.join("klib/common/stdlib")).unwrap();
+    dist
+}
+
+#[test]
+fn native_binaries_link_the_precompiled_stdlib() {
+    let p = Project::new();
+    let dist = fake_native(p.home.path());
+    p.file("kargo.toml", &manifest("nat", "\n[target.native]\nplatforms = [\"linux_x64\"]\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    let build = |profile: &[&str], env: &[(&str, &str)]| {
+        let mut cmd = p.kargo();
+        cmd.arg("build").args(profile).envs(env.iter().copied());
+        String::from_utf8(cmd.assert().failure().code(101).get_output().stderr.clone()).unwrap()
+    };
+    let argfile = |profile: &str| p.read(&format!("target/{profile}/native/.fingerprint/nat-linux_x64-main.konanc.args"));
+    let cache_flag = |args: &str| args.lines().any(|l| l.trim_matches('"').starts_with("-Xauto-cache-from=") && l.contains("klib/common"));
+
+    // The first build says that the compiler is about to build the cache.
+    let stderr = build(&[], &[]);
+    assert!(stderr.contains("building the Kotlin/Native standard library cache for linux_x64"), "{stderr}");
+    assert!(cache_flag(&argfile("debug")), "{}", argfile("debug"));
+
+    // Once the compiler has made it, builds stay quiet but still pass the flag.
+    std::fs::create_dir_all(dist.join("klib/cache/linux_x64-gSTATIC-system/stdlib-per-file-cache")).unwrap();
+    let stderr = build(&[], &[]);
+    assert!(!stderr.contains("standard library cache"), "{stderr}");
+    assert!(cache_flag(&argfile("debug")));
+
+    // KARGO_NATIVE_CACHE=false and optimized builds don't use it.
+    build(&[], &[("KARGO_NATIVE_CACHE", "false")]);
+    assert!(!cache_flag(&argfile("debug")));
+    build(&["--release"], &[]);
+    assert!(!cache_flag(&argfile("release")), "{}", argfile("release"));
+}
+
 #[test]
 fn old_kotlin_on_new_jdk_fails_early() {
     let p = Project::new();
@@ -789,6 +1004,49 @@ jdk = \"25\"
         .stderr(predicate::str::contains("Kotlin 2.1.0 cannot run on JDK 25"))
         .stderr(predicate::str::contains("[toolchain] jdk = \"21\""))
         .stderr(predicate::str::contains("Compiling").not());
+}
+
+#[test]
+fn invalid_jvm_target_is_rejected_before_building() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    for bad in ["abc", "7", "1.9", "17.0"] {
+        p.file("kargo.toml", &manifest("jt", &format!("[target.jvm]\njvm-target = \"{bad}\"\n")));
+        p.kargo()
+            .args(["build", "--offline"])
+            .assert()
+            .code(101)
+            .stderr(predicate::str::contains(format!("invalid [target.jvm] jvm-target `{bad}`")))
+            .stderr(predicate::str::contains("`8` or `1.8`"))
+            .stderr(predicate::str::contains("Compiling").not());
+    }
+    // `8` is Java 8, which Kotlin spells `1.8`; either spelling loads.
+    for ok in ["8", "1.8", "17"] {
+        p.file("kargo.toml", &manifest("jt", &format!("[target.jvm]\njvm-target = \"{ok}\"\n")));
+        p.kargo().arg("info").assert().success();
+    }
+}
+
+#[test]
+fn jvm_target_newer_than_the_system_jdk_fails_early() {
+    let p = Project::new();
+    // A system JDK Kargo identifies from the `release` file next to `bin/java`, without starting it.
+    let jdk = p.home.path().join("system-jdk");
+    std::fs::create_dir_all(jdk.join("bin")).unwrap();
+    std::fs::write(jdk.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" }), "").unwrap();
+    std::fs::write(jdk.join("release"), "JAVA_VERSION=\"21.0.4\"\n").unwrap();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("jt", "[target.jvm]\njvm-target = \"26\"\n"));
+    for command in ["build", "check", "test", "run"] {
+        p.kargo()
+            .args([command, "--offline"])
+            .env("JAVA_HOME", &jdk)
+            .assert()
+            .code(101)
+            .stderr(predicate::str::contains("jvm-target 26 is newer than JDK 21"))
+            .stderr(predicate::str::contains("[toolchain] jdk = \"26\""))
+            .stderr(predicate::str::contains("Compiling").not());
+    }
 }
 
 #[test]
@@ -1077,4 +1335,134 @@ fn invalid_bin_sections_are_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("tools", "[[bin]]\nname = \"x\"\n"));
     p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("[[bin]] `x` needs an entry point"));
+}
+
+// Warnings about projects that are valid but probably not what was meant. Every build below
+// runs offline and stops at the toolchain, after the warnings are printed.
+
+#[test]
+fn build_and_check_warn_when_a_target_has_no_sources() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("empty", "[target.jvm]\n[target.wasm]\n"));
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args(["--offline", cmd])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains("warning: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target"))
+            .stderr(predicate::str::contains("warning: no Kotlin sources found in src/ or src-wasm/ for the wasm target"));
+    }
+
+    // `run` and `package` only build the JVM target.
+    for cmd in ["run", "package"] {
+        p.kargo()
+            .args(["--offline", cmd])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("warning: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target"))
+            .stderr(predicate::str::contains("for the wasm target").not());
+    }
+
+    // A target with sources is not mentioned, and `-q` silences the rest.
+    p.file("src-jvm/Main.kt", "fun main() {}\n");
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("for the wasm target"))
+        .stderr(predicate::str::contains("for the jvm target").not());
+    p.kargo().args(["--offline", "-q", "build"]).assert().failure().stderr(predicate::str::contains("warning:").not());
+}
+
+#[test]
+fn pre_build_hooks_can_provide_the_sources() {
+    let p = Project::new();
+    let hook =
+        r#"gen = { run = 'mkdir -p src && touch src/Gen.kt', windows-run = 'mkdir src && type nul> src\Gen.kt', hooks = ["pre-build"] }"#;
+    p.file("kargo.toml", &manifest("generated", &format!("[tasks]\n{hook}\n")));
+    p.kargo().args(["--offline", "build"]).assert().failure().stderr(predicate::str::contains("no Kotlin or Java sources").not());
+    assert!(p.path().join("src/Gen.kt").is_file());
+}
+
+#[test]
+fn a_resources_only_jvm_project_has_nothing_to_warn_about() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("assets", "")).file("resources/config.properties", "a=1\n");
+    p.kargo().args(["--offline", "build"]).assert().failure().stderr(predicate::str::contains("no Kotlin or Java sources").not());
+}
+
+#[test]
+fn kotlin_scripts_are_reported_as_ignored() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("scripts", ""))
+        .file("src/Main.kt", "fun main() {}\n")
+        .file("src/script.kts", "println(\"script\")\n")
+        .file("tests/Check.kts", "");
+    for cmd in ["build", "check", "test"] {
+        p.kargo()
+            .args(["--offline", cmd])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("warning: `src/script.kts` is ignored: Kargo does not compile or run Kotlin scripts (.kts)"))
+            .stderr(predicate::str::contains("warning: `tests/Check.kts` is ignored"));
+    }
+}
+
+#[test]
+fn tasks_named_like_built_in_commands_warn() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("tasks", "[tasks]\nbuild = \"echo built\"\nb = \"echo alias\"\nci = \"echo ci\"\n"));
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "warning: task `build` is hidden by the built-in `kargo build` command; run the task with `kargo task build` or rename it",
+        ))
+        .stderr(predicate::str::contains("warning: task `b` is hidden by the built-in `kargo b` command"))
+        .stderr(predicate::str::contains("task `ci`").not());
+
+    // The listing marks them; running one through `kargo task` works and needs no warning.
+    p.kargo()
+        .arg("task")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo built [hidden by `kargo build`; run it with `kargo task build`]"))
+        .stdout(predicate::str::contains("echo ci\n"));
+    p.kargo().args(["task", "build"]).assert().success().stderr(predicate::str::contains("hidden by").not());
+    // A task a built-in command does not hide is run by name.
+    p.kargo().arg("ci").assert().success().stderr(predicate::str::contains("hidden by").not());
+}
+
+#[test]
+fn odd_package_versions_warn() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", "[package]\nname = \"odd\"\nversion = \"not.a.version.x\"\n");
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("warning: package version `not.a.version.x` does not look like a version"));
+
+    p.file("kargo.toml", &manifest("odd", ""));
+    p.kargo().args(["--offline", "build"]).assert().failure().stderr(predicate::str::contains("does not look like a version").not());
+}
+
+#[test]
+fn warnings_in_a_workspace_name_the_package() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n")
+        .file("app/kargo.toml", &manifest("app", ""))
+        .file("app/src/Main.kt", "fun main() {}\n")
+        .file("lib/kargo.toml", "[package]\nname = \"lib\"\nversion = \"one\"\n");
+    p.kargo()
+        .args(["--offline", "build", "-p", "lib"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("warning: package `lib`: package version `one` does not look like a version"))
+        .stderr(predicate::str::contains("warning: package `lib`: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target"));
+    p.kargo().args(["--offline", "build", "-p", "app"]).assert().failure().stderr(predicate::str::contains("warning:").not());
 }

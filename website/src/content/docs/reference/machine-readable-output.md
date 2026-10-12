@@ -35,6 +35,8 @@ A `compiler-message` is one diagnostic from the Kotlin compiler (JVM, Wasm or Na
 | `column` | 1-based column, or `null` (javac reports none) |
 | `rendered` | The diagnostic as the compiler printed it, with the source line and a caret |
 
+With [`warnings-as-errors`](../manifest/#kotlin), the compiler's `warnings found and -Werror specified` summary is the last `compiler-message`, after the diagnostics it counts. Kargo's own [warnings](../warnings/), such as a target without sources, are plain text on stderr, not JSON messages.
+
 `kargo build` and `kargo check` end with a `build-finished` message whose `success` says whether the build succeeded. The exit code is the same as without the flag: `101` when the build fails.
 
 `--message-format` takes `human` (the default) or `json`. With `kargo test` and `kargo run` only the compiler output becomes JSON: the tests' and the program's own output still goes to stdout as text after it. Compiler output that isn't a diagnostic, such as Kotlin/Native's linker messages, goes to stderr. Android builds run through Gradle, so their diagnostics are not converted.

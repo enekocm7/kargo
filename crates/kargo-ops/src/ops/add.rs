@@ -61,7 +61,7 @@ pub fn add(config: &Config, ws: &Workspace, opts: &AddOptions) -> Result<Vec<Str
         if !opts.no_verify && !version.starts_with(['[', '(']) {
             let pom = Artifact::new(spec.module.clone(), &version).with_extension("pom");
             let module = Artifact::new(spec.module.clone(), &version).with_extension("module");
-            let exists = client.fetch(&pom.repo_path())?.is_some() || client.fetch(&module.repo_path())?.is_some();
+            let exists = client.fetch(&client.artifact_path(&pom)?)?.is_some() || client.fetch(&client.artifact_path(&module)?)?.is_some();
             if !exists {
                 bail!("`{}:{version}` was not found in any repository", spec.module);
             }

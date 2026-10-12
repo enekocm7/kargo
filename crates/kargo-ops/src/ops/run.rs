@@ -259,12 +259,13 @@ fn compile_jvm_example(ctx: &BuildContext, name: &str, file: &Path, main_classes
     let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
     let mut dev_cp = super::local::artifacts(ctx, super::local::LocalTarget::Jvm, &all_scopes, true)?;
     dev_cp.extend(ctx.resolve("jvm/test", Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?.files());
-    let jdk = ctx.compiler_jdk()?;
+    let jdk = ctx.jvm_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
     let processor_path = jvm_processor_path(ctx, &setup, true)?;
     let javac_args = jvm_javac_args(&setup, jvm);
+    let jvm_target = jvm.target_for(jdk.version)?;
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(dev_cp);
@@ -277,7 +278,7 @@ fn compile_jvm_example(ctx: &BuildContext, name: &str, file: &Path, main_classes
         classpath: classpath.clone(),
         friend_paths: Vec::new(),
         output: output.clone(),
-        jvm_target: &jvm.target_for(jdk.version),
+        jvm_target: &jvm_target,
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         javac_args: &javac_args,

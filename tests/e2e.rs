@@ -92,6 +92,42 @@ fn jvm_lifecycle() {
 }
 
 #[test]
+fn jvm_target_spellings_and_limits() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write("app/src/Main.kt", "fun main() { println(Legacy.greeting()) }\n");
+    t.write("app/src/Legacy.java", "public class Legacy { public static String greeting() { return \"hi\"; } }\n");
+    let with_target = |target: &str| {
+        t.write("app/kargo.toml", &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.jvm]\njvm-target = \"{target}\"\n"));
+    };
+    let class_version = |name: &str| {
+        let bytes = std::fs::read(t.dir.path().join("app/target/debug/jvm/classes").join(name)).unwrap();
+        u16::from_be_bytes([bytes[6], bytes[7]])
+    };
+
+    // Kotlin only knows Java 8 as `1.8` while javac wants `8`; Kargo takes either spelling.
+    for (target, version) in [("8", 52), ("1.8", 52), ("17", 61)] {
+        with_target(target);
+        t.kargo("app").arg("build").assert().success();
+        assert_eq!(class_version("MainKt.class"), version, "Kotlin classes for jvm-target {target}");
+        assert_eq!(class_version("Legacy.class"), version, "Java classes for jvm-target {target}");
+    }
+
+    // A bad value, or one the JDK can't compile for, fails before the compilers start.
+    with_target("abc");
+    t.kargo("app").arg("build").assert().code(101).stderr(predicate::str::contains("invalid [target.jvm] jvm-target `abc`"));
+    with_target("99");
+    t.kargo("app")
+        .arg("build")
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("jvm-target 99 is newer than JDK"))
+        .stderr(predicate::str::contains("[toolchain] jdk = \"99\""))
+        .stderr(predicate::str::contains("Compiling").not());
+}
+
+#[test]
 fn jvm_test_failures_and_filters() {
     require_e2e!();
     let t = E2e::new();
@@ -294,6 +330,45 @@ fn daemon_matches_standalone_compiler() {
     t.write("both/src/J.java", "public class J { static String s() { return \"java\"; } }\n");
     t.kargo("both").arg("run").assert().success().stdout(predicate::str::contains("from java"));
     t.kargo("both").args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("pid"));
+}
+
+#[test]
+fn warnings_as_errors_summary_comes_after_the_diagnostics() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["strict"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("strict/kargo.toml")).unwrap();
+    t.write("strict/kargo.toml", &format!("{manifest}\n[kotlin]\nwarnings-as-errors = true\n"));
+    t.write("strict/src/Main.kt", "@Deprecated(\"use other\")\nfun old(): Int = 1\n\nfun main() = println(old())\n");
+
+    // kotlinc prints "warnings found and -Werror specified" first; Kargo prints it last.
+    for daemon in ["false", "true"] {
+        let out = t.kargo("strict").arg("build").env("KARGO_DAEMON", daemon).assert().failure().code(101).get_output().stderr.clone();
+        let text = String::from_utf8_lossy(&out);
+        let lines: Vec<&str> = text.lines().collect();
+        let position = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("no `{needle}` in {text}"));
+        assert!(position("is deprecated") < position("warnings found and -Werror specified"), "daemon={daemon}: {text}");
+        assert!(position("warnings found and -Werror specified") < position("could not compile `strict`"), "daemon={daemon}: {text}");
+    }
+
+    // The same order in JSON messages.
+    for daemon in ["false", "true"] {
+        let out = t
+            .kargo("strict")
+            .args(["build", "--message-format", "json"])
+            .env("KARGO_DAEMON", daemon)
+            .assert()
+            .failure()
+            .code(101)
+            .get_output()
+            .stdout
+            .clone();
+        let messages: Vec<serde_json::Value> = String::from_utf8_lossy(&out).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let compiler: Vec<&str> =
+            messages.iter().filter(|m| m["reason"] == "compiler-message").map(|m| m["message"].as_str().unwrap()).collect();
+        assert!(compiler.len() >= 2, "daemon={daemon}: {messages:?}");
+        assert_eq!(compiler.last(), Some(&"warnings found and -Werror specified"), "daemon={daemon}: {compiler:?}");
+    }
 }
 
 #[test]

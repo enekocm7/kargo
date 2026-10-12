@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use super::{FreshnessCheck, Outcome, ResolvedPlugin, SourceSet, fingerprint, plugin_args};
 use kargo_manifest::{Cinterop, NativeKind};
 use kargo_toolchain::NativeToolchain;
-use kargo_toolchain::native::executable_extension;
+use kargo_toolchain::native::{cache_enabled, executable_extension};
 use kargo_util::process::{self, slash};
 use kargo_util::shell::Shell;
 
@@ -99,11 +99,23 @@ impl NativeCompilation<'_> {
         args
     }
 
+    /// Whether this compilation can link a precompiled standard library: a klib doesn't link
+    /// it, and `-opt` optimizes the whole program, which the compiler can't do with precompiled code.
+    fn can_use_cache(&self) -> bool {
+        !self.optimize && self.produce() != "library"
+    }
+
+    /// Options that link the precompiled standard library instead of lowering it again.
+    /// They don't change the output, so they stay out of the fingerprint.
+    fn cache_args(&self, toolchain: &NativeToolchain) -> Vec<String> {
+        if self.can_use_cache() && cache_enabled() { toolchain.cache_args() } else { Vec::new() }
+    }
+
     pub fn compile(&self, shell: &Shell, toolchain: &NativeToolchain, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
         if self.sources.kotlin_files().is_empty() {
             return Ok(Outcome::Empty);
         }
-        let args = self.args();
+        let mut args = self.args();
         let mut all = args.clone();
         all.push(toolchain.version.clone());
         let fp = fingerprint(&self.sources, &self.libraries, self.plugins, &all);
@@ -115,6 +127,15 @@ impl NativeCompilation<'_> {
         check.invalidate();
         announce();
         std::fs::create_dir_all(&self.output_dir)?;
+
+        let cache = self.cache_args(toolchain);
+        if !cache.is_empty() && !toolchain.stdlib_cache_dir(&self.konan_target, self.debug).is_dir() {
+            shell.note(format!(
+                "building the Kotlin/Native standard library cache for {} (one time per Kotlin version, takes a few minutes); later builds are much faster",
+                self.konan_target
+            ));
+        }
+        args.splice(0..0, cache);
 
         let argfile = fingerprint_dir.join(format!("{}-{}-{tag}.konanc.args", self.name, self.konan_target));
         process::write_argfile(&argfile, &args)?;
@@ -274,6 +295,21 @@ mod tests {
         assert!(unit(NativeKind::Shared, "mingw_x64").artifact().ends_with("app.dll"));
         assert!(unit(NativeKind::Shared, "macos_arm64").artifact().ends_with("libapp.dylib"));
         assert!(unit(NativeKind::Static, "linux_x64").artifact().ends_with("libapp.a"));
+    }
+
+    #[test]
+    fn stdlib_cache_is_for_unoptimized_binaries() {
+        for kind in [NativeKind::Executable, NativeKind::Shared, NativeKind::Static] {
+            assert!(unit(kind, "linux_x64").can_use_cache(), "{kind:?}");
+        }
+        assert!(!unit(NativeKind::Library, "linux_x64").can_use_cache(), "klibs don't link the standard library");
+        let mut optimized = unit(NativeKind::Executable, "linux_x64");
+        optimized.optimize = true;
+        assert!(!optimized.can_use_cache(), "-opt can't use precompiled code");
+        // The test runner links a program whatever `kind` says.
+        let mut tests = unit(NativeKind::Library, "linux_x64");
+        tests.test_runner = true;
+        assert!(tests.can_use_cache());
     }
 
     #[test]

@@ -4,8 +4,12 @@
 //! module wins, unless a root dependency is `force`d. Kotlin Multiplatform
 //! libraries are resolved through Gradle module metadata so that each target
 //! platform receives the matching artifact (`.jar` or `.klib`).
+//!
+//! The graph is made of modules (`group:artifact`), and every module has one version. What a
+//! module contributes to the classpath are artifacts: its default files, plus one file for each
+//! root that asks for a `classifier` or `extension` (native libraries are declared that way).
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -19,7 +23,7 @@ use super::repo::{MavenClient, resolve_relative};
 use super::version::{Version, VersionReq};
 
 /// Bumped whenever resolution semantics change, invalidating locked results.
-pub const RESOLVER_VERSION: &str = "4";
+pub const RESOLVER_VERSION: &str = "5";
 
 /// An exclusion pattern; `*` matches anything.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,6 +61,16 @@ impl DependencyRequest {
     pub fn new(module: ModuleId, version: Option<String>) -> Self {
         Self { module, version, classifier: None, extension: None, exclusions: Vec::new(), force: false, transitive: true }
     }
+
+    /// Whether this asks for the module's default artifact rather than one with a classifier or extension.
+    pub fn is_default_artifact(&self) -> bool {
+        self.classifier.is_none() && self.extension.is_none()
+    }
+
+    /// Whether both ask for the same artifact: `group:artifact:classifier:extension`.
+    pub fn same_artifact(&self, other: &DependencyRequest) -> bool {
+        self.module == other.module && self.classifier == other.classifier && self.extension == other.extension
+    }
 }
 
 /// One resolved module.
@@ -64,7 +78,8 @@ impl DependencyRequest {
 pub struct ResolvedNode {
     pub module: ModuleId,
     pub version: String,
-    /// Downloaded artifact files (may be empty for POM-only or redirect modules).
+    /// Downloaded artifact files: the module's own and the ones requested with a classifier or
+    /// extension (may be empty for POM-only or redirect modules).
     pub files: Vec<PathBuf>,
     /// Direct dependencies with the version each one asked for.
     pub dependencies: Vec<(ModuleId, Option<String>)>,
@@ -73,6 +88,7 @@ pub struct ResolvedNode {
 /// The result of resolving a set of roots for one platform.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Resolution {
+    /// The modules the project asks for, once each however many classifiers it declares.
     pub roots: Vec<ModuleId>,
     /// Nodes in breadth-first order (roots first), which is also classpath order.
     pub nodes: Vec<ResolvedNode>,
@@ -195,6 +211,13 @@ impl<'a> Resolver<'a> {
         self.pins.insert(module, Version::parse(version));
     }
 
+    /// Like [`Resolver::pin`] for a SNAPSHOT `version`, fixed at the build whose files are named
+    /// `build` (`1.0-20240101.120000-1`) instead of the newest one.
+    pub fn pin_build(&mut self, module: ModuleId, version: &str, build: &str) {
+        self.client.pin_snapshot_build(&module, version, build);
+        self.pin(module, version);
+    }
+
     pub fn managed_version(&self, module: &ModuleId) -> Option<&str> {
         self.constraints.get(module).map(String::as_str)
     }
@@ -205,7 +228,7 @@ impl<'a> Resolver<'a> {
             return Ok(Some(pom.clone()));
         }
         let artifact = Artifact::new(module.clone(), version).with_extension("pom");
-        let Some(xml) = self.client.fetch_text(&artifact.repo_path())? else { return Ok(None) };
+        let Some(xml) = self.client.fetch_text(&self.client.artifact_path(&artifact)?)? else { return Ok(None) };
         let pom = Pom::parse(&xml).with_context(|| format!("failed to parse POM of {module}:{version}"))?;
         self.poms.lock().expect("lock poisoned").insert(key, pom.clone());
         Ok(Some(pom))
@@ -268,7 +291,7 @@ impl<'a> Resolver<'a> {
 
     fn info_from_module_metadata(&self, module: &ModuleId, version: &str, has_pom: bool) -> Result<Option<NodeInfo>> {
         let artifact = Artifact::new(module.clone(), version).with_extension("module");
-        let Some(json) = self.client.fetch_text(&artifact.repo_path())? else { return Ok(None) };
+        let Some(json) = self.client.fetch_text(&self.client.artifact_path(&artifact)?)? else { return Ok(None) };
         let meta = ModuleMetadata::parse(&json)?;
         let Some(variant) = select_variant(&meta, module, &self.platform) else {
             if has_pom && self.platform == Platform::Jvm {
@@ -331,7 +354,7 @@ impl<'a> Resolver<'a> {
         }
         let artifact = Artifact::new(module.clone(), version).with_extension("module");
         let mut constraints = Vec::new();
-        let from_metadata = match self.client.fetch_text(&artifact.repo_path())? {
+        let from_metadata = match self.client.fetch_text(&self.client.artifact_path(&artifact)?)? {
             Some(json) => {
                 let meta = ModuleMetadata::parse(&json)?;
                 meta.variants.iter().find(|v| v.attributes.get("org.gradle.category").and_then(|c| c.as_str()) == Some("platform")).map(
@@ -390,7 +413,10 @@ impl<'a> Resolver<'a> {
             "klib" => Some("klib"),
             _ => Some("jar"),
         };
-        let files = extension.map(|ext| vec![Artifact::new(module.clone(), version).with_extension(ext).repo_path()]).unwrap_or_default();
+        let files = match extension {
+            Some(ext) => vec![self.client.artifact_path(&Artifact::new(module.clone(), version).with_extension(ext))?],
+            None => Vec::new(),
+        };
         Ok(NodeInfo { edges, files, constraints: Vec::new() })
     }
 
@@ -509,6 +535,27 @@ impl<'a> Resolver<'a> {
             }
             stalled = 0;
 
+            let version = match used.get(&module) {
+                Some(v) => v.clone(),
+                None => {
+                    // Reuse the previous iteration's decision: it was made with
+                    // complete information, unlike the partial requests seen so far.
+                    let v = match selected.get(&module) {
+                        Some(v) => v.clone(),
+                        None => self.choose(&module, &requests[&module])?,
+                    };
+                    used.insert(module.clone(), v.clone());
+                    order.push(module.clone());
+                    v
+                }
+            };
+            // A non-transitive root only asks for the module itself. It does not mark the module as
+            // visited: another path, or a root for another classifier of it, may still bring its
+            // dependencies in.
+            if !transitive {
+                continue;
+            }
+
             // Revisit only if this path excludes less than every previous one.
             match exclusions_seen.get_mut(&module) {
                 Some(prev) => {
@@ -520,28 +567,9 @@ impl<'a> Resolver<'a> {
                 }
                 None => {
                     exclusions_seen.insert(module.clone(), excl.clone());
-                    order.push(module.clone());
                 }
             }
             let excl = exclusions_seen[&module].clone();
-
-            let version = match used.get(&module) {
-                Some(v) => v.clone(),
-                None => {
-                    // Reuse the previous iteration's decision: it was made with
-                    // complete information, unlike the partial requests seen so far.
-                    let v = match selected.get(&module) {
-                        Some(v) => v.clone(),
-                        None => self.choose(&module, &requests[&module])?,
-                    };
-                    used.insert(module.clone(), v.clone());
-                    v
-                }
-            };
-            if !transitive {
-                edges_by_module.entry(module.clone()).or_default();
-                continue;
-            }
             if !self.has_info(&module, version.as_str()) {
                 // Fetch the metadata of everything queued whose version is already known in
                 // parallel, instead of one network round-trip per module.
@@ -597,20 +625,27 @@ impl<'a> Resolver<'a> {
         used: &HashMap<ModuleId, Version>,
         edges: &HashMap<ModuleId, Vec<Edge>>,
     ) -> Result<Resolution> {
+        // A module gets its default files when a root without classifier or extension, or another
+        // module, depends on it. Roots with a classifier or extension add their own artifact on top
+        // of those, and are the only artifacts of a module nothing else depends on (as in Gradle).
+        let mut wants_default: HashSet<&ModuleId> = edges.values().flatten().map(|e| &e.module).collect();
+        wants_default.extend(roots.iter().filter(|r| r.is_default_artifact()).map(|r| &r.module));
+
         let file_lists: Vec<Vec<String>> = order
             .iter()
             .map(|module| {
                 let version = used[module].as_str();
-                // Roots may ask for a specific classifier/extension.
-                if let Some(root) = roots.iter().find(|r| &r.module == module)
-                    && (root.classifier.is_some() || root.extension.is_some())
-                {
+                let mut files = if wants_default.contains(module) { self.node_info(module, version)?.files } else { Vec::new() };
+                for root in roots.iter().filter(|r| &r.module == module && !r.is_default_artifact()) {
                     let artifact = Artifact::new(module.clone(), version)
                         .with_classifier(root.classifier.clone())
                         .with_extension(root.extension.clone().unwrap_or_else(|| "jar".into()));
-                    return Ok(vec![artifact.repo_path()]);
+                    let path = self.client.artifact_path(&artifact)?;
+                    if !files.contains(&path) {
+                        files.push(path);
+                    }
                 }
-                Ok(self.node_info(module, version)?.files)
+                Ok(files)
             })
             .collect::<Result<_>>()?;
 
@@ -634,7 +669,13 @@ impl<'a> Resolver<'a> {
                     .unwrap_or_default(),
             })
             .collect();
-        Ok(Resolution { roots: roots.iter().map(|r| r.module.clone()).collect(), nodes })
+        let mut root_modules: Vec<ModuleId> = Vec::new();
+        for root in roots {
+            if !root_modules.contains(&root.module) {
+                root_modules.push(root.module.clone());
+            }
+        }
+        Ok(Resolution { roots: root_modules, nodes })
     }
 }
 
@@ -669,21 +710,35 @@ mod tests {
         fn publish(&self, coord: &str, version: &str, deps: &[(&str, &str, &str)]) {
             let (group, artifact) = coord.split_once(':').unwrap();
             let dir = format!("{}/{artifact}/{version}", group.replace('.', "/"));
-            let deps_xml: String = deps
+            self.write(&format!("{dir}/{artifact}-{version}.pom"), &pom_xml(group, artifact, version, deps));
+            self.write(&format!("{dir}/{artifact}-{version}.jar"), "jar");
+            self.add_metadata_version(group, artifact, version);
+        }
+
+        /// Publishes a SNAPSHOT the way `mvn deploy` stores it: files named after the build (`stamp` is
+        /// `20240101.120000-1`) in the `-SNAPSHOT` directory, which the version's `maven-metadata.xml` lists.
+        fn publish_snapshot(&self, coord: &str, version: &str, stamp: &str, deps: &[(&str, &str, &str)]) {
+            let (group, artifact) = coord.split_once(':').unwrap();
+            let dir = format!("{}/{artifact}/{version}", group.replace('.', "/"));
+            let file_version = format!("{}-{stamp}", version.strip_suffix("-SNAPSHOT").unwrap());
+            self.write(&format!("{dir}/{artifact}-{file_version}.pom"), &pom_xml(group, artifact, version, deps));
+            self.write(&format!("{dir}/{artifact}-{file_version}.jar"), &format!("jar {file_version}"));
+            self.write_snapshot_metadata(&dir, &file_version, &["jar", "pom"]);
+            self.add_metadata_version(group, artifact, version);
+        }
+
+        fn write_snapshot_metadata(&self, dir: &str, file_version: &str, extensions: &[&str]) {
+            let updated = file_version.rsplit_once('-').unwrap().0.rsplit('-').next().unwrap().replace('.', "");
+            let entries: String = extensions
                 .iter()
-                .map(|(c, v, extra)| {
-                    let (g, a) = c.split_once(':').unwrap();
-                    format!("<dependency><groupId>{g}</groupId><artifactId>{a}</artifactId><version>{v}</version>{extra}</dependency>")
+                .map(|ext| {
+                    format!("<snapshotVersion><extension>{ext}</extension><value>{file_version}</value><updated>{updated}</updated></snapshotVersion>")
                 })
                 .collect();
             self.write(
-                &format!("{dir}/{artifact}-{version}.pom"),
-                &format!(
-                    "<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><dependencies>{deps_xml}</dependencies></project>"
-                ),
+                &format!("{dir}/maven-metadata.xml"),
+                &format!("<metadata><versioning><snapshotVersions>{entries}</snapshotVersions></versioning></metadata>"),
             );
-            self.write(&format!("{dir}/{artifact}-{version}.jar"), "jar");
-            self.add_metadata_version(group, artifact, version);
         }
 
         fn add_metadata_version(&self, group: &str, artifact: &str, version: &str) {
@@ -702,6 +757,19 @@ mod tests {
             let config = Config::new(self.home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
             MavenClient::new(&config, vec![Repository::new("test", format!("file://{}", self.dir.path().display()))])
         }
+    }
+
+    fn pom_xml(group: &str, artifact: &str, version: &str, deps: &[(&str, &str, &str)]) -> String {
+        let deps_xml: String = deps
+            .iter()
+            .map(|(c, v, extra)| {
+                let (g, a) = c.split_once(':').unwrap();
+                format!("<dependency><groupId>{g}</groupId><artifactId>{a}</artifactId><version>{v}</version>{extra}</dependency>")
+            })
+            .collect();
+        format!(
+            "<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><dependencies>{deps_xml}</dependencies></project>"
+        )
     }
 
     fn req(coord: &str, version: &str) -> DependencyRequest {
@@ -875,6 +943,86 @@ mod tests {
     }
 
     #[test]
+    fn classifier_roots_add_artifacts_to_the_module() {
+        let repo = TestRepo::new();
+        repo.publish("g:x", "1.0", &[("g:dep", "1.0", "")]);
+        repo.publish("g:dep", "1.0", &[]);
+        repo.write("g/x/1.0/x-1.0-natives.jar", "natives");
+        repo.write("g/x/1.0/x-1.0-sources.jar", "sources");
+        let client = repo.client();
+        let natives = |non_transitive: bool| {
+            let mut r = req("g:x", "1.0");
+            r.classifier = Some("natives".into());
+            r.transitive = !non_transitive;
+            r
+        };
+
+        // The main jar and the classifier jar are both on the classpath, whichever comes first,
+        // and the module is one node at one version.
+        for roots in [[req("g:x", "1.0"), natives(false)], [natives(false), req("g:x", "1.0")]] {
+            let res = Resolver::new(&client, Platform::Jvm).resolve(&roots).unwrap();
+            assert_eq!(versions(&res), ["x:1.0", "dep:1.0"]);
+            let mut names = file_names(&res);
+            names.sort();
+            assert_eq!(names, ["dep-1.0.jar", "x-1.0-natives.jar", "x-1.0.jar"]);
+            assert_eq!(res.roots, ["g:x".parse().unwrap()], "one module, not one root per classifier");
+        }
+
+        // A non-transitive classifier root (the usual way to declare natives) must not stop the
+        // plain declaration from bringing in the module's dependencies, even when it is listed first.
+        for roots in [[req("g:x", "1.0"), natives(true)], [natives(true), req("g:x", "1.0")]] {
+            let res = Resolver::new(&client, Platform::Jvm).resolve(&roots).unwrap();
+            assert_eq!(versions(&res), ["x:1.0", "dep:1.0"]);
+            assert_eq!(res.node(&"g:x".parse().unwrap()).unwrap().files.len(), 2);
+        }
+
+        // Only the classifier artifact when nothing else needs the main jar, as in Gradle.
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives(true)]).unwrap();
+        assert_eq!(file_names(&res), ["x-1.0-natives.jar"]);
+
+        // Another module that depends on `x` brings its main jar back.
+        repo.publish("g:user", "1.0", &[("g:x", "1.0", "")]);
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives(true), req("g:user", "1.0")]).unwrap();
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["dep-1.0.jar", "user-1.0.jar", "x-1.0-natives.jar", "x-1.0.jar"]);
+
+        // Several classifiers, each once.
+        let mut sources = req("g:x", "1.0");
+        sources.classifier = Some("sources".into());
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives(false), sources.clone(), natives(true), sources]).unwrap();
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["dep-1.0.jar", "x-1.0-natives.jar", "x-1.0-sources.jar"]);
+    }
+
+    #[test]
+    fn classifier_roots_share_the_module_version() {
+        let repo = TestRepo::new();
+        repo.publish("g:x", "1.0", &[]);
+        repo.publish("g:x", "2.0", &[]);
+        repo.write("g/x/1.0/x-1.0-natives.jar", "natives 1");
+        repo.write("g/x/2.0/x-2.0-natives.jar", "natives 2");
+        let client = repo.client();
+        let mut natives = req("g:x", "1.0");
+        natives.classifier = Some("natives".into());
+        // The highest version wins for every classifier of the module.
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives.clone(), req("g:x", "2.0")]).unwrap();
+        assert_eq!(res.node(&"g:x".parse().unwrap()).unwrap().version, "2.0");
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["x-2.0-natives.jar", "x-2.0.jar"]);
+
+        // `force` pins them all.
+        natives.force = true;
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives, req("g:x", "2.0")]).unwrap();
+        assert_eq!(res.node(&"g:x".parse().unwrap()).unwrap().version, "1.0");
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["x-1.0-natives.jar", "x-1.0.jar"]);
+    }
+
+    #[test]
     fn missing_module_reports_path() {
         let repo = TestRepo::new();
         repo.publish("g:x", "1.0", &[("g:ghost", "1.0", "")]);
@@ -1022,6 +1170,86 @@ mod tests {
         let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("old:x", "1.0")]).unwrap();
         assert_eq!(file_names(&res), ["x-1.0.jar"]);
         assert!(res.files()[0].to_string_lossy().replace('\\', "/").contains("new/x/1.0"));
+    }
+
+    #[test]
+    fn timestamped_snapshots_resolve_to_the_newest_build() {
+        let repo = TestRepo::new();
+        repo.publish_snapshot("g:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[("g:dep", "1.0-SNAPSHOT", "")]);
+        repo.publish_snapshot("g:dep", "1.0-SNAPSHOT", "20240101.130000-4", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("g:lib", "1.0-SNAPSHOT")]).unwrap();
+        assert_eq!(versions(&res), ["lib:1.0-SNAPSHOT", "dep:1.0-SNAPSHOT"]);
+        assert_eq!(file_names(&res), ["lib-1.0-20240101.120000-1.jar", "dep-1.0-20240101.130000-4.jar"]);
+
+        // A later deployment replaces the metadata; the next resolution follows it.
+        repo.publish_snapshot("g:lib", "1.0-SNAPSHOT", "20240102.080000-2", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("g:lib", "1.0-SNAPSHOT")]).unwrap();
+        assert_eq!(versions(&res), ["lib:1.0-SNAPSHOT"]);
+        assert_eq!(file_names(&res), ["lib-1.0-20240102.080000-2.jar"]);
+    }
+
+    #[test]
+    fn snapshots_stored_under_their_plain_name_resolve() {
+        let repo = TestRepo::new();
+        repo.publish("g:lib", "2.0-SNAPSHOT", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("g:lib", "2.0-SNAPSHOT")]).unwrap();
+        assert_eq!(file_names(&res), ["lib-2.0-SNAPSHOT.jar"]);
+    }
+
+    #[test]
+    fn timestamped_snapshot_root_extension() {
+        let repo = TestRepo::new();
+        repo.publish_snapshot("g:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[]);
+        let dir = "g/lib/1.0-SNAPSHOT";
+        repo.write(&format!("{dir}/lib-1.0-20240101.120000-1.zip"), "zip");
+        repo.write_snapshot_metadata(dir, "1.0-20240101.120000-1", &["jar", "pom", "zip"]);
+        let mut root = req("g:lib", "1.0-SNAPSHOT");
+        root.extension = Some("zip".into());
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[root]).unwrap();
+        assert_eq!(file_names(&res), ["lib-1.0-20240101.120000-1.zip"]);
+    }
+
+    #[test]
+    fn timestamped_snapshot_gradle_metadata_and_parent_poms() {
+        let repo = TestRepo::new();
+        let marker = "<!-- do_not_remove: published-with-gradle-metadata -->";
+        let dir = "s/ui/1.0-SNAPSHOT";
+        repo.write(
+            &format!("{dir}/ui-1.0-20240101.120000-1.pom"),
+            &format!("<project>{marker}<groupId>s</groupId><artifactId>ui</artifactId><version>1.0-SNAPSHOT</version></project>"),
+        );
+        repo.write(
+            &format!("{dir}/ui-1.0-20240101.120000-1.module"),
+            r#"{"formatVersion": "1.1", "variants": [
+              {"name": "runtimeElements", "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime"},
+               "dependencies": [{"group": "s", "module": "core", "version": {"requires": "1.0-SNAPSHOT"}}],
+               "files": [{"name": "ui-1.0-SNAPSHOT.jar", "url": "ui-1.0-20240101.120000-1.jar"}]}
+            ]}"#,
+        );
+        repo.write(&format!("{dir}/ui-1.0-20240101.120000-1.jar"), "jar");
+        repo.write_snapshot_metadata(dir, "1.0-20240101.120000-1", &["pom", "module", "jar"]);
+        // `core` inherits its dependencies from a SNAPSHOT parent.
+        repo.write(
+            "s/parent/1.0-SNAPSHOT/parent-1.0-20240101.100000-9.pom",
+            "<project><groupId>s</groupId><artifactId>parent</artifactId><version>1.0-SNAPSHOT</version><packaging>pom</packaging>
+             <dependencies><dependency><groupId>s</groupId><artifactId>inherited</artifactId><version>1.0</version></dependency></dependencies></project>",
+        );
+        repo.write_snapshot_metadata("s/parent/1.0-SNAPSHOT", "1.0-20240101.100000-9", &["pom"]);
+        repo.write(
+            "s/core/1.0-SNAPSHOT/core-1.0-20240101.110000-2.pom",
+            "<project><parent><groupId>s</groupId><artifactId>parent</artifactId><version>1.0-SNAPSHOT</version></parent><artifactId>core</artifactId><version>1.0-SNAPSHOT</version></project>",
+        );
+        repo.write("s/core/1.0-SNAPSHOT/core-1.0-20240101.110000-2.jar", "jar");
+        repo.write_snapshot_metadata("s/core/1.0-SNAPSHOT", "1.0-20240101.110000-2", &["pom", "jar"]);
+        repo.publish("s:inherited", "1.0", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("s:ui", "1.0-SNAPSHOT")]).unwrap();
+        assert_eq!(versions(&res), ["ui:1.0-SNAPSHOT", "core:1.0-SNAPSHOT", "inherited:1.0"]);
+        assert_eq!(file_names(&res), ["ui-1.0-20240101.120000-1.jar", "core-1.0-20240101.110000-2.jar", "inherited-1.0.jar"]);
     }
 
     #[test]

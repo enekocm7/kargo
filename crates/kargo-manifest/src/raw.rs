@@ -581,7 +581,7 @@ impl DependencyParser<'_> {
         for (name, value) in table {
             match parse_dependency(name, value, section, self.workspace)? {
                 Entry::Maven(dep) => {
-                    if deps.iter().any(|d| d.module == dep.module && d.classifier == dep.classifier) {
+                    if deps.iter().any(|d| d.same_artifact(&dep)) {
                         bail!("dependency `{}` is declared more than once in [{section}]", dep.module);
                     }
                     deps.push(dep);
@@ -685,7 +685,10 @@ impl RawManifest {
                         .map(|j| -> Result<JvmTarget> {
                             Ok(JvmTarget {
                                 jvm_target_set: j.jvm_target.is_some(),
-                                jvm_target: j.jvm_target.unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
+                                jvm_target: match j.jvm_target {
+                                    Some(target) => normalize_jvm_target(&target)?,
+                                    None => DEFAULT_JVM_TARGET.to_owned(),
+                                },
                                 main_class: j.main_class,
                                 jvm_args: j.jvm_args,
                                 javac_args: j.javac_args,
@@ -981,11 +984,7 @@ impl RawManifest {
         };
         if let (Some(major), Some(jvm)) = (jdk.major(), &mut targets.jvm) {
             // The default target never exceeds the pinned JDK; an explicit one must not.
-            jvm.jvm_target = jvm.target_for(major);
-            let target: u32 = jvm.jvm_target.strip_prefix("1.").unwrap_or(&jvm.jvm_target).parse().unwrap_or(0);
-            if target > major {
-                bail!("[target.jvm] jvm-target {} is newer than the [toolchain] JDK {major}", jvm.jvm_target);
-            }
+            jvm.jvm_target = jvm.target_for(major)?;
         }
 
         let dependencies = deps.parse(&self.dependencies, "dependencies", false, None)?;

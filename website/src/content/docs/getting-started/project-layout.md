@@ -46,6 +46,8 @@ See [Multiplatform projects](../../guides/multiplatform/) for a complete example
 
 Subdirectories are fine. You don't need to mirror the package name in the folder structure, but it's a good habit.
 
+Kargo compiles `.kt` files (and `.java` files on the JVM). Kotlin scripts (`.kts`) are not compiled or run, and a target with no sources has nothing to build; `kargo build` prints a [warning](../../reference/warnings/) for both instead of staying silent.
+
 ## Several programs
 
 A project can hold more than one `fun main`. Run any of them with `kargo run --main <class>`, give them names with [`[[bin]]`](../../reference/manifest/#bin) tables, and keep example programs in `examples/<name>.kt` for `kargo run --example <name>`. See [Several programs in one project](../../guides/multiple-programs/).

@@ -115,21 +115,22 @@ pub struct UpdatePlan {
 }
 
 impl UpdatePlan {
-    /// The versions to pin in the resolution `key`. Locked versions are kept only while the
-    /// resolution's inputs are unchanged; otherwise the manifest changed and it resolves afresh.
-    fn pins(&self, key: &str, inputs: &str) -> Vec<(ModuleId, String)> {
-        let mut pins: Vec<(ModuleId, String)> = Vec::new();
+    /// The versions to pin in the resolution `key`, each with the locked build when it is a SNAPSHOT
+    /// (`1.0-20240101.120000-1`). Locked versions are kept only while the resolution's inputs are
+    /// unchanged; otherwise the manifest changed and it resolves afresh.
+    fn pins(&self, key: &str, inputs: &str) -> Vec<(ModuleId, String, Option<String>)> {
+        let mut pins: Vec<(ModuleId, String, Option<String>)> = Vec::new();
         if let Some(locked) = self.previous.resolutions.get(key).filter(|r| r.inputs == inputs) {
             for pkg in &locked.packages {
                 if let Ok(module) = pkg.module.parse::<ModuleId>()
                     && !self.modules.contains(&module)
                 {
-                    pins.push((module, pkg.version.clone()));
+                    pins.push((module, pkg.version.clone(), pkg.build_file_version()));
                 }
             }
         }
         if let Some(precise) = &self.precise {
-            pins.extend(self.modules.iter().map(|m| (m.clone(), precise.clone())));
+            pins.extend(self.modules.iter().map(|m| (m.clone(), precise.clone(), None)));
         }
         pins
     }
@@ -154,10 +155,10 @@ impl TargetSetup {
         }
         let mut out: Vec<DependencyRequest> = Vec::new();
         for d in deps {
-            if out.iter().any(|r| r.module == d.module && r.classifier == d.classifier) {
-                continue;
+            let request = to_request(d);
+            if !out.iter().any(|r| r.same_artifact(&request)) {
+                out.push(request);
             }
-            out.push(to_request(d));
         }
         out
     }
@@ -175,11 +176,11 @@ pub fn to_request(d: &Dependency) -> DependencyRequest {
     }
 }
 
-/// Appends `extra` dependencies unless the user already declared the module.
+/// Appends `extra` dependencies unless the user already declared that artifact of the module.
 fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
     let mut out: Vec<Dependency> = user.to_vec();
     for d in extra {
-        if !out.iter().any(|u| u.module == d.module && u.classifier == d.classifier) {
+        if !out.iter().any(|u| u.same_artifact(d)) {
             out.push(d.clone());
         }
     }
@@ -315,6 +316,16 @@ impl<'a> BuildContext<'a> {
         Ok(jdk)
     }
 
+    /// The JDK that compiles the JVM target: the `compiler_jdk`, once it is known to be new
+    /// enough for `jvm-target`. Checked here so a bad target fails before anything downloads.
+    pub fn jvm_jdk(&self) -> Result<&Jdk> {
+        let jdk = self.compiler_jdk()?;
+        if let Some(jvm) = &self.ws.manifest().targets.jvm {
+            jvm.target_for(jdk.version)?;
+        }
+        Ok(jdk)
+    }
+
     pub fn kotlin_compiler(&self) -> Result<&KotlinCompiler> {
         self.shared.compiler.get_or_try_init(|| KotlinCompiler::resolve(&self.client, &self.ws.manifest().kotlin.version))
     }
@@ -409,8 +420,11 @@ impl<'a> BuildContext<'a> {
         self.shell().verbose("Resolving", key);
         let mut resolver = Resolver::new(&self.client, platform);
         if let Some(plan) = &self.update {
-            for (module, version) in plan.pins(key, &inputs) {
-                resolver.pin(module, &version);
+            for (module, version, build) in plan.pins(key, &inputs) {
+                match build {
+                    Some(build) => resolver.pin_build(module, &version, &build),
+                    None => resolver.pin(module, &version),
+                }
             }
         }
         for bom in boms {

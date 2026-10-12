@@ -17,7 +17,7 @@ $ kargo test
 
 * **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`).
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
-* **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and before a cached artifact is first locked, and against the lockfile on re-download.
+* **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and before a cached artifact is first locked, and against the lockfile on re-download. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
 * **Incremental:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, only the affected Kotlin/JVM files are recompiled, in a warm compiler daemon, so an edit rebuilds in well under a second.
 * **Android** is built by the Android Gradle Plugin. Kargo generates the Gradle project under `target/android` from `kargo.toml`, so you never edit Gradle files.
 
@@ -76,6 +76,8 @@ A workspace is a directory whose `kargo.toml` has a `[workspace]` with `members`
 
 `expect` declarations in `src/` can have `actual` implementations in `src-<target>/`. On the JVM, `.java` files next to your Kotlin files are compiled together with them (set `[target.jvm] main-class` if your `main` is in Java).
 
+Kargo warns about projects that build but are probably not what you meant: a target with no sources (`no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target`), Kotlin scripts (`.kts`), which are never compiled or run, a task hidden by a built-in command, and a package version that doesn't look like a version (`not.a.version.x`). Warnings go to stderr, never change the exit code, and `-q` hides them.
+
 ## `kargo.toml`
 
 ```toml
@@ -92,7 +94,7 @@ compiler-args = ["-Xcontext-parameters"]
 
 # Targets: no [target] section means a JVM project.
 [target.jvm]
-jvm-target = "25"                     # default: 25, or your JDK's version if it is older
+jvm-target = "25"                     # 8 (or 1.8) and up, at most your JDK's version; default: 25, or your JDK's version if it is older
 # main-class = "com.example.MainKt"   # detected from a top-level `fun main` or a `@JvmStatic fun main` in an object; set it for a Java main
 # jvm-args = ["-Xmx1g"]
 # javac-args = ["-Xlint:all"]         # extra javac options for Java sources
@@ -126,6 +128,7 @@ guava = { group = "com.google.guava", version = "33.4.0-jre", exclude = ["com.go
 logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" }
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
 mathlib = { path = "../mathlib" }   # another Kargo package, built from source
+lwjgl-natives = { coords = "org.lwjgl:lwjgl:3.3.6", classifier = "natives-windows", scope = "runtime" }  # a classifier jar, next to the module's own
 # Other keys: classifier, extension, force, transitive, workspace = true
 "com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
 "com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }  # KSP processor (JVM, Android)
@@ -186,9 +189,9 @@ A path dependency brings its own Maven dependencies along, and is built for the 
 jdk = "21"            # newest Temurin 21; or an exact release like "21.0.5+11"; default "system"
 ```
 
-With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`. Any other value makes Kargo download that Temurin JDK from Adoptium on first use. The download is verified against the published SHA-256 and installed under `~/.kargo/toolchains/jdk/<release>`; it is then used for compiling, running and testing, and passed to Gradle for Android builds. A major version picks the newest installed release of it. Kargo also checks that `jvm-target` is not newer than the pinned JDK, and that the Kotlin compiler can run on it: compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer, so pin `jdk = "21"` or upgrade Kotlin.
+With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`. Any other value makes Kargo download that Temurin JDK from Adoptium on first use. The download is verified against the published SHA-256 and installed under `~/.kargo/toolchains/jdk/<release>`; it is then used for compiling, running and testing, and passed to Gradle for Android builds. A major version picks the newest installed release of it. Kargo also checks that `jvm-target` is not newer than the JDK that builds the project (pinned or system), and that the Kotlin compiler can run on it: compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer, so pin `jdk = "21"` or upgrade Kotlin.
 
-Kotlin/Native distributions are tied to `[kotlin] version`. They are installed under `~/.kargo/toolchains/kotlin-native/<version>` on the first native build. Their LLVM and sysroot dependencies go to `~/.kargo/toolchains/konan` instead of `~/.konan` (override with `KONAN_DATA_DIR`).
+Kotlin/Native distributions are tied to `[kotlin] version`. They are installed under `~/.kargo/toolchains/kotlin-native/<version>` on the first native build. Their LLVM and sysroot dependencies go to `~/.kargo/toolchains/konan` instead of `~/.konan` (override with `KONAN_DATA_DIR`). Debug builds link a precompiled standard library that the compiler builds on first use (one to two minutes) into the distribution's `klib/cache`, which roughly halves rebuild times; `KARGO_NATIVE_CACHE=false` turns it off.
 
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
@@ -227,7 +230,7 @@ envs = { run = "echo $KARGO_PKG_NAME", shell = "sh" }                  # POSIX o
 dirs = { run = "ls", windows-run = "dir" }                               # per-OS commands
 ```
 
-Run them with `kargo task ci` or just `kargo ci` (built-in commands such as `kargo fmt` take precedence over a task of the same name). Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
+Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kargo build` or `kargo fmt` take precedence over a task of the same name, which then runs only as `kargo task build`; Kargo warns about such a task, and `kargo task` and `kargo --help` mark it. Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
 
 ### Plugins
 
@@ -260,6 +263,7 @@ Run them with `kargo task ci` or just `kargo ci` (built-in commands such as `kar
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
 | `KARGO_DAEMON` | `false` turns off the compiler daemon |
 | `KARGO_INCREMENTAL` | `false` turns off incremental compilation |
+| `KARGO_NATIVE_CACHE` | `false` turns off the precompiled Kotlin/Native standard library cache for debug builds |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
 | `BROWSER` | Browser for `kargo doc --open` and `kargo run --open` |
@@ -277,7 +281,7 @@ Kargo is a Cargo workspace:
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
-| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, commands |
+| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, commands |
 | `kargo` | The CLI binary |
 
 ```bash

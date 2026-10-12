@@ -43,6 +43,35 @@ pub const DEFAULT_KOTLIN_VERSION: &str = "2.4.21";
 /// the version of the JDK that builds the project if that JDK is older.
 pub const DEFAULT_JVM_TARGET: &str = "25";
 
+/// The oldest bytecode target Kotlin accepts: Java 8, which it spells `1.8`.
+const MIN_JVM_TARGET: u32 = 8;
+
+/// Checks a `jvm-target` and returns it as the Kotlin compiler spells it: `8` and `1.8` both
+/// become `1.8`, and Java 9 and newer stay plain numbers (`17`). `javac --release` takes `8`.
+pub fn normalize_jvm_target(value: &str) -> Result<String> {
+    let value = value.trim();
+    let major = match value {
+        "1.8" => Some(MIN_JVM_TARGET),
+        _ => value.parse::<u32>().ok().filter(|m| *m >= MIN_JVM_TARGET && m.to_string() == value),
+    };
+    match major {
+        Some(major) => Ok(jvm_target_spelling(major)),
+        None => {
+            bail!("invalid [target.jvm] jvm-target `{value}` (expected a Java version: `8` or `1.8`, or `9` and up, like `17` or `21`)")
+        }
+    }
+}
+
+/// Java `major` as Kotlin's `-jvm-target` spells it.
+fn jvm_target_spelling(major: u32) -> String {
+    if major == MIN_JVM_TARGET { "1.8".to_owned() } else { major.to_string() }
+}
+
+/// The Java version of a normalized `jvm-target`.
+fn jvm_target_major(target: &str) -> u32 {
+    target.strip_prefix("1.").unwrap_or(target).parse().unwrap_or(0)
+}
+
 /// A compilation target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TargetKind {
@@ -155,6 +184,12 @@ impl Dependency {
             bom: false,
         }
     }
+
+    /// Whether both declare the same artifact: `group:artifact:classifier:extension`. The version is
+    /// not part of the key, and one module may be declared once per classifier (native libraries).
+    pub fn same_artifact(&self, other: &Dependency) -> bool {
+        self.module == other.module && self.classifier == other.classifier && self.extension == other.extension
+    }
 }
 
 /// Another Kargo package that this one depends on, built from source:
@@ -209,11 +244,19 @@ pub struct JvmTarget {
 impl JvmTarget {
     /// The bytecode target to compile for with a JDK of major version `jdk`: the
     /// configured `jvm-target`, or the default lowered to `jdk` when that JDK is older.
-    pub fn target_for(&self, jdk: u32) -> String {
-        match self.jvm_target.parse::<u32>() {
-            Ok(default) if !self.jvm_target_set && jdk < default => jdk.to_string(),
-            _ => self.jvm_target.clone(),
+    /// Fails when the configured target is newer than `jdk`, which cannot compile for it.
+    pub fn target_for(&self, jdk: u32) -> Result<String> {
+        let major = jvm_target_major(&self.jvm_target);
+        if major > jdk && !self.jvm_target_set {
+            return Ok(jvm_target_spelling(jdk));
         }
+        if major > jdk {
+            bail!(
+                "[target.jvm] jvm-target {major} is newer than JDK {jdk}, which builds the project; \
+                 set `[toolchain] jdk = \"{major}\"` in kargo.toml to build with a newer JDK, or lower `jvm-target`"
+            );
+        }
+        Ok(self.jvm_target.clone())
     }
 }
 

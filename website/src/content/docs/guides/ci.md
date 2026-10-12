@@ -48,7 +48,7 @@ jobs:
           path: target/release/jvm/*-all.jar
 ```
 
-`--locked` makes the build fail if `kargo.lock` is out of date, so nobody forgets to commit it. `kargo fmt --check` and `kargo lint` fail the job on unformatted code and detekt issues; see [Formatting and linting](../formatting-and-linting/).
+`--locked` makes the build fail if `kargo.lock` is out of date, so nobody forgets to commit it. A Kargo upgrade that changes how dependencies resolve also counts as out of date: build once locally without `--locked` and commit the new lockfile (see [`kargo.lock`](../../reference/lockfile/)). `kargo fmt --check` and `kargo lint` fail the job on unformatted code and detekt issues; see [Formatting and linting](../formatting-and-linting/).
 
 The first build of the job starts a [compiler daemon](../build-performance/#the-compiler-daemon) that the later steps reuse, so `check`, `build`, `test` and `package` each skip JVM startup. Leave `~/.kargo/daemon` out of the cache: it only holds that run's daemon state and large class-data archives. Set `KARGO_DAEMON=false` if your CI doesn't allow background processes.
 
@@ -78,6 +78,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
 ```
+
+### Kotlin/Native cache
+
+Debug builds of a native target link a precompiled [standard library cache](../native/#build-speed) that Kotlin/Native builds on first use, which takes one to two minutes per platform. It lives under `~/.kargo/toolchains/kotlin-native/<version>/klib/cache`, so the `~/.kargo` cache above keeps it between runs. If your CI starts from an empty home every time, building it costs more than it saves; set `KARGO_NATIVE_CACHE=false` for those jobs.
 
 ### Wasm
 
