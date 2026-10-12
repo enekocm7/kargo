@@ -25,33 +25,78 @@ const SUGGESTED_JDK: u32 = 21;
 pub struct KotlinCompiler {
     pub version: String,
     pub classpath: Vec<PathBuf>,
+    /// Whether `classpath` includes the Build Tools API implementation
+    /// (`kotlin-build-tools-impl`), which provides incremental compilation.
+    pub build_tools: bool,
 }
 
 impl KotlinCompiler {
-    /// Resolves the compiler's classpath. The result for a version never changes, so it is
-    /// remembered in the download cache and later runs skip dependency resolution entirely.
+    /// Resolves the compiler's classpath, with the Build Tools API implementation when the
+    /// version publishes one. The result for a version never changes, so it is remembered
+    /// in the download cache and later runs skip dependency resolution entirely.
     pub fn resolve(client: &MavenClient, version: &str) -> Result<Self> {
-        let cache = client.cache_dir();
-        let memo = cache.join(".classpaths").join(format!("kotlin-compiler-embeddable-{version}.txt"));
-        if let Ok(text) = std::fs::read_to_string(&memo) {
-            let classpath: Vec<PathBuf> = text.lines().filter(|l| !l.is_empty()).map(|l| cache.join(l)).collect();
-            if !classpath.is_empty() && classpath.iter().all(|p| p.is_file()) {
-                return Ok(Self { version: version.to_owned(), classpath });
-            }
+        if let Some(classpath) = resolve_memoized(client, version, true)? {
+            return Ok(Self { version: version.to_owned(), classpath, build_tools: true });
         }
-        let resolver = Resolver::new(client, Platform::Jvm);
-        let root = DependencyRequest::new(ModuleId::new(KOTLIN_GROUP, "kotlin-compiler-embeddable"), Some(version.to_owned()));
-        let resolution = resolver.resolve(&[root]).with_context(|| format!("failed to obtain the Kotlin {version} compiler"))?;
-        let classpath = resolution.files();
-        let rel: Option<Vec<String>> =
-            classpath.iter().map(|p| p.strip_prefix(cache).ok().map(|r| r.to_string_lossy().into_owned())).collect();
-        if let Some(rel) = rel {
-            // Only a speed-up: a failed write just means resolving again next time.
-            let _ = kargo_util::fs::write_string_atomic(&memo, &(rel.join("\n") + "\n"));
-        }
-        Ok(Self { version: version.to_owned(), classpath })
+        let classpath =
+            resolve_memoized(client, version, false)?.with_context(|| format!("failed to obtain the Kotlin {version} compiler"))?;
+        Ok(Self { version: version.to_owned(), classpath, build_tools: false })
+    }
+
+    /// The Build Tools API jar, against which Kargo's incremental compilation bridge is built.
+    pub fn build_tools_api_jar(&self) -> Option<&PathBuf> {
+        let prefix = format!("kotlin-build-tools-api-{}", self.version);
+        self.build_tools.then(|| self.classpath.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&prefix))))?
     }
 }
+
+/// The compiler classpath, optionally with `kotlin-build-tools-impl`. `Ok(None)` when the
+/// Build Tools API implementation is not published for `version`.
+fn resolve_memoized(client: &MavenClient, version: &str, build_tools: bool) -> Result<Option<Vec<PathBuf>>> {
+    let cache = client.cache_dir();
+    let name = if build_tools { "kotlin-build-tools-impl" } else { "kotlin-compiler-embeddable" };
+    let memo = cache.join(".classpaths").join(format!("{name}-{version}.txt"));
+    if let Ok(text) = std::fs::read_to_string(&memo) {
+        if text.trim() == UNAVAILABLE {
+            return Ok(None);
+        }
+        let classpath: Vec<PathBuf> = text.lines().filter(|l| !l.is_empty()).map(|l| cache.join(l)).collect();
+        if !classpath.is_empty() && classpath.iter().all(|p| p.is_file()) {
+            return Ok(Some(classpath));
+        }
+    }
+    let mut roots = vec![DependencyRequest::new(ModuleId::new(KOTLIN_GROUP, "kotlin-compiler-embeddable"), Some(version.to_owned()))];
+    if build_tools {
+        let impl_module = ModuleId::new(KOTLIN_GROUP, "kotlin-build-tools-impl");
+        let pom = Artifact::new(impl_module.clone(), version).with_extension("pom").repo_path();
+        match client.fetch(&pom) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let _ = kargo_util::fs::write_string_atomic(&memo, UNAVAILABLE);
+                return Ok(None);
+            }
+            // Offline without it in the cache: compile non-incrementally this time.
+            Err(_) => return Ok(None),
+        }
+        roots.push(DependencyRequest::new(impl_module, Some(version.to_owned())));
+    }
+    let resolver = Resolver::new(client, Platform::Jvm);
+    let resolution = match resolver.resolve(&roots) {
+        Ok(r) => r,
+        Err(_) if build_tools => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("failed to obtain the Kotlin {version} compiler")),
+    };
+    let classpath = resolution.files();
+    let rel: Option<Vec<String>> = classpath.iter().map(|p| p.strip_prefix(cache).ok().map(|r| r.to_string_lossy().into_owned())).collect();
+    if let Some(rel) = rel {
+        // Only a speed-up: a failed write just means resolving again next time.
+        let _ = kargo_util::fs::write_string_atomic(&memo, &(rel.join("\n") + "\n"));
+    }
+    Ok(Some(classpath))
+}
+
+/// Memo content for a Kotlin version without a published Build Tools API implementation.
+const UNAVAILABLE: &str = "unavailable";
 
 /// The newest JDK major version the Kotlin `version` compiler can run on, or
 /// `None` if no limit is known.

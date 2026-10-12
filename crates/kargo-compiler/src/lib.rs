@@ -2,6 +2,7 @@
 //! between them: source sets, compiler plugins and up-to-date checks.
 
 pub mod daemon;
+pub mod incremental;
 pub mod jar;
 pub mod jvm;
 pub mod mainclass;

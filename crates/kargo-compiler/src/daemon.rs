@@ -22,9 +22,14 @@ use kargo_util::hash::{Fingerprint, sha256_bytes};
 use kargo_util::shell::Shell;
 
 const SOURCE: &str = include_str!("daemon/KargoDaemon.java");
+/// The incremental compilation bridge, built against the project's Build Tools API.
+const IC_SOURCE: &str = include_str!("daemon/KargoIc.java");
 const PROTOCOL: u32 = 1;
 /// Exit code with which the daemon asks the client to run the tool as a process.
 const UNSUPPORTED: i32 = -1000;
+/// Exit code of an incremental compilation that failed for reasons other than compile
+/// errors (corrupt caches, an API mismatch); the caller should rebuild from scratch.
+pub const IC_FAILED: i32 = -1001;
 /// Seconds a daemon waits for work before exiting.
 pub const IDLE_TIMEOUT_SECS: u64 = 3 * 60 * 60;
 /// How long to wait for a freshly started daemon to accept connections.
@@ -54,6 +59,8 @@ pub enum Tool<'a> {
     /// A Kotlin compiler main class such as `K2JVMCompiler`.
     Kotlin(&'a str),
     Javac,
+    /// Incremental Kotlin/JVM compilation through the Build Tools API (arguments as in `KargoIc.java`).
+    KotlinIncremental,
 }
 
 /// The JVM options a daemon (or a standalone compiler process) runs with.
@@ -114,11 +121,13 @@ pub fn run(shell: &Shell, jdk: &Jdk, compiler_classpath: &[PathBuf], tool: Tool,
 }
 
 fn try_run(shell: &Shell, root: &Path, jdk: &Jdk, classpath: &[PathBuf], tool: Tool, args: &[String]) -> Result<Option<i32>> {
+    let classpath = &with_ic_bridge(shell, root, jdk, classpath);
     let dir = root.join(daemon_key(jdk, classpath));
     let info = dir.join("info");
     let (command, mut list): (&str, Vec<&str>) = match tool {
         Tool::Kotlin(main) => ("kotlin", vec![main]),
         Tool::Javac => ("javac", Vec::new()),
+        Tool::KotlinIncremental => ("kotlin-ic", Vec::new()),
     };
     list.extend(args.iter().map(String::as_str));
     if shell.is_verbose() {
@@ -144,6 +153,88 @@ fn try_run(shell: &Shell, root: &Path, jdk: &Jdk, classpath: &[PathBuf], tool: T
     };
     let code = request(stream, &token, command, &list)?.context("the new compiler daemon closed the connection")?;
     Ok((code != UNSUPPORTED).then_some(code))
+}
+
+/// Where classpath snapshots of jars are cached for incremental compilation, once the
+/// daemon is enabled (incremental compilation runs only in the daemon).
+pub fn snapshot_cache_dir() -> Option<PathBuf> {
+    root().map(|r| r.join("ic-snapshots"))
+}
+
+/// Whether `classpath` can compile incrementally (it contains the Build Tools API implementation).
+pub fn supports_incremental(classpath: &[PathBuf]) -> bool {
+    find_jar(classpath, "kotlin-build-tools-api-").is_some() && find_jar(classpath, "kotlin-build-tools-impl-").is_some()
+}
+
+fn find_jar<'a>(classpath: &'a [PathBuf], prefix: &str) -> Option<&'a PathBuf> {
+    classpath.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(prefix)))
+}
+
+/// Appends the incremental compilation bridge to a compiler classpath that has the Build
+/// Tools API, so every request for this compiler goes to the same daemon.
+fn with_ic_bridge(shell: &Shell, root: &Path, jdk: &Jdk, classpath: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = classpath.to_vec();
+    if !supports_incremental(classpath) {
+        return out;
+    }
+    match ic_bridge(root, jdk, classpath) {
+        Ok(dir) => out.push(dir),
+        Err(e) => shell.verbose("Skipping", format!("incremental compilation: {e:#}")),
+    }
+    out
+}
+
+/// Compiles `KargoIc.java` against the classpath's Build Tools API, once per API jar and JDK.
+fn ic_bridge(root: &Path, jdk: &Jdk, classpath: &[PathBuf]) -> Result<PathBuf> {
+    let api = find_jar(classpath, "kotlin-build-tools-api-").context("no Build Tools API jar")?;
+    let mut fp = Fingerprint::new();
+    fp.str(&sha256_bytes(IC_SOURCE.as_bytes())).str(&api.to_string_lossy()).str(&jdk.version.to_string());
+    let classes = root.join(format!("ic-{}", &fp.finish()[..16]));
+    if classes.join("KargoIc.class").is_file() {
+        return Ok(classes);
+    }
+    // Older Build Tools APIs (before Kotlin 2.4) lack what the bridge uses; don't retry every build.
+    let failed = classes.with_extension("failed");
+    if failed.is_file() {
+        bail!("this Kotlin version's Build Tools API is not supported (see {})", failed.display());
+    }
+    let mut javac_cp = vec![api.clone()];
+    javac_cp.extend(find_jar(classpath, "kotlin-stdlib-").cloned());
+    if let Err(e) = compile_java(root, jdk, "KargoIc.java", IC_SOURCE, &javac_cp, &classes) {
+        let _ = std::fs::create_dir_all(root);
+        let _ = std::fs::write(&failed, format!("{e:#}\n"));
+        return Err(e);
+    }
+    Ok(classes)
+}
+
+/// Compiles one Java source into `classes` (atomically, so concurrent builds don't clash).
+fn compile_java(root: &Path, jdk: &Jdk, file_name: &str, source: &str, classpath: &[PathBuf], classes: &Path) -> Result<()> {
+    if !jdk.has_javac() {
+        bail!("{} has no `javac` to build the daemon", jdk.home.display());
+    }
+    let staging = root.join(format!(".staging-{}-{}", std::process::id(), file_name.trim_end_matches(".java")));
+    kargo_util::fs::remove_dir_all_if_exists(&staging)?;
+    std::fs::create_dir_all(&staging)?;
+    let source_path = staging.join(file_name);
+    std::fs::write(&source_path, source)?;
+    let out = staging.join("classes");
+    let mut cmd = Command::new(jdk.javac());
+    cmd.args(["-nowarn", "-encoding", "UTF-8", "--release", "11", "-d"]).arg(&out);
+    if !classpath.is_empty() {
+        cmd.arg("-cp").arg(kargo_util::fs::join_paths(classpath));
+    }
+    let output = cmd.arg(&source_path).stdin(Stdio::null()).output().context("failed to run javac")?;
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        bail!("javac failed to build {file_name}: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    let main_class = format!("{}.class", file_name.trim_end_matches(".java"));
+    if std::fs::rename(&out, classes).is_err() && !classes.join(&main_class).is_file() {
+        bail!("failed to install the daemon classes into {}", classes.display());
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(())
 }
 
 /// The daemon directory name: everything that must match for a daemon to be reused.
@@ -174,32 +265,9 @@ fn connect(info: &Path) -> Option<(TcpStream, String)> {
 /// Compiles the daemon class once per source version and JDK major, shared by all daemons.
 fn daemon_classes(root: &Path, jdk: &Jdk) -> Result<PathBuf> {
     let classes = root.join(format!("classes-{}-{}", &sha256_bytes(SOURCE.as_bytes())[..12], jdk.version));
-    if classes.join("KargoDaemon.class").is_file() {
-        return Ok(classes);
+    if !classes.join("KargoDaemon.class").is_file() {
+        compile_java(root, jdk, "KargoDaemon.java", SOURCE, &[], &classes)?;
     }
-    if !jdk.has_javac() {
-        bail!("{} has no `javac` to build the daemon", jdk.home.display());
-    }
-    let staging = root.join(format!(".staging-{}", std::process::id()));
-    kargo_util::fs::remove_dir_all_if_exists(&staging)?;
-    std::fs::create_dir_all(&staging)?;
-    let source = staging.join("KargoDaemon.java");
-    std::fs::write(&source, SOURCE)?;
-    let out = staging.join("classes");
-    let output = Command::new(jdk.javac())
-        .args(["-nowarn", "-encoding", "UTF-8", "--release", "11", "-d"])
-        .arg(&out)
-        .arg(&source)
-        .stdin(Stdio::null())
-        .output()
-        .context("failed to run javac")?;
-    if !output.status.success() {
-        bail!("javac failed to build the daemon: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    if std::fs::rename(&out, &classes).is_err() && !classes.join("KargoDaemon.class").is_file() {
-        bail!("failed to install the daemon classes into {}", classes.display());
-    }
-    let _ = std::fs::remove_dir_all(&staging);
     Ok(classes)
 }
 

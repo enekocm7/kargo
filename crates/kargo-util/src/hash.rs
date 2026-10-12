@@ -51,9 +51,23 @@ impl Fingerprint {
     }
 
     /// Adds a file's path, size and modification time (cheap, like Cargo's mtime checks).
+    /// A directory (such as a classes directory on a classpath) adds every file in it, since
+    /// its own modification time doesn't change when a file inside is rewritten.
     pub fn file_stamp(&mut self, path: &Path) -> &mut Self {
         self.str(&path.to_string_lossy());
         match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => {
+                let mut files: Vec<_> = walkdir::WalkDir::new(path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.into_path())
+                    .collect();
+                files.sort();
+                for file in files {
+                    self.file_stamp(&file);
+                }
+            }
             Ok(meta) => {
                 self.hasher.update(meta.len().to_le_bytes());
                 let mtime =
@@ -75,6 +89,18 @@ impl Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directories_are_stamped_by_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::write(dir.path().join("a/X.class"), "1").unwrap();
+        let stamp = || Fingerprint::new().file_stamp(dir.path()).finish();
+        let before = stamp();
+        assert_eq!(before, stamp());
+        std::fs::write(dir.path().join("a/X.class"), "22").unwrap();
+        assert_ne!(before, stamp(), "rewriting a file inside changes the stamp");
+    }
 
     #[test]
     fn known_digests() {

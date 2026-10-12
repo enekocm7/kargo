@@ -5,10 +5,12 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use super::incremental::{IcOutcome, IncrementalUnit};
 use super::{FreshnessCheck, Outcome, ResolvedPlugin, SourceSet, daemon, fingerprint, plugin_args, run_kotlin_compiler};
 use kargo_toolchain::kotlin::JVM_COMPILER_MAIN;
 use kargo_toolchain::{Jdk, KotlinCompiler};
 use kargo_util::fs::{copy_dir, join_paths, remove_dir_all_if_exists};
+use kargo_util::hash::Fingerprint;
 use kargo_util::process::{self, slash};
 use kargo_util::shell::Shell;
 
@@ -37,9 +39,16 @@ pub fn javac_release(jvm_target: &str) -> &str {
 
 impl JvmCompilation<'_> {
     fn kotlin_args(&self, jdk: &Jdk) -> Vec<String> {
+        let mut args = vec!["-d".to_owned(), slash(&self.output)];
+        args.extend(self.kotlin_options(jdk));
+        // Kotlin sees Java sources too, so Kotlin code can reference Java declarations.
+        args.extend(self.sources.all().map(|p| slash(p)));
+        args
+    }
+
+    /// Kotlin compiler arguments other than the output directory and the sources.
+    fn kotlin_options(&self, jdk: &Jdk) -> Vec<String> {
         let mut args = vec![
-            "-d".to_owned(),
-            slash(&self.output),
             "-module-name".to_owned(),
             self.name.to_owned(),
             "-jvm-target".to_owned(),
@@ -60,8 +69,6 @@ impl JvmCompilation<'_> {
         args.extend(plugin_args(self.plugins));
         args.extend(self.sources.fragment_args());
         args.extend(self.kotlin_args.iter().cloned());
-        // Kotlin sees Java sources too, so Kotlin code can reference Java declarations.
-        args.extend(self.sources.all().map(|p| slash(p)));
         args
     }
 
@@ -125,20 +132,39 @@ impl JvmCompilation<'_> {
         check.invalidate();
         announce();
 
-        remove_dir_all_if_exists(&self.output)?;
-        std::fs::create_dir_all(&self.output).with_context(|| format!("failed to create {}", self.output.display()))?;
-
-        if !self.sources.kotlin_files().is_empty() {
-            run_kotlin_compiler(
-                shell,
-                jdk,
-                &compiler.classpath,
-                JVM_COMPILER_MAIN,
-                &kotlin_args,
-                &fingerprint_dir.join(format!("{}.kotlinc.args", self.name)),
-                self.name,
-            )?;
+        // Classes javac and the resource copy put into the output last time; they are
+        // replaced below, and removing them first drops those of deleted files.
+        let produced = fingerprint_dir.join(format!("{}.produced", self.name));
+        for file in std::fs::read_to_string(&produced).unwrap_or_default().lines().filter(|l| !l.is_empty()) {
+            let _ = std::fs::remove_file(self.output.join(file));
         }
+        let _ = std::fs::remove_file(&produced);
+
+        let kotlin_files = !self.sources.kotlin_files().is_empty();
+        let incremental =
+            if kotlin_files { self.compile_incrementally(shell, jdk, compiler, fingerprint_dir)? } else { IcOutcome::Unavailable };
+        match incremental {
+            IcOutcome::Compiled => {}
+            IcOutcome::Errors => bail!("could not compile `{}` due to previous errors", self.name),
+            IcOutcome::Unavailable => {
+                // A full compile leaves incremental caches behind that no longer match the output.
+                remove_dir_all_if_exists(&fingerprint_dir.join(format!("{}.ic", self.name)))?;
+                remove_dir_all_if_exists(&self.output)?;
+                std::fs::create_dir_all(&self.output).with_context(|| format!("failed to create {}", self.output.display()))?;
+                if kotlin_files {
+                    run_kotlin_compiler(
+                        shell,
+                        jdk,
+                        &compiler.classpath,
+                        JVM_COMPILER_MAIN,
+                        &kotlin_args,
+                        &fingerprint_dir.join(format!("{}.kotlinc.args", self.name)),
+                        self.name,
+                    )?;
+                }
+            }
+        }
+        let before = output_files(&self.output);
 
         if !self.sources.java_files().is_empty() {
             if !jdk.has_javac() {
@@ -168,9 +194,57 @@ impl JvmCompilation<'_> {
                 copy_dir(dir, &self.output)?;
             }
         }
+        let after = output_files(&self.output);
+        let added: Vec<&str> = after.iter().filter(|f| !before.contains(*f)).map(String::as_str).collect();
+        kargo_util::fs::write_string_atomic(&produced, &added.join("\n"))?;
         check.record()?;
         Ok(Outcome::Compiled)
     }
+
+    /// Recompiles only what changed, when the daemon and the Build Tools API are available.
+    /// Multiplatform sources (`expect`/`actual` fragments) always compile from scratch.
+    fn compile_incrementally(&self, shell: &Shell, jdk: &Jdk, compiler: &KotlinCompiler, fingerprint_dir: &Path) -> Result<IcOutcome> {
+        if !compiler.build_tools || !self.sources.fragment_args().is_empty() {
+            return Ok(IcOutcome::Unavailable);
+        }
+        let options = self.kotlin_options(jdk);
+        let mut config = Fingerprint::new();
+        config.str(&compiler.version).str(&slash(&self.output));
+        // The classpath reaches the compiler as snapshots; everything else forces a clean build.
+        let mut skip_next = false;
+        for o in &options {
+            if std::mem::take(&mut skip_next) {
+                continue;
+            }
+            skip_next = o == "-classpath";
+            if !skip_next {
+                config.str(o);
+            }
+        }
+        for p in self.plugins {
+            config.file_stamp(&p.jar);
+        }
+        let unit = IncrementalUnit {
+            state_dir: fingerprint_dir.join(format!("{}.ic", self.name)),
+            output: &self.output,
+            sources: self.sources.all().cloned().collect(),
+            classpath: &self.classpath,
+            options,
+            config: config.finish(),
+            compiler_version: &compiler.version,
+        };
+        unit.compile(shell, jdk, &compiler.classpath)
+    }
+}
+
+/// Files under `dir`, relative to it with `/` separators.
+fn output_files(dir: &Path) -> std::collections::HashSet<String> {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.path().strip_prefix(dir).ok().map(slash))
+        .collect()
 }
 
 fn all_files(dir: &Path) -> Vec<PathBuf> {
