@@ -167,7 +167,7 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
 
 /// The Java version whose API docs JDK types link to: the JVM target, else the running JDK.
 fn jdk_docs_version(manifest: &kargo_manifest::Manifest, running: u32) -> u32 {
-    let target = manifest.targets.jvm.as_ref().map(|j| j.target_for(running));
+    let target = manifest.targets.jvm.as_ref().and_then(|j| j.target_for(running).ok());
     target.as_deref().and_then(|t| t.strip_prefix("1.").unwrap_or(t).parse().ok()).unwrap_or(running)
 }
 

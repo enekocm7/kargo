@@ -315,6 +315,16 @@ impl<'a> BuildContext<'a> {
         Ok(jdk)
     }
 
+    /// The JDK that compiles the JVM target: the `compiler_jdk`, once it is known to be new
+    /// enough for `jvm-target`. Checked here so a bad target fails before anything downloads.
+    pub fn jvm_jdk(&self) -> Result<&Jdk> {
+        let jdk = self.compiler_jdk()?;
+        if let Some(jvm) = &self.ws.manifest().targets.jvm {
+            jvm.target_for(jdk.version)?;
+        }
+        Ok(jdk)
+    }
+
     pub fn kotlin_compiler(&self) -> Result<&KotlinCompiler> {
         self.shared.compiler.get_or_try_init(|| KotlinCompiler::resolve(&self.client, &self.ws.manifest().kotlin.version))
     }

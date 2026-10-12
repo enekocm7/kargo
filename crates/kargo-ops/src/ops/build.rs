@@ -309,7 +309,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let setup = ctx.setup(TargetKind::Jvm)?;
     // On a cold cache the JDK, the compiler and the dependencies all download at once.
     let (toolchain, classpaths) = super::join(
-        || -> Result<_> { Ok((ctx.compiler_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
+        || -> Result<_> { Ok((ctx.jvm_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
         || jvm_classpaths(ctx, &setup),
     );
     let (jdk, compiler, plugins) = toolchain?;
@@ -322,7 +322,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     let classes = out.join("classes");
-    let jvm_target = jvm.target_for(jdk.version);
+    let jvm_target = jvm.target_for(jdk.version)?;
     let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"]);
     let mut resources = vec![ctx.ws.resources()];
     let ksp = JvmKspUnit {

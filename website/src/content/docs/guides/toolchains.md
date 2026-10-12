@@ -18,7 +18,7 @@ With anything other than `system`, Kargo downloads that [Eclipse Temurin](https:
 
 A major version like `"21"` uses the newest release of 21 you have installed, and downloads one if you have none.
 
-Kargo also checks that `[target.jvm] jvm-target` is not newer than the pinned JDK, so you get a clear error instead of a confusing compiler failure. If you don't set `jvm-target`, it defaults to 25, lowered to the JDK's version when the JDK is older, so pinning `jdk = "21"` alone is enough.
+Kargo also checks that `[target.jvm] jvm-target` is not newer than the JDK that builds the project (the pinned one, or `JAVA_HOME`/`PATH` with `jdk = "system"`), so you get a clear error with a hint to set `[toolchain] jdk`, instead of a confusing compiler failure. If you don't set `jvm-target`, it defaults to 25, lowered to the JDK's version when the JDK is older, so pinning `jdk = "21"` alone is enough.
 
 ### Older Kotlin versions on new JDKs
 
