@@ -36,6 +36,7 @@ export default defineConfig({
 						{ label: 'Your first Kotlin app', slug: 'guides/first-app' },
 						{ label: 'Managing dependencies', slug: 'guides/dependencies' },
 						{ label: 'Testing', slug: 'guides/testing' },
+						{ label: 'Several programs', slug: 'guides/multiple-programs' },
 						{ label: 'API documentation', slug: 'guides/documentation' },
 						{ label: 'Formatting and linting', slug: 'guides/formatting-and-linting' },
 						{ label: 'Multiplatform projects', slug: 'guides/multiplatform' },

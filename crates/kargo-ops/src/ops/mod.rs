@@ -224,21 +224,27 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
     ctx.save_lockfile()
 }
 
-/// `kargo package`: builds a self-contained ("fat") jar for the JVM target.
-pub fn package(ctx: &BuildContext) -> Result<PathBuf> {
+/// `kargo package`: builds a self-contained ("fat") jar for the JVM target, launching
+/// the project's main class or, with `bin`, that `[[bin]]` (`<bin>-<version>-all.jar`).
+pub fn package(ctx: &BuildContext, bin: Option<&str>) -> Result<PathBuf> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
         bail!("`kargo package` creates an executable jar and needs the JVM target; use `kargo build` for other targets");
     }
+    let bin_main = match bin {
+        Some(name) => Some(build::bin_main_class(ctx.ws.root(), build::find_bin(ctx.ws.manifest(), name)?)?),
+        None => None,
+    };
     let start = std::time::Instant::now();
     let env = build::hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     let jvm = build_jvm(ctx)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
     let pkg = &ctx.ws.manifest().package;
-    let dest = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join(format!("{}-{}-all.jar", pkg.name, pkg.version));
-    ctx.shell().status("Packaging", format!("{} v{} ({})", pkg.name, pkg.version, dest.display()));
+    let name = bin.unwrap_or(&pkg.name);
+    let dest = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join(format!("{name}-{}-all.jar", pkg.version));
+    ctx.shell().status("Packaging", format!("{name} v{} ({})", pkg.version, dest.display()));
     let manifest = JarManifest {
-        main_class: jvm.main_class.clone(),
+        main_class: bin_main.or(jvm.main_class),
         class_path: Vec::new(),
         implementation_title: Some(pkg.name.clone()),
         implementation_version: Some(pkg.version.clone()),

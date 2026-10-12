@@ -1,5 +1,5 @@
 //! Shell completions: the `kargo completions <shell>` scripts and the dynamic candidates (tasks, plugins,
-//! frameworks, installed toolchains) they ask the `kargo` binary for while the user types.
+//! frameworks, installed toolchains, bins and examples) they ask the `kargo` binary for while the user types.
 //!
 //! The scripts are thin: on every <Tab> they run `COMPLETE=<shell> kargo -- <words>`, which
 //! [`complete_if_requested`] answers from the clap definition plus the current project.
@@ -73,6 +73,25 @@ pub fn tasks() -> Vec<CompletionCandidate> {
             CompletionCandidate::new(&t.name).help(Some(help.into())).tag(Some("Tasks".into()))
         })
         .collect()
+}
+
+/// The `[[bin]]` programs of the project in the current directory, for `--bin`.
+pub fn bins() -> Vec<CompletionCandidate> {
+    let Some(ws) = workspace() else { return Vec::new() };
+    ws.manifest()
+        .bins
+        .iter()
+        .map(|b| {
+            let help = b.main.clone().or_else(|| b.path.as_ref().map(|p| p.display().to_string())).or_else(|| b.entry_point.clone());
+            CompletionCandidate::new(&b.name).help(help.map(Into::into))
+        })
+        .collect()
+}
+
+/// The `examples/<name>.kt` programs of the project in the current directory, for `--example`.
+pub fn examples() -> Vec<CompletionCandidate> {
+    let Some(ws) = workspace() else { return Vec::new() };
+    ws.examples().into_iter().map(CompletionCandidate::new).collect()
 }
 
 /// Everything `kargo <name>` can run besides the built-in commands: project tasks and `kargo-*` executables.

@@ -29,7 +29,7 @@ $ kargo test
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo build [--release] [-t <target>] [--keep-going] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
-| `kargo run [-t <target>] [-- args]` | Build and run |
+| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt` |
 | `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports` |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
@@ -40,7 +40,7 @@ $ kargo test
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
-| `kargo package [--release]` | Build a self-contained fat jar (JVM) |
+| `kargo package [--release] [--bin <name>]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]` |
 | `kargo fetch` | Pre-download everything |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
@@ -65,6 +65,7 @@ tests-jvm/ ...       target-specific tests
 resources/           JVM resources (test-resources/ for tests)
 android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
+examples/            example programs: kargo run --example <name>
 target/              build output: target/<debug|release>/<target>/
 ```
 
@@ -116,6 +117,10 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 # Scopes: compile (default), runtime, provided, processor. Other keys: classifier, extension, force, transitive
 
 [target.jvm.dependencies]   # per-target dependencies
+
+[[bin]]                     # more programs: kargo run --bin migrate, kargo package --bin migrate
+name = "migrate"
+path = "src/tools/Migrate.kt"   # the file with its `main`; or main = "<JVM class>" / entry-point = "<native function>"
 
 [dev-dependencies]          # test-only dependencies
 

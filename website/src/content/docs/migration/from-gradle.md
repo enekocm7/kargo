@@ -179,6 +179,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `tasks.register("x") { exec ... }` | `[tasks] x = "..."` |
 | `tasks.compileKotlin { dependsOn(gen) }` | `gen = { run = "...", hooks = ["pre-build"] }` |
 | `./gradlew run --args="a b"` | `kargo run -- a b` |
+| extra `JavaExec` tasks for other mains | `[[bin]]` and `kargo run --bin <name>`, or `kargo run --main <class>` |
 | `./gradlew test --tests "*Foo*"` | `kargo test Foo` |
 | `./gradlew dependencies` | `kargo tree` |
 | `./gradlew dependencyUpdates` (Versions plugin) | `kargo outdated`, then `kargo upgrade` |

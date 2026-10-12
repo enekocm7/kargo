@@ -19,6 +19,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     target: Option<RawTargets>,
     #[serde(default)]
+    bin: Vec<RawBin>,
+    #[serde(default)]
     dependencies: toml::Table,
     #[serde(default)]
     dev_dependencies: toml::Table,
@@ -42,6 +44,15 @@ pub(super) struct RawManifest {
     lint: RawLint,
     #[serde(default)]
     test: RawTest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawBin {
+    name: String,
+    main: Option<String>,
+    entry_point: Option<String>,
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -830,6 +841,7 @@ impl RawManifest {
             }
         }
 
+        let bins = validate_bins(self.bin)?;
         let doc = self.doc.validate()?;
         let fmt = self.fmt.validate()?;
         let lint = self.lint.validate()?;
@@ -857,6 +869,7 @@ impl RawManifest {
                 warnings_as_errors: self.kotlin.warnings_as_errors,
             },
             targets,
+            bins,
             dependencies: parse_dependencies(&self.dependencies, "dependencies")?,
             dev_dependencies: parse_dependencies(&self.dev_dependencies, "dev-dependencies")?,
             repositories,
@@ -868,6 +881,47 @@ impl RawManifest {
             release_profile: self.profile.release.unwrap_or_default().apply(Profile::release()),
         })
     }
+}
+
+/// Validates `[[bin]]`: unique names, and a `main`/`entry-point` or a `path`, not both.
+fn validate_bins(raw: Vec<RawBin>) -> Result<Vec<Bin>> {
+    let mut bins: Vec<Bin> = Vec::new();
+    for b in raw {
+        let name = b.name;
+        if name.is_empty()
+            || !name.starts_with(|c: char| c.is_ascii_alphabetic())
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            bail!("invalid [[bin]] name `{name}` (start with a letter; use letters, digits, `-` and `_`)");
+        }
+        if bins.iter().any(|other| other.name == name) {
+            bail!("[[bin]] `{name}` is declared more than once");
+        }
+        let is_class = |s: &str| !s.is_empty() && s.split('.').all(|seg| !seg.is_empty() && !seg.contains(char::is_whitespace));
+        for (key, value) in [("main", &b.main), ("entry-point", &b.entry_point)] {
+            if let Some(v) = value
+                && !is_class(v)
+            {
+                bail!("[[bin]] `{name}`: invalid `{key}` `{v}` (expected a qualified name such as `com.example.tools.MigrateKt`)");
+            }
+        }
+        match (&b.path, b.main.is_some() || b.entry_point.is_some()) {
+            (Some(_), true) => bail!("[[bin]] `{name}`: set either `path` or `main`/`entry-point`, not both"),
+            (None, false) => {
+                bail!(
+                    "[[bin]] `{name}` needs an entry point: set `path` to the file with its `main`, or `main` (JVM) and `entry-point` (Native)"
+                )
+            }
+            _ => {}
+        }
+        if let Some(path) = &b.path
+            && path.extension().is_none_or(|e| e != "kt")
+        {
+            bail!("[[bin]] `{name}`: `path` must be a Kotlin source file (`.kt`), got `{}`", path.display());
+        }
+        bins.push(Bin { name, main: b.main, entry_point: b.entry_point, path: b.path });
+    }
+    Ok(bins)
 }
 
 /// Fails unless `version` (a tool version from `[section] key`) is one exact version.

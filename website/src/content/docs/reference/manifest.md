@@ -137,7 +137,7 @@ javac-args = ["-Xlint:all"]             # extra javac options for Java sources
 
 When you don't set `jvm-target`, Kargo targets Java 25, or the version of the JDK that builds the project if that JDK is older (a pinned `[toolchain] jdk`, else `JAVA_HOME` or `java` on `PATH`). The compiled classes then always run on the JDK you build with. Set `jvm-target` explicitly to support older Java runtimes than the one you build with.
 
-Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one.
+Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one, run another with `kargo run --main <class>`, or declare each program as a [`[[bin]]`](#bin).
 
 ### `[target.wasm]`
 
@@ -213,6 +213,30 @@ Every target table can have a `dependencies` sub-table:
 [target.jvm.dependencies]
 "com.zaxxer:HikariCP" = "6.2.1"
 ```
+
+## `[[bin]]`
+
+Named programs besides the default one, run with `kargo run --bin <name>` and packaged with `kargo package --bin <name>`. Repeat the table for each program.
+
+```toml
+[[bin]]
+name = "migrate"
+path = "src/tools/Migrate.kt"            # the file whose `main` to run; works for every target
+
+[[bin]]
+name = "report"
+main = "com.example.report.Cli"          # JVM main class
+entry-point = "com.example.report.main"  # Kotlin/Native entry function
+```
+
+| Key | Meaning |
+|---|---|
+| `name` | Required. Letters, digits, `-` and `_`, starting with a letter; unique |
+| `path` | A `.kt` file, relative to the project root, that declares exactly one `main` |
+| `main` | The JVM main class |
+| `entry-point` | The Kotlin/Native entry function |
+
+Set `path`, or `main` and/or `entry-point`, but not both. The sources stay in `src/`. An executable Native target links one extra executable per bin with a native entry point, into `target/<profile>/native/<platform>/bin/`. See [Several programs in one project](../../guides/multiple-programs/).
 
 ## `[dependencies]` and `[dev-dependencies]`
 

@@ -14,6 +14,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo build [--release] [--keep-going]` | `kargo build [--release] [--keep-going]` | `-t` picks targets; `--keep-going` builds every target despite failures |
 | `cargo check [--tests] [--keep-going]` | `kargo check [--tests] [--keep-going]` | Skips packaging and linking; JVM still writes classes |
 | `cargo run -- args` | `kargo run -- args` | |
+| `cargo run --bin foo` / `--example foo` | `kargo run --bin foo` / `--example foo` | Also `kargo run --main <class>` for an undeclared `main` |
 | `cargo test [filter] [--no-fail-fast]` | `kargo test [filter] [--no-fail-fast]` | Fails fast across targets by default; `[test] fail-fast = false` changes that |
 | `cargo doc [--open]` | `kargo doc [--open]` | Runs Dokka on your KDoc comments |
 | `cargo fmt [--check]` | `kargo fmt [--check]` | Runs ktlint; configured by `.editorconfig` |
@@ -39,6 +40,8 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `Cargo.toml` | `kargo.toml` |
 | `Cargo.lock` | `kargo.lock` |
 | `src/main.rs` / `src/lib.rs` | any `.kt` file in `src/` (`fun main` makes it an app) |
+| `[[bin]]` / `src/bin/*.rs` | `[[bin]]` with `path` or `main`; sources stay in `src/` |
+| `examples/*.rs` | `examples/*.kt` |
 | `tests/` | `tests/` (unit tests don't live next to the code) |
 | `[target.'cfg(unix)'.dependencies]` | `[target.jvm.dependencies]` etc. |
 | `#[cfg(target_os = ...)]` | `expect`/`actual` with `src-<target>/` |
