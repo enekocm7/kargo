@@ -254,10 +254,8 @@ impl<'a> Resolver<'a> {
     fn load_node_info(&self, module: &ModuleId, version: &str) -> Result<NodeInfo> {
         let pom = self.raw_pom(module, version)?;
         let wants_metadata = pom.as_ref().is_none_or(|p| p.has_gradle_metadata);
-        if wants_metadata {
-            if let Some(info) = self.info_from_module_metadata(module, version, pom.is_some())? {
-                return Ok(info);
-            }
+        if wants_metadata && let Some(info) = self.info_from_module_metadata(module, version, pom.is_some())? {
+            return Ok(info);
         }
         if pom.is_none() {
             bail!("{module}:{version} was not found in any repository");
@@ -604,13 +602,13 @@ impl<'a> Resolver<'a> {
             .map(|module| {
                 let version = used[module].as_str();
                 // Roots may ask for a specific classifier/extension.
-                if let Some(root) = roots.iter().find(|r| &r.module == module) {
-                    if root.classifier.is_some() || root.extension.is_some() {
-                        let artifact = Artifact::new(module.clone(), version)
-                            .with_classifier(root.classifier.clone())
-                            .with_extension(root.extension.clone().unwrap_or_else(|| "jar".into()));
-                        return Ok(vec![artifact.repo_path()]);
-                    }
+                if let Some(root) = roots.iter().find(|r| &r.module == module)
+                    && (root.classifier.is_some() || root.extension.is_some())
+                {
+                    let artifact = Artifact::new(module.clone(), version)
+                        .with_classifier(root.classifier.clone())
+                        .with_extension(root.extension.clone().unwrap_or_else(|| "jar".into()));
+                    return Ok(vec![artifact.repo_path()]);
                 }
                 Ok(self.node_info(module, version)?.files)
             })

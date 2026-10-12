@@ -83,6 +83,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         label.push(' ');
         label.push_str(arg);
     }
+    ctx.unlock()?;
     ctx.shell().status("Running", format!("`{label}`"));
     ctx.shell().verbose("Command", process::describe(&cmd));
     let status = cmd.status().with_context(|| format!("failed to start `{}`", cmd.get_program().to_string_lossy()))?;

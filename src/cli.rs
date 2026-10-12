@@ -470,13 +470,13 @@ pub fn main() -> ExitCode {
 fn parse() -> Cli {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let mut cmd = Cli::command();
-    if wants_top_level_help(&args) {
-        if let Some(tasks) = tasks_help() {
-            cmd = cmd.after_help(format!(
-                "{tasks}
+    if wants_top_level_help(&args)
+        && let Some(tasks) = tasks_help()
+    {
+        cmd = cmd.after_help(format!(
+            "{tasks}
 {AFTER_HELP}"
-            ));
-        }
+        ));
     }
     let matches = cmd.get_matches_from(args);
     Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
@@ -770,7 +770,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         }
         Command::Clean { release } => {
             let ws = load_workspace(&global)?;
-            let removed = ops::clean(&ws, release.then_some(ProfileKind::Release))?;
+            let removed = ops::clean(&ws, shell, release.then_some(ProfileKind::Release))?;
             shell.status("Removed", removed.display());
             Ok(0)
         }
@@ -965,12 +965,12 @@ fn print_info(ws: &Workspace) {
 /// `kargo <name>`: a task from the manifest, else a `kargo-<name>` executable.
 fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u8> {
     let (name, args) = argv.split_first().context("missing subcommand")?;
-    if let Ok(ws) = load_workspace(global) {
-        if ws.manifest().tasks.contains_key(name) {
-            let env = kargo_ops::plugins::base_env(&ws, "dev");
-            kargo_ops::tasks::run(config.shell(), ws.root(), &ws.manifest().tasks, name, args, &env)?;
-            return Ok(0);
-        }
+    if let Ok(ws) = load_workspace(global)
+        && ws.manifest().tasks.contains_key(name)
+    {
+        let env = kargo_ops::plugins::base_env(&ws, "dev");
+        kargo_ops::tasks::run(config.shell(), ws.root(), &ws.manifest().tasks, name, args, &env)?;
+        return Ok(0);
     }
     let Some(program) = kargo_ops::plugins::find_subcommand(config, name) else {
         bail!("no such command: `{name}`\n\n\tView all installed commands with `kargo --help` and `kargo plugins`");

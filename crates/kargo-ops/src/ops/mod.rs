@@ -26,6 +26,7 @@ use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_manifest::{Hook, Scope, TargetKind};
 use kargo_maven::{Platform, Resolution};
 use kargo_util::fs::remove_dir_all_if_exists;
+use kargo_util::shell::Shell;
 
 /// Runs `f` on every item on its own thread and returns the results in item order.
 /// A single item runs inline. Used to build independent targets (and Native platforms)
@@ -91,12 +92,31 @@ pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> 
 }
 
 /// `kargo clean`: removes the build directory (or one profile of it).
-pub fn clean(ws: &Workspace, profile: Option<crate::workspace::ProfileKind>) -> Result<PathBuf> {
+pub fn clean(ws: &Workspace, shell: &Shell, profile: Option<crate::workspace::ProfileKind>) -> Result<PathBuf> {
     let dir = match profile {
         Some(p) => ws.target_dir().join(p.dir_name()),
         None => ws.target_dir().to_path_buf(),
     };
-    remove_dir_all_if_exists(&dir)?;
+    if !ws.target_dir().exists() {
+        return Ok(dir);
+    }
+    let lock = ws.lock(shell)?;
+    if profile.is_some() {
+        remove_dir_all_if_exists(&dir)?;
+    } else {
+        // Everything but the lock this process holds.
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+            let path = entry?.path();
+            if path == lock.path() {
+                continue;
+            }
+            if path.is_dir() {
+                remove_dir_all_if_exists(&path)?;
+            } else {
+                std::fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+        }
+    }
     Ok(dir)
 }
 

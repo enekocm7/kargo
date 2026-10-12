@@ -104,10 +104,10 @@ fn strip_comments(src: &str) -> String {
 pub fn facade_class_name(file: &Path, src: &str) -> String {
     for line in src.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("@file:JvmName(") {
-            if let Some(name) = rest.trim().strip_prefix('"').and_then(|r| r.split('"').next()) {
-                return name.to_owned();
-            }
+        if let Some(rest) = line.strip_prefix("@file:JvmName(")
+            && let Some(name) = rest.trim().strip_prefix('"').and_then(|r| r.split('"').next())
+        {
+            return name.to_owned();
         }
     }
     let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();

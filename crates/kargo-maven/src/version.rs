@@ -431,10 +431,10 @@ impl FromStr for VersionReq {
                 }
                 let lower = (!lo.is_empty()).then(|| Bound { version: Version::parse(lo), inclusive: lower_inclusive });
                 let upper = (!hi.is_empty()).then(|| Bound { version: Version::parse(hi), inclusive: upper_inclusive });
-                if let (Some(l), Some(u)) = (&lower, &upper) {
-                    if l.version > u.version {
-                        return Err(err());
-                    }
+                if let (Some(l), Some(u)) = (&lower, &upper)
+                    && l.version > u.version
+                {
+                    return Err(err());
                 }
                 Interval { lower, upper }
             } else {

@@ -117,9 +117,12 @@ target/
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
 ├── lint/                         Kargo's detekt settings for kargo lint
-└── android/                      the generated Gradle project
+├── android/                      the generated Gradle project
+└── .kargo-lock                   build-directory lock (see below)
 ```
 
 `kargo package` writes `target/<profile>/jvm/<name>-<version>-all.jar`.
 
 Change the output directory with the `KARGO_TARGET_DIR` environment variable.
+
+`target/.kargo-lock` keeps two Kargo processes from building the same project at the same time. See [Concurrent commands](../../reference/commands/#concurrent-commands).

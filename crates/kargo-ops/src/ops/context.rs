@@ -14,6 +14,7 @@ use kargo_manifest::{Dependency, Scope, TargetKind};
 use kargo_maven::{DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
+use kargo_util::flock::FileLock;
 use kargo_util::hash::Fingerprint;
 use kargo_util::shell::Shell;
 
@@ -36,6 +37,8 @@ pub struct BuildContext<'a> {
     jdk: Lazy<Jdk>,
     compiler: Lazy<KotlinCompiler>,
     native: Lazy<NativeToolchain>,
+    /// The build-directory lock, held until [`BuildContext::unlock`] or drop.
+    build_lock: Mutex<Option<FileLock>>,
 }
 
 /// A value initialized at most once even when targets build in parallel, so two
@@ -80,10 +83,10 @@ impl UpdatePlan {
         let mut pins: Vec<(ModuleId, String)> = Vec::new();
         if let Some(locked) = self.previous.resolutions.get(key).filter(|r| r.inputs == inputs) {
             for pkg in &locked.packages {
-                if let Ok(module) = pkg.module.parse::<ModuleId>() {
-                    if !self.modules.contains(&module) {
-                        pins.push((module, pkg.version.clone()));
-                    }
+                if let Ok(module) = pkg.module.parse::<ModuleId>()
+                    && !self.modules.contains(&module)
+                {
+                    pins.push((module, pkg.version.clone()));
                 }
             }
         }
@@ -148,6 +151,8 @@ fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
 impl<'a> BuildContext<'a> {
     pub fn new(config: &'a Config, ws: &'a Workspace, profile: ProfileKind) -> Result<Self> {
         kargo_compiler::daemon::configure(config.home());
+        // Taken before reading kargo.lock so a concurrent process's write is seen.
+        let build_lock = ws.lock(config.shell())?;
         let lock = Lockfile::load(&ws.lockfile_path())?;
         Ok(Self {
             config,
@@ -162,6 +167,7 @@ impl<'a> BuildContext<'a> {
             jdk: Lazy::new(),
             compiler: Lazy::new(),
             native: Lazy::new(),
+            build_lock: Mutex::new(Some(build_lock)),
         })
     }
 
@@ -305,6 +311,19 @@ impl<'a> BuildContext<'a> {
             None => lock.resolutions.clear(),
         }
         self.lock_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Saves `kargo.lock` and releases the build-directory lock, so a long-running
+    /// program started by `kargo run` does not block other Kargo commands.
+    pub fn unlock(&self) -> Result<()> {
+        self.save_lockfile()?;
+        self.build_lock.lock().expect("lock poisoned").take();
+        Ok(())
+    }
+
+    /// The path of the held build-directory lock, if any.
+    pub fn build_lock_path(&self) -> Option<PathBuf> {
+        self.build_lock.lock().expect("lock poisoned").as_ref().map(|l| l.path().to_path_buf())
     }
 
     pub fn fingerprint_dir(&self, target: TargetKind) -> PathBuf {

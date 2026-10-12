@@ -296,10 +296,10 @@ fn start(shell: &Shell, root: &Path, dir: &Path, jdk: &Jdk, classpath: &[PathBuf
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         // Wait for a new info file (a stale one may point at a dead daemon).
-        if std::fs::read_to_string(&info).ok() != before {
-            if let Some(c) = connect(&info) {
-                return Ok(c);
-            }
+        if std::fs::read_to_string(&info).ok() != before
+            && let Some(c) = connect(&info)
+        {
+            return Ok(c);
         }
         if let Ok(Some(status)) = child.try_wait() {
             bail!("the compiler daemon exited during startup ({status}); see {}", dir.join("daemon.log").display());

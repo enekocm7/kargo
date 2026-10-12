@@ -471,7 +471,56 @@ fn clean_removes_target_dir() {
     assert!(!p.path().join("target/release").exists());
     assert!(p.path().join("target/debug").exists());
     p.kargo().arg("clean").assert().success();
+    // Only the build-directory lock survives a full clean.
+    let left: Vec<_> = std::fs::read_dir(p.path().join("target")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left, [".kargo-lock"]);
+    // Cleaning a project that was never built creates nothing.
+    std::fs::remove_dir_all(p.path().join("target")).unwrap();
+    p.kargo().arg("clean").assert().success();
     assert!(!p.path().join("target").exists());
+}
+
+#[test]
+fn build_directory_lock_serializes_kargo_processes() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("locked", ""));
+    p.file("target/debug/jvm/x.txt", "x");
+    let lock_path = p.path().join("target/.kargo-lock");
+    let held = std::fs::File::create(&lock_path).unwrap();
+    held.lock().unwrap();
+
+    // A hook's nested `kargo` is told the lock is its parent's and does not wait.
+    p.kargo().arg("clean").env("KARGO_BUILD_LOCK", &lock_path).assert().success();
+    p.file("target/debug/jvm/x.txt", "x");
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("kargo"))
+        .arg("clean")
+        .current_dir(p.path())
+        .env("KARGO_HOME", p.home.path())
+        .env_remove("KARGO_TARGET_DIR")
+        .env_remove("KARGO_BUILD_LOCK")
+        .env("NO_COLOR", "1")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stderr.read_to_string(&mut out).unwrap();
+        out
+    });
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(child.try_wait().unwrap().is_none(), "kargo clean finished while another process held the lock");
+    assert!(p.path().join("target/debug/jvm/x.txt").exists());
+
+    drop(held);
+    assert!(child.wait().unwrap().success());
+    let stderr = reader.join().unwrap();
+    assert!(stderr.contains("Blocking waiting for file lock on build directory"), "{stderr}");
+    assert!(!p.path().join("target/debug").exists());
 }
 
 #[test]
