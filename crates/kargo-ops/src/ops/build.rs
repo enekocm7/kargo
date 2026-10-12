@@ -10,10 +10,10 @@ use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::mainclass::{find_jvm_main_class, find_single_entry_point};
-use kargo_compiler::native::NativeCompilation;
+use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
-use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Cinterop, Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::{Platform, Resolution};
 use kargo_toolchain::native::resolve_platform;
 use kargo_util::fs::collect_files;
@@ -342,6 +342,51 @@ pub fn native_libraries(ctx: &BuildContext, setup: &TargetSetup, konan_target: &
     Ok(ctx.resolve(&key, Platform::Native(konan_target.to_owned()), &requests, &setup.boms)?.files())
 }
 
+/// The `.def` file of every `[target.native.cinterop]` entry (`None` for a headers-only one),
+/// failing on a missing file before any toolchain is downloaded.
+pub fn native_cinterop_defs<'a>(ctx: &BuildContext<'a>) -> Result<Vec<(&'a Cinterop, Option<PathBuf>)>> {
+    let native = ctx.ws.manifest().targets.native.as_ref().context("the Native target is not enabled")?;
+    native
+        .cinterop
+        .iter()
+        .map(|interop| {
+            let def = ctx.ws.root().join(interop.def_path());
+            if def.is_file() {
+                Ok((interop, Some(def)))
+            } else if interop.def.is_none() && !interop.headers.is_empty() {
+                Ok((interop, None))
+            } else {
+                bail!(
+                    "the definition file {} of [target.native.cinterop.{}] does not exist; create it, set `def`, or list `headers`",
+                    interop.def_path().display(),
+                    interop.name
+                )
+            }
+        })
+        .collect()
+}
+
+/// Runs `cinterop` for every `[target.native.cinterop]` entry and returns the klibs with the bindings.
+pub fn native_cinterop(ctx: &BuildContext, konan_target: &str) -> Result<Vec<PathBuf>> {
+    let defs = native_cinterop_defs(ctx)?;
+    if defs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let toolchain = ctx.native_toolchain()?;
+    let output_dir = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(konan_target).join("cinterop");
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
+    defs.into_iter()
+        .map(|(interop, def)| {
+            let unit =
+                CinteropUnit { interop, konan_target: konan_target.to_owned(), root: ctx.ws.root(), def, output_dir: output_dir.clone() };
+            unit.generate(ctx.shell(), toolchain, &fp_dir, &|| {
+                ctx.shell().status("Generating", format!("{} C bindings ({konan_target})", interop.name))
+            })?;
+            Ok(unit.artifact())
+        })
+        .collect()
+}
+
 /// The `-entry` of a native executable: `entry-point` from kargo.toml, or the single `main` in the sources.
 pub fn native_entry_point(native: &kargo_manifest::NativeTarget, srcs: &SourceSet) -> Result<Option<String>> {
     Ok(match (&native.entry_point, native.kind) {
@@ -362,6 +407,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
         return Ok(Vec::new());
     }
     let entry_point = native_entry_point(native, &srcs)?;
+    native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
@@ -371,7 +417,8 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     // Each platform is a separate Kotlin/Native compiler process.
     super::parallel_map(&platforms, |konan_target| -> Result<NativeBuild> {
         let konan_target = konan_target.clone();
-        let libraries = native_libraries(ctx, &setup, &konan_target, false)?;
+        let mut libraries = native_libraries(ctx, &setup, &konan_target, false)?;
+        libraries.extend(native_cinterop(ctx, &konan_target)?);
         let unit = NativeCompilation {
             name: &manifest.package.name,
             konan_target: konan_target.clone(),

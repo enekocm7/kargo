@@ -554,6 +554,31 @@ fn fmt_and_lint_sections_are_validated() {
 }
 
 #[test]
+fn missing_cinterop_def_is_reported_before_compiling() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\npackage = \"sqlite3\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    // The default location is interop/<name>.def; nothing is downloaded before the check.
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args([cmd, "--target", "native"])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains("sqlite.def of [target.native.cinterop.sqlite] does not exist"));
+    }
+    // An explicit `def` must exist even when `headers` are listed.
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\ndef = \"c/sqlite.def\"\nheaders = [\"sqlite3.h\"]\n"));
+    p.kargo()
+        .args(["build", "--target", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sqlite.def of [target.native.cinterop.sqlite] does not exist"));
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\nlibs = [\"x\"]\n"));
+    p.kargo().args(["build", "--target", "native"]).assert().failure().stderr(predicate::str::contains("unknown field `libs`"));
+}
+
+#[test]
 fn disabled_target_is_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("jvmonly", ""));

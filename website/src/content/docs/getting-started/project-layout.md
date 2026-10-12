@@ -19,6 +19,7 @@ my-app/
 ├── resources/           JVM resources, put on the classpath and in the jar
 ├── test-resources/      resources for JVM tests
 ├── android/             AndroidManifest.xml, res/, assets/
+├── interop/             cinterop .def files for C libraries (Kotlin/Native)
 └── target/              build output (git-ignored)
 ```
 
@@ -113,7 +114,7 @@ target/
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
-│   ├── native/
+│   ├── native/                   one directory per platform; cinterop/ holds C bindings
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
 ├── lint/                         Kargo's detekt settings for kargo lint

@@ -9,8 +9,8 @@ use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, native_libraries, native_platforms, select_targets,
-    sources, wasm_libraries,
+    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, native_cinterop, native_libraries, native_platforms,
+    select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
@@ -400,7 +400,8 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     }
     let setup = ctx.setup(TargetKind::Native)?;
     let _ = native_libraries(ctx, &setup, host, false)?;
-    let libraries = native_libraries(ctx, &setup, host, true)?;
+    let mut libraries = native_libraries(ctx, &setup, host, true)?;
+    libraries.extend(native_cinterop(ctx, host)?);
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);

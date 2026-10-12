@@ -64,6 +64,7 @@ tests/               common tests (kotlin.test)
 tests-jvm/ ...       target-specific tests
 resources/           JVM resources (test-resources/ for tests)
 android/             AndroidManifest.xml, res/, assets/
+interop/             cinterop .def files for C libraries (Kotlin/Native)
 target/              build output: target/<debug|release>/<target>/
 ```
 
@@ -96,6 +97,10 @@ environment = "js"          # or "wasi"
 [target.native]
 platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...
 kind = "executable"         # library, shared, static
+
+[target.native.cinterop.sqlite]   # C library bindings; def defaults to interop/sqlite.def
+package = "sqlite3"
+linker-options = ["-lsqlite3"]    # also: def, headers, compiler-options
 
 [target.android]
 namespace = "com.example.app"
