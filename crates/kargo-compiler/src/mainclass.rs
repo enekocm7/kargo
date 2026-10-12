@@ -311,13 +311,24 @@ fn scan_mains(src: &str) -> Vec<(EntryKind, Option<String>, Signature)> {
     found
 }
 
+/// Reads a source file as text, dropping the UTF-8 byte-order mark that
+/// Windows editors put at the start of a file. The Kotlin compiler ignores it,
+/// but `str::trim` doesn't, so it would hide a leading `package` or `@file:`.
+fn read_source(file: &Path) -> Option<String> {
+    let mut text = std::fs::read_to_string(file).ok()?;
+    if text.starts_with('\u{feff}') {
+        text.remove(0);
+    }
+    Some(text)
+}
+
 /// Scans `files` for entry points.
 pub fn find_entry_points(files: &[PathBuf]) -> Vec<EntryPoint> {
     files
         .iter()
         .filter(|f| f.extension().is_some_and(|e| e == "kt"))
         .flat_map(|f| {
-            let Ok(raw) = std::fs::read_to_string(f) else { return Vec::new() };
+            let Some(raw) = read_source(f) else { return Vec::new() };
             let src = strip_comments(&raw);
             let package = package_of(&src);
             scan_mains(&src)
@@ -536,6 +547,28 @@ object O { @JvmStatic fun main(args: Array<String>) {} }
         );
         assert!(find_entry_point_in(&two, false).unwrap_err().to_string().contains("more than one"));
         assert!(find_entry_point_in(&dir.path().join("Missing.kt"), false).unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn utf8_bom_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let bom = "\u{feff}";
+        let plain = write(dir.path(), "Main.kt", &format!("{bom}package enc\nfun main() {{ println(\"hi\") }}\n"));
+        let e = find_single_entry_point(std::slice::from_ref(&plain), "main-class").unwrap();
+        assert_eq!((e.package.as_str(), e.jvm_class.as_str()), ("enc", "enc.MainKt"));
+        assert_eq!(e.native_entry(), "enc.main");
+
+        let crlf = write(dir.path(), "Crlf.kt", &format!("{bom}package enc\r\n\r\nfun main() {{}}\r\n"));
+        assert_eq!(find_entry_point_in(&crlf, false).unwrap().jvm_class, "enc.CrlfKt");
+
+        let named = write(dir.path(), "App.kt", &format!("{bom}@file:JvmName(\"Launcher\")\npackage enc\nfun main() {{}}\n"));
+        assert_eq!(find_entry_point_in(&named, false).unwrap().jvm_class, "enc.Launcher");
+
+        let no_package = write(dir.path(), "Bare.kt", &format!("{bom}fun main() {{}}\n"));
+        assert_eq!(find_entry_point_in(&no_package, false).unwrap().jvm_class, "BareKt");
+
+        let object = write(dir.path(), "Cli.kt", &format!("{bom}package enc\nobject Cli {{ @JvmStatic fun main() {{}} }}\n"));
+        assert_eq!(find_entry_point_in(&object, false).unwrap().jvm_class, "enc.Cli");
     }
 
     #[test]
