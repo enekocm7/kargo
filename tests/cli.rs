@@ -396,6 +396,68 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
 }
 
 #[test]
+fn classifier_dependencies_keep_both_jars() {
+    // Native libraries are declared twice: the module, and its classifier jar. Both belong on the
+    // runtime classpath and in kargo.lock, and neither may replace the other.
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[("g:util", "1.0")])
+        .publish_classifier("g:lib", "1.0", "natives-windows")
+        .publish("g:util", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    // The classifier dependency's key sorts before the module's, and it does not follow dependencies.
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "natives",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n\
+                 a-natives = {{ coords = \"g:lib:1.0\", classifier = \"natives-windows\", scope = \"runtime\", transitive = false }}\n\
+                 [repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+
+    let tree = |args: &[&str]| -> serde_json::Value {
+        let out =
+            p.kargo().arg("tree").args(args).arg("--offline").args(["--format", "json"]).assert().success().get_output().stdout.clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let files_of = |tree: &serde_json::Value, id: &str| -> Vec<String> {
+        let module =
+            tree["trees"][0]["modules"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("{id}: {tree}"));
+        let mut files: Vec<String> = module["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap().rsplit(['/', '\\']).next().unwrap().to_owned())
+            .collect();
+        files.sort();
+        files
+    };
+
+    let runtime = tree(&[]);
+    let roots = runtime["trees"][0]["roots"].as_array().unwrap();
+    assert_eq!(roots.iter().filter(|r| *r == "g:lib").count(), 1, "one module, not one root per classifier: {roots:?}");
+    assert_eq!(files_of(&runtime, "g:lib"), ["lib-1.0-natives-windows.jar", "lib-1.0.jar"]);
+    assert_eq!(files_of(&runtime, "g:util"), ["util-1.0.jar"], "the module's own dependencies are kept");
+    // The classifier jar is a runtime dependency, so the compile classpath has the main jar only.
+    assert_eq!(files_of(&tree(&["--configuration", "compile"]), "g:lib"), ["lib-1.0.jar"]);
+
+    let lock = kargo_ops::lockfile::Lockfile::load(&p.path().join("kargo.lock")).unwrap();
+    let locked: Vec<_> = lock.resolutions["jvm/runtime"].packages.iter().filter(|pkg| pkg.module == "g:lib").collect();
+    assert_eq!(locked.len(), 1, "{lock:?}");
+    let paths: Vec<&str> = locked[0].files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["g/lib/1.0/lib-1.0.jar", "g/lib/1.0/lib-1.0-natives-windows.jar"]);
+    assert!(locked[0].files.iter().all(|f| !f.sha256.is_empty()));
+
+    // The lockfile restores to the same classpath.
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
+    assert_eq!(files_of(&tree(&[]), "g:lib"), ["lib-1.0-natives-windows.jar", "lib-1.0.jar"]);
+}
+
+#[test]
 fn corrupt_cached_artifact_is_redownloaded_before_locking() {
     let repo = LocalRepo::new();
     repo.publish("g:lib", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);

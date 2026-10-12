@@ -9,8 +9,8 @@ description: What kargo.lock contains and how it keeps builds reproducible and s
 
 For every resolution (one per target and classpath, such as `jvm/runtime`):
 
-- a fingerprint of the inputs (requested dependencies, BOMs, repositories),
-- the root modules,
+- a fingerprint of the inputs (requested dependencies, BOMs, repositories, and the version of Kargo's resolver),
+- the root modules, each once,
 - every resolved module with its version and the dependencies it asked for,
 - the repository path and **SHA-256** of every downloaded file.
 
@@ -31,6 +31,22 @@ dependencies = ["org.jetbrains.kotlin:kotlin-stdlib:2.1.20"]
 [[resolution."jvm/runtime".package.files]]
 path = "org/jetbrains/kotlinx/kotlinx-datetime-jvm/0.7.1/kotlinx-datetime-jvm-0.7.1.jar"
 sha256 = "b3a1..."
+```
+
+A module is locked once, at one version, and lists all of its files. A module declared with a [classifier](../../guides/dependencies/#classifiers-and-native-libraries), such as a native library, lists its main jar and the classifier jar:
+
+```toml title="kargo.lock"
+[[resolution."jvm/runtime".package]]
+module = "org.lwjgl:lwjgl"
+version = "3.3.6"
+
+[[resolution."jvm/runtime".package.files]]
+path = "org/lwjgl/lwjgl/3.3.6/lwjgl-3.3.6.jar"
+sha256 = "5c7e..."
+
+[[resolution."jvm/runtime".package.files]]
+path = "org/lwjgl/lwjgl/3.3.6/lwjgl-3.3.6-natives-windows.jar"
+sha256 = "91d0..."
 ```
 
 ## How it's used
@@ -81,3 +97,5 @@ When a re-downloaded file doesn't match `kargo.lock`, the error says which side 
 | `--refresh` | Ignore the lockfile and cached metadata for this run, and re-verify cached artifacts against the repository (re-downloading corrupt ones) |
 
 If the lockfile is corrupt or from an unsupported version, delete it; Kargo regenerates it on the next build.
+
+A Kargo release that changes how dependencies resolve changes the inputs fingerprint, so the affected resolutions are computed again the first time you build with it. With `--locked` that is an error: after upgrading Kargo, build once without `--locked` and commit the updated `kargo.lock`.

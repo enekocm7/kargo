@@ -660,3 +660,25 @@ path = \"src/tools/Seed.kt\"
     let twice = format!("{}[[bin]]\nname = \"x\"\nmain = \"a.C\"\n", bin("name = \"x\"\nmain = \"a.B\""));
     assert!(parse_err(&twice).contains("declared more than once"));
 }
+
+#[test]
+fn a_module_can_be_declared_once_per_classifier_and_extension() {
+    let deps = |body: &str| parse(&format!("{MINIMAL}\n[dependencies]\n{body}\n")).dependencies;
+
+    // Native libraries are declared as the module plus its classifier jar.
+    let found = deps(
+        "\"org.lwjgl:lwjgl\" = \"3.3.6\"\n\
+         lwjgl-natives = { coords = \"org.lwjgl:lwjgl:3.3.6\", classifier = \"natives-windows\", scope = \"runtime\" }\n\
+         lwjgl-linux = { coords = \"org.lwjgl:lwjgl:3.3.6\", classifier = \"natives-linux\", scope = \"runtime\" }\n\
+         lwjgl-zip = { coords = \"org.lwjgl:lwjgl:3.3.6\", classifier = \"natives-linux\", extension = \"zip\" }",
+    );
+    assert_eq!(found.len(), 4);
+    assert!(!found[0].same_artifact(&found[1]) && !found[1].same_artifact(&found[2]) && !found[2].same_artifact(&found[3]));
+    assert!(found[1].same_artifact(&found[1]));
+
+    let twice = parse_err(&format!(
+        "{MINIMAL}\n[dependencies]\n\"g:a\" = {{ version = \"1\", classifier = \"x\", extension = \"zip\" }}\n\
+         other = {{ coords = \"g:a:1\", classifier = \"x\", extension = \"zip\" }}\n"
+    ));
+    assert!(twice.contains("declared more than once"), "{twice}");
+}

@@ -4,8 +4,12 @@
 //! module wins, unless a root dependency is `force`d. Kotlin Multiplatform
 //! libraries are resolved through Gradle module metadata so that each target
 //! platform receives the matching artifact (`.jar` or `.klib`).
+//!
+//! The graph is made of modules (`group:artifact`), and every module has one version. What a
+//! module contributes to the classpath are artifacts: its default files, plus one file for each
+//! root that asks for a `classifier` or `extension` (native libraries are declared that way).
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -19,7 +23,7 @@ use super::repo::{MavenClient, resolve_relative};
 use super::version::{Version, VersionReq};
 
 /// Bumped whenever resolution semantics change, invalidating locked results.
-pub const RESOLVER_VERSION: &str = "4";
+pub const RESOLVER_VERSION: &str = "5";
 
 /// An exclusion pattern; `*` matches anything.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,6 +61,16 @@ impl DependencyRequest {
     pub fn new(module: ModuleId, version: Option<String>) -> Self {
         Self { module, version, classifier: None, extension: None, exclusions: Vec::new(), force: false, transitive: true }
     }
+
+    /// Whether this asks for the module's default artifact rather than one with a classifier or extension.
+    pub fn is_default_artifact(&self) -> bool {
+        self.classifier.is_none() && self.extension.is_none()
+    }
+
+    /// Whether both ask for the same artifact: `group:artifact:classifier:extension`.
+    pub fn same_artifact(&self, other: &DependencyRequest) -> bool {
+        self.module == other.module && self.classifier == other.classifier && self.extension == other.extension
+    }
 }
 
 /// One resolved module.
@@ -64,7 +78,8 @@ impl DependencyRequest {
 pub struct ResolvedNode {
     pub module: ModuleId,
     pub version: String,
-    /// Downloaded artifact files (may be empty for POM-only or redirect modules).
+    /// Downloaded artifact files: the module's own and the ones requested with a classifier or
+    /// extension (may be empty for POM-only or redirect modules).
     pub files: Vec<PathBuf>,
     /// Direct dependencies with the version each one asked for.
     pub dependencies: Vec<(ModuleId, Option<String>)>,
@@ -73,6 +88,7 @@ pub struct ResolvedNode {
 /// The result of resolving a set of roots for one platform.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Resolution {
+    /// The modules the project asks for, once each however many classifiers it declares.
     pub roots: Vec<ModuleId>,
     /// Nodes in breadth-first order (roots first), which is also classpath order.
     pub nodes: Vec<ResolvedNode>,
@@ -519,6 +535,27 @@ impl<'a> Resolver<'a> {
             }
             stalled = 0;
 
+            let version = match used.get(&module) {
+                Some(v) => v.clone(),
+                None => {
+                    // Reuse the previous iteration's decision: it was made with
+                    // complete information, unlike the partial requests seen so far.
+                    let v = match selected.get(&module) {
+                        Some(v) => v.clone(),
+                        None => self.choose(&module, &requests[&module])?,
+                    };
+                    used.insert(module.clone(), v.clone());
+                    order.push(module.clone());
+                    v
+                }
+            };
+            // A non-transitive root only asks for the module itself. It does not mark the module as
+            // visited: another path, or a root for another classifier of it, may still bring its
+            // dependencies in.
+            if !transitive {
+                continue;
+            }
+
             // Revisit only if this path excludes less than every previous one.
             match exclusions_seen.get_mut(&module) {
                 Some(prev) => {
@@ -530,28 +567,9 @@ impl<'a> Resolver<'a> {
                 }
                 None => {
                     exclusions_seen.insert(module.clone(), excl.clone());
-                    order.push(module.clone());
                 }
             }
             let excl = exclusions_seen[&module].clone();
-
-            let version = match used.get(&module) {
-                Some(v) => v.clone(),
-                None => {
-                    // Reuse the previous iteration's decision: it was made with
-                    // complete information, unlike the partial requests seen so far.
-                    let v = match selected.get(&module) {
-                        Some(v) => v.clone(),
-                        None => self.choose(&module, &requests[&module])?,
-                    };
-                    used.insert(module.clone(), v.clone());
-                    v
-                }
-            };
-            if !transitive {
-                edges_by_module.entry(module.clone()).or_default();
-                continue;
-            }
             if !self.has_info(&module, version.as_str()) {
                 // Fetch the metadata of everything queued whose version is already known in
                 // parallel, instead of one network round-trip per module.
@@ -607,20 +625,27 @@ impl<'a> Resolver<'a> {
         used: &HashMap<ModuleId, Version>,
         edges: &HashMap<ModuleId, Vec<Edge>>,
     ) -> Result<Resolution> {
+        // A module gets its default files when a root without classifier or extension, or another
+        // module, depends on it. Roots with a classifier or extension add their own artifact on top
+        // of those, and are the only artifacts of a module nothing else depends on (as in Gradle).
+        let mut wants_default: HashSet<&ModuleId> = edges.values().flatten().map(|e| &e.module).collect();
+        wants_default.extend(roots.iter().filter(|r| r.is_default_artifact()).map(|r| &r.module));
+
         let file_lists: Vec<Vec<String>> = order
             .iter()
             .map(|module| {
                 let version = used[module].as_str();
-                // Roots may ask for a specific classifier/extension.
-                if let Some(root) = roots.iter().find(|r| &r.module == module)
-                    && (root.classifier.is_some() || root.extension.is_some())
-                {
+                let mut files = if wants_default.contains(module) { self.node_info(module, version)?.files } else { Vec::new() };
+                for root in roots.iter().filter(|r| &r.module == module && !r.is_default_artifact()) {
                     let artifact = Artifact::new(module.clone(), version)
                         .with_classifier(root.classifier.clone())
                         .with_extension(root.extension.clone().unwrap_or_else(|| "jar".into()));
-                    return Ok(vec![self.client.artifact_path(&artifact)?]);
+                    let path = self.client.artifact_path(&artifact)?;
+                    if !files.contains(&path) {
+                        files.push(path);
+                    }
                 }
-                Ok(self.node_info(module, version)?.files)
+                Ok(files)
             })
             .collect::<Result<_>>()?;
 
@@ -644,7 +669,13 @@ impl<'a> Resolver<'a> {
                     .unwrap_or_default(),
             })
             .collect();
-        Ok(Resolution { roots: roots.iter().map(|r| r.module.clone()).collect(), nodes })
+        let mut root_modules: Vec<ModuleId> = Vec::new();
+        for root in roots {
+            if !root_modules.contains(&root.module) {
+                root_modules.push(root.module.clone());
+            }
+        }
+        Ok(Resolution { roots: root_modules, nodes })
     }
 }
 
@@ -909,6 +940,86 @@ mod tests {
         root.extension = Some("zip".into());
         let res = Resolver::new(&client, Platform::Jvm).resolve(&[root]).unwrap();
         assert_eq!(file_names(&res), ["x-1.0-natives.zip"]);
+    }
+
+    #[test]
+    fn classifier_roots_add_artifacts_to_the_module() {
+        let repo = TestRepo::new();
+        repo.publish("g:x", "1.0", &[("g:dep", "1.0", "")]);
+        repo.publish("g:dep", "1.0", &[]);
+        repo.write("g/x/1.0/x-1.0-natives.jar", "natives");
+        repo.write("g/x/1.0/x-1.0-sources.jar", "sources");
+        let client = repo.client();
+        let natives = |non_transitive: bool| {
+            let mut r = req("g:x", "1.0");
+            r.classifier = Some("natives".into());
+            r.transitive = !non_transitive;
+            r
+        };
+
+        // The main jar and the classifier jar are both on the classpath, whichever comes first,
+        // and the module is one node at one version.
+        for roots in [[req("g:x", "1.0"), natives(false)], [natives(false), req("g:x", "1.0")]] {
+            let res = Resolver::new(&client, Platform::Jvm).resolve(&roots).unwrap();
+            assert_eq!(versions(&res), ["x:1.0", "dep:1.0"]);
+            let mut names = file_names(&res);
+            names.sort();
+            assert_eq!(names, ["dep-1.0.jar", "x-1.0-natives.jar", "x-1.0.jar"]);
+            assert_eq!(res.roots, ["g:x".parse().unwrap()], "one module, not one root per classifier");
+        }
+
+        // A non-transitive classifier root (the usual way to declare natives) must not stop the
+        // plain declaration from bringing in the module's dependencies, even when it is listed first.
+        for roots in [[req("g:x", "1.0"), natives(true)], [natives(true), req("g:x", "1.0")]] {
+            let res = Resolver::new(&client, Platform::Jvm).resolve(&roots).unwrap();
+            assert_eq!(versions(&res), ["x:1.0", "dep:1.0"]);
+            assert_eq!(res.node(&"g:x".parse().unwrap()).unwrap().files.len(), 2);
+        }
+
+        // Only the classifier artifact when nothing else needs the main jar, as in Gradle.
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives(true)]).unwrap();
+        assert_eq!(file_names(&res), ["x-1.0-natives.jar"]);
+
+        // Another module that depends on `x` brings its main jar back.
+        repo.publish("g:user", "1.0", &[("g:x", "1.0", "")]);
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives(true), req("g:user", "1.0")]).unwrap();
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["dep-1.0.jar", "user-1.0.jar", "x-1.0-natives.jar", "x-1.0.jar"]);
+
+        // Several classifiers, each once.
+        let mut sources = req("g:x", "1.0");
+        sources.classifier = Some("sources".into());
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives(false), sources.clone(), natives(true), sources]).unwrap();
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["dep-1.0.jar", "x-1.0-natives.jar", "x-1.0-sources.jar"]);
+    }
+
+    #[test]
+    fn classifier_roots_share_the_module_version() {
+        let repo = TestRepo::new();
+        repo.publish("g:x", "1.0", &[]);
+        repo.publish("g:x", "2.0", &[]);
+        repo.write("g/x/1.0/x-1.0-natives.jar", "natives 1");
+        repo.write("g/x/2.0/x-2.0-natives.jar", "natives 2");
+        let client = repo.client();
+        let mut natives = req("g:x", "1.0");
+        natives.classifier = Some("natives".into());
+        // The highest version wins for every classifier of the module.
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives.clone(), req("g:x", "2.0")]).unwrap();
+        assert_eq!(res.node(&"g:x".parse().unwrap()).unwrap().version, "2.0");
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["x-2.0-natives.jar", "x-2.0.jar"]);
+
+        // `force` pins them all.
+        natives.force = true;
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[natives, req("g:x", "2.0")]).unwrap();
+        assert_eq!(res.node(&"g:x".parse().unwrap()).unwrap().version, "1.0");
+        let mut names = file_names(&res);
+        names.sort();
+        assert_eq!(names, ["x-1.0-natives.jar", "x-1.0.jar"]);
     }
 
     #[test]

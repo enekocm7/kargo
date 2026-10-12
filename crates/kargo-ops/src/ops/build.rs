@@ -200,7 +200,7 @@ pub fn jvm_processor_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -
     // BOMs only apply to declared processors, so framework-only setups keep their lockfile entry.
     let boms: &[_] = if declared.is_empty() { &[] } else { &setup.boms };
     for r in declared {
-        if !requests.iter().any(|q| q.module == r.module && q.classifier == r.classifier) {
+        if !requests.iter().any(|q| q.same_artifact(&r)) {
             requests.push(r);
         }
     }

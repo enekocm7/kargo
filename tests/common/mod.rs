@@ -69,6 +69,14 @@ impl LocalRepo {
         self.list_version(&dir, version)
     }
 
+    /// Publishes the `classifier` jar of a module already published with [`LocalRepo::publish`].
+    pub fn publish_classifier(&self, coord: &str, version: &str, classifier: &str) -> &Self {
+        let (group, artifact) = coord.split_once(':').unwrap();
+        let rel = format!("{}/{artifact}/{version}/{artifact}-{version}-{classifier}.jar", group.replace('.', "/"));
+        self.write(&rel, &format!("jar {coord} {version} {classifier}"));
+        self
+    }
+
     /// Publishes a SNAPSHOT the way `mvn deploy` stores it: timestamped files in the `1.0-SNAPSHOT`
     /// directory (`stamp` is `20240101.120000-1`) and the `maven-metadata.xml` that points at them.
     /// Publishing again moves the metadata to the new build and leaves the old files in place.

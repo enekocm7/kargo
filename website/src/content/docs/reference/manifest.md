@@ -268,7 +268,7 @@ shared = { workspace = true }                                   # inherited from
 | `group`, `artifact` | | Coordinates when the key isn't `group:artifact` |
 | `coords` | | `group:artifact[:version]` in one string |
 | `scope` | `compile` | `compile`, `runtime`, `provided`, `processor` (a Java [annotation processor](../../guides/dependencies/#annotation-processors)) or `ksp` (a [KSP processor](../../guides/dependencies/#kotlin-symbol-processing-ksp)); `processor` and `ksp` apply to the JVM and Android only |
-| `classifier` | | Artifact classifier |
+| `classifier` | | Artifact classifier. Selects one file of the module; declare the module again without it for the main jar ([native libraries](../../guides/dependencies/#classifiers-and-native-libraries)) |
 | `extension` (alias `type`) | `jar` | Artifact extension |
 | `exclude` | `[]` | `group:artifact` or `group:*` to exclude transitively |
 | `force` | `false` | Use this version even if a newer one is requested |
@@ -276,6 +276,8 @@ shared = { workspace = true }                                   # inherited from
 | `bom` | `false` | Import as a BOM |
 | `path` | | Directory of another Kargo package to build from source. The key must be its package name, and only `scope` can be set with it |
 | `workspace` | | `true` to inherit the entry of the same name from `[workspace.dependencies]`; only `scope` can be set with it |
+
+A module can be declared several times with different `classifier` or `extension` values (the key must differ); declaring the same `group:artifact:classifier:extension` twice is an error. All of them share the module's version.
 
 `[dev-dependencies]` are only used to compile and run tests. Path dependencies are described in [Workspaces and path dependencies](../../guides/workspaces/).
 

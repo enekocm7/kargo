@@ -575,7 +575,7 @@ impl DependencyParser<'_> {
         for (name, value) in table {
             match parse_dependency(name, value, section, self.workspace)? {
                 Entry::Maven(dep) => {
-                    if deps.iter().any(|d| d.module == dep.module && d.classifier == dep.classifier) {
+                    if deps.iter().any(|d| d.same_artifact(&dep)) {
                         bail!("dependency `{}` is declared more than once in [{section}]", dep.module);
                     }
                     deps.push(dep);
