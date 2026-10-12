@@ -42,6 +42,10 @@ sha256 = "b3a1..."
 - When you change dependencies in `kargo.toml`, only the affected resolutions are recomputed.
 - The file is only rewritten when its content changes.
 
+## Workspaces and path dependencies
+
+Packages built together share one `kargo.lock`: the workspace's, at its root, or the consuming package's when it has [path dependencies](../../guides/workspaces/) outside a workspace. Each package's resolutions are keyed with its name, such as `mathlib/jvm/runtime`. Outside a workspace, the consuming package keeps the plain keys (`jvm/runtime`). `kargo update` re-resolves every package of the project.
+
 ### Checksum mismatches
 
 When a re-downloaded file doesn't match `kargo.lock`, the error says which side is suspect:

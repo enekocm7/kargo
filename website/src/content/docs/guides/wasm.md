@@ -45,7 +45,7 @@ $ kargo run -t wasm
      Running `node target/debug/wasm/hello.mjs`
 ```
 
-- Kargo writes `target/<profile>/package.json` and runs the package manager's `install` there, so `node_modules` sits next to the `wasm/` directory where Node.js finds it. The install runs again only when the set of packages changes.
+- Kargo writes `target/<profile>/package.json` (`target/<profile>/<member>/package.json` in a [workspace](../workspaces/)) and runs the package manager's `install` there, so `node_modules` sits next to the `wasm/` directory where Node.js finds it. The install runs again only when the set of packages changes.
 - When two libraries ask for different versions of the same package, the highest version wins.
 - npm packages that only your `[dev-dependencies]` need are installed into `target/<profile>/wasm/test/` for `kargo test`.
 - This needs a package manager on your `PATH`, even for `kargo build`. Projects whose libraries need no npm packages never run one.

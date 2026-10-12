@@ -101,6 +101,21 @@ pub fn join_paths(paths: &[PathBuf]) -> String {
     paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join(sep)
 }
 
+/// Canonicalizes without Windows' `\\?\` prefix, which confuses many tools.
+pub fn dunce_canonicalize(path: &Path) -> PathBuf {
+    let Ok(canonical) = path.canonicalize() else { return path.to_path_buf() };
+    #[cfg(windows)]
+    {
+        let s = canonical.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\")
+            && !stripped.starts_with("UNC\\")
+        {
+            return PathBuf::from(stripped);
+        }
+    }
+    canonical
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

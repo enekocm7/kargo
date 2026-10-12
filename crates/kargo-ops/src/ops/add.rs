@@ -2,9 +2,11 @@
 
 use anyhow::{Context, Result, bail};
 
-use crate::workspace::Workspace;
+use std::path::{Component, Path, PathBuf};
+
+use crate::workspace::{Project, Workspace, dunce_canonicalize};
 use kargo_manifest::edit::{DependencySection, ManifestEditor, NewDependency};
-use kargo_manifest::{Manifest, Scope};
+use kargo_manifest::{MANIFEST_NAME, Scope};
 use kargo_maven::{Artifact, CoordSpec, MavenClient, VersionReq, select_latest};
 use kargo_util::config::Config;
 
@@ -71,9 +73,68 @@ pub fn add(config: &Config, ws: &Workspace, opts: &AddOptions) -> Result<Vec<Str
         added.push(format!("{}:{version}", spec.module));
     }
     // Never write a manifest that no longer parses.
-    Manifest::parse(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     editor.save()?;
     Ok(added)
+}
+
+/// `kargo add --path <dir>`: depends on the package in `dir` (absolute, or relative to the current
+/// directory). The entry's key is that package's name and its path is written relative to `ws`.
+/// Returns the package name.
+pub fn add_path(config: &Config, ws: &Workspace, dir: &Path, section: DependencySection, scope: Option<Scope>) -> Result<String> {
+    let dir = dunce_canonicalize(dir);
+    let manifest_path = dir.join(MANIFEST_NAME);
+    if !manifest_path.is_file() {
+        bail!("`{}` has no {MANIFEST_NAME}; `--path` takes the directory of a Kargo package", dir.display());
+    }
+    let text = std::fs::read_to_string(&manifest_path).with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    if kargo_manifest::is_workspace(&text).with_context(|| format!("failed to parse manifest at {}", manifest_path.display()))? {
+        bail!("`{}` is a workspace, not a package; pass the directory of one of its members", dir.display());
+    }
+    let table: toml::Table = toml::from_str(&text).with_context(|| format!("failed to parse manifest at {}", manifest_path.display()))?;
+    let name = table
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .with_context(|| format!("{} has no [package] `name`", manifest_path.display()))?
+        .to_owned();
+    if dir == ws.root() {
+        bail!("`{name}` cannot depend on itself");
+    }
+    let relative = relative_path(ws.root(), &dir);
+    let mut editor = ManifestEditor::load(&ws.manifest_path())?;
+    let original = editor.contents();
+    let replaced = editor.add_path_dependency(section, &name, &relative.to_string_lossy(), scope)?;
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    editor.save()?;
+    // Loading the project follows the new dependency, which catches cycles, name clashes and Kotlin version conflicts.
+    if let Err(e) = Project::load(&ws.manifest_path()) {
+        kargo_util::fs::write_string_atomic(&ws.manifest_path(), &original)?;
+        return Err(e.context(format!("cannot add `{name}`; kargo.toml was not changed")));
+    }
+    let verb = if replaced { "Updating" } else { "Adding" };
+    let shown = relative.to_string_lossy().replace('\\', "/");
+    config.shell().status(verb, format!("{name} (path {shown}) to [{}]", section.display()));
+    Ok(name)
+}
+
+/// `target` relative to the directory `base` (both canonical), or `target` itself when they
+/// share no prefix (e.g. different drives on Windows).
+fn relative_path(base: &Path, target: &Path) -> PathBuf {
+    let base: Vec<Component> = base.components().collect();
+    let target_parts: Vec<Component> = target.components().collect();
+    let common = base.iter().zip(&target_parts).take_while(|(a, b)| a == b).count();
+    if common == 0 {
+        return target.to_path_buf();
+    }
+    let mut out = PathBuf::new();
+    for _ in common..base.len() {
+        out.push("..");
+    }
+    for part in &target_parts[common..] {
+        out.push(part);
+    }
+    out
 }
 
 /// Enables built-in frameworks in `[frameworks]`.
@@ -92,7 +153,7 @@ pub fn add_frameworks(config: &Config, ws: &Workspace, names: &[String]) -> Resu
             config.shell().note(format!("framework `{name}` is already enabled"));
         }
     }
-    Manifest::parse(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     editor.save()
 }
 
@@ -105,7 +166,7 @@ pub fn remove(config: &Config, ws: &Workspace, names: &[String], section: Depend
         let key = editor.remove_dependency(section, name)?;
         config.shell().status("Removing", format!("{key} from [{}]", section.display()));
     }
-    Manifest::parse(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     editor.save()
 }
 
@@ -114,6 +175,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use kargo_manifest::Manifest;
     use kargo_util::shell::{Shell, Verbosity};
 
     fn local_repo(dir: &Path) {

@@ -23,7 +23,7 @@ Yes, on the JVM and Android. `.java` files next to your Kotlin files are compile
 
 ### Are multi-module projects supported?
 
-Not yet. Each `kargo.toml` describes one package.
+Yes. A package can depend on another package on disk with `{ path = "../lib" }`, and a `[workspace]` builds several packages with one `kargo.lock` and one `target/`. See [Workspaces and path dependencies](../../guides/workspaces/). Path dependencies don't work for the Android target yet.
 
 ## Errors
 
@@ -51,6 +51,10 @@ If the project really has several programs, keep them all: run one with `kargo r
 ### `cannot find symbol` for a generated class such as `AutoValue_Person`
 
 The annotation processor didn't run. Kargo only runs processors you declare with `scope = "processor"`; a processor that is merely on the classpath is ignored (JDK 23 and newer ignore it too). Move the processor artifact to `scope = "processor"`, keep its annotations as a `provided` dependency, and see [Annotation processors](../../guides/dependencies/#annotation-processors).
+
+### `unresolved reference` for a class a KSP processor generates, such as `PersonJsonAdapter`
+
+The KSP processor didn't run. Declare it with `scope = "ksp"`, not `processor` (which only runs `javac` processors over Java sources), and see [Kotlin Symbol Processing](../../guides/dependencies/#kotlin-symbol-processing-ksp). With `-v`, Kargo prints the arguments it passes to KSP; the generated files are under `target/<profile>/jvm/generated/ksp/`.
 
 ### `Node.js is required to run Kotlin/Wasm programs`
 

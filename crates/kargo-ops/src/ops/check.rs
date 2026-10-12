@@ -37,7 +37,7 @@ pub struct CheckOptions {
 
 /// Output directory of `kargo check` for one target.
 fn check_dir(ctx: &BuildContext, target: TargetKind) -> PathBuf {
-    ctx.ws.target_dir().join(ctx.profile.dir_name()).join("check").join(target.as_str())
+    ctx.ws.profile_dir(ctx.profile).join("check").join(target.as_str())
 }
 
 pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {

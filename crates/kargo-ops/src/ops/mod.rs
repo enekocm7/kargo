@@ -7,6 +7,7 @@ pub mod context;
 pub mod doc;
 pub mod fmt;
 pub mod lint;
+pub mod local;
 pub mod new;
 pub mod run;
 pub mod test;
@@ -19,7 +20,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-use self::build::{build_jvm, jvm_classpaths, native_libraries, native_platforms, select_targets, wasm_libraries};
+use self::build::{build_jvm, jvm_classpaths, native_platforms, native_resolution, select_targets, wasm_resolution};
 use self::context::BuildContext;
 use crate::workspace::Workspace;
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -177,12 +178,16 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
                 test?;
                 build::jvm_processor_path(ctx, &setup, false)?;
                 build::jvm_processor_path(ctx, &setup, true)?;
+                build::jvm_ksp_path(ctx, &setup, false)?;
+                if !build::jvm_ksp_path(ctx, &setup, true)?.is_empty() {
+                    ctx.ksp_tool()?;
+                }
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
                 let (compiler, deps) = join(
                     || ctx.kotlin_compiler().map(|_| ()),
-                    || wasm_libraries(ctx, &setup, false).and(wasm_libraries(ctx, &setup, true)),
+                    || wasm_resolution(ctx, &setup, false).and(wasm_resolution(ctx, &setup, true)),
                 );
                 compiler?;
                 deps?;
@@ -190,8 +195,8 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
             TargetKind::Native => {
                 let setup = ctx.setup(target)?;
                 for p in native_platforms(ctx)? {
-                    native_libraries(ctx, &setup, &p, false)?;
-                    native_libraries(ctx, &setup, &p, true)?;
+                    native_resolution(ctx, &setup, &p, false)?;
+                    native_resolution(ctx, &setup, &p, true)?;
                 }
                 ctx.native_toolchain()?;
             }
@@ -219,6 +224,8 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
             let setup = ctx.setup(target)?;
             build::jvm_processor_path(ctx, &setup, false)?;
             build::jvm_processor_path(ctx, &setup, true)?;
+            build::jvm_ksp_path(ctx, &setup, false)?;
+            build::jvm_ksp_path(ctx, &setup, true)?;
         }
     }
     ctx.save_lockfile()

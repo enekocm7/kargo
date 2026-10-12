@@ -62,6 +62,8 @@ fn configuration(scope: Scope, test: bool) -> &'static str {
     match (scope, test) {
         (Scope::Processor, true) => "testAnnotationProcessor",
         (Scope::Processor, false) => "annotationProcessor",
+        (Scope::Ksp, true) => "kspTest",
+        (Scope::Ksp, false) => "ksp",
         (_, true) => "testImplementation",
         (Scope::Compile, false) => "implementation",
         (Scope::Runtime, false) => "runtimeOnly",
@@ -162,6 +164,10 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     }
     if fw.lombok.is_some() {
         plugins.push(format!("    id(\"org.jetbrains.kotlin.plugin.lombok\") version {}", kts_string(kotlin)));
+    }
+    let uses_ksp = manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp);
+    if uses_ksp {
+        plugins.push(format!("    id(\"com.google.devtools.ksp\") version {}", kts_string(builtins::ksp_version(manifest))));
     }
 
     let mut s = String::new();
@@ -326,7 +332,8 @@ pub fn generate(ws: &Workspace) -> Result<PathBuf> {
     if !manifest_file.is_file() {
         bail!("Android builds need {}; `kargo new --target android` creates one", manifest_file.display());
     }
-    let dir = ws.target_dir().join("android");
+    crate::ops::local::unsupported(ws, TargetKind::Android)?;
+    let dir = ws.work_dir("android");
     std::fs::create_dir_all(&dir)?;
     let write = |name: &str, contents: &str| -> Result<()> {
         let path = dir.join(name);
@@ -377,7 +384,7 @@ pub fn gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
 /// The classpath of the Android main sources (`android.jar` first, then the
 /// dependencies' classes), as resolved by Gradle. Used by `kargo doc`.
 pub fn doc_classpath(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
-    let list = ctx.ws.target_dir().join("android/build/kargo/doc-classpath.txt");
+    let list = ctx.ws.work_dir("android").join("build/kargo/doc-classpath.txt");
     if !gradle(ctx, &[DOC_CLASSPATH_TASK.to_owned()])? {
         bail!("Gradle `{DOC_CLASSPATH_TASK}` failed; check that `kargo build --target android` works");
     }
@@ -393,7 +400,7 @@ pub fn build(ctx: &BuildContext) -> Result<PathBuf> {
     if !gradle(ctx, std::slice::from_ref(&task))? {
         bail!("Gradle `{task}` failed");
     }
-    let dir = ctx.ws.target_dir().join("android/build/outputs");
+    let dir = ctx.ws.work_dir("android").join("build/outputs");
     let lower = variant(ctx.profile).to_lowercase();
     let out = if android.config.kind == "application" { dir.join("apk").join(&lower) } else { dir.join("aar") };
     Ok(out)
@@ -421,7 +428,7 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
     if no_run {
         return gradle(ctx, &[format!("compile{}UnitTestSources", variant(ctx.profile))]);
     }
-    let results = ctx.ws.target_dir().join("android/build/test-results").join(&task);
+    let results = ctx.ws.work_dir("android").join("build/test-results").join(&task);
     if results.exists() {
         std::fs::remove_dir_all(&results).with_context(|| format!("failed to clear {}", results.display()))?;
     }
@@ -536,6 +543,26 @@ mod tests {
     }
 
     #[test]
+    fn ksp_dependencies_apply_the_ksp_plugin() {
+        let (_d, ws) = workspace("");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        assert!(!build_gradle(&ws, &android).unwrap().contains("com.google.devtools.ksp"));
+
+        let (_d, ws) = workspace(
+            "[dependencies]\n\"androidx.room:room-compiler\" = { version = \"2.8.0\", scope = \"ksp\" }\n[dev-dependencies]\n\"x:test-processor\" = { version = \"1\", scope = \"ksp\" }\n",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains(&format!("id(\"com.google.devtools.ksp\") version \"{}\"", builtins::KSP_VERSION)), "{text}");
+        assert!(text.contains("    ksp(\"androidx.room:room-compiler:2.8.0\")"), "{text}");
+        assert!(text.contains("    kspTest(\"x:test-processor:1\")"), "{text}");
+
+        let (_d, ws) = workspace("[dependencies]\n\"x:p\" = { version = \"1\", scope = \"ksp\" }\n[kotlin]\nksp = \"2.3.10\"\n");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        assert!(build_gradle(&ws, &android).unwrap().contains("id(\"com.google.devtools.ksp\") version \"2.3.10\""));
+    }
+
+    #[test]
     fn registers_kotlin_source_dirs() {
         // AGP's built-in Kotlin ignores Kotlin files in the Java source dirs.
         let (_d, ws) = workspace("");
@@ -584,6 +611,8 @@ mod tests {
         assert_eq!(configuration(Scope::Runtime, true), "testImplementation");
         assert_eq!(configuration(Scope::Processor, false), "annotationProcessor");
         assert_eq!(configuration(Scope::Processor, true), "testAnnotationProcessor");
+        assert_eq!(configuration(Scope::Ksp, false), "ksp");
+        assert_eq!(configuration(Scope::Ksp, true), "kspTest");
     }
 
     #[test]

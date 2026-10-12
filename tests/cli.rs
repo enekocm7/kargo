@@ -163,6 +163,9 @@ fn add_and_remove_dependencies() {
     p.kargo().args(["add", "com.acme:widget:1.0.0", "--target", "jvm", "--scope", "processor"]).assert().success();
     assert!(p.read("kargo.toml").contains(r#""com.acme:widget" = { version = "1.0.0", scope = "processor" }"#), "{}", p.read("kargo.toml"));
 
+    p.kargo().args(["add", "com.acme:widget:1.2.0", "--scope", "ksp"]).assert().success();
+    assert!(p.read("kargo.toml").contains(r#""com.acme:widget" = { version = "1.2.0", scope = "ksp" }"#), "{}", p.read("kargo.toml"));
+
     p.kargo().args(["add", "com.acme:missing:1.0"]).assert().failure().stderr(predicate::str::contains("not found"));
     p.kargo().args(["add", "--framework", "coroutines"]).assert().success();
     assert!(p.read("kargo.toml").contains("coroutines = true"));
@@ -297,6 +300,43 @@ fn update_selected_modules_precisely_or_as_a_dry_run() {
     p.kargo().args(["update", "--offline"]).assert().success();
     assert!(locked(&p, "g:util", "1.1") && locked(&p, "g:dep", "1.1"));
     p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("up to date"));
+}
+
+#[test]
+fn update_locks_processors_apart_from_the_classpaths() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[])
+        .publish("g:codegen", "1.0", &[("g:poet", "1.0")])
+        .publish("g:poet", "1.0", &[])
+        .publish("g:test-codegen", "1.0", &[])
+        .publish("g:apt", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n\"g:codegen\" = {{ version = \"1.0\", scope = \"ksp\" }}\n\
+                 \"g:apt\" = {{ version = \"1.0\", scope = \"processor\" }}\n\
+                 [dev-dependencies]\n\"g:test-codegen\" = {{ version = \"1.0\", scope = \"ksp\" }}\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["update", "--offline"]).assert().success();
+    let lock = kargo_ops::lockfile::Lockfile::load(&p.path().join("kargo.lock")).unwrap();
+    let modules = |key: &str| -> Vec<String> { lock.resolutions[key].packages.iter().map(|p| p.module.clone()).collect() };
+    assert_eq!(modules("jvm/ksp"), ["g:codegen", "g:poet"]);
+    assert_eq!(modules("jvm/test-ksp"), ["g:codegen", "g:test-codegen", "g:poet"]);
+    assert_eq!(modules("jvm/annotation-processors"), ["g:apt"]);
+    for key in ["jvm/compile", "jvm/runtime", "jvm/test"] {
+        let m = modules(key);
+        assert!(m.contains(&"g:lib".to_owned()), "{key}: {m:?}");
+        assert!(!m.iter().any(|m| m.contains("codegen") || m == "g:apt"), "processors stay off {key}: {m:?}");
+    }
 }
 
 #[test]
@@ -773,6 +813,92 @@ fn daemon_status_and_stop() {
     std::fs::write(dir.join("info"), format!("{port} token 1\n")).unwrap();
     p.kargo().args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("No compiler daemons are running."));
     p.kargo().args(["daemon", "stop"]).assert().success().stderr(predicate::str::contains("Stopped 0 compiler daemons"));
+}
+
+#[test]
+fn workspace_members_share_one_lockfile_and_resolve_path_dependencies() {
+    let repo = LocalRepo::new();
+    repo.publish("g:util", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n\n[workspace.dependencies]\n\"g:util\" = \"1.0\"\n")
+        .file("app/kargo.toml", &manifest("app", "[dependencies]\nlib = { path = \"../lib\" }\n"))
+        // Only `lib` knows the repository; `app` still resolves `lib`'s dependencies from it.
+        .file(
+            "lib/kargo.toml",
+            &manifest("lib", &format!("[dependencies]\n\"g:util\" = {{ workspace = true }}\n[repositories]\nlocal = \"{}\"\n", repo.url())),
+        );
+
+    p.kargo().arg("info").assert().success().stdout(predicate::str::contains("members:      app v0.1.0, lib v0.1.0"));
+    p.kargo().arg("info").current_dir(p.path().join("app")).assert().success().stdout(predicate::str::contains("path deps:    lib ("));
+
+    let out = p.kargo().args(["tree", "-p", "app", "--offline"]).assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("app v0.1.0 (jvm)"), "{text}");
+    assert!(text.contains("├── lib v0.1.0 ("), "{text}");
+    assert!(text.contains("g:util:1.0"), "{text}");
+
+    // One kargo.lock at the root, with entries per member.
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("[resolution.\"app/jvm/runtime\"]"), "{lock}");
+    assert!(!p.path().join("app/kargo.lock").exists());
+
+    // Inside a member, commands apply to that member.
+    let out = p.kargo().args(["tree", "--offline"]).current_dir(p.path().join("lib")).assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("lib v0.1.0 (jvm)") && !text.contains("app v0.1.0"), "{text}");
+    assert!(p.read("kargo.lock").contains("[resolution.\"lib/jvm/runtime\"]"));
+
+    p.kargo().args(["tree", "--workspace", "--offline", "--locked"]).assert().success();
+    p.kargo().arg("run").assert().failure().code(101).stderr(predicate::str::contains("pick one with `-p <name>` (app, lib)"));
+    p.kargo().args(["build", "-p", "nope"]).assert().failure().stderr(predicate::str::contains("its members are: app, lib"));
+    p.kargo().args(["add", "g:util:1.0", "--no-verify"]).assert().failure().stderr(predicate::str::contains("-p <name>"));
+}
+
+#[test]
+fn add_path_dependency_writes_a_relative_path() {
+    let p = Project::new();
+    p.file("calc/kargo.toml", &manifest("calc", "")).file("mathlib/kargo.toml", &manifest("mathlib", ""));
+    p.kargo()
+        .args(["add", "--path", "../mathlib"])
+        .current_dir(p.path().join("calc"))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding mathlib (path ../mathlib) to [dependencies]"));
+    assert!(p.read("calc/kargo.toml").contains("mathlib = { path = \"../mathlib\" }"), "{}", p.read("calc/kargo.toml"));
+
+    // A cycle is refused and leaves kargo.toml untouched.
+    let before = p.read("mathlib/kargo.toml");
+    p.kargo().args(["add", "--path", "../calc", "--dev", "--scope", "runtime"]).current_dir(p.path().join("mathlib")).assert().success();
+    p.file("mathlib/kargo.toml", &before);
+    p.kargo()
+        .args(["add", "--path", "../calc"])
+        .current_dir(p.path().join("mathlib"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cycle: mathlib -> calc -> mathlib"));
+    assert_eq!(p.read("mathlib/kargo.toml"), before);
+
+    p.kargo()
+        .args(["add", "--path", "../nowhere"])
+        .current_dir(p.path().join("calc"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no kargo.toml"));
+    p.kargo().args(["remove", "mathlib"]).current_dir(p.path().join("calc")).assert().success();
+    assert!(!p.read("calc/kargo.toml").contains("mathlib"));
+}
+
+#[test]
+fn path_dependency_must_support_the_target() {
+    let p = Project::new();
+    p.file("calc/kargo.toml", &manifest("calc", "[dependencies]\nmathlib = { path = \"../mathlib\" }\n[target.jvm]\n[target.wasm]\n"))
+        .file("mathlib/kargo.toml", &manifest("mathlib", ""));
+    p.kargo()
+        .args(["tree", "-t", "wasm", "--offline"])
+        .current_dir(p.path().join("calc"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`calc` depends on the path dependency `mathlib`, which does not enable the wasm target"));
 }
 
 /// A JVM + Android project that fails both targets offline: the Kotlin compiler is not
