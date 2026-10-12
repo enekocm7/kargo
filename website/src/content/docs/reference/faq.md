@@ -98,6 +98,10 @@ export KARGO_COMPILER_JVM_OPTS="-Xmx4g"
 
 The next build starts a compiler daemon with the new options. See [Build performance](../../guides/build-performance/#memory).
 
+### A build after an edit behaves as if the old code were still there
+
+Incremental compilation should never produce stale classes; if it does, please report it. To recover, run `kargo clean` (or build once with `KARGO_INCREMENTAL=false`), which discards the incremental caches.
+
 ### The compiler daemon misbehaves
 
 Run `kargo daemon stop`; the next build starts a fresh daemon. To rule the daemon out, build with `KARGO_DAEMON=false`, which runs the compiler as a separate process. `-v` shows whether a build used the daemon, and its log is `daemon.log` in the directory `kargo daemon status` prints.

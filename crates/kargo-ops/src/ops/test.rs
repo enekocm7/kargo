@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
@@ -31,6 +32,21 @@ pub struct TestOptions {
     pub filter: Option<String>,
     /// Compile tests without running them.
     pub no_run: bool,
+    /// Keep testing the remaining targets after one fails (`--no-fail-fast`),
+    /// overriding `[test] fail-fast` in `kargo.toml`.
+    pub no_fail_fast: bool,
+}
+
+/// What happened to one target in a `kargo test` run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetOutcome {
+    Passed,
+    /// Its tests ran and at least one failed.
+    Failed,
+    /// Its tests could not be compiled or started.
+    Error,
+    /// Not run because an earlier target failed.
+    Skipped,
 }
 
 /// Runs the tests; returns `true` when everything passed.
@@ -48,15 +64,49 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         TargetKind::Native => test_native(ctx, opts),
         TargetKind::Android => Ok(TestRun::Android),
     });
-    let mut ok = true;
-    for run in prepared {
-        ok &= match run? {
-            TestRun::Done(passed) => passed,
-            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts.filter.as_deref())?,
-            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label)?,
-            TestRun::Android => test_android(ctx, opts)?,
+    let fail_fast = !opts.no_fail_fast && ctx.ws.manifest().test.fail_fast;
+    let mut outcomes = Vec::new();
+    // In fail-fast mode an error ends the run once the skipped targets are listed.
+    let mut fatal = None;
+    for (&target, run) in targets.iter().zip(prepared) {
+        if outcomes.iter().any(|(_, o)| *o != TargetOutcome::Passed) && fail_fast {
+            outcomes.push((target, TargetOutcome::Skipped));
+            continue;
+        }
+        let passed = run.and_then(|run| match run {
+            TestRun::Done(passed) => Ok(passed),
+            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts.filter.as_deref()),
+            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label),
+            TestRun::Android => test_android(ctx, opts),
+        });
+        let outcome = match passed {
+            Ok(true) => TargetOutcome::Passed,
+            Ok(false) => TargetOutcome::Failed,
+            Err(e) if fail_fast || targets.len() == 1 => {
+                fatal = Some(e);
+                TargetOutcome::Error
+            }
+            Err(e) => {
+                ctx.shell().error(format!("could not test the {target} target: {e:#}"));
+                TargetOutcome::Error
+            }
         };
+        outcomes.push((target, outcome));
     }
+    let skipped: Vec<&str> = outcomes.iter().filter(|(_, o)| *o == TargetOutcome::Skipped).map(|(t, _)| t.as_str()).collect();
+    if !skipped.is_empty() {
+        ctx.shell().note(format!(
+            "skipped the {} target{} after a failure; pass `--no-fail-fast` to test every target",
+            skipped.join(", "),
+            if skipped.len() == 1 { "" } else { "s" }
+        ));
+    } else if outcomes.len() > 1 && !fail_fast {
+        print_target_table(&outcomes, anstream::stdout())?;
+    }
+    if let Some(e) = fatal {
+        return Err(e);
+    }
+    let ok = outcomes.iter().all(|(_, o)| *o == TargetOutcome::Passed);
     let mut env = env;
     env.push(("KARGO_TEST_RESULT".to_owned(), if ok { "success" } else { "failure" }.to_owned()));
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostTest, &env)?;
@@ -64,6 +114,25 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         finished(ctx, start);
     }
     Ok(ok)
+}
+
+/// Prints one line per target with how its tests went, after a `--no-fail-fast` run.
+fn print_target_table(outcomes: &[(TargetKind, TargetOutcome)], mut out: impl std::io::Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "
+test results by target:"
+    )?;
+    for (target, outcome) in outcomes {
+        let (style, text) = match outcome {
+            TargetOutcome::Passed => (AnsiColor::Green.on_default(), "ok"),
+            TargetOutcome::Failed => (AnsiColor::Red.on_default(), "FAILED"),
+            TargetOutcome::Error => (AnsiColor::Red.on_default(), "error (could not compile or run the tests)"),
+            TargetOutcome::Skipped => (AnsiColor::Yellow.on_default(), "skipped"),
+        };
+        writeln!(out, "    {:<8} {style}{text}{style:#}", target.as_str())?;
+    }
+    Ok(())
 }
 
 /// A target's compiled tests, ready to run.

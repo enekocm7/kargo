@@ -52,7 +52,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
         TargetKind::Native => check_native(ctx, opts.tests),
         TargetKind::Android => crate::gradle::check(ctx, opts.tests),
     });
-    checked.into_iter().collect::<Result<()>>()?;
+    super::collect_targets(ctx, "check", opts.build.keep_going, targets.iter().copied().zip(checked))?;
     finished(ctx, start);
     Ok(())
 }

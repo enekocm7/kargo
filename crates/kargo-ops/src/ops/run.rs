@@ -35,7 +35,7 @@ pub fn runnable_target(enabled: &[TargetKind], requested: Option<TargetKind>) ->
 /// Builds and runs; returns the program's exit code.
 pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
-    let results = build(ctx, &BuildOptions { targets: vec![target], release: opts.release })?;
+    let results = build(ctx, &BuildOptions { targets: vec![target], release: opts.release, keep_going: false })?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
 
     let root = ctx.ws.root();

@@ -13,6 +13,7 @@ kargo-manifest.workspace = true
 kargo-toolchain.workspace = true
 kargo-compiler.workspace = true
 anstream.workspace = true
+anstyle.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 serde.workspace = true

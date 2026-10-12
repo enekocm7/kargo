@@ -150,6 +150,133 @@ fn add_and_remove_dependencies() {
 }
 
 #[test]
+fn add_prefers_plain_releases_and_remove_targets_a_table() {
+    let repo = LocalRepo::new();
+    repo.publish("org.acme:datetime", "0.7.1", &[]).publish("org.acme:datetime", "0.8.0", &[]).publish(
+        "org.acme:datetime",
+        "0.8.0-0.6.x-compat",
+        &[],
+    );
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &format!("\n[repositories]\nlocal = \"{}\"\n", repo.url())));
+
+    p.kargo()
+        .args(["add", "org.acme:datetime", "-t", "wasm"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("org.acme:datetime:0.8.0 to [target.wasm.dependencies]"));
+    assert!(p.read("kargo.toml").contains("\"org.acme:datetime\" = \"0.8.0\""));
+
+    p.kargo().args(["remove", "org.acme:datetime"]).assert().failure().stderr(predicate::str::contains("[dependencies]"));
+    p.kargo()
+        .args(["remove", "org.acme:datetime", "-t", "wasm"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing org.acme:datetime from [target.wasm.dependencies]"));
+    assert!(!p.read("kargo.toml").contains("org.acme:datetime"));
+}
+
+#[test]
+fn outdated_and_upgrade_edit_versions_in_kargo_toml() {
+    let repo = LocalRepo::new();
+    for v in ["1.0.0", "1.4.0", "2.0.0"] {
+        repo.publish("com.acme:widget", v, &[]);
+    }
+    repo.publish("com.acme:fresh", "1.0", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "\n[dependencies]\n\"com.acme:widget\" = \"1.0.0\"  # the UI kit\n\"com.acme:fresh\" = \"1.0\"\n\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+
+    let out = p.kargo().args(["outdated"]).assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("name             current  compatible  latest  kind"), "{text}");
+    assert!(text.contains("com.acme:widget  1.0.0    1.4.0       2.0.0   dependencies"), "{text}");
+    assert!(!text.contains("com.acme:fresh"), "{text}");
+
+    p.kargo()
+        .args(["upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Upgrading com.acme:widget v1.0.0 -> v1.4.0 in [dependencies]"))
+        .stderr(predicate::str::contains("dry run"));
+    assert!(p.read("kargo.toml").contains("\"com.acme:widget\" = \"1.0.0\""));
+
+    p.kargo().args(["upgrade"]).assert().success().stderr(predicate::str::contains("--incompatible"));
+    assert!(p.read("kargo.toml").contains("\"com.acme:widget\" = \"1.4.0\"  # the UI kit"));
+    p.kargo().args(["upgrade", "--incompatible", "com.acme:widget"]).assert().success();
+    assert!(p.read("kargo.toml").contains("\"com.acme:widget\" = \"2.0.0\"  # the UI kit"));
+
+    p.kargo().args(["outdated"]).assert().success().stdout("").stderr(predicate::str::contains("newest version"));
+    p.kargo().args(["upgrade", "com.acme:nope"]).assert().failure().stderr(predicate::str::contains("not declared"));
+}
+
+#[test]
+fn update_selected_modules_precisely_or_as_a_dry_run() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[("g:util", "[1.0,2.0)")])
+        .publish("g:other", "1.0", &[("g:dep", "[1.0,2.0)")])
+        .publish("g:util", "1.0", &[])
+        .publish("g:dep", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n\"g:other\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    let locked = |p: &Project, module: &str, version: &str| {
+        p.read("kargo.lock").contains(&format!("module = \"{module}\"\nversion = \"{version}\""))
+    };
+
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("Adding g:util v1.0"));
+    assert!(locked(&p, "g:util", "1.0") && locked(&p, "g:dep", "1.0"));
+    repo.publish("g:util", "1.1", &[]).publish("g:dep", "1.1", &[]);
+
+    p.kargo()
+        .args(["update", "g:util", "--dry-run", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating g:util v1.0 -> v1.1"))
+        .stderr(predicate::str::contains("dry run"));
+    assert!(locked(&p, "g:util", "1.0"), "dry run leaves kargo.lock alone");
+
+    p.kargo()
+        .args(["update", "g:util", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating g:util v1.0 -> v1.1"))
+        .stderr(predicate::str::contains("g:dep").not());
+    assert!(locked(&p, "g:util", "1.1") && locked(&p, "g:dep", "1.0"), "only g:util moves");
+
+    p.kargo().args(["update", "g:util", "--precise", "1.0", "--offline"]).assert().success();
+    assert!(locked(&p, "g:util", "1.0"));
+    // The precise version survives later builds because the manifest did not change.
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success().stdout(predicate::str::contains("g:util:1.0"));
+
+    p.kargo().args(["update", "g:nope", "--offline"]).assert().failure().stderr(predicate::str::contains("not locked"));
+    p.kargo().args(["update", "g:util", "g:dep", "--precise", "1.0"]).assert().failure().stderr(predicate::str::contains("exactly one"));
+
+    p.kargo().args(["update", "--offline"]).assert().success();
+    assert!(locked(&p, "g:util", "1.1") && locked(&p, "g:dep", "1.1"));
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("up to date"));
+}
+
+#[test]
 fn tree_resolves_from_local_repository_and_writes_lockfile() {
     let repo = LocalRepo::new();
     repo.publish("g:lib", "1.0", &[("g:util", "1.0")])
@@ -537,4 +664,60 @@ fn daemon_status_and_stop() {
     std::fs::write(dir.join("info"), format!("{port} token 1\n")).unwrap();
     p.kargo().args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("No compiler daemons are running."));
     p.kargo().args(["daemon", "stop"]).assert().success().stderr(predicate::str::contains("Stopped 0 compiler daemons"));
+}
+
+/// A JVM + Android project that fails both targets offline: the Kotlin compiler is not
+/// cached and there is no `android/AndroidManifest.xml`.
+fn two_failing_targets() -> Project {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("twin", "[target.jvm]\n\n[target.android]\nnamespace = \"com.example.twin\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("tests/MainTest.kt", "class MainTest\n");
+    p
+}
+
+#[test]
+fn build_keep_going_reports_every_failed_target() {
+    let p = two_failing_targets();
+    // By default the first failure is the error.
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("could not build").not().and(predicate::str::contains("offline mode")));
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args(["--offline", cmd, "--keep-going"])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains(format!("could not {cmd} the jvm target")))
+            .stderr(predicate::str::contains(format!("could not {cmd} the android target: Android builds need")))
+            .stderr(predicate::str::contains(format!("could not {cmd} 2 of 2 targets (jvm, android)")));
+    }
+}
+
+#[test]
+fn test_fail_fast_skips_the_remaining_targets() {
+    let p = two_failing_targets();
+    p.kargo()
+        .args(["--offline", "test"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("skipped the android target after a failure; pass `--no-fail-fast`"))
+        .stderr(predicate::str::contains("Running Android").not());
+    let table =
+        || predicate::str::contains("test results by target:\n    jvm      error").and(predicate::str::contains("    android  error"));
+    p.kargo()
+        .args(["--offline", "test", "--no-fail-fast"])
+        .assert()
+        .failure()
+        .code(101)
+        .stdout(table())
+        .stderr(predicate::str::contains("could not test the android target: Android builds need"));
+    // `[test] fail-fast = false` makes it the default.
+    p.file("kargo.toml", &(p.read("kargo.toml") + "\n[test]\nfail-fast = false\n"));
+    p.kargo().args(["--offline", "test"]).assert().failure().code(101).stdout(table());
 }

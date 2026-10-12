@@ -165,6 +165,32 @@ impl ManifestEditor {
         Ok(key)
     }
 
+    /// Changes the version of a declared dependency in place, keeping its formatting, comments and
+    /// other keys. Returns the manifest key.
+    pub fn set_dependency_version(&mut self, section: DependencySection, module: &ModuleId, version: &str) -> Result<String> {
+        let key = self.table(section).and_then(|t| Self::find_key(t, module));
+        let Some(key) = key else {
+            bail!("dependency `{module}` is not declared in [{}]", section.display());
+        };
+        let item = self.table_mut(section)?.get_mut(&key).expect("key was just found");
+        if item.is_str() {
+            replace_str(item, version);
+            return Ok(key);
+        }
+        let table = item.as_table_like_mut().with_context(|| format!("dependency `{key}` is neither a version string nor a table"))?;
+        if let Some(v) = table.get_mut("version") {
+            replace_str(v, version);
+        } else if let Some(coords) = table.get_mut("coords").filter(|c| c.as_str().is_some_and(|s| s.split(':').count() >= 3)) {
+            // `coords = "group:artifact:version[:classifier]"`
+            let mut parts: Vec<String> = coords.as_str().unwrap_or_default().split(':').map(str::to_owned).collect();
+            parts[2] = version.to_owned();
+            replace_str(coords, &parts.join(":"));
+        } else {
+            bail!("dependency `{key}` in [{}] has no version to change (it is managed by a BOM)", section.display());
+        }
+        Ok(key)
+    }
+
     /// Enables a built-in framework (`[frameworks] name = true`) unless configured already.
     pub fn enable_framework(&mut self, name: &str) -> Result<bool> {
         let frameworks = self
@@ -181,6 +207,15 @@ impl ManifestEditor {
                 Ok(true)
             }
         }
+    }
+}
+
+/// Replaces a string value, keeping the whitespace and comments around it.
+fn replace_str(item: &mut Item, new: &str) {
+    if let Some(value) = item.as_value_mut() {
+        let decor = value.decor().clone();
+        *value = Value::from(new);
+        *value.decor_mut() = decor;
     }
 }
 
@@ -276,6 +311,30 @@ alias = { coords = "com.b:y", version = "2.0" }
         assert_eq!(ed.remove_dependency(DependencySection::Main, "com.a:x").unwrap(), "com.a:x");
         assert!(ed.remove_dependency(DependencySection::Main, "com.a:x").is_err());
         assert!(ed.remove_dependency(DependencySection::Dev, "x").is_err());
+    }
+
+    #[test]
+    fn sets_versions_in_place() {
+        let text = format!(
+            "{BASE}coords-style = {{ coords = \"com.d:w:1.0:linux\" }}\nmanaged = {{ coords = \"com.e:v\" }}\n\n[dev-dependencies]\n\"com.t:t\" = \"1.0\"   # pinned\n\n[target.jvm.dependencies.table-style]\ngroup = \"com.f\"\nversion = \"1.0\"\nscope = \"runtime\"\n"
+        );
+        let mut ed = ManifestEditor::from_str(Path::new("kargo.toml"), &text).unwrap();
+        let set = |ed: &mut ManifestEditor, section, m: &str, v: &str| ed.set_dependency_version(section, &m.parse().unwrap(), v);
+        assert_eq!(set(&mut ed, DependencySection::Main, "com.a:x", "1.5").unwrap(), "com.a:x");
+        assert_eq!(set(&mut ed, DependencySection::Main, "com.b:y", "2.5").unwrap(), "alias");
+        set(&mut ed, DependencySection::Main, "com.d:w", "1.1").unwrap();
+        set(&mut ed, DependencySection::Dev, "com.t:t", "1.1").unwrap();
+        set(&mut ed, DependencySection::Target(TargetKind::Jvm), "com.f:table-style", "1.1").unwrap();
+        assert!(set(&mut ed, DependencySection::Main, "com.e:v", "1.0").unwrap_err().to_string().contains("BOM"));
+        assert!(set(&mut ed, DependencySection::Main, "com.z:z", "1.0").unwrap_err().to_string().contains("not declared"));
+        let out = ed.contents();
+        assert!(out.contains("name = \"demo\"   # keep this comment"), "{out}");
+        assert!(out.contains("\"com.a:x\" = \"1.5\"\n"), "{out}");
+        assert!(out.contains("alias = { coords = \"com.b:y\", version = \"2.5\" }"), "{out}");
+        assert!(out.contains("coords-style = { coords = \"com.d:w:1.1:linux\" }"), "{out}");
+        assert!(out.contains("\"com.t:t\" = \"1.1\"   # pinned"), "{out}");
+        assert!(out.contains("group = \"com.f\"\nversion = \"1.1\"\nscope = \"runtime\""), "{out}");
+        crate::Manifest::parse(&out).unwrap();
     }
 
     #[test]

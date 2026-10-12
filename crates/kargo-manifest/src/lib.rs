@@ -602,6 +602,19 @@ pub struct LintSettings {
     pub baseline: Option<PathBuf>,
 }
 
+/// `[test]`: options for `kargo test`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestSettings {
+    /// Stop at the first target whose tests fail; `kargo test --no-fail-fast` overrides it.
+    pub fail_fast: bool,
+}
+
+impl Default for TestSettings {
+    fn default() -> Self {
+        Self { fail_fast: true }
+    }
+}
+
 /// A fully validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -621,6 +634,7 @@ pub struct Manifest {
     pub doc: DocSettings,
     pub fmt: FmtSettings,
     pub lint: LintSettings,
+    pub test: TestSettings,
 }
 
 impl Manifest {

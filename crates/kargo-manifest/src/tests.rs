@@ -446,3 +446,11 @@ baseline = \"config/baseline.xml\"
     assert!(parse_err(&with("lint", "detekt = \"\"")).contains("exact detekt version"));
     assert!(parse_err(&with("lint", "max-issues = 3")).contains("max-issues"));
 }
+
+#[test]
+fn test_section() {
+    assert!(parse(MINIMAL).test.fail_fast, "targets stop at the first failure by default");
+    assert!(!parse(&format!("{MINIMAL}\n[test]\nfail-fast = false\n")).test.fail_fast);
+    assert!(parse_err(&format!("{MINIMAL}\n[test]\nfail-fast = \"no\"\n")).contains("fail-fast"));
+    assert!(parse_err(&format!("{MINIMAL}\n[test]\nthreads = 2\n")).contains("threads"));
+}

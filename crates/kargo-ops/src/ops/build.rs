@@ -23,6 +23,8 @@ pub struct BuildOptions {
     /// Targets to build; empty means every enabled target.
     pub targets: Vec<kargo_manifest::TargetKind>,
     pub release: bool,
+    /// Build every target even when one fails, then report all failures (`--keep-going`).
+    pub keep_going: bool,
 }
 
 impl BuildOptions {
@@ -106,8 +108,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         }
         Ok(r)
     });
-    for r in built {
-        let r = r?;
+    for r in super::collect_targets(ctx, "build", opts.keep_going, targets.iter().copied().zip(built))? {
         results.jvm = results.jvm.or(r.jvm);
         results.wasm = results.wasm.or(r.wasm);
         results.native.extend(r.native);

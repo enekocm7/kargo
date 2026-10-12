@@ -1,9 +1,9 @@
 ---
 title: Build performance
-description: How Kargo keeps builds fast (the compiler daemon, parallel targets and downloads) and how to tune or turn it off.
+description: How Kargo keeps builds fast (the compiler daemon, incremental compilation, parallel targets and downloads) and how to tune or turn it off.
 ---
 
-Most of the time of a small Kotlin build is not compiling: it's starting a JVM and warming up the compiler's JIT. Kargo avoids that cost, builds independent work at the same time, and skips work whose inputs haven't changed.
+Most of the time of a small Kotlin build is not compiling: it's starting a JVM and warming up the compiler's JIT. Kargo avoids that cost, recompiles only the files affected by a change, builds independent work at the same time, and skips work whose inputs haven't changed.
 
 ```console
 $ touch src/Main.kt && kargo build
@@ -55,6 +55,37 @@ Kargo also falls back to a separate process on its own when the daemon can't be 
 The daemon's working directory is not your project. Relative paths in `[kotlin] compiler-args` or `[profile.*] compiler-args` resolve against the daemon's directory, so use absolute paths there (or turn the daemon off).
 :::
 
+## Incremental compilation
+
+On the JVM, Kargo recompiles only the files you changed and the files that depend on what changed, not the whole target. It uses the Kotlin Build Tools API, the same incremental compiler Gradle uses, inside the compiler daemon.
+
+```console
+$ echo "// tweak" >> src/gen/G5.kt && kargo build
+   Compiling bigproj v0.1.0 (jvm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.39s
+```
+
+In a project with 300 source files, changing one file rebuilds in about 0.4 seconds instead of about 5 seconds (with the daemon) or more than 20 seconds (without it).
+
+- **What triggers a recompile.** Kargo tells the compiler which sources changed since the last successful build. The compiler also recompiles the files that use a declaration whose signature changed, and the users of a `const val` whose value changed.
+- **Dependencies.** Each classpath jar is summarized in a snapshot (cached under `~/.kargo/daemon/ic-snapshots`), so adding, removing or upgrading a dependency recompiles only the code that uses what changed. The tests' snapshot of the main classes works the same way, so a change in `src/` recompiles only the tests that depend on it.
+- **Clean rebuilds.** Changing compiler options, compiler plugins, `[frameworks]` or the Kotlin version recompiles the target from scratch once. A clean build takes somewhat longer than without incremental compilation, because the compiler also records what each file depends on.
+- **Deleted files.** Their classes are removed from `target/` on the next successful build.
+- **Java sources.** Kotlin compiles incrementally; `javac` still compiles all Java sources of a target whenever it rebuilds.
+- **Where the state lives.** The caches are in `target/<profile>/jvm/.fingerprint/<name>.ic/`, so `kargo clean` removes them.
+
+Incremental compilation needs the compiler daemon, and a Kotlin version that publishes `kotlin-build-tools-impl` (2.4 and newer). Multiplatform projects that share code between `src/` and `src-jvm/` with `expect`/`actual`, and the Wasm and Native targets, compile each target from scratch (in the daemon for Wasm).
+
+### Turning it off
+
+Set `KARGO_INCREMENTAL=false` (like Cargo's `CARGO_INCREMENTAL=0`) to recompile whole targets while keeping the daemon. Kargo discards the incremental caches when it does:
+
+```sh
+KARGO_INCREMENTAL=false kargo build
+```
+
+Kargo also falls back to a full rebuild by itself when the incremental compiler fails for a reason other than a compile error, for example a corrupt cache; the details go to the daemon's log.
+
 ## Parallel work
 
 Kargo runs independent work at the same time:
@@ -70,7 +101,3 @@ Kargo runs independent work at the same time:
 - **Cached toolchain lookups.** The JDK's version is read from its `release` file instead of starting `java`, and the Kotlin compiler's classpath is remembered per version, so a no-op build needs no network access.
 - **Fast packaging.** `kargo package` copies the classes of dependency jars into the fat jar without decompressing and recompressing them.
 - **Class-data sharing.** On JDK 19 and newer, the JUnit launcher used by `kargo test` and a standalone compiler (with the daemon off) reuse an archive of the classes they loaded on their first run, which cuts their startup time. The archives live in `~/.kargo/daemon/cds`.
-
-:::note
-Kargo doesn't compile incrementally yet: when a source file of a target changes, the whole target (main or tests) is recompiled. The daemon makes that recompilation fast.
-:::

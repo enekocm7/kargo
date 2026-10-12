@@ -66,16 +66,25 @@ kargo init [path] [options]
 
 ## `kargo build` (`b`)
 
-Compile all enabled targets, or the ones you name.
+Compile all enabled targets, or the ones you name. Targets build at the same time; if one fails, the command reports that failure and exits with code 101.
 
 | Option | Meaning |
 |---|---|
+| `--keep-going` | Build every target even if one fails, then report each failure and which targets failed and succeeded |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
 ```sh
 kargo build
 kargo build --release -t jvm -t native
+```
+
+With `--keep-going`, every failed target gets its own error and a summary follows:
+
+```console
+$ kargo build --keep-going
+error: could not build the wasm target: ...
+error: could not build 1 of 3 targets (wasm); jvm, native succeeded
 ```
 
 ## `kargo check` (`c`)
@@ -85,6 +94,7 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | Option | Meaning |
 |---|---|
 | `--tests` | Also check the test sources (`tests/`, `tests-<target>/`) |
+| `--keep-going` | Check every target even if one fails, then report each failure (as for `kargo build`) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
@@ -134,8 +144,11 @@ kargo test [filter] [options]
 |---|---|
 | `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
+| `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
+
+By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
 ## `kargo doc` (`d`)
 
@@ -199,7 +212,7 @@ kargo add -F <framework,...>
 | `--no-verify` | Don't check that the artifact exists |
 | `-F, --framework <list>` | Enable built-in frameworks instead |
 
-Without a version, the latest release is used.
+Without a version, the latest release is used. Plain versions win over variants that some libraries publish next to them, such as `0.8.0-0.6.x-compat` or `33.0.0-jre`; Kargo prints a note naming the variant it skipped. When a library publishes only variants, the newest one is used.
 
 ## `kargo remove` (`rm`)
 
@@ -208,6 +221,66 @@ Remove dependencies from `kargo.toml`.
 ```sh
 kargo remove <group:artifact or key>... [--dev] [-t <target>]
 ```
+
+| Option | Meaning |
+|---|---|
+| `--dev` | Remove from `[dev-dependencies]` |
+| `-t, --target <target>` | Remove from `[target.<target>.dependencies]` |
+
+Without an option, the dependency is removed from `[dependencies]`.
+
+## `kargo outdated`
+
+List the dependencies in `kargo.toml` that have newer versions in your repositories.
+
+```sh
+kargo outdated [group:artifact or key]... [--pre]
+```
+
+```console
+$ kargo outdated
+name                                    current  compatible  latest   kind
+org.jetbrains.kotlinx:kotlinx-datetime  0.6.0    0.6.2       0.8.0    dependencies
+io.mockk:mockk                          1.13.0   1.14.11     1.14.11  dev-dependencies
+```
+
+| Column | Meaning |
+|---|---|
+| `current` | The version in `kargo.toml` |
+| `compatible` | The newest version with the same major version (for `0.x`, the same minor version), or `-` if there is none |
+| `latest` | The newest version, or `-` if `current` is the newest |
+| `kind` | The table the dependency is declared in |
+
+| Option | Meaning |
+|---|---|
+| `names` | Only check these dependencies |
+| `--pre` | Consider pre-release versions. Dependencies already on a pre-release always consider them |
+
+A dependency stays on its variant: `33.0.0-jre` is compared with other `-jre` versions, and a plain version never moves to a `-compat` one. Dependencies declared with a version range or without a version (managed by a BOM) are skipped. The command only reads; nothing is changed.
+
+## `kargo upgrade`
+
+Raise the versions in `kargo.toml` to the newest compatible versions, keeping the file's formatting and comments.
+
+```sh
+kargo upgrade [group:artifact or key]... [options]
+```
+
+```console
+$ kargo upgrade
+note: `org.jetbrains.kotlinx:kotlinx-datetime` 0.8.0 is available but not compatible; use `--incompatible` to upgrade to it
+   Upgrading org.jetbrains.kotlinx:kotlinx-datetime v0.6.0 -> v0.6.2 in [dependencies]
+   Upgrading io.mockk:mockk v1.13.0 -> v1.14.11 in [dev-dependencies]
+```
+
+| Option | Meaning |
+|---|---|
+| `names` | Only upgrade these dependencies |
+| `-i, --incompatible` | Upgrade to the newest version even across a major version (or a `0.x` minor version) |
+| `--pre` | Consider pre-release versions |
+| `--dry-run` | Print the changes without writing `kargo.toml` |
+
+"Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). `kargo.lock` is re-resolved on the next build because the manifest changed.
 
 ## `kargo tree`
 
@@ -238,7 +311,27 @@ Download all dependencies and toolchains so later builds can run offline.
 
 ## `kargo update`
 
-Re-resolve all dependencies and rewrite `kargo.lock`.
+Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges are picked up.
+
+```sh
+kargo update [group:artifact]... [--precise <version>] [--dry-run]
+```
+
+| Option | Meaning |
+|---|---|
+| `modules` | Only update these locked modules (direct or transitive). Every other module keeps its locked version |
+| `--precise <version>` | Lock the one given module at exactly this version, for example to pick up a security fix in a transitive dependency or to step back from a broken release |
+| `--dry-run` | Print the changes without writing `kargo.lock` |
+
+Each change is printed as `Updating`, `Adding` or `Removing`:
+
+```console
+$ kargo update org.jetbrains.kotlinx:kotlinx-io-core --precise 0.7.0
+    Updating org.jetbrains.kotlinx:kotlinx-io-core v0.6.0 -> v0.7.0
+     Updated kargo.lock
+```
+
+`kargo update` changes only `kargo.lock`, never `kargo.toml`; use [`kargo upgrade`](#kargo-upgrade) to change the versions you declared. A `--precise` version stays locked until `kargo.toml` changes or you run `kargo update` for that module again. See [kargo.lock](../lockfile/#commands).
 
 ## `kargo clean`
 
