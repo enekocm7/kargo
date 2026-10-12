@@ -290,9 +290,9 @@ fn start(shell: &Shell, root: &Path, dir: &Path, jdk: &Jdk, classpath: &[PathBuf
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    detach(&mut cmd);
     shell.verbose("Starting", format!("compiler daemon `{}`", kargo_util::process::describe(&cmd)));
-    let mut child = cmd.spawn().context("failed to start the compiler daemon")?;
+    // Detached so it outlives Kargo, without holding on to Kargo's stdio (#82).
+    let mut child = kargo_util::process::spawn_detached(&mut cmd).context("failed to start the compiler daemon")?;
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         // Wait for a new info file (a stale one may point at a dead daemon).
@@ -309,22 +309,6 @@ fn start(shell: &Shell, root: &Path, dir: &Path, jdk: &Jdk, classpath: &[PathBuf
             bail!("the compiler daemon did not start within {}s", START_TIMEOUT.as_secs());
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Keeps the daemon alive after Kargo exits and out of the terminal's Ctrl-C.
-fn detach(cmd: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 }
 
