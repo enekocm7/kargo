@@ -1355,6 +1355,22 @@ fn run_rejects_wasm_libraries() {
 }
 
 #[test]
+fn test_list_says_which_targets_it_cannot_list() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\n"));
+    p.file("tests/WebTest.kt", "import kotlin.test.*\nclass WebTest { @Test fun works() {} }\n");
+    // Nothing is compiled for a target whose tests can't be listed, so this runs offline.
+    p.kargo()
+        .args(["--offline", "test", "--list", "--format", "json"])
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicate::str::contains("`--list` does not list wasm tests yet"));
+    p.kargo().args(["test", "--format", "json"]).assert().failure().stderr(predicate::str::contains("--list"));
+    p.kargo().args(["test", "--list", "--no-run"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
 fn wasm_target_options_are_validated() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("lib", "[target.wasm]\nenvironment = \"wasi\"\nkind = \"library\"\n"));

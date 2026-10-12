@@ -1,6 +1,6 @@
 ---
 title: Machine-readable output
-description: JSON output for compiler diagnostics, kargo metadata, kargo info and kargo tree, and JUnit XML test reports, for editors, scripts and CI.
+description: JSON output for compiler diagnostics, test discovery and test results, kargo metadata, kargo info and kargo tree, and JUnit XML test reports, for editors, scripts and CI.
 ---
 
 Kargo's normal output is for people. Editors, scripts and CI systems can ask for stable, machine-readable formats instead:
@@ -9,6 +9,8 @@ Kargo's normal output is for people. Editors, scripts and CI systems can ask for
 |---|---|
 | Compiler errors and warnings with file, line and column | `kargo build --message-format json` (also `check`, `test`, `run`) |
 | The project model for an editor: roots, classpaths, compiler arguments | `kargo metadata` |
+| The tests of a project, with their source locations | `kargo test --list --format json` |
+| Each test's result as it runs, for a test explorer | `kargo test --message-format json` |
 | Project metadata | `kargo info --format json` |
 | The resolved dependency graph | `kargo tree --format json` |
 | Per-test results for CI | `kargo test --report junit` |
@@ -40,7 +42,59 @@ With [`warnings-as-errors`](../manifest/#kotlin), the compiler's `warnings found
 
 `kargo build` and `kargo check` end with a `build-finished` message whose `success` says whether the build succeeded. The exit code is the same as without the flag: `101` when the build fails.
 
-`--message-format` takes `human` (the default) or `json`. With `kargo test` and `kargo run` only the compiler output becomes JSON: the tests' and the program's own output still goes to stdout as text after it. Compiler output that isn't a diagnostic, such as Kotlin/Native's linker messages, goes to stderr. Android builds run through Gradle, so their diagnostics are not converted.
+`--message-format` takes `human` (the default) or `json`. With `kargo run` only the compiler output becomes JSON: the program's own output still goes to stdout as text after it. `kargo test` also reports each test as JSON ([Test results](#test-results)) and moves its human-readable report to stderr. Compiler output that isn't a diagnostic, such as Kotlin/Native's linker messages, goes to stderr. Android builds run through Gradle, so their diagnostics are not converted.
+
+## Test discovery
+
+`kargo test --list --format json` compiles the tests and prints one `test-discovered` message per test, without running any:
+
+```console
+$ kargo test --list --format json 2>/dev/null
+{"display-name":"adds()","file":"/home/me/app/tests/MathTest.kt","id":"[engine:junit-jupiter]/[class:com.example.app.MathTest]/[method:adds()]","line":7,"name":"adds","package":"app","parent-id":"[engine:junit-jupiter]/[class:com.example.app.MathTest]","reason":"test-discovered","suite":"com.example.app.MathTest","target":"jvm"}
+```
+
+| Field | Meaning |
+|---|---|
+| `package` | The package the test belongs to |
+| `target` | `jvm` or `native` |
+| `id` | Identifies the test within its target. On the JVM it is the JUnit Platform unique id; on Native it is `suite.name` |
+| `parent-id` | The id of the class (or other container) the test belongs to, or `null` (Native) |
+| `suite` | The test class, such as `com.example.app.MathTest` (nested classes use `$`) |
+| `name` | The test function, such as `adds` |
+| `display-name` | The name the test framework shows, such as `adds()` |
+| `file` | Absolute path of the source file that declares the test, or `null` if Kargo can't tell |
+| `line` | 1-based line of the test function (or of its class when the function isn't found), or `null` |
+
+A parameterized test or test factory is listed once; its invocations only exist when it runs, and their `parent-id` is its `id`. Kargo finds `file` and `line` by looking for the class and function in the test sources, so tests generated at run time (Kotest specs, dynamic tests) point at their class at best.
+
+Wasm and Android tests are not listed yet: `kargo test --list` notes that and prints nothing for them. A filter (`kargo test --list MathTest`) lists only the tests it would run.
+
+## Test results
+
+With `--message-format json`, `kargo test` reports each test as JSON while it runs, on the same stdout as the compiler messages:
+
+```console
+$ kargo test --message-format json 2>/dev/null
+{"display-name":"adds()","id":"[engine:junit-jupiter]/[class:com.example.app.MathTest]/[method:adds()]","name":"adds","package":"app","parent-id":"[engine:junit-jupiter]/[class:com.example.app.MathTest]","reason":"test-started","suite":"com.example.app.MathTest","target":"jvm"}
+{"display-name":"adds()","duration-ms":12,"id":"[engine:junit-jupiter]/[class:com.example.app.MathTest]/[method:adds()]","name":"adds","outcome":"passed","package":"app","parent-id":"[engine:junit-jupiter]/[class:com.example.app.MathTest]","reason":"test-finished","suite":"com.example.app.MathTest","target":"jvm"}
+{"failed":0,"ignored":0,"package":"app","passed":1,"reason":"test-summary","success":true,"target":"jvm"}
+```
+
+`test-started` and `test-finished` carry the `package`, `target`, `id`, `parent-id`, `suite`, `name` and `display-name` of [test discovery](#test-discovery), so the ids match those of `--list` (an invocation of a parameterized test has its own id, with the parameterized test as its `parent-id`). `test-finished` adds:
+
+| Field | Meaning |
+|---|---|
+| `outcome` | `passed`, `failed` or `ignored` (skipped, disabled or a failed assumption) |
+| `duration-ms` | How long the test took, in milliseconds |
+| `message` | Why it failed (the assertion message), or why it was skipped; absent when it passed |
+| `details` | The stack trace of a failure |
+| `stdout`, `stderr` | What the test printed, when it printed something (`stderr` on the JVM only) |
+
+An ignored test gets a `test-finished` message without a `test-started` one. On the JVM, a class whose setup failed (such as a failing `@BeforeAll`) is reported as a failed `test-finished` whose `suite` is the class and whose `name` is its display name.
+
+Each target ends with a `test-summary` message: the `passed`, `failed` and `ignored` counts and `success`. The exit code is the same as without the flag.
+
+With `--message-format json`, stdout holds only JSON messages: the human-readable report (`test MathTest.adds ... ok`, JUnit's tree, the result table) moves to stderr. Native and Wasm results come from the test runner's TeamCity messages as each test ends; Android results come from Gradle's JUnit XML once all tests have run, so there are no `test-started` messages.
 
 ## `kargo metadata`
 

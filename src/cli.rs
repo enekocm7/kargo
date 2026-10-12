@@ -17,7 +17,7 @@ use kargo_ops::ops::fmt::FmtOptions;
 use kargo_ops::ops::lint::LintOptions;
 use kargo_ops::ops::publish::PublishOptions;
 use kargo_ops::ops::run::{Program, RunOptions};
-use kargo_ops::ops::test::TestOptions;
+use kargo_ops::ops::test::{ListFormat, TestOptions};
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
 use kargo_ops::warnings;
@@ -428,6 +428,12 @@ enum Command {
         /// Start the JVM tests suspended, waiting for a debugger on this port (default 5005)
         #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
         debug: Option<u16>,
+        /// Compile the tests and list them instead of running them (JVM and Native)
+        #[arg(long, conflicts_with_all = ["no_run", "report", "debug"])]
+        list: bool,
+        /// Output format of `--list`; `json` prints one JSON object per test
+        #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
+        format: FormatArg,
     },
     /// Generate API documentation from KDoc with Dokka
     #[command(visible_alias = "d")]
@@ -947,11 +953,12 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug })?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run, no_fail_fast, report, debug } => {
+        Command::Test { build, filter, no_run, no_fail_fast, report, debug, list, format } => {
             set_message_format(build.message_format);
             let project = load_project(&global)?;
             let junit_report = report == Some(ReportArg::Junit);
-            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug };
+            let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
+            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug, list };
             let passed = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
                 ops::test::test(ctx, &opts)
             })?;
@@ -1579,6 +1586,10 @@ mod tests {
             Command::Check { keep_going: true, .. }
         ));
         assert!(matches!(Cli::try_parse_from(["kargo", "t", "--no-fail-fast"]).unwrap().command, Command::Test { no_fail_fast: true, .. }));
+        let cli = Cli::try_parse_from(["kargo", "test", "--list", "--format", "json", "MathTest"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { list: true, format: FormatArg::Json, .. }));
+        assert!(Cli::try_parse_from(["kargo", "test", "--format", "json"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "test", "--list", "--no-run"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "test", "--report", "junit", "--message-format", "json"]).unwrap();
         assert!(matches!(
             cli.command,

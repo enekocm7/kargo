@@ -1,9 +1,9 @@
 ---
 title: Editor integration
-description: Get completion and validation in kargo.toml, import a project into an editor or language server, browse library sources and attach a debugger.
+description: Get completion and validation in kargo.toml, import a project into an editor or language server, browse library sources, drive a test explorer and attach a debugger.
 ---
 
-Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors and a debugger port.
+Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
 
 ## Completion and validation in `kargo.toml`
 
@@ -84,6 +84,19 @@ kargo check --message-format json
 ```
 
 Each error and warning is one JSON line with the file, line, column, severity and message, ending with a `build-finished` line. See [Compiler diagnostics](../../reference/machine-readable-output/#compiler-diagnostics). Pass `--tests` to check the tests too.
+
+## Test explorer
+
+A test explorer needs the tests before they run and their results while they run. Kargo gives both as JSON lines on stdout:
+
+```sh
+kargo test --list --format json       # compile and list the tests, without running them
+kargo test --message-format json      # run them, reporting each one as it starts and ends
+```
+
+`--list` prints a `test-discovered` message per test with an `id`, its class (`suite`), `name`, `display-name`, and the `file` and `line` that declare it, for gutter icons and "go to test". A run prints `test-started` and `test-finished` messages with the same ids, then a `test-summary` per target. `test-finished` carries the outcome, the duration, the failure message and stack trace, and what the test printed. To run one test, pass its `Class.name` as the filter: `kargo test --message-format json com.example.app.MathTest.adds`.
+
+JVM and Native tests can be listed; Wasm and Android tests report results but can't be listed yet. The fields are described in [Test discovery](../../reference/machine-readable-output/#test-discovery) and [Test results](../../reference/machine-readable-output/#test-results).
 
 ## Debugging
 

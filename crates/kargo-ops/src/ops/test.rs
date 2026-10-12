@@ -1,6 +1,8 @@
-//! `kargo test`: compiles and runs tests for each target.
+//! `kargo test`: compiles and runs tests for each target, or lists them (`--list`).
+//! With `--message-format json` each test's start and result is also a JSON message
+//! on stdout, and the human-readable report moves to stderr.
 
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -19,9 +21,10 @@ use crate::warnings;
 use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
-use kargo_compiler::testreport;
+use kargo_compiler::testreport::{self, TestEvent};
 use kargo_compiler::wasm::{WasmCompilation, npm_dependencies};
 use kargo_compiler::{Outcome, common_kotlin_args};
+use kargo_compiler::{diagnostics, junit};
 use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::Platform;
 use kargo_toolchain::browser::{self, Browser};
@@ -43,6 +46,18 @@ pub struct TestOptions {
     pub junit_report: bool,
     /// Start the JVM tests suspended, waiting for a JDWP debugger on this port (`--debug`).
     pub debug: Option<u16>,
+    /// Print the tests instead of running them (`--list`).
+    pub list: Option<ListFormat>,
+}
+
+/// How `kargo test --list` prints the tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListFormat {
+    /// `<target>: <Class>.<name>` per test.
+    #[default]
+    Text,
+    /// One `test-discovered` JSON message per test.
+    Json,
 }
 
 /// What happened to one target in a `kargo test` run.
@@ -59,6 +74,10 @@ enum TargetOutcome {
 
 /// Runs the tests; returns `true` when everything passed.
 pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
+    if let Some(format) = opts.list {
+        list(ctx, opts, format)?;
+        return Ok(true);
+    }
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.build.targets)?;
     if opts.debug.is_some() && targets != [TargetKind::Jvm] {
@@ -115,7 +134,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
             if skipped.len() == 1 { "" } else { "s" }
         ));
     } else if outcomes.len() > 1 && !fail_fast {
-        print_target_table(&outcomes, anstream::stdout())?;
+        print_target_table(&outcomes, human_out())?;
     }
     if let Some(e) = fatal {
         return Err(e);
@@ -128,6 +147,37 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         finished(ctx, start);
     }
     Ok(ok)
+}
+
+/// Where the human-readable test report goes: stdout, or stderr when stdout carries
+/// JSON messages (`--message-format json`).
+pub(crate) fn human_out() -> Box<dyn Write> {
+    if diagnostics::is_json() { Box::new(anstream::stderr()) } else { Box::new(anstream::stdout()) }
+}
+
+/// Prints a test message as a JSON line, adding the package and target.
+pub(crate) fn emit_event(package: &str, target: TargetKind, mut message: serde_json::Map<String, serde_json::Value>) {
+    message.insert("package".to_owned(), package.into());
+    message.insert("target".to_owned(), target.as_str().into());
+    diagnostics::emit(&serde_json::Value::Object(message));
+}
+
+/// [`emit_event`] for a test read from TeamCity messages or a JUnit XML report.
+pub(crate) fn emit_report_event(package: &str, target: TargetKind, event: TestEvent<'_>) {
+    if let serde_json::Value::Object(message) = testreport::event_json(event) {
+        emit_event(package, target, message);
+    }
+}
+
+/// With `--message-format json`, prints the `test-summary` message that ends a target's results.
+pub(crate) fn emit_summary(ctx: &BuildContext, target: TargetKind, passed: usize, failed: usize, ignored: usize, success: bool) {
+    if !diagnostics::is_json() {
+        return;
+    }
+    let json = serde_json::json!({ "reason": "test-summary", "passed": passed, "failed": failed, "ignored": ignored, "success": success });
+    if let serde_json::Value::Object(message) = json {
+        emit_event(&ctx.ws.manifest().package.name, target, message);
+    }
 }
 
 /// Prints one line per target with how its tests went, after a `--no-fail-fast` run.
@@ -211,33 +261,70 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
+    let mode = if diagnostics::is_json() { JunitMode::Events } else { JunitMode::Run };
+    Ok(TestRun::Junit(junit_command(ctx, opts, &JvmTestClasses { classes: test_classes, classpath }, mode)?))
+}
 
+/// What the JUnit console launcher is asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JunitMode {
+    /// Run the tests, printing a tree of results.
+    Run,
+    /// Run the tests, with Kargo's listener reporting each one (`--message-format json`).
+    Events,
+    /// List the tests without running them (`--list`).
+    List,
+}
+
+/// The JUnit console launcher command that runs (or lists) the compiled tests.
+fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses, mode: JunitMode) -> Result<Command> {
     let jdk = ctx.compiler_jdk()?;
     let jvm = ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")?;
     let launcher = ctx.tool_jar("org.junit.platform", "junit-platform-console-standalone", JUNIT_VERSION)?;
-    let mut run_cp = vec![test_classes.clone()];
-    run_cp.extend(classpath);
+    let mut run_cp = vec![tests.classes.clone()];
+    run_cp.extend(tests.classpath.iter().cloned());
+    if mode != JunitMode::Run {
+        // The launcher registers the listener through its `META-INF/services` entry.
+        let cache = ctx.config.home().join("cache").join("junit");
+        run_cp.push(junit::listener(&cache, jdk, &launcher).context("failed to build Kargo's JUnit listener")?);
+    }
     let mut cmd = Command::new(jdk.java());
     if let Some(port) = opts.debug {
         cmd.arg(super::run::jdwp_option(port));
     }
     // The launcher loads the tests in its own class loader, so its JVM classpath is just the launcher.
-    cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)))
-        .args(&jvm.jvm_args)
-        .arg("-jar")
+    cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher))).args(&jvm.jvm_args);
+    if mode == JunitMode::List {
+        cmd.arg(format!("-D{}=true", junit::LIST_PROPERTY));
+    }
+    let colors = mode == JunitMode::Run && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    cmd.arg("-jar")
         .arg(&launcher)
         .arg("execute")
         .arg("--disable-banner")
-        .arg("--details=tree")
-        .args((!std::io::IsTerminal::is_terminal(&std::io::stdout())).then_some("--disable-ansi-colors"))
+        .arg(if mode == JunitMode::List { "--details=none" } else { "--details=tree" })
+        .args((!colors).then_some("--disable-ansi-colors"))
         .arg("--class-path")
         .arg(join_paths(&run_cp))
         .arg("--scan-class-path")
-        .arg(&test_classes)
-        .arg("--fail-if-no-tests")
-        .args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&test_classes)))
+        .arg(&tests.classes)
+        .args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes)))
         .current_dir(ctx.ws.root());
-    Ok(TestRun::Junit(cmd))
+    match mode {
+        JunitMode::Run => {
+            cmd.arg("--fail-if-no-tests");
+        }
+        JunitMode::Events => {
+            // Captured output reaches the listener, which reports it with the test.
+            cmd.arg("--fail-if-no-tests")
+                .arg("--config=junit.platform.output.capture.stdout=true")
+                .arg("--config=junit.platform.output.capture.stderr=true");
+        }
+        JunitMode::List => {
+            cmd.arg("--config=junit.platform.execution.dryRun.enabled=true");
+        }
+    }
+    Ok(cmd)
 }
 
 fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions) -> Result<bool> {
@@ -250,7 +337,11 @@ fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions) -> Result
     if let Some(port) = opts.debug {
         super::run::note_debugger(ctx.shell(), port, "the test JVM");
     }
-    let status = process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?;
+    let status = if diagnostics::is_json() {
+        run_junit_events(ctx, cmd)?
+    } else {
+        process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?
+    };
     if let Some(dir) = &reports {
         wrote_reports(ctx, dir);
     }
@@ -265,6 +356,38 @@ fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions) -> Result
         }
     }
     Ok(status.success())
+}
+
+/// Runs the launcher with Kargo's listener, passing each test message on with the package
+/// and target added, and the launcher's own output to stderr.
+fn run_junit_events(ctx: &BuildContext, mut cmd: Command) -> Result<std::process::ExitStatus> {
+    ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
+    let mut child = cmd.stdout(Stdio::piped()).spawn().context("failed to start the JUnit console launcher")?;
+    let stdout = child.stdout.take().context("missing test stdout")?;
+    let package = &ctx.ws.manifest().package.name;
+    let (mut passed, mut failed, mut ignored) = (0, 0, 0);
+    let mut err = anstream::stderr();
+    for line in BufReader::new(stdout).lines() {
+        let line = line?;
+        match junit::parse_event(&line) {
+            Some(message) => {
+                if message.get("reason").and_then(|r| r.as_str()) == Some("test-finished") {
+                    match message.get("outcome").and_then(|o| o.as_str()) {
+                        Some("passed") => passed += 1,
+                        Some("ignored") => ignored += 1,
+                        _ => failed += 1,
+                    }
+                }
+                emit_event(package, TargetKind::Jvm, message);
+            }
+            // The listener starts each message on a new line, which leaves blank lines behind.
+            None if line.trim().is_empty() => {}
+            None => writeln!(err, "{line}")?,
+        }
+    }
+    let status = child.wait()?;
+    emit_summary(ctx, TargetKind::Jvm, passed, failed, ignored, status.success());
+    Ok(status)
 }
 
 /// Compiled JVM test classes and the classpath they were compiled against.
@@ -383,7 +506,13 @@ fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str, target: Targe
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.stdout(Stdio::piped()).spawn().with_context(|| format!("failed to start {label}"))?;
     let stdout = child.stdout.take().context("missing test stdout")?;
-    let summary = testreport::report(BufReader::new(stdout), anstream::stdout())?;
+    let package = ctx.ws.manifest().package.name.clone();
+    let json = diagnostics::is_json();
+    let summary = testreport::report_with(BufReader::new(stdout), human_out(), |event| {
+        if json {
+            emit_report_event(&package, target, event);
+        }
+    })?;
     let status = child.wait()?;
     // Runners exit non-zero when a test failed; without a failed test that means a crash.
     let abnormal = (!status.success()).then(|| {
@@ -413,11 +542,12 @@ fn finish_reported(
         wrote_reports(ctx, &dir);
     }
     summary.crashed = abnormal.is_some() && summary.failed == 0;
+    emit_summary(ctx, target, summary.passed, summary.failed, summary.ignored, summary.success());
     if summary.crashed && !summary.ran_tests() {
         ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
         return Ok(false);
     }
-    testreport::print_summary(&summary, anstream::stdout())?;
+    testreport::print_summary(&summary, human_out())?;
     if summary.crashed {
         ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
     }
@@ -448,7 +578,15 @@ fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions) -> Re
 
     // The report is read on its own thread so tests print as they finish.
     let (lines_tx, lines) = mpsc::channel::<String>();
-    let reporter = std::thread::spawn(move || testreport::report(BufReader::new(ChannelReader::new(lines)), anstream::stdout()));
+    let package = ctx.ws.manifest().package.name.clone();
+    let json = diagnostics::is_json();
+    let reporter = std::thread::spawn(move || {
+        testreport::report_with(BufReader::new(ChannelReader::new(lines)), human_out(), |event| {
+            if json {
+                emit_report_event(&package, TargetKind::Wasm, event);
+            }
+        })
+    });
     let outcome = wait_for_page(&mut child, &events, &lines_tx, browser_timeout());
     drop(lines_tx);
     let summary = reporter.join().map_err(|_| anyhow::anyhow!("the test reporter panicked"))??;
@@ -688,16 +826,34 @@ fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation,
 }
 
 fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
+    let Some(executable) = compile_native_tests(ctx)? else {
+        return Ok(TestRun::Done(true));
+    };
+    if opts.no_run {
+        return Ok(TestRun::Done(true));
+    }
+    let mut cmd = Command::new(executable);
+    cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root());
+    if let Some(filter) = &opts.filter {
+        cmd.arg(format!("--ktest_filter=*{filter}*"));
+    }
+    Ok(TestRun::Reported(cmd, "native tests"))
+}
+
+/// Compiles the Kotlin/Native tests for this host into a test executable. Returns `None`
+/// (after saying why) when there is nothing to run.
+fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     let manifest = ctx.ws.manifest();
     let tests = sources(ctx, TargetKind::Native, true, &["kt"]);
     if tests.kotlin_files().is_empty() {
-        return Ok(no_tests(ctx, TargetKind::Native));
+        no_tests(ctx, TargetKind::Native);
+        return Ok(None);
     }
     let host = Host::current()?.konan_target;
     let platforms = native_platforms(ctx)?;
     if !platforms.iter().any(|p| p == host) {
         ctx.shell().warn(format!("skipping native tests: this host ({host}) is not in `platforms`"));
-        return Ok(TestRun::Done(true));
+        return Ok(None);
     }
     let setup = ctx.setup(TargetKind::Native)?;
     let _ = native_libraries(ctx, &setup, host, false)?;
@@ -727,15 +883,215 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     };
     let outcome =
         unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| compiling(ctx, TargetKind::Native, ", tests"))?;
-    if opts.no_run || outcome == Outcome::Empty {
-        return Ok(TestRun::Done(true));
+    Ok((outcome != Outcome::Empty).then(|| unit.artifact()))
+}
+
+/// A test found by `kargo test --list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListedTest {
+    /// Unique within the target: JUnit's unique id on the JVM, `Class.name` elsewhere.
+    id: String,
+    /// The enclosing test (such as the parameterized test of an invocation) on the JVM.
+    parent_id: Option<String>,
+    /// The class or suite (`package.Class`).
+    suite: String,
+    name: String,
+    display_name: String,
+    file: Option<PathBuf>,
+    line: Option<usize>,
+}
+
+impl ListedTest {
+    fn from_name(suite: &str, name: &str) -> Self {
+        let id = if suite.is_empty() { name.to_owned() } else { format!("{suite}.{name}") };
+        ListedTest {
+            id,
+            parent_id: None,
+            suite: suite.to_owned(),
+            name: name.to_owned(),
+            display_name: name.to_owned(),
+            file: None,
+            line: None,
+        }
     }
-    let mut cmd = Command::new(unit.artifact());
-    cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root());
-    if let Some(filter) = &opts.filter {
-        cmd.arg(format!("--ktest_filter=*{filter}*"));
+
+    fn full_name(&self) -> String {
+        if self.suite.is_empty() { self.name.clone() } else { format!("{}.{}", self.suite, self.name) }
     }
-    Ok(TestRun::Reported(cmd, "native tests"))
+}
+
+/// `kargo test --list`: compiles the tests of each target and prints them without running them.
+fn list(ctx: &BuildContext, opts: &TestOptions, format: ListFormat) -> Result<()> {
+    let targets = select_targets(ctx, &opts.build.targets)?;
+    let listed = super::parallel_map(&targets, |&target| match target {
+        TargetKind::Jvm => list_jvm(ctx, opts),
+        TargetKind::Native => list_native(ctx, opts),
+        TargetKind::Wasm | TargetKind::Android => {
+            ctx.shell().note(format!("`--list` does not list {target} tests yet"));
+            Ok(Vec::new())
+        }
+    });
+    let package = &ctx.ws.manifest().package.name;
+    let mut out = anstream::stdout();
+    for (&target, tests) in targets.iter().zip(listed) {
+        let mut tests = tests?;
+        let test_sources = sources(ctx, target, true, &["kt", "java"]);
+        locate_tests(&mut tests, &test_sources.all().cloned().collect::<Vec<_>>());
+        for test in &tests {
+            match format {
+                ListFormat::Text => writeln!(out, "{target}: {}", test.full_name())?,
+                ListFormat::Json => {
+                    let json = serde_json::json!({
+                        "reason": "test-discovered",
+                        "id": test.id,
+                        "parent-id": test.parent_id,
+                        "suite": test.suite,
+                        "name": test.name,
+                        "display-name": test.display_name,
+                        "file": test.file.as_ref().map(|f| f.display().to_string()),
+                        "line": test.line,
+                    });
+                    if let serde_json::Value::Object(message) = json {
+                        emit_event(package, target, message);
+                    }
+                }
+            }
+        }
+        ctx.shell().status("Listed", format!("{} {target} test{}", tests.len(), if tests.len() == 1 { "" } else { "s" }));
+    }
+    Ok(())
+}
+
+fn list_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<ListedTest>> {
+    let main = build_jvm(ctx)?;
+    let Some(tests) = compile_jvm_tests(ctx, &main.classes, "Compiling")? else {
+        no_tests(ctx, TargetKind::Jvm);
+        return Ok(Vec::new());
+    };
+    let mut cmd = junit_command(ctx, opts, &tests, JunitMode::List)?;
+    ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
+    let output = cmd.stdin(Stdio::null()).output().context("failed to start the JUnit console launcher")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        anyhow::bail!(
+            "the JUnit console launcher failed to list the tests ({}):\n{}{}",
+            process::describe_status(output.status),
+            stdout.trim_end(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        );
+    }
+    Ok(stdout.lines().filter_map(junit::parse_event).filter_map(|event| listed_from_event(&event)).collect())
+}
+
+/// The test in a `test-discovered` message from Kargo's JUnit listener.
+fn listed_from_event(event: &serde_json::Map<String, serde_json::Value>) -> Option<ListedTest> {
+    let field = |key: &str| event.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    (field("reason")? == "test-discovered").then_some(())?;
+    let name = field("name")?;
+    Some(ListedTest {
+        id: field("id")?,
+        parent_id: field("parent-id"),
+        suite: field("suite").unwrap_or_default(),
+        display_name: field("display-name").unwrap_or_else(|| name.clone()),
+        name,
+        file: None,
+        line: None,
+    })
+}
+
+fn list_native(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<ListedTest>> {
+    let Some(executable) = compile_native_tests(ctx)? else {
+        return Ok(Vec::new());
+    };
+    let mut cmd = Command::new(&executable);
+    cmd.arg("--ktest_list_tests").current_dir(ctx.ws.root()).stdin(Stdio::null());
+    ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
+    let output = cmd.output().with_context(|| format!("failed to start {}", executable.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "the native test executable failed to list the tests ({}):\n{}",
+            process::describe_status(output.status),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        );
+    }
+    let filter = opts.filter.as_deref().map(|f| f.replace('#', "."));
+    let tests = parse_native_list(&String::from_utf8_lossy(&output.stdout));
+    Ok(tests.into_iter().filter(|t| filter.as_deref().is_none_or(|f| t.full_name().contains(f))).collect())
+}
+
+/// Parses what a Kotlin/Native test executable prints for `--ktest_list_tests`: each suite
+/// on a line of its own ending with `.`, followed by its tests, indented.
+fn parse_native_list(output: &str) -> Vec<ListedTest> {
+    let mut suite = String::new();
+    let mut tests = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            tests.push(ListedTest::from_name(&suite, line.trim()));
+        } else {
+            suite = line.trim().trim_end_matches('.').to_owned();
+        }
+    }
+    tests
+}
+
+/// Fills in the source file and line of each test, by finding the file that declares its
+/// class and the function in it. Tests whose source cannot be found keep `None`.
+fn locate_tests(tests: &mut [ListedTest], files: &[PathBuf]) {
+    let mut texts: Vec<Option<String>> = vec![None; files.len()];
+    for test in tests {
+        // `app.Outer$Inner` is declared as `class Inner` in package `app`.
+        let (package, class) = match test.suite.rsplit_once('.') {
+            Some((package, class)) => (package, class),
+            None => ("", test.suite.as_str()),
+        };
+        let simple = class.rsplit('$').next().unwrap_or(class);
+        if simple.is_empty() {
+            continue;
+        }
+        for (i, file) in files.iter().enumerate() {
+            let text = texts[i].get_or_insert_with(|| std::fs::read_to_string(file).unwrap_or_default());
+            if declared_package(text) != package {
+                continue;
+            }
+            let Some(class_line) = find_line(text, |line| declares(line, &["class", "object", "interface"], simple)) else {
+                continue;
+            };
+            let name = test.name.trim_end_matches("()");
+            let line = find_line(text, |line| declares(line, &["fun", "void"], name)).unwrap_or(class_line);
+            test.file = Some(std::path::absolute(file).unwrap_or_else(|_| file.clone()));
+            test.line = Some(line);
+            break;
+        }
+    }
+}
+
+/// The package a Kotlin or Java source declares (empty for the default package).
+fn declared_package(text: &str) -> &str {
+    text.lines().map(str::trim).find_map(|line| line.strip_prefix("package ")).map(|p| p.trim().trim_end_matches(';').trim()).unwrap_or("")
+}
+
+/// The 1-based number of the first line matching `matches`.
+fn find_line(text: &str, matches: impl Fn(&str) -> bool) -> Option<usize> {
+    text.lines().position(matches).map(|i| i + 1)
+}
+
+/// Whether `line` declares `name` after one of `keywords` (`class Foo`, `` fun `a test`( ``, `void foo(`).
+fn declares(line: &str, keywords: &[&str], name: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let rest = |i: usize| words[i + 1..].join(" ");
+    (0..words.len()).any(|i| {
+        if !keywords.contains(&words[i]) {
+            return false;
+        }
+        // Skip type parameters: `fun <T> name(`.
+        let after = rest(i);
+        let after = if after.starts_with('<') { after.split_once("> ").map(|(_, r)| r.to_owned()).unwrap_or_default() } else { after };
+        let after = after.strip_prefix(&format!("`{name}`")).or_else(|| after.strip_prefix(name));
+        after.is_some_and(|r| r.is_empty() || r.starts_with(['(', ' ', ':', '{', '<']))
+    })
 }
 
 #[cfg(test)]
@@ -771,6 +1127,61 @@ mod tests {
             std::fs::write(path, "").unwrap();
         }
         assert_eq!(test_class_names(dir.path()), ["TopKt", "app.MyTest$Nested", "app.MyTest"]);
+    }
+
+    #[test]
+    fn parses_native_test_lists() {
+        let tests = parse_native_list("app.MathTest.\n  adds\n  fails\n\nOtherTest.\n  works\n");
+        let names: Vec<String> = tests.iter().map(ListedTest::full_name).collect();
+        assert_eq!(names, ["app.MathTest.adds", "app.MathTest.fails", "OtherTest.works"]);
+        assert_eq!(tests[0].id, "app.MathTest.adds");
+        assert_eq!(tests[0].suite, "app.MathTest");
+    }
+
+    #[test]
+    fn reads_listed_tests_from_the_listener() {
+        let event = junit::parse_event(
+            r#"##kargo {"reason":"test-discovered","id":"[engine:x]/[method:a()]","parent-id":"[engine:x]","suite":"app.T","name":"a","display-name":"a()"}"#,
+        )
+        .unwrap();
+        let test = listed_from_event(&event).unwrap();
+        assert_eq!((test.id.as_str(), test.parent_id.as_deref()), ("[engine:x]/[method:a()]", Some("[engine:x]")));
+        assert_eq!((test.suite.as_str(), test.name.as_str(), test.display_name.as_str()), ("app.T", "a", "a()"));
+        let started = junit::parse_event(r#"##kargo {"reason":"test-started","id":"x","name":"a"}"#).unwrap();
+        assert!(listed_from_event(&started).is_none());
+    }
+
+    #[test]
+    fn locates_test_functions() {
+        let dir = tempfile::tempdir().unwrap();
+        let kotlin = dir.path().join("MathTest.kt");
+        std::fs::write(
+            &kotlin,
+            "package app\n\nclass MathTest {\n    @Test\n    fun `adds two`() {}\n\n    @Test fun <T> generic() {}\n\n    class Inner {\n        @Test fun deep() {}\n    }\n}\n",
+        )
+        .unwrap();
+        let java = dir.path().join("JavaTest.java");
+        std::fs::write(&java, "package app;\n\nclass JavaTest {\n    @Test\n    void works() {}\n}\n").unwrap();
+        let other = dir.path().join("Other.kt");
+        std::fs::write(&other, "package elsewhere\n\nclass MathTest {\n    fun adds() {}\n}\n").unwrap();
+        let mut tests = vec![
+            ListedTest::from_name("app.MathTest", "adds two"),
+            ListedTest::from_name("app.MathTest", "generic"),
+            ListedTest::from_name("app.MathTest$Inner", "deep"),
+            ListedTest::from_name("app.JavaTest", "works()"),
+            ListedTest::from_name("app.MathTest", "dynamic name"),
+            ListedTest::from_name("app.Missing", "x"),
+        ];
+        locate_tests(&mut tests, &[other.clone(), kotlin.clone(), java.clone()]);
+        let found: Vec<_> = tests.iter().map(|t| (t.file.as_deref().and_then(Path::file_name), t.line)).collect();
+        let kt = Some(std::ffi::OsStr::new("MathTest.kt"));
+        assert_eq!(found[0], (kt, Some(5)));
+        assert_eq!(found[1], (kt, Some(7)));
+        assert_eq!(found[2], (kt, Some(10)));
+        assert_eq!(found[3], (Some(std::ffi::OsStr::new("JavaTest.java")), Some(5)));
+        // A test without a function of its name points at its class.
+        assert_eq!(found[4], (kt, Some(3)));
+        assert_eq!(found[5], (None, None));
     }
 
     #[test]

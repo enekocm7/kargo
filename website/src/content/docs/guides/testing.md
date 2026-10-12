@@ -119,6 +119,33 @@ The filter keeps the tests whose fully qualified `package.Class.method` name con
 
 On the JVM, a filter that matches a test class name selects whole classes, which works with every JUnit Platform engine. A filter that matches no class name is matched against method names, which only finds tests of method-based engines such as JUnit Jupiter (what `kotlin.test` uses), not Kotest specs.
 
+## Listing tests
+
+`--list` compiles the tests and prints them without running any:
+
+```console
+$ kargo test --list
+   Compiling app v0.1.0 (jvm)
+   Compiling app v0.1.0 (jvm, tests)
+jvm: com.example.app.GreetingTest.greetsByName
+jvm: com.example.app.MathTest.adds
+      Listed 2 jvm tests
+```
+
+A filter narrows the list the way it narrows a run. `--format json` prints one JSON object per test instead, with its id, class, name, display name, source file and line, for editors and other tools; see [Test discovery](../../reference/machine-readable-output/#test-discovery).
+
+JVM and Native tests can be listed. Wasm and Android tests can't be listed yet; `--list` says so and moves on.
+
+## Test results as JSON
+
+Editors that show a test explorer can follow a run test by test:
+
+```sh
+kargo test --message-format json
+```
+
+Each test prints a `test-started` and a `test-finished` JSON line on stdout as it runs, with its outcome, duration, failure message and stack trace, and what it printed. Each target ends with a `test-summary` line. The usual report goes to stderr. See [Test results](../../reference/machine-readable-output/#test-results) for the fields.
+
 ## Debugging tests
 
 `--debug` starts the JVM that runs the tests suspended, waiting for a debugger to attach over JDWP on port 5005 of `127.0.0.1` (`--debug=<port>` for another one). Combine it with a filter to stop in one test:
