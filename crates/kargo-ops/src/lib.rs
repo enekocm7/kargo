@@ -8,6 +8,8 @@ pub mod lockfile;
 pub mod npm;
 pub mod ops;
 pub mod plugins;
+pub mod publication;
+pub mod signing;
 pub mod tasks;
 pub mod warnings;
 pub mod wasm_output;

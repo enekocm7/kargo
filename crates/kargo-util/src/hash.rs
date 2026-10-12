@@ -4,8 +4,9 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+use md5::Md5;
 use sha1::Sha1;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 fn hash_reader<D: Digest>(mut reader: impl Read) -> io::Result<String> {
     let mut hasher = D::new();
@@ -30,6 +31,53 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// The checksums a Maven repository keeps next to every file, in hexadecimal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checksums {
+    pub md5: String,
+    pub sha1: String,
+    pub sha256: String,
+    pub sha512: String,
+}
+
+impl Checksums {
+    /// Each checksum with the extension of the file it is published in (`md5`, `sha1`, ...).
+    pub fn files(&self) -> [(&'static str, &str); 4] {
+        [("md5", &self.md5), ("sha1", &self.sha1), ("sha256", &self.sha256), ("sha512", &self.sha512)]
+    }
+}
+
+/// MD5, SHA-1, SHA-256 and SHA-512 of a file, computed in one pass.
+pub fn checksums_file(path: &Path) -> io::Result<Checksums> {
+    checksums_reader(File::open(path)?)
+}
+
+/// MD5, SHA-1, SHA-256 and SHA-512 of `bytes`.
+pub fn checksums_bytes(bytes: &[u8]) -> Checksums {
+    checksums_reader(bytes).expect("reading from memory cannot fail")
+}
+
+fn checksums_reader(mut reader: impl Read) -> io::Result<Checksums> {
+    let (mut md5, mut sha1, mut sha256, mut sha512) = (Md5::new(), Sha1::new(), Sha256::new(), Sha512::new());
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        md5.update(&buf[..n]);
+        sha1.update(&buf[..n]);
+        sha256.update(&buf[..n]);
+        sha512.update(&buf[..n]);
+    }
+    Ok(Checksums {
+        md5: hex::encode(md5.finalize()),
+        sha1: hex::encode(sha1.finalize()),
+        sha256: hex::encode(sha256.finalize()),
+        sha512: hex::encode(sha512.finalize()),
+    })
 }
 
 /// Incremental fingerprint builder used for up-to-date checks.
@@ -110,6 +158,12 @@ mod tests {
         std::fs::write(&p, b"abc").unwrap();
         assert_eq!(sha1_file(&p).unwrap(), "a9993e364706816aba3e25717850c26c9cd0d89d");
         assert_eq!(sha256_file(&p).unwrap(), sha256_bytes(b"abc"));
+        let sums = checksums_file(&p).unwrap();
+        assert_eq!(sums.md5, "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(sums.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(sums.sha256, sha256_bytes(b"abc"));
+        assert!(sums.sha512.starts_with("ddaf35a193617aba"));
+        assert_eq!(checksums_bytes(b"abc"), sums);
     }
 
     #[test]

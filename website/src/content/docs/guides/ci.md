@@ -97,6 +97,10 @@ Tests of a Wasm project with `environment = "browser"` run in a headless browser
 
 For release builds, Binaryen's `wasm-opt` makes the Wasm module much smaller; `npm install -g binaryen` puts it on `PATH` (see [Release builds](../wasm/#release-builds)).
 
+### Publishing releases
+
+`kargo publish` uploads a library from CI, with the Maven Central token and the signing key in secrets. See [Publishing from CI](../publishing/#publishing-from-ci) for a complete workflow.
+
 ## Other CI systems
 
 The steps are the same everywhere:

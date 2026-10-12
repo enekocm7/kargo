@@ -15,6 +15,7 @@ kargo-compiler.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 dirs.workspace = true
 flate2.workspace = true
 serde.workspace = true

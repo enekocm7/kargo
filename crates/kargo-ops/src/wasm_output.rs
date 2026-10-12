@@ -530,6 +530,9 @@ mod tests {
             description: Some("Greets".to_owned()),
             authors: vec!["Ada".to_owned(), "Grace".to_owned()],
             license: Some("MIT".to_owned()),
+            homepage: None,
+            repository: None,
+            publish: true,
         };
         let deps = map(&[("@js-joda/core", "3.2.0")]);
         let text = package_json(&package, "@acme/hello".to_owned(), "hello", &deps);

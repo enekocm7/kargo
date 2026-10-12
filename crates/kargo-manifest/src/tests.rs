@@ -354,12 +354,75 @@ fn konan_target_normalization() {
 #[test]
 fn repository_errors() {
     let with = |r: &str| format!("{MINIMAL}\n[repositories]\n{r}\n");
-    assert!(parse_err(&with("x = \"ftp://nope\"")).contains("http"));
+    assert!(parse_err(&with("x = \"ftp://nope\"")).contains("maven-local"));
     assert!(parse_err(&with("x = { url = \"https://a\", username-env = \"U\" }")).contains("both"));
     assert!(parse_err(&with("x = 3")).contains("expected a URL"));
     // Duplicate of Maven Central is ignored.
     let m = parse(&with(&format!("central = \"{}/\"", kargo_maven::repo::MAVEN_CENTRAL)));
     assert_eq!(m.repositories.len(), 1);
+}
+
+#[test]
+fn publishing_settings() {
+    let m = parse(MINIMAL);
+    assert_eq!(m.publish, PublishSettings::default());
+    assert!(m.package.publish && m.package.homepage.is_none());
+
+    let m = parse(
+        r#"
+[package]
+name = "lib"
+version = "1.0.0"
+homepage = "https://example.com/lib"
+repository = "https://github.com/me/lib"
+publish = false
+
+[repositories]
+internal = { url = "https://repo.example.com/releases", username-env = "U", password-env = "P" }
+
+[publish]
+repository = "internal"
+sign = true
+sources = false
+javadoc = "empty"
+central-publishing = "automatic"
+"#,
+    );
+    assert_eq!(m.package.homepage.as_deref(), Some("https://example.com/lib"));
+    assert_eq!(m.package.repository.as_deref(), Some("https://github.com/me/lib"));
+    assert!(!m.package.publish);
+    assert_eq!(
+        m.publish,
+        PublishSettings {
+            repository: Some("internal".into()),
+            sign: Some(true),
+            sources: false,
+            javadoc: Javadoc::Empty,
+            central_publishing: CentralPublishing::Automatic,
+        }
+    );
+    for destination in ["maven-central", "maven-local"] {
+        assert_eq!(
+            parse(&format!("{MINIMAL}\n[publish]\nrepository = \"{destination}\"\n")).publish.repository.as_deref(),
+            Some(destination)
+        );
+    }
+    assert_eq!(parse(&format!("{MINIMAL}\n[publish]\njavadoc = false\n")).publish.javadoc, Javadoc::Off);
+
+    let with = |p: &str| format!("{MINIMAL}\n[publish]\n{p}\n");
+    assert!(parse_err(&with("repository = \"nowhere\"")).contains("maven-central, maven-local"));
+    assert!(parse_err(&with("javadoc = \"html\"")).contains("javadoc"));
+    assert!(parse_err(&with("central-publishing = \"later\"")).contains("manual"));
+    assert!(parse_err(&with("checksums = []")).contains("unknown field"));
+    let bad_url = MINIMAL.replace("version = \"0.1.0\"", "version = \"0.1.0\"\nrepository = \"github.com/me/lib\"");
+    assert!(parse_err(&bad_url).contains("`repository` must be an http(s):// URL"));
+}
+
+#[test]
+fn maven_local_repository() {
+    let m = parse(&format!("{MINIMAL}\n[repositories]\nlocal = \"maven-local\"\n"));
+    let local = m.repositories.iter().find(|r| r.name == "local").expect("the local repository is added");
+    assert!(local.url.replace('\\', "/").ends_with(".m2/repository") || std::env::var_os(kargo_maven::repo::MAVEN_LOCAL_ENV).is_some());
 }
 
 #[test]

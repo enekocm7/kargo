@@ -15,6 +15,7 @@ use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::doc::DocOptions;
 use kargo_ops::ops::fmt::FmtOptions;
 use kargo_ops::ops::lint::LintOptions;
+use kargo_ops::ops::publish::PublishOptions;
 use kargo_ops::ops::run::{Program, RunOptions};
 use kargo_ops::ops::test::TestOptions;
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
@@ -567,15 +568,38 @@ enum Command {
         #[arg(short, long)]
         release: bool,
     },
-    /// Build a self-contained executable jar (JVM)
+    /// Build a self-contained executable jar, or a library's jar and sources jar (JVM)
     Package {
         #[arg(short, long)]
         release: bool,
         /// Launch the [[bin]] with this name instead of the main class (writes <NAME>-<version>-all.jar)
         #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::bins))]
         bin: Option<String>,
+        /// Build the self-contained <name>-<version>-all.jar even for a library (no main function)
+        #[arg(long)]
+        fat: bool,
         #[command(flatten)]
         package: OnePackageArg,
+    },
+    /// Build a library and publish it to a Maven repository
+    #[command(long_about = "Build a library with the release profile and publish it to a Maven repository.
+
+Publishes the jar or klibs of every target (except Android) with a POM, Gradle module metadata,
+sources and javadoc jars, checksums and, when signing is on, GnuPG signatures. The destination is
+`--repository <name>` (a [repositories] entry, `maven-central` or `maven-local`), `--local`, or
+`repository` in [publish].")]
+    Publish {
+        /// Where to publish: a [repositories] entry, `maven-central` or `maven-local` (default: [publish] repository)
+        #[arg(long, value_name = "NAME", conflicts_with = "local")]
+        repository: Option<String>,
+        /// Publish to the local Maven repository (~/.m2/repository), like `--repository maven-local`
+        #[arg(long)]
+        local: bool,
+        /// Build, stage and sign everything in target/release/publish, but upload nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
     },
     /// Run a task from [tasks], or list tasks
     Task {
@@ -1072,13 +1096,39 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, bin, package } => {
+        Command::Package { release, bin, fat, package } => {
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
             let ctx = context(&config, &project, index, &global, profile(release))?;
-            let jar = ops::package(&ctx, bin.as_deref())?;
+            let jar = ops::package(&ctx, bin.as_deref(), fat)?;
             println!("{}", jar.display());
+            Ok(0)
+        }
+        Command::Publish { repository, local, dry_run, packages } => {
+            let project = load_project(&global)?;
+            let repository = if local { Some(kargo_maven::repo::MAVEN_LOCAL.to_owned()) } else { repository };
+            let opts = PublishOptions { repository, dry_run };
+            let mut selected = project.select(&packages.selection())?;
+            if packages.workspace || (packages.packages.is_empty() && selected.len() > 1) {
+                // Publishing a whole workspace skips the members that opt out; naming one with `-p` is an error.
+                selected.retain(|&i| {
+                    let keep = project.package(i).manifest().package.publish;
+                    if !keep {
+                        shell.note(format!("skipping `{}`, which has `publish = false`", project.package(i).name()));
+                    }
+                    keep
+                });
+                if selected.is_empty() {
+                    bail!("no member of the workspace can be published; they all have `publish = false`");
+                }
+            }
+            let ordered = ops::publish::publish_order(&project, &selected);
+            let ctx = context(&config, &project, ordered[0], &global, ProfileKind::Release)?;
+            for index in ordered {
+                warn_manifest(shell, &project, project.package(index));
+                ops::publish::publish(&ctx.for_package(index), &opts)?;
+            }
             Ok(0)
         }
         Command::Task { name, list: _, args } => {
@@ -1456,6 +1506,14 @@ mod tests {
         assert!(Cli::try_parse_from(["kargo", "run", "--main", "A", "--bin", "b"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "package", "--bin", "migrate"]).unwrap();
         assert!(matches!(cli.command, Command::Package { bin: Some(ref b), .. } if b == "migrate"));
+        let cli = Cli::try_parse_from(["kargo", "package", "--fat"]).unwrap();
+        assert!(matches!(cli.command, Command::Package { fat: true, bin: None, .. }));
+        let cli = Cli::try_parse_from(["kargo", "publish", "--repository", "company", "--dry-run", "--workspace"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Publish { repository: Some(ref r), local: false, dry_run: true, ref packages } if r == "company" && packages.workspace
+        ));
+        assert!(Cli::try_parse_from(["kargo", "publish", "--local", "--repository", "company"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "new", "app", "--target", "jvm,wasm", "--with", "serialization,coroutines"]).unwrap();
         assert!(matches!(cli.command, Command::New { ref args, .. } if args.targets.len() == 2 && args.frameworks.len() == 2));
         let cli = Cli::try_parse_from(["kargo", "add", "--framework", "compose"]).unwrap();

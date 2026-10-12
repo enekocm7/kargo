@@ -1269,3 +1269,103 @@ fn native_path_dependency() {
         .stdout(predicate::str::contains("Hello, native!"))
         .stderr(predicate::str::contains("Compiling nlib v0.1.0 (native, "));
 }
+
+/// The `file:///` URL of a directory, for `[repositories]`.
+fn file_url(dir: &std::path::Path) -> String {
+    format!("file:///{}", dir.display().to_string().replace('\\', "/").trim_start_matches('/'))
+}
+
+#[test]
+fn publish_a_jvm_library_and_use_it() {
+    require_e2e!();
+    let t = E2e::new();
+    let maven_local = t.dir.path().join("m2");
+    t.create(&["--lib", "mathlib"]);
+    t.write(
+        "mathlib/kargo.toml",
+        "[package]\nname = \"mathlib\"\nversion = \"1.0.0\"\ngroup = \"com.example\"\ndescription = \"Math\"\nlicense = \"MIT\"\n\n\
+         [target.jvm]\njvm-target = \"17\"\n\n[publish]\njavadoc = \"empty\"\n",
+    );
+    t.write("mathlib/src/Math.kt", "package com.example.mathlib\n\nfun twice(x: Int): Int = x * 2\n");
+
+    // A library's `kargo package` is its own classes and sources, not a fat jar with the stdlib.
+    let jar = t.kargo("mathlib").args(["package", "-q"]).assert().success().get_output().stdout.clone();
+    let jar = String::from_utf8(jar).unwrap();
+    assert!(jar.trim().ends_with("mathlib-1.0.0.jar"), "{jar}");
+    let names = zip_names(std::path::Path::new(jar.trim()));
+    assert!(names.iter().any(|n| n == "com/example/mathlib/MathKt.class") && !names.iter().any(|n| n.starts_with("kotlin/")), "{names:?}");
+
+    t.kargo("mathlib")
+        .args(["publish", "--local"])
+        .env("KARGO_MAVEN_LOCAL", &maven_local)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Published com.example:mathlib:1.0.0 to maven-local"));
+    let dir = maven_local.join("com/example/mathlib/1.0.0");
+    for file in
+        ["mathlib-1.0.0.jar", "mathlib-1.0.0-sources.jar", "mathlib-1.0.0-javadoc.jar", "mathlib-1.0.0.pom", "mathlib-1.0.0.jar.sha1"]
+    {
+        assert!(dir.join(file).is_file(), "{file} is published");
+    }
+    let pom = std::fs::read_to_string(dir.join("mathlib-1.0.0.pom")).unwrap();
+    assert!(pom.contains("<artifactId>kotlin-stdlib</artifactId>") && pom.contains("<name>MIT</name>"), "{pom}");
+
+    t.create(&["app"]);
+    t.write("app/kargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[repositories]\nlocal = \"maven-local\"\n\n[dependencies]\n\"com.example:mathlib\" = \"1.0.0\"\n");
+    t.write("app/src/Main.kt", "import com.example.mathlib.twice\n\nfun main() {\n    println(twice(21))\n}\n");
+    t.kargo("app").arg("run").env("KARGO_MAVEN_LOCAL", &maven_local).assert().success().stdout(predicate::str::contains("42"));
+}
+
+#[test]
+fn publish_a_multiplatform_library_and_use_it() {
+    require_e2e!();
+    let t = E2e::new();
+    let repo = t.dir.path().join("repo");
+    t.create(&["--lib", "kmp", "--target", "jvm,wasm"]);
+    t.write(
+        "kmp/kargo.toml",
+        &format!(
+            "[package]\nname = \"kmp\"\nversion = \"1.0.0\"\ngroup = \"com.example\"\n\n[target.jvm]\njvm-target = \"17\"\n\n[target.wasm]\n\n\
+             [repositories]\nstaging = \"{}\"\n\n[publish]\nrepository = \"staging\"\n",
+            file_url(&repo)
+        ),
+    );
+    t.write(
+        "kmp/src/Platform.kt",
+        "package com.example.kmp\n\nexpect fun platform(): String\n\nfun hello(): String = \"Hello from ${platform()}\"\n",
+    );
+    t.write("kmp/src-jvm/Platform.jvm.kt", "package com.example.kmp\n\nactual fun platform(): String = \"JVM\"\n");
+    t.write("kmp/src-wasm/Platform.wasm.kt", "package com.example.kmp\n\nactual fun platform(): String = \"Wasm\"\n");
+    // The default javadoc jar comes from Dokka.
+    t.kargo("kmp").arg("publish").assert().success().stderr(predicate::str::contains("Published com.example:kmp:1.0.0 to `staging`"));
+    for file in [
+        "kmp/1.0.0/kmp-1.0.0.module",
+        "kmp/maven-metadata.xml",
+        "kmp-jvm/1.0.0/kmp-jvm-1.0.0.jar",
+        "kmp-jvm/1.0.0/kmp-jvm-1.0.0-javadoc.jar",
+        "kmp-wasm-js/1.0.0/kmp-wasm-js-1.0.0.klib",
+        "kmp-wasm-js/1.0.0/kmp-wasm-js-1.0.0.module",
+    ] {
+        assert!(repo.join("com/example").join(file).is_file(), "{file} is published");
+    }
+    assert!(zip_names(&repo.join("com/example/kmp-jvm/1.0.0/kmp-jvm-1.0.0-javadoc.jar")).iter().any(|n| n == "index.html"));
+
+    t.create(&["app", "--target", "jvm,wasm"]);
+    t.write(
+        "app/kargo.toml",
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.jvm]\n\n[target.wasm]\n\n[repositories]\nstaging = \"{}\"\n\n\
+             [dependencies]\n\"com.example:kmp\" = \"1.0.0\"\n",
+            file_url(&repo)
+        ),
+    );
+    t.write("app/src/Main.kt", "import com.example.kmp.hello\n\nfun main() {\n    println(hello())\n}\n");
+    t.kargo("app").args(["run", "-t", "jvm"]).assert().success().stdout(predicate::str::contains("Hello from JVM"));
+    t.kargo("app").args(["build", "-t", "wasm"]).assert().success();
+    t.kargo("app").args(["tree", "-t", "wasm"]).assert().success().stdout(predicate::str::contains("com.example:kmp-wasm-js:1.0.0"));
+}
+
+fn zip_names(path: &std::path::Path) -> Vec<String> {
+    let archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    archive.file_names().map(|n| n.unwrap().into_owned()).collect()
+}

@@ -1,12 +1,16 @@
 //! Maven repository support: coordinates, versions, POMs, Gradle module
 //! metadata, downloading and transitive resolution.
 
+pub mod central;
 pub mod coord;
+pub mod deploy;
 pub mod module;
 pub mod pom;
 pub mod repo;
 pub mod resolver;
 pub mod snapshot;
+#[cfg(test)]
+mod testserver;
 pub mod version;
 
 pub use coord::{Artifact, CoordSpec, ModuleId};

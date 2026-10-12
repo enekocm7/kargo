@@ -58,16 +58,28 @@ const ANDROID_REFERENCE: &str = "https://developer.android.com/reference/kotlin/
 /// Generates the documentation and returns the path of its `index.html`.
 pub fn doc(ctx: &BuildContext, opts: &DocOptions) -> Result<PathBuf> {
     let start = Instant::now();
+    let targets = select_targets(ctx, &opts.targets)?;
+    let index = generate(ctx, &targets)?.join("index.html");
+    finished(ctx, start);
+    ctx.shell().status("Generated", index.display());
+    if opts.open {
+        ctx.shell().status("Opening", index.display());
+        crate::web::open_in_browser(index.as_os_str())?;
+    }
+    Ok(index)
+}
+
+/// Runs Dokka for `targets` and returns the directory holding the HTML (`target/<profile>/doc`).
+pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
     let ws = ctx.ws;
     let manifest = ws.manifest();
-    let targets = select_targets(ctx, &opts.targets)?;
 
     let mut dirs = vec![ws.common_sources()];
     dirs.extend(targets.iter().map(|t| ws.target_sources(*t)));
     if dirs.iter().all(|d| collect_files(d, &["kt", "java"]).is_empty()) {
         bail!("no Kotlin or Java sources to document; add them under `src/` or `src-<target>/`");
     }
-    let source_sets = source_sets(ctx, &targets)?;
+    let source_sets = source_sets(ctx, targets)?;
 
     let jdk = ctx.jdk()?;
     let dokka_version = manifest.doc.dokka_version.as_deref().unwrap_or(DOKKA_VERSION);
@@ -112,13 +124,7 @@ pub fn doc(ctx: &BuildContext, opts: &DocOptions) -> Result<PathBuf> {
     if !index.is_file() {
         bail!("Dokka finished but did not write {}", index.display());
     }
-    finished(ctx, start);
-    ctx.shell().status("Generated", index.display());
-    if opts.open {
-        ctx.shell().status("Opening", index.display());
-        crate::web::open_in_browser(index.as_os_str())?;
-    }
-    Ok(index)
+    Ok(out)
 }
 
 /// Builds the Dokka source sets for `targets` from the project layout.

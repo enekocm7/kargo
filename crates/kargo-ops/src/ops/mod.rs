@@ -9,6 +9,7 @@ pub mod fmt;
 pub mod lint;
 pub mod local;
 pub mod new;
+pub mod publish;
 pub mod run;
 pub mod target;
 pub mod test;
@@ -232,7 +233,9 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
 
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target, launching
 /// the project's main class or, with `bin`, that `[[bin]]` (`<bin>-<version>-all.jar`).
-pub fn package(ctx: &BuildContext, bin: Option<&str>) -> Result<PathBuf> {
+/// A library (no main class) gets a jar of its own classes and a sources jar instead,
+/// unless `fat` asks for the self-contained jar.
+pub fn package(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathBuf> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
         bail!("`kargo package` creates an executable jar and needs the JVM target; use `kargo build` for other targets");
     }
@@ -247,6 +250,14 @@ pub fn package(ctx: &BuildContext, bin: Option<&str>) -> Result<PathBuf> {
     let jvm = build_jvm(ctx)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
     let pkg = &ctx.ws.manifest().package;
+    if bin.is_none() && !fat && jvm.main_class.is_none() {
+        let jar = publish::package_library(ctx, &jvm)?;
+        let mut env = env;
+        env.push(("KARGO_PACKAGE".to_owned(), jar.to_string_lossy().into_owned()));
+        crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
+        build::finished(ctx, start);
+        return Ok(jar);
+    }
     let name = bin.unwrap_or(&pkg.name);
     let dest = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join(format!("{name}-{}-all.jar", pkg.version));
     ctx.shell().status("Packaging", format!("{name} v{} ({})", pkg.version, dest.display()));

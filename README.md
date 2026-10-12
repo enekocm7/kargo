@@ -42,7 +42,8 @@ $ kargo test
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
-| `kargo package [--release] [--bin <name>]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]` |
+| `kargo package [--release] [--bin <name>] [--fat]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar) |
+| `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo fetch` | Pre-download everything |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
@@ -86,6 +87,8 @@ Kargo warns about projects that build but are probably not what you meant: a tar
 name = "my-app"
 version = "0.1.0"
 group = "com.example"
+# description, authors = ["Ada <ada@example.com>"], license = "MIT", homepage, repository: the POM of `kargo publish`
+# publish = false           # keep `kargo publish` away from this package
 
 [kotlin]
 version = "2.4.21"
@@ -147,6 +150,14 @@ path = "src/tools/Migrate.kt"   # the file with its `main`; or main = "<JVM clas
 [repositories]              # Maven Central is always used; Google Maven is added for Android/Compose
 jitpack = "https://jitpack.io"
 company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
+local = "maven-local"       # ~/.m2/repository, where `kargo publish --local` and `mvn install` put libraries
+
+[publish]                   # kargo publish; every key is optional
+repository = "maven-central"  # default destination: maven-central, maven-local or a [repositories] entry
+# sign = true               # GnuPG signatures; default: on for Maven Central only
+# sources = true
+# javadoc = "dokka"         # or "empty" (a manifest only) or false
+# central-publishing = "manual"   # or "automatic": release as soon as Maven Central validates the upload
 
 [profile.release]
 compiler-args = []          # also: debug, optimize
@@ -273,6 +284,9 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
 | `BROWSER` | Browser for `kargo doc --open` and `kargo run --open` |
 | `KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT` | Browser, extra arguments and silence timeout (seconds) for Wasm browser tests |
+| `KARGO_MAVEN_LOCAL` | The local Maven repository for `kargo publish --local` and `"maven-local"` (default `~/.m2/repository`) |
+| `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | Central Portal user token for `kargo publish` to Maven Central (`KARGO_MAVEN_CENTRAL_URL` overrides the Portal) |
+| `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_PASSPHRASE`, `KARGO_SIGNING_KEY_ID`, `KARGO_GPG` | Signing key (ASCII-armored), its passphrase, which key, and the `gpg` to sign published files with |
 | `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
 
 ## Development
@@ -282,11 +296,11 @@ Kargo is a Cargo workspace:
 | Crate | Responsibility |
 |---|---|
 | `kargo-util` | Terminal output, configuration, filesystem/hash/process helpers |
-| `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver |
+| `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver, uploads and the Maven Central Portal |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
-| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, commands |
+| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, commands |
 | `kargo` | The CLI binary |
 
 ```bash
