@@ -211,6 +211,13 @@ impl<'a> Resolver<'a> {
         self.pins.insert(module, Version::parse(version));
     }
 
+    /// Like [`Resolver::pin`] for a SNAPSHOT `version`, fixed at the build whose files are named
+    /// `build` (`1.0-20240101.120000-1`) instead of the newest one.
+    pub fn pin_build(&mut self, module: ModuleId, version: &str, build: &str) {
+        self.client.pin_snapshot_build(&module, version, build);
+        self.pin(module, version);
+    }
+
     pub fn managed_version(&self, module: &ModuleId) -> Option<&str> {
         self.constraints.get(module).map(String::as_str)
     }
@@ -221,7 +228,7 @@ impl<'a> Resolver<'a> {
             return Ok(Some(pom.clone()));
         }
         let artifact = Artifact::new(module.clone(), version).with_extension("pom");
-        let Some(xml) = self.client.fetch_text(&artifact.repo_path())? else { return Ok(None) };
+        let Some(xml) = self.client.fetch_text(&self.client.artifact_path(&artifact)?)? else { return Ok(None) };
         let pom = Pom::parse(&xml).with_context(|| format!("failed to parse POM of {module}:{version}"))?;
         self.poms.lock().expect("lock poisoned").insert(key, pom.clone());
         Ok(Some(pom))
@@ -284,7 +291,7 @@ impl<'a> Resolver<'a> {
 
     fn info_from_module_metadata(&self, module: &ModuleId, version: &str, has_pom: bool) -> Result<Option<NodeInfo>> {
         let artifact = Artifact::new(module.clone(), version).with_extension("module");
-        let Some(json) = self.client.fetch_text(&artifact.repo_path())? else { return Ok(None) };
+        let Some(json) = self.client.fetch_text(&self.client.artifact_path(&artifact)?)? else { return Ok(None) };
         let meta = ModuleMetadata::parse(&json)?;
         let Some(variant) = select_variant(&meta, module, &self.platform) else {
             if has_pom && self.platform == Platform::Jvm {
@@ -347,7 +354,7 @@ impl<'a> Resolver<'a> {
         }
         let artifact = Artifact::new(module.clone(), version).with_extension("module");
         let mut constraints = Vec::new();
-        let from_metadata = match self.client.fetch_text(&artifact.repo_path())? {
+        let from_metadata = match self.client.fetch_text(&self.client.artifact_path(&artifact)?)? {
             Some(json) => {
                 let meta = ModuleMetadata::parse(&json)?;
                 meta.variants.iter().find(|v| v.attributes.get("org.gradle.category").and_then(|c| c.as_str()) == Some("platform")).map(
@@ -406,7 +413,10 @@ impl<'a> Resolver<'a> {
             "klib" => Some("klib"),
             _ => Some("jar"),
         };
-        let files = extension.map(|ext| vec![Artifact::new(module.clone(), version).with_extension(ext).repo_path()]).unwrap_or_default();
+        let files = match extension {
+            Some(ext) => vec![self.client.artifact_path(&Artifact::new(module.clone(), version).with_extension(ext))?],
+            None => Vec::new(),
+        };
         Ok(NodeInfo { edges, files, constraints: Vec::new() })
     }
 
@@ -630,7 +640,7 @@ impl<'a> Resolver<'a> {
                     let artifact = Artifact::new(module.clone(), version)
                         .with_classifier(root.classifier.clone())
                         .with_extension(root.extension.clone().unwrap_or_else(|| "jar".into()));
-                    let path = artifact.repo_path();
+                    let path = self.client.artifact_path(&artifact)?;
                     if !files.contains(&path) {
                         files.push(path);
                     }
@@ -700,21 +710,35 @@ mod tests {
         fn publish(&self, coord: &str, version: &str, deps: &[(&str, &str, &str)]) {
             let (group, artifact) = coord.split_once(':').unwrap();
             let dir = format!("{}/{artifact}/{version}", group.replace('.', "/"));
-            let deps_xml: String = deps
+            self.write(&format!("{dir}/{artifact}-{version}.pom"), &pom_xml(group, artifact, version, deps));
+            self.write(&format!("{dir}/{artifact}-{version}.jar"), "jar");
+            self.add_metadata_version(group, artifact, version);
+        }
+
+        /// Publishes a SNAPSHOT the way `mvn deploy` stores it: files named after the build (`stamp` is
+        /// `20240101.120000-1`) in the `-SNAPSHOT` directory, which the version's `maven-metadata.xml` lists.
+        fn publish_snapshot(&self, coord: &str, version: &str, stamp: &str, deps: &[(&str, &str, &str)]) {
+            let (group, artifact) = coord.split_once(':').unwrap();
+            let dir = format!("{}/{artifact}/{version}", group.replace('.', "/"));
+            let file_version = format!("{}-{stamp}", version.strip_suffix("-SNAPSHOT").unwrap());
+            self.write(&format!("{dir}/{artifact}-{file_version}.pom"), &pom_xml(group, artifact, version, deps));
+            self.write(&format!("{dir}/{artifact}-{file_version}.jar"), &format!("jar {file_version}"));
+            self.write_snapshot_metadata(&dir, &file_version, &["jar", "pom"]);
+            self.add_metadata_version(group, artifact, version);
+        }
+
+        fn write_snapshot_metadata(&self, dir: &str, file_version: &str, extensions: &[&str]) {
+            let updated = file_version.rsplit_once('-').unwrap().0.rsplit('-').next().unwrap().replace('.', "");
+            let entries: String = extensions
                 .iter()
-                .map(|(c, v, extra)| {
-                    let (g, a) = c.split_once(':').unwrap();
-                    format!("<dependency><groupId>{g}</groupId><artifactId>{a}</artifactId><version>{v}</version>{extra}</dependency>")
+                .map(|ext| {
+                    format!("<snapshotVersion><extension>{ext}</extension><value>{file_version}</value><updated>{updated}</updated></snapshotVersion>")
                 })
                 .collect();
             self.write(
-                &format!("{dir}/{artifact}-{version}.pom"),
-                &format!(
-                    "<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><dependencies>{deps_xml}</dependencies></project>"
-                ),
+                &format!("{dir}/maven-metadata.xml"),
+                &format!("<metadata><versioning><snapshotVersions>{entries}</snapshotVersions></versioning></metadata>"),
             );
-            self.write(&format!("{dir}/{artifact}-{version}.jar"), "jar");
-            self.add_metadata_version(group, artifact, version);
         }
 
         fn add_metadata_version(&self, group: &str, artifact: &str, version: &str) {
@@ -733,6 +757,19 @@ mod tests {
             let config = Config::new(self.home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
             MavenClient::new(&config, vec![Repository::new("test", format!("file://{}", self.dir.path().display()))])
         }
+    }
+
+    fn pom_xml(group: &str, artifact: &str, version: &str, deps: &[(&str, &str, &str)]) -> String {
+        let deps_xml: String = deps
+            .iter()
+            .map(|(c, v, extra)| {
+                let (g, a) = c.split_once(':').unwrap();
+                format!("<dependency><groupId>{g}</groupId><artifactId>{a}</artifactId><version>{v}</version>{extra}</dependency>")
+            })
+            .collect();
+        format!(
+            "<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><dependencies>{deps_xml}</dependencies></project>"
+        )
     }
 
     fn req(coord: &str, version: &str) -> DependencyRequest {
@@ -1133,6 +1170,86 @@ mod tests {
         let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("old:x", "1.0")]).unwrap();
         assert_eq!(file_names(&res), ["x-1.0.jar"]);
         assert!(res.files()[0].to_string_lossy().replace('\\', "/").contains("new/x/1.0"));
+    }
+
+    #[test]
+    fn timestamped_snapshots_resolve_to_the_newest_build() {
+        let repo = TestRepo::new();
+        repo.publish_snapshot("g:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[("g:dep", "1.0-SNAPSHOT", "")]);
+        repo.publish_snapshot("g:dep", "1.0-SNAPSHOT", "20240101.130000-4", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("g:lib", "1.0-SNAPSHOT")]).unwrap();
+        assert_eq!(versions(&res), ["lib:1.0-SNAPSHOT", "dep:1.0-SNAPSHOT"]);
+        assert_eq!(file_names(&res), ["lib-1.0-20240101.120000-1.jar", "dep-1.0-20240101.130000-4.jar"]);
+
+        // A later deployment replaces the metadata; the next resolution follows it.
+        repo.publish_snapshot("g:lib", "1.0-SNAPSHOT", "20240102.080000-2", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("g:lib", "1.0-SNAPSHOT")]).unwrap();
+        assert_eq!(versions(&res), ["lib:1.0-SNAPSHOT"]);
+        assert_eq!(file_names(&res), ["lib-1.0-20240102.080000-2.jar"]);
+    }
+
+    #[test]
+    fn snapshots_stored_under_their_plain_name_resolve() {
+        let repo = TestRepo::new();
+        repo.publish("g:lib", "2.0-SNAPSHOT", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("g:lib", "2.0-SNAPSHOT")]).unwrap();
+        assert_eq!(file_names(&res), ["lib-2.0-SNAPSHOT.jar"]);
+    }
+
+    #[test]
+    fn timestamped_snapshot_root_extension() {
+        let repo = TestRepo::new();
+        repo.publish_snapshot("g:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[]);
+        let dir = "g/lib/1.0-SNAPSHOT";
+        repo.write(&format!("{dir}/lib-1.0-20240101.120000-1.zip"), "zip");
+        repo.write_snapshot_metadata(dir, "1.0-20240101.120000-1", &["jar", "pom", "zip"]);
+        let mut root = req("g:lib", "1.0-SNAPSHOT");
+        root.extension = Some("zip".into());
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[root]).unwrap();
+        assert_eq!(file_names(&res), ["lib-1.0-20240101.120000-1.zip"]);
+    }
+
+    #[test]
+    fn timestamped_snapshot_gradle_metadata_and_parent_poms() {
+        let repo = TestRepo::new();
+        let marker = "<!-- do_not_remove: published-with-gradle-metadata -->";
+        let dir = "s/ui/1.0-SNAPSHOT";
+        repo.write(
+            &format!("{dir}/ui-1.0-20240101.120000-1.pom"),
+            &format!("<project>{marker}<groupId>s</groupId><artifactId>ui</artifactId><version>1.0-SNAPSHOT</version></project>"),
+        );
+        repo.write(
+            &format!("{dir}/ui-1.0-20240101.120000-1.module"),
+            r#"{"formatVersion": "1.1", "variants": [
+              {"name": "runtimeElements", "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime"},
+               "dependencies": [{"group": "s", "module": "core", "version": {"requires": "1.0-SNAPSHOT"}}],
+               "files": [{"name": "ui-1.0-SNAPSHOT.jar", "url": "ui-1.0-20240101.120000-1.jar"}]}
+            ]}"#,
+        );
+        repo.write(&format!("{dir}/ui-1.0-20240101.120000-1.jar"), "jar");
+        repo.write_snapshot_metadata(dir, "1.0-20240101.120000-1", &["pom", "module", "jar"]);
+        // `core` inherits its dependencies from a SNAPSHOT parent.
+        repo.write(
+            "s/parent/1.0-SNAPSHOT/parent-1.0-20240101.100000-9.pom",
+            "<project><groupId>s</groupId><artifactId>parent</artifactId><version>1.0-SNAPSHOT</version><packaging>pom</packaging>
+             <dependencies><dependency><groupId>s</groupId><artifactId>inherited</artifactId><version>1.0</version></dependency></dependencies></project>",
+        );
+        repo.write_snapshot_metadata("s/parent/1.0-SNAPSHOT", "1.0-20240101.100000-9", &["pom"]);
+        repo.write(
+            "s/core/1.0-SNAPSHOT/core-1.0-20240101.110000-2.pom",
+            "<project><parent><groupId>s</groupId><artifactId>parent</artifactId><version>1.0-SNAPSHOT</version></parent><artifactId>core</artifactId><version>1.0-SNAPSHOT</version></project>",
+        );
+        repo.write("s/core/1.0-SNAPSHOT/core-1.0-20240101.110000-2.jar", "jar");
+        repo.write_snapshot_metadata("s/core/1.0-SNAPSHOT", "1.0-20240101.110000-2", &["pom", "jar"]);
+        repo.publish("s:inherited", "1.0", &[]);
+        let client = repo.client();
+        let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("s:ui", "1.0-SNAPSHOT")]).unwrap();
+        assert_eq!(versions(&res), ["ui:1.0-SNAPSHOT", "core:1.0-SNAPSHOT", "inherited:1.0"]);
+        assert_eq!(file_names(&res), ["ui-1.0-20240101.120000-1.jar", "core-1.0-20240101.110000-2.jar", "inherited-1.0.jar"]);
     }
 
     #[test]

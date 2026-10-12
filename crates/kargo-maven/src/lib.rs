@@ -6,6 +6,7 @@ pub mod module;
 pub mod pom;
 pub mod repo;
 pub mod resolver;
+pub mod snapshot;
 pub mod version;
 
 pub use coord::{Artifact, CoordSpec, ModuleId};

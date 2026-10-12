@@ -35,6 +35,12 @@ Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` an
 
 Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.10 or newer, or add `[toolchain] jdk = "21"` so Kargo builds with JDK 21. See [Older Kotlin versions on new JDKs](../../guides/toolchains/#older-kotlin-versions-on-new-jdks).
 
+### `jvm-target ... is newer than JDK ...` or `invalid [target.jvm] jvm-target`
+
+`[target.jvm] jvm-target` is the Java version of the bytecode Kargo produces, and the JDK that builds the project can't target a version newer than itself. Lower `jvm-target`, or add `[toolchain] jdk = "26"` (the same version) so Kargo downloads and builds with a JDK that can. The default target never triggers this: it is lowered to your JDK's version.
+
+`invalid [target.jvm] jvm-target` means the value isn't a Java version: use `8` (or `1.8`), or a number from `9` up such as `17` or `21`. See [`[target.jvm]`](../manifest/#targetjvm).
+
 ### `could not determine the main class`
 
 Kargo looks for a top-level Kotlin `fun main`, or a `@JvmStatic fun main` in an `object` or `companion object`. The message says why detection failed: ``no `main` function found``, or ``found multiple `main` functions`` followed by the classes it found. Set the main class explicitly:
@@ -95,6 +101,10 @@ Tasks run in `cmd` on Windows, which doesn't understand `$VAR`, `mkdir -p` or `.
 ### A dependency has the wrong version
 
 Run `kargo tree --duplicates` to see who asks for what. The highest requested version wins; add `force = true` to your own declaration to pin one.
+
+### A SNAPSHOT dependency isn't found, or doesn't update
+
+Add the repository that holds the SNAPSHOT to `[repositories]`; Maven Central doesn't accept them. Kargo finds timestamped builds (`lib-1.0-20240101.120000-1.jar`) through the `1.0-SNAPSHOT/maven-metadata.xml` in that repository. A build stays locked in `kargo.lock`, so to get a newer one run `kargo update`. If it fails with `could not find`, the repository probably deleted the locked build; `kargo update` locks the current one. See [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions).
 
 ### The compiler runs out of memory
 

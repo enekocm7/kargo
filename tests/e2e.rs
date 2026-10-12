@@ -92,6 +92,42 @@ fn jvm_lifecycle() {
 }
 
 #[test]
+fn jvm_target_spellings_and_limits() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write("app/src/Main.kt", "fun main() { println(Legacy.greeting()) }\n");
+    t.write("app/src/Legacy.java", "public class Legacy { public static String greeting() { return \"hi\"; } }\n");
+    let with_target = |target: &str| {
+        t.write("app/kargo.toml", &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.jvm]\njvm-target = \"{target}\"\n"));
+    };
+    let class_version = |name: &str| {
+        let bytes = std::fs::read(t.dir.path().join("app/target/debug/jvm/classes").join(name)).unwrap();
+        u16::from_be_bytes([bytes[6], bytes[7]])
+    };
+
+    // Kotlin only knows Java 8 as `1.8` while javac wants `8`; Kargo takes either spelling.
+    for (target, version) in [("8", 52), ("1.8", 52), ("17", 61)] {
+        with_target(target);
+        t.kargo("app").arg("build").assert().success();
+        assert_eq!(class_version("MainKt.class"), version, "Kotlin classes for jvm-target {target}");
+        assert_eq!(class_version("Legacy.class"), version, "Java classes for jvm-target {target}");
+    }
+
+    // A bad value, or one the JDK can't compile for, fails before the compilers start.
+    with_target("abc");
+    t.kargo("app").arg("build").assert().code(101).stderr(predicate::str::contains("invalid [target.jvm] jvm-target `abc`"));
+    with_target("99");
+    t.kargo("app")
+        .arg("build")
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("jvm-target 99 is newer than JDK"))
+        .stderr(predicate::str::contains("[toolchain] jdk = \"99\""))
+        .stderr(predicate::str::contains("Compiling").not());
+}
+
+#[test]
 fn jvm_test_failures_and_filters() {
     require_e2e!();
     let t = E2e::new();

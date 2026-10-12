@@ -129,7 +129,7 @@ With no `[target.*]` section, the project targets the JVM with default settings.
 
 ```toml
 [target.jvm]
-jvm-target = "25"                       # default "25", lowered to your JDK if it is older
+jvm-target = "25"                       # 8 (or 1.8) and up; default "25", lowered to your JDK if it is older
 main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun main`; set it for a Java main
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 javac-args = ["-Xlint:all"]             # extra javac options for Java sources
@@ -137,7 +137,16 @@ javac-args = ["-Xlint:all"]             # extra javac options for Java sources
 
 `javac-args` are appended to the `javac` command line for main and test Java sources, after the options Kargo sets (`-d`, `-encoding UTF-8`, `--release` from `jvm-target`, `-classpath`, and the [annotation processor](../../guides/dependencies/#annotation-processors) options). Use it for lint flags, `-parameters` or processor options such as `-Akey=value`. It has no effect on Kotlin sources; use `[kotlin] compiler-args` for those.
 
+`jvm-target` is a Java version: `8`, or `9` and up (`11`, `17`, `21`, ...). `1.8` is accepted as another spelling of `8`. Kargo checks the value when it loads `kargo.toml`, so a typo such as `"abc"` or `"1.9"` fails with the list of valid values before any compiler starts. It passes `1.8` to the Kotlin compiler (which doesn't accept `8`) and `--release 8` to `javac`.
+
 When you don't set `jvm-target`, Kargo targets Java 25, or the version of the JDK that builds the project if that JDK is older (a pinned `[toolchain] jdk`, else `JAVA_HOME` or `java` on `PATH`). The compiled classes then always run on the JDK you build with. Set `jvm-target` explicitly to support older Java runtimes than the one you build with.
+
+An explicit `jvm-target` can't be newer than the JDK that builds the project, pinned or from `JAVA_HOME`/`PATH`, because that JDK can't compile for it. Kargo stops with an error that suggests setting `[toolchain] jdk` to a matching version:
+
+```console
+$ kargo build
+error: [target.jvm] jvm-target 26 is newer than JDK 25, which builds the project; set `[toolchain] jdk = "26"` in kargo.toml to build with a newer JDK, or lower `jvm-target`
+```
 
 Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one, run another with `kargo run --main <class>`, or declare each program as a [`[[bin]]`](#bin).
 

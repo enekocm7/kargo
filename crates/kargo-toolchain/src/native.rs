@@ -4,6 +4,10 @@
 //! Kotlin/Native downloads further dependencies (LLVM, sysroots) on first use.
 //! Kargo points `KONAN_DATA_DIR` at `~/.kargo/toolchains/konan` so those are
 //! managed alongside the distributions instead of living in `~/.konan`.
+//!
+//! The compiler can link against a precompiled Kotlin standard library instead of
+//! lowering it again on every build, which roughly halves the time of a debug build. It
+//! builds that cache inside the distribution (`klib/cache`) the first time it is asked to.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,8 +16,21 @@ use anyhow::{Context, Result, bail};
 
 use kargo_maven::{Artifact, MavenClient, ModuleId, Version};
 use kargo_util::config::Config;
+use kargo_util::process::slash;
 
 use crate::archive::{self, ArchiveKind};
+
+/// Environment variable that turns the precompiled standard library off (`false`, `0`, `no` or `off`).
+pub const CACHE_ENV: &str = "KARGO_NATIVE_CACHE";
+
+/// Whether builds may use the precompiled standard library (on unless [`CACHE_ENV`] says otherwise).
+pub fn cache_enabled() -> bool {
+    std::env::var(CACHE_ENV).map_or(true, |v| !is_off(&v))
+}
+
+fn is_off(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off")
+}
 
 /// The host as Kotlin/Native names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +106,24 @@ impl NativeToolchain {
         let mut cmd = Command::new(cinterop_in(&self.home));
         cmd.env("KONAN_DATA_DIR", &self.data_dir);
         cmd
+    }
+
+    /// `konanc` options that link the precompiled standard library, or none when this
+    /// distribution has no standard library to precompile.
+    ///
+    /// `-Xauto-cache-from` names the klibs the compiler may precompile on demand; it puts the
+    /// result in the distribution's own `klib/cache`, so removing the distribution removes it.
+    pub fn cache_args(&self) -> Vec<String> {
+        let stdlib = self.home.join("klib").join("common");
+        if stdlib.join("stdlib").is_dir() { vec![format!("-Xauto-cache-from={}", slash(&stdlib))] } else { Vec::new() }
+    }
+
+    /// Where the compiler keeps the precompiled standard library for `konan_target`.
+    /// Builds with debug info (`-g`) use a separate one. The directory names are the compiler's:
+    /// `linux_x64-gSTATIC-system` with debug info, `linux_x64STATIC-system` without.
+    pub fn stdlib_cache_dir(&self, konan_target: &str, debug: bool) -> PathBuf {
+        let flavor = if debug { "-gSTATIC" } else { "STATIC" };
+        self.home.join("klib").join("cache").join(format!("{konan_target}{flavor}-system")).join("stdlib-per-file-cache")
     }
 
     fn at(config: &Config, version: &str) -> Result<Self> {
@@ -237,6 +272,40 @@ mod tests {
         NativeToolchain::remove(&config, "2.4.3").unwrap();
         assert!(NativeToolchain::remove(&config, "2.4.3").is_err());
         assert_eq!(NativeToolchain::installed(&config).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stdlib_cache_options() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config::new(tmp.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let home = config.native_dir().join("2.4.21");
+        fake_dist(&home);
+        let toolchain = NativeToolchain::find(&config, "2.4.21").unwrap().unwrap();
+        // A distribution without a standard library has nothing to precompile.
+        assert!(toolchain.cache_args().is_empty());
+
+        std::fs::create_dir_all(home.join("klib/common/stdlib")).unwrap();
+        let args = toolchain.cache_args();
+        assert_eq!(args.len(), 1);
+        let dir = args[0].strip_prefix("-Xauto-cache-from=").unwrap();
+        assert!(dir.ends_with("2.4.21/klib/common"), "{dir}");
+        assert!(!dir.contains('\\'), "argfiles use forward slashes: {dir}");
+
+        // Debug-info builds and others each get their own cache.
+        let debug = toolchain.stdlib_cache_dir("linux_x64", true);
+        let plain = toolchain.stdlib_cache_dir("linux_x64", false);
+        assert!(debug.ends_with("klib/cache/linux_x64-gSTATIC-system/stdlib-per-file-cache"), "{debug:?}");
+        assert!(plain.ends_with("klib/cache/linux_x64STATIC-system/stdlib-per-file-cache"), "{plain:?}");
+    }
+
+    #[test]
+    fn cache_switch_values() {
+        for off in ["false", "FALSE", " 0 ", "no", "Off"] {
+            assert!(is_off(off), "{off}");
+        }
+        for on in ["true", "1", "yes", "on", ""] {
+            assert!(!is_off(on), "{on}");
+        }
     }
 
     #[test]

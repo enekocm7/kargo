@@ -259,7 +259,7 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
     let mut test_cp = super::local::artifacts(ctx, super::local::LocalTarget::Jvm, &all_scopes, true)?;
     test_cp.extend(ctx.resolve("jvm/test", Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?.files());
-    let jdk = ctx.compiler_jdk()?;
+    let jdk = ctx.jvm_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
@@ -267,7 +267,7 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let test_classes = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-classes");
     let processor_path = jvm_processor_path(ctx, &setup, true)?;
     let javac_args = jvm_javac_args(&setup, jvm);
-    let jvm_target = jvm.target_for(jdk.version);
+    let jvm_target = jvm.target_for(jdk.version)?;
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(test_cp);
