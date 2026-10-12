@@ -761,6 +761,54 @@ fn toolchain_list_and_remove() {
     assert!(!out.contains("jdk-17.0.12+7") && !out.contains("2.4.21"), "{out}");
 }
 
+/// A Kotlin/Native 2.4.21 distribution with a standard library whose `konanc` always fails,
+/// which leaves the arguments Kargo passed in the `.konanc.args` file for the test to read.
+fn fake_native(home: &std::path::Path) -> std::path::PathBuf {
+    let dist = home.join("toolchains/kotlin-native/2.4.21");
+    let konanc = dist.join("bin").join(if cfg!(windows) { "konanc.bat" } else { "konanc" });
+    std::fs::create_dir_all(konanc.parent().unwrap()).unwrap();
+    std::fs::write(&konanc, if cfg!(windows) { "@exit /b 1\r\n" } else { "#!/bin/sh\nexit 1\n" }).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&konanc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::create_dir_all(dist.join("klib/common/stdlib")).unwrap();
+    dist
+}
+
+#[test]
+fn native_binaries_link_the_precompiled_stdlib() {
+    let p = Project::new();
+    let dist = fake_native(p.home.path());
+    p.file("kargo.toml", &manifest("nat", "\n[target.native]\nplatforms = [\"linux_x64\"]\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    let build = |profile: &[&str], env: &[(&str, &str)]| {
+        let mut cmd = p.kargo();
+        cmd.arg("build").args(profile).envs(env.iter().copied());
+        String::from_utf8(cmd.assert().failure().code(101).get_output().stderr.clone()).unwrap()
+    };
+    let argfile = |profile: &str| p.read(&format!("target/{profile}/native/.fingerprint/nat-linux_x64-main.konanc.args"));
+    let cache_flag = |args: &str| args.lines().any(|l| l.trim_matches('"').starts_with("-Xauto-cache-from=") && l.contains("klib/common"));
+
+    // The first build says that the compiler is about to build the cache.
+    let stderr = build(&[], &[]);
+    assert!(stderr.contains("building the Kotlin/Native standard library cache for linux_x64"), "{stderr}");
+    assert!(cache_flag(&argfile("debug")), "{}", argfile("debug"));
+
+    // Once the compiler has made it, builds stay quiet but still pass the flag.
+    std::fs::create_dir_all(dist.join("klib/cache/linux_x64-gSTATIC-system/stdlib-per-file-cache")).unwrap();
+    let stderr = build(&[], &[]);
+    assert!(!stderr.contains("standard library cache"), "{stderr}");
+    assert!(cache_flag(&argfile("debug")));
+
+    // KARGO_NATIVE_CACHE=false and optimized builds don't use it.
+    build(&[], &[("KARGO_NATIVE_CACHE", "false")]);
+    assert!(!cache_flag(&argfile("debug")));
+    build(&["--release"], &[]);
+    assert!(!cache_flag(&argfile("release")), "{}", argfile("release"));
+}
+
 #[test]
 fn old_kotlin_on_new_jdk_fails_early() {
     let p = Project::new();
