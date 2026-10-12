@@ -17,6 +17,8 @@ kind = "executable"        # or "library", "shared", "static"
 # [target.native.cinterop.sqlite]       # bind a C library, see below
 ```
 
+In an existing project, `kargo target add native` writes this section for you: `kind = "executable"` when the sources have a top-level `fun main`, `"library"` otherwise (override with `--app` or `--lib`). See [`kargo target`](../../reference/commands/#kargo-target).
+
 You don't need to install anything. On the first native build Kargo downloads the Kotlin/Native distribution that matches `[kotlin] version` into `~/.kargo/toolchains/kotlin-native/<version>`, plus its LLVM toolchain and sysroot into `~/.kargo/toolchains/konan`. The first build therefore takes a few minutes; later builds are quick.
 
 Output goes to `target/<profile>/native/<platform>/`.

@@ -42,6 +42,15 @@ myapp/
     └── assets/
 ```
 
+### Add Android to an existing project
+
+```sh
+kargo target add android          # an application (or a library when the sources have no `main`)
+kargo target add android --lib    # an Android library
+```
+
+This writes `[target.android]` with the namespace `<group>.<name>`, `min-sdk = 24` and the `kind`, then creates `android/AndroidManifest.xml` and, for an application, `src-android/MainActivity.kt`. Existing files are never overwritten. The activity calls `greeting("Android")` when `src/` declares that function in the same package (as `kargo new` projects do), and shows a fixed text otherwise. Build it with `kargo build --target android`. See [`kargo target`](../../reference/commands/#kargo-target).
+
 ## Build, run, test
 
 ```sh

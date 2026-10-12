@@ -87,7 +87,12 @@ fn init_uses_directory_name_and_keeps_files() {
     p.kargo().args(["init", "--no-vcs"]).arg(&dir).assert().success();
     assert!(std::fs::read_to_string(dir.join("kargo.toml")).unwrap().contains("name = \"existing-proj\""));
     assert_eq!(std::fs::read_to_string(dir.join("src/Main.kt")).unwrap(), "fun main() {}");
-    p.kargo().args(["init", "--no-vcs"]).arg(&dir).assert().failure().stderr(predicate::str::contains("already contains"));
+    p.kargo()
+        .args(["init", "--no-vcs"])
+        .arg(&dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already contains").and(predicate::str::contains("kargo target add")));
 }
 
 #[test]
@@ -1465,4 +1470,155 @@ fn warnings_in_a_workspace_name_the_package() {
         .stderr(predicate::str::contains("warning: package `lib`: package version `one` does not look like a version"))
         .stderr(predicate::str::contains("warning: package `lib`: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target"));
     p.kargo().args(["--offline", "build", "-p", "app"]).assert().failure().stderr(predicate::str::contains("warning:").not());
+}
+
+#[test]
+fn target_add_keeps_an_implicit_jvm_target_and_the_formatting() {
+    let p = Project::new();
+    let original = "# My app\n[package]\nname = \"multi\"   # the name\nversion = \"0.1.0\"\ngroup = \"org.acme\"\n\n[dependencies]\n";
+    p.file("kargo.toml", original);
+    p.file(
+        "src/Main.kt",
+        "package org.acme.multi\n\nfun greeting(name: String) = \"Hello, $name!\"\n\nfun main() = println(greeting(\"x\"))\n",
+    );
+    p.kargo()
+        .args(["target", "add", "wasm", "native"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding jvm target"))
+        .stderr(predicate::str::contains("no [target] section"))
+        .stderr(predicate::str::contains("Adding wasm target"))
+        .stderr(predicate::str::contains("Adding native target (executable)"))
+        .stderr(predicate::str::contains("created src-wasm/.gitkeep"));
+    let toml = p.read("kargo.toml");
+    assert!(toml.starts_with(original), "{toml}");
+    assert!(
+        toml.ends_with(
+            "\n[target.jvm]\n\n[target.wasm]\nenvironment = \"js\"\n\n[target.native]\nplatforms = [\"host\"]\nkind = \"executable\"\n"
+        ),
+        "{toml}"
+    );
+    assert!(p.path().join("src-native/.gitkeep").is_file());
+    p.kargo()
+        .args(["info", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"jvm\",\n    \"wasm\",\n    \"native\""));
+}
+
+#[test]
+fn target_add_is_idempotent_and_infers_libraries() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("lib", "\n[target.jvm]\n"));
+    p.file("src/Lib.kt", "package com.example.lib\n\nfun answer() = 42\n");
+    p.kargo().args(["target", "add", "native"]).assert().success().stderr(predicate::str::contains("Adding native target (library)"));
+    let before = p.read("kargo.toml");
+    assert!(before.contains("kind = \"library\""), "{before}");
+    p.kargo()
+        .args(["target", "add", "native", "jvm"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("the native target is already enabled"))
+        .stderr(predicate::str::contains("the jvm target is already enabled"));
+    assert_eq!(p.read("kargo.toml"), before);
+    p.kargo().args(["target", "add", "android", "--app"]).assert().success();
+    assert!(p.read("kargo.toml").contains("namespace = \"com.example.lib\"\nkind = \"application\""));
+}
+
+#[test]
+fn target_add_android_scaffolds_without_overwriting() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("droid", ""));
+    p.file("src/Main.kt", "package com.example.droid\n\nfun main() = println(\"hi\")\n");
+    p.file("android/AndroidManifest.xml", "<manifest>mine</manifest>\n");
+    p.kargo()
+        .args(["target", "add", "android"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding android target (application)"))
+        .stderr(predicate::str::contains("created src-android/MainActivity.kt"));
+    assert_eq!(p.read("android/AndroidManifest.xml"), "<manifest>mine</manifest>\n");
+    let activity = p.read("src-android/MainActivity.kt");
+    assert!(activity.starts_with("package com.example.droid\n"), "{activity}");
+    // The project has no `greeting` function to call.
+    assert!(activity.contains("\"Hello, Android!\""), "{activity}");
+    assert!(!p.path().join("src-android/.gitkeep").exists());
+}
+
+#[test]
+fn target_add_warns_about_unsupported_frameworks() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("spring", "\n[frameworks]\nspring-boot = true\n"));
+    p.kargo()
+        .args(["target", "add", "wasm"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("the wasm target will not build with the enabled frameworks"));
+}
+
+#[test]
+fn target_remove_keeps_sources_and_refuses_the_last_target() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("multi", "\n[target.jvm]\n\n[target.native]\nkind = \"library\"\n\n[target.native.dependencies]\n\"g:a\" = \"1.0\"\n\n[target.native.cinterop.zlib]\nheaders = [\"zlib.h\"]\n"),
+    );
+    p.file("src-native/Native.kt", "fun native() = 1\n");
+    p.file("tests-native/NativeTest.kt", "\n");
+    p.kargo()
+        .args(["target", "remove", "native"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing native target"))
+        .stderr(predicate::str::contains("kept src-native/, tests-native/ on disk"));
+    let toml = p.read("kargo.toml");
+    assert_eq!(toml, manifest("multi", "\n[target.jvm]\n"));
+    assert!(p.path().join("src-native/Native.kt").is_file());
+    p.kargo().args(["target", "remove", "wasm"]).assert().success().stderr(predicate::str::contains("the wasm target is not enabled"));
+    p.kargo()
+        .args(["target", "rm", "jvm"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("cannot remove the last target (jvm)"))
+        .stderr(predicate::str::contains("kargo target add"));
+    assert_eq!(p.read("kargo.toml"), toml);
+
+    // An implicit JVM project has a single target, too.
+    p.file("kargo.toml", &manifest("plain", ""));
+    p.kargo().args(["target", "remove", "jvm"]).assert().failure().stderr(predicate::str::contains("cannot remove the last target"));
+}
+
+#[test]
+fn target_list_shows_enabled_and_available_targets() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("plain", ""));
+    p.kargo()
+        .args(["target", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("jvm      jvm-target"))
+        .stdout(predicate::str::contains("(implicit: kargo.toml has no [target] section)"))
+        .stdout(predicate::str::contains("Available targets"))
+        .stdout(predicate::str::contains("    wasm\n    native\n    android\n"));
+    p.file("kargo.toml", &manifest("multi", "\n[target.wasm]\nenvironment = \"browser\"\n"));
+    let out = p.kargo().args(["target", "ls", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["enabled"][0]["name"], "wasm");
+    assert_eq!(json["enabled"][0]["implicit"], false);
+    assert_eq!(json["enabled"][0]["settings"]["environment"], "browser");
+    assert_eq!(json["available"], serde_json::json!(["jvm", "native", "android"]));
+}
+
+#[test]
+fn target_add_edits_the_selected_workspace_member() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n");
+    p.file("app/kargo.toml", &manifest("app", ""));
+    p.file("lib/kargo.toml", &manifest("lib", ""));
+    p.kargo().args(["target", "add", "wasm"]).assert().failure();
+    p.kargo().args(["target", "add", "wasm", "-p", "lib"]).assert().success();
+    assert!(p.read("lib/kargo.toml").contains("[target.wasm]"));
+    assert!(!p.read("app/kargo.toml").contains("[target"));
+    assert!(p.path().join("lib/src-wasm/.gitkeep").is_file());
 }

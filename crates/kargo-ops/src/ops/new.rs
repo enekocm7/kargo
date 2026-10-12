@@ -162,6 +162,24 @@ fn file(path: &str, contents: impl Into<String>) -> TemplateFile {
     TemplateFile { path: PathBuf::from(path), contents: contents.into() }
 }
 
+/// The `[target.<name>]` table `kargo new` writes for a target, with its defaults. `lib` picks a
+/// library over an application (Native and Android); `namespace` is the Android namespace.
+/// `kargo target add` appends the same table to an existing manifest.
+pub fn target_section(target: TargetKind, lib: bool, namespace: &str) -> String {
+    match target {
+        TargetKind::Jvm => "[target.jvm]\n".to_owned(),
+        TargetKind::Wasm => "[target.wasm]\nenvironment = \"js\"\n".to_owned(),
+        TargetKind::Native => {
+            let kind = if lib { "library" } else { "executable" };
+            format!("[target.native]\nplatforms = [\"host\"]\nkind = \"{kind}\"\n")
+        }
+        TargetKind::Android => {
+            let kind = if lib { "library" } else { "application" };
+            format!("[target.android]\nnamespace = \"{namespace}\"\nkind = \"{kind}\"\nmin-sdk = 24\n")
+        }
+    }
+}
+
 pub fn manifest(opts: &NewOptions) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "[package]");
@@ -175,24 +193,9 @@ pub fn manifest(opts: &NewOptions) -> String {
     }
     // No [target] section at all means a plain JVM project.
     let jvm_only = opts.targets == [TargetKind::Jvm];
-    for target in &opts.targets {
-        match target {
-            TargetKind::Jvm => {
-                if !jvm_only {
-                    let _ = writeln!(s, "\n[target.jvm]");
-                }
-            }
-            TargetKind::Wasm => {
-                let _ = writeln!(s, "\n[target.wasm]\nenvironment = \"js\"");
-            }
-            TargetKind::Native => {
-                let kind = if opts.lib { "library" } else { "executable" };
-                let _ = writeln!(s, "\n[target.native]\nplatforms = [\"host\"]\nkind = \"{kind}\"");
-            }
-            TargetKind::Android => {
-                let kind = if opts.lib { "library" } else { "application" };
-                let _ = writeln!(s, "\n[target.android]\nnamespace = \"{}\"\nkind = \"{kind}\"\nmin-sdk = 24", opts.package());
-            }
+    if !jvm_only {
+        for &target in &opts.targets {
+            let _ = write!(s, "\n{}", target_section(target, opts.lib, &opts.package()));
         }
     }
     if !opts.frameworks.is_empty() {
@@ -354,8 +357,12 @@ class GreetingTest {{
     )
 }
 
-fn android_files(opts: &NewOptions) -> Vec<TemplateFile> {
+/// The Android manifest and, for an application, a launcher activity. The activity shows
+/// `greeting("Android")` from the template's `src/Main.kt` when `use_greeting` is set, else a
+/// fixed text (for `kargo target add` in a project without that function).
+pub(crate) fn android_files(opts: &NewOptions, use_greeting: bool) -> Vec<TemplateFile> {
     let pkg = opts.package();
+    let text = if use_greeting { r#"greeting("Android")"# } else { r#""Hello, Android!""# };
     let mut files = Vec::new();
     if opts.lib {
         files.push(file(
@@ -400,7 +407,7 @@ class MainActivity : ComponentActivity() {{
     override fun onCreate(savedInstanceState: Bundle?) {{
         super.onCreate(savedInstanceState)
         setContent {{
-            MaterialTheme {{ Text(greeting("Android")) }}
+            MaterialTheme {{ Text({text}) }}
         }}
     }}
 }}
@@ -417,7 +424,7 @@ import android.widget.TextView
 class MainActivity : Activity() {{
     override fun onCreate(savedInstanceState: Bundle?) {{
         super.onCreate(savedInstanceState)
-        setContentView(TextView(this).apply {{ text = greeting("Android") }})
+        setContentView(TextView(this).apply {{ text = {text} }})
     }}
 }}
 "#
@@ -445,7 +452,7 @@ pub fn template(opts: &NewOptions) -> Result<Vec<TemplateFile>> {
     }
     files.push(file("tests/GreetingTest.kt", test_source(opts)));
     if opts.targets.contains(&TargetKind::Android) {
-        files.extend(android_files(opts));
+        files.extend(android_files(opts, true));
     }
     if opts.has("lombok") {
         files.push(file("lombok.config", "config.stopBubbling = true\nlombok.addLombokGeneratedAnnotation = true\n"));
@@ -462,7 +469,7 @@ pub fn template(opts: &NewOptions) -> Result<Vec<TemplateFile>> {
 pub fn create(dir: &Path, opts: &NewOptions) -> Result<Vec<PathBuf>> {
     let files = template(opts)?;
     if dir.join(MANIFEST_NAME).exists() {
-        bail!("`{}` already contains a {MANIFEST_NAME}", dir.display());
+        bail!("`{}` already contains a {MANIFEST_NAME}; use `kargo target add <target>` to enable more targets", dir.display());
     }
     std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let mut written = Vec::new();

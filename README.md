@@ -38,6 +38,7 @@ $ kargo test
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor\|ksp] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
+| `kargo target add\|remove\|list <target>... [--lib\|--app]` | Enable or disable targets in an existing project (keeps `kargo.toml` formatting, scaffolds `src-<target>/` and Android files), or list them |
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
@@ -54,7 +55,7 @@ $ kargo test
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
 
-In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree` and `fetch` take `-p <member>` (repeatable) or `--workspace`; `run`, `package`, `add`, `remove`, `outdated` and `upgrade` take `-p <member>`.
+In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree` and `fetch` take `-p <member>` (repeatable) or `--workspace`; `run`, `package`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`.
 
 ## Project layout
 

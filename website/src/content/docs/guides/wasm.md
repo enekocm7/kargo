@@ -18,6 +18,8 @@ environment = "browser"   # "js" (default), "browser" or "wasi"
 | `browser` | Web pages. Kargo adds an HTML page, serves it with `kargo run` and runs the tests in a headless browser. See [Browser apps](#browser-apps). | `kotlin-stdlib-wasm-js` |
 | `wasi` | Standalone runtimes using the WebAssembly System Interface. | `kotlin-stdlib-wasm-wasi` |
 
+In an existing project, `kargo target add wasm` writes `[target.wasm]` with `environment = "js"` (and keeps an implicit JVM target enabled); change the environment afterwards if you need another. See [`kargo target`](../../reference/commands/#kargo-target).
+
 `js` and `browser` compile to the same module and use the same libraries. The environment decides what Kargo does around it: Node.js runs a `js` program, and a browser loads a `browser` app from the page Kargo serves.
 
 ## Run and test with Node.js

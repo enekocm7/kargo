@@ -163,6 +163,42 @@ enum ToolchainCommand {
     Which,
 }
 
+#[derive(Debug, Subcommand)]
+enum TargetCommand {
+    /// Enable targets: add [target.<name>] to kargo.toml and scaffold the files they need
+    Add {
+        /// Targets to enable (space- or comma-separated)
+        #[arg(value_enum, required = true, value_delimiter = ',')]
+        targets: Vec<TargetArg>,
+        /// Native and Android: build a library (default: inferred, a `main` function makes an application)
+        #[arg(long, conflicts_with = "app")]
+        lib: bool,
+        /// Native and Android: build an application (default: inferred)
+        #[arg(long)]
+        app: bool,
+        #[command(flatten)]
+        package: OnePackageArg,
+    },
+    /// Disable targets: remove [target.<name>] and its sub-tables (sources stay on disk)
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// Targets to disable (space- or comma-separated)
+        #[arg(value_enum, required = true, value_delimiter = ',')]
+        targets: Vec<TargetArg>,
+        #[command(flatten)]
+        package: OnePackageArg,
+    },
+    /// List the enabled targets and the ones that can be added
+    #[command(visible_alias = "ls")]
+    List {
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
+        #[command(flatten)]
+        package: OnePackageArg,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ConfigurationArg {
     Compile,
@@ -476,6 +512,11 @@ enum Command {
         dry_run: bool,
         #[command(flatten)]
         package: OnePackageArg,
+    },
+    /// Enable, disable or list the project's targets (jvm, wasm, native, android)
+    Target {
+        #[command(subcommand)]
+        command: TargetCommand,
     },
     /// Display the dependency tree
     Tree {
@@ -918,6 +959,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             ops::add::remove(&config, &ws, &names, section(dev, target))?;
             Ok(0)
         }
+        Command::Target { command } => target(shell, &global, command),
         Command::Tree { target, configuration, depth, duplicates, packages, format } => {
             let project = load_project(&global)?;
             let configuration = match configuration {
@@ -1150,6 +1192,36 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
                     Some(t) => println!("kotlin-native: {} at {}", t.version, t.home.display()),
                     None => println!("kotlin-native: {} (not installed yet; installed on first native build)", m.kotlin.version),
                 }
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn target(shell: &Shell, global: &GlobalArgs, command: TargetCommand) -> Result<u8> {
+    let kinds = |targets: Vec<TargetArg>| targets.into_iter().map(TargetKind::from).collect::<Vec<_>>();
+    match command {
+        TargetCommand::Add { targets, lib, app, package } => {
+            let ws = load_one(global, &package, "`kargo target add`")?;
+            let lib = if lib {
+                Some(true)
+            } else if app {
+                Some(false)
+            } else {
+                None
+            };
+            ops::target::add(shell, &ws, &kinds(targets), lib)?;
+        }
+        TargetCommand::Remove { targets, package } => {
+            let ws = load_one(global, &package, "`kargo target remove`")?;
+            ops::target::remove(shell, &ws, &kinds(targets))?;
+        }
+        TargetCommand::List { format, package } => {
+            let ws = load_one(global, &package, "`kargo target list`")?;
+            let (enabled, available) = ops::target::list(&ws)?;
+            match format {
+                FormatArg::Text => print!("{}", ops::target::render(&enabled, &available)),
+                FormatArg::Json => println!("{}", serde_json::to_string_pretty(&ops::target::json(&enabled, &available))?),
             }
         }
     }
@@ -1424,6 +1496,18 @@ mod tests {
         assert!(matches!(cli.command, Command::Doc { ref targets, open: true, .. } if matches!(targets[..], [TargetArg::Jvm])));
         let cli = Cli::try_parse_from(["kargo", "fmt", "--check"]).unwrap();
         assert!(matches!(cli.command, Command::Fmt { check: true, .. }));
+        let cli = Cli::try_parse_from(["kargo", "target", "add", "wasm", "native,android", "--lib", "-p", "app"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Target { command: TargetCommand::Add { ref targets, lib: true, app: false, ref package } }
+                if targets.len() == 3 && package.package.as_deref() == Some("app")
+        ));
+        assert!(Cli::try_parse_from(["kargo", "target", "add"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "target", "add", "wasm", "--lib", "--app"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "target", "rm", "wasm"]).unwrap();
+        assert!(matches!(cli.command, Command::Target { command: TargetCommand::Remove { .. } }));
+        let cli = Cli::try_parse_from(["kargo", "target", "ls", "--format", "json"]).unwrap();
+        assert!(matches!(cli.command, Command::Target { command: TargetCommand::List { format: FormatArg::Json, .. } }));
         let cli = Cli::try_parse_from(["kargo", "lint", "--create-baseline"]).unwrap();
         assert!(matches!(cli.command, Command::Lint { create_baseline: true, .. }));
     }

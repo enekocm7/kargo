@@ -82,7 +82,7 @@ Kargo runs `git init` in the new directory when `git` is on the `PATH`, unless y
 
 ## `kargo init`
 
-Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten.
+Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten. A directory that already has a `kargo.toml` is refused; use [`kargo target add`](#kargo-target) to enable more targets in it.
 
 ```sh
 kargo init [path] [options]
@@ -344,6 +344,44 @@ note: `org.jetbrains.kotlinx:kotlinx-datetime` 0.8.0 is available but not compat
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 Dependencies inherited with `workspace = true` are skipped; upgrade them in the workspace's `kargo.toml`. "Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). `kargo.lock` is re-resolved on the next build because the manifest changed.
+
+## `kargo target`
+
+Enable, disable or list the targets of an existing project. `kargo target add` writes the same `[target.<name>]` table `kargo new` would, keeping the formatting and comments of `kargo.toml`, and scaffolds the files the target needs.
+
+```sh
+kargo target add <target>... [--lib | --app]
+kargo target remove <target>...          # alias: rm
+kargo target list [--format json]        # alias: ls
+```
+
+```console
+$ kargo target add wasm
+      Adding jvm target
+note: kargo.toml had no [target] section, which means jvm only; [target.jvm] keeps the jvm target enabled
+      Adding wasm target
+note: created src-wasm/.gitkeep
+note: run `kargo build --target wasm` to build it
+```
+
+| Option | Meaning |
+|---|---|
+| `<target>...` | `jvm`, `wasm`, `native` or `android`; space- or comma-separated |
+| `--lib` | `add`: a Native or Android library (`kind = "library"`) |
+| `--app` | `add`: a Native executable or an Android application |
+| `--format json` | `list`: print JSON (`enabled` with each target's settings, and `available`) |
+| `-p, --package <name>` | The workspace member whose `kargo.toml` to edit or list |
+
+`kargo target add`:
+
+- Writes the defaults of `kargo new`: `environment = "js"` for Wasm, `platforms = ["host"]` and a `kind` for Native, and `namespace`, `kind` and `min-sdk = 24` for Android (the namespace is the package's `group` plus its name).
+- Adds `[target.jvm]` first when `kargo.toml` has no `[target]` section, because such a project is implicitly JVM and would stop building for the JVM once any other `[target.*]` table exists.
+- Without `--lib` or `--app`, picks an application when the sources declare a `main` function (or the manifest sets `main-class` or a `[[bin]]`), and a library otherwise.
+- Creates only missing files and never overwrites one: `src-<target>/.gitkeep` when `src-<target>/` does not exist, and for Android `android/AndroidManifest.xml` plus, for an application, a launcher activity in `src-android/MainActivity.kt`.
+- Is idempotent: a target that is already enabled prints a note and leaves `kargo.toml` alone.
+- Warns when an enabled framework does not support the new target (Spring Boot on Wasm, for example).
+
+`kargo target remove` deletes `[target.<name>]` with its `dependencies` and `cinterop` sub-tables. It keeps `src-<target>/`, `tests-<target>/` (and `android/`) on disk and lists them. Removing the last enabled target is an error: add another target first.
 
 ## `kargo tree`
 
