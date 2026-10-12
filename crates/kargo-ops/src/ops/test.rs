@@ -35,6 +35,8 @@ pub struct TestOptions {
     /// Keep testing the remaining targets after one fails (`--no-fail-fast`),
     /// overriding `[test] fail-fast` in `kargo.toml`.
     pub no_fail_fast: bool,
+    /// Write JUnit XML reports to `target/<profile>/<target>/test-reports` (`--report junit`).
+    pub junit_report: bool,
 }
 
 /// What happened to one target in a `kargo test` run.
@@ -75,8 +77,8 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         }
         let passed = run.and_then(|run| match run {
             TestRun::Done(passed) => Ok(passed),
-            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts.filter.as_deref()),
-            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label),
+            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts),
+            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts),
             TestRun::Android => test_android(ctx, opts),
         });
         let outcome = match passed {
@@ -157,7 +159,25 @@ fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         no_tests(ctx, TargetKind::Android);
         return Ok(true);
     }
-    crate::gradle::test(ctx, opts.filter.as_deref(), opts.no_run)
+    let reports = (opts.junit_report && !opts.no_run).then(|| reports_dir(ctx, TargetKind::Android)).transpose()?;
+    let passed = crate::gradle::test(ctx, opts.filter.as_deref(), opts.no_run, reports.as_deref())?;
+    if let Some(dir) = &reports {
+        wrote_reports(ctx, dir);
+    }
+    Ok(passed)
+}
+
+/// Clears and returns `target/<profile>/<target>/test-reports`, where `--report junit` writes.
+fn reports_dir(ctx: &BuildContext, target: TargetKind) -> Result<PathBuf> {
+    let dir = ctx.ws.output_dir(ctx.profile, target).join("test-reports");
+    kargo_util::fs::remove_dir_all_if_exists(&dir)?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn wrote_reports(ctx: &BuildContext, dir: &Path) {
+    let shown = dir.strip_prefix(ctx.ws.root()).unwrap_or(dir);
+    ctx.shell().status("Reported", format!("JUnit XML in {}", shown.display()));
 }
 
 fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
@@ -194,9 +214,18 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     Ok(TestRun::Junit(cmd))
 }
 
-fn run_junit(ctx: &BuildContext, mut cmd: Command, filter: Option<&str>) -> Result<bool> {
+fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions) -> Result<bool> {
+    let reports = opts.junit_report.then(|| reports_dir(ctx, TargetKind::Jvm)).transpose()?;
+    if let Some(dir) = &reports {
+        // The launcher writes `TEST-junit-jupiter.xml` (one file per test engine).
+        cmd.arg("--reports-dir").arg(dir);
+    }
     ctx.shell().status("Running", "JVM tests (JUnit Platform)");
     let status = process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?;
+    if let Some(dir) = &reports {
+        wrote_reports(ctx, dir);
+    }
+    let filter = opts.filter.as_deref();
     if status.code() == Some(JUNIT_NO_TESTS) {
         match filter {
             Some(filter) => ctx.shell().error(format!("no JVM tests match `{filter}`; the filter matches `package.Class.method` names")),
@@ -306,13 +335,21 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// Runs a test executable whose stdout carries TeamCity messages.
-fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str) -> Result<bool> {
+fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str, target: TargetKind, opts: &TestOptions) -> Result<bool> {
     ctx.shell().status("Running", label);
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.stdout(Stdio::piped()).spawn().with_context(|| format!("failed to start {label}"))?;
     let stdout = child.stdout.take().context("missing test stdout")?;
     let mut summary = testreport::report(BufReader::new(stdout), anstream::stdout())?;
     let status = child.wait()?;
+    if opts.junit_report {
+        let dir = reports_dir(ctx, target)?;
+        let file = dir.join(format!("TEST-{target}.xml"));
+        let package = &ctx.ws.manifest().package.name;
+        testreport::write_junit_xml(&file, &format!("{package} ({target})"), &summary.cases)
+            .with_context(|| format!("failed to write {}", file.display()))?;
+        wrote_reports(ctx, &dir);
+    }
     // Runners exit non-zero when a test failed; without a failed test that means a crash.
     summary.crashed = !status.success() && summary.failed == 0;
     if summary.crashed && !summary.ran_tests() {

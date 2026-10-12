@@ -120,7 +120,7 @@ impl NativeCompilation<'_> {
         process::write_argfile(&argfile, &args)?;
         let mut cmd = toolchain.command();
         cmd.arg(format!("@{}", argfile.display()));
-        let status = process::status(shell, &mut cmd, "the Kotlin/Native compiler")?;
+        let status = crate::diagnostics::status(shell, &mut cmd, "the Kotlin/Native compiler")?;
         if !status.success() {
             bail!("could not compile `{}` for {} due to previous errors", self.name, self.konan_target);
         }

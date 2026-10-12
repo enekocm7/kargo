@@ -181,7 +181,7 @@ impl JvmCompilation<'_> {
                         cmd.arg("-J--sun-misc-unsafe-memory-access=allow");
                     }
                     cmd.arg(format!("@{}", argfile.display()));
-                    process::status(shell, &mut cmd, "javac")?.success()
+                    crate::diagnostics::status(shell, &mut cmd, "javac")?.success()
                 }
             };
             if !success {

@@ -412,8 +412,8 @@ pub fn check(ctx: &BuildContext, tests: bool) -> Result<()> {
 }
 
 /// `kargo test --target android`: runs local unit tests and reports the
-/// results Gradle writes as JUnit XML.
-pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool) -> Result<bool> {
+/// results Gradle writes as JUnit XML, copying those files to `report_dir` if given.
+pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: Option<&Path>) -> Result<bool> {
     compiling(ctx, TargetKind::Android, ", gradle tests");
     let task = format!("test{}UnitTest", variant(ctx.profile));
     if no_run {
@@ -439,6 +439,9 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool) -> Result<bo
     reports.sort();
     for report in &reports {
         let xml = std::fs::read_to_string(report).with_context(|| format!("failed to read {}", report.display()))?;
+        if let (Some(dir), Some(name)) = (report_dir, report.file_name()) {
+            std::fs::write(dir.join(name), &xml).with_context(|| format!("failed to copy {} to {}", report.display(), dir.display()))?;
+        }
         let part =
             testreport::report_junit_xml(&xml, anstream::stdout()).with_context(|| format!("failed to parse {}", report.display()))?;
         summary.merge(part);

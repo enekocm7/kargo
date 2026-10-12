@@ -490,6 +490,7 @@ dependencies = [
  "kargo-toolchain",
  "kargo-util",
  "predicates",
+ "serde_json",
  "tempfile",
  "zip",
 ]

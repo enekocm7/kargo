@@ -2,6 +2,7 @@
 //! between them: source sets, compiler plugins and up-to-date checks.
 
 pub mod daemon;
+pub mod diagnostics;
 pub mod incremental;
 pub mod jar;
 pub mod jvm;
@@ -198,7 +199,7 @@ pub fn run_kotlin_compiler(
         .arg(kargo_util::fs::join_paths(compiler_classpath))
         .arg(main_class)
         .arg(format!("@{}", argfile.display()));
-    let status = process::status(shell, &mut cmd, "the Kotlin compiler")?;
+    let status = diagnostics::status(shell, &mut cmd, "the Kotlin compiler")?;
     if !status.success() {
         bail!("could not compile `{what}` due to previous errors");
     }

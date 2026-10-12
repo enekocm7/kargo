@@ -1,0 +1,257 @@
+//! Compiler diagnostics. By default compiler output goes to stderr unchanged; with
+//! `--message-format json` it is parsed into one JSON object per diagnostic (file,
+//! line, column, severity, message) on stdout, so editors don't scrape text.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::{Context, Result};
+
+use kargo_util::process;
+use kargo_util::shell::Shell;
+
+static JSON: AtomicBool = AtomicBool::new(false);
+
+/// Serializes JSON lines from compilations running in parallel.
+static STDOUT: Mutex<()> = Mutex::new(());
+
+/// Switches compiler output to JSON messages on stdout (`--message-format json`).
+pub fn set_json(json: bool) {
+    JSON.store(json, Ordering::Relaxed);
+}
+
+pub fn is_json() -> bool {
+    JSON.load(Ordering::Relaxed)
+}
+
+/// Prints one JSON message as a line on stdout.
+pub fn emit(message: &serde_json::Value) {
+    let _guard = STDOUT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{message}");
+    let _ = out.flush();
+}
+
+/// One message from kotlinc, konanc or javac.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    /// `error`, `warning`, `info`, `exception` or `note`.
+    pub severity: String,
+    pub message: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    /// The diagnostic as the compiler printed it, including the source excerpt.
+    pub rendered: String,
+}
+
+impl Diagnostic {
+    /// The `compiler-message` JSON object. Relative paths are resolved against the
+    /// current directory, where the compilers report them from, and use the
+    /// platform's separators.
+    pub fn to_json(&self) -> serde_json::Value {
+        let file = self.file.as_ref().map(|f| {
+            let path = Path::new(f);
+            let path = match std::env::current_dir() {
+                Ok(cwd) if path.is_relative() && !path.has_root() => cwd.join(path),
+                _ => path.to_path_buf(),
+            };
+            path.components().collect::<PathBuf>().display().to_string()
+        });
+        serde_json::json!({
+            "reason": "compiler-message",
+            "severity": self.severity,
+            "message": self.message,
+            "file": file,
+            "line": self.line,
+            "column": self.column,
+            "rendered": self.rendered,
+        })
+    }
+}
+
+const SEVERITIES: [&str; 4] = ["error", "warning", "info", "exception"];
+
+/// Parses the first line of a diagnostic: `path:line:col: severity: message`
+/// (kotlinc and konanc), `path:line: severity: message` (javac),
+/// `severity: message` (no location) or javac's `Note: message`.
+pub fn parse_header(line: &str) -> Option<Diagnostic> {
+    let line = line.trim_end_matches('\r');
+    let diagnostic = |severity: &str, message: &str, location: Option<(String, Option<u32>, Option<u32>)>| {
+        let (file, line_no, column) = match location {
+            Some((file, line, column)) => (Some(file), line, column),
+            None => (None, None, None),
+        };
+        Some(Diagnostic {
+            severity: severity.to_owned(),
+            message: message.trim().to_owned(),
+            file,
+            line: line_no,
+            column,
+            rendered: line.to_owned(),
+        })
+    };
+    if let Some(message) = line.strip_prefix("Note: ") {
+        return diagnostic("note", message, None);
+    }
+    for severity in SEVERITIES {
+        if let Some(message) = line.strip_prefix(severity).and_then(|r| r.strip_prefix(": ")) {
+            return diagnostic(severity, message, None);
+        }
+    }
+    // The earliest `: severity: ` ends the location.
+    let (start, severity) = SEVERITIES.iter().filter_map(|s| line.find(&format!(": {s}: ")).map(|i| (i, *s))).min()?;
+    let location = parse_location(&line[..start])?;
+    diagnostic(severity, &line[start + severity.len() + 4..], Some(location))
+}
+
+/// Splits `path:line[:column]`; the path may contain colons (`C:\src\A.kt`).
+fn parse_location(location: &str) -> Option<(String, Option<u32>, Option<u32>)> {
+    let number = |s: &str| s.parse::<u32>().ok();
+    let (rest, last) = location.rsplit_once(':')?;
+    let last = number(last)?;
+    if let Some((file, line)) = rest.rsplit_once(':').and_then(|(f, l)| Some((f, number(l)?))) {
+        if !file.is_empty() {
+            return Some((file.to_owned(), Some(line), Some(last)));
+        }
+    }
+    (!rest.is_empty()).then(|| (rest.to_owned(), Some(last), None))
+}
+
+/// javac's closing `1 error` / `3 warnings` line.
+fn is_count_line(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    matches!(
+        (words.next().map(|n| n.parse::<u32>().is_ok()), words.next(), words.next()),
+        (Some(true), Some("error" | "errors" | "warning" | "warnings"), None)
+    )
+}
+
+/// Receives compiler output line by line: in human mode it goes to stderr as is,
+/// in JSON mode diagnostics become JSON messages and anything else goes to stderr.
+#[derive(Debug, Default)]
+pub struct Relay {
+    current: Option<Diagnostic>,
+}
+
+impl Relay {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Handles one line (without its line terminator).
+    pub fn line(&mut self, line: &str) {
+        if !is_json() {
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(err, "{line}");
+            return;
+        }
+        if let Some(diagnostic) = parse_header(line) {
+            self.flush();
+            self.current = Some(diagnostic);
+        } else if is_count_line(line) {
+            self.flush();
+            eprintln!("{line}");
+        } else if let Some(current) = &mut self.current {
+            current.rendered.push('\n');
+            current.rendered.push_str(line.trim_end_matches('\r'));
+        } else {
+            eprintln!("{line}");
+        }
+    }
+
+    /// Handles a block of complete lines.
+    pub fn text(&mut self, text: &str) {
+        for line in text.lines() {
+            self.line(line);
+        }
+    }
+
+    /// Emits the diagnostic in progress; call when the compiler is done.
+    pub fn flush(&mut self) {
+        if let Some(diagnostic) = self.current.take() {
+            emit(&diagnostic.to_json());
+        }
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+/// Runs a compiler process: with inherited stdio normally, or capturing its output
+/// to turn it into JSON messages with `--message-format json`.
+pub fn status(shell: &Shell, cmd: &mut Command, what: &str) -> Result<ExitStatus> {
+    if !is_json() {
+        return process::status(shell, cmd, what);
+    }
+    shell.verbose("Running", format!("`{}`", process::describe(cmd)));
+    let output = cmd.output().with_context(|| format!("failed to start {what} (`{}`)", cmd.get_program().to_string_lossy()))?;
+    let mut relay = Relay::new();
+    relay.text(&String::from_utf8_lossy(&output.stderr));
+    relay.text(&String::from_utf8_lossy(&output.stdout));
+    relay.flush();
+    Ok(output.status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_kotlin_diagnostics() {
+        let d = parse_header("src/Main.kt:2:16: error: unresolved reference 'x'.").unwrap();
+        assert_eq!(d.severity, "error");
+        assert_eq!(d.message, "unresolved reference 'x'.");
+        assert_eq!((d.file.as_deref(), d.line, d.column), (Some("src/Main.kt"), Some(2), Some(16)));
+
+        let d = parse_header(r"C:\p\src\Main.kt:10:1: warning: parameter 'a' is never used").unwrap();
+        assert_eq!((d.file.as_deref(), d.line, d.column), (Some(r"C:\p\src\Main.kt"), Some(10), Some(1)));
+        assert_eq!(d.severity, "warning");
+
+        let d = parse_header("warning: flag -Xfoo is deprecated").unwrap();
+        assert_eq!((d.severity.as_str(), d.file, d.line), ("warning", None, None));
+        assert_eq!(d.message, "flag -Xfoo is deprecated");
+    }
+
+    #[test]
+    fn parses_javac_diagnostics() {
+        let d = parse_header(r"C:\p\src\Util.java:5: error: ';' expected").unwrap();
+        assert_eq!((d.file.as_deref(), d.line, d.column), (Some(r"C:\p\src\Util.java"), Some(5), None));
+        assert_eq!(d.message, "';' expected");
+        let d = parse_header("/p/src/Util.java:7: warning: [deprecation] old() in Util has been deprecated").unwrap();
+        assert_eq!((d.file.as_deref(), d.line, d.severity.as_str()), (Some("/p/src/Util.java"), Some(7), "warning"));
+        assert_eq!(parse_header("Note: Some input files use unchecked operations.").unwrap().severity, "note");
+        assert!(is_count_line("1 error"));
+        assert!(is_count_line("12 warnings"));
+        assert!(!is_count_line("1 error here"));
+    }
+
+    #[test]
+    fn ignores_other_lines() {
+        assert!(parse_header("    val x = y").is_none());
+        assert!(parse_header("            ^").is_none());
+        assert!(parse_header("note: error: x").is_none());
+        assert!(parse_header("Main.kt: error: no line number").is_none());
+        assert!(parse_header("info: kotlinc-jvm 2.3.0").is_some());
+    }
+
+    #[test]
+    fn json_message() {
+        let d = parse_header("/abs/Main.kt:3:5: error: boom").unwrap();
+        let json = d.to_json();
+        assert_eq!(json["reason"], "compiler-message");
+        assert_eq!(Path::new(json["file"].as_str().unwrap()), Path::new("/abs/Main.kt"));
+        assert_eq!(json["line"], 3);
+        assert_eq!(json["column"], 5);
+        assert_eq!(json["message"], "boom");
+        let relative = parse_header("src/Main.kt:1:1: error: x").unwrap().to_json();
+        assert!(Path::new(relative["file"].as_str().unwrap()).is_absolute());
+        assert!(parse_header("error: x").unwrap().to_json()["file"].is_null());
+    }
+}

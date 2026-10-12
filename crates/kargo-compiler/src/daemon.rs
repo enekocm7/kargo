@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::diagnostics;
 use kargo_toolchain::Jdk;
 use kargo_util::hash::{Fingerprint, sha256_bytes};
 use kargo_util::shell::Shell;
@@ -381,17 +382,25 @@ fn request(mut stream: TcpStream, token: &str, command: &str, args: &[&str]) -> 
     }
 }
 
-/// Writes compiler output to stderr line by line, making paths under the
-/// working directory relative as a standalone compiler would.
+/// Passes compiler output to [`diagnostics::Relay`] line by line, making paths under
+/// the working directory relative as a standalone compiler would.
 struct OutputRelay {
     pending: Vec<u8>,
-    prefix: Option<String>,
+    /// The working directory, as written natively and with forward slashes (how Kargo
+    /// passes source paths, so how the compiler prints them on Windows).
+    prefixes: Vec<String>,
+    relay: diagnostics::Relay,
 }
 
 impl OutputRelay {
     fn new() -> Self {
-        let prefix = std::env::current_dir().ok().map(|d| format!("{}{}", d.display(), std::path::MAIN_SEPARATOR));
-        Self { pending: Vec::new(), prefix }
+        let mut prefixes = Vec::new();
+        if let Ok(dir) = std::env::current_dir() {
+            prefixes.push(format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR));
+            prefixes.push(format!("{}/", kargo_util::process::slash(&dir)));
+            prefixes.dedup();
+        }
+        Self { pending: Vec::new(), prefixes, relay: diagnostics::Relay::new() }
     }
 
     fn push(&mut self, bytes: &[u8]) {
@@ -408,20 +417,17 @@ impl OutputRelay {
         if !rest.is_empty() {
             self.emit(&rest);
         }
+        self.relay.flush();
     }
 
-    fn emit(&self, bytes: &[u8]) {
+    fn emit(&mut self, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes);
-        let rendered = relativize(&text, self.prefix.as_deref());
-        let mut err = std::io::stderr().lock();
-        let _ = err.write_all(rendered.as_bytes());
-        let _ = err.flush();
+        self.relay.text(&relativize(&text, &self.prefixes));
     }
 }
 
-fn relativize(text: &str, prefix: Option<&str>) -> String {
-    let Some(prefix) = prefix else { return text.to_owned() };
-    text.split_inclusive('\n').map(|line| line.strip_prefix(prefix).unwrap_or(line)).collect()
+fn relativize(text: &str, prefixes: &[String]) -> String {
+    text.split_inclusive('\n').map(|line| prefixes.iter().find_map(|p| line.strip_prefix(p.as_str())).unwrap_or(line)).collect()
 }
 
 /// A running daemon, as listed by `kargo daemon status`.
@@ -466,13 +472,19 @@ mod tests {
     #[test]
     fn relativizes_paths_under_the_working_directory() {
         let text = "/p/src/Main.kt:2:16: error: x\n    val x = 1\n/other/A.kt:1:1: warning: y\n";
-        assert_eq!(relativize(text, Some("/p/")), "src/Main.kt:2:16: error: x\n    val x = 1\n/other/A.kt:1:1: warning: y\n");
-        assert_eq!(relativize("no newline", None), "no newline");
+        assert_eq!(relativize(text, &["/p/".to_owned()]), "src/Main.kt:2:16: error: x\n    val x = 1\n/other/A.kt:1:1: warning: y\n");
+        assert_eq!(relativize("no newline", &[]), "no newline");
+        // On Windows the compiler prints the forward-slash paths Kargo passes it.
+        let prefixes = [r"C:\p\".to_owned(), "C:/p/".to_owned()];
+        assert_eq!(
+            relativize("C:/p/src/A.kt:1:1: error: x\nC:\\p\\B.kt:2:2: error: y\n", &prefixes),
+            "src/A.kt:1:1: error: x\nB.kt:2:2: error: y\n"
+        );
     }
 
     #[test]
     fn relay_splits_lines_across_chunks() {
-        let mut relay = OutputRelay { pending: Vec::new(), prefix: None };
+        let mut relay = OutputRelay { pending: Vec::new(), prefixes: Vec::new(), relay: diagnostics::Relay::new() };
         relay.pending.extend_from_slice(b"partial");
         relay.push(b" line\nnext");
         assert_eq!(relay.pending, b"next");
