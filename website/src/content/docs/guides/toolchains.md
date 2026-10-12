@@ -62,7 +62,7 @@ $ kargo toolchain remove native 2.4.10
 
 ## Kotlin/Native
 
-Kotlin/Native distributions are tied to `[kotlin] version` and installed automatically on the first native build, under `~/.kargo/toolchains/kotlin-native/<version>`. Their LLVM toolchains and sysroots go in `~/.kargo/toolchains/konan` (override with `KONAN_DATA_DIR`).
+Kotlin/Native distributions are tied to `[kotlin] version` and installed automatically on the first native build, under `~/.kargo/toolchains/kotlin-native/<version>`. Their LLVM toolchains and sysroots go in `~/.kargo/toolchains/konan` (override with `KONAN_DATA_DIR`). The precompiled standard library that speeds up [debug builds](../native/#build-speed) is built into the distribution itself (`klib/cache`), so `kargo toolchain remove native <version>` removes it too.
 
 ## The Kotlin compiler
 

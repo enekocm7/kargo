@@ -157,6 +157,23 @@ platforms = ["host"]
 linker-options = ["-L/usr/local/lib", "-lsqlite3"]
 ```
 
+## Build speed
+
+Most of a small Kotlin/Native build is the standard library: unless told otherwise, the compiler loads and lowers all of it again on every build. For debug builds Kargo tells it to link a precompiled copy instead, as the Gradle plugin does. Rebuilding a small program takes about half the time (10 seconds instead of 5 on one machine, 16 instead of 6 on a slower one).
+
+```console
+$ kargo build
+   Compiling tool v0.1.0 (native, linux_x64)
+note: building the Kotlin/Native standard library cache for linux_x64 (one time per Kotlin version, takes a few minutes); later builds are much faster
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 97.17s
+```
+
+- **One-time cost.** The first build that needs the cache builds it, which adds one to two minutes. It's kept per Kotlin/Native version and platform in `~/.kargo/toolchains/kotlin-native/<version>/klib/cache`, a few tens of megabytes each, and `kargo toolchain remove native <version>` removes it with the distribution.
+- **Debug builds only.** `--release` (any profile with `optimize = true`) optimizes the whole program, standard library included, so it can't use precompiled code and builds as slowly as before. `kargo check` and `kind = "library"` build a klib, which doesn't link the standard library.
+- **Debug info.** Builds with `debug = true` (the default in `dev`) and builds without it each get their own cache.
+- **Turning it off.** Set `KARGO_NATIVE_CACHE=false` (or `0`, `no`, `off`) to compile without it, for example when the toolchain directory is read-only. Switching it doesn't trigger a rebuild, because the output is the same.
+- **CI.** The cache is under `~/.kargo`, so a cached `~/.kargo` [keeps it between runs](../ci/#kotlinnative-cache). A job that starts from an empty home pays for building it on every run; set `KARGO_NATIVE_CACHE=false` there.
+
 ## Moving the toolchain
 
 Kotlin/Native's dependency cache normally lives in `~/.konan`. Kargo keeps it under `~/.kargo/toolchains/konan` instead so everything Kargo downloads is in one place. Set `KONAN_DATA_DIR` to use a different directory.
