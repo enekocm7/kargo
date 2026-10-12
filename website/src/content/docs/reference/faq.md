@@ -48,6 +48,14 @@ The class of a top-level function in `Main.kt` is `MainKt`; for `object Cli { @J
 
 If the project really has several programs, keep them all: run one with `kargo run --main com.example.tools.MigrateKt`, or declare each as a `[[bin]]` and use `kargo run --bin <name>`. See [Several programs in one project](../../guides/multiple-programs/).
 
+### `no Kotlin or Java sources found in src/ ...`
+
+`kargo build` has nothing to compile for that target, so it succeeds without doing anything; `kargo run` then fails later with `could not determine the main class`. Put your code in `src/` (or `src-<target>/` for one target) and make sure the files end in `.kt` (or `.java` on the JVM). If a [`pre-build` hook](../../guides/tasks-and-plugins/#hooks) generates the sources, the warning goes away once the hook has run. See [Warnings](../warnings/#no-sources).
+
+### A `.kts` script does nothing, or a task named `build` doesn't run
+
+Kargo doesn't compile or run Kotlin scripts, and `kargo build` always runs the built-in command, not a task of that name. Both print a warning that says what to do instead: put the code in a `.kt` file, and run the task with `kargo task build` or rename it. See [Warnings](../warnings/).
+
 ### `cannot find symbol` for a generated class such as `AutoValue_Person`
 
 The annotation processor didn't run. Kargo only runs processors you declare with `scope = "processor"`; a processor that is merely on the classpath is ignored (JDK 23 and newer ignore it too). Move the processor artifact to `scope = "processor"`, keep its annotations as a `provided` dependency, and see [Annotation processors](../../guides/dependencies/#annotation-processors).

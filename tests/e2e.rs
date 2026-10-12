@@ -297,6 +297,45 @@ fn daemon_matches_standalone_compiler() {
 }
 
 #[test]
+fn warnings_as_errors_summary_comes_after_the_diagnostics() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["strict"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("strict/kargo.toml")).unwrap();
+    t.write("strict/kargo.toml", &format!("{manifest}\n[kotlin]\nwarnings-as-errors = true\n"));
+    t.write("strict/src/Main.kt", "@Deprecated(\"use other\")\nfun old(): Int = 1\n\nfun main() = println(old())\n");
+
+    // kotlinc prints "warnings found and -Werror specified" first; Kargo prints it last.
+    for daemon in ["false", "true"] {
+        let out = t.kargo("strict").arg("build").env("KARGO_DAEMON", daemon).assert().failure().code(101).get_output().stderr.clone();
+        let text = String::from_utf8_lossy(&out);
+        let lines: Vec<&str> = text.lines().collect();
+        let position = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("no `{needle}` in {text}"));
+        assert!(position("is deprecated") < position("warnings found and -Werror specified"), "daemon={daemon}: {text}");
+        assert!(position("warnings found and -Werror specified") < position("could not compile `strict`"), "daemon={daemon}: {text}");
+    }
+
+    // The same order in JSON messages.
+    for daemon in ["false", "true"] {
+        let out = t
+            .kargo("strict")
+            .args(["build", "--message-format", "json"])
+            .env("KARGO_DAEMON", daemon)
+            .assert()
+            .failure()
+            .code(101)
+            .get_output()
+            .stdout
+            .clone();
+        let messages: Vec<serde_json::Value> = String::from_utf8_lossy(&out).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let compiler: Vec<&str> =
+            messages.iter().filter(|m| m["reason"] == "compiler-message").map(|m| m["message"].as_str().unwrap()).collect();
+        assert!(compiler.len() >= 2, "daemon={daemon}: {messages:?}");
+        assert_eq!(compiler.last(), Some(&"warnings found and -Werror specified"), "daemon={daemon}: {compiler:?}");
+    }
+}
+
+#[test]
 fn dependencies_and_hooks() {
     require_e2e!();
     let t = E2e::new();

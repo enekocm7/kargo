@@ -1,6 +1,6 @@
 //! Kargo's build engine: workspaces, lockfile, built-in frameworks, tasks,
-//! plugins, Android/Gradle integration and the high-level operations behind
-//! each CLI command.
+//! plugins, Android/Gradle integration, warnings about suspicious projects and
+//! the high-level operations behind each CLI command.
 
 pub mod builtins;
 pub mod gradle;
@@ -9,4 +9,5 @@ pub mod npm;
 pub mod ops;
 pub mod plugins;
 pub mod tasks;
+pub mod warnings;
 pub mod workspace;
