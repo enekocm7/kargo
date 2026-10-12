@@ -52,6 +52,20 @@ jobs:
 
 The first build of the job starts a [compiler daemon](../build-performance/#the-compiler-daemon) that the later steps reuse, so `check`, `build`, `test` and `package` each skip JVM startup. Leave `~/.kargo/daemon` out of the cache: it only holds that run's daemon state and large class-data archives. Set `KARGO_DAEMON=false` if your CI doesn't allow background processes.
 
+### Test results
+
+`kargo test --report junit` writes JUnit XML reports to `target/<profile>/<target>/test-reports/` (see [Test reports for CI](../testing/#test-reports-for-ci)). Upload them so failed tests show up by name in the run summary, for example with a JUnit report action:
+
+```yaml
+      - run: kargo test --locked --report junit
+      - uses: mikepenz/action-junit-report@v5
+        if: always()
+        with:
+          report_paths: target/*/*/test-reports/*.xml
+```
+
+`if: always()` publishes the results when tests fail, which is when you need them. In GitLab, list the same paths under `artifacts: reports: junit:`; in Jenkins, pass them to the `junit` step.
+
 ### Several operating systems
 
 Kotlin/Native and Compose Desktop produce OS-specific output. Use a matrix:
@@ -82,7 +96,7 @@ The steps are the same everywhere:
 1. Install Rust, then `cargo install --locked --git https://github.com/enekocm7/kargo kargo`.
 2. Provide a JDK, or pin one with `[toolchain] jdk`.
 3. Cache `~/.kargo` (or `$KARGO_HOME`), except its `daemon/` directory.
-4. Run `kargo test --locked`.
+4. Run `kargo test --locked`, adding `--report junit` if the CI shows JUnit XML results.
 
 Kargo exits with status `101` on build and test failures, like Cargo.
 
@@ -92,5 +106,9 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 |---|---|
 | `--locked` | Fail instead of silently changing `kargo.lock` |
 | `--offline` | Make sure a step uses only what's cached |
+| `kargo test --no-fail-fast` | Test every target and print a result per target instead of stopping at the first failure (or set [`[test] fail-fast = false`](../../reference/manifest/#test)) |
+| `kargo build --keep-going` | Build every target and report all failures, not just the first |
+| `kargo test --report junit` | Write JUnit XML reports for the CI's test summary |
+| `--message-format json` | Compiler diagnostics as JSON, to annotate them on the changed lines. See [Machine-readable output](../../reference/machine-readable-output/) |
 | `-q`, `--quiet` | Less log noise |
 | `-v`, `--verbose` | Print the exact compiler commands when debugging |

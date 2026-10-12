@@ -490,6 +490,7 @@ dependencies = [
  "kargo-toolchain",
  "kargo-util",
  "predicates",
+ "serde_json",
  "tempfile",
  "zip",
 ]
@@ -545,6 +546,7 @@ name = "kargo-ops"
 version = "0.1.0"
 dependencies = [
  "anstream",
+ "anstyle",
  "anyhow",
  "dirs",
  "kargo-compiler",

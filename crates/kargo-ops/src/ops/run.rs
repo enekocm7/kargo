@@ -35,7 +35,7 @@ pub fn runnable_target(enabled: &[TargetKind], requested: Option<TargetKind>) ->
 /// Builds and runs; returns the program's exit code.
 pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
-    let results = build(ctx, &BuildOptions { targets: vec![target], release: opts.release })?;
+    let results = build(ctx, &BuildOptions { targets: vec![target], release: opts.release, keep_going: false })?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
 
     let root = ctx.ws.root();
@@ -83,6 +83,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         label.push(' ');
         label.push_str(arg);
     }
+    ctx.unlock()?;
     ctx.shell().status("Running", format!("`{label}`"));
     ctx.shell().verbose("Command", process::describe(&cmd));
     let status = cmd.status().with_context(|| format!("failed to start `{}`", cmd.get_program().to_string_lossy()))?;

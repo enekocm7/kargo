@@ -11,6 +11,7 @@ description: Environment variables Kargo reads and sets.
 | `KARGO_TARGET_DIR` | Build output directory (default `target/` next to the project's or workspace's `kargo.toml`) |
 | `KARGO_OFFLINE` | Same as `--offline` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon (or compiler process), e.g. `-Xmx4g` |
+| `KARGO_INCREMENTAL` | `false` (or `0`, `no`, `off`) recompiles whole targets instead of only the files a change affects ([incremental compilation](../../guides/build-performance/#incremental-compilation)) |
 | `KARGO_DAEMON` | `false` (or `0`, `no`, `off`) runs the Kotlin compiler as a separate process on every build instead of in the [compiler daemon](../../guides/build-performance/#the-compiler-daemon) |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME` | JDK to use when `[toolchain] jdk` is `system` |
@@ -32,6 +33,7 @@ For tasks, hook plugins and `kargo-*` subcommands:
 | `KARGO_KOTLIN_VERSION` | From `[kotlin]` |
 | `KARGO_TASK` | The running task's name (tasks only) |
 | `KARGO_HOOK` | The hook being run (hooks only) |
+| `KARGO_BUILD_LOCK` | The build-directory lock this Kargo process holds (hooks only); a `kargo` command the hook runs on the same project uses that lock instead of waiting for it |
 | `KARGO_CLASSPATH`, `KARGO_JVM_JAR` | After a JVM build |
 | `KARGO_PACKAGE` | After `kargo package` |
 | `KARGO_TEST_RESULT` | After tests |

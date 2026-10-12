@@ -82,7 +82,10 @@ $ kargo run -t wasm
 Hello from WebAssembly!
 $ kargo test                  # tests on every target
 $ kargo test -t native
+$ kargo test --no-fail-fast   # keep testing the other targets when one fails
 ```
+
+`kargo test` stops at the first target that fails; `--no-fail-fast` (or `[test] fail-fast = false`) tests them all and prints a result per target. `kargo build --keep-going` builds every target and reports each failure. See [Testing every target](../testing/#testing-every-target).
 
 ## Dependencies
 

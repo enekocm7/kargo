@@ -11,10 +11,10 @@ use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::mainclass::{find_jvm_main_class, find_single_entry_point};
-use kargo_compiler::native::NativeCompilation;
+use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
-use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Cinterop, Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::{Platform, Resolution};
 use kargo_toolchain::native::resolve_platform;
 use kargo_util::fs::collect_files;
@@ -24,6 +24,8 @@ pub struct BuildOptions {
     /// Targets to build; empty means every enabled target.
     pub targets: Vec<kargo_manifest::TargetKind>,
     pub release: bool,
+    /// Build every target even when one fails, then report all failures (`--keep-going`).
+    pub keep_going: bool,
 }
 
 impl BuildOptions {
@@ -109,8 +111,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         }
         Ok(r)
     });
-    for r in built {
-        let r = r?;
+    for r in super::collect_targets(ctx, "build", opts.keep_going, targets.iter().copied().zip(built))? {
         results.jvm = results.jvm.or(r.jvm);
         results.wasm = results.wasm.or(r.wasm);
         results.native.extend(r.native);
@@ -134,7 +135,12 @@ pub fn hook_env(ctx: &BuildContext) -> Vec<(String, String)> {
         ProfileKind::Dev => "dev",
         ProfileKind::Release => "release",
     };
-    crate::plugins::base_env(ctx.ws, profile)
+    let mut env = crate::plugins::base_env(ctx.ws, profile);
+    // Hooks run while this process holds the build lock; a `kargo` they call must not wait on it.
+    if let Some(lock) = ctx.build_lock_path() {
+        env.push((kargo_util::flock::HELD_LOCK_ENV.to_owned(), lock.to_string_lossy().into_owned()));
+    }
+    env
 }
 
 pub fn finished(ctx: &BuildContext, start: Instant) {
@@ -183,6 +189,33 @@ pub fn jvm_classpaths(ctx: &BuildContext, setup: &TargetSetup) -> Result<JvmClas
     Ok(JvmClasspaths { compile: compile?, runtime: runtime? })
 }
 
+/// The javac `-processorpath`: framework processors (e.g. Lombok) followed by
+/// `scope = "processor"` dependencies; `test` adds processor dev-dependencies.
+pub fn jvm_processor_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -> Result<Vec<PathBuf>> {
+    let mut requests: Vec<_> = setup.contributions.annotation_processors.iter().map(super::context::to_request).collect();
+    let declared = setup.requests(&[Scope::Processor], test);
+    // BOMs only apply to declared processors, so framework-only setups keep their lockfile entry.
+    let boms: &[_] = if declared.is_empty() { &[] } else { &setup.boms };
+    for r in declared {
+        if !requests.iter().any(|q| q.module == r.module && q.classifier == r.classifier) {
+            requests.push(r);
+        }
+    }
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dev_processors = test && setup.dev.iter().any(|d| d.scope == Scope::Processor);
+    let key = if dev_processors { "jvm/test-annotation-processors" } else { "jvm/annotation-processors" };
+    Ok(ctx.resolve(key, Platform::Jvm, &requests, boms)?.files())
+}
+
+/// `javac` arguments: framework-provided ones, then `[target.jvm] javac-args`.
+pub fn jvm_javac_args(setup: &TargetSetup, jvm: &kargo_manifest::JvmTarget) -> Vec<String> {
+    let mut args = setup.contributions.javac_args.clone();
+    args.extend(jvm.javac_args.iter().cloned());
+    args
+}
+
 fn jvm_settings<'a>(ctx: &BuildContext<'a>) -> Result<&'a kargo_manifest::JvmTarget> {
     ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")
 }
@@ -209,12 +242,8 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let (jdk, compiler, plugins) = toolchain?;
     let classpaths = classpaths?;
     let classpath = jvm_compile_classpath(ctx, &classpaths)?;
-    let processor_path: Vec<PathBuf> = if setup.contributions.annotation_processors.is_empty() {
-        Vec::new()
-    } else {
-        let requests: Vec<_> = setup.contributions.annotation_processors.iter().map(super::context::to_request).collect();
-        ctx.resolve("jvm/annotation-processors", Platform::Jvm, &requests, &[])?.files()
-    };
+    let processor_path = jvm_processor_path(ctx, &setup, false)?;
+    let javac_args = jvm_javac_args(&setup, jvm);
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
 
     let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
@@ -231,7 +260,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
         jvm_target: &jvm.target_for(jdk.version),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
-        javac_args: &setup.contributions.javac_args,
+        javac_args: &javac_args,
         processor_path: &processor_path,
         resources: vec![ctx.ws.resources()],
     };
@@ -423,6 +452,51 @@ pub fn native_klib(ctx: &BuildContext, konan_target: &str) -> Result<Option<Path
     Ok(Some(unit.artifact()))
 }
 
+/// The `.def` file of every `[target.native.cinterop]` entry (`None` for a headers-only one),
+/// failing on a missing file before any toolchain is downloaded.
+pub fn native_cinterop_defs<'a>(ctx: &BuildContext<'a>) -> Result<Vec<(&'a Cinterop, Option<PathBuf>)>> {
+    let native = ctx.ws.manifest().targets.native.as_ref().context("the Native target is not enabled")?;
+    native
+        .cinterop
+        .iter()
+        .map(|interop| {
+            let def = ctx.ws.root().join(interop.def_path());
+            if def.is_file() {
+                Ok((interop, Some(def)))
+            } else if interop.def.is_none() && !interop.headers.is_empty() {
+                Ok((interop, None))
+            } else {
+                bail!(
+                    "the definition file {} of [target.native.cinterop.{}] does not exist; create it, set `def`, or list `headers`",
+                    interop.def_path().display(),
+                    interop.name
+                )
+            }
+        })
+        .collect()
+}
+
+/// Runs `cinterop` for every `[target.native.cinterop]` entry and returns the klibs with the bindings.
+pub fn native_cinterop(ctx: &BuildContext, konan_target: &str) -> Result<Vec<PathBuf>> {
+    let defs = native_cinterop_defs(ctx)?;
+    if defs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let toolchain = ctx.native_toolchain()?;
+    let output_dir = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(konan_target).join("cinterop");
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
+    defs.into_iter()
+        .map(|(interop, def)| {
+            let unit =
+                CinteropUnit { interop, konan_target: konan_target.to_owned(), root: ctx.ws.root(), def, output_dir: output_dir.clone() };
+            unit.generate(ctx.shell(), toolchain, &fp_dir, &|| {
+                ctx.shell().status("Generating", format!("{} C bindings ({konan_target})", interop.name))
+            })?;
+            Ok(unit.artifact())
+        })
+        .collect()
+}
+
 /// The `-entry` of a native executable: `entry-point` from kargo.toml, or the single `main` in the sources.
 pub fn native_entry_point(native: &kargo_manifest::NativeTarget, srcs: &SourceSet) -> Result<Option<String>> {
     Ok(match (&native.entry_point, native.kind) {
@@ -443,6 +517,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
         return Ok(Vec::new());
     }
     let entry_point = native_entry_point(native, &srcs)?;
+    native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
@@ -452,7 +527,8 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     // Each platform is a separate Kotlin/Native compiler process.
     super::parallel_map(&platforms, |konan_target| -> Result<NativeBuild> {
         let konan_target = konan_target.clone();
-        let libraries = native_libraries(ctx, &setup, &konan_target, false)?;
+        let mut libraries = native_libraries(ctx, &setup, &konan_target, false)?;
+        libraries.extend(native_cinterop(ctx, &konan_target)?);
         let unit = NativeCompilation {
             name: &manifest.package.name,
             konan_target: konan_target.clone(),

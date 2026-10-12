@@ -122,6 +122,20 @@ fn info_describes_the_project() {
 }
 
 #[test]
+fn info_as_json() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("infoapp", "[frameworks]\ncoroutines = true\n[target.jvm]\n[dev-dependencies]\n\"g:t\" = \"1\"\n"));
+    let out = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let info: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(info["package"]["name"], "infoapp");
+    assert_eq!(info["package"]["version"], "0.1.0");
+    assert_eq!(info["targets"], serde_json::json!(["jvm"]));
+    assert_eq!(info["frameworks"], serde_json::json!(["coroutines"]));
+    assert_eq!(info["dev-dependencies"][0], serde_json::json!({"name": "g:t", "module": "g:t", "version": "1", "scope": "compile"}));
+    assert!(info["target-dir"].as_str().unwrap().ends_with("target"), "{info}");
+}
+
+#[test]
 fn add_and_remove_dependencies() {
     let repo = LocalRepo::new();
     repo.publish("com.acme:widget", "1.0.0", &[]).publish("com.acme:widget", "1.2.0", &[]).publish("com.acme:widget", "2.0.0-beta1", &[]);
@@ -136,6 +150,9 @@ fn add_and_remove_dependencies() {
 
     p.kargo().args(["add", "com.acme:widget", "--target", "jvm", "--scope", "runtime"]).assert().success();
     assert!(p.read("kargo.toml").contains("[target.jvm.dependencies]"));
+
+    p.kargo().args(["add", "com.acme:widget:1.0.0", "--target", "jvm", "--scope", "processor"]).assert().success();
+    assert!(p.read("kargo.toml").contains(r#""com.acme:widget" = { version = "1.0.0", scope = "processor" }"#), "{}", p.read("kargo.toml"));
 
     p.kargo().args(["add", "com.acme:missing:1.0"]).assert().failure().stderr(predicate::str::contains("not found"));
     p.kargo().args(["add", "--framework", "coroutines"]).assert().success();
@@ -310,6 +327,18 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
         .success()
         .stdout(predicate::str::contains("g:util: requested 1.0, 2.0 -> selected 2.0"));
 
+    let out = p.kargo().args(["tree", "--offline", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let tree: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(tree["package"]["name"], "treeapp");
+    assert_eq!(tree["configuration"], "runtime");
+    let jvm = &tree["trees"][0];
+    assert_eq!(jvm["target"], "jvm");
+    assert!(jvm["roots"].as_array().unwrap().contains(&serde_json::json!("g:lib")), "{jvm}");
+    let lib = jvm["modules"].as_array().unwrap().iter().find(|m| m["id"] == "g:lib").unwrap();
+    assert_eq!(lib["dependencies"][0], serde_json::json!({"id": "g:util", "requested": "1.0", "version": "2.0"}));
+    assert!(lib["files"][0].as_str().unwrap().ends_with("lib-1.0.jar"), "{lib}");
+    p.kargo().args(["tree", "--format", "json", "--depth", "1"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+
     // --locked succeeds while the lockfile is current, and fails after a manifest change.
     p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
     let changed = p.read("kargo.toml").replace("\"g:other\" = \"1.0\"\n", "");
@@ -471,7 +500,56 @@ fn clean_removes_target_dir() {
     assert!(!p.path().join("target/release").exists());
     assert!(p.path().join("target/debug").exists());
     p.kargo().arg("clean").assert().success();
+    // Only the build-directory lock survives a full clean.
+    let left: Vec<_> = std::fs::read_dir(p.path().join("target")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left, [".kargo-lock"]);
+    // Cleaning a project that was never built creates nothing.
+    std::fs::remove_dir_all(p.path().join("target")).unwrap();
+    p.kargo().arg("clean").assert().success();
     assert!(!p.path().join("target").exists());
+}
+
+#[test]
+fn build_directory_lock_serializes_kargo_processes() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("locked", ""));
+    p.file("target/debug/jvm/x.txt", "x");
+    let lock_path = p.path().join("target/.kargo-lock");
+    let held = std::fs::File::create(&lock_path).unwrap();
+    held.lock().unwrap();
+
+    // A hook's nested `kargo` is told the lock is its parent's and does not wait.
+    p.kargo().arg("clean").env("KARGO_BUILD_LOCK", &lock_path).assert().success();
+    p.file("target/debug/jvm/x.txt", "x");
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("kargo"))
+        .arg("clean")
+        .current_dir(p.path())
+        .env("KARGO_HOME", p.home.path())
+        .env_remove("KARGO_TARGET_DIR")
+        .env_remove("KARGO_BUILD_LOCK")
+        .env("NO_COLOR", "1")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stderr.read_to_string(&mut out).unwrap();
+        out
+    });
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(child.try_wait().unwrap().is_none(), "kargo clean finished while another process held the lock");
+    assert!(p.path().join("target/debug/jvm/x.txt").exists());
+
+    drop(held);
+    assert!(child.wait().unwrap().success());
+    let stderr = reader.join().unwrap();
+    assert!(stderr.contains("Blocking waiting for file lock on build directory"), "{stderr}");
+    assert!(!p.path().join("target/debug").exists());
 }
 
 #[test]
@@ -551,6 +629,31 @@ fn fmt_and_lint_sections_are_validated() {
     p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("run the `lint` task with `kargo task lint`"));
     p.file("kargo.toml", &manifest("style", "[lint]\nmax-issues = 3\n"));
     p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("unknown field `max-issues`"));
+}
+
+#[test]
+fn missing_cinterop_def_is_reported_before_compiling() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\npackage = \"sqlite3\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    // The default location is interop/<name>.def; nothing is downloaded before the check.
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args([cmd, "--target", "native"])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains("sqlite.def of [target.native.cinterop.sqlite] does not exist"));
+    }
+    // An explicit `def` must exist even when `headers` are listed.
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\ndef = \"c/sqlite.def\"\nheaders = [\"sqlite3.h\"]\n"));
+    p.kargo()
+        .args(["build", "--target", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sqlite.def of [target.native.cinterop.sqlite] does not exist"));
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\nlibs = [\"x\"]\n"));
+    p.kargo().args(["build", "--target", "native"]).assert().failure().stderr(predicate::str::contains("unknown field `libs`"));
 }
 
 #[test]
@@ -747,4 +850,72 @@ fn path_dependency_must_support_the_target() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("`calc` depends on the path dependency `mathlib`, which does not enable the wasm target"));
+}
+
+/// A JVM + Android project that fails both targets offline: the Kotlin compiler is not
+/// cached and there is no `android/AndroidManifest.xml`.
+fn two_failing_targets() -> Project {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("twin", "[target.jvm]\n\n[target.android]\nnamespace = \"com.example.twin\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("tests/MainTest.kt", "class MainTest\n");
+    p
+}
+
+#[test]
+fn build_keep_going_reports_every_failed_target() {
+    let p = two_failing_targets();
+    // By default the first failure is the error.
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("could not build").not().and(predicate::str::contains("offline mode")));
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args(["--offline", cmd, "--keep-going"])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains(format!("could not {cmd} the jvm target")))
+            .stderr(predicate::str::contains(format!("could not {cmd} the android target: Android builds need")))
+            .stderr(predicate::str::contains(format!("could not {cmd} 2 of 2 targets (jvm, android)")));
+    }
+}
+
+#[test]
+fn json_message_format_ends_with_build_finished() {
+    let p = two_failing_targets();
+    for cmd in ["build", "check"] {
+        let out = p.kargo().args(["--offline", cmd, "--message-format", "json"]).assert().failure().code(101).get_output().stdout.clone();
+        let text = String::from_utf8(out).unwrap();
+        // stdout holds only JSON messages.
+        let messages: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(messages.last().unwrap(), &serde_json::json!({"reason": "build-finished", "success": false}), "{text}");
+    }
+}
+
+#[test]
+fn test_fail_fast_skips_the_remaining_targets() {
+    let p = two_failing_targets();
+    p.kargo()
+        .args(["--offline", "test"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("skipped the android target after a failure; pass `--no-fail-fast`"))
+        .stderr(predicate::str::contains("Running Android").not());
+    let table =
+        || predicate::str::contains("test results by target:\n    jvm      error").and(predicate::str::contains("    android  error"));
+    p.kargo()
+        .args(["--offline", "test", "--no-fail-fast"])
+        .assert()
+        .failure()
+        .code(101)
+        .stdout(table())
+        .stderr(predicate::str::contains("could not test the android target: Android builds need"));
+    // `[test] fail-fast = false` makes it the default.
+    p.file("kargo.toml", &(p.read("kargo.toml") + "\n[test]\nfail-fast = false\n"));
+    p.kargo().args(["--offline", "test"]).assert().failure().code(101).stdout(table());
 }

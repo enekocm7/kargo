@@ -187,3 +187,4 @@ These are planned:
 - Members don't inherit `[package]`, `[frameworks]` or Kotlin compiler options from the workspace.
 - Members build one after another, and a change in a dependency recompiles its consumers.
 - Android members can't use path dependencies.
+- A path dependency can't be an annotation processor (`scope = "processor"`).

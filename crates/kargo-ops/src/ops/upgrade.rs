@@ -82,10 +82,10 @@ pub fn outdated(config: &Config, ws: &Workspace, names: &[String], prerelease: b
     let client = MavenClient::new(config, ws.manifest().repositories.clone());
     let mut out = Vec::new();
     for (section, dep) in selected(ws.manifest(), names)? {
-        if let Some(o) = check(&client, section, dep, prerelease)? {
-            if o.compatible.is_some() || o.latest.is_some() {
-                out.push(o);
-            }
+        if let Some(o) = check(&client, section, dep, prerelease)?
+            && (o.compatible.is_some() || o.latest.is_some())
+        {
+            out.push(o);
         }
     }
     Ok(out)
@@ -130,12 +130,10 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
             continue;
         };
         let target = if opts.incompatible { o.latest.clone() } else { o.compatible.clone() };
-        if !opts.incompatible {
-            if let Some(latest) = o.latest.as_ref().filter(|l| o.compatible.as_ref() != Some(*l)) {
-                config
-                    .shell()
-                    .note(format!("`{}` {latest} is available but not compatible; use `--incompatible` to upgrade to it", o.name));
-            }
+        if !opts.incompatible
+            && let Some(latest) = o.latest.as_ref().filter(|l| o.compatible.as_ref() != Some(*l))
+        {
+            config.shell().note(format!("`{}` {latest} is available but not compatible; use `--incompatible` to upgrade to it", o.name));
         }
         let Some(target) = target else { continue };
         editor.set_dependency_version(section, &dep.module, &target)?;

@@ -46,6 +46,10 @@ main-class = "com.example.app.MainKt"
 
 The class of a top-level function in `Main.kt` is `MainKt`; for `object Cli { @JvmStatic fun main(...) }` it is `Cli`. If your `main` is in a Java class, give its fully qualified name, such as `com.example.app.App`. Kargo doesn't look for `main` in Java files.
 
+### `cannot find symbol` for a generated class such as `AutoValue_Person`
+
+The annotation processor didn't run. Kargo only runs processors you declare with `scope = "processor"`; a processor that is merely on the classpath is ignored (JDK 23 and newer ignore it too). Move the processor artifact to `scope = "processor"`, keep its annotations as a `provided` dependency, and see [Annotation processors](../../guides/dependencies/#annotation-processors).
+
 ### `Node.js is required to run Kotlin/Wasm programs`
 
 Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Building Wasm doesn't need it; running and testing do.
@@ -94,6 +98,10 @@ export KARGO_COMPILER_JVM_OPTS="-Xmx4g"
 
 The next build starts a compiler daemon with the new options. See [Build performance](../../guides/build-performance/#memory).
 
+### A build after an edit behaves as if the old code were still there
+
+Incremental compilation should never produce stale classes; if it does, please report it. To recover, run `kargo clean` (or build once with `KARGO_INCREMENTAL=false`), which discards the incremental caches.
+
 ### The compiler daemon misbehaves
 
 Run `kargo daemon stop`; the next build starts a fresh daemon. To rule the daemon out, build with `KARGO_DAEMON=false`, which runs the compiler as a separate process. `-v` shows whether a build used the daemon, and its log is `daemon.log` in the directory `kargo daemon status` prints.
@@ -106,6 +114,10 @@ kargo build --refresh       # re-check repositories, ignoring cached metadata an
 ```
 
 `--refresh` also re-verifies cached artifacts against the repository's checksums and downloads corrupt ones again. Use `-v` to see the exact commands Kargo runs.
+
+### `Blocking waiting for file lock on build directory`
+
+Another Kargo process is building or resolving the same project, for example an IDE, a file watcher or a second terminal. The command continues once the other process finishes. If nothing else is running, check for a hung `kargo` process (a stuck hook, for example) and stop it. The operating system releases the lock when that process exits. See [Concurrent commands](../commands/#concurrent-commands).
 
 ### "checksum mismatch" for a locked artifact
 

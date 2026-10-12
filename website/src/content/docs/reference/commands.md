@@ -36,6 +36,18 @@ In a [workspace](../../guides/workspaces/), commands apply to every member at th
 
 `-p` takes any package of the project, including a path dependency that is not a member. Outside a workspace there is one package, so you never need these options.
 
+### Concurrent commands
+
+Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `package`, `update`, `clean`, `android` and `toolchain which`) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
+
+```console
+$ kargo build
+    Blocking waiting for file lock on build directory
+   Compiling my-app v0.1.0 (jvm)
+```
+
+`kargo run` releases the lock once the build is done, so a long-running program doesn't block other commands. Downloads to the shared cache in `~/.kargo` don't need the lock: each file is written to a temporary name and renamed into place, so two projects can fetch the same artifact at the same time.
+
 ---
 
 ## `kargo new`
@@ -78,10 +90,12 @@ kargo init [path] [options]
 
 ## `kargo build` (`b`)
 
-Compile all enabled targets, or the ones you name.
+Compile all enabled targets, or the ones you name. Targets build at the same time; if one fails, the command reports that failure and exits with code 101.
 
 | Option | Meaning |
 |---|---|
+| `--keep-going` | Build every target even if one fails, then report each failure and which targets failed and succeeded |
+| `--message-format <fmt>` | `human` (default) or `json`: print each compiler diagnostic as a JSON object on stdout. See [Machine-readable output](../machine-readable-output/#compiler-diagnostics) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace` | Which packages to build ([package selection](#package-selection)) |
@@ -92,6 +106,15 @@ Compile all enabled targets, or the ones you name.
 kargo build
 kargo build --release -t jvm -t native
 kargo build -p calc
+kargo build --message-format json
+```
+
+With `--keep-going`, every failed target gets its own error and a summary follows:
+
+```console
+$ kargo build --keep-going
+error: could not build the wasm target: ...
+error: could not build 1 of 3 targets (wasm); jvm, native succeeded
 ```
 
 ## `kargo check` (`c`)
@@ -101,6 +124,8 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | Option | Meaning |
 |---|---|
 | `--tests` | Also check the test sources (`tests/`, `tests-<target>/`) |
+| `--keep-going` | Check every target even if one fails, then report each failure (as for `kargo build`) |
+| `--message-format <fmt>` | `human` (default) or `json`, as for `kargo build` |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace` | Which packages to check |
@@ -130,6 +155,7 @@ Build and run the program. Arguments after `--` go to the program.
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `android` |
 | `-p, --package <name>` | The package to run; required at the root of a workspace with several members |
+| `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 
 How each target runs:
 
@@ -152,9 +178,14 @@ kargo test [filter] [options]
 |---|---|
 | `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
+| `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
+| `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
+| `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build` |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace` | Which packages to test, one after another. The command fails if any test failed |
+
+By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
 ## `kargo doc` (`d`)
 
@@ -217,7 +248,7 @@ kargo add -F <framework,...>
 | `--path <dir>` | Depend on the Kargo package in `<dir>` (relative to the current directory), built from source. The entry is named after that package, and its path is written relative to `kargo.toml`. See [path dependencies](../../guides/workspaces/) |
 | `--dev` | Add to `[dev-dependencies]` |
 | `-t, --target <target>` | Add to `[target.<target>.dependencies]` |
-| `--scope <scope>` | `compile`, `runtime` or `provided` |
+| `--scope <scope>` | `compile`, `runtime`, `provided` or `processor` |
 | `--bom` | Import as a BOM |
 | `--pre` | Allow pre-release versions when picking the latest |
 | `--no-verify` | Don't check that the artifact exists |
@@ -310,6 +341,7 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 | `--depth <n>` | unlimited | Maximum depth |
 | `-d, --duplicates` | | Only modules requested in several versions |
 | `-p, --package <name>`, `--workspace` | current package | Which packages to show |
+| `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies; it can't be combined with `--depth` or `--duplicates`. When several packages are selected, the JSON output is an array with one document per package |
 
 Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`; their Maven dependencies appear in the graph next to yours.
 
@@ -357,7 +389,7 @@ In a workspace, or with path dependencies, `kargo update` re-resolves every pack
 
 ## `kargo clean`
 
-Delete `target/` (the workspace's, in a workspace).
+Delete everything in `target/` except the build-directory lock, `target/.kargo-lock`. In a workspace, that is the workspace's `target/`.
 
 | Option | Meaning |
 |---|---|
@@ -414,6 +446,10 @@ Show or stop the background compiler daemons that keep the Kotlin compiler warm 
 ## `kargo info`
 
 Print project information: package, targets, path dependencies and paths. At the root of a workspace, it prints the members, the Kotlin version, the lockfile and the target directory.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--format <fmt>` | `text` | `text` or `json`. `json` also lists every dependency and repository. See [Machine-readable output](../machine-readable-output/#kargo-info---format-json) |
 
 ## `kargo completions`
 

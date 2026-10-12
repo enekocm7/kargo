@@ -104,6 +104,21 @@ detekt = "1.23.8"
 
 See [Formatting and linting](../../guides/formatting-and-linting/).
 
+## `[test]`
+
+Options for `kargo test`. Every key is optional.
+
+```toml
+[test]
+fail-fast = false
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `fail-fast` | `true` | Stop at the first target whose tests fail or don't compile. `false` tests every target and prints a result per target, like `kargo test --no-fail-fast` |
+
+See [Testing every target](../../guides/testing/#testing-every-target).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.
@@ -115,7 +130,10 @@ With no `[target.*]` section, the project targets the JVM with default settings.
 jvm-target = "25"                       # default "25", lowered to your JDK if it is older
 main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun main`; set it for a Java main
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
+javac-args = ["-Xlint:all"]             # extra javac options for Java sources
 ```
+
+`javac-args` are appended to the `javac` command line for main and test Java sources, after the options Kargo sets (`-d`, `-encoding UTF-8`, `--release` from `jvm-target`, `-classpath`, and the [annotation processor](../../guides/dependencies/#annotation-processors) options). Use it for lint flags, `-parameters` or processor options such as `-Akey=value`. It has no effect on Kotlin sources; use `[kotlin] compiler-args` for those.
 
 When you don't set `jvm-target`, Kargo targets Java 25, or the version of the JDK that builds the project if that JDK is older (a pinned `[toolchain] jdk`, else `JAVA_HOME` or `java` on `PATH`). The compiled classes then always run on the JDK you build with. Set `jvm-target` explicitly to support older Java runtimes than the one you build with.
 
@@ -142,9 +160,26 @@ platforms = ["host"]               # default ["host"]
 kind = "executable"                # "executable" (default), "library", "shared" or "static"
 entry-point = "com.example.main"
 linker-options = ["-lcurl"]
+
+[target.native.cinterop.sqlite]    # a C library bound with cinterop; one table per library
+def = "interop/sqlite.def"         # default: interop/<name>.def
+package = "sqlite3"
+headers = ["sqlite3.h"]
+compiler-options = ["-I/usr/include"]
+linker-options = ["-lsqlite3"]
 ```
 
 Valid platforms: `host`, `linux_x64`, `linux_arm64`, `mingw_x64`, `macos_x64`, `macos_arm64`, `ios_arm64`, `ios_x64`, `ios_simulator_arm64`, `watchos_arm64`, `watchos_simulator_arm64`, `tvos_arm64`, `tvos_simulator_arm64`, `android_arm64`, `android_arm32`, `android_x64`. Gradle-style names like `linuxX64` are accepted too.
+
+| `[target.native.cinterop.<name>]` key | Default | Meaning |
+|---|---|---|
+| `def` | `interop/<name>.def` | The `.def` file, relative to the project root. It must exist unless only `headers` are given |
+| `package` | the `.def` file's `package` | Kotlin package of the generated bindings |
+| `headers` | `[]` | Extra headers to bind |
+| `compiler-options` | `[]` | clang options for reading the headers (`-I`, `-D`, ...) |
+| `linker-options` | `[]` | Linker options recorded in the bindings and used by every program that links them |
+
+The name may contain letters, digits, `_` and `-`. See [Using C libraries](../../guides/native/#using-c-libraries).
 
 ### `[target.android]`
 
@@ -197,7 +232,7 @@ shared = { workspace = true }                                   # inherited from
 | `version` | | Version or Maven range. Optional when a BOM manages it. Required for BOMs. |
 | `group`, `artifact` | | Coordinates when the key isn't `group:artifact` |
 | `coords` | | `group:artifact[:version]` in one string |
-| `scope` | `compile` | `compile`, `runtime` or `provided` |
+| `scope` | `compile` | `compile`, `runtime`, `provided` or `processor` (a Java [annotation processor](../../guides/dependencies/#annotation-processors), JVM and Android only) |
 | `classifier` | | Artifact classifier |
 | `extension` (alias `type`) | `jar` | Artifact extension |
 | `exclude` | `[]` | `group:artifact` or `group:*` to exclude transitively |

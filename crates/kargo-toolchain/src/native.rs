@@ -60,6 +60,10 @@ fn konanc_in(home: &Path) -> PathBuf {
     home.join("bin").join(if cfg!(windows) { "konanc.bat" } else { "konanc" })
 }
 
+fn cinterop_in(home: &Path) -> PathBuf {
+    home.join("bin").join(if cfg!(windows) { "cinterop.bat" } else { "cinterop" })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeToolchain {
     pub home: PathBuf,
@@ -76,6 +80,13 @@ impl NativeToolchain {
     /// A `konanc` command with Kargo's Kotlin/Native data directory.
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(self.konanc());
+        cmd.env("KONAN_DATA_DIR", &self.data_dir);
+        cmd
+    }
+
+    /// A `cinterop` command (C library bindings) with Kargo's Kotlin/Native data directory.
+    pub fn cinterop_command(&self) -> Command {
+        let mut cmd = Command::new(cinterop_in(&self.home));
         cmd.env("KONAN_DATA_DIR", &self.data_dir);
         cmd
     }
@@ -155,10 +166,10 @@ fn migrate_all_legacy(config: &Config) {
     let suffix = format!("-{}", host.classifier);
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(version) = name.strip_prefix("kotlin-native-").and_then(|r| r.strip_suffix(&suffix)) {
-            if let Ok(toolchain) = NativeToolchain::at(config, version) {
-                migrate_legacy(config, &toolchain);
-            }
+        if let Some(version) = name.strip_prefix("kotlin-native-").and_then(|r| r.strip_suffix(&suffix))
+            && let Ok(toolchain) = NativeToolchain::at(config, version)
+        {
+            migrate_legacy(config, &toolchain);
         }
     }
 }

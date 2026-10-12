@@ -92,6 +92,8 @@ enum ScopeArg {
     Compile,
     Runtime,
     Provided,
+    /// A Java annotation processor (javac -processorpath)
+    Processor,
 }
 
 impl From<ScopeArg> for Scope {
@@ -100,6 +102,7 @@ impl From<ScopeArg> for Scope {
             ScopeArg::Compile => Scope::Compile,
             ScopeArg::Runtime => Scope::Runtime,
             ScopeArg::Provided => Scope::Provided,
+            ScopeArg::Processor => Scope::Processor,
         }
     }
 }
@@ -194,6 +197,31 @@ impl OnePackageArg {
     }
 }
 
+/// Output format of `kargo info` and `kargo tree`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum FormatArg {
+    #[default]
+    Text,
+    Json,
+}
+
+/// How compiler diagnostics are printed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum MessageFormatArg {
+    /// Compiler output as is, on stderr
+    #[default]
+    Human,
+    /// One JSON object per diagnostic, on stdout
+    Json,
+}
+
+/// Test report files `kargo test --report` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReportArg {
+    /// JUnit XML in target/<profile>/<target>/test-reports
+    Junit,
+}
+
 #[derive(Debug, Args)]
 struct BuildArgs {
     /// Build with the release profile
@@ -204,12 +232,27 @@ struct BuildArgs {
     targets: Vec<TargetArg>,
     #[command(flatten)]
     packages: PackageArgs,
+    /// How to print compiler diagnostics
+    #[arg(long, value_enum, default_value_t, value_name = "FMT")]
+    message_format: MessageFormatArg,
 }
 
 impl BuildArgs {
     fn options(&self) -> BuildOptions {
-        BuildOptions { targets: self.targets.iter().map(|t| (*t).into()).collect(), release: self.release }
+        BuildOptions { targets: self.targets.iter().map(|t| (*t).into()).collect(), release: self.release, keep_going: false }
     }
+}
+
+fn set_message_format(format: MessageFormatArg) {
+    kargo_compiler::diagnostics::set_json(format == MessageFormatArg::Json);
+}
+
+/// With `--message-format json`, ends the output with `{"reason":"build-finished",...}`.
+fn build_finished<T>(format: MessageFormatArg, result: Result<T>) -> Result<T> {
+    if format == MessageFormatArg::Json {
+        kargo_compiler::diagnostics::emit(&serde_json::json!({ "reason": "build-finished", "success": result.is_ok() }));
+    }
+    result
 }
 
 #[derive(Debug, Args)]
@@ -255,7 +298,13 @@ enum Command {
     },
     /// Compile the project
     #[command(visible_alias = "b")]
-    Build(BuildArgs),
+    Build {
+        #[command(flatten)]
+        build: BuildArgs,
+        /// Build every target even if one fails, then report all failures
+        #[arg(long)]
+        keep_going: bool,
+    },
     /// Type-check the project without packaging or linking
     #[command(visible_alias = "c")]
     Check {
@@ -264,6 +313,9 @@ enum Command {
         /// Also check the test sources
         #[arg(long)]
         tests: bool,
+        /// Check every target even if one fails, then report all failures
+        #[arg(long)]
+        keep_going: bool,
     },
     /// Build and run the program
     #[command(visible_alias = "r")]
@@ -275,6 +327,9 @@ enum Command {
         target: Option<TargetArg>,
         #[command(flatten)]
         package: OnePackageArg,
+        /// How to print compiler diagnostics
+        #[arg(long, value_enum, default_value_t, value_name = "FMT")]
+        message_format: MessageFormatArg,
         /// Arguments for the program
         #[arg(last = true)]
         args: Vec<String>,
@@ -289,6 +344,12 @@ enum Command {
         /// Compile tests but do not run them
         #[arg(long)]
         no_run: bool,
+        /// Test every target even if one fails, then print a result per target
+        #[arg(long)]
+        no_fail_fast: bool,
+        /// Also write test reports: `junit` writes JUnit XML to target/<profile>/<target>/test-reports
+        #[arg(long, value_enum, value_name = "FORMAT")]
+        report: Option<ReportArg>,
     },
     /// Generate API documentation from KDoc with Dokka
     #[command(visible_alias = "d")]
@@ -412,6 +473,9 @@ enum Command {
         duplicates: bool,
         #[command(flatten)]
         packages: PackageArgs,
+        /// Output format; `json` prints the whole resolved graph
+        #[arg(long, value_enum, default_value_t, conflicts_with_all = ["depth", "duplicates"])]
+        format: FormatArg,
     },
     /// Download all dependencies and toolchains
     Fetch {
@@ -475,7 +539,11 @@ enum Command {
         command: DaemonCommand,
     },
     /// Print project information
-    Info,
+    Info {
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
+    },
     /// Print a shell completion script
     #[command(long_about = "Print a shell completion script.
 
@@ -516,13 +584,13 @@ pub fn main() -> ExitCode {
 fn parse() -> Cli {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let mut cmd = Cli::command();
-    if wants_top_level_help(&args) {
-        if let Some(tasks) = tasks_help() {
-            cmd = cmd.after_help(format!(
-                "{tasks}
+    if wants_top_level_help(&args)
+        && let Some(tasks) = tasks_help()
+    {
+        cmd = cmd.after_help(format!(
+            "{tasks}
 {AFTER_HELP}"
-            ));
-        }
+        ));
     }
     let matches = cmd.get_matches_from(args);
     Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
@@ -689,30 +757,39 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             shell.status("Created", format!("{} `{}` package", if opts.lib { "library" } else { "application" }, opts.name));
             Ok(0)
         }
-        Command::Build(args) => {
+        Command::Build { build, keep_going } => {
+            set_message_format(build.message_format);
             let project = load_project(&global)?;
-            let opts = args.options();
-            for_each_package(&config, &project, &args.packages.selection(), &global, opts.profile(), |ctx| ops::build::build(ctx, &opts))?;
+            let opts = BuildOptions { keep_going, ..build.options() };
+            let results = for_each_package(&config, &project, &build.packages.selection(), &global, opts.profile(), |ctx| {
+                ops::build::build(ctx, &opts)
+            });
+            build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Check { build, tests } => {
+        Command::Check { build, tests, keep_going } => {
+            set_message_format(build.message_format);
             let project = load_project(&global)?;
-            let opts = CheckOptions { build: build.options(), tests };
-            for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
+            let opts = CheckOptions { build: BuildOptions { keep_going, ..build.options() }, tests };
+            let results = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
                 ops::check::check(ctx, &opts)
-            })?;
+            });
+            build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, package, args } => {
+        Command::Run { release, target, message_format, package, args } => {
+            set_message_format(message_format);
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             let ctx = context(&config, &project, index, &global, profile(release))?;
             let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, args })?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run } => {
+        Command::Test { build, filter, no_run, no_fail_fast, report } => {
+            set_message_format(build.message_format);
             let project = load_project(&global)?;
-            let opts = TestOptions { build: build.options(), filter, no_run };
+            let junit_report = report == Some(ReportArg::Junit);
+            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report };
             let passed = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
                 ops::test::test(ctx, &opts)
             })?;
@@ -792,18 +869,42 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             ops::add::remove(&config, &ws, &names, section(dev, target))?;
             Ok(0)
         }
-        Command::Tree { target, configuration, depth, duplicates, packages } => {
+        Command::Tree { target, configuration, depth, duplicates, packages, format } => {
             let project = load_project(&global)?;
             let configuration = match configuration {
                 ConfigurationArg::Compile => Configuration::Compile,
                 ConfigurationArg::Runtime => Configuration::Runtime,
                 ConfigurationArg::Test => Configuration::Test,
             };
+            if format == FormatArg::Json {
+                let mut documents = Vec::new();
+                for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+                    let mut trees = Vec::new();
+                    for t in tree_targets(ctx, target) {
+                        for (label, res) in ops::resolution_for(ctx, t, configuration)? {
+                            trees.push(ops::tree::json(&label, &res));
+                        }
+                    }
+                    let configuration_name = match configuration {
+                        Configuration::Compile => "compile",
+                        Configuration::Runtime => "runtime",
+                        Configuration::Test => "test",
+                    };
+                    let pkg = &ctx.ws.manifest().package;
+                    documents.push(serde_json::json!({
+                        "package": { "name": pkg.name, "version": pkg.version },
+                        "configuration": configuration_name,
+                        "trees": trees,
+                    }));
+                    Ok(())
+                })?;
+                // One package prints the same object as before; a workspace prints one per member.
+                let output = if documents.len() == 1 { documents.remove(0) } else { serde_json::Value::Array(documents) };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(0);
+            }
             for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
-                let targets = match target {
-                    Some(t) => vec![t.into()],
-                    None => ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect(),
-                };
+                let targets = tree_targets(ctx, target);
                 let pkg = &ctx.ws.manifest().package;
                 for t in targets {
                     let locals = ops::tree::path_dependencies(ctx, t, configuration)?;
@@ -869,7 +970,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         }
         Command::Clean { release } => {
             let project = load_project(&global)?;
-            let removed = ops::clean(project.target_dir(), release.then_some(ProfileKind::Release))?;
+            let removed = ops::clean(project.package(project.members()[0]), shell, release.then_some(ProfileKind::Release))?;
             shell.status("Removed", removed.display());
             Ok(0)
         }
@@ -906,11 +1007,17 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             let ok = kargo_ops::gradle::gradle(&ctx, &args)?;
             Ok(if ok { 0 } else { FAILURE })
         }
-        Command::Info => {
+        Command::Info { format } => {
             let project = load_project(&global)?;
-            match project.select_one(&Selection::default(), "`kargo info`") {
-                Ok(index) => print_info(&project, project.package(index)),
-                Err(_) => print_workspace_info(&project),
+            match format {
+                FormatArg::Text => match project.select_one(&Selection::default(), "`kargo info`") {
+                    Ok(index) => print_info(&project, project.package(index)),
+                    Err(_) => print_workspace_info(&project),
+                },
+                FormatArg::Json => match project.select_one(&Selection::default(), "`kargo info`") {
+                    Ok(index) => println!("{}", serde_json::to_string_pretty(&info_json(project.package(index)))?),
+                    Err(_) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(&project))?),
+                },
             }
             Ok(0)
         }
@@ -1047,6 +1154,32 @@ fn list_plugins(config: &Config, global: &GlobalArgs) {
     }
 }
 
+/// The targets a tree is shown for: the one given, else every enabled target that has a resolution.
+fn tree_targets(ctx: &BuildContext, target: Option<TargetArg>) -> Vec<TargetKind> {
+    match target {
+        Some(t) => vec![t.into()],
+        None => ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect(),
+    }
+}
+
+/// `kargo info --format json` at the root of a workspace: its members, lockfile and build directory.
+fn workspace_info_json(project: &Project) -> serde_json::Value {
+    let members: Vec<serde_json::Value> = project
+        .members()
+        .iter()
+        .map(|&i| {
+            let pkg = project.package(i);
+            serde_json::json!({ "name": pkg.name(), "version": pkg.manifest().package.version, "root": pkg.root().display().to_string() })
+        })
+        .collect();
+    serde_json::json!({
+        "workspace": project.root().display().to_string(),
+        "members": members,
+        "lockfile": project.lockfile_path().display().to_string(),
+        "target-dir": project.target_dir().display().to_string(),
+    })
+}
+
 fn print_workspace_info(project: &Project) {
     let members: Vec<String> =
         project.members().iter().map(|&i| project.package(i)).map(|p| format!("{} v{}", p.name(), p.manifest().package.version)).collect();
@@ -1071,18 +1204,7 @@ fn print_info(project: &Project, ws: &Workspace) {
     println!("kotlin:       {}", m.kotlin.version);
     let targets: Vec<&str> = m.targets.enabled().iter().map(|t| t.as_str()).collect();
     println!("targets:      {}", targets.join(", "));
-    let fw = &m.frameworks;
-    let enabled: Vec<&str> = [
-        ("compose", fw.compose.is_some()),
-        ("serialization", fw.serialization.is_some()),
-        ("coroutines", fw.coroutines.is_some()),
-        ("ktor", fw.ktor.is_some()),
-        ("lombok", fw.lombok.is_some()),
-        ("spring-boot", fw.spring_boot.is_some()),
-    ]
-    .into_iter()
-    .filter_map(|(n, on)| on.then_some(n))
-    .collect();
+    let enabled = enabled_frameworks(m);
     if !enabled.is_empty() {
         println!("frameworks:   {}", enabled.join(", "));
     }
@@ -1098,15 +1220,66 @@ fn print_info(project: &Project, ws: &Workspace) {
     println!("target dir:   {}", ws.target_dir().display());
 }
 
+fn enabled_frameworks(m: &kargo_manifest::Manifest) -> Vec<&'static str> {
+    let fw = &m.frameworks;
+    [
+        ("compose", fw.compose.is_some()),
+        ("serialization", fw.serialization.is_some()),
+        ("coroutines", fw.coroutines.is_some()),
+        ("ktor", fw.ktor.is_some()),
+        ("lombok", fw.lombok.is_some()),
+        ("spring-boot", fw.spring_boot.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(n, on)| on.then_some(n))
+    .collect()
+}
+
+/// `kargo info --format json`.
+fn info_json(ws: &Workspace) -> serde_json::Value {
+    let m = ws.manifest();
+    let dependencies = |deps: &[kargo_manifest::Dependency]| -> Vec<serde_json::Value> {
+        deps.iter()
+            .map(|d| {
+                let scope = match d.scope {
+                    Scope::Compile => "compile",
+                    Scope::Runtime => "runtime",
+                    Scope::Provided => "provided",
+                    Scope::Processor => "processor",
+                };
+                serde_json::json!({ "name": d.name, "module": d.module.to_string(), "version": d.version, "scope": scope })
+            })
+            .collect()
+    };
+    serde_json::json!({
+        "package": {
+            "name": m.package.name,
+            "version": m.package.version,
+            "group": m.package.group,
+            "description": m.package.description,
+        },
+        "kotlin": m.kotlin.version,
+        "jdk": m.toolchain.jdk.to_string(),
+        "targets": m.targets.enabled().iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+        "frameworks": enabled_frameworks(m),
+        "dependencies": dependencies(&m.dependencies),
+        "dev-dependencies": dependencies(&m.dev_dependencies),
+        "repositories": m.repositories.iter().map(|r| serde_json::json!({ "name": r.name, "url": r.url })).collect::<Vec<_>>(),
+        "root": ws.root().display().to_string(),
+        "manifest": ws.manifest_path().display().to_string(),
+        "target-dir": ws.target_dir().display().to_string(),
+    })
+}
+
 /// `kargo <name>`: a task from the manifest, else a `kargo-<name>` executable.
 fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u8> {
     let (name, args) = argv.split_first().context("missing subcommand")?;
-    if let Ok(ws) = load_workspace(global) {
-        if ws.manifest().tasks.contains_key(name) {
-            let env = kargo_ops::plugins::base_env(&ws, "dev");
-            kargo_ops::tasks::run(config.shell(), ws.root(), &ws.manifest().tasks, name, args, &env)?;
-            return Ok(0);
-        }
+    if let Ok(ws) = load_workspace(global)
+        && ws.manifest().tasks.contains_key(name)
+    {
+        let env = kargo_ops::plugins::base_env(&ws, "dev");
+        kargo_ops::tasks::run(config.shell(), ws.root(), &ws.manifest().tasks, name, args, &env)?;
+        return Ok(0);
     }
     let Some(program) = kargo_ops::plugins::find_subcommand(config, name) else {
         bail!("no such command: `{name}`\n\n\tView all installed commands with `kargo --help` and `kargo plugins`");
@@ -1131,9 +1304,10 @@ mod tests {
     fn parses_common_invocations() {
         let cli = Cli::try_parse_from(["kargo", "build", "--release", "-t", "jvm", "-t", "native"]).unwrap();
         match cli.command {
-            Command::Build(args) => {
-                let o = args.options();
+            Command::Build { build, keep_going } => {
+                let o = build.options();
                 assert!(o.release);
+                assert!(!keep_going);
                 assert_eq!(o.targets, [TargetKind::Jvm, TargetKind::Native]);
             }
             other => panic!("{other:?}"),
@@ -1160,8 +1334,24 @@ mod tests {
         assert!(matches!(cli.command, Command::Test { ref filter, no_run: true, .. } if filter.as_deref() == Some("MathTest")));
         let cli = Cli::try_parse_from(["kargo", "c", "--tests", "-r", "-t", "native"]).unwrap();
         assert!(
-            matches!(cli.command, Command::Check { ref build, tests: true } if build.release && build.options().targets == [TargetKind::Native])
+            matches!(cli.command, Command::Check { ref build, tests: true, keep_going: false } if build.release && build.options().targets == [TargetKind::Native])
         );
+        assert!(matches!(Cli::try_parse_from(["kargo", "b", "--keep-going"]).unwrap().command, Command::Build { keep_going: true, .. }));
+        assert!(matches!(
+            Cli::try_parse_from(["kargo", "check", "--keep-going"]).unwrap().command,
+            Command::Check { keep_going: true, .. }
+        ));
+        assert!(matches!(Cli::try_parse_from(["kargo", "t", "--no-fail-fast"]).unwrap().command, Command::Test { no_fail_fast: true, .. }));
+        let cli = Cli::try_parse_from(["kargo", "test", "--report", "junit", "--message-format", "json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Test { report: Some(ReportArg::Junit), ref build, .. } if build.message_format == MessageFormatArg::Json
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["kargo", "info", "--format", "json"]).unwrap().command,
+            Command::Info { format: FormatArg::Json }
+        ));
+        assert!(Cli::try_parse_from(["kargo", "tree", "--format", "json", "--duplicates"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "update", "g:a", "--precise", "1.2", "--dry-run"]).unwrap();
         assert!(
             matches!(cli.command, Command::Update { ref modules, ref precise, dry_run: true } if modules == &["g:a"] && precise.as_deref() == Some("1.2"))
@@ -1182,7 +1372,7 @@ mod tests {
     #[test]
     fn parses_package_selection() {
         let cli = Cli::try_parse_from(["kargo", "build", "-p", "app", "--package", "lib"]).unwrap();
-        assert!(matches!(cli.command, Command::Build(ref args) if args.packages.selection().packages == ["app", "lib"]));
+        assert!(matches!(cli.command, Command::Build { ref build, .. } if build.packages.selection().packages == ["app", "lib"]));
         let cli = Cli::try_parse_from(["kargo", "test", "--workspace"]).unwrap();
         assert!(matches!(cli.command, Command::Test { ref build, .. } if build.packages.workspace));
         assert!(Cli::try_parse_from(["kargo", "build", "--workspace", "-p", "app"]).is_err());

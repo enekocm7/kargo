@@ -19,7 +19,7 @@ Users get the full picture from `README.md` and the website in `website/`. Read 
 
 ## Repository layout
 
-Cargo workspace (edition 2024, MSRV 1.85). Crates depend downward in roughly this order:
+Cargo workspace (edition 2024, MSRV 1.89). Crates depend downward in roughly this order:
 
 | Path                     | Responsibility                                                                                                                                                |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -27,7 +27,7 @@ Cargo workspace (edition 2024, MSRV 1.85). Crates depend downward in roughly thi
 | `crates/kargo-maven`     | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, the resolver                                                                 |
 | `crates/kargo-manifest`  | The `kargo.toml` model (`raw.rs` is the serde layer, `lib.rs` the validated model), format-preserving edits (`edit.rs`)                                       |
 | `crates/kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, archives                                                                                 |
-| `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, the compiler daemon (`daemon.rs`, `daemon/KargoDaemon.java`), jar packaging, entry points, test reports        |
+| `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, the compiler daemon (`daemon.rs`, `daemon/KargoDaemon.java`), incremental compilation (`incremental.rs`, `daemon/KargoIc.java`), jar packaging, entry points, test reports (`testreport.rs`), compiler diagnostics (`diagnostics.rs`) |
 | `crates/kargo-ops`       | The build engine: `workspace.rs`, `ops/` (one module per command), `builtins.rs` (frameworks), `lockfile.rs`, `gradle.rs` (Android), `tasks.rs`, `plugins.rs` |
 | `src/`                   | The `kargo` binary: `cli.rs` (clap definitions and dispatch), `main.rs`                                                                                       |
 | `tests/`                 | `cli.rs` offline CLI integration tests, `e2e.rs` real-compiler tests, `common/` shared helpers                                                                |

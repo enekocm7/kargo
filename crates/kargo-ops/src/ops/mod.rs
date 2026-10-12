@@ -16,16 +16,18 @@ pub mod tree;
 pub mod update;
 pub mod upgrade;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
 use self::build::{build_jvm, jvm_classpaths, native_platforms, native_resolution, select_targets, wasm_resolution};
 use self::context::BuildContext;
+use crate::workspace::Workspace;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_manifest::{Hook, Scope, TargetKind};
 use kargo_maven::{Platform, Resolution};
 use kargo_util::fs::remove_dir_all_if_exists;
+use kargo_util::shell::Shell;
 
 /// Runs `f` on every item on its own thread and returns the results in item order.
 /// A single item runs inline. Used to build independent targets (and Native platforms)
@@ -41,6 +43,46 @@ pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -
     })
 }
 
+/// Collects the per-target results of a multi-target operation.
+///
+/// Without `keep_going` the first failure (in target order) is returned as is. With it,
+/// every failed target's error is printed and the operation fails with a summary naming
+/// the targets that failed and those that succeeded, like `cargo build --keep-going`.
+pub(crate) fn collect_targets<R>(
+    ctx: &BuildContext,
+    action: &str,
+    keep_going: bool,
+    results: impl IntoIterator<Item = (TargetKind, Result<R>)>,
+) -> Result<Vec<R>> {
+    let (mut ok, mut succeeded, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+    for (target, result) in results {
+        match result {
+            Ok(r) => {
+                ok.push(r);
+                succeeded.push(target);
+            }
+            Err(e) if !keep_going => return Err(e),
+            Err(e) => failed.push((target, e)),
+        }
+    }
+    if failed.len() == 1 && succeeded.is_empty() {
+        return Err(failed.remove(0).1);
+    }
+    if failed.is_empty() {
+        return Ok(ok);
+    }
+    for (target, err) in &failed {
+        ctx.shell().error(format!("could not {action} the {target} target: {err:#}"));
+    }
+    let names = |targets: &[TargetKind]| targets.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ");
+    let failed: Vec<TargetKind> = failed.into_iter().map(|(t, _)| t).collect();
+    let total = failed.len() + succeeded.len();
+    if succeeded.is_empty() {
+        bail!("could not {action} {} of {total} targets ({})", failed.len(), names(&failed));
+    }
+    bail!("could not {action} {} of {total} targets ({}); {} succeeded", failed.len(), names(&failed), names(&succeeded))
+}
+
 /// Runs `a` and `b` at the same time, e.g. fetching the compiler while dependencies resolve.
 pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) {
     std::thread::scope(|s| {
@@ -50,13 +92,32 @@ pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> 
     })
 }
 
-/// `kargo clean`: removes the build directory `target_dir` (or one profile of it).
-pub fn clean(target_dir: &Path, profile: Option<crate::workspace::ProfileKind>) -> Result<PathBuf> {
+/// `kargo clean`: removes the build directory (or one profile of it).
+pub fn clean(ws: &Workspace, shell: &Shell, profile: Option<crate::workspace::ProfileKind>) -> Result<PathBuf> {
     let dir = match profile {
-        Some(p) => target_dir.join(p.dir_name()),
-        None => target_dir.to_path_buf(),
+        Some(p) => ws.target_dir().join(p.dir_name()),
+        None => ws.target_dir().to_path_buf(),
     };
-    remove_dir_all_if_exists(&dir)?;
+    if !ws.target_dir().exists() {
+        return Ok(dir);
+    }
+    let lock = ws.lock(shell)?;
+    if profile.is_some() {
+        remove_dir_all_if_exists(&dir)?;
+    } else {
+        // Everything but the lock this process holds.
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+            let path = entry?.path();
+            if path == lock.path() {
+                continue;
+            }
+            if path.is_dir() {
+                remove_dir_all_if_exists(&path)?;
+            } else {
+                std::fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+        }
+    }
     Ok(dir)
 }
 
@@ -115,6 +176,8 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
                 toolchain?;
                 main?;
                 test?;
+                build::jvm_processor_path(ctx, &setup, false)?;
+                build::jvm_processor_path(ctx, &setup, true)?;
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
@@ -140,6 +203,26 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
         Ok(())
     });
     fetched.into_iter().collect()
+}
+
+/// `kargo update`: re-resolves every dependency, ignoring `kargo.lock`.
+pub fn update(ctx: &BuildContext) -> Result<()> {
+    ctx.reset_lockfile(None);
+    let targets: Vec<TargetKind> = ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
+    for target in targets {
+        for configuration in [Configuration::Compile, Configuration::Runtime, Configuration::Test] {
+            if target != TargetKind::Jvm && configuration == Configuration::Compile {
+                continue;
+            }
+            resolution_for(ctx, target, configuration)?;
+        }
+        if target == TargetKind::Jvm {
+            let setup = ctx.setup(target)?;
+            build::jvm_processor_path(ctx, &setup, false)?;
+            build::jvm_processor_path(ctx, &setup, true)?;
+        }
+    }
+    ctx.save_lockfile()
 }
 
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target.

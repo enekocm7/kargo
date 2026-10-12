@@ -478,16 +478,17 @@ pub fn create(dir: &Path, opts: &NewOptions) -> Result<Vec<PathBuf>> {
         std::fs::write(&path, f.contents).with_context(|| format!("failed to write {}", path.display()))?;
         written.push(path);
     }
-    if opts.vcs && !inside_git_repo(dir) {
-        if let Some(git) = kargo_util::process::find_on_path("git") {
-            let _ = std::process::Command::new(git)
-                .arg("init")
-                .arg("--quiet")
-                .current_dir(dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
+    if opts.vcs
+        && !inside_git_repo(dir)
+        && let Some(git) = kargo_util::process::find_on_path("git")
+    {
+        let _ = std::process::Command::new(git)
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
     Ok(written)
 }

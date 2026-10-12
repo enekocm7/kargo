@@ -43,6 +43,7 @@ kargo test -t jvm          # one target
 kargo test Calculator      # only tests whose package.Class.method contains "Calculator"
 kargo test Calculator.adds # one test
 kargo test --no-run        # compile tests without running them
+kargo test --no-fail-fast  # test every target even if one fails
 kargo check --tests        # type-check tests without linking (fastest; see kargo check)
 kargo test --release       # with the release profile
 ```
@@ -52,6 +53,58 @@ kargo test --release       # with the release profile
 With several targets enabled, the tests of every target compile at the same time; they then run one target after another, so each target's results stay together. See [Build performance](../build-performance/).
 
 On the JVM every class in `tests/` and `tests-jvm/` is scanned, whatever its name: a class called `T` or a Kotest spec called `UserSpec` runs just like `UserTest`. If test sources compiled but no test was found, or the filter matched nothing, `kargo test` reports an error and exits with `101` instead of silently passing.
+
+## Testing every target
+
+By default `kargo test` stops at the first target whose tests fail or don't compile, like `cargo test`: the tests of later targets still compile, but don't run. It notes the targets it skipped:
+
+```console
+$ kargo test
+...
+note: skipped the native target after a failure; pass `--no-fail-fast` to test every target
+error: test failed
+```
+
+Pass `--no-fail-fast` to test the remaining targets anyway. Each target's tests run, errors are reported per target, and a table at the end shows how every target went:
+
+```console
+$ kargo test --no-fail-fast
+...
+test results by target:
+    jvm      ok
+    wasm     error (could not compile or run the tests)
+    native   ok
+error: test failed
+```
+
+`kargo test` still exits with `101` if any target failed. To make this the default, for example for CI, set it in `kargo.toml`:
+
+```toml title="kargo.toml"
+[test]
+fail-fast = false
+```
+
+`kargo build --keep-going` and `kargo check --keep-going` do the same for builds: every target is built and each failure is reported.
+
+## Test reports for CI
+
+CI systems such as GitHub Actions, GitLab and Jenkins show per-test results from JUnit XML files. Pass `--report junit` and Kargo writes them next to each target's build output, in addition to the usual console report:
+
+```console
+$ kargo test --report junit
+     Running JVM tests (JUnit Platform)
+...
+    Reported JUnit XML in target/debug/jvm/test-reports
+```
+
+| Target | Report files in `target/<profile>/<target>/test-reports/` |
+|---|---|
+| JVM | Written by the JUnit console launcher: one `TEST-<engine>.xml` per test engine, such as `TEST-junit-jupiter.xml` |
+| Wasm | `TEST-wasm.xml`, built from the test runner's results |
+| Native | `TEST-native.xml`, built from the test runner's results |
+| Android | Gradle's `TEST-<class>.xml` files, copied from `target/android/build/test-results` |
+
+Each report has one `<testsuite>` per test class, with each test's time, failure message and stack trace, and what it printed. The directory is cleared at the start of every run, so it never holds results from an earlier one. See [CI](../ci/#test-results) for publishing the reports.
 
 ## Filtering tests
 

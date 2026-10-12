@@ -15,6 +15,7 @@ use kargo_manifest::{Dependency, Scope, TargetKind};
 use kargo_maven::{DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
+use kargo_util::flock::FileLock;
 use kargo_util::hash::Fingerprint;
 use kargo_util::shell::Shell;
 
@@ -52,6 +53,8 @@ struct Shared {
     native: Lazy<NativeToolchain>,
     /// Artifacts of path dependencies already built in this invocation, by package, target and platform.
     built: Mutex<HashMap<String, Option<PathBuf>>>,
+    /// The build-directory lock, held until [`BuildContext::unlock`] or drop.
+    build_lock: Mutex<Option<FileLock>>,
 }
 
 /// A package reached through path dependencies, with the scope it has for the consumer.
@@ -65,8 +68,10 @@ pub struct LocalDependency {
 /// Maven's rules: a provided dependency is not passed on, and a runtime one stays runtime.
 pub fn combine_scopes(outer: Scope, inner: Scope) -> Option<Scope> {
     match (outer, inner) {
-        (_, Scope::Provided) => None,
+        // Annotation processors only run for the package that declares them.
+        (_, Scope::Provided | Scope::Processor) => None,
         (Scope::Provided, _) => Some(Scope::Provided),
+        (Scope::Processor, _) => None,
         (Scope::Runtime, _) | (_, Scope::Runtime) => Some(Scope::Runtime),
         (Scope::Compile, Scope::Compile) => Some(Scope::Compile),
     }
@@ -114,10 +119,10 @@ impl UpdatePlan {
         let mut pins: Vec<(ModuleId, String)> = Vec::new();
         if let Some(locked) = self.previous.resolutions.get(key).filter(|r| r.inputs == inputs) {
             for pkg in &locked.packages {
-                if let Ok(module) = pkg.module.parse::<ModuleId>() {
-                    if !self.modules.contains(&module) {
-                        pins.push((module, pkg.version.clone()));
-                    }
+                if let Ok(module) = pkg.module.parse::<ModuleId>()
+                    && !self.modules.contains(&module)
+                {
+                    pins.push((module, pkg.version.clone()));
                 }
             }
         }
@@ -143,7 +148,7 @@ impl TargetSetup {
     pub fn requests(&self, scopes: &[Scope], include_dev: bool) -> Vec<DependencyRequest> {
         let mut deps: Vec<&Dependency> = self.main.iter().filter(|d| scopes.contains(&d.scope)).collect();
         if include_dev {
-            deps.extend(self.dev.iter());
+            deps.extend(self.dev.iter().filter(|d| scopes.contains(&d.scope)));
         }
         let mut out: Vec<DependencyRequest> = Vec::new();
         for d in deps {
@@ -183,6 +188,8 @@ impl<'a> BuildContext<'a> {
     /// The context for building `package` of `project`; it owns `kargo.lock`.
     pub fn new(config: &'a Config, project: &'a Project, package: usize, profile: ProfileKind) -> Result<Self> {
         kargo_compiler::daemon::configure(config.home());
+        // Taken before reading kargo.lock so a concurrent process's write is seen.
+        let build_lock = project.package(package).lock(config.shell())?;
         let lock = Lockfile::load(&project.lockfile_path())?;
         Ok(Self {
             config,
@@ -201,6 +208,7 @@ impl<'a> BuildContext<'a> {
                 compiler: Lazy::new(),
                 native: Lazy::new(),
                 built: Mutex::new(HashMap::new()),
+                build_lock: Mutex::new(Some(build_lock)),
             }),
             owner: true,
         })
@@ -446,6 +454,19 @@ impl<'a> BuildContext<'a> {
         self.shared.lock_dirty.store(true, Ordering::SeqCst);
     }
 
+    /// Saves `kargo.lock` and releases the build-directory lock, so a long-running
+    /// program started by `kargo run` does not block other Kargo commands.
+    pub fn unlock(&self) -> Result<()> {
+        self.save_lockfile()?;
+        self.shared.build_lock.lock().expect("lock poisoned").take();
+        Ok(())
+    }
+
+    /// The path of the held build-directory lock, if any.
+    pub fn build_lock_path(&self) -> Option<PathBuf> {
+        self.shared.build_lock.lock().expect("lock poisoned").as_ref().map(|l| l.path().to_path_buf())
+    }
+
     pub fn fingerprint_dir(&self, target: TargetKind) -> PathBuf {
         self.ws.output_dir(self.profile, target).join(".fingerprint")
     }
@@ -579,16 +600,23 @@ lib = { path = \"../lib\" }
         provided.scope = Scope::Provided;
         let mut runtime = Dependency::new("r:r".parse().unwrap(), Some("1".into()));
         runtime.scope = Scope::Runtime;
+        let mut processor = Dependency::new("ap:ap".parse().unwrap(), Some("1".into()));
+        processor.scope = Scope::Processor;
+        let mut test_processor = Dependency::new("tp:tp".parse().unwrap(), Some("1".into()));
+        test_processor.scope = Scope::Processor;
         let setup = TargetSetup {
             target: TargetKind::Jvm,
             contributions: Contributions::default(),
-            main: vec![Dependency::new("c:c".parse().unwrap(), Some("1".into())), provided, runtime],
-            dev: vec![Dependency::new("t:t".parse().unwrap(), Some("1".into()))],
+            main: vec![Dependency::new("c:c".parse().unwrap(), Some("1".into())), provided, runtime, processor],
+            dev: vec![Dependency::new("t:t".parse().unwrap(), Some("1".into())), test_processor],
             boms: vec![],
         };
         let names = |r: Vec<DependencyRequest>| r.into_iter().map(|r| r.module.artifact).collect::<Vec<_>>();
         assert_eq!(names(setup.requests(&[Scope::Compile, Scope::Provided], false)), ["c", "p"]);
         assert_eq!(names(setup.requests(&[Scope::Compile, Scope::Runtime], false)), ["c", "r"]);
         assert_eq!(names(setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true)), ["c", "p", "r", "t"]);
+        // Processors never land on a classpath, only on the processor path.
+        assert_eq!(names(setup.requests(&[Scope::Processor], false)), ["ap"]);
+        assert_eq!(names(setup.requests(&[Scope::Processor], true)), ["ap", "tp"]);
     }
 }

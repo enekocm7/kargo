@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, native_libraries, native_platforms, select_targets,
-    sources, wasm_libraries,
+    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, jvm_javac_args, jvm_processor_path, native_cinterop,
+    native_libraries, native_platforms, select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
@@ -31,6 +32,23 @@ pub struct TestOptions {
     pub filter: Option<String>,
     /// Compile tests without running them.
     pub no_run: bool,
+    /// Keep testing the remaining targets after one fails (`--no-fail-fast`),
+    /// overriding `[test] fail-fast` in `kargo.toml`.
+    pub no_fail_fast: bool,
+    /// Write JUnit XML reports to `target/<profile>/<target>/test-reports` (`--report junit`).
+    pub junit_report: bool,
+}
+
+/// What happened to one target in a `kargo test` run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetOutcome {
+    Passed,
+    /// Its tests ran and at least one failed.
+    Failed,
+    /// Its tests could not be compiled or started.
+    Error,
+    /// Not run because an earlier target failed.
+    Skipped,
 }
 
 /// Runs the tests; returns `true` when everything passed.
@@ -48,15 +66,49 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         TargetKind::Native => test_native(ctx, opts),
         TargetKind::Android => Ok(TestRun::Android),
     });
-    let mut ok = true;
-    for run in prepared {
-        ok &= match run? {
-            TestRun::Done(passed) => passed,
-            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts.filter.as_deref())?,
-            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label)?,
-            TestRun::Android => test_android(ctx, opts)?,
+    let fail_fast = !opts.no_fail_fast && ctx.ws.manifest().test.fail_fast;
+    let mut outcomes = Vec::new();
+    // In fail-fast mode an error ends the run once the skipped targets are listed.
+    let mut fatal = None;
+    for (&target, run) in targets.iter().zip(prepared) {
+        if outcomes.iter().any(|(_, o)| *o != TargetOutcome::Passed) && fail_fast {
+            outcomes.push((target, TargetOutcome::Skipped));
+            continue;
+        }
+        let passed = run.and_then(|run| match run {
+            TestRun::Done(passed) => Ok(passed),
+            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts),
+            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts),
+            TestRun::Android => test_android(ctx, opts),
+        });
+        let outcome = match passed {
+            Ok(true) => TargetOutcome::Passed,
+            Ok(false) => TargetOutcome::Failed,
+            Err(e) if fail_fast || targets.len() == 1 => {
+                fatal = Some(e);
+                TargetOutcome::Error
+            }
+            Err(e) => {
+                ctx.shell().error(format!("could not test the {target} target: {e:#}"));
+                TargetOutcome::Error
+            }
         };
+        outcomes.push((target, outcome));
     }
+    let skipped: Vec<&str> = outcomes.iter().filter(|(_, o)| *o == TargetOutcome::Skipped).map(|(t, _)| t.as_str()).collect();
+    if !skipped.is_empty() {
+        ctx.shell().note(format!(
+            "skipped the {} target{} after a failure; pass `--no-fail-fast` to test every target",
+            skipped.join(", "),
+            if skipped.len() == 1 { "" } else { "s" }
+        ));
+    } else if outcomes.len() > 1 && !fail_fast {
+        print_target_table(&outcomes, anstream::stdout())?;
+    }
+    if let Some(e) = fatal {
+        return Err(e);
+    }
+    let ok = outcomes.iter().all(|(_, o)| *o == TargetOutcome::Passed);
     let mut env = env;
     env.push(("KARGO_TEST_RESULT".to_owned(), if ok { "success" } else { "failure" }.to_owned()));
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostTest, &env)?;
@@ -64,6 +116,25 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         finished(ctx, start);
     }
     Ok(ok)
+}
+
+/// Prints one line per target with how its tests went, after a `--no-fail-fast` run.
+fn print_target_table(outcomes: &[(TargetKind, TargetOutcome)], mut out: impl std::io::Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "
+test results by target:"
+    )?;
+    for (target, outcome) in outcomes {
+        let (style, text) = match outcome {
+            TargetOutcome::Passed => (AnsiColor::Green.on_default(), "ok"),
+            TargetOutcome::Failed => (AnsiColor::Red.on_default(), "FAILED"),
+            TargetOutcome::Error => (AnsiColor::Red.on_default(), "error (could not compile or run the tests)"),
+            TargetOutcome::Skipped => (AnsiColor::Yellow.on_default(), "skipped"),
+        };
+        writeln!(out, "    {:<8} {style}{text}{style:#}", target.as_str())?;
+    }
+    Ok(())
 }
 
 /// A target's compiled tests, ready to run.
@@ -88,7 +159,25 @@ fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         no_tests(ctx, TargetKind::Android);
         return Ok(true);
     }
-    crate::gradle::test(ctx, opts.filter.as_deref(), opts.no_run)
+    let reports = (opts.junit_report && !opts.no_run).then(|| reports_dir(ctx, TargetKind::Android)).transpose()?;
+    let passed = crate::gradle::test(ctx, opts.filter.as_deref(), opts.no_run, reports.as_deref())?;
+    if let Some(dir) = &reports {
+        wrote_reports(ctx, dir);
+    }
+    Ok(passed)
+}
+
+/// Clears and returns `target/<profile>/<target>/test-reports`, where `--report junit` writes.
+fn reports_dir(ctx: &BuildContext, target: TargetKind) -> Result<PathBuf> {
+    let dir = ctx.ws.output_dir(ctx.profile, target).join("test-reports");
+    kargo_util::fs::remove_dir_all_if_exists(&dir)?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn wrote_reports(ctx: &BuildContext, dir: &Path) {
+    let shown = dir.strip_prefix(ctx.ws.root()).unwrap_or(dir);
+    ctx.shell().status("Reported", format!("JUnit XML in {}", shown.display()));
 }
 
 fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
@@ -125,9 +214,18 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     Ok(TestRun::Junit(cmd))
 }
 
-fn run_junit(ctx: &BuildContext, mut cmd: Command, filter: Option<&str>) -> Result<bool> {
+fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions) -> Result<bool> {
+    let reports = opts.junit_report.then(|| reports_dir(ctx, TargetKind::Jvm)).transpose()?;
+    if let Some(dir) = &reports {
+        // The launcher writes `TEST-junit-jupiter.xml` (one file per test engine).
+        cmd.arg("--reports-dir").arg(dir);
+    }
     ctx.shell().status("Running", "JVM tests (JUnit Platform)");
     let status = process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?;
+    if let Some(dir) = &reports {
+        wrote_reports(ctx, dir);
+    }
+    let filter = opts.filter.as_deref();
     if status.code() == Some(JUNIT_NO_TESTS) {
         match filter {
             Some(filter) => ctx.shell().error(format!("no JVM tests match `{filter}`; the filter matches `package.Class.method` names")),
@@ -167,6 +265,8 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
     let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
     let test_classes = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-classes");
+    let processor_path = jvm_processor_path(ctx, &setup, true)?;
+    let javac_args = jvm_javac_args(&setup, jvm);
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(test_cp);
@@ -180,8 +280,8 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
         jvm_target: &jvm.target_for(jdk.version),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
-        javac_args: &setup.contributions.javac_args,
-        processor_path: &[],
+        javac_args: &javac_args,
+        processor_path: &processor_path,
         resources: vec![ctx.ws.test_resources()],
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
@@ -237,13 +337,21 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// Runs a test executable whose stdout carries TeamCity messages.
-fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str) -> Result<bool> {
+fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str, target: TargetKind, opts: &TestOptions) -> Result<bool> {
     ctx.shell().status("Running", label);
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.stdout(Stdio::piped()).spawn().with_context(|| format!("failed to start {label}"))?;
     let stdout = child.stdout.take().context("missing test stdout")?;
     let mut summary = testreport::report(BufReader::new(stdout), anstream::stdout())?;
     let status = child.wait()?;
+    if opts.junit_report {
+        let dir = reports_dir(ctx, target)?;
+        let file = dir.join(format!("TEST-{target}.xml"));
+        let package = &ctx.ws.manifest().package.name;
+        testreport::write_junit_xml(&file, &format!("{package} ({target})"), &summary.cases)
+            .with_context(|| format!("failed to write {}", file.display()))?;
+        wrote_reports(ctx, &dir);
+    }
     // Runners exit non-zero when a test failed; without a failed test that means a crash.
     summary.crashed = !status.success() && summary.failed == 0;
     if summary.crashed && !summary.ran_tests() {
@@ -331,7 +439,8 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     }
     let setup = ctx.setup(TargetKind::Native)?;
     let _ = native_libraries(ctx, &setup, host, false)?;
-    let libraries = native_libraries(ctx, &setup, host, true)?;
+    let mut libraries = native_libraries(ctx, &setup, host, true)?;
+    libraries.extend(native_cinterop(ctx, host)?);
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
