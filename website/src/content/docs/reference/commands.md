@@ -102,6 +102,8 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 
 [Path dependencies](../../guides/workspaces/) are built first, for the same targets.
 
+Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
+
 ```sh
 kargo build
 kargo build --release -t jvm -t native
@@ -412,7 +414,7 @@ kargo task <name> [args]
 kargo <name> [args]      # shorthand
 ```
 
-Inside a project, `kargo --help` also lists its tasks.
+Inside a project, `kargo --help` also lists its tasks. A task named like a built-in command, such as `build` or `test`, can only run as `kargo task <name>`; the listing marks it and the commands that work on a package [warn about it](../warnings/#tasks-hidden-by-built-in-commands).
 
 ## `kargo plugins`
 

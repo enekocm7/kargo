@@ -840,7 +840,9 @@ fn fmt_and_lint_sections_are_validated() {
     p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("kargo lint --create-baseline"));
     // A task named like the command is reachable through `kargo task`.
     p.file("kargo.toml", &manifest("style", "[tasks]\nlint = \"echo custom\"\n[lint]\nbaseline = \"baseline.xml\"\n"));
-    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("run the `lint` task with `kargo task lint`"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains(
+        "warning: task `lint` is hidden by the built-in `kargo lint` command; run the task with `kargo task lint`",
+    ));
     p.file("kargo.toml", &manifest("style", "[lint]\nmax-issues = 3\n"));
     p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("unknown field `max-issues`"));
 }
@@ -1287,4 +1289,134 @@ fn invalid_bin_sections_are_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("tools", "[[bin]]\nname = \"x\"\n"));
     p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("[[bin]] `x` needs an entry point"));
+}
+
+// Warnings about projects that are valid but probably not what was meant. Every build below
+// runs offline and stops at the toolchain, after the warnings are printed.
+
+#[test]
+fn build_and_check_warn_when_a_target_has_no_sources() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("empty", "[target.jvm]\n[target.wasm]\n"));
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args(["--offline", cmd])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains("warning: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target"))
+            .stderr(predicate::str::contains("warning: no Kotlin sources found in src/ or src-wasm/ for the wasm target"));
+    }
+
+    // `run` and `package` only build the JVM target.
+    for cmd in ["run", "package"] {
+        p.kargo()
+            .args(["--offline", cmd])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("warning: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target"))
+            .stderr(predicate::str::contains("for the wasm target").not());
+    }
+
+    // A target with sources is not mentioned, and `-q` silences the rest.
+    p.file("src-jvm/Main.kt", "fun main() {}\n");
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("for the wasm target"))
+        .stderr(predicate::str::contains("for the jvm target").not());
+    p.kargo().args(["--offline", "-q", "build"]).assert().failure().stderr(predicate::str::contains("warning:").not());
+}
+
+#[test]
+fn pre_build_hooks_can_provide_the_sources() {
+    let p = Project::new();
+    let hook =
+        r#"gen = { run = 'mkdir -p src && touch src/Gen.kt', windows-run = 'mkdir src && type nul> src\Gen.kt', hooks = ["pre-build"] }"#;
+    p.file("kargo.toml", &manifest("generated", &format!("[tasks]\n{hook}\n")));
+    p.kargo().args(["--offline", "build"]).assert().failure().stderr(predicate::str::contains("no Kotlin or Java sources").not());
+    assert!(p.path().join("src/Gen.kt").is_file());
+}
+
+#[test]
+fn a_resources_only_jvm_project_has_nothing_to_warn_about() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("assets", "")).file("resources/config.properties", "a=1\n");
+    p.kargo().args(["--offline", "build"]).assert().failure().stderr(predicate::str::contains("no Kotlin or Java sources").not());
+}
+
+#[test]
+fn kotlin_scripts_are_reported_as_ignored() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("scripts", ""))
+        .file("src/Main.kt", "fun main() {}\n")
+        .file("src/script.kts", "println(\"script\")\n")
+        .file("tests/Check.kts", "");
+    for cmd in ["build", "check", "test"] {
+        p.kargo()
+            .args(["--offline", cmd])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("warning: `src/script.kts` is ignored: Kargo does not compile or run Kotlin scripts (.kts)"))
+            .stderr(predicate::str::contains("warning: `tests/Check.kts` is ignored"));
+    }
+}
+
+#[test]
+fn tasks_named_like_built_in_commands_warn() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("tasks", "[tasks]\nbuild = \"echo built\"\nb = \"echo alias\"\nci = \"echo ci\"\n"));
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "warning: task `build` is hidden by the built-in `kargo build` command; run the task with `kargo task build` or rename it",
+        ))
+        .stderr(predicate::str::contains("warning: task `b` is hidden by the built-in `kargo b` command"))
+        .stderr(predicate::str::contains("task `ci`").not());
+
+    // The listing marks them; running one through `kargo task` works and needs no warning.
+    p.kargo()
+        .arg("task")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo built [hidden by `kargo build`; run it with `kargo task build`]"))
+        .stdout(predicate::str::contains("echo ci\n"));
+    p.kargo().args(["task", "build"]).assert().success().stderr(predicate::str::contains("hidden by").not());
+    // A task a built-in command does not hide is run by name.
+    p.kargo().arg("ci").assert().success().stderr(predicate::str::contains("hidden by").not());
+}
+
+#[test]
+fn odd_package_versions_warn() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", "[package]\nname = \"odd\"\nversion = \"not.a.version.x\"\n");
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("warning: package version `not.a.version.x` does not look like a version"));
+
+    p.file("kargo.toml", &manifest("odd", ""));
+    p.kargo().args(["--offline", "build"]).assert().failure().stderr(predicate::str::contains("does not look like a version").not());
+}
+
+#[test]
+fn warnings_in_a_workspace_name_the_package() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n")
+        .file("app/kargo.toml", &manifest("app", ""))
+        .file("app/src/Main.kt", "fun main() {}\n")
+        .file("lib/kargo.toml", "[package]\nname = \"lib\"\nversion = \"one\"\n");
+    p.kargo()
+        .args(["--offline", "build", "-p", "lib"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("warning: package `lib`: package version `one` does not look like a version"))
+        .stderr(predicate::str::contains("warning: package `lib`: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target"));
+    p.kargo().args(["--offline", "build", "-p", "app"]).assert().failure().stderr(predicate::str::contains("warning:").not());
 }

@@ -19,6 +19,7 @@ use kargo_ops::ops::run::{Program, RunOptions};
 use kargo_ops::ops::test::TestOptions;
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
+use kargo_ops::warnings;
 use kargo_ops::workspace::{ProfileKind, Project, Selection, Workspace};
 use kargo_util::config::Config;
 use kargo_util::shell::{Shell, Verbosity};
@@ -626,6 +627,7 @@ fn tasks_help() -> Option<String> {
         return None;
     }
     let width = tasks.keys().map(String::len).max().unwrap_or(0);
+    let builtins = builtin_commands();
     let mut out = String::from(
         "Tasks (from kargo.toml, run with `kargo <task>`):
 ",
@@ -635,19 +637,39 @@ fn tasks_help() -> Option<String> {
             "  {:width$}  {}
 ",
             task.name,
-            task_description(task)
+            task_description(task, &builtins)
         ));
     }
     Some(out)
 }
 
-fn task_description(task: &kargo_manifest::Task) -> String {
+fn task_description(task: &kargo_manifest::Task, builtins: &[String]) -> String {
     let mut desc = task.description.clone().unwrap_or_else(|| task.platform_run().join(" && "));
     if !task.hooks.is_empty() {
         let hooks: Vec<&str> = task.hooks.iter().map(|h| h.as_str()).collect();
         desc.push_str(&format!(" [hooks: {}]", hooks.join(", ")));
     }
+    if builtins.contains(&task.name) {
+        desc.push_str(&format!(" [hidden by `kargo {0}`; run it with `kargo task {0}`]", task.name));
+    }
     desc
+}
+
+/// The names `kargo <name>` runs as a built-in command, aliases included. A task of the same
+/// name can only be run with `kargo task <name>`.
+fn builtin_commands() -> Vec<String> {
+    let mut names = vec!["help".to_owned()];
+    for command in Cli::command().get_subcommands() {
+        names.push(command.get_name().to_owned());
+        names.extend(command.get_all_aliases().map(str::to_owned));
+    }
+    names
+}
+
+/// Warns about `kargo.toml` settings that work but are probably mistakes.
+fn warn_manifest(shell: &Shell, project: &Project, ws: &Workspace) {
+    let builtins = builtin_commands();
+    warnings::emit(shell, project, ws, warnings::manifest(ws.manifest(), |name| builtins.iter().any(|b| b == name)));
 }
 
 fn report_error(shell: &Shell, err: &anyhow::Error) {
@@ -703,6 +725,7 @@ fn for_each_package<T>(
     let ctx = context(config, project, selected[0], global, profile)?;
     let mut results = Vec::new();
     for &index in &selected {
+        warn_manifest(config.shell(), project, project.package(index));
         results.push(op(&ctx.for_package(index))?);
     }
     Ok(results)
@@ -796,6 +819,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             set_message_format(message_format);
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
+            warn_manifest(shell, &project, project.package(index));
             let ctx = context(&config, &project, index, &global, profile(release))?;
             let program = match (main, bin, example) {
                 (Some(main), _, _) => Program::Main(main),
@@ -835,7 +859,6 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         Command::Fmt { check, packages } => {
             let project = load_project(&global)?;
             let ok = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
-                note_shadowed_task(shell, ctx.ws, "fmt");
                 ops::fmt::fmt(ctx, &FmtOptions { check })
             })?;
             if ok.iter().all(|ok| *ok) {
@@ -851,7 +874,6 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         Command::Lint { create_baseline, packages } => {
             let project = load_project(&global)?;
             let ok = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
-                note_shadowed_task(shell, ctx.ws, "lint");
                 ops::lint::lint(ctx, &LintOptions { create_baseline })
             })?;
             if ok.iter().all(|ok| *ok) {
@@ -998,6 +1020,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         Command::Package { release, bin, package } => {
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
+            warn_manifest(shell, &project, project.package(index));
             let ctx = context(&config, &project, index, &global, profile(release))?;
             let jar = ops::package(&ctx, bin.as_deref())?;
             println!("{}", jar.display());
@@ -1069,13 +1092,6 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
     }
 }
 
-/// Built-in commands win over tasks of the same name; say how to reach the task.
-fn note_shadowed_task(shell: &Shell, ws: &Workspace, command: &str) {
-    if ws.manifest().tasks.contains_key(command) {
-        shell.note(format!("`kargo {command}` is a built-in command; run the `{command}` task with `kargo task {command}`"));
-    }
-}
-
 fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) -> Result<u8> {
     // Toolchain commands also work outside a project. Packages built together share their
     // toolchains, so the first member stands for a whole workspace.
@@ -1142,8 +1158,9 @@ fn list_tasks(ws: &Workspace) {
     }
     println!("Available tasks:");
     let width = tasks.keys().map(String::len).max().unwrap_or(0);
+    let builtins = builtin_commands();
     for task in tasks.values() {
-        println!("    {:width$}  {}", task.name, task_description(task));
+        println!("    {:width$}  {}", task.name, task_description(task, &builtins));
     }
 }
 

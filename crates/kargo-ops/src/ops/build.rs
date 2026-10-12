@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::context::{BuildContext, TargetSetup};
 use super::local::{self, LocalTarget};
+use crate::warnings;
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
@@ -96,11 +97,20 @@ pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: 
     SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str())
 }
 
+/// Warns about sources that are missing for `targets` or that Kargo ignores. Call it after the
+/// pre-build hooks, which may generate sources.
+pub fn warn_about_sources(ctx: &BuildContext, targets: &[TargetKind]) {
+    let mut messages = warnings::missing_sources(ctx.ws, targets);
+    messages.extend(warnings::ignored_files(ctx.ws));
+    warnings::emit(ctx.shell(), ctx.project, ctx.ws, messages);
+}
+
 pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.targets)?;
     let env = hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    warn_about_sources(ctx, &targets);
 
     let mut results = BuildResults::default();
     // Targets don't depend on each other, so they build at the same time.

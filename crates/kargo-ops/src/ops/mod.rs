@@ -244,6 +244,7 @@ pub fn package(ctx: &BuildContext, bin: Option<&str>) -> Result<PathBuf> {
     let start = std::time::Instant::now();
     let env = build::hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    build::warn_about_sources(ctx, &[TargetKind::Jvm]);
     let jvm = build_jvm(ctx)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
     let pkg = &ctx.ws.manifest().package;

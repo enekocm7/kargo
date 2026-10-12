@@ -19,6 +19,8 @@ authors = ["Ada <ada@example.com>"]
 license = "MIT"
 ```
 
+`version` names the jar and is the version in its Maven coordinates. Any string is accepted, but Kargo [warns](../warnings/#odd-package-versions) about one that doesn't start with a digit or that uses anything besides letters, digits and `.`, `-`, `_`, `+`.
+
 ## `[kotlin]`
 
 ```toml
@@ -40,7 +42,7 @@ warnings-as-errors = false
 | `ksp` | `2.3.12` | [KSP](../../guides/dependencies/#kotlin-symbol-processing-ksp) version for `scope = "ksp"` dependencies (the standalone tool on the JVM, the Gradle plugin on Android) |
 | `opt-in` | `[]` | Annotations to opt in to everywhere |
 | `compiler-args` | `[]` | Extra arguments for every compilation |
-| `warnings-as-errors` | `false` | Fail on warnings |
+| `warnings-as-errors` | `false` | Fail on warnings. The compiler's `warnings found and -Werror specified` summary is printed [after the diagnostics](../warnings/#warnings-as-errors) |
 
 ## `[toolchain]`
 
@@ -345,6 +347,8 @@ portable = { run = "echo $KARGO_PKG_NAME", windows-run = "echo %KARGO_PKG_NAME%"
 ```
 
 `shell` picks the shell the commands run in: `sh`, `bash`, `cmd`, `powershell` or `pwsh`. The default is `sh` on Unix and `cmd` on Windows. `windows-run` (a command or a list) replaces `run` on Windows. When it is not set, `run` is used on every platform.
+
+A task can have any name without spaces, but one named like a built-in command (`build`, `test`, `fmt`, ...) or its alias (`b`, `t`, ...) runs only as `kargo task <name>`, and Kargo [warns](../warnings/#tasks-hidden-by-built-in-commands) about it.
 
 See [Tasks and plugins](../../guides/tasks-and-plugins/).
 

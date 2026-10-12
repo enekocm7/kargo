@@ -1,10 +1,11 @@
-//! Compiler diagnostics. By default compiler output goes to stderr unchanged; with
+//! Compiler diagnostics. By default compiler output goes to stderr unchanged, except
+//! that the `-Werror` summary the compilers print first comes last; with
 //! `--message-format json` it is parsed into one JSON object per diagnostic (file,
 //! line, column, severity, message) on stdout, so editors don't scrape text.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -130,36 +131,67 @@ fn is_count_line(line: &str) -> bool {
     )
 }
 
+/// What the Kotlin compilers report as an error under `-Werror` once they have reported warnings.
+const WERROR_SUMMARY: &str = "warnings found and -Werror specified";
+
+/// Whether `line` is the `-Werror` summary. The compilers print it ahead of the warnings
+/// (now errors) it counts, because their messages without a location sort first.
+fn is_werror_summary(line: &str) -> bool {
+    line.trim_end_matches('\r').strip_prefix("error: ") == Some(WERROR_SUMMARY)
+}
+
 /// Receives compiler output line by line: in human mode it goes to stderr as is,
 /// in JSON mode diagnostics become JSON messages and anything else goes to stderr.
-#[derive(Debug, Default)]
-pub struct Relay {
+///
+/// The `-Werror` summary is held back until [`Relay::flush`], so it ends the output like the
+/// summary of any other build instead of announcing diagnostics that have not been printed yet.
+#[derive(Debug)]
+pub struct Relay<W: Write = std::io::Stderr> {
     current: Option<Diagnostic>,
+    summary: Option<Diagnostic>,
+    /// Where human-readable lines go.
+    err: W,
 }
 
 impl Relay {
     pub fn new() -> Self {
-        Self::default()
+        Self::to(std::io::stderr())
+    }
+}
+
+impl Default for Relay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<W: Write> Relay<W> {
+    fn to(err: W) -> Self {
+        Self { current: None, summary: None, err }
     }
 
     /// Handles one line (without its line terminator).
     pub fn line(&mut self, line: &str) {
+        if is_werror_summary(line) {
+            self.emit_current();
+            self.summary = parse_header(line);
+            return;
+        }
         if !is_json() {
-            let mut err = std::io::stderr().lock();
-            let _ = writeln!(err, "{line}");
+            let _ = writeln!(self.err, "{line}");
             return;
         }
         if let Some(diagnostic) = parse_header(line) {
-            self.flush();
+            self.emit_current();
             self.current = Some(diagnostic);
         } else if is_count_line(line) {
-            self.flush();
-            eprintln!("{line}");
+            self.emit_current();
+            let _ = writeln!(self.err, "{line}");
         } else if let Some(current) = &mut self.current {
             current.rendered.push('\n');
             current.rendered.push_str(line.trim_end_matches('\r'));
         } else {
-            eprintln!("{line}");
+            let _ = writeln!(self.err, "{line}");
         }
     }
 
@@ -170,33 +202,56 @@ impl Relay {
         }
     }
 
-    /// Emits the diagnostic in progress; call when the compiler is done.
-    pub fn flush(&mut self) {
+    /// Emits the diagnostic in progress (JSON mode).
+    fn emit_current(&mut self) {
         if let Some(diagnostic) = self.current.take() {
             emit(&diagnostic.to_json());
         }
     }
+
+    /// Emits the diagnostic in progress and the held-back summary; call when the compiler is done.
+    pub fn flush(&mut self) {
+        self.emit_current();
+        if let Some(summary) = self.summary.take() {
+            if is_json() {
+                emit(&summary.to_json());
+            } else {
+                let _ = writeln!(self.err, "{}", summary.rendered);
+            }
+        }
+    }
 }
 
-impl Drop for Relay {
+impl<W: Write> Drop for Relay<W> {
     fn drop(&mut self) {
         self.flush();
     }
 }
 
-/// Runs a compiler process: with inherited stdio normally, or capturing its output
-/// to turn it into JSON messages with `--message-format json`.
+/// Runs a compiler process and relays its diagnostics: with `--message-format json`
+/// they become JSON messages, otherwise its stderr is passed on line by line.
 pub fn status(shell: &Shell, cmd: &mut Command, what: &str) -> Result<ExitStatus> {
-    if !is_json() {
-        return process::status(shell, cmd, what);
-    }
     shell.verbose("Running", format!("`{}`", process::describe(cmd)));
-    let output = cmd.output().with_context(|| format!("failed to start {what} (`{}`)", cmd.get_program().to_string_lossy()))?;
+    let start_error = |cmd: &Command| format!("failed to start {what} (`{}`)", cmd.get_program().to_string_lossy());
+    if is_json() {
+        let output = cmd.output().with_context(|| start_error(cmd))?;
+        let mut relay = Relay::new();
+        relay.text(&String::from_utf8_lossy(&output.stderr));
+        relay.text(&String::from_utf8_lossy(&output.stdout));
+        relay.flush();
+        return Ok(output.status);
+    }
+    // stdout stays inherited; only stderr, where the compilers report, goes through the relay.
+    let mut child = cmd.stderr(Stdio::piped()).spawn().with_context(|| start_error(cmd))?;
     let mut relay = Relay::new();
-    relay.text(&String::from_utf8_lossy(&output.stderr));
-    relay.text(&String::from_utf8_lossy(&output.stdout));
+    if let Some(stderr) = child.stderr.take() {
+        for line in BufReader::new(stderr).split(b'\n') {
+            let Ok(line) = line else { break };
+            relay.line(&String::from_utf8_lossy(&line));
+        }
+    }
     relay.flush();
-    Ok(output.status)
+    child.wait().with_context(|| start_error(cmd))
 }
 
 #[cfg(test)]
@@ -239,6 +294,48 @@ mod tests {
         assert!(parse_header("note: error: x").is_none());
         assert!(parse_header("Main.kt: error: no line number").is_none());
         assert!(parse_header("info: kotlinc-jvm 2.3.0").is_some());
+    }
+
+    #[test]
+    fn werror_summary_comes_after_the_diagnostics_it_counts() {
+        let mut relay = Relay::to(Vec::new());
+        relay.text("error: warnings found and -Werror specified\nsrc/A.kt:1:1: error: 'f' is deprecated.\nf()\n^\n");
+        let so_far = String::from_utf8(relay.err.clone()).unwrap();
+        assert_eq!(
+            so_far, "src/A.kt:1:1: error: 'f' is deprecated.\nf()\n^\n",
+            "the summary is held back, the rest is printed as it arrives"
+        );
+        relay.line("src/A.kt:2:1: error: 'g' is deprecated.");
+        relay.flush();
+        let out = String::from_utf8(std::mem::take(&mut relay.err)).unwrap();
+        assert_eq!(
+            out,
+            "src/A.kt:1:1: error: 'f' is deprecated.\nf()\n^\nsrc/A.kt:2:1: error: 'g' is deprecated.\nerror: warnings found and -Werror specified\n"
+        );
+        relay.flush();
+        assert!(relay.err.is_empty(), "the summary is printed once");
+    }
+
+    #[test]
+    fn dropping_a_relay_prints_the_held_back_summary() {
+        let mut out = Vec::new();
+        {
+            let mut relay = Relay::to(&mut out);
+            relay.line("error: warnings found and -Werror specified\r");
+        }
+        assert_eq!(String::from_utf8(out).unwrap(), "error: warnings found and -Werror specified\n");
+    }
+
+    #[test]
+    fn only_the_exact_summary_is_held_back() {
+        assert!(is_werror_summary("error: warnings found and -Werror specified"));
+        assert!(is_werror_summary("error: warnings found and -Werror specified\r"));
+        assert!(!is_werror_summary("warning: warnings found and -Werror specified"));
+        assert!(!is_werror_summary("src/A.kt:1:1: error: warnings found and -Werror specified"));
+        assert!(!is_werror_summary("error: warnings found and -Werror specified, really"));
+        let mut relay = Relay::to(Vec::new());
+        relay.text("warning: unused\nerror: something else\n");
+        assert_eq!(String::from_utf8(relay.err.clone()).unwrap(), "warning: unused\nerror: something else\n");
     }
 
     #[test]

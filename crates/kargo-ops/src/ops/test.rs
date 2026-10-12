@@ -14,6 +14,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
+use crate::warnings;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::testreport;
@@ -57,6 +58,8 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let targets = select_targets(ctx, &opts.build.targets)?;
     let env = hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
+    // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
+    warnings::emit(ctx.shell(), ctx.project, ctx.ws, warnings::ignored_files(ctx.ws));
 
     // Compile every target's tests at the same time, then run them one target at a
     // time so their output doesn't interleave.

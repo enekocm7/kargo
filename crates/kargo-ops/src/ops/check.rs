@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 
 use super::build::{
     BuildOptions, announce, compile_jvm, finished, hook_env, native_cinterop, native_cinterop_defs, native_libraries, native_platforms,
-    native_programs, select_targets, sources, wasm_libraries,
+    native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
@@ -45,6 +45,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     let targets = select_targets(ctx, &opts.build.targets)?;
     // Pre-build hooks may generate sources, so they run before checking.
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx))?;
+    warn_about_sources(ctx, &targets);
 
     let checked = super::parallel_map(&targets, |&target| match target {
         TargetKind::Jvm => check_jvm(ctx, opts.tests),
