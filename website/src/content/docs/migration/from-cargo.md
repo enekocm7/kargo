@@ -11,10 +11,10 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 |---|---|---|
 | `cargo new foo [--lib]` | `kargo new foo [--lib]` | Add `-t jvm,wasm,native,android` and `-w <frameworks>` |
 | `cargo init` | `kargo init` | |
-| `cargo build [--release]` | `kargo build [--release]` | `-t` picks targets |
-| `cargo check [--tests]` | `kargo check [--tests]` | Skips packaging and linking; JVM still writes classes |
+| `cargo build [--release] [--keep-going]` | `kargo build [--release] [--keep-going]` | `-t` picks targets; `--keep-going` builds every target despite failures |
+| `cargo check [--tests] [--keep-going]` | `kargo check [--tests] [--keep-going]` | Skips packaging and linking; JVM still writes classes |
 | `cargo run -- args` | `kargo run -- args` | |
-| `cargo test [filter]` | `kargo test [filter]` | |
+| `cargo test [filter] [--no-fail-fast]` | `kargo test [filter] [--no-fail-fast]` | Fails fast across targets by default; `[test] fail-fast = false` changes that |
 | `cargo doc [--open]` | `kargo doc [--open]` | Runs Dokka on your KDoc comments |
 | `cargo fmt [--check]` | `kargo fmt [--check]` | Runs ktlint; configured by `.editorconfig` |
 | `cargo clippy` | `kargo lint` | Runs detekt; configured by `detekt.yml` |

@@ -66,16 +66,25 @@ kargo init [path] [options]
 
 ## `kargo build` (`b`)
 
-Compile all enabled targets, or the ones you name.
+Compile all enabled targets, or the ones you name. Targets build at the same time; if one fails, the command reports that failure and exits with code 101.
 
 | Option | Meaning |
 |---|---|
+| `--keep-going` | Build every target even if one fails, then report each failure and which targets failed and succeeded |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
 ```sh
 kargo build
 kargo build --release -t jvm -t native
+```
+
+With `--keep-going`, every failed target gets its own error and a summary follows:
+
+```console
+$ kargo build --keep-going
+error: could not build the wasm target: ...
+error: could not build 1 of 3 targets (wasm); jvm, native succeeded
 ```
 
 ## `kargo check` (`c`)
@@ -85,6 +94,7 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | Option | Meaning |
 |---|---|
 | `--tests` | Also check the test sources (`tests/`, `tests-<target>/`) |
+| `--keep-going` | Check every target even if one fails, then report each failure (as for `kargo build`) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
@@ -134,8 +144,11 @@ kargo test [filter] [options]
 |---|---|
 | `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
+| `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
+
+By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
 ## `kargo doc` (`d`)
 
