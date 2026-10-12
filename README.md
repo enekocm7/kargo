@@ -19,7 +19,7 @@ $ kargo test
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
 * **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and before a cached artifact is first locked, and against the lockfile on re-download. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
 * **Incremental:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, only the affected Kotlin/JVM files are recompiled, in a warm compiler daemon, so an edit rebuilds in well under a second.
-* **Android** is built by the Android Gradle Plugin. Kargo generates the Gradle project under `target/android` from `kargo.toml`, so you never edit Gradle files.
+* **Android** is built by the Android Gradle Plugin. Kargo generates the Gradle project under `target/android` from `kargo.toml`, so you never edit Gradle files, and downloads the Gradle version that plugin needs (a project `gradlew` wins; `gradle-version` pins another).
 
 ## Commands
 
@@ -47,7 +47,7 @@ $ kargo test
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
-| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs and Kotlin/Native distributions |
+| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, Kotlin/Native and Gradle distributions |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
 | `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
@@ -121,6 +121,7 @@ linker-options = ["-lsqlite3"]    # also: def, headers, compiler-options
 [target.android]
 namespace = "com.example.app"
 min-sdk = 24                # target-sdk = 36, compile-sdk = 37, kind = "application" | "library"
+# agp-version = "9.4.1"     # gradle-version defaults to what AGP needs (9.6.0)
 
 [dependencies]
 "org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"
@@ -193,11 +194,13 @@ With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`.
 
 Kotlin/Native distributions are tied to `[kotlin] version`. They are installed under `~/.kargo/toolchains/kotlin-native/<version>` on the first native build. Their LLVM and sysroot dependencies go to `~/.kargo/toolchains/konan` instead of `~/.konan` (override with `KONAN_DATA_DIR`). Debug builds link a precompiled standard library that the compiler builds on first use (one to two minutes) into the distribution's `klib/cache`, which roughly halves rebuild times; `KARGO_NATIVE_CACHE=false` turns it off.
 
+Android builds run on a Gradle that Kargo downloads from `services.gradle.org` (checksum-verified, under `~/.kargo/toolchains/gradle/<version>`): the version the Android Gradle Plugin in use requires, or `[target.android] gradle-version`. A `gradlew` in the project root takes precedence, `--system-gradle` uses the `gradle` on `PATH`, and `target/android` gets a Gradle wrapper so it opens in Android Studio.
+
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
-$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21
+$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0
 $ kargo toolchain install            # whatever the current project needs
-$ kargo toolchain list               # installed JDKs/Kotlin/Native, disk usage, what the project uses
+$ kargo toolchain list               # installed JDKs/Kotlin/Native/Gradle, disk usage, what the project uses
 $ kargo toolchain which              # toolchains resolved for this project
 $ kargo toolchain remove jdk 17      # all JDK 17 releases (or one release)
 $ kargo toolchain remove native 2.4.10
@@ -260,6 +263,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_HOME` | Cache and toolchains (default `~/.kargo`) |
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
+| `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
 | `KARGO_DAEMON` | `false` turns off the compiler daemon |
 | `KARGO_INCREMENTAL` | `false` turns off incremental compilation |
@@ -279,7 +283,7 @@ Kargo is a Cargo workspace:
 | `kargo-util` | Terminal output, configuration, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
-| `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, browsers, archives |
+| `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, commands |
 | `kargo` | The CLI binary |

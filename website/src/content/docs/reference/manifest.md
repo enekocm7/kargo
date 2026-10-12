@@ -221,6 +221,7 @@ compile-sdk = 37
 version-code = 1
 version-name = "0.1.0"
 agp-version = "..."              # Android Gradle Plugin version
+gradle-version = "..."           # Gradle version that runs the build
 ```
 
 | Key | Default |
@@ -231,6 +232,8 @@ agp-version = "..."              # Android Gradle Plugin version
 | `target-sdk` | `36` |
 | `compile-sdk` | `37` |
 | `version-code` | `1` |
+| `agp-version` | `9.4.1` |
+| `gradle-version` | The minimum Gradle version `agp-version` requires (`9.6.0` for AGP 9.4.1). Must not be older than that. A `gradlew` in the project root is used instead when present. See [Android](../../guides/android/#gradle) |
 
 ### Per-target dependencies
 

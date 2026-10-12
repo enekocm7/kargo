@@ -5,6 +5,7 @@ pub mod adoptium;
 pub mod archive;
 pub mod browser;
 pub mod download;
+pub mod gradle;
 pub mod jdk;
 pub mod jdks;
 pub mod kotlin;
@@ -14,6 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+pub use gradle::GradleDistribution;
 pub use jdk::Jdk;
 pub use kotlin::KotlinCompiler;
 pub use native::NativeToolchain;
@@ -23,15 +25,4 @@ use kargo_util::process::find_on_path;
 /// Finds Node.js, used to run Kotlin/Wasm (`js` and `wasi`) output.
 pub fn node() -> Result<PathBuf> {
     find_on_path("node").context("Node.js is required to run Kotlin/Wasm programs; install it and put `node` on PATH")
-}
-
-/// Finds Gradle, used for Android builds. A `gradlew` in the project wins.
-pub fn gradle(project_dir: &std::path::Path) -> Result<PathBuf> {
-    let wrapper = project_dir.join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" });
-    if wrapper.is_file() {
-        return Ok(wrapper);
-    }
-    find_on_path("gradle").context(
-        "Gradle is required for Android builds; install it (https://gradle.org/install) or add a Gradle wrapper (gradlew) to the project",
-    )
 }

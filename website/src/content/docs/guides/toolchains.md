@@ -1,6 +1,6 @@
 ---
 title: Managing JDKs
-description: Pin a JDK per project and manage installed JDKs and Kotlin/Native distributions.
+description: Pin a JDK per project and manage installed JDKs, Kotlin/Native and Gradle distributions.
 ---
 
 Kargo can use the JDK you already have, or download and manage JDKs for you, per project.
@@ -50,12 +50,14 @@ $ kargo toolchain available          # JDK versions you can install (LTS release
 $ kargo toolchain install jdk 21     # newest 21
 $ kargo toolchain install jdk 21.0.5+11
 $ kargo toolchain install native 2.4.21
+$ kargo toolchain install gradle     # the Gradle this Android project needs (or: gradle 9.6.0)
 $ kargo toolchain install            # everything the current project needs
 $ kargo toolchain list               # installed toolchains, disk usage, and what this project uses
 $ kargo toolchain which              # the toolchains this project resolves to
 $ kargo toolchain remove jdk 17      # every JDK 17 release
 $ kargo toolchain remove jdk 17.0.13+11
 $ kargo toolchain remove native 2.4.10
+$ kargo toolchain remove gradle 9.5.0
 ```
 
 `kargo toolchain ls` and `kargo toolchain rm` are aliases.
@@ -63,6 +65,10 @@ $ kargo toolchain remove native 2.4.10
 ## Kotlin/Native
 
 Kotlin/Native distributions are tied to `[kotlin] version` and installed automatically on the first native build, under `~/.kargo/toolchains/kotlin-native/<version>`. Their LLVM toolchains and sysroots go in `~/.kargo/toolchains/konan` (override with `KONAN_DATA_DIR`). The precompiled standard library that speeds up [debug builds](../native/#build-speed) is built into the distribution itself (`klib/cache`), so `kargo toolchain remove native <version>` removes it too.
+
+## Gradle
+
+Android builds run the Android Gradle Plugin on Gradle. Kargo downloads the Gradle version that plugin needs on the first Android build, verifies its SHA-256 and installs it under `~/.kargo/toolchains/gradle/<version>`. A `gradlew` in the project root takes precedence, and `gradle-version` under `[target.android]` pins another version. See [Android](../android/#gradle).
 
 ## The Kotlin compiler
 

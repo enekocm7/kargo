@@ -818,7 +818,7 @@ fn lint_with_detekt() {
 fn doc_android_library() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
-        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs Gradle and the Android SDK)");
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs the Android SDK)");
         return;
     }
     let t = E2e::new();
@@ -1114,7 +1114,7 @@ fn native_cinterop_tests() {
 fn android_app_with_compose() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
-        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs Gradle and the Android SDK)");
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs the Android SDK)");
         return;
     }
     let t = E2e::new();
@@ -1128,6 +1128,10 @@ fn android_app_with_compose() {
     t.kargo("droid").arg("build").assert().success();
     let apk = t.dir.path().join("droid/target/android/build/outputs/apk/debug/droid-debug.apk");
     assert!(apk.is_file());
+    // Kargo-managed Gradle comes with a wrapper, so the generated project builds on its own.
+    let props = t.dir.path().join("droid/target/android/gradle/wrapper/gradle-wrapper.properties");
+    assert!(std::fs::read_to_string(&props).unwrap().contains("distributionSha256Sum="), "{}", props.display());
+    assert!(t.dir.path().join("droid/target/android/gradlew").is_file());
     // The app's own code must be dexed into the APK, not only the libraries.
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&apk).unwrap()).unwrap();
     let names: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).filter(|n| n.ends_with(".dex")).collect();

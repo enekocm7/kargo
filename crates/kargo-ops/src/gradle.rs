@@ -2,6 +2,12 @@
 //! under `target/android` that points at the Kargo source layout, then drives
 //! Gradle. Android packaging (resources, dexing, signing) is AGP's domain.
 //!
+//! The Gradle that runs the build is, in order of precedence: a `gradlew` in the
+//! project root, the Gradle on `PATH` with `--system-gradle`, or a Kargo-managed
+//! distribution (`gradle-version`, by default the version the AGP in use needs).
+//! With a managed Gradle, the generated project also gets a Gradle wrapper for it,
+//! so it builds on its own and opens in Android Studio.
+//!
 //! Layout used for Android:
 //! ```text
 //! src/, src-android/          Kotlin/Java sources
@@ -21,7 +27,10 @@ use crate::ops::build::{announce, compiling};
 use crate::ops::context::BuildContext;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::testreport::{self, TestSummary};
-use kargo_manifest::{AndroidTarget, Dependency, Manifest, Scope, TargetKind};
+use kargo_manifest::{AndroidConfig, AndroidTarget, Dependency, Manifest, Scope, TargetKind};
+use kargo_toolchain::gradle::{self as toolchain_gradle, AgpGradle};
+use kargo_toolchain::{GradleDistribution, Jdk};
+use kargo_util::config::Config;
 use kargo_util::process;
 
 pub const AGP_VERSION: &str = "9.4.1";
@@ -145,7 +154,7 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     let kotlin = &manifest.kotlin.version;
     let fw = &manifest.frameworks;
     let is_app = cfg.kind == "application";
-    let agp = cfg.agp_version.as_deref().unwrap_or(AGP_VERSION);
+    let agp = agp_version(cfg);
     let root = ws.root();
 
     let mut plugins = vec![format!(
@@ -361,10 +370,166 @@ fn variant(profile: ProfileKind) -> &'static str {
     }
 }
 
+/// The Android Gradle Plugin version of `cfg` (`agp-version`, or Kargo's default).
+pub fn agp_version(cfg: &AndroidConfig) -> &str {
+    cfg.agp_version.as_deref().unwrap_or(AGP_VERSION)
+}
+
+/// Where the Gradle that runs an Android build comes from, in order of precedence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GradleChoice {
+    /// A Gradle wrapper (`gradlew`) in the project root.
+    Project(PathBuf),
+    /// The Gradle on `PATH`, with `--system-gradle`.
+    System(PathBuf),
+    /// A Kargo-managed distribution; `pinned` when `gradle-version` names it.
+    Managed { version: String, pinned: bool },
+}
+
+/// Picks the Gradle for `ws` without downloading anything. Fails when the
+/// `agp-version` and `gradle-version` of the project are incompatible.
+pub fn choose_gradle(ws: &Workspace, config: &Config) -> Result<GradleChoice> {
+    if let Some(wrapper) = toolchain_gradle::project_wrapper(ws.root()) {
+        return Ok(GradleChoice::Project(wrapper));
+    }
+    let android = ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?;
+    let agp = agp_version(&android.config);
+    let (version, pinned) = match &android.config.gradle_version {
+        Some(version) => {
+            toolchain_gradle::check_compatible(agp, version)?;
+            (version.clone(), true)
+        }
+        None => (toolchain_gradle::gradle_for_agp(agp)?.version().to_owned(), false),
+    };
+    if config.system_gradle() {
+        let system = process::find_on_path("gradle").with_context(|| {
+            format!("`--system-gradle` needs `gradle` on PATH; install it (https://gradle.org/install) or drop the flag to let Kargo download Gradle {version}")
+        })?;
+        return Ok(GradleChoice::System(system));
+    }
+    Ok(GradleChoice::Managed { version, pinned })
+}
+
+fn managed_reason(pinned: bool, agp: &str) -> String {
+    if pinned { "gradle-version in kargo.toml".to_owned() } else { format!("default for AGP {agp}") }
+}
+
+/// Describes the Gradle `kargo toolchain which` reports, without downloading it.
+pub fn describe_gradle(ws: &Workspace, config: &Config) -> Result<String> {
+    let android = ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?;
+    let agp = agp_version(&android.config);
+    Ok(match choose_gradle(ws, config)? {
+        GradleChoice::Project(wrapper) => format!("project wrapper at {}", wrapper.display()),
+        GradleChoice::System(gradle) => format!("system at {} (--system-gradle)", gradle.display()),
+        GradleChoice::Managed { version, pinned } => {
+            let why = managed_reason(pinned, agp);
+            match GradleDistribution::find(config, &version)? {
+                Some(dist) => format!("{version} ({why}) at {}", dist.home.display()),
+                None => format!("{version} ({why}; not installed yet, installed on first android build)"),
+            }
+        }
+    })
+}
+
+/// The Gradle launcher for `choice`, with the managed distribution it belongs to (if any),
+/// downloading that distribution when needed.
+fn launcher(ctx: &BuildContext, choice: GradleChoice) -> Result<(PathBuf, Option<GradleDistribution>)> {
+    let shell = ctx.shell();
+    match choice {
+        GradleChoice::Project(wrapper) => {
+            shell.verbose("Using", format!("the project's Gradle wrapper at {}", wrapper.display()));
+            Ok((wrapper, None))
+        }
+        GradleChoice::System(gradle) => {
+            shell.verbose("Using", format!("Gradle at {} (--system-gradle)", gradle.display()));
+            Ok((gradle, None))
+        }
+        GradleChoice::Managed { version, pinned } => {
+            let android = ctx.ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?;
+            let agp = agp_version(&android.config);
+            if !pinned && let AgpGradle::Newer(_) = toolchain_gradle::gradle_for_agp(agp)? {
+                shell.warn(format!(
+                    "Kargo does not know which Gradle Android Gradle Plugin {agp} needs and uses Gradle {version}; \
+                     set `gradle-version` under [target.android] if the build fails"
+                ));
+            }
+            let dist = match GradleDistribution::find(ctx.config, &version)? {
+                Some(dist) => dist,
+                None if ctx.config.offline() => {
+                    if let Some(system) = process::find_on_path("gradle") {
+                        shell.warn(format!(
+                            "Gradle {version} is not installed and Kargo is offline; using the Gradle on PATH ({}) instead",
+                            system.display()
+                        ));
+                        return Ok((system, None));
+                    }
+                    bail!(
+                        "Gradle {version} is not installed and Kargo is offline; run `kargo fetch` (or `kargo toolchain install gradle`) while online"
+                    );
+                }
+                None => GradleDistribution::ensure(ctx.config, &version)?,
+            };
+            shell.verbose("Using", format!("Gradle {version} ({}) at {}", managed_reason(pinned, agp), dist.home.display()));
+            Ok((dist.executable(), Some(dist)))
+        }
+    }
+}
+
+/// The JDK that runs Gradle, checked against the AGP version.
+fn gradle_jdk<'a>(ctx: &'a BuildContext) -> Result<&'a Jdk> {
+    let android = ctx.ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?;
+    let agp = agp_version(&android.config);
+    let jdk = ctx.jdk()?;
+    let min = toolchain_gradle::min_jdk_for_agp(agp);
+    if jdk.version < min {
+        bail!(
+            "Android Gradle Plugin {agp} needs JDK {min} or newer, but this project uses JDK {} at {}; set `jdk = {min}` under [toolchain] in kargo.toml",
+            jdk.version,
+            jdk.home.display()
+        );
+    }
+    Ok(jdk)
+}
+
+/// Copies the Gradle wrapper of `dist` into the generated project at `dir`.
+fn write_wrapper(ctx: &BuildContext, dist: &GradleDistribution, dir: &Path, jdk: &Jdk) -> Result<()> {
+    let template = dist.wrapper(ctx.config, &jdk.home)?;
+    for file in toolchain_gradle::WRAPPER_FILES {
+        let (from, to) = (template.join(file), dir.join(file));
+        if std::fs::read(&from).ok() != std::fs::read(&to).ok() {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&from, &to).with_context(|| format!("failed to write {}", to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// `kargo fetch` for Android: downloads the Gradle the build uses and prepares its
+/// wrapper. Gradle itself fetches the dependencies during the build.
+pub fn fetch(ctx: &BuildContext) -> Result<()> {
+    let choice = choose_gradle(ctx.ws, ctx.config)?;
+    let jdk = gradle_jdk(ctx)?;
+    if let (_, Some(dist)) = launcher(ctx, choice)? {
+        dist.wrapper(ctx.config, &jdk.home)?;
+    }
+    ctx.shell().note("Android dependencies are fetched by Gradle during `kargo build --target android`");
+    Ok(())
+}
+
 /// Runs Gradle tasks in the generated project.
 pub fn gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
+    // Chosen first, so an incompatible `agp-version` and `gradle-version` fail before anything else.
+    let choice = choose_gradle(ctx.ws, ctx.config)?;
     let dir = generate(ctx.ws)?;
-    let gradle = kargo_toolchain::gradle(ctx.ws.root())?;
+    let jdk = gradle_jdk(ctx)?;
+    let (gradle, dist) = launcher(ctx, choice)?;
+    if let Some(dist) = &dist
+        && let Err(e) = write_wrapper(ctx, dist, &dir, jdk)
+    {
+        ctx.shell().warn(format!("could not add a Gradle wrapper to {}: {e:#}", dir.display()));
+    }
     let mut cmd = Command::new(&gradle);
     cmd.arg("--project-dir").arg(&dir).arg("--console=plain");
     if !ctx.shell().is_verbose() {
@@ -373,9 +538,7 @@ pub fn gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
     if ctx.config.offline() {
         cmd.arg("--offline");
     }
-    if let Ok(jdk) = ctx.jdk() {
-        cmd.env("JAVA_HOME", &jdk.home);
-    }
+    cmd.env("JAVA_HOME", &jdk.home);
     cmd.args(tasks).current_dir(ctx.ws.root());
     let status = process::status(ctx.shell(), &mut cmd, "Gradle")?;
     Ok(status.success())
@@ -613,6 +776,36 @@ mod tests {
         assert_eq!(configuration(Scope::Processor, true), "testAnnotationProcessor");
         assert_eq!(configuration(Scope::Ksp, false), "ksp");
         assert_eq!(configuration(Scope::Ksp, true), "kspTest");
+    }
+
+    #[test]
+    fn chooses_gradle_by_precedence() {
+        use kargo_util::shell::{Shell, Verbosity};
+        let home = tempfile::tempdir().unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_offline(true);
+
+        // By default, the Gradle the AGP version needs.
+        let (_d, ws) = workspace("");
+        let managed = GradleChoice::Managed { version: "9.6.0".to_owned(), pinned: false };
+        assert_eq!(choose_gradle(&ws, &config).unwrap(), managed);
+        let (_d, ws) = workspace("agp-version = \"8.13.0\"\n");
+        assert_eq!(choose_gradle(&ws, &config).unwrap(), GradleChoice::Managed { version: "8.13".to_owned(), pinned: false });
+        let described = describe_gradle(&ws, &config).unwrap();
+        assert!(described.starts_with("8.13 (default for AGP 8.13.0; not installed yet"), "{described}");
+
+        // `gradle-version` pins it, if AGP can run on it.
+        let (_d, ws) = workspace("gradle-version = \"9.7\"\n");
+        assert_eq!(choose_gradle(&ws, &config).unwrap(), GradleChoice::Managed { version: "9.7".to_owned(), pinned: true });
+        assert!(describe_gradle(&ws, &config).unwrap().contains("gradle-version in kargo.toml"));
+        let (_d, ws) = workspace("agp-version = \"9.4.1\"\ngradle-version = \"9.1.0\"\n");
+        let err = choose_gradle(&ws, &config).unwrap_err().to_string();
+        assert!(err.contains("Gradle 9.1.0 is too old for Android Gradle Plugin 9.4.1, which needs Gradle 9.6.0 or newer"), "{err}");
+
+        // A project wrapper wins over everything, even an incompatible pair.
+        let wrapper = ws.root().join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" });
+        std::fs::write(&wrapper, "").unwrap();
+        assert_eq!(choose_gradle(&ws, &config).unwrap(), GradleChoice::Project(wrapper));
+        assert!(describe_gradle(&ws, &config).unwrap().starts_with("project wrapper at"));
     }
 
     #[test]

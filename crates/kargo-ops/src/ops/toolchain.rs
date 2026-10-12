@@ -1,4 +1,4 @@
-//! `kargo toolchain`: managing JDKs and Kotlin/Native distributions.
+//! `kargo toolchain`: managing JDKs, Kotlin/Native and Gradle distributions.
 
 use std::fmt::Write as _;
 
@@ -8,7 +8,7 @@ use kargo_manifest::{JdkRequest, Manifest, TargetKind};
 use kargo_maven::MavenClient;
 use kargo_toolchain::archive::{dir_size, human_size};
 use kargo_toolchain::jdks::{self, ManagedJdk};
-use kargo_toolchain::{Jdk, NativeToolchain, adoptium};
+use kargo_toolchain::{GradleDistribution, Jdk, NativeToolchain, adoptium};
 use kargo_util::config::Config;
 
 /// Kinds of toolchains Kargo manages.
@@ -16,6 +16,18 @@ use kargo_util::config::Config;
 pub enum ToolKind {
     Jdk,
     Native,
+    Gradle,
+}
+
+/// The managed Gradle version an Android project uses, if it uses one: none for a
+/// project with its own `gradlew`, or for a project without the Android target.
+fn project_gradle(project: &Manifest) -> Result<Option<String>> {
+    let Some(android) = &project.targets.android else { return Ok(None) };
+    if let Some(version) = &android.config.gradle_version {
+        kargo_toolchain::gradle::check_compatible(crate::gradle::agp_version(&android.config), version)?;
+        return Ok(Some(version.clone()));
+    }
+    Ok(Some(kargo_toolchain::gradle::gradle_for_agp(crate::gradle::agp_version(&android.config))?.version().to_owned()))
 }
 
 /// Whether a managed JDK is the one `request` selects among `installed`.
@@ -87,6 +99,23 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
     if data.is_dir() {
         let _ = writeln!(out, "    dependencies (LLVM, sysroots): {} at {}", human_size(dir_size(&data)), data.display());
     }
+
+    let gradles = GradleDistribution::installed(config)?;
+    let gradle = project.and_then(|m| project_gradle(m).ok().flatten());
+    let _ = writeln!(out, "\nGradle ({}):", config.gradle_dir().display());
+    if gradles.is_empty() {
+        let _ = writeln!(out, "    (none installed)");
+    }
+    for dist in &gradles {
+        let used = gradle.as_deref() == Some(dist.version.as_str());
+        let _ = writeln!(
+            out,
+            "    {:<22} {:>10}{}",
+            dist.version,
+            human_size(dir_size(&dist.home)),
+            if used { "  (used by this project)" } else { "" }
+        );
+    }
     Ok(out)
 }
 
@@ -113,6 +142,15 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
             let toolchain = NativeToolchain::ensure(config, &client, &version)?;
             Ok(format!("Kotlin/Native {} at {}", toolchain.version, toolchain.home.display()))
         }
+        ToolKind::Gradle => {
+            let version = match (version, project.map(project_gradle).transpose()?.flatten()) {
+                (Some(v), _) => v.to_owned(),
+                (None, Some(v)) => v,
+                (None, None) => kargo_toolchain::gradle::gradle_for_agp(crate::gradle::AGP_VERSION)?.version().to_owned(),
+            };
+            let dist = GradleDistribution::ensure(config, &version)?;
+            Ok(format!("Gradle {} at {}", dist.version, dist.home.display()))
+        }
     }
 }
 
@@ -125,6 +163,9 @@ pub fn install_for_project(config: &Config, manifest: &Manifest) -> Result<Vec<S
     if manifest.targets.is_enabled(TargetKind::Native) {
         done.push(install(config, Some(manifest), ToolKind::Native, None)?);
     }
+    if project_gradle(manifest)?.is_some() {
+        done.push(install(config, Some(manifest), ToolKind::Gradle, None)?);
+    }
     Ok(done)
 }
 
@@ -135,6 +176,10 @@ pub fn remove(config: &Config, kind: ToolKind, selector: &str) -> Result<Vec<Str
         ToolKind::Native => {
             let removed = NativeToolchain::remove(config, selector)?;
             Ok(vec![format!("Kotlin/Native {}", removed.version)])
+        }
+        ToolKind::Gradle => {
+            let removed = GradleDistribution::remove(config, selector)?;
+            Ok(vec![format!("Gradle {}", removed.version)])
         }
     }
 }
@@ -199,6 +244,38 @@ mod tests {
 
         let text = list(&config, None).unwrap();
         assert!(!text.contains("used by this project"));
+        assert!(text.contains("Gradle (") && text.contains("(none installed)"), "{text}");
+    }
+
+    #[test]
+    fn manages_gradle_distributions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path());
+        let gradle = config.gradle_dir().join("9.6.0/bin").join(if cfg!(windows) { "gradle.bat" } else { "gradle" });
+        std::fs::create_dir_all(gradle.parent().unwrap()).unwrap();
+        std::fs::write(&gradle, "").unwrap();
+
+        let android = Manifest::parse("[package]\nname = \"p\"\nversion = \"1\"\n[target.android]\nnamespace = \"a.b\"\n").unwrap();
+        let text = list(&config, Some(&android)).unwrap();
+        let gradle_section = text.split("Gradle (").nth(1).unwrap();
+        let used: Vec<&str> = gradle_section.lines().filter(|l| l.contains("used by this project")).collect();
+        assert_eq!(used.len(), 1, "{text}");
+        assert!(used[0].contains("9.6.0"), "the default for AGP {}: {text}", crate::gradle::AGP_VERSION);
+
+        // Installed already: no download needed, even offline.
+        assert!(install(&config, Some(&android), ToolKind::Gradle, None).unwrap().starts_with("Gradle 9.6.0 at"));
+        assert_eq!(install_for_project(&config, &android).unwrap().len(), 1);
+        assert!(format!("{:#}", install(&config, None, ToolKind::Gradle, Some("9.5.0")).unwrap_err()).contains("offline"));
+
+        let pinned = Manifest::parse(
+            "[package]\nname = \"p\"\nversion = \"1\"\n[target.android]\nnamespace = \"a.b\"\nagp-version = \"9.4.1\"\ngradle-version = \"9.1.0\"\n",
+        )
+        .unwrap();
+        let err = install(&config, Some(&pinned), ToolKind::Gradle, None).unwrap_err().to_string();
+        assert!(err.contains("needs Gradle 9.6.0 or newer"), "{err}");
+
+        assert_eq!(remove(&config, ToolKind::Gradle, "9.6.0").unwrap(), ["Gradle 9.6.0"]);
+        assert!(remove(&config, ToolKind::Gradle, "9.6.0").is_err());
     }
 
     #[test]

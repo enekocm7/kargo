@@ -64,6 +64,9 @@ struct GlobalArgs {
     /// Ignore cached metadata and kargo.lock, re-checking repositories and re-verifying cached artifacts
     #[arg(long, global = true)]
     refresh: bool,
+    /// Run Android builds with the Gradle on PATH instead of a Kargo-managed one
+    #[arg(long, global = true, env = "KARGO_SYSTEM_GRADLE")]
+    system_gradle: bool,
     /// Path to kargo.toml
     #[arg(long, global = true, value_name = "PATH")]
     manifest_path: Option<PathBuf>,
@@ -117,6 +120,8 @@ enum ToolArg {
     Jdk,
     /// A Kotlin/Native distribution
     Native,
+    /// A Gradle distribution (runs Android builds)
+    Gradle,
 }
 
 impl From<ToolArg> for ToolKind {
@@ -124,6 +129,7 @@ impl From<ToolArg> for ToolKind {
         match t {
             ToolArg::Jdk => ToolKind::Jdk,
             ToolArg::Native => ToolKind::Native,
+            ToolArg::Gradle => ToolKind::Gradle,
         }
     }
 }
@@ -138,14 +144,14 @@ enum DaemonCommand {
 
 #[derive(Debug, Subcommand)]
 enum ToolchainCommand {
-    /// List installed JDKs and Kotlin/Native distributions
+    /// List installed JDKs, Kotlin/Native and Gradle distributions
     #[command(visible_alias = "ls")]
     List,
     /// Install a toolchain (without arguments: everything this project needs)
     Install {
         #[arg(value_enum)]
         kind: Option<ToolArg>,
-        /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version (default: the project's)
+        /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's)
         version: Option<String>,
     },
     /// Remove an installed toolchain
@@ -153,7 +159,7 @@ enum ToolchainCommand {
     Remove {
         #[arg(value_enum)]
         kind: ToolArg,
-        /// JDK: a major version (removes all its releases) or a release; Native: a version
+        /// JDK: a major version (removes all its releases) or a release; Native, Gradle: a version
         #[arg(add = ArgValueCandidates::new(complete::installed_toolchains))]
         version: String,
     },
@@ -777,7 +783,8 @@ fn new_options(dir: &Path, args: NewArgs) -> Result<NewOptions> {
 
 fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
     let global = cli.global;
-    let config = Config::from_env(shell.clone())?.with_offline(global.offline).with_refresh(global.refresh);
+    let config =
+        Config::from_env(shell.clone())?.with_offline(global.offline).with_refresh(global.refresh).with_system_gradle(global.system_gradle);
 
     match cli.command {
         Command::New { path, args } => {
@@ -1111,10 +1118,11 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
             let what = toolchain_ops::install(config, manifest, kind.into(), version.as_deref())?;
             shell.status("Installed", what);
         }
-        ToolchainCommand::Install { kind: None, version: Some(_) } => bail!("specify what to install: `jdk` or `native`"),
+        ToolchainCommand::Install { kind: None, version: Some(_) } => bail!("specify what to install: `jdk`, `native` or `gradle`"),
         ToolchainCommand::Install { kind: None, version: None } => {
-            let project =
-                project.as_ref().context("not in a Kargo project; use `kargo toolchain install jdk <version>` or `native <version>`")?;
+            let project = project
+                .as_ref()
+                .context("not in a Kargo project; use `kargo toolchain install jdk <version>`, `native <version>` or `gradle <version>`")?;
             // Members share the JDK and Kotlin version, but any of them may have the Native target.
             let mut done: Vec<String> = Vec::new();
             for &member in project.members() {
@@ -1125,7 +1133,7 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
                 }
             }
             if done.is_empty() {
-                shell.status("Fresh", "this project uses the system JDK and no Kotlin/Native target");
+                shell.status("Fresh", "this project uses the system JDK and no Kotlin/Native or Android target");
             }
             for what in done {
                 shell.status("Installed", what);
@@ -1150,6 +1158,9 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
                     Some(t) => println!("kotlin-native: {} at {}", t.version, t.home.display()),
                     None => println!("kotlin-native: {} (not installed yet; installed on first native build)", m.kotlin.version),
                 }
+            }
+            if m.targets.is_enabled(TargetKind::Android) {
+                println!("gradle:        {}", kargo_ops::gradle::describe_gradle(ws, config)?);
             }
         }
     }

@@ -26,7 +26,7 @@ Cargo workspace (edition 2024, MSRV 1.89). Crates depend downward in roughly thi
 | `crates/kargo-util`      | Terminal output (`Shell`), global `Config`, filesystem / hash / process helpers                                                                               |
 | `crates/kargo-maven`     | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, the resolver                                                                 |
 | `crates/kargo-manifest`  | The `kargo.toml` model (`raw.rs` is the serde layer, `lib.rs` the validated model), format-preserving edits (`edit.rs`)                                       |
-| `crates/kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, browsers, archives                                                                       |
+| `crates/kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, browsers, archives                                                 |
 | `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, the compiler daemon (`daemon.rs`, `daemon/KargoDaemon.java`), incremental compilation (`incremental.rs`, `daemon/KargoIc.java`), jar packaging, entry points, test reports (`testreport.rs`), compiler diagnostics (`diagnostics.rs`) |
 | `crates/kargo-ops`       | The build engine: `workspace.rs`, `ops/` (one module per command), `builtins.rs` (frameworks), `lockfile.rs`, `gradle.rs` (Android), `tasks.rs`, `plugins.rs`, `warnings.rs` (warnings about valid but suspicious projects) |
 | `src/`                   | The `kargo` binary: `cli.rs` (clap definitions and dispatch), `main.rs`                                                                                       |

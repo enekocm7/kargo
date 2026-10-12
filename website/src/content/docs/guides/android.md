@@ -8,7 +8,7 @@ Android apps are built by the Android Gradle Plugin (AGP), which Kargo drives fo
 ## Requirements
 
 - The [Android SDK](https://developer.android.com/studio). Set `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) to its location.
-- [Gradle](https://gradle.org/install) on your `PATH`, or a `gradlew` wrapper in the project root (the wrapper wins if present).
+- Nothing else: Kargo downloads the Gradle version your Android Gradle Plugin needs (see [Gradle](#gradle)).
 - For `kargo run`: `adb` (from the SDK platform-tools) and a connected device or running emulator.
 
 ## Create an app
@@ -29,6 +29,7 @@ min-sdk = 24
 # version-code = 1
 # version-name = "0.1.0"
 # agp-version = "..."                    # pin the Android Gradle Plugin version
+# gradle-version = "..."                 # pin the Gradle version (default: the one AGP needs)
 ```
 
 ```text
@@ -59,6 +60,44 @@ kargo doc -t android                # API documentation in target/debug/doc/
 
 The generated project compiles Kotlin with the Kotlin Gradle plugin at your `[kotlin] version`, so Android code is compiled with the same Kotlin version as your other targets rather than the version bundled with AGP.
 
+## Gradle
+
+You don't install Gradle. The first Android build downloads the Gradle version the Android Gradle Plugin (AGP) in use requires from `services.gradle.org`, verifies the SHA-256 Gradle publishes for it, and installs it under `~/.kargo/toolchains/gradle/<version>`. With the default AGP 9.4.1 that is Gradle 9.6.0. Gradle runs on the project's JDK (`[toolchain] jdk`), which must be JDK 17 or newer for AGP 8 and later.
+
+Kargo picks the Gradle that runs the build in this order:
+
+1. A Gradle wrapper (`gradlew`) in the project root, if there is one.
+2. With `--system-gradle` (or `KARGO_SYSTEM_GRADLE=1`), the `gradle` on your `PATH`.
+3. A Kargo-managed Gradle: `gradle-version` under `[target.android]` if set, otherwise the version AGP requires.
+
+`kargo toolchain which` shows which one a project uses, and `kargo build -v` prints it:
+
+```console
+$ kargo toolchain which
+jdk:           system (JDK 21 at /usr/lib/jvm/jdk-21)
+kotlin:        2.4.21
+gradle:        9.6.0 (default for AGP 9.4.1) at /home/me/.kargo/toolchains/gradle/9.6.0
+```
+
+To use a newer Gradle than AGP requires, pin it:
+
+```toml title="kargo.toml"
+[target.android]
+namespace = "com.example.myapp"
+gradle-version = "9.7"
+```
+
+Kargo checks `agp-version` and `gradle-version` against AGP's compatibility table before it runs anything, and stops with the versions that would work:
+
+```console
+$ kargo build -t android
+error: Gradle 9.1.0 is too old for Android Gradle Plugin 9.4.1, which needs Gradle 9.6.0 or newer; set `gradle-version = "9.6.0"` under [target.android] (or remove it to use 9.6.0), or pick an older `agp-version`
+```
+
+For `--offline` builds, download Gradle beforehand with `kargo fetch` or `kargo toolchain install gradle`. If Gradle isn't installed and Kargo is offline, it falls back to a `gradle` on `PATH` and warns.
+
+Gradle keeps its daemon and caches in `~/.gradle` (`GRADLE_USER_HOME`), shared with any other Gradle builds on the machine, so later builds start faster.
+
 ## Running any Gradle task
 
 `kargo android` passes its arguments to Gradle in the generated project:
@@ -87,3 +126,5 @@ Android is just another target. Common code in `src/` is shared with JVM, Wasm a
 ## Opening in Android Studio
 
 You can open `target/android` in Android Studio to use the layout editor or debugger. Don't edit the generated Gradle files there: Kargo rewrites them on every build. Change `kargo.toml` instead.
+
+When Kargo manages Gradle, it also writes a Gradle wrapper into `target/android` (`gradlew`, `gradlew.bat` and `gradle/wrapper/`), pinned to the same Gradle version and checksum. Android Studio uses it when it opens the project, and you can run `./gradlew` in `target/android` yourself.
