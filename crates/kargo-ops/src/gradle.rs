@@ -62,6 +62,8 @@ fn configuration(scope: Scope, test: bool) -> &'static str {
     match (scope, test) {
         (Scope::Processor, true) => "testAnnotationProcessor",
         (Scope::Processor, false) => "annotationProcessor",
+        (Scope::Ksp, true) => "kspTest",
+        (Scope::Ksp, false) => "ksp",
         (_, true) => "testImplementation",
         (Scope::Compile, false) => "implementation",
         (Scope::Runtime, false) => "runtimeOnly",
@@ -162,6 +164,10 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     }
     if fw.lombok.is_some() {
         plugins.push(format!("    id(\"org.jetbrains.kotlin.plugin.lombok\") version {}", kts_string(kotlin)));
+    }
+    let uses_ksp = manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp);
+    if uses_ksp {
+        plugins.push(format!("    id(\"com.google.devtools.ksp\") version {}", kts_string(builtins::ksp_version(manifest))));
     }
 
     let mut s = String::new();
@@ -537,6 +543,26 @@ mod tests {
     }
 
     #[test]
+    fn ksp_dependencies_apply_the_ksp_plugin() {
+        let (_d, ws) = workspace("");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        assert!(!build_gradle(&ws, &android).unwrap().contains("com.google.devtools.ksp"));
+
+        let (_d, ws) = workspace(
+            "[dependencies]\n\"androidx.room:room-compiler\" = { version = \"2.8.0\", scope = \"ksp\" }\n[dev-dependencies]\n\"x:test-processor\" = { version = \"1\", scope = \"ksp\" }\n",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains(&format!("id(\"com.google.devtools.ksp\") version \"{}\"", builtins::KSP_VERSION)), "{text}");
+        assert!(text.contains("    ksp(\"androidx.room:room-compiler:2.8.0\")"), "{text}");
+        assert!(text.contains("    kspTest(\"x:test-processor:1\")"), "{text}");
+
+        let (_d, ws) = workspace("[dependencies]\n\"x:p\" = { version = \"1\", scope = \"ksp\" }\n[kotlin]\nksp = \"2.3.10\"\n");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        assert!(build_gradle(&ws, &android).unwrap().contains("id(\"com.google.devtools.ksp\") version \"2.3.10\""));
+    }
+
+    #[test]
     fn registers_kotlin_source_dirs() {
         // AGP's built-in Kotlin ignores Kotlin files in the Java source dirs.
         let (_d, ws) = workspace("");
@@ -585,6 +611,8 @@ mod tests {
         assert_eq!(configuration(Scope::Runtime, true), "testImplementation");
         assert_eq!(configuration(Scope::Processor, false), "annotationProcessor");
         assert_eq!(configuration(Scope::Processor, true), "testAnnotationProcessor");
+        assert_eq!(configuration(Scope::Ksp, false), "ksp");
+        assert_eq!(configuration(Scope::Ksp, true), "kspTest");
     }
 
     #[test]

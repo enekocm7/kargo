@@ -103,6 +103,9 @@ pub enum Scope {
     /// A Java annotation processor: goes on javac's `-processorpath` only,
     /// never on the compile or runtime classpath (e.g. AutoValue, MapStruct).
     Processor,
+    /// A Kotlin Symbol Processing (KSP) processor: runs on Kotlin and Java sources
+    /// before compilation, never on the compile or runtime classpath (e.g. Moshi, Room).
+    Ksp,
 }
 
 impl FromStr for Scope {
@@ -114,7 +117,8 @@ impl FromStr for Scope {
             "runtime" | "runtime-only" => Ok(Scope::Runtime),
             "provided" | "compile-only" => Ok(Scope::Provided),
             "processor" | "annotation-processor" => Ok(Scope::Processor),
-            other => bail!("unknown dependency scope `{other}` (expected compile, runtime, provided or processor)"),
+            "ksp" => Ok(Scope::Ksp),
+            other => bail!("unknown dependency scope `{other}` (expected compile, runtime, provided, processor or ksp)"),
         }
     }
 }
@@ -183,6 +187,8 @@ pub struct KotlinSettings {
     pub version_set: bool,
     pub language_version: Option<String>,
     pub api_version: Option<String>,
+    /// KSP version (`[kotlin] ksp`); `None` uses the version Kargo pins.
+    pub ksp_version: Option<String>,
     pub opt_in: Vec<String>,
     pub compiler_args: Vec<String>,
     pub warnings_as_errors: bool,

@@ -3,11 +3,12 @@
 
 use anyhow::{Result, bail};
 
-use super::context::{self, BuildContext, UpdatePlan};
+use super::build;
+use super::context::{BuildContext, UpdatePlan};
 use super::{Configuration, resolution_for};
 use crate::lockfile::LockChange;
 use kargo_manifest::TargetKind;
-use kargo_maven::{ModuleId, Platform, VersionReq};
+use kargo_maven::{ModuleId, VersionReq};
 
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOptions {
@@ -77,9 +78,9 @@ fn resolve_package(ctx: &BuildContext) -> Result<()> {
         }
         if target == TargetKind::Jvm {
             let setup = ctx.setup(target)?;
-            if !setup.contributions.annotation_processors.is_empty() {
-                let requests: Vec<_> = setup.contributions.annotation_processors.iter().map(context::to_request).collect();
-                ctx.resolve("jvm/annotation-processors", Platform::Jvm, &requests, &[])?;
+            for test in [false, true] {
+                build::jvm_processor_path(ctx, &setup, test)?;
+                build::jvm_ksp_path(ctx, &setup, test)?;
             }
         }
     }

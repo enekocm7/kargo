@@ -102,6 +102,7 @@ struct RawKotlin {
     version: Option<String>,
     language_version: Option<String>,
     api_version: Option<String>,
+    ksp: Option<String>,
     #[serde(default)]
     opt_in: Vec<String>,
     #[serde(default)]
@@ -501,8 +502,8 @@ fn path_dependency(name: &str, path: PathBuf, detailed: DetailedDependency, sect
         Some(s) => s.parse().with_context(ctx)?,
         None => Scope::Compile,
     };
-    if scope == Scope::Processor {
-        bail!("{}: a `path` dependency can't be an annotation processor yet; depend on it as `compile` or `runtime`", ctx());
+    if matches!(scope, Scope::Processor | Scope::Ksp) {
+        bail!("{}: a `path` dependency can't be an annotation or KSP processor yet; depend on it as `compile` or `runtime`", ctx());
     }
     Ok(PathDependency { name: name.to_owned(), path, scope, dev: false, target: None })
 }
@@ -642,6 +643,9 @@ impl RawManifest {
             (None, None) => (DEFAULT_KOTLIN_VERSION.to_owned(), false),
         };
         validate_version_string("Kotlin version", &kotlin_version)?;
+        if let Some(ksp) = &self.kotlin.ksp {
+            validate_version_string("KSP version", ksp)?;
+        }
         let mut deps = DependencyParser { workspace, paths: Vec::new() };
 
         let mut targets = match self.target {
@@ -963,6 +967,7 @@ impl RawManifest {
                 version_set: kotlin_version_set,
                 language_version: self.kotlin.language_version,
                 api_version: self.kotlin.api_version,
+                ksp_version: self.kotlin.ksp,
                 opt_in: self.kotlin.opt_in,
                 compiler_args: self.kotlin.compiler_args,
                 warnings_as_errors: self.kotlin.warnings_as_errors,
