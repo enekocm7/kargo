@@ -14,6 +14,7 @@ kargo add io.mockk:mockk --dev                   # test-only
 kargo add org.slf4j:slf4j-simple --scope runtime # only needed at runtime
 kargo add jakarta.servlet:jakarta.servlet-api --scope provided
 kargo add com.google.auto.value:auto-value:1.11.0 --scope processor # a javac annotation processor
+kargo add com.squareup.moshi:moshi-kotlin-codegen:1.15.2 --scope ksp # a KSP processor
 kargo add com.google.guava:guava -t jvm          # only for the JVM target
 kargo add org.jetbrains.kotlinx:kotlinx-io-core --pre   # allow a pre-release as "latest"
 ```
@@ -83,7 +84,7 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 |---|---|
 | `version` | A version or Maven range. Required unless a BOM manages it. |
 | `group`, `artifact`, `coords` | Alternatives to writing `"group:artifact"` as the key. |
-| `scope` | `compile` (default), `runtime`, `provided` or `processor`. |
+| `scope` | `compile` (default), `runtime`, `provided`, `processor` or `ksp`. |
 | `exclude` | `group:artifact` (or `group:*`) entries to drop from this dependency's tree. |
 | `transitive` | `false` to ignore this dependency's own dependencies. |
 | `force` | `true` to pin this version even if something else asks for a newer one. |
@@ -98,6 +99,7 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 | `runtime` | no | yes | yes |
 | `provided` | yes | no | no |
 | `processor` | no (`javac -processorpath` only) | no | no |
+| `ksp` | no (KSP processor path only) | no | no |
 
 ## Annotation processors
 
@@ -134,7 +136,60 @@ javac-args = ["-Amapstruct.defaultComponentModel=spring", "-Xlint:all"]
 ```
 
 :::note
-Processors only see Java sources. Kotlin annotation processing (KSP or kapt, which Room, Dagger/Hilt and Moshi codegen use) is not supported yet. The [Lombok framework](../frameworks/#lombok) is the exception: it adds a Kotlin compiler plugin so Kotlin code can use what Lombok generates.
+Java annotation processors only see Java sources. For processors that read Kotlin code, use [KSP](#kotlin-symbol-processing-ksp). The [Lombok framework](../frameworks/#lombok) is the exception: it adds a Kotlin compiler plugin so Kotlin code can use what Lombok generates.
+:::
+
+## Kotlin Symbol Processing (KSP)
+
+[KSP](https://kotlinlang.org/docs/ksp-overview.html) processors read your Kotlin (and Java) sources and generate code before they compile. Moshi codegen, Room, Dagger and Hilt, Koin annotations and many more ship one. Declare the processor with `scope = "ksp"` and the library it generates code for as a normal dependency:
+
+```toml title="kargo.toml"
+[dependencies]
+"com.squareup.moshi:moshi" = "1.15.2"
+"com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }
+```
+
+```kotlin title="src/Main.kt"
+package com.example.app
+
+import com.squareup.moshi.JsonClass
+import com.squareup.moshi.Moshi
+
+@JsonClass(generateAdapter = true)
+data class Person(val name: String, val age: Int)
+
+fun main() {
+    val adapter = Moshi.Builder().build().adapter(Person::class.java) // uses the generated PersonJsonAdapter
+    println(adapter.toJson(Person("Ada", 36)))
+}
+```
+
+```console
+$ kargo run
+  Processing app v0.1.0 (jvm, ksp)
+   Compiling app v0.1.0 (jvm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.57s
+     Running `java com.example.app.MainKt`
+{"name":"Ada","age":36}
+```
+
+On the JVM target, Kargo runs KSP2 standalone (`symbol-processing-aa-embeddable`) right before the Kotlin compiler, once for the main sources and once for the tests. The Kotlin and Java files it generates under `target/<profile>/jvm/generated/ksp/<main|test>/` are compiled with your sources, and generated resources are copied into the output. KSP reruns only when a source, a dependency or a processor changed. It analyzes the sources with your `[kotlin] language-version` and `api-version`, which default to the major and minor version of `[kotlin] version`.
+
+Kargo uses KSP 2.3.12 unless you pick another version in `[kotlin]`. It applies to the JVM and to the Gradle KSP plugin on Android:
+
+```toml title="kargo.toml"
+[kotlin]
+ksp = "2.3.10"
+```
+
+Since 2.3.0, KSP versions no longer follow Kotlin versions, so one KSP release works with several Kotlin versions.
+
+As with `processor`, KSP processors and their dependencies never reach the compile or runtime classpath, are not packaged, and are pinned in `kargo.lock` (under `jvm/ksp`, and `jvm/test-ksp` when you have test-only processors). Processors in `[dependencies]` or `[target.jvm.dependencies]` run for the main and test sources; a processor in `[dev-dependencies]` runs for the tests only. On Android, the scope maps to the Gradle KSP plugin's `ksp(...)` and `kspTest(...)` configurations.
+
+KSP processes JVM and Android code. Wasm and Native ignore `ksp` dependencies.
+
+:::note[What about kapt?]
+Kargo doesn't support kapt. It is in maintenance mode, slow (it generates Java stubs for all your Kotlin code first) and the libraries that needed it now ship KSP processors. A Java-only processor that runs on Java sources works with [`scope = "processor"`](#annotation-processors).
 :::
 
 ## BOMs (platforms)

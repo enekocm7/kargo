@@ -34,7 +34,7 @@ $ kargo test
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
-| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor] [--bom]` | Add dependencies (latest release when no version is given) |
+| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor\|ksp] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
@@ -82,7 +82,7 @@ group = "com.example"
 version = "2.4.21"
 opt-in = ["kotlin.ExperimentalStdlibApi"]
 compiler-args = ["-Xcontext-parameters"]
-# language-version, api-version, warnings-as-errors
+# language-version, api-version, warnings-as-errors, ksp (KSP version, default 2.3.12)
 
 # Targets: no [target] section means a JVM project.
 [target.jvm]
@@ -113,7 +113,8 @@ guava = { group = "com.google.guava", version = "33.4.0-jre", exclude = ["com.go
 logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" }
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
 "com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
-# Scopes: compile (default), runtime, provided, processor. Other keys: classifier, extension, force, transitive
+"com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }  # KSP processor (JVM, Android)
+# Scopes: compile (default), runtime, provided, processor, ksp. Other keys: classifier, extension, force, transitive
 
 [target.jvm.dependencies]   # per-target dependencies
 

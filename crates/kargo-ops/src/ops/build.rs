@@ -9,6 +9,7 @@ use super::context::{BuildContext, TargetSetup};
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
+use kargo_compiler::ksp::KspRun;
 use kargo_compiler::mainclass::{find_jvm_main_class, find_single_entry_point};
 use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
@@ -192,6 +193,75 @@ pub fn jvm_processor_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -
     Ok(ctx.resolve(key, Platform::Jvm, &requests, boms)?.files())
 }
 
+/// The KSP processor path: `scope = "ksp"` dependencies; `test` adds KSP dev-dependencies.
+pub fn jvm_ksp_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -> Result<Vec<PathBuf>> {
+    let requests = setup.requests(&[Scope::Ksp], test);
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dev_processors = test && setup.dev.iter().any(|d| d.scope == Scope::Ksp);
+    let key = if dev_processors { "jvm/test-ksp" } else { "jvm/ksp" };
+    Ok(ctx.resolve(key, Platform::Jvm, &requests, &setup.boms)?.files())
+}
+
+/// The compilation a KSP pass precedes.
+pub(crate) struct JvmKspUnit<'a> {
+    pub name: &'a str,
+    pub test: bool,
+    pub libraries: Vec<PathBuf>,
+    pub friends: Vec<PathBuf>,
+    pub jdk: &'a kargo_toolchain::Jdk,
+    pub jvm_target: &'a str,
+}
+
+/// Runs the KSP processors over the main (or test) sources and adds what they generate to
+/// `sources` and `resources`. Does nothing when no `scope = "ksp"` dependency applies.
+pub(crate) fn run_jvm_ksp(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    unit: JvmKspUnit,
+    sources: &mut SourceSet,
+    resources: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let processor_path = jvm_ksp_path(ctx, setup, unit.test)?;
+    if processor_path.is_empty() {
+        return Ok(());
+    }
+    let ws = ctx.ws;
+    let kotlin = &ws.manifest().kotlin;
+    let language_version = kotlin.language_version.clone().unwrap_or_else(|| kargo_compiler::ksp::language_version(&kotlin.version));
+    let api_version = kotlin.api_version.clone().unwrap_or_else(|| language_version.clone());
+    let (source_roots, dir, what) = if unit.test {
+        (vec![ws.common_tests(), ws.target_tests(TargetKind::Jvm)], "test", ", tests, ksp")
+    } else {
+        (vec![ws.common_sources(), ws.target_sources(TargetKind::Jvm)], "main", ", ksp")
+    };
+    let run = KspRun {
+        name: unit.name,
+        source_roots,
+        libraries: unit.libraries,
+        friends: unit.friends,
+        processor_path: &processor_path,
+        tool_classpath: ctx.ksp_tool()?,
+        jvm_target: unit.jvm_target,
+        language_version: &language_version,
+        api_version: &api_version,
+        output: ws.output_dir(ctx.profile, TargetKind::Jvm).join("generated").join("ksp").join(dir),
+        project_dir: ws.root(),
+    };
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
+    let generated = run.run(ctx.shell(), unit.jdk, &fp_dir, &|| announce(ctx, "Processing", TargetKind::Jvm, what))?;
+    // Generated files join the platform fragment, unless that would turn a single-fragment
+    // compilation (only `src/` has Kotlin) into a multiplatform one.
+    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
+        sources.platform.extend(generated.sources);
+    } else {
+        sources.common.extend(generated.sources);
+    }
+    resources.extend(generated.resources);
+    Ok(())
+}
+
 /// `javac` arguments: framework-provided ones, then `[target.jvm] javac-args`.
 pub fn jvm_javac_args(setup: &TargetSetup, jvm: &kargo_manifest::JvmTarget) -> Vec<String> {
     let mut args = setup.contributions.javac_args.clone();
@@ -231,7 +301,18 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     let classes = out.join("classes");
-    let srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"]);
+    let jvm_target = jvm.target_for(jdk.version);
+    let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"]);
+    let mut resources = vec![ctx.ws.resources()];
+    let ksp = JvmKspUnit {
+        name: &manifest.package.name,
+        test: false,
+        libraries: classpaths.compile.files(),
+        friends: Vec::new(),
+        jdk,
+        jvm_target: &jvm_target,
+    };
+    run_jvm_ksp(ctx, &setup, ksp, &mut srcs, &mut resources)?;
 
     let unit = JvmCompilation {
         name: &manifest.package.name,
@@ -239,12 +320,12 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
         classpath: classpaths.compile.files(),
         friend_paths: Vec::new(),
         output: classes.clone(),
-        jvm_target: &jvm.target_for(jdk.version),
+        jvm_target: &jvm_target,
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         javac_args: &javac_args,
         processor_path: &processor_path,
-        resources: vec![ctx.ws.resources()],
+        resources,
     };
     let outcome = unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, verb, TargetKind::Jvm, ""))?;
     Ok(JvmClasses { classes, sources: srcs, classpaths, outcome })

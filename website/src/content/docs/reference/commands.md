@@ -224,7 +224,7 @@ kargo add -F <framework,...>
 |---|---|
 | `--dev` | Add to `[dev-dependencies]` |
 | `-t, --target <target>` | Add to `[target.<target>.dependencies]` |
-| `--scope <scope>` | `compile`, `runtime`, `provided` or `processor` |
+| `--scope <scope>` | `compile`, `runtime`, `provided`, `processor` (javac annotation processor) or `ksp` (KSP processor) |
 | `--bom` | Import as a BOM |
 | `--pre` | Allow pre-release versions when picking the latest |
 | `--no-verify` | Don't check that the artifact exists |

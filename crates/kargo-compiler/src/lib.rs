@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod incremental;
 pub mod jar;
 pub mod jvm;
+pub mod ksp;
 pub mod mainclass;
 pub mod native;
 pub mod testreport;

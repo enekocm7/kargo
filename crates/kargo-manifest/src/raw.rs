@@ -102,6 +102,7 @@ struct RawKotlin {
     version: Option<String>,
     language_version: Option<String>,
     api_version: Option<String>,
+    ksp: Option<String>,
     #[serde(default)]
     opt_in: Vec<String>,
     #[serde(default)]
@@ -544,6 +545,9 @@ impl RawManifest {
 
         let kotlin_version = self.kotlin.version.unwrap_or_else(|| DEFAULT_KOTLIN_VERSION.to_owned());
         validate_version_string("Kotlin version", &kotlin_version)?;
+        if let Some(ksp) = &self.kotlin.ksp {
+            validate_version_string("KSP version", ksp)?;
+        }
 
         let mut targets = match self.target {
             // No [target] section means a plain JVM project.
@@ -852,6 +856,7 @@ impl RawManifest {
                 version: kotlin_version,
                 language_version: self.kotlin.language_version,
                 api_version: self.kotlin.api_version,
+                ksp_version: self.kotlin.ksp,
                 opt_in: self.kotlin.opt_in,
                 compiler_args: self.kotlin.compiler_args,
                 warnings_as_errors: self.kotlin.warnings_as_errors,

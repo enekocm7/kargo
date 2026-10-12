@@ -18,6 +18,14 @@ pub const LOGBACK_VERSION: &str = "1.5.32";
 pub const LOMBOK_VERSION: &str = "1.18.48";
 pub const SPRING_BOOT_VERSION: &str = "4.1.1";
 pub const JUNIT_VERSION: &str = "6.1.3";
+/// KSP2 (`com.google.devtools.ksp`), used for `scope = "ksp"` dependencies on the JVM and Android
+/// unless `[kotlin] ksp` overrides it.
+pub const KSP_VERSION: &str = "2.3.12";
+
+/// The KSP version to use: `[kotlin] ksp`, or [`KSP_VERSION`].
+pub fn ksp_version(manifest: &Manifest) -> &str {
+    manifest.kotlin.ksp_version.as_deref().unwrap_or(KSP_VERSION)
+}
 
 /// A Kotlin compiler plugin shipped with the compiler (`org.jetbrains.kotlin:<artifact>:<kotlin version>`)
 /// or fetched from Maven.

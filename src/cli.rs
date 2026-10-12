@@ -94,6 +94,8 @@ enum ScopeArg {
     Provided,
     /// A Java annotation processor (javac -processorpath)
     Processor,
+    /// A Kotlin Symbol Processing processor (KSP2, runs before compilation)
+    Ksp,
 }
 
 impl From<ScopeArg> for Scope {
@@ -103,6 +105,7 @@ impl From<ScopeArg> for Scope {
             ScopeArg::Runtime => Scope::Runtime,
             ScopeArg::Provided => Scope::Provided,
             ScopeArg::Processor => Scope::Processor,
+            ScopeArg::Ksp => Scope::Ksp,
         }
     }
 }
@@ -1061,6 +1064,7 @@ fn info_json(ws: &Workspace) -> serde_json::Value {
                     Scope::Runtime => "runtime",
                     Scope::Provided => "provided",
                     Scope::Processor => "processor",
+                    Scope::Ksp => "ksp",
                 };
                 serde_json::json!({ "name": d.name, "module": d.module.to_string(), "version": d.version, "scope": scope })
             })

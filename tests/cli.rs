@@ -154,6 +154,9 @@ fn add_and_remove_dependencies() {
     p.kargo().args(["add", "com.acme:widget:1.0.0", "--target", "jvm", "--scope", "processor"]).assert().success();
     assert!(p.read("kargo.toml").contains(r#""com.acme:widget" = { version = "1.0.0", scope = "processor" }"#), "{}", p.read("kargo.toml"));
 
+    p.kargo().args(["add", "com.acme:widget:1.2.0", "--scope", "ksp"]).assert().success();
+    assert!(p.read("kargo.toml").contains(r#""com.acme:widget" = { version = "1.2.0", scope = "ksp" }"#), "{}", p.read("kargo.toml"));
+
     p.kargo().args(["add", "com.acme:missing:1.0"]).assert().failure().stderr(predicate::str::contains("not found"));
     p.kargo().args(["add", "--framework", "coroutines"]).assert().success();
     assert!(p.read("kargo.toml").contains("coroutines = true"));
@@ -288,6 +291,43 @@ fn update_selected_modules_precisely_or_as_a_dry_run() {
     p.kargo().args(["update", "--offline"]).assert().success();
     assert!(locked(&p, "g:util", "1.1") && locked(&p, "g:dep", "1.1"));
     p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("up to date"));
+}
+
+#[test]
+fn update_locks_processors_apart_from_the_classpaths() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[])
+        .publish("g:codegen", "1.0", &[("g:poet", "1.0")])
+        .publish("g:poet", "1.0", &[])
+        .publish("g:test-codegen", "1.0", &[])
+        .publish("g:apt", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n\"g:codegen\" = {{ version = \"1.0\", scope = \"ksp\" }}\n\
+                 \"g:apt\" = {{ version = \"1.0\", scope = \"processor\" }}\n\
+                 [dev-dependencies]\n\"g:test-codegen\" = {{ version = \"1.0\", scope = \"ksp\" }}\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["update", "--offline"]).assert().success();
+    let lock = kargo_ops::lockfile::Lockfile::load(&p.path().join("kargo.lock")).unwrap();
+    let modules = |key: &str| -> Vec<String> { lock.resolutions[key].packages.iter().map(|p| p.module.clone()).collect() };
+    assert_eq!(modules("jvm/ksp"), ["g:codegen", "g:poet"]);
+    assert_eq!(modules("jvm/test-ksp"), ["g:codegen", "g:test-codegen", "g:poet"]);
+    assert_eq!(modules("jvm/annotation-processors"), ["g:apt"]);
+    for key in ["jvm/compile", "jvm/runtime", "jvm/test"] {
+        let m = modules(key);
+        assert!(m.contains(&"g:lib".to_owned()), "{key}: {m:?}");
+        assert!(!m.iter().any(|m| m.contains("codegen") || m == "g:apt"), "processors stay off {key}: {m:?}");
+    }
 }
 
 #[test]
