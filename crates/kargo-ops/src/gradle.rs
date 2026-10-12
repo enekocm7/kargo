@@ -60,6 +60,8 @@ fn coord(d: &Dependency) -> String {
 
 fn configuration(scope: Scope, test: bool) -> &'static str {
     match (scope, test) {
+        (Scope::Processor, true) => "testAnnotationProcessor",
+        (Scope::Processor, false) => "annotationProcessor",
         (_, true) => "testImplementation",
         (Scope::Compile, false) => "implementation",
         (Scope::Runtime, false) => "runtimeOnly",
@@ -577,6 +579,8 @@ mod tests {
         assert!(line.contains("isTransitive = false") && line.contains("strictly(\"1\")"), "{line}");
         assert_eq!(configuration(Scope::Provided, false), "compileOnly");
         assert_eq!(configuration(Scope::Runtime, true), "testImplementation");
+        assert_eq!(configuration(Scope::Processor, false), "annotationProcessor");
+        assert_eq!(configuration(Scope::Processor, true), "testAnnotationProcessor");
     }
 
     #[test]

@@ -9,8 +9,8 @@ use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, native_libraries, native_platforms, select_targets,
-    sources, wasm_libraries,
+    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, jvm_javac_args, jvm_processor_path, native_libraries,
+    native_platforms, select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
@@ -236,6 +236,8 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
     let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
     let test_classes = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-classes");
+    let processor_path = jvm_processor_path(ctx, &setup, true)?;
+    let javac_args = jvm_javac_args(&setup, jvm);
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(test_cp);
@@ -249,8 +251,8 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
         jvm_target: &jvm.target_for(jdk.version),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
-        javac_args: &setup.contributions.javac_args,
-        processor_path: &[],
+        javac_args: &javac_args,
+        processor_path: &processor_path,
         resources: vec![ctx.ws.test_resources()],
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);

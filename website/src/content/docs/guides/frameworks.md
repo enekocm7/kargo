@@ -126,7 +126,7 @@ lombok = true
 lombok = { version = "1.18.48", config = "lombok.config" }
 ```
 
-Adds Lombok as a `provided` dependency and annotation processor for Java sources, and the Kotlin Lombok compiler plugin so Kotlin code can see the generated getters, setters and builders. A `lombok.config` in the project root is picked up automatically. JVM and Android only.
+Adds Lombok as a `provided` dependency and annotation processor for main and test Java sources, and the Kotlin Lombok compiler plugin so Kotlin code can see the generated getters, setters and builders. A `lombok.config` in the project root is picked up automatically. JVM and Android only.
 
 ## Combining frameworks
 

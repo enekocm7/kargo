@@ -155,6 +155,8 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
                 toolchain?;
                 main?;
                 test?;
+                build::jvm_processor_path(ctx, &setup, false)?;
+                build::jvm_processor_path(ctx, &setup, true)?;
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
@@ -180,6 +182,26 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
         Ok(())
     });
     fetched.into_iter().collect()
+}
+
+/// `kargo update`: re-resolves every dependency, ignoring `kargo.lock`.
+pub fn update(ctx: &BuildContext) -> Result<()> {
+    ctx.reset_lockfile(None);
+    let targets: Vec<TargetKind> = ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
+    for target in targets {
+        for configuration in [Configuration::Compile, Configuration::Runtime, Configuration::Test] {
+            if target != TargetKind::Jvm && configuration == Configuration::Compile {
+                continue;
+            }
+            resolution_for(ctx, target, configuration)?;
+        }
+        if target == TargetKind::Jvm {
+            let setup = ctx.setup(target)?;
+            build::jvm_processor_path(ctx, &setup, false)?;
+            build::jvm_processor_path(ctx, &setup, true)?;
+        }
+    }
+    ctx.save_lockfile()
 }
 
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target.
