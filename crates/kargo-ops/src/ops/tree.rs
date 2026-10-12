@@ -56,6 +56,43 @@ pub fn render(title: &str, resolution: &Resolution, max_depth: Option<usize>) ->
     out
 }
 
+/// Describes a resolution for `kargo tree --format json`: the roots plus every
+/// resolved module once, each listing its direct dependencies (a graph, not a tree,
+/// so shared modules are not repeated).
+pub fn json(target: &str, resolution: &Resolution) -> serde_json::Value {
+    let versions: HashMap<&ModuleId, &str> = resolution.nodes.iter().map(|n| (&n.module, n.version.as_str())).collect();
+    let nodes: Vec<serde_json::Value> = resolution
+        .nodes
+        .iter()
+        .map(|n| {
+            let dependencies: Vec<serde_json::Value> = n
+                .dependencies
+                .iter()
+                .map(|(m, requested)| {
+                    serde_json::json!({
+                        "id": m.to_string(),
+                        "requested": requested,
+                        "version": versions.get(m).copied(),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "id": n.module.to_string(),
+                "group": n.module.group,
+                "artifact": n.module.artifact,
+                "version": n.version,
+                "files": n.files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>(),
+                "dependencies": dependencies,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "target": target,
+        "roots": resolution.roots.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "modules": nodes,
+    })
+}
+
 /// Renders `resolution` with duplicates suppressed (for `--duplicates`): lists
 /// modules that were requested in more than one version.
 pub fn conflicts(resolution: &Resolution) -> Result<Vec<String>> {
@@ -127,6 +164,18 @@ demo (jvm)
         let text = render("t", &sample(), Some(1));
         assert!(!text.contains("g:shared"), "{text}");
         assert!(text.contains("g:other:1"));
+    }
+
+    #[test]
+    fn describes_graph_as_json() {
+        let value = json("jvm", &sample());
+        assert_eq!(value["target"], "jvm");
+        assert_eq!(value["roots"], serde_json::json!(["g:app", "g:other"]));
+        let modules = value["modules"].as_array().unwrap();
+        assert_eq!(modules.len(), 4);
+        assert_eq!(modules[0]["id"], "g:app");
+        assert_eq!(modules[0]["group"], "g");
+        assert_eq!(modules[0]["dependencies"][0], serde_json::json!({"id": "g:shared", "requested": "1.0", "version": "2.0"}));
     }
 
     #[test]

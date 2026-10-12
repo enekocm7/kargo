@@ -1,8 +1,11 @@
 //! Parses TeamCity service messages (emitted by the Kotlin/Wasm and
 //! Kotlin/Native test runners) and JUnit XML reports (written by Gradle for
-//! Android unit tests) into a Cargo-style test report.
+//! Android unit tests) into a Cargo-style test report, and writes JUnit XML
+//! reports for `kargo test --report junit`.
 
 use std::io::{BufRead, Write};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anstyle::{AnsiColor, Style};
 
@@ -14,6 +17,27 @@ pub struct TestSummary {
     pub failures: Vec<(String, String)>,
     /// The test process failed without reporting a failed test (it crashed).
     pub crashed: bool,
+    /// Every test that ran, in order, for JUnit XML reports.
+    pub cases: Vec<TestCase>,
+}
+
+/// One test's result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestCase {
+    /// The enclosing class or suite (`package.Class`); may be empty.
+    pub class: String,
+    pub name: String,
+    pub time: Duration,
+    pub outcome: CaseOutcome,
+    /// What the test printed.
+    pub output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaseOutcome {
+    Passed,
+    Failed { message: String, details: String },
+    Ignored,
 }
 
 impl TestSummary {
@@ -32,6 +56,7 @@ impl TestSummary {
         self.ignored += other.ignored;
         self.failures.extend(other.failures);
         self.crashed |= other.crashed;
+        self.cases.extend(other.cases);
     }
 }
 
@@ -91,46 +116,63 @@ pub fn report(input: impl BufRead, mut out: impl Write) -> std::io::Result<TestS
 
     let mut summary = TestSummary::default();
     let mut suites: Vec<String> = Vec::new();
-    let mut current_failed = false;
+    let mut current_failure: Option<(String, String)> = None;
+    let mut started = Instant::now();
+    // What the current test printed.
+    let mut output = String::new();
     for line in input.lines() {
         let line = line?;
         let Some((name, attrs)) = parse_message(&line) else {
             writeln!(out, "{line}")?;
+            output.push_str(&line);
+            output.push('\n');
             continue;
         };
-        let test_name = || {
-            let suite = suites.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(".");
-            let test = attr(&attrs, "name");
-            if suite.is_empty() { test.to_owned() } else { format!("{suite}.{test}") }
-        };
+        let suite = suites.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(".");
+        let test = attr(&attrs, "name");
+        let full_name = if suite.is_empty() { test.to_owned() } else { format!("{suite}.{test}") };
+        let case = |outcome, time, output| TestCase { class: suite.clone(), name: test.to_owned(), time, outcome, output };
         match name.as_str() {
-            "testSuiteStarted" => suites.push(attr(&attrs, "name").to_owned()),
+            "testSuiteStarted" => suites.push(test.to_owned()),
             "testSuiteFinished" => {
                 suites.pop();
             }
-            "testStarted" => current_failed = false,
+            "testStarted" => {
+                current_failure = None;
+                started = Instant::now();
+                output.clear();
+            }
             "testFailed" => {
-                current_failed = true;
                 let message = attr(&attrs, "message");
                 let details = attr(&attrs, "details");
                 let text = if details.is_empty() { message.to_owned() } else { format!("{message}\n{details}") };
-                summary.failures.push((test_name(), text));
+                summary.failures.push((full_name.clone(), text));
+                current_failure = Some((message.to_owned(), details.to_owned()));
             }
             "testIgnored" => {
                 summary.ignored += 1;
-                writeln!(out, "test {} ... {ignored_style}ignored{ignored_style:#}", test_name())?;
+                summary.cases.push(case(CaseOutcome::Ignored, Duration::ZERO, String::new()));
+                writeln!(out, "test {full_name} ... {ignored_style}ignored{ignored_style:#}")?;
             }
             "testFinished" => {
-                if current_failed {
+                // Prefer the runner's own `duration` (milliseconds) over the time between messages.
+                let time = attr(&attrs, "duration").parse().map(Duration::from_millis).unwrap_or_else(|_| started.elapsed());
+                let output = std::mem::take(&mut output);
+                if let Some((message, details)) = current_failure.take() {
                     summary.failed += 1;
-                    writeln!(out, "test {} ... {failed_style}FAILED{failed_style:#}", test_name())?;
+                    summary.cases.push(case(CaseOutcome::Failed { message, details }, time, output));
+                    writeln!(out, "test {full_name} ... {failed_style}FAILED{failed_style:#}")?;
                 } else {
                     summary.passed += 1;
-                    writeln!(out, "test {} ... {ok}ok{ok:#}", test_name())?;
+                    summary.cases.push(case(CaseOutcome::Passed, time, output));
+                    writeln!(out, "test {full_name} ... {ok}ok{ok:#}")?;
                 }
-                current_failed = false;
             }
-            "testStdOut" | "testStdErr" => write!(out, "{}", attr(&attrs, "out"))?,
+            "testStdOut" | "testStdErr" => {
+                let text = attr(&attrs, "out");
+                write!(out, "{text}")?;
+                output.push_str(text);
+            }
             _ => {}
         }
     }
@@ -151,18 +193,32 @@ pub fn report_junit_xml(xml: &str, mut out: impl Write) -> std::io::Result<TestS
         let name = case.attribute("name").unwrap_or_default();
         let full = if class.is_empty() { name.to_owned() } else { format!("{class}.{name}") };
         let failure = case.children().find(|c| c.has_tag_name("failure") || c.has_tag_name("error"));
-        if let Some(failure) = failure {
+        let outcome = if let Some(failure) = failure {
             summary.failed += 1;
-            let text = failure.text().map(str::trim).filter(|t| !t.is_empty()).or(failure.attribute("message")).unwrap_or_default();
+            let message = failure.attribute("message").unwrap_or_default();
+            let details = failure.text().map(str::trim).unwrap_or_default();
+            let text = if details.is_empty() { message } else { details };
             summary.failures.push((full.clone(), text.to_owned()));
             writeln!(out, "test {full} ... {failed_style}FAILED{failed_style:#}")?;
+            CaseOutcome::Failed { message: message.to_owned(), details: details.to_owned() }
         } else if case.children().any(|c| c.has_tag_name("skipped")) {
             summary.ignored += 1;
             writeln!(out, "test {full} ... {ignored_style}ignored{ignored_style:#}")?;
+            CaseOutcome::Ignored
         } else {
             summary.passed += 1;
             writeln!(out, "test {full} ... {ok}ok{ok:#}")?;
-        }
+            CaseOutcome::Passed
+        };
+        let seconds = case.attribute("time").and_then(|t| t.parse::<f64>().ok()).filter(|t| t.is_finite() && *t >= 0.0);
+        let output = case.children().find(|c| c.has_tag_name("system-out")).and_then(|c| c.text()).unwrap_or_default();
+        summary.cases.push(TestCase {
+            class: class.to_owned(),
+            name: name.to_owned(),
+            time: seconds.map(Duration::from_secs_f64).unwrap_or_default(),
+            outcome,
+            output: output.to_owned(),
+        });
     }
     Ok(summary)
 }
@@ -181,6 +237,82 @@ pub fn print_summary(summary: &TestSummary, mut out: impl Write) -> std::io::Res
         "\ntest result: {style}{verdict}{style:#}. {} passed; {} failed; {} ignored",
         summary.passed, summary.failed, summary.ignored
     )
+}
+
+/// Renders `cases` as a JUnit XML document with one `<testsuite>` per class,
+/// the format CI systems (GitHub Actions, GitLab, Jenkins) read.
+pub fn junit_xml(name: &str, cases: &[TestCase]) -> String {
+    let mut classes: Vec<&str> = Vec::new();
+    for case in cases {
+        if !classes.contains(&case.class.as_str()) {
+            classes.push(&case.class);
+        }
+    }
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let all: Vec<&TestCase> = cases.iter().collect();
+    xml.push_str(&format!("<testsuites name=\"{}\"{}>\n", escape(name), counts(&all)));
+    for class in classes {
+        let members: Vec<&TestCase> = cases.iter().filter(|c| c.class == class).collect();
+        let suite = escape(if class.is_empty() { name } else { class });
+        xml.push_str(&format!("  <testsuite name=\"{suite}\"{}>\n", counts(&members)));
+        for case in members {
+            let open =
+                format!("    <testcase name=\"{}\" classname=\"{suite}\" time=\"{:.3}\"", escape(&case.name), case.time.as_secs_f64());
+            if case.outcome == CaseOutcome::Passed && case.output.is_empty() {
+                xml.push_str(&format!("{open}/>\n"));
+                continue;
+            }
+            xml.push_str(&format!("{open}>\n"));
+            match &case.outcome {
+                CaseOutcome::Passed => {}
+                CaseOutcome::Ignored => xml.push_str("      <skipped/>\n"),
+                CaseOutcome::Failed { message, details } => {
+                    xml.push_str(&format!("      <failure message=\"{}\">{}</failure>\n", escape(message), escape(details)))
+                }
+            }
+            if !case.output.is_empty() {
+                xml.push_str(&format!("      <system-out>{}</system-out>\n", escape(&case.output)));
+            }
+            xml.push_str("    </testcase>\n");
+        }
+        xml.push_str("  </testsuite>\n");
+    }
+    xml.push_str("</testsuites>\n");
+    xml
+}
+
+/// The `tests`, `failures`, `errors`, `skipped` and `time` attributes of a suite.
+fn counts(cases: &[&TestCase]) -> String {
+    let failures = cases.iter().filter(|c| matches!(c.outcome, CaseOutcome::Failed { .. })).count();
+    let skipped = cases.iter().filter(|c| c.outcome == CaseOutcome::Ignored).count();
+    let time = cases.iter().map(|c| c.time).sum::<Duration>().as_secs_f64();
+    format!(" tests=\"{}\" failures=\"{failures}\" errors=\"0\" skipped=\"{skipped}\" time=\"{time:.3}\"", cases.len())
+}
+
+/// Writes [`junit_xml`] to `path`, creating its directory.
+pub fn write_junit_xml(path: &Path, name: &str, cases: &[TestCase]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, junit_xml(name, cases))
+}
+
+/// Escapes text for XML attributes and content, dropping the control characters
+/// XML 1.0 can't hold (such as the escape in ANSI-colored test output).
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' | '\r' | '\t' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -204,7 +336,7 @@ mod tests {
 ##teamcity[testSuiteStarted name='' flowId='1']
 ##teamcity[testSuiteStarted name='MathTest' flowId='1']
 ##teamcity[testStarted name='adds' flowId='1']
-##teamcity[testFinished name='adds' flowId='1']
+##teamcity[testFinished name='adds' duration='12' flowId='1']
 ##teamcity[testStarted name='fails' flowId='1']
 hello from test
 ##teamcity[testFailed name='fails' message='Expected <4>, actual <3>.' details='trace|nline2' flowId='1']
@@ -222,6 +354,12 @@ hello from test
         assert!(text.contains("hello from test"));
         assert_eq!(summary.failures[0].0, "MathTest.fails");
         assert!(summary.failures[0].1.contains("trace\nline2"));
+        assert_eq!(summary.cases.len(), 3);
+        assert_eq!((summary.cases[0].class.as_str(), summary.cases[0].name.as_str()), ("MathTest", "adds"));
+        assert_eq!(summary.cases[0].time, Duration::from_millis(12));
+        assert_eq!(summary.cases[1].output, "hello from test\n");
+        assert!(matches!(&summary.cases[1].outcome, CaseOutcome::Failed { message, .. } if message == "Expected <4>, actual <3>."));
+        assert_eq!(summary.cases[2].outcome, CaseOutcome::Ignored);
 
         let mut out = Vec::new();
         print_summary(&summary, &mut out).unwrap();
@@ -263,5 +401,33 @@ hello from test
         assert_eq!(summary.failures[0].0, "GreetingTest.fails");
         assert!(summary.failures[0].1.contains("GreetingTest.kt:9"));
         assert!(report_junit_xml("<testsuite", Vec::new()).is_err());
+        assert_eq!(summary.cases[0].time, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn writes_junit_xml() {
+        let case = |class: &str, name: &str, outcome| TestCase {
+            class: class.into(),
+            name: name.into(),
+            time: Duration::from_millis(1500),
+            outcome,
+            output: String::new(),
+        };
+        let mut cases = vec![
+            case("app.MathTest", "adds", CaseOutcome::Passed),
+            case("app.MathTest", "fails", CaseOutcome::Failed { message: "a < b".into(), details: "trace\u{1b}[0m".into() }),
+            case("app.Other", "later", CaseOutcome::Ignored),
+        ];
+        cases[0].output = "printed\n".into();
+        let xml = junit_xml("demo (wasm)", &cases);
+        assert!(xml.contains(r#"<testsuites name="demo (wasm)" tests="3" failures="1" errors="0" skipped="1" time="4.500">"#), "{xml}");
+        assert!(xml.contains(r#"<testsuite name="app.Other" tests="1" failures="0" errors="0" skipped="1" time="1.500">"#), "{xml}");
+        assert!(xml.contains(r#"<failure message="a &lt; b">trace[0m</failure>"#), "{xml}");
+
+        // The report reads back with the same results.
+        let summary = report_junit_xml(&xml, Vec::new()).unwrap();
+        assert_eq!((summary.passed, summary.failed, summary.ignored), (1, 1, 1));
+        assert_eq!(summary.cases[0], cases[0]);
+        assert_eq!(summary.cases[2], cases[2]);
     }
 }

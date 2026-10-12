@@ -71,12 +71,14 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | Option | Meaning |
 |---|---|
 | `--keep-going` | Build every target even if one fails, then report each failure and which targets failed and succeeded |
+| `--message-format <fmt>` | `human` (default) or `json`: print each compiler diagnostic as a JSON object on stdout. See [Machine-readable output](../machine-readable-output/#compiler-diagnostics) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
 ```sh
 kargo build
 kargo build --release -t jvm -t native
+kargo build --message-format json
 ```
 
 With `--keep-going`, every failed target gets its own error and a summary follows:
@@ -95,6 +97,7 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 |---|---|
 | `--tests` | Also check the test sources (`tests/`, `tests-<target>/`) |
 | `--keep-going` | Check every target even if one fails, then report each failure (as for `kargo build`) |
+| `--message-format <fmt>` | `human` (default) or `json`, as for `kargo build` |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
@@ -122,6 +125,7 @@ Build and run the program. Arguments after `--` go to the program.
 |---|---|
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `android` |
+| `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 
 How each target runs:
 
@@ -145,6 +149,8 @@ kargo test [filter] [options]
 | `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
 | `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
+| `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
+| `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build` |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 
@@ -292,6 +298,7 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 | `-c, --configuration <c>` | `runtime` | `compile`, `runtime` or `test` |
 | `--depth <n>` | unlimited | Maximum depth |
 | `-d, --duplicates` | | Only modules requested in several versions |
+| `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies; it can't be combined with `--depth` or `--duplicates`. See [Machine-readable output](../machine-readable-output/#kargo-tree---format-json) |
 
 ## `kargo package`
 
@@ -392,6 +399,10 @@ Show or stop the background compiler daemons that keep the Kotlin compiler warm 
 ## `kargo info`
 
 Print project information: package, targets, toolchains and paths.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--format <fmt>` | `text` | `text` or `json`. `json` also lists every dependency and repository. See [Machine-readable output](../machine-readable-output/#kargo-info---format-json) |
 
 ## `kargo completions`
 
