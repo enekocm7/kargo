@@ -128,6 +128,9 @@ pub fn installed_toolchains() -> Vec<CompletionCandidate> {
     for native in kargo_toolchain::NativeToolchain::installed(&config).unwrap_or_default() {
         out.push(CompletionCandidate::new(native.version).help(Some("Kotlin/Native".into())));
     }
+    for gradle in kargo_toolchain::GradleDistribution::installed(&config).unwrap_or_default() {
+        out.push(CompletionCandidate::new(gradle.version).help(Some("Gradle".into())));
+    }
     out
 }
 

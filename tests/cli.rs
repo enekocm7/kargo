@@ -786,6 +786,49 @@ fn android_requires_manifest_file() {
 }
 
 #[test]
+fn android_rejects_incompatible_gradle_before_running_it() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\nagp-version = \"9.4.1\"\ngradle-version = \"9.1.0\"\n"),
+    );
+    p.file("android/AndroidManifest.xml", "<manifest/>");
+    for cmd in ["build", "check", "fetch"] {
+        p.kargo()
+            .args([cmd, "--target", "android", "--offline"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Gradle 9.1.0 is too old for Android Gradle Plugin 9.4.1, which needs Gradle 9.6.0 or newer"))
+            .stderr(predicate::str::contains("gradle-version = \"9.6.0\""));
+    }
+    assert!(!p.path().join("target/android").exists(), "nothing is generated for an incompatible pair");
+}
+
+#[test]
+fn toolchain_manages_gradle() {
+    let p = Project::new();
+    let gradle = p.home.path().join("toolchains/gradle/9.6.0/bin").join(if cfg!(windows) { "gradle.bat" } else { "gradle" });
+    std::fs::create_dir_all(gradle.parent().unwrap()).unwrap();
+    std::fs::write(&gradle, "").unwrap();
+    p.file("kargo.toml", &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\n"));
+
+    p.kargo()
+        .args(["toolchain", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"Gradle \(.*\):\n    9\.6\.0 .*used by this project").unwrap());
+    // Installed already, so no download is needed.
+    p.kargo()
+        .args(["toolchain", "install", "gradle", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed Gradle 9.6.0"));
+    p.kargo().args(["toolchain", "install", "gradle", "9.5.0", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));
+    p.kargo().args(["toolchain", "remove", "gradle", "9.6.0"]).assert().success().stderr(predicate::str::contains("Removed Gradle 9.6.0"));
+    p.kargo().args(["toolchain", "remove", "gradle", "9.6.0"]).assert().failure().stderr(predicate::str::contains("not installed"));
+}
+
+#[test]
 fn doc_reports_what_it_cannot_document() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("nodocs", "[target.jvm]\n"));

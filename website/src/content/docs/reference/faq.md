@@ -102,9 +102,13 @@ Node.js can't find an npm package that a library imports. Kargo installs these p
 
 Install the Android SDK (Android Studio installs it to `~/Android/Sdk` on Linux and `~/Library/Android/sdk` on macOS) and set `ANDROID_HOME`.
 
-### `Gradle is required for Android builds`
+### `Gradle ... is too old for Android Gradle Plugin ...`
 
-Install Gradle, or put a `gradlew` wrapper in the project root.
+The `gradle-version` under `[target.android]` is older than the `agp-version` needs. Use the version the message names, or remove `gradle-version` to let Kargo pick it. See [Android](../../guides/android/#gradle).
+
+### `Gradle ... is not installed and Kargo is offline`
+
+Kargo downloads Gradle for Android builds on first use. Run `kargo fetch` (or `kargo toolchain install gradle`) once while online.
 
 ### `kargo.lock needs to be updated ... but --locked was passed`
 

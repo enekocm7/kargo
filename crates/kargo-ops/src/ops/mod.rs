@@ -200,9 +200,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
                 }
                 ctx.native_toolchain()?;
             }
-            TargetKind::Android => {
-                ctx.shell().note("Android dependencies are fetched by Gradle during `kargo build --target android`");
-            }
+            TargetKind::Android => crate::gradle::fetch(ctx)?,
         }
         Ok(())
     });

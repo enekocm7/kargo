@@ -207,6 +207,8 @@ pub struct AndroidConfig {
     pub kind: String,
     /// Android Gradle Plugin version.
     pub agp_version: Option<String>,
+    /// Gradle version that runs the Android build (default: the one `agp-version` requires).
+    pub gradle_version: Option<String>,
 }
 
 fn default_min_sdk() -> u32 {

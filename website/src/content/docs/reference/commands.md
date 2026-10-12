@@ -16,6 +16,7 @@ These work with every command.
 | `--offline` | Never use the network (also `KARGO_OFFLINE=1`) |
 | `--locked` | Fail if `kargo.lock` would need to change |
 | `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
+| `--system-gradle` | Run Android builds with the `gradle` on `PATH` instead of a Kargo-managed Gradle (also `KARGO_SYSTEM_GRADLE=1`). A project `gradlew` still wins |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
 | `-V`, `--version` | Print the version |
 | `-h`, `--help` | Print help |
@@ -372,7 +373,7 @@ Build a self-contained, runnable fat jar with all runtime dependencies, path dep
 
 ## `kargo fetch`
 
-Download all dependencies and toolchains so later builds can run offline.
+Download all dependencies and toolchains so later builds can run offline. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
 
 | Option | Meaning |
 |---|---|
@@ -440,13 +441,13 @@ kargo android connectedAndroidTest
 
 ## `kargo toolchain`
 
-Manage JDKs and Kotlin/Native distributions.
+Manage JDKs, Kotlin/Native and Gradle distributions.
 
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses |
-| `install [jdk\|native] [version]` | Install a toolchain; with no arguments, whatever the project needs |
-| `remove` (`rm`) `<jdk\|native> <version>` | Remove one. For JDKs, a major version removes all its releases |
+| `install [jdk\|native\|gradle] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses |
+| `remove` (`rm`) `<jdk\|native\|gradle> <version>` | Remove one. For JDKs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 

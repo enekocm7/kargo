@@ -71,6 +71,7 @@ entry-point = "com.example.main"
 [target.android]
 namespace = "com.example.app"
 min-sdk = 26
+gradle-version = "9.6.0"
 
 [dependencies]
 "org.jetbrains.kotlinx:kotlinx-coroutines-core" = "1.11.0"
@@ -143,6 +144,8 @@ optimize = true
     assert_eq!(android.config.min_sdk, 26);
     assert_eq!(android.config.compile_sdk, 37);
     assert_eq!(android.config.kind, "application");
+    assert_eq!(android.config.gradle_version.as_deref(), Some("9.6.0"));
+    assert_eq!(android.config.agp_version, None);
 
     assert_eq!(m.dependencies.len(), 5);
     let datetime = m.dependencies.iter().find(|d| d.name == "datetime").unwrap();

@@ -14,12 +14,13 @@ pub struct Config {
     home: PathBuf,
     offline: bool,
     refresh: bool,
+    system_gradle: bool,
     shell: Shell,
 }
 
 impl Config {
     pub fn new(home: PathBuf, shell: Shell) -> Self {
-        Self { home, offline: false, refresh: false, shell }
+        Self { home, offline: false, refresh: false, system_gradle: false, shell }
     }
 
     /// Builds a configuration from the environment.
@@ -38,6 +39,11 @@ impl Config {
 
     pub fn with_refresh(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
+        self
+    }
+
+    pub fn with_system_gradle(mut self, system_gradle: bool) -> Self {
+        self.system_gradle = system_gradle;
         self
     }
 
@@ -65,6 +71,11 @@ impl Config {
         self.toolchains_dir().join("kotlin-native")
     }
 
+    /// Kargo-managed Gradle distributions, one directory per version.
+    pub fn gradle_dir(&self) -> PathBuf {
+        self.toolchains_dir().join("gradle")
+    }
+
     /// Kotlin/Native's own dependency cache (LLVM, sysroots), normally `~/.konan`.
     pub fn konan_data_dir(&self) -> PathBuf {
         match std::env::var_os("KONAN_DATA_DIR") {
@@ -85,6 +96,11 @@ impl Config {
     /// Ignore cached metadata (e.g. `maven-metadata.xml`) and re-check remotes.
     pub fn refresh(&self) -> bool {
         self.refresh
+    }
+
+    /// Run Android builds with the Gradle on `PATH` instead of a Kargo-managed one (`--system-gradle`).
+    pub fn system_gradle(&self) -> bool {
+        self.system_gradle
     }
 
     pub fn shell(&self) -> &Shell {
