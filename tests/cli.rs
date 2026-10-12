@@ -840,6 +840,49 @@ jdk = \"25\"
 }
 
 #[test]
+fn invalid_jvm_target_is_rejected_before_building() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    for bad in ["abc", "7", "1.9", "17.0"] {
+        p.file("kargo.toml", &manifest("jt", &format!("[target.jvm]\njvm-target = \"{bad}\"\n")));
+        p.kargo()
+            .args(["build", "--offline"])
+            .assert()
+            .code(101)
+            .stderr(predicate::str::contains(format!("invalid [target.jvm] jvm-target `{bad}`")))
+            .stderr(predicate::str::contains("`8` or `1.8`"))
+            .stderr(predicate::str::contains("Compiling").not());
+    }
+    // `8` is Java 8, which Kotlin spells `1.8`; either spelling loads.
+    for ok in ["8", "1.8", "17"] {
+        p.file("kargo.toml", &manifest("jt", &format!("[target.jvm]\njvm-target = \"{ok}\"\n")));
+        p.kargo().arg("info").assert().success();
+    }
+}
+
+#[test]
+fn jvm_target_newer_than_the_system_jdk_fails_early() {
+    let p = Project::new();
+    // A system JDK Kargo identifies from the `release` file next to `bin/java`, without starting it.
+    let jdk = p.home.path().join("system-jdk");
+    std::fs::create_dir_all(jdk.join("bin")).unwrap();
+    std::fs::write(jdk.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" }), "").unwrap();
+    std::fs::write(jdk.join("release"), "JAVA_VERSION=\"21.0.4\"\n").unwrap();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("jt", "[target.jvm]\njvm-target = \"26\"\n"));
+    for command in ["build", "check", "test", "run"] {
+        p.kargo()
+            .args([command, "--offline"])
+            .env("JAVA_HOME", &jdk)
+            .assert()
+            .code(101)
+            .stderr(predicate::str::contains("jvm-target 26 is newer than JDK 21"))
+            .stderr(predicate::str::contains("[toolchain] jdk = \"26\""))
+            .stderr(predicate::str::contains("Compiling").not());
+    }
+}
+
+#[test]
 fn toolchain_install_requires_network_or_cache() {
     let p = Project::new();
     p.kargo().args(["toolchain", "install", "jdk", "21", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));

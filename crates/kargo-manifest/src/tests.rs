@@ -413,12 +413,52 @@ fn default_jvm_target_follows_older_jdks() {
     assert_eq!(jvm(&format!("{MINIMAL}\n[toolchain]\njdk = \"21\"\n[target.jvm]\n")).jvm_target, "21");
     // So does an older system JDK at build time.
     let default = jvm(MINIMAL);
-    assert_eq!(default.target_for(21), "21");
-    assert_eq!(default.target_for(99), DEFAULT_JVM_TARGET);
-    // An explicit target is kept as written.
+    assert_eq!(default.target_for(21).unwrap(), "21");
+    assert_eq!(default.target_for(99).unwrap(), DEFAULT_JVM_TARGET);
+    // An explicit target is kept, as long as the JDK can compile for it.
     let explicit = jvm(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"11\"\n"));
-    assert_eq!(explicit.target_for(21), "11");
-    assert_eq!(jvm(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"25\"\n")).target_for(21), "25");
+    assert_eq!(explicit.target_for(21).unwrap(), "11");
+    assert_eq!(explicit.target_for(11).unwrap(), "11");
+}
+
+#[test]
+fn jvm_target_is_normalized_for_kotlin() {
+    let jvm = |target: &str| parse(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"{target}\"\n")).targets.jvm.unwrap();
+    // Kotlin spells Java 8 `1.8` and rejects `8`.
+    assert_eq!(jvm("8").jvm_target, "1.8");
+    assert_eq!(jvm("1.8").jvm_target, "1.8");
+    for target in ["9", "11", "17", "21", "25", "26"] {
+        assert_eq!(jvm(target).jvm_target, target);
+    }
+    assert!(jvm("8").jvm_target_set);
+    // Java 8 is also what the default lowers to on a JDK 8.
+    assert_eq!(parse(MINIMAL).targets.jvm.unwrap().target_for(8).unwrap(), "1.8");
+}
+
+#[test]
+fn jvm_target_is_validated_at_load() {
+    for bad in ["abc", "", "7", "1.7", "1.9", "1.11", "0", "-1", "17.0", "017", "+17", "1.8.0"] {
+        let err = parse_err(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"{bad}\"\n"));
+        assert!(err.contains(&format!("jvm-target `{bad}`")), "{bad}: {err}");
+        assert!(err.contains("`8` or `1.8`"), "{bad}: {err}");
+    }
+    // Surrounding whitespace is ignored, like in `[toolchain] jdk`.
+    let padded = parse(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \" 21 \"\n")).targets.jvm.unwrap();
+    assert_eq!(padded.jvm_target, "21");
+}
+
+#[test]
+fn jvm_target_must_not_exceed_the_jdk() {
+    let jvm = |target: &str| parse(&format!("{MINIMAL}\n[target.jvm]\njvm-target = \"{target}\"\n")).targets.jvm.unwrap();
+    let err = jvm("26").target_for(25).unwrap_err().to_string();
+    assert!(err.contains("jvm-target 26 is newer than JDK 25"), "{err}");
+    assert!(err.contains("[toolchain] jdk = \"26\""), "{err}");
+    assert_eq!(jvm("25").target_for(25).unwrap(), "25");
+    assert_eq!(jvm("1.8").target_for(11).unwrap(), "1.8");
+    // The same check applies to a pinned JDK at load time, with the same hint.
+    let err = parse_err(&format!("{MINIMAL}\n[toolchain]\njdk = \"21\"\n[target.jvm]\njvm-target = \"26\"\n"));
+    assert!(err.contains("jvm-target 26 is newer than JDK 21"), "{err}");
+    assert!(err.contains("[toolchain] jdk = \"26\""), "{err}");
 }
 
 #[test]
