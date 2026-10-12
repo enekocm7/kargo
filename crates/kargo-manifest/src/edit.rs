@@ -131,6 +131,9 @@ impl ManifestEditor {
                     Some(Scope::Provided) => {
                         inline.insert("scope", Value::from("provided"));
                     }
+                    Some(Scope::Processor) => {
+                        inline.insert("scope", Value::from("processor"));
+                    }
                     _ => {}
                 }
                 if let Some(c) = &dep.classifier {

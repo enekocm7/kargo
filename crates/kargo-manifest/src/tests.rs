@@ -50,9 +50,11 @@ warnings-as-errors = true
 jvm-target = "21"
 main-class = "com.example.AppKt"
 jvm-args = ["-Xmx1g"]
+javac-args = ["-parameters", "-Xlint:all"]
 
 [target.jvm.dependencies]
 "ch.qos.logback:logback-classic" = { version = "1.5.0", scope = "runtime" }
+"com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }
 
 [target.wasm]
 environment = "wasi"
@@ -124,6 +126,8 @@ optimize = true
     assert_eq!(jvm.jvm_target, "21");
     assert_eq!(jvm.main_class.as_deref(), Some("com.example.AppKt"));
     assert_eq!(jvm.dependencies[0].scope, Scope::Runtime);
+    assert_eq!(jvm.dependencies[1].scope, Scope::Processor);
+    assert_eq!(jvm.javac_args, ["-parameters", "-Xlint:all"]);
 
     assert_eq!(m.targets.wasm.as_ref().unwrap().environment, WasmEnvironment::Wasi);
     assert_eq!(m.targets.wasm.as_ref().unwrap().package_manager, Some(PackageManager::Pnpm));
@@ -183,7 +187,7 @@ optimize = true
     assert!(m.dev_profile.optimize && m.dev_profile.debug);
 
     let jvm_deps = m.dependencies_for(TargetKind::Jvm);
-    assert_eq!(jvm_deps.len(), 6);
+    assert_eq!(jvm_deps.len(), 7);
     assert_eq!(m.dependencies_for(TargetKind::Wasm).len(), 5);
 }
 

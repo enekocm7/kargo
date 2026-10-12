@@ -119,6 +119,8 @@ struct RawJvm {
     #[serde(default)]
     jvm_args: Vec<String>,
     #[serde(default)]
+    javac_args: Vec<String>,
+    #[serde(default)]
     dependencies: toml::Table,
 }
 
@@ -529,6 +531,7 @@ impl RawManifest {
                     jvm_target_set: false,
                     main_class: None,
                     jvm_args: Vec::new(),
+                    javac_args: Vec::new(),
                     dependencies: Vec::new(),
                 }),
                 ..Default::default()
@@ -543,6 +546,7 @@ impl RawManifest {
                                 jvm_target: j.jvm_target.unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
                                 main_class: j.main_class,
                                 jvm_args: j.jvm_args,
+                                javac_args: j.javac_args,
                                 dependencies: parse_dependencies(&j.dependencies, "target.jvm.dependencies")?,
                             })
                         })

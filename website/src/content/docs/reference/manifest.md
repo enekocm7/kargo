@@ -115,7 +115,10 @@ With no `[target.*]` section, the project targets the JVM with default settings.
 jvm-target = "25"                       # default "25", lowered to your JDK if it is older
 main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun main`; set it for a Java main
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
+javac-args = ["-Xlint:all"]             # extra javac options for Java sources
 ```
+
+`javac-args` are appended to the `javac` command line for main and test Java sources, after the options Kargo sets (`-d`, `-encoding UTF-8`, `--release` from `jvm-target`, `-classpath`, and the [annotation processor](../../guides/dependencies/#annotation-processors) options). Use it for lint flags, `-parameters` or processor options such as `-Akey=value`. It has no effect on Kotlin sources; use `[kotlin] compiler-args` for those.
 
 When you don't set `jvm-target`, Kargo targets Java 25, or the version of the JDK that builds the project if that JDK is older (a pinned `[toolchain] jdk`, else `JAVA_HOME` or `java` on `PATH`). The compiled classes then always run on the JDK you build with. Set `jvm-target` explicitly to support older Java runtimes than the one you build with.
 
@@ -195,7 +198,7 @@ platform = { coords = "g:bom", version = "1.0", bom = true }
 | `version` | | Version or Maven range. Optional when a BOM manages it. Required for BOMs. |
 | `group`, `artifact` | | Coordinates when the key isn't `group:artifact` |
 | `coords` | | `group:artifact[:version]` in one string |
-| `scope` | `compile` | `compile`, `runtime` or `provided` |
+| `scope` | `compile` | `compile`, `runtime`, `provided` or `processor` (a Java [annotation processor](../../guides/dependencies/#annotation-processors), JVM and Android only) |
 | `classifier` | | Artifact classifier |
 | `extension` (alias `type`) | `jar` | Artifact extension |
 | `exclude` | `[]` | `group:artifact` or `group:*` to exclude transitively |

@@ -113,6 +113,8 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
                 toolchain?;
                 main?;
                 test?;
+                build::jvm_processor_path(ctx, &setup, false)?;
+                build::jvm_processor_path(ctx, &setup, true)?;
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
@@ -153,10 +155,8 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
         }
         if target == TargetKind::Jvm {
             let setup = ctx.setup(target)?;
-            if !setup.contributions.annotation_processors.is_empty() {
-                let requests: Vec<_> = setup.contributions.annotation_processors.iter().map(context::to_request).collect();
-                ctx.resolve("jvm/annotation-processors", Platform::Jvm, &requests, &[])?;
-            }
+            build::jvm_processor_path(ctx, &setup, false)?;
+            build::jvm_processor_path(ctx, &setup, true)?;
         }
     }
     ctx.save_lockfile()

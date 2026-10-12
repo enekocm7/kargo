@@ -137,6 +137,9 @@ fn add_and_remove_dependencies() {
     p.kargo().args(["add", "com.acme:widget", "--target", "jvm", "--scope", "runtime"]).assert().success();
     assert!(p.read("kargo.toml").contains("[target.jvm.dependencies]"));
 
+    p.kargo().args(["add", "com.acme:widget:1.0.0", "--target", "jvm", "--scope", "processor"]).assert().success();
+    assert!(p.read("kargo.toml").contains(r#""com.acme:widget" = { version = "1.0.0", scope = "processor" }"#), "{}", p.read("kargo.toml"));
+
     p.kargo().args(["add", "com.acme:missing:1.0"]).assert().failure().stderr(predicate::str::contains("not found"));
     p.kargo().args(["add", "--framework", "coroutines"]).assert().success();
     assert!(p.read("kargo.toml").contains("coroutines = true"));

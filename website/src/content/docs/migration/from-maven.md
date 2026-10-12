@@ -124,6 +124,8 @@ Credentials that lived in `~/.m2/settings.xml` become environment variables name
 | `<scope>compile</scope>` (default) | `[dependencies]` |
 | `<scope>runtime</scope>` | `scope = "runtime"` |
 | `<scope>provided</scope>` | `scope = "provided"` |
+| `maven-compiler-plugin` `<annotationProcessorPaths>` | `scope = "processor"` |
+| `maven-compiler-plugin` `<compilerArgs>` | `[target.jvm] javac-args` |
 | `<scope>test</scope>` | `[dev-dependencies]` |
 | `<type>pom</type><scope>import</scope>` | `bom = true` |
 | `<exclusions>` | `exclude = ["group:artifact"]` |

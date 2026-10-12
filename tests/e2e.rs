@@ -375,6 +375,48 @@ fn spring_boot_with_lombok() {
 }
 
 #[test]
+fn java_annotation_processor() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["apt"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("apt/kargo.toml")).unwrap();
+    t.write(
+        "apt/kargo.toml",
+        &format!(
+            "{manifest}
+[target.jvm]
+javac-args = [\"-Xlint:-processing\"]
+
+[target.jvm.dependencies]
+             \"com.google.auto.value:auto-value-annotations\" = {{ version = \"1.11.0\", scope = \"provided\" }}
+             \"com.google.auto.value:auto-value\" = {{ version = \"1.11.0\", scope = \"processor\" }}
+"
+        ),
+    );
+    t.write(
+        "apt/src/Person.java",
+        "package com.example.apt;
+import com.google.auto.value.AutoValue;
+@AutoValue public abstract class Person {
+    public abstract String name();
+    public static Person create(String n) { return new AutoValue_Person(n); }
+}
+",
+    );
+    t.write(
+        "apt/src/Main.kt",
+        "package com.example.apt
+
+fun main() = println(Person.create(\"Ada\"))
+",
+    );
+    t.kargo("apt").arg("run").assert().success().stdout(predicate::str::contains("Person{name=Ada}"));
+    // The processor is not packaged.
+    let lib = t.dir.path().join("apt/target/debug/jvm/lib");
+    assert!(!std::fs::read_dir(lib).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("auto-value")));
+}
+
+#[test]
 fn ktor_and_compose_compile() {
     require_e2e!();
     let t = E2e::new();
