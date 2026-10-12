@@ -360,6 +360,26 @@ fn multiplatform_expect_actual_on_wasm() {
 }
 
 #[test]
+fn wasm_main_receives_program_arguments() {
+    require_e2e!();
+    if which("node").is_none() {
+        eprintln!("skipping: Node.js not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["wargs", "--target", "wasm"]);
+    t.write("wargs/src/Main.kt", "package com.example.wargs\n\nfun greeting(name: String) = \"Hello, $name!\"\n\nfun main(args: Array<String>) = println(\"args=\" + args.toList())\n");
+    for environment in ["js", "wasi"] {
+        t.write(
+            "wargs/kargo.toml",
+            &format!("[package]\nname = \"wargs\"\nversion = \"0.1.0\"\n\n[target.wasm]\nenvironment = \"{environment}\"\n"),
+        );
+        t.kargo("wargs").args(["run", "--", "a", "b c"]).assert().success().stdout(predicate::str::contains("args=[a, b c]"));
+    }
+    t.kargo("wargs").arg("test").assert().success();
+}
+
+#[test]
 fn check_type_checks_without_packaging() {
     require_e2e!();
     let t = E2e::new();

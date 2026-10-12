@@ -167,7 +167,7 @@ How each target runs:
 | Target | Runs |
 |---|---|
 | JVM | `java -cp ... <main-class>` with `jvm-args` |
-| Wasm | `node target/<profile>/wasm/<name>.mjs` |
+| Wasm | `node target/<profile>/wasm/<name>.mjs`; the arguments reach `main(args)` (see [Program arguments](../../guides/wasm/#program-arguments)) |
 | Native | the executable built for the host platform |
 | Android | installs on the connected device with Gradle, then launches it with `adb` |
 

@@ -432,7 +432,7 @@ pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool
 const ALL_SCOPES: [Scope; 3] = [Scope::Compile, Scope::Runtime, Scope::Provided];
 
 pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
-    let Some(build) = compile_wasm(ctx)? else { return Ok(None) };
+    let Some(build) = compile_wasm(ctx, true)? else { return Ok(None) };
     // Outside the Wasm output directory, which is wiped on every recompile;
     // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
     crate::npm::install(ctx, &build.libraries, &ctx.ws.profile_dir(ctx.profile))?;
@@ -440,7 +440,8 @@ pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
 }
 
 /// Compiles and links the Wasm target without installing npm packages (enough for a path dependency).
-pub fn compile_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
+/// `main_args` passes the program arguments to `main(args)`; off for a path dependency.
+pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBuild>> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
     let setup = ctx.setup(TargetKind::Wasm)?;
@@ -462,6 +463,7 @@ pub fn compile_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(ctx.profile, TargetKind::Wasm),
         debug: profile.debug,
+        main_args,
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Wasm);
     if unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Wasm, ""))? == Outcome::Empty {

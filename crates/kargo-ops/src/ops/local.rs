@@ -51,7 +51,7 @@ pub fn artifacts(ctx: &BuildContext, target: LocalTarget, scopes: &[Scope], dev:
             let child = ctx.for_package(dep.package);
             match target {
                 LocalTarget::Jvm => Ok(Some(build_jvm(&child)?.jar)),
-                LocalTarget::Wasm => Ok(compile_wasm(&child)?.map(|w| w.klib)),
+                LocalTarget::Wasm => Ok(compile_wasm(&child, false)?.map(|w| w.klib)),
                 LocalTarget::Native(konan) => native_klib(&child, konan),
             }
         })?;
