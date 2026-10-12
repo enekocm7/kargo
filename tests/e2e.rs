@@ -454,6 +454,253 @@ fn wasm_main_receives_program_arguments() {
     t.kargo("wargs").arg("test").assert().success();
 }
 
+/// A Wasm project (`web`) with the given `[target.wasm]` body.
+fn wasm_project(t: &E2e, name: &str, wasm: &str) {
+    t.create(&[name, "--target", "wasm"]);
+    t.write(&format!("{name}/kargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[target.wasm]\n{wasm}"));
+}
+
+#[test]
+fn wasm_browser_tests_run_in_a_headless_browser() {
+    require_e2e!();
+    if kargo_toolchain::browser::browser().is_err() {
+        eprintln!("skipping: no browser installed");
+        return;
+    }
+    let t = E2e::new();
+    wasm_project(&t, "web", "environment = \"browser\"\n");
+    t.kargo("web")
+        .arg("test")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Running Wasm tests (headless browser)"))
+        .stdout(predicate::str::contains("test com.example.web.GreetingTest.greetsByName ... ok"));
+
+    // Output, failures and reports come through like they do under Node.js.
+    t.write(
+        "web/tests/PageTest.kt",
+        "package com.example.web\n\nimport kotlin.test.*\n\nclass PageTest {\n    @Test fun talks() { println(\"hello from the page\") }\n    @Test fun fails() = assertEquals(3, 1 + 1, \"math\")\n    @Test @Ignore fun skipped() {}\n}\n",
+    );
+    t.kargo("web").args(["test", "--report", "junit"]).assert().failure().code(101).stdout(
+        predicate::str::contains("hello from the page")
+            .and(predicate::str::contains("PageTest.fails ... FAILED"))
+            .and(predicate::str::contains("PageTest.skipped ... ignored"))
+            .and(predicate::str::contains("test result: FAILED. 2 passed; 1 failed; 1 ignored")),
+    );
+    let report = std::fs::read_to_string(t.dir.path().join("web/target/debug/wasm/test-reports/TEST-wasm.xml")).unwrap();
+    assert!(report.contains("PageTest") && report.contains("<failure"), "{report}");
+
+    // The browser is chosen with KARGO_BROWSER; one that does not exist is reported.
+    t.kargo("web")
+        .arg("test")
+        .env("KARGO_BROWSER", t.dir.path().join("no-such-browser"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("KARGO_BROWSER is"));
+}
+
+#[test]
+fn wasm_browser_tests_run_in_every_installed_browser() {
+    require_e2e!();
+    let browsers = kargo_toolchain::browser::installed_browsers();
+    if browsers.is_empty() {
+        eprintln!("skipping: no browser installed");
+        return;
+    }
+    let t = E2e::new();
+    wasm_project(&t, "each", "environment = \"browser\"\n");
+    for browser in browsers {
+        eprintln!("testing in {}", browser.exe.display());
+        t.kargo("each")
+            .arg("test")
+            .env("KARGO_BROWSER", &browser.exe)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("test com.example.each.GreetingTest.greetsByName ... ok"));
+    }
+}
+
+#[test]
+fn wasm_browser_app_is_served() {
+    require_e2e!();
+    let t = E2e::new();
+    wasm_project(&t, "site", "environment = \"browser\"\n");
+    t.write("site/resources/style.css", "body { margin: 0 }\n");
+    let server = Served::start(&t, "site");
+    let url = server.host.clone();
+
+    let home = http_get(&url, "/");
+    assert!(home.starts_with("HTTP/1.1 200 OK") && home.contains("Content-Type: text/html"), "{home}");
+    assert!(home.contains("<script type=\"module\" src=\"./site.mjs\"></script>"), "{home}");
+    let module = http_get(&url, "/site.mjs");
+    assert!(module.starts_with("HTTP/1.1 200 OK") && module.contains("Content-Type: text/javascript"), "{module}");
+    // Browsers only compile a streamed module that is served as WebAssembly.
+    assert!(http_get(&url, "/site.wasm").contains("Content-Type: application/wasm"));
+    // `resources/` is copied next to the module.
+    let css = http_get(&url, "/style.css");
+    assert!(css.contains("Content-Type: text/css") && css.contains("margin: 0"), "{css}");
+    assert!(http_get(&url, "/missing.js").starts_with("HTTP/1.1 404"));
+    assert!(http_get(&url, "/..%2Fkargo.toml").starts_with("HTTP/1.1 404"));
+}
+
+#[test]
+fn wasm_browser_app_serves_its_own_page() {
+    require_e2e!();
+    let t = E2e::new();
+    wasm_project(&t, "custom", "environment = \"browser\"\n");
+    t.write(
+        "custom/resources/index.html",
+        "<!doctype html><html><head><title>mine</title></head><body><script type=\"module\" src=\"./custom.mjs\"></script></body></html>\n",
+    );
+    let server = Served::start(&t, "custom");
+    let home = http_get(&server.host, "/");
+    assert!(home.contains("<title>mine</title>") && !home.contains("is running"), "{home}");
+    assert!(!home.contains("importmap"), "a page that needs no npm package gets no import map:\n{home}");
+}
+
+#[test]
+fn wasm_library_builds_an_npm_package() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["greeter", "--lib", "--target", "wasm"]);
+    t.write(
+        "greeter/kargo.toml",
+        "[package]\nname = \"greeter\"\nversion = \"0.3.0\"\nlicense = \"MIT\"\n\n[target.wasm]\nkind = \"library\"\nmodule-name = \"greeter-core\"\nnpm-name = \"@acme/greeter\"\nwasm-opt = false\n",
+    );
+    t.write(
+        "greeter/src/Greeter.kt",
+        "package com.example.greeter\n\n@OptIn(ExperimentalJsExport::class)\n@JsExport\nfun greet(name: String): String = \"Hello, $name!\"\n\nfun unused(): String = \"not exported\"\n",
+    );
+    t.kargo("greeter").arg("build").assert().success().stderr(predicate::str::contains("Compiling greeter v0.3.0 (wasm)"));
+
+    let out = t.dir.path().join("greeter/target/debug/wasm");
+    for file in ["greeter-core.mjs", "greeter-core.wasm", "greeter-core.d.mts", "package.json"] {
+        assert!(out.join(file).is_file(), "{file} is missing");
+    }
+    let declarations = std::fs::read_to_string(out.join("greeter-core.d.mts")).unwrap();
+    assert!(declarations.contains("export declare function greet(name: string): string;"), "{declarations}");
+    let package: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("package.json")).unwrap()).unwrap();
+    assert_eq!(package["name"], "@acme/greeter");
+    assert_eq!(package["version"], "0.3.0");
+    assert_eq!(package["license"], "MIT");
+    assert_eq!(package["type"], "module");
+    assert_eq!(package["main"], "./greeter-core.mjs");
+    assert_eq!(package["types"], "./greeter-core.d.mts");
+
+    // A library has no program, and the module exports what is marked `@JsExport`.
+    t.kargo("greeter").args(["run", "-t", "wasm"]).assert().failure().stderr(predicate::str::contains("has no program to run"));
+    if which("node").is_some() {
+        let script =
+            "import('./target/debug/wasm/greeter-core.mjs').then(m => console.log(m.greet('npm'), Object.keys(m).includes('unused')))";
+        let output = StdCommand::new("node").args(["-e", script]).current_dir(t.dir.path().join("greeter")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Hello, npm! false", "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    t.kargo("greeter").arg("test").assert().success();
+}
+
+#[test]
+fn wasm_release_removes_dead_code_and_reports_the_size() {
+    require_e2e!();
+    let t = E2e::new();
+    wasm_project(&t, "slim", "wasm-opt = false\n");
+    t.kargo("slim").arg("build").assert().success().stderr(predicate::str::contains("Size").not());
+    let debug = std::fs::metadata(t.dir.path().join("slim/target/debug/wasm/slim.wasm")).unwrap().len();
+
+    t.kargo("slim").args(["build", "--release"]).assert().success().stderr(
+        predicate::str::contains("Size slim.wasm").and(predicate::str::contains("gzipped")).and(predicate::str::contains("Binaryen").not()),
+    );
+    let release = std::fs::metadata(t.dir.path().join("slim/target/release/wasm/slim.wasm")).unwrap().len();
+    assert!(release * 4 < debug, "dead code elimination should shrink the module a lot: {release} bytes in release, {debug} in debug");
+    if which("node").is_some() {
+        t.kargo("slim").args(["run", "--release", "-t", "wasm"]).assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
+    }
+}
+
+#[test]
+fn wasm_release_runs_wasm_opt_when_it_is_installed() {
+    require_e2e!();
+    if which("wasm-opt").is_none() {
+        eprintln!("skipping: Binaryen (wasm-opt) not installed");
+        return;
+    }
+    let t = E2e::new();
+    wasm_project(&t, "tiny", "");
+    t.kargo("tiny")
+        .args(["build", "--release"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Optimizing tiny.wasm with wasm-opt").and(predicate::str::contains("Optimized tiny.wasm:")));
+    // Unchanged output is not optimized again.
+    t.kargo("tiny").args(["build", "--release"]).assert().success().stderr(predicate::str::contains("Optimizing").not());
+    if which("node").is_some() {
+        t.kargo("tiny").args(["run", "--release", "-t", "wasm"]).assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
+    }
+}
+
+/// `kargo run --port 0` on a project, stopped when dropped.
+struct Served {
+    child: std::process::Child,
+    /// `127.0.0.1:<port>`
+    host: String,
+}
+
+impl Served {
+    fn start(t: &E2e, project: &str) -> Self {
+        use std::io::{BufRead, BufReader};
+        let program = Command::cargo_bin("kargo").unwrap().get_program().to_owned();
+        let mut cmd = StdCommand::new(program);
+        cmd.current_dir(t.dir.path().join(project))
+            .env_remove("KARGO_TARGET_DIR")
+            .env("NO_COLOR", "1")
+            .args(["run", "--port", "0"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        });
+        let mut log = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let host = loop {
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(wait) {
+                Ok(line) => {
+                    if let Some(at) = line.find("http://") {
+                        break line[at + "http://".len()..].split('/').next().unwrap().to_owned();
+                    }
+                    log.push(line);
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    panic!("kargo run never started serving:\n{}", log.join("\n"));
+                }
+            }
+        };
+        Served { child, host }
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A bare HTTP/1.1 GET that returns the whole response.
+fn http_get(host: &str, path: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    String::from_utf8_lossy(&response).into_owned()
+}
+
 #[test]
 fn check_type_checks_without_packaging() {
     require_e2e!();

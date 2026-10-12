@@ -16,7 +16,7 @@ use kargo_compiler::mainclass::{find_entry_point_in, find_jvm_main_class, find_s
 use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
-use kargo_manifest::{Bin, Cinterop, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Bin, Cinterop, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
 use kargo_maven::{Platform, Resolution};
 use kargo_toolchain::native::resolve_platform;
 use kargo_util::fs::collect_files;
@@ -55,8 +55,15 @@ pub struct WasmBuild {
     pub module: PathBuf,
     pub klib: PathBuf,
     pub environment: WasmEnvironment,
+    pub kind: WasmKind,
+    /// The module's name: `module-name`, else the package name. It names the files in `dir`.
+    pub name: String,
+    /// The output directory (`target/<profile>/wasm`).
+    pub dir: PathBuf,
     /// The klibs the module was compiled against.
     pub libraries: Vec<PathBuf>,
+    /// The `node_modules` holding the npm packages the module imports, once installed.
+    pub node_modules: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -429,7 +436,7 @@ pub fn wasm_resolution(ctx: &BuildContext, setup: &TargetSetup, include_dev: boo
     let env = ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
     let key = if include_dev { "wasm/test" } else { "wasm/main" };
     let requests = setup.requests(&ALL_SCOPES, include_dev);
-    ctx.resolve(key, Platform::Wasm(env.as_str().to_owned()), &requests, &setup.boms)
+    ctx.resolve(key, Platform::Wasm(env.platform().to_owned()), &requests, &setup.boms)
 }
 
 /// Every klib the Wasm sources compile against: path dependencies first, then Maven libraries.
@@ -441,11 +448,20 @@ pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool
 
 const ALL_SCOPES: [Scope; 3] = [Scope::Compile, Scope::Runtime, Scope::Provided];
 
+/// Compiles the Wasm target and adds what surrounds the module: the page of a browser app, the
+/// `package.json` of a library, and in a release build `wasm-opt` and the size report.
 pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
-    let Some(build) = compile_wasm(ctx, true)? else { return Ok(None) };
+    let Some(build) = prepare_wasm(ctx)? else { return Ok(None) };
+    crate::wasm_output::finish(ctx, &build)?;
+    Ok(Some(build))
+}
+
+/// Compiles the Wasm target and installs the npm packages it imports (enough to run its tests).
+pub fn prepare_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
+    let Some(mut build) = compile_wasm(ctx, true)? else { return Ok(None) };
     // Outside the Wasm output directory, which is wiped on every recompile;
     // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
-    crate::npm::install(ctx, &build.libraries, &ctx.ws.profile_dir(ctx.profile))?;
+    build.node_modules = crate::npm::install(ctx, &build.libraries, &ctx.ws.profile_dir(ctx.profile))?;
     Ok(Some(build))
 }
 
@@ -464,7 +480,7 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
     let profile = ctx.ws.profile(ctx.profile);
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let unit = WasmCompilation {
-        name: &manifest.package.name,
+        name: wasm.module_name(&manifest.package),
         environment: wasm.environment,
         sources: sources(ctx, TargetKind::Wasm, false, &["kt"]),
         libraries,
@@ -473,13 +489,24 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(ctx.profile, TargetKind::Wasm),
         debug: profile.debug,
+        optimize: profile.optimize,
+        declarations: wasm.kind == WasmKind::Library,
         main_args,
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Wasm);
     if unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Wasm, ""))? == Outcome::Empty {
         return Ok(None);
     }
-    Ok(Some(WasmBuild { module: unit.module_path(), klib: unit.klib_path(), environment: wasm.environment, libraries: unit.libraries }))
+    Ok(Some(WasmBuild {
+        module: unit.module_path(),
+        klib: unit.klib_path(),
+        environment: wasm.environment,
+        kind: wasm.kind,
+        name: unit.name.to_owned(),
+        dir: unit.output.clone(),
+        libraries: unit.libraries,
+        node_modules: None,
+    }))
 }
 
 pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {

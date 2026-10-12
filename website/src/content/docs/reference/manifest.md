@@ -156,14 +156,28 @@ Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a t
 
 ```toml
 [target.wasm]
-environment = "js"      # "js" (default) or "wasi"
-package-manager = "pnpm" # "npm", "pnpm" or "bun"; default: the first one found on PATH
+environment = "js"        # "js" (default), "browser" or "wasi"
+kind = "application"      # "application" (default) or "library"
+module-name = "hello"     # name of the .mjs and .wasm files; default: the package name
+npm-name = "@acme/hello"  # npm package name of a library; default: the lowercase package name
+package-manager = "pnpm"  # "npm", "pnpm" or "bun"; default: the first one found on PATH
+wasm-opt = false          # false, or the path of a wasm-opt executable; default: wasm-opt on PATH
+
+[target.wasm.npm-dependencies]
+"left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `environment` | `"js"` | `"js"` for Node.js and browsers, `"wasi"` for WASI runtimes |
-| `package-manager` | first of `npm`, `pnpm`, `bun` on `PATH` | The tool that installs the [npm packages](../../guides/wasm/#npm-packages) your Wasm libraries need |
+| `environment` | `"js"` | `"js"` for Node.js, `"browser"` for web pages (`kargo run` serves them and `kargo test` uses a headless browser), `"wasi"` for WASI runtimes. See [WebAssembly](../../guides/wasm/#setup) |
+| `kind` | `"application"` | `"application"` for a program with a `main`, `"library"` for an npm package of `@JsExport` functions with TypeScript declarations. A library needs `environment = "js"` or `"browser"` |
+| `module-name` | the package name | Name of the compiled module's files (`<name>.mjs`, `<name>.wasm`). Letters, digits, `-`, `_` and `.` |
+| `npm-name` | the lowercase package name | `name` in the `package.json` of a library. May be scoped (`@scope/name`); only valid with `kind = "library"` |
+| `package-manager` | first of `npm`, `pnpm`, `bun` on `PATH` | The tool that installs the [npm packages](../../guides/wasm/#npm-packages) your project needs |
+| `wasm-opt` | `true` | In release builds, run Binaryen's `wasm-opt` over the module when there is one on `PATH`. `false` never runs it; a string is the path of the executable to run, relative to the project. See [Release builds](../../guides/wasm/#release-builds) |
+| `npm-dependencies` | none | A table of npm packages (`name = "version"`) to install in addition to those the klibs ask for. Your version wins on a conflict |
+
+With `optimize = true`, as in the [release profile](#profiledev-and-profilerelease), a Wasm build removes code nothing reaches, runs `wasm-opt` and reports the size of the output.
 
 ### `[target.native]`
 
@@ -388,5 +402,5 @@ compiler-args = ["-Xno-call-assertions"]
 | Key | `dev` default | `release` default | Meaning |
 |---|---|---|---|
 | `debug` | `true` | `false` | Include debug information |
-| `optimize` | `false` | `true` | Optimize (mainly affects Native and Wasm) |
+| `optimize` | `false` | `true` | Optimize (mainly affects Native and Wasm; for Wasm it removes dead code, see [Release builds](../../guides/wasm/#release-builds)) |
 | `compiler-args` | `[]` | `[]` | Extra compiler arguments for this profile |

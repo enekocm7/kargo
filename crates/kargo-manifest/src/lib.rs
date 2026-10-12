@@ -262,8 +262,12 @@ impl JvmTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WasmEnvironment {
+    /// Node.js (the default); the module can also be loaded by a bundler or a page.
     #[default]
     Js,
+    /// A web browser: Kargo adds an HTML page, serves it for `kargo run` and runs tests in a headless browser.
+    Browser,
+    /// The WebAssembly System Interface.
     Wasi,
 }
 
@@ -271,9 +275,50 @@ impl WasmEnvironment {
     pub fn as_str(self) -> &'static str {
         match self {
             WasmEnvironment::Js => "js",
+            WasmEnvironment::Browser => "browser",
             WasmEnvironment::Wasi => "wasi",
         }
     }
+
+    /// The Kotlin/Wasm target (`-Xwasm-target=wasm-<platform>`) and Maven variant:
+    /// `js` for Node.js and browsers alike, or `wasi`.
+    pub fn platform(self) -> &'static str {
+        match self {
+            WasmEnvironment::Js | WasmEnvironment::Browser => "js",
+            WasmEnvironment::Wasi => "wasi",
+        }
+    }
+}
+
+/// What a Wasm build produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WasmKind {
+    /// A program with a `main` function (the default).
+    #[default]
+    Application,
+    /// An npm package: `@JsExport` functions, a `package.json` and TypeScript declarations.
+    Library,
+}
+
+impl WasmKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WasmKind::Application => "application",
+            WasmKind::Library => "library",
+        }
+    }
+}
+
+/// `[target.wasm] wasm-opt`: whether release builds optimize the module with Binaryen's `wasm-opt`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum WasmOpt {
+    /// Use `wasm-opt` from `PATH` when there is one (the default).
+    #[default]
+    Auto,
+    /// Never run `wasm-opt`.
+    Off,
+    /// Run this executable; relative to the project directory.
+    Path(PathBuf),
 }
 
 /// The tool that installs the npm packages Wasm libraries need.
@@ -319,9 +364,29 @@ impl FromStr for PackageManager {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmTarget {
     pub environment: WasmEnvironment,
+    pub kind: WasmKind,
+    /// Name of the output files (`<module-name>.mjs`, `.wasm`); `None` uses the package name.
+    pub module_name: Option<String>,
+    /// The npm package name of a library; `None` uses the package name.
+    pub npm_name: Option<String>,
     /// `None` picks the first of npm, pnpm and bun found on `PATH`.
     pub package_manager: Option<PackageManager>,
+    /// npm packages the project needs besides those its Wasm libraries ask for, by name.
+    pub npm_dependencies: BTreeMap<String, String>,
+    pub wasm_opt: WasmOpt,
     pub dependencies: Vec<Dependency>,
+}
+
+impl WasmTarget {
+    /// The name of the compiled module and its files: `module-name`, else the package name.
+    pub fn module_name<'a>(&'a self, package: &'a Package) -> &'a str {
+        self.module_name.as_deref().unwrap_or(&package.name)
+    }
+
+    /// The name of the npm package a library publishes: `npm-name`, else the lowercase package name.
+    pub fn npm_package_name(&self, package: &Package) -> String {
+        self.npm_name.clone().unwrap_or_else(|| package.name.to_ascii_lowercase())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -844,6 +909,33 @@ pub fn validate_package_name(name: &str) -> Result<()> {
     }
     if let Some(bad) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_')) {
         bail!("package name `{name}` contains invalid character `{bad}` (use letters, digits, `-` and `_`)");
+    }
+    Ok(())
+}
+
+/// A Wasm module name becomes file names and an import path, so it stays portable.
+fn validate_module_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.starts_with('.') || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+        bail!("invalid [target.wasm] module-name `{name}` (use letters, digits, `-`, `_` and `.`, not starting with `.`)");
+    }
+    Ok(())
+}
+
+/// npm package names: lowercase, URL-safe, optionally scoped (`@scope/name`).
+fn validate_npm_name(name: &str) -> Result<()> {
+    let part_ok = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with(['.', '_'])
+            && part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_' | '~'))
+    };
+    let valid = match name.strip_prefix('@') {
+        Some(scoped) => scoped.split_once('/').is_some_and(|(scope, rest)| part_ok(scope) && part_ok(rest)),
+        None => part_ok(name),
+    };
+    if !valid || name.len() > 214 {
+        bail!(
+            "invalid [target.wasm] npm-name `{name}` (use lowercase letters, digits, `-`, `.`, `_` and `~`, optionally scoped like `@scope/name`)"
+        );
     }
     Ok(())
 }

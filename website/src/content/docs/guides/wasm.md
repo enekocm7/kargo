@@ -1,25 +1,28 @@
 ---
 title: WebAssembly
-description: Compile Kotlin to WebAssembly for Node.js, browsers or WASI.
+description: Compile Kotlin to WebAssembly for Node.js, browsers or WASI, serve browser apps, and publish Wasm libraries as npm packages.
 ---
 
-Kargo compiles Kotlin to WebAssembly with the Kotlin/Wasm compiler. No Gradle and no npm project are involved; Kargo only runs npm, pnpm or bun when a library needs [npm packages](#npm-packages).
+Kargo compiles Kotlin to WebAssembly with the Kotlin/Wasm compiler. No Gradle and no npm project are involved. Kargo only runs npm, pnpm or bun when a project needs [npm packages](#npm-packages), and Binaryen's `wasm-opt` if you have it for [release builds](#release-builds).
 
 ## Setup
 
 ```toml title="kargo.toml"
 [target.wasm]
-environment = "js"     # or "wasi"
+environment = "browser"   # "js" (default), "browser" or "wasi"
 ```
 
 | Environment | Use it for | Standard library |
 |---|---|---|
-| `js` (default) | Node.js and browsers. Can call JavaScript through `external` declarations and `js(...)`. | `kotlin-stdlib-wasm-js` |
+| `js` (default) | Programs and libraries that run on Node.js. They can call JavaScript through `external` declarations and `js(...)`. | `kotlin-stdlib-wasm-js` |
+| `browser` | Web pages. Kargo adds an HTML page, serves it with `kargo run` and runs the tests in a headless browser. See [Browser apps](#browser-apps). | `kotlin-stdlib-wasm-js` |
 | `wasi` | Standalone runtimes using the WebAssembly System Interface. | `kotlin-stdlib-wasm-wasi` |
 
-## Run and test
+`js` and `browser` compile to the same module and use the same libraries. The environment decides what Kargo does around it: Node.js runs a `js` program, and a browser loads a `browser` app from the page Kargo serves.
 
-[Node.js](https://nodejs.org) runs Wasm programs and tests. You need it on your `PATH` for `kargo run -t wasm` and `kargo test -t wasm`, but not for building.
+## Run and test with Node.js
+
+[Node.js](https://nodejs.org) runs `js` and `wasi` programs and tests. You need it on your `PATH` for `kargo run -t wasm` and `kargo test -t wasm`, but not for building.
 
 ```console
 $ kargo new hello -t wasm
@@ -52,8 +55,83 @@ Kotlin/Wasm itself always calls `main` with an empty array. When your `main` tak
 
 - With `environment = "js"` they come from `process.argv` after the script path. Outside Node.js, for example in a browser, `args` is empty.
 - With `environment = "wasi"` they come from the WASI `args_get` call, without the program name (and without the `.mjs` launcher when Node.js runs it).
+- With `environment = "browser"` there is no command line, so `args` is always empty.
 
 This works only when your `main` is in a named package, which `kargo new` always sets up. A `main(args)` in the default package gets an empty array, and Kargo warns about it when it compiles.
+
+## Browser apps
+
+With `environment = "browser"`, `kargo run` builds the app and serves it, and `kargo test` runs the tests in a browser.
+
+```toml title="kargo.toml"
+[target.wasm]
+environment = "browser"
+```
+
+```console
+$ kargo run -t wasm
+   Compiling hello v0.1.0 (wasm)
+     Serving target/debug/wasm at http://127.0.0.1:8080/ (press Ctrl+C to stop)
+```
+
+Open the address in a browser. The page loads your program, and whatever it prints with `println` appears in the browser's developer console. Stop the server with Ctrl+C.
+
+| Option | Meaning |
+|---|---|
+| `--port <port>` | The port to listen on. The default is `8080`; `0` picks a free one. Kargo only listens on `127.0.0.1`, so the page is not reachable from other machines |
+| `--open` | Open the page in your browser (the one named by `$BROWSER`, else the system default) |
+
+Kargo serves the files with the content types browsers need (`application/wasm` for the module, JavaScript for the `.mjs` files) and without caching, so reload the page after you run `kargo run` again.
+
+### The page
+
+Without any setup Kargo writes `index.html` next to the module: a short page that loads `<module>.mjs` with `<script type="module">`. To build the page yourself, put your files in `resources/`. Kargo copies everything below `resources/` into `target/<profile>/wasm/`, and a `resources/index.html` replaces the generated page:
+
+```html title="resources/index.html"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>My app</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="./hello.mjs"></script>
+</body>
+</html>
+```
+
+The module is named after the package (`hello.mjs` here), or after [`module-name`](#module-name-and-output-files). The Kotlin code reaches the page through the browser APIs, with `external` declarations or `js(...)`; the Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/wasm-js-interop.html) in depth.
+
+:::note
+`resources/` is a JVM concept too (it ends up in the jar). In a project that targets both, the files in `resources/` go to the jar and to the browser app.
+:::
+
+### Testing in a browser
+
+`kargo test` serves a page that runs your tests and starts a browser without a window to load it. The tests report their results back to Kargo, which prints them like it does for any other target:
+
+```console
+$ kargo test -t wasm
+   Compiling hello v0.1.0 (wasm, tests)
+     Running Wasm tests (headless browser)
+test com.example.hello.GreetingTest.greetsByName ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored
+```
+
+What the tests print, failures with their stack traces and `--report junit` all work as for Node.js. Test name filters are not supported on Wasm.
+
+Kargo looks for a browser in this order: the one named by `KARGO_BROWSER`, then Chrome, Chromium, Edge, Brave and Firefox on your `PATH` and in their usual install locations. Each run uses a throwaway profile, so a browser you have open is left alone. Kargo treats an executable whose name contains `firefox` as Firefox and anything else as a Chromium-based browser (Chrome, Edge, Chromium, Brave), because the two take different command lines. When the tests are done Kargo stops the browser; it asks Firefox to close its window instead of ending its process, since Firefox can hand over to another process, for example when it applies an update on startup. Without a browser, `kargo test` fails and tells you to install one; `kargo test --no-run` doesn't need one.
+
+| Variable | Meaning |
+|---|---|
+| `KARGO_BROWSER` | The browser to use: a path to its executable, or a command on `PATH` |
+| `KARGO_BROWSER_ARGS` | Extra command-line arguments for it, separated by spaces. Chrome and the other Chromium-based browsers usually need `--no-sandbox` in a container |
+| `KARGO_BROWSER_TIMEOUT` | Seconds the browser may stay silent before the tests count as hung (default `120`) |
+
+The browser has to support WebAssembly garbage collection and exception handling, which Kotlin/Wasm requires; current Chrome, Edge and Firefox do, and so does Safari for the people who open your page. See [CI](../ci/#wasm) for running these tests on a build server.
 
 ## npm packages
 
@@ -74,6 +152,21 @@ $ kargo run -t wasm
 - This needs a package manager on your `PATH`, even for `kargo build`. Projects whose libraries need no npm packages never run one.
 - With `--offline`, Kargo passes `--offline` to the package manager, which then installs only from its own cache.
 
+### Your own npm packages
+
+To use an npm package from your own code, for example through `@JsModule("left-pad")`, list it in `[target.wasm.npm-dependencies]`. Kargo installs it with the others, and your entry wins when a library asks for another version of the same package:
+
+```toml title="kargo.toml"
+[target.wasm.npm-dependencies]
+"left-pad" = "1.3.0"
+```
+
+### In the browser
+
+Node.js finds packages in `node_modules` by itself; a browser needs to be told where they are. For a `browser` app Kargo adds an [import map](https://developer.mozilla.org/docs/Web/HTML/Element/script/type/importmap) to the page, which maps each installed package to its ES module (the `exports`, `module` or `main` entry of its `package.json`), and serves `node_modules` at `/node_modules/`. `kargo run` and `kargo test` both do this, and the page you put in `resources/index.html` gets the import map too, unless it has one of its own.
+
+This works for packages that ship ES modules, such as `@js-joda/core`. A package that only ships CommonJS can't run in a browser without a bundler; bundle it yourself, or use a `js` target and a bundler of your choice.
+
 ### Choosing npm, pnpm or bun
 
 By default Kargo uses the first of `npm`, `pnpm` and `bun` it finds on your `PATH`. To pick one, set `package-manager`:
@@ -83,9 +176,105 @@ By default Kargo uses the first of `npm`, `pnpm` and `bun` it finds on your `PAT
 package-manager = "bun"   # "npm", "pnpm" or "bun"
 ```
 
-The package manager's lockfile (`package-lock.json`, `pnpm-lock.yaml` or `bun.lock`) stays in `target/<profile>/`. When you switch package managers, Kargo deletes the old `node_modules` and lockfile and installs again. The packages always run on Node.js, whichever tool installed them.
+The package manager's lockfile (`package-lock.json`, `pnpm-lock.yaml` or `bun.lock`) stays in `target/<profile>/`. When you switch package managers, Kargo deletes the old `node_modules` and lockfile and installs again. The packages always run on Node.js or in the browser, whichever tool installed them.
 
-## Calling JavaScript (environment `js`)
+## Libraries and npm packages
+
+A Wasm project can be a library for JavaScript and TypeScript code. Set `kind = "library"` and mark what you want to expose with `@JsExport`:
+
+```toml title="kargo.toml"
+[package]
+name = "greeter"
+version = "0.3.0"
+license = "MIT"
+
+[target.wasm]
+environment = "browser"           # or "js"
+kind = "library"
+module-name = "greeter-core"      # the name of the files; default: the package name
+npm-name = "@acme/greeter"        # the npm package name; default: the lowercase package name
+```
+
+```kotlin title="src/Greeter.kt"
+package com.example.greeter
+
+@OptIn(ExperimentalJsExport::class)
+@JsExport
+fun greet(name: String): String = "Hello, $name!"
+```
+
+```console
+$ kargo build --release
+   Compiling greeter v0.3.0 (wasm)
+$ ls target/release/wasm
+greeter-core.d.mts  greeter-core.import-object.mjs  greeter-core.js-builtins.mjs
+greeter-core.mjs    greeter-core.wasm               package.json
+```
+
+`target/<profile>/wasm/` is now an npm package. Publish it with `npm publish target/release/wasm`, or pack it with `npm pack`, and use it like any other:
+
+```js
+import { greet } from "@acme/greeter";
+
+console.log(greet("npm")); // Hello, npm!
+```
+
+- **`@JsExport`** marks the top-level functions that JavaScript can call. In Kotlin 2.4 Kotlin/Wasm exports functions only; the annotation does not apply to classes. Everything else is removed from release builds.
+- **`greeter-core.d.mts`** holds TypeScript declarations for the exported functions (`export declare function greet(name: string): string;`).
+- **`package.json`** is written for you: `name`, `version`, `description`, `license` and `author` come from `[package]`, `type` is `module`, and `main`, `module`, `types` and `exports` point at the files above. Its `dependencies` list the [npm packages](#npm-packages) the library needs, both those its Kotlin libraries ask for and your `npm-dependencies`.
+- A library has no `main`, so `kargo run` refuses to run it. `kargo test` runs its tests like any other Wasm target, on Node.js or in a headless browser, according to `environment`.
+- The module finds its `.wasm` next to itself, so keep the files together. `kind = "library"` needs `environment = "js"` or `"browser"`; a `wasi` module is not an npm package.
+
+## Release builds
+
+`kargo build --release -t wasm` (and `kargo run --release`) produces a much smaller module than the default dev build:
+
+1. **Dead code is removed.** The release profile links with the Kotlin compiler's dead code elimination: only what `main` or `@JsExport` can reach stays. For the hello world project that takes the module from 609 KiB to 27 KiB.
+2. **`wasm-opt` optimizes the module**, when Binaryen's `wasm-opt` is on your `PATH`. Kargo runs it with `-O3` and the settings Kotlin/Wasm modules need. The hello world module shrinks again, from 27 KiB to 1.3 KiB.
+3. **Kargo reports the size** of the module, how much it compresses, and the total of the files in the output directory.
+
+```console
+$ kargo build --release
+   Compiling hello v0.1.0 (wasm)
+  Optimizing hello.wasm with wasm-opt
+   Optimized hello.wasm: 27.2 KiB -> 1.3 KiB
+        Size hello.wasm 1.3 KiB (711 B gzipped), 5 files 8.8 KiB in target/release/wasm
+    Finished `release` profile [optimized] target(s) in 0.86s
+```
+
+Without `wasm-opt`, the build still removes dead code and says how to get it:
+
+```console
+note: install Binaryen (https://github.com/WebAssembly/binaryen) and put `wasm-opt` on PATH to make the release module smaller; [target.wasm] wasm-opt = false hides this note
+        Size hello.wasm 27.2 KiB (9.5 KiB gzipped), 5 files 34.7 KiB in target/release/wasm
+```
+
+[Binaryen](https://github.com/WebAssembly/binaryen) comes from most package managers (for example `brew install binaryen` or `apt install binaryen`) and from npm (`npm install -g binaryen`). Use `wasm-opt` in `[target.wasm]` to change what Kargo does:
+
+```toml title="kargo.toml"
+[target.wasm]
+wasm-opt = false                 # never run it
+# wasm-opt = "tools/wasm-opt"    # run this executable (relative to the project), not the one on PATH
+```
+
+An optimized module is not optimized again until the next recompile. The dev profile never runs `wasm-opt` or removes code, so debugging keeps every function.
+
+## Module name and output files
+
+A build writes these files to `target/<profile>/wasm/`, named after the package or after `module-name`:
+
+| File | What it is |
+|---|---|
+| `<name>.mjs` | The ES module that loads the Wasm module and runs `main` |
+| `<name>.wasm` | The compiled program |
+| `<name>.import-object.mjs`, `<name>.js-builtins.mjs` | JavaScript the module imports; keep them next to it |
+| `<name>.d.mts` | TypeScript declarations (libraries only) |
+| `package.json` | The npm package (libraries only) |
+| `index.html` and your `resources/` | The page of a `browser` app |
+
+Set `module-name` to change `<name>`, for example when the package name is not what the files should be called. It may contain letters, digits, `-`, `_` and `.`.
+
+## Calling JavaScript (environments `js` and `browser`)
 
 ```kotlin title="src-wasm/Console.kt"
 @file:OptIn(ExperimentalWasmJsInterop::class)
@@ -101,13 +290,10 @@ fun shout(text: String) = warn(text.uppercase())
 
 The Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/wasm-js-interop.html) in depth.
 
-## Using it from a web page
-
-`kargo build --release -t wasm` produces an ES module you can import from your own JavaScript or bundler. Serve the `target/release/wasm/` directory and load the `.mjs` file with `<script type="module">`.
-
 ## Limitations
 
 - **Compose for Web is not supported.** It needs the Compose Gradle plugin's resource pipeline. Use the JVM (desktop) or Android target for Compose.
 - Libraries must publish a Wasm variant (`wasmJs` or `wasmWasi`). JVM-only libraries can't be used.
 - Test name filters are ignored on Wasm; all tests run.
-- npm packages are installed for Node.js only. If you load the output in a browser, bundle the packages listed in `target/<profile>/package.json` yourself.
+- Packages that only ship CommonJS can't be used in the `browser` environment without bundling them yourself.
+- `kargo run` serves a browser app as it is. It doesn't rebuild or reload the page when your sources change; run it again.

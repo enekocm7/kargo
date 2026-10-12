@@ -8,15 +8,17 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use super::build::{
-    BuildOptions, BuildResults, JvmBuild, announce, bin_main_class, build, compiling, find_bin, finished, hook_env, jvm_classpaths,
-    jvm_javac_args, jvm_processor_path, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries, sources,
+    BuildOptions, BuildResults, JvmBuild, WasmBuild, announce, bin_main_class, build, compiling, find_bin, finished, hook_env,
+    jvm_classpaths, jvm_javac_args, jvm_processor_path, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries,
+    sources,
 };
 use super::context::BuildContext;
+use crate::web;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::mainclass::find_entry_point_in;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::{SourceSet, common_kotlin_args};
-use kargo_manifest::{Hook, NativeKind, Scope, TargetKind};
+use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
 use kargo_maven::Platform;
 use kargo_toolchain::native::Host;
 use kargo_util::fs::join_paths;
@@ -53,7 +55,14 @@ pub struct RunOptions {
     pub release: bool,
     pub program: Program,
     pub args: Vec<String>,
+    /// The port a Wasm browser app is served on (`--port`); `None` uses [`DEFAULT_PORT`].
+    pub port: Option<u16>,
+    /// Open the served page in a browser (`--open`).
+    pub open: bool,
 }
+
+/// The port `kargo run` serves a Wasm browser app on unless told otherwise.
+pub const DEFAULT_PORT: u16 = 8080;
 
 /// Picks the target to run: explicit, else JVM, Native, Wasm, Android in that order.
 pub fn runnable_target(enabled: &[TargetKind], requested: Option<TargetKind>) -> Result<TargetKind> {
@@ -83,7 +92,18 @@ fn example_file(ctx: &BuildContext, name: &str) -> Result<PathBuf> {
 }
 
 /// Fails early, before anything compiles, when the selected program cannot exist.
-fn validate(ctx: &BuildContext, target: TargetKind, program: &Program) -> Result<()> {
+fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result<()> {
+    let program = &opts.program;
+    let wasm = ctx.ws.manifest().targets.wasm.as_ref().filter(|_| target == TargetKind::Wasm);
+    if wasm.is_some_and(|w| w.kind == WasmKind::Library) {
+        bail!(
+            "[target.wasm] kind = \"library\" builds an npm package and has no program to run; \
+             build it with `kargo build` and publish target/<profile>/wasm"
+        );
+    }
+    if (opts.port.is_some() || opts.open) && !wasm.is_some_and(|w| w.environment == WasmEnvironment::Browser) {
+        bail!("`--port` and `--open` serve a Wasm browser app; they need `-t wasm` with [target.wasm] environment = \"browser\"");
+    }
     if *program != Program::Default && !matches!(target, TargetKind::Jvm | TargetKind::Native) {
         bail!("`kargo run {}` only works for the jvm and native targets, not {target}", program.flag());
     }
@@ -125,7 +145,7 @@ fn bin_hint(ctx: &BuildContext) -> String {
 /// Builds and runs; returns the program's exit code.
 pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
-    validate(ctx, target, &opts.program)?;
+    validate(ctx, target, opts)?;
     // `--main` and `--example` on Kotlin/Native link their own executable instead of the project's.
     let separate_native = target == TargetKind::Native && matches!(opts.program, Program::Main(_) | Program::Example(_));
     let results = if separate_native {
@@ -151,6 +171,9 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         TargetKind::Wasm => {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
+            if wasm.environment == WasmEnvironment::Browser {
+                return serve_wasm_app(ctx, &wasm, opts);
+            }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             cmd.arg(&wasm.module);
             label = format!("node {}", rel(&wasm.module));
@@ -178,6 +201,25 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     ctx.shell().verbose("Command", process::describe(&cmd));
     let status = cmd.status().with_context(|| format!("failed to start `{}`", cmd.get_program().to_string_lossy()))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Serves a Wasm browser app until the process is stopped (Ctrl+C).
+fn serve_wasm_app(ctx: &BuildContext, wasm: &WasmBuild, opts: &RunOptions) -> Result<i32> {
+    let listener = web::bind(opts.port.unwrap_or(DEFAULT_PORT))?;
+    let mut site = web::Site::new(&wasm.dir);
+    if let Some(node_modules) = &wasm.node_modules {
+        site = site.mount("node_modules", node_modules);
+    }
+    // Other `kargo` commands may build while the page is being served.
+    ctx.unlock()?;
+    let server = web::Server::start(listener, site, None)?;
+    let dir = wasm.dir.strip_prefix(ctx.ws.root()).unwrap_or(&wasm.dir);
+    ctx.shell().status("Serving", format!("{} at {} (press Ctrl+C to stop)", dir.display(), server.url()));
+    if opts.open {
+        web::open_in_browser(std::ffi::OsStr::new(&server.url()))?;
+    }
+    server.wait();
+    Ok(0)
 }
 
 /// The main class and classpath of the JVM program to run.

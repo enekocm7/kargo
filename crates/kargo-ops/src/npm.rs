@@ -1,7 +1,8 @@
 //! npm packages for Kotlin/Wasm: libraries such as kotlinx-datetime import npm
-//! packages (`@js-joda/core`) at runtime. Kargo reads them from the klibs and
-//! installs them with npm, pnpm or bun into a `node_modules` that Node.js finds
-//! from the compiled `.mjs` files.
+//! packages (`@js-joda/core`) at runtime. Kargo reads them from the klibs, adds
+//! the project's own `[target.wasm.npm-dependencies]` and installs them with
+//! npm, pnpm or bun into a `node_modules` that Node.js finds from the compiled
+//! `.mjs` files (a browser gets an import map, see `wasm_output`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,16 +19,26 @@ use kargo_util::process::{self, find_on_path};
 /// Lockfiles the package managers leave next to `package.json`.
 const LOCKFILES: [&str; 4] = ["package-lock.json", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
 
-/// Installs the npm packages that `libraries` need into `dir/node_modules`.
+/// The npm packages the project needs, as `name -> version`: those its Wasm
+/// `libraries` ask for, and `[target.wasm.npm-dependencies]`, which wins on a conflict.
+pub fn dependencies(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+    let mut deps = npm_dependencies(libraries)?;
+    if let Some(wasm) = &ctx.ws.manifest().targets.wasm {
+        deps.extend(wasm.npm_dependencies.clone());
+    }
+    Ok(deps)
+}
+
+/// Installs the npm packages that `libraries` need into `dir/node_modules` and
+/// returns that directory, or `None` when no package is needed.
 ///
 /// Node.js resolves bare imports by walking up from the importing module, so
-/// any `.mjs` below `dir` sees them. Nothing happens when no library needs an
-/// npm package, or when `dir` already holds exactly these packages installed
-/// by the same package manager.
-pub fn install(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<()> {
-    let deps = npm_dependencies(libraries)?;
+/// any `.mjs` below `dir` sees them. Nothing is installed when `dir` already
+/// holds exactly these packages installed by the same package manager.
+pub fn install(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<Option<PathBuf>> {
+    let deps = dependencies(ctx, libraries)?;
     if deps.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let packages = deps.iter().map(|(name, version)| format!("{name}@{version}")).collect::<Vec<_>>().join(", ");
     let preferred = ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.package_manager);
@@ -38,7 +49,7 @@ pub fn install(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<
     let node_modules = dir.join("node_modules");
     let marker = node_modules.join(".kargo-package.json");
     if std::fs::read_to_string(&marker).is_ok_and(|s| s == installed) {
-        return Ok(());
+        return Ok(Some(node_modules));
     }
     // Start clean: package managers don't share `node_modules` layouts or lockfiles.
     remove_dir_all_if_exists(&node_modules)?;
@@ -63,7 +74,7 @@ pub fn install(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<
         );
     }
     std::fs::write(marker, installed)?;
-    Ok(())
+    Ok(Some(node_modules))
 }
 
 /// The configured package manager, or else the first of npm, pnpm and bun on `PATH`.

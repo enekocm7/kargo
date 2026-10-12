@@ -78,6 +78,22 @@ Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Bu
 
 A Wasm dependency, such as `kotlinx-datetime`, imports npm packages at runtime, and Kargo installs them with npm, pnpm or bun. Install [Node.js](https://nodejs.org), which includes npm, or install [pnpm](https://pnpm.io) or [bun](https://bun.sh), and make sure it is on your `PATH`. If you set `package-manager` in `[target.wasm]`, that tool must be on your `PATH`. See [npm packages](../../guides/wasm/#npm-packages).
 
+### `no browser found to run the Wasm tests`
+
+A Wasm project with `environment = "browser"` runs its tests in a browser without a window, and Kargo found none. Install Chrome, Chromium, Edge, Brave or Firefox, or set `KARGO_BROWSER` to the path of one. In a container, also set `KARGO_BROWSER_ARGS=--no-sandbox` if Chrome refuses to start as root. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser).
+
+### Wasm browser tests fail with `timed out ... without output`
+
+The browser started but its page stopped reporting, so Kargo gave up after `KARGO_BROWSER_TIMEOUT` seconds (default 120). A test that runs longer than that without printing needs a higher value. If nothing ever ran, the browser may be too old for WebAssembly garbage collection and exception handling; update it.
+
+### How do I run my Wasm code in a browser?
+
+Set `environment = "browser"` in `[target.wasm]` and run `kargo run -t wasm`. Kargo writes a page, serves it on `http://127.0.0.1:8080/` and, with `--open`, opens it. See [Browser apps](../../guides/wasm/#browser-apps).
+
+### How do I publish a Kotlin/Wasm library to npm?
+
+Set `kind = "library"` in `[target.wasm]`, mark the functions to expose with `@JsExport`, build, and run `npm publish target/release/wasm`. See [Libraries and npm packages](../../guides/wasm/#libraries-and-npm-packages).
+
 ### `Cannot find package '...'` when running Wasm
 
 Node.js can't find an npm package that a library imports. Kargo installs these packages into `target/<profile>/node_modules` when it builds. If you deleted part of that directory, run `kargo clean` and build again.

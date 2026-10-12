@@ -258,10 +258,72 @@ headers = [\"curl/curl.h\"]
 }
 
 #[test]
+fn wasm_target_options() {
+    let with = |t: &str| format!("{MINIMAL}\n{t}\n");
+    let wasm = |t: &str| parse(&with(t)).targets.wasm.unwrap();
+
+    let default = wasm("[target.wasm]");
+    assert_eq!(default.environment, WasmEnvironment::Js);
+    assert_eq!(default.kind, WasmKind::Application);
+    assert_eq!(default.wasm_opt, WasmOpt::Auto);
+    assert!(default.npm_dependencies.is_empty());
+    assert_eq!(default.module_name(&parse(MINIMAL).package), "hello");
+
+    let browser = wasm("[target.wasm]\nenvironment = \"browser\"");
+    assert_eq!(browser.environment, WasmEnvironment::Browser);
+    assert_eq!(browser.environment.as_str(), "browser");
+    // Browsers and Node.js run the same Kotlin/Wasm target and use the same libraries.
+    assert_eq!(browser.environment.platform(), "js");
+    assert_eq!(WasmEnvironment::Wasi.platform(), "wasi");
+
+    let library = wasm(
+        r#"
+[target.wasm]
+environment = "browser"
+kind = "library"
+module-name = "hello.core"
+npm-name = "@acme/hello"
+wasm-opt = "tools/wasm-opt"
+
+[target.wasm.npm-dependencies]
+"@js-joda/core" = "^3.2.0"
+"#,
+    );
+    assert_eq!(library.kind, WasmKind::Library);
+    assert_eq!(library.module_name(&parse(MINIMAL).package), "hello.core");
+    assert_eq!(library.npm_package_name(&parse(MINIMAL).package), "@acme/hello");
+    assert_eq!(library.wasm_opt, WasmOpt::Path("tools/wasm-opt".into()));
+    assert_eq!(library.npm_dependencies["@js-joda/core"], "^3.2.0");
+
+    // The npm name defaults to the lowercase package name.
+    let lowercase = Manifest::parse("[package]\nname = \"Hello_App\"\nversion = \"1\"\n[target.wasm]\nkind = \"lib\"\n").unwrap();
+    assert_eq!(lowercase.targets.wasm.unwrap().npm_package_name(&lowercase.package), "hello_app");
+
+    assert_eq!(wasm("[target.wasm]\nwasm-opt = false").wasm_opt, WasmOpt::Off);
+    assert_eq!(wasm("[target.wasm]\nwasm-opt = true").wasm_opt, WasmOpt::Auto);
+}
+
+#[test]
+fn wasm_target_option_errors() {
+    let with = |t: &str| format!("{MINIMAL}\n[target.wasm]\n{t}\n");
+    assert!(parse_err(&with("kind = \"plugin\"")).contains("unknown wasm kind `plugin` (expected `application` or `library`)"));
+    assert!(parse_err(&with("environment = \"wasi\"\nkind = \"library\"")).contains("needs environment = \"js\" or \"browser\""));
+    assert!(parse_err(&with("module-name = \"a/b\"")).contains("invalid [target.wasm] module-name `a/b`"));
+    assert!(parse_err(&with("module-name = \".hidden\"")).contains("invalid [target.wasm] module-name"));
+    assert!(parse_err(&with("npm-name = \"hello\"")).contains("set kind = \"library\""));
+    assert!(parse_err(&with("kind = \"library\"\nnpm-name = \"Hello\"")).contains("invalid [target.wasm] npm-name `Hello`"));
+    assert!(parse_err(&with("kind = \"library\"\nnpm-name = \"@scope\"")).contains("invalid [target.wasm] npm-name"));
+    assert!(parse_err(&with("wasm-opt = 3")).contains("`wasm-opt` must be true, false or the path"));
+    assert!(parse_err(&with("npm-dependencies = { left-pad = 1 }")).contains("invalid type"));
+    assert!(parse_err(&with("[target.wasm.npm-dependencies]\nleft-pad = \"\"")).contains("needs a package name and a version"));
+    assert!(parse_err(&with("html = \"index.html\"")).contains("unknown field"));
+}
+
+#[test]
 fn target_errors() {
     let with = |t: &str| format!("{MINIMAL}\n{t}\n");
     assert!(parse_err(&with("[target]")).contains("no target is enabled"));
-    assert!(parse_err(&with("[target.wasm]\nenvironment = \"node\"")).contains("wasm environment"));
+    assert!(parse_err(&with("[target.wasm]\nenvironment = \"node\"")).contains("expected `js`, `browser` or `wasi`"));
     assert!(parse_err(&with("[target.wasm]\npackage-manager = \"yarn\"")).contains("expected `npm`, `pnpm` or `bun`"));
     assert!(parse_err(&with("[target.native]\nplatforms = [\"plan9\"]")).contains("Kotlin/Native platform"));
     assert!(parse_err(&with("[target.native]\nkind = \"weird\"")).contains("native kind"));

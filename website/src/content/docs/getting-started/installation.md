@@ -64,6 +64,8 @@ You only need these for some targets:
 | You want to... | You need |
 |---|---|
 | Run or test **WebAssembly** programs | [Node.js](https://nodejs.org) (`node` on `PATH`). Compiling Wasm doesn't need it, unless a dependency needs [npm packages](../../guides/wasm/#npm-packages); then npm, pnpm or bun must be on `PATH` too. |
+| Test a Wasm **browser** app | Chrome, Chromium, Edge, Brave or Firefox (Kargo runs it without a window; see [Testing in a browser](../../guides/wasm/#testing-in-a-browser)). `kargo run` only needs a browser to look at the page. |
+| Make release **Wasm** modules smaller | [Binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-opt` on `PATH`. Without it, release builds still remove dead code. |
 | Build for **Android** | The [Android SDK](https://developer.android.com/studio) (set `ANDROID_HOME`) and [Gradle](https://gradle.org/install), or a `gradlew` wrapper in the project |
 | Run on an **Android** device | `adb` from the SDK platform-tools, plus a device or emulator |
 | Build **Kotlin/Native** | Nothing. Kargo downloads Kotlin/Native and its LLVM toolchain on the first native build. |

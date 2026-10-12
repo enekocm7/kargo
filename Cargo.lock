@@ -549,6 +549,7 @@ dependencies = [
  "anstyle",
  "anyhow",
  "dirs",
+ "flate2",
  "kargo-compiler",
  "kargo-manifest",
  "kargo-maven",

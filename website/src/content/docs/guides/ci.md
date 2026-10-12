@@ -93,6 +93,10 @@ Add Node.js so Wasm tests can run. It also provides npm, which Kargo uses to ins
           node-version: 22
 ```
 
+Tests of a Wasm project with `environment = "browser"` run in a headless browser instead. GitHub's `ubuntu-latest`, `macos-latest` and `windows-latest` runners come with Chrome, which Kargo finds. On a container image, install a browser and pass the flags it needs through `KARGO_BROWSER_ARGS`, for example `--no-sandbox` when running as root. See [Testing in a browser](../wasm/#testing-in-a-browser).
+
+For release builds, Binaryen's `wasm-opt` makes the Wasm module much smaller; `npm install -g binaryen` puts it on `PATH` (see [Release builds](../wasm/#release-builds)).
+
 ## Other CI systems
 
 The steps are the same everywhere:

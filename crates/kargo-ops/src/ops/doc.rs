@@ -116,7 +116,7 @@ pub fn doc(ctx: &BuildContext, opts: &DocOptions) -> Result<PathBuf> {
     ctx.shell().status("Generated", index.display());
     if opts.open {
         ctx.shell().status("Opening", index.display());
-        open_in_browser(&index)?;
+        crate::web::open_in_browser(index.as_os_str())?;
     }
     Ok(index)
 }
@@ -279,24 +279,6 @@ impl DokkaConfig<'_> {
 
 fn path_str(path: &Path) -> String {
     path.to_string_lossy().into_owned()
-}
-
-/// Opens `path` in the browser named by `$BROWSER`, else the system default.
-fn open_in_browser(path: &Path) -> Result<()> {
-    let mut cmd = match std::env::var_os("BROWSER").filter(|b| !b.is_empty()) {
-        Some(browser) => Command::new(browser),
-        None if cfg!(windows) => {
-            let mut c = Command::new("rundll32");
-            c.arg("url.dll,FileProtocolHandler");
-            c
-        }
-        None if cfg!(target_os = "macos") => Command::new("open"),
-        None => Command::new("xdg-open"),
-    };
-    cmd.arg(path);
-    cmd.spawn()
-        .with_context(|| format!("failed to open {} in a browser (`{}`); open it manually", path.display(), process::describe(&cmd)))?;
-    Ok(())
 }
 
 #[cfg(test)]

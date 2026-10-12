@@ -104,6 +104,8 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
+For Wasm, a release build removes dead code, runs `wasm-opt` when it is installed and prints the size of the module. A `kind = "library"` project also gets a `package.json` and TypeScript declarations. See [WebAssembly](../../guides/wasm/).
+
 ```sh
 kargo build
 kargo build --release -t jvm -t native
@@ -160,16 +162,20 @@ Build and run the program. Arguments after `--` go to the program.
 | `--main <name>` | Run another `main`: a JVM class such as `com.example.tools.MigrateKt`, or on Native an entry function such as `com.example.tools.main`. `--entry-point` is an alias |
 | `--bin <name>` | Run the [`[[bin]]`](../manifest/#bin) with this name |
 | `--example <name>` | Compile and run `examples/<name>.kt` against the project and its dev-dependencies |
+| `--port <port>` | Wasm browser apps: the port to serve on (default `8080`; `0` picks a free one) |
+| `--open` | Wasm browser apps: open the served page in your browser |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 
 `--main`, `--bin` and `--example` exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
+
+`--port` and `--open` only apply to a Wasm browser app; `kargo run` rejects them for any other target. A Wasm project with `kind = "library"` has no program, so `kargo run` rejects it too.
 
 How each target runs:
 
 | Target | Runs |
 |---|---|
 | JVM | `java -cp ... <main-class>` with `jvm-args` |
-| Wasm | `node target/<profile>/wasm/<name>.mjs`; the arguments reach `main(args)` (see [Program arguments](../../guides/wasm/#program-arguments)) |
+| Wasm | `node target/<profile>/wasm/<name>.mjs`; the arguments reach `main(args)` (see [Program arguments](../../guides/wasm/#program-arguments)). With `environment = "browser"` it serves `target/<profile>/wasm/` on `127.0.0.1` until you press Ctrl+C (see [Browser apps](../../guides/wasm/#browser-apps)) |
 | Native | the executable built for the host platform |
 | Android | installs on the connected device with Gradle, then launches it with `adb` |
 
@@ -193,6 +199,8 @@ kargo test [filter] [options]
 | `-p, --package <name>`, `--workspace` | Which packages to test, one after another. The command fails if any test failed |
 
 By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
+
+Wasm tests run on Node.js, or with `environment = "browser"` in a headless browser: Chrome, Edge, Chromium, Brave or Firefox, found on `PATH` or named by `KARGO_BROWSER`. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser).
 
 ## `kargo doc` (`d`)
 

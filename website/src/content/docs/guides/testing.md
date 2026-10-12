@@ -124,11 +124,13 @@ On the JVM, a filter that matches a test class name selects whole classes, which
 | Target | Test runner | Default test libraries |
 |---|---|---|
 | JVM | JUnit Platform | `kotlin-test-junit5`, `junit-jupiter` |
-| Wasm | Node.js | `kotlin-test-wasm-js` / `kotlin-test-wasm-wasi` |
+| Wasm | Node.js, or a headless browser with `environment = "browser"` | `kotlin-test-wasm-js` / `kotlin-test-wasm-wasi` |
 | Native | the native test binary | built into Kotlin/Native |
 | Android | Gradle local unit tests (`testDebugUnitTest`) | `kotlin-test-junit`, `junit` |
 
 Test filters are not supported on Wasm; all tests run.
+
+With `environment = "browser"`, Kargo serves a test page, starts Chrome, Chromium, Edge, Brave or Firefox without a window to load it, and prints the results the page reports, so output, failures and `--report junit` look the same as on Node.js. See [Testing in a browser](../wasm/#testing-in-a-browser).
 
 ## JVM-only test libraries
 
