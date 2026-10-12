@@ -211,6 +211,69 @@ impl Version {
             matches!(tok, "alpha" | "a" | "beta" | "b" | "milestone" | "m" | "rc" | "cr" | "dev" | "eap" | "snapshot" | "pre" | "preview")
         })
     }
+
+    /// The words in the version that are not release or pre-release qualifiers, joined by `-`:
+    /// `jre` for `33.0.0-jre`, `x-compat` for `0.8.0-0.6.x-compat`, and empty for `1.2.0`,
+    /// `2.0.0-RC1` or `6.4.0.Final`. Libraries publish such variants next to their plain versions.
+    pub fn variant(&self) -> String {
+        const QUALIFIER_WORDS: [&str; 18] = [
+            "alpha",
+            "a",
+            "beta",
+            "b",
+            "milestone",
+            "m",
+            "rc",
+            "cr",
+            "dev",
+            "eap",
+            "snapshot",
+            "pre",
+            "preview",
+            "final",
+            "release",
+            "ga",
+            "sp",
+            "v",
+        ];
+        let lower = self.raw.to_lowercase();
+        let words: Vec<&str> =
+            lower.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| !w.is_empty() && !QUALIFIER_WORDS.contains(w)).collect();
+        words.join("-")
+    }
+
+    /// The leading numeric components: `[1, 2]` for `1.2-RC1`.
+    fn numeric_prefix(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        for part in self.raw.split('.') {
+            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+            let Ok(n) = digits.parse() else { break };
+            out.push(n);
+            if digits.len() != part.len() {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Whether `other` is a compatible upgrade under semantic versioning: the same major
+    /// version, or for `0.x` the same minor version (like Cargo's default requirements).
+    pub fn is_compatible_with(&self, other: &Version) -> bool {
+        let (a, b) = (self.numeric_prefix(), other.numeric_prefix());
+        match (a.first(), b.first()) {
+            (Some(0), Some(0)) => a.get(1).copied().unwrap_or(0) == b.get(1).copied().unwrap_or(0),
+            (Some(x), Some(y)) => x == y,
+            _ => self.raw == other.raw,
+        }
+    }
+}
+
+/// Picks the newest of `versions`, skipping pre-releases unless `allow_prerelease`, and preferring
+/// versions whose [`Version::variant`] is `variant` (so `0.8.0` wins over `0.8.0-0.6.x-compat`
+/// when `variant` is empty). Falls back to the newest version of any variant.
+pub fn select_latest<'a>(versions: &'a [Version], variant: &str, allow_prerelease: bool) -> Option<&'a Version> {
+    let candidates = || versions.iter().filter(|v| allow_prerelease || !v.is_prerelease());
+    candidates().filter(|v| v.variant() == variant).max().or_else(|| candidates().max())
 }
 
 impl PartialEq for Version {
@@ -411,6 +474,40 @@ mod tests {
             assert!(v(pair[0]) < v(pair[1]), "{} should be < {}", pair[0], pair[1]);
             assert!(v(pair[1]) > v(pair[0]), "{} should be > {}", pair[1], pair[0]);
         }
+    }
+
+    #[test]
+    fn variants() {
+        for plain in ["1.2.0", "2.0.0-RC1", "2.1.0-dev-5441", "1.0.0-beta02", "6.4.0.Final", "5.3.0.RELEASE", "1.0-SNAPSHOT"] {
+            assert_eq!(v(plain).variant(), "", "{plain}");
+        }
+        assert_eq!(v("33.0.0-jre").variant(), "jre");
+        assert_eq!(v("0.8.0-0.6.x-compat").variant(), "x-compat");
+        assert_eq!(v("1.6.4-native-mt").variant(), "native-mt");
+    }
+
+    #[test]
+    fn compatibility() {
+        assert!(v("1.2.0").is_compatible_with(&v("1.9.3")));
+        assert!(!v("1.2.0").is_compatible_with(&v("2.0.0")));
+        assert!(v("0.6.0").is_compatible_with(&v("0.6.2")));
+        assert!(!v("0.6.0").is_compatible_with(&v("0.7.0")));
+        assert!(v("33.0.0-jre").is_compatible_with(&v("33.4.0-jre")));
+        assert!(v("6.4.0.Final").is_compatible_with(&v("6.6.1.Final")));
+        assert!(!v("abc").is_compatible_with(&v("1.0")));
+    }
+
+    #[test]
+    fn latest_prefers_plain_versions() {
+        let all: Vec<Version> = ["0.6.2", "0.7.1", "0.8.0", "0.8.0-0.6.x-compat", "0.9.0-RC1"].map(v).to_vec();
+        assert_eq!(select_latest(&all, "", false).unwrap().as_str(), "0.8.0");
+        assert_eq!(select_latest(&all, "", true).unwrap().as_str(), "0.9.0-RC1");
+        assert_eq!(select_latest(&all, "x-compat", false).unwrap().as_str(), "0.8.0-0.6.x-compat");
+        // Only variants published: take the newest of them.
+        let guava: Vec<Version> = ["32.1.0-jre", "33.0.0-android", "33.0.0-jre"].map(v).to_vec();
+        assert_eq!(select_latest(&guava, "", false).unwrap().as_str(), "33.0.0-jre");
+        assert_eq!(select_latest(&guava, "android", false).unwrap().as_str(), "33.0.0-android");
+        assert!(select_latest(&[v("1.0-RC1")], "", false).is_none());
     }
 
     #[test]

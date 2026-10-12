@@ -141,6 +141,17 @@ impl Workspace {
         self.root.join(format!("tests-{}", target.as_str()))
     }
 
+    /// Every existing source and test directory (`src/`, `src-<target>/`, `tests/`,
+    /// `tests-<target>/`) for any target, enabled or not, relative to the root.
+    /// Used by `kargo fmt` and `kargo lint`, which never look inside `target/`.
+    pub fn source_roots(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![PathBuf::from("src")];
+        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(t.source_dir_name())));
+        dirs.push(PathBuf::from("tests"));
+        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("tests-{}", t.as_str()))));
+        dirs.into_iter().filter(|d| self.root.join(d).is_dir()).collect()
+    }
+
     pub fn resources(&self) -> PathBuf {
         self.root.join("resources")
     }
@@ -182,6 +193,9 @@ mod tests {
         assert!(ws.target_sources(TargetKind::Native).ends_with("src-native"));
         assert!(ws.target_tests(TargetKind::Jvm).ends_with("tests-jvm"));
         assert!(!ws.root().to_string_lossy().starts_with(r"\\?\"));
+        std::fs::create_dir_all(dir.path().join("tests-jvm")).unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        assert_eq!(ws.source_roots(), [PathBuf::from("src"), PathBuf::from("tests-jvm")]);
     }
 
     #[test]

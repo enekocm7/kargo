@@ -147,6 +147,133 @@ fn add_and_remove_dependencies() {
 }
 
 #[test]
+fn add_prefers_plain_releases_and_remove_targets_a_table() {
+    let repo = LocalRepo::new();
+    repo.publish("org.acme:datetime", "0.7.1", &[]).publish("org.acme:datetime", "0.8.0", &[]).publish(
+        "org.acme:datetime",
+        "0.8.0-0.6.x-compat",
+        &[],
+    );
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &format!("\n[repositories]\nlocal = \"{}\"\n", repo.url())));
+
+    p.kargo()
+        .args(["add", "org.acme:datetime", "-t", "wasm"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("org.acme:datetime:0.8.0 to [target.wasm.dependencies]"));
+    assert!(p.read("kargo.toml").contains("\"org.acme:datetime\" = \"0.8.0\""));
+
+    p.kargo().args(["remove", "org.acme:datetime"]).assert().failure().stderr(predicate::str::contains("[dependencies]"));
+    p.kargo()
+        .args(["remove", "org.acme:datetime", "-t", "wasm"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing org.acme:datetime from [target.wasm.dependencies]"));
+    assert!(!p.read("kargo.toml").contains("org.acme:datetime"));
+}
+
+#[test]
+fn outdated_and_upgrade_edit_versions_in_kargo_toml() {
+    let repo = LocalRepo::new();
+    for v in ["1.0.0", "1.4.0", "2.0.0"] {
+        repo.publish("com.acme:widget", v, &[]);
+    }
+    repo.publish("com.acme:fresh", "1.0", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "\n[dependencies]\n\"com.acme:widget\" = \"1.0.0\"  # the UI kit\n\"com.acme:fresh\" = \"1.0\"\n\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+
+    let out = p.kargo().args(["outdated"]).assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("name             current  compatible  latest  kind"), "{text}");
+    assert!(text.contains("com.acme:widget  1.0.0    1.4.0       2.0.0   dependencies"), "{text}");
+    assert!(!text.contains("com.acme:fresh"), "{text}");
+
+    p.kargo()
+        .args(["upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Upgrading com.acme:widget v1.0.0 -> v1.4.0 in [dependencies]"))
+        .stderr(predicate::str::contains("dry run"));
+    assert!(p.read("kargo.toml").contains("\"com.acme:widget\" = \"1.0.0\""));
+
+    p.kargo().args(["upgrade"]).assert().success().stderr(predicate::str::contains("--incompatible"));
+    assert!(p.read("kargo.toml").contains("\"com.acme:widget\" = \"1.4.0\"  # the UI kit"));
+    p.kargo().args(["upgrade", "--incompatible", "com.acme:widget"]).assert().success();
+    assert!(p.read("kargo.toml").contains("\"com.acme:widget\" = \"2.0.0\"  # the UI kit"));
+
+    p.kargo().args(["outdated"]).assert().success().stdout("").stderr(predicate::str::contains("newest version"));
+    p.kargo().args(["upgrade", "com.acme:nope"]).assert().failure().stderr(predicate::str::contains("not declared"));
+}
+
+#[test]
+fn update_selected_modules_precisely_or_as_a_dry_run() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[("g:util", "[1.0,2.0)")])
+        .publish("g:other", "1.0", &[("g:dep", "[1.0,2.0)")])
+        .publish("g:util", "1.0", &[])
+        .publish("g:dep", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n\"g:other\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    let locked = |p: &Project, module: &str, version: &str| {
+        p.read("kargo.lock").contains(&format!("module = \"{module}\"\nversion = \"{version}\""))
+    };
+
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("Adding g:util v1.0"));
+    assert!(locked(&p, "g:util", "1.0") && locked(&p, "g:dep", "1.0"));
+    repo.publish("g:util", "1.1", &[]).publish("g:dep", "1.1", &[]);
+
+    p.kargo()
+        .args(["update", "g:util", "--dry-run", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating g:util v1.0 -> v1.1"))
+        .stderr(predicate::str::contains("dry run"));
+    assert!(locked(&p, "g:util", "1.0"), "dry run leaves kargo.lock alone");
+
+    p.kargo()
+        .args(["update", "g:util", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating g:util v1.0 -> v1.1"))
+        .stderr(predicate::str::contains("g:dep").not());
+    assert!(locked(&p, "g:util", "1.1") && locked(&p, "g:dep", "1.0"), "only g:util moves");
+
+    p.kargo().args(["update", "g:util", "--precise", "1.0", "--offline"]).assert().success();
+    assert!(locked(&p, "g:util", "1.0"));
+    // The precise version survives later builds because the manifest did not change.
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success().stdout(predicate::str::contains("g:util:1.0"));
+
+    p.kargo().args(["update", "g:nope", "--offline"]).assert().failure().stderr(predicate::str::contains("not locked"));
+    p.kargo().args(["update", "g:util", "g:dep", "--precise", "1.0"]).assert().failure().stderr(predicate::str::contains("exactly one"));
+
+    p.kargo().args(["update", "--offline"]).assert().success();
+    assert!(locked(&p, "g:util", "1.1") && locked(&p, "g:dep", "1.1"));
+    p.kargo().args(["update", "--offline"]).assert().success().stderr(predicate::str::contains("up to date"));
+}
+
+#[test]
 fn tree_resolves_from_local_repository_and_writes_lockfile() {
     let repo = LocalRepo::new();
     repo.publish("g:lib", "1.0", &[("g:util", "1.0")])
@@ -264,6 +391,48 @@ fn tasks_list_run_and_dependencies() {
 }
 
 #[test]
+fn help_and_task_list_show_project_tasks() {
+    let p = Project::new();
+    p.kargo().arg("--help").assert().success().stdout(predicate::str::contains("Tasks").not());
+    p.file("kargo.toml", &manifest("tasky", "[tasks]\ngen = { run = \"echo gen\", description = \"generate sources\" }\n"));
+    for args in [&["--help"][..], &["-h"], &["help"], &["-q", "--help"]] {
+        p.kargo().args(args).assert().success().stdout(predicate::str::contains("Tasks").and(predicate::str::contains("generate sources")));
+    }
+    p.kargo().args(["build", "--help"]).assert().success().stdout(predicate::str::contains("generate sources").not());
+    p.kargo().args(["task", "--list"]).assert().success().stdout(predicate::str::contains("gen  generate sources"));
+}
+
+#[test]
+fn completions() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        Project::new().kargo().args(["completions", shell]).assert().success().stdout(predicate::str::contains("COMPLETE"));
+    }
+    Project::new().kargo().args(["completions", "tcsh"]).assert().failure();
+
+    // What the scripts ask kargo for on <Tab> (fish's protocol: one `value\thelp` per line).
+    let p = Project::new();
+    let complete = |words: &[&str]| {
+        let out = p.kargo().env("COMPLETE", "fish").arg("--").arg("kargo").args(words).assert().success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+    let values = |out: &str| out.lines().map(|l| l.split('\t').next().unwrap().to_string()).collect::<Vec<_>>();
+
+    // Outside a project: built-in commands only.
+    assert!(values(&complete(&["bu"])).contains(&"build".to_string()));
+    assert!(!complete(&[""]).contains("generate sources"));
+
+    p.file(
+        "kargo.toml",
+        &manifest("tasky", "[tasks]\ngen = { run = \"echo gen\", description = \"generate sources\" }\nlint = \"echo lint\"\n"),
+    );
+    assert!(complete(&["g"]).contains("gen\tgenerate sources"));
+    assert_eq!(values(&complete(&["task", "l"])), ["lint"]);
+    assert_eq!(values(&complete(&["build", "-t", ""])), ["jvm", "wasm", "native", "android"]);
+    assert!(values(&complete(&["toolchain", ""])).contains(&"install".to_string()));
+    assert!(values(&complete(&["add", "--framework", "spr"])).contains(&"spring-boot".to_string()));
+}
+
+#[test]
 fn failing_task_propagates_error() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("failing", "[tasks]\nboom = \"exit 9\"\n"));
@@ -349,6 +518,39 @@ fn doc_section_is_validated() {
     p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("`source-link` must be an http(s):// URL"));
     p.file("kargo.toml", &manifest("docs", "[doc]\nformat = \"html\"\n"));
     p.kargo().arg("doc").assert().failure().stderr(predicate::str::contains("unknown field `format`"));
+}
+
+#[test]
+fn fmt_and_lint_need_kotlin_sources() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("empty", ""));
+    // `target/` is never formatted or linted.
+    p.file("target/debug/Generated.kt", "fun   generated( ) = 1\n");
+    for cmd in ["fmt", "lint"] {
+        p.kargo().arg(cmd).assert().failure().code(101).stderr(predicate::str::contains("no Kotlin sources found"));
+    }
+}
+
+#[test]
+fn fmt_and_lint_sections_are_validated() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("style", "[fmt]\nexclude = [\"!src/gen/**\"]\n"));
+    p.kargo().args(["fmt", "--check"]).assert().failure().stderr(predicate::str::contains("[fmt] `exclude` entries must be globs"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nconfig = [\"config/detekt.yml\"]\n"));
+    p.kargo()
+        .arg("lint")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("[lint] config file `config/detekt.yml` does not exist"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nbaseline = \"baseline.xml\"\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("kargo lint --create-baseline"));
+    // A task named like the command is reachable through `kargo task`.
+    p.file("kargo.toml", &manifest("style", "[tasks]\nlint = \"echo custom\"\n[lint]\nbaseline = \"baseline.xml\"\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("run the `lint` task with `kargo task lint`"));
+    p.file("kargo.toml", &manifest("style", "[lint]\nmax-issues = 3\n"));
+    p.kargo().arg("lint").assert().failure().stderr(predicate::str::contains("unknown field `max-issues`"));
 }
 
 #[test]

@@ -21,6 +21,8 @@ anstyle = "1.0.14"
 anyhow = "1"
 base64 = "0.23.1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+# Pinned exactly: dynamic completion is behind clap_complete's `unstable-dynamic` feature.
+clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
 dirs = "7.0.0"
 flate2 = "1.1.10"
 hex = "0.4.3"
@@ -63,6 +65,7 @@ kargo-compiler.workspace = true
 kargo-ops.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

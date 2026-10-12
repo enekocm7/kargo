@@ -327,6 +327,45 @@ fn doc_generates_html_from_kdoc() {
 }
 
 #[test]
+fn fmt_and_lint_with_ktlint_and_detekt() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["style"]);
+    // A new project is already formatted and lint-free.
+    t.kargo("style").args(["fmt", "--check"]).assert().success().stderr(predicate::str::contains("Checking formatting of style v0.1.0"));
+    t.kargo("style").arg("lint").assert().success().stderr(predicate::str::contains("Linting style v0.1.0"));
+
+    t.write("style/src/Messy.kt", "package com.example.style\n\nfun   messy( ) =  listOf(1,2)\n");
+    t.write("style/src/gen/Generated.kt", "package com.example.style\n\nfun   generated( ) =  1\n");
+    let manifest = t.dir.path().join("style/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text}\n[fmt]\nexclude = [\"src/gen/**\"]\n")).unwrap();
+    t.kargo("style")
+        .args(["fmt", "--check"])
+        .assert()
+        .code(101)
+        .stdout(predicate::str::contains("src/Messy.kt:3"))
+        .stdout(predicate::str::contains("Generated.kt").not())
+        .stderr(predicate::str::contains("formatting check failed"));
+    t.kargo("style").arg("fmt").assert().success();
+    let messy = std::fs::read_to_string(t.dir.path().join("style/src/Messy.kt")).unwrap();
+    assert!(messy.contains("fun messy() = listOf(1, 2)"), "{messy}");
+    let generated = std::fs::read_to_string(t.dir.path().join("style/src/gen/Generated.kt")).unwrap();
+    assert!(generated.contains("fun   generated( )"), "excluded files are left alone: {generated}");
+    t.kargo("style").args(["fmt", "--check"]).assert().success();
+
+    // detekt issues fail `kargo lint`; detekt.yml and a baseline silence them.
+    t.write("style/src/gen/Generated.kt", "package com.example.style\n\nfun generated() = 1\n");
+    t.kargo("style").arg("lint").assert().code(101).stdout(predicate::str::contains("FunctionOnlyReturningConstant"));
+    t.write("style/detekt.yml", "style:\n  FunctionOnlyReturningConstant:\n    active: false\n");
+    t.kargo("style").arg("lint").assert().success();
+    std::fs::remove_file(t.dir.path().join("style/detekt.yml")).unwrap();
+    t.kargo("style").args(["lint", "--create-baseline"]).assert().success().stderr(predicate::str::contains("detekt-baseline.xml"));
+    assert!(t.dir.path().join("style/detekt-baseline.xml").is_file());
+    t.kargo("style").arg("lint").assert().success();
+}
+
+#[test]
 fn doc_android_library() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {

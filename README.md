@@ -32,18 +32,24 @@ $ kargo test
 | `kargo run [-t <target>] [-- args]` | Build and run |
 | `kargo test [filter] [--no-run] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native) |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
+| `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
+| `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
-| `kargo remove <group:artifact>...` | Remove dependencies |
+| `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
+| `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
+| `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates]` | Show the dependency graph |
 | `kargo package [--release]` | Build a self-contained fat jar (JVM) |
-| `kargo fetch` / `kargo update` | Pre-download everything / re-resolve `kargo.lock` |
-| `kargo task [name] [args]`, `kargo <task>` | List or run tasks |
+| `kargo fetch` | Pre-download everything |
+| `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
+| `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs and Kotlin/Native distributions |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
 | `kargo clean`, `kargo info` | Remove `target/`, show project information |
+| `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
 
@@ -117,6 +123,13 @@ compiler-args = []          # also: debug, optimize
 includes = ["docs/module.md"]
 source-link = "https://github.com/me/my-app/blob/main"
 external-links = ["https://kotlinlang.org/api/kotlinx.coroutines/"]
+
+[fmt]                       # kargo fmt (ktlint); style rules go in .editorconfig
+exclude = ["src/generated/**"]
+
+[lint]                      # kargo lint (detekt); detekt.yml is picked up when present
+config = ["config/detekt.yml"]
+baseline = "detekt-baseline.xml"
 ```
 
 ### Toolchains
@@ -160,14 +173,14 @@ Each framework adds its libraries, compiler plugin and compiler flags for every 
 
 ```toml
 [tasks]
-fmt = "ktlint -F \"src/**/*.kt\""
+proto = "protoc --kotlin_out=src-jvm proto/*.proto"
 gen = { run = ["mkdir -p build", "./gen.sh"], description = "Generate code", hooks = ["pre-build"] }
-ci = { depends-on = ["fmt", "gen"] }
+ci = { depends-on = ["proto", "gen"], run = "kargo fmt --check" }
 envs = { run = "echo $KARGO_PKG_NAME", shell = "sh" }                  # POSIX on every OS
 dirs = { run = "ls", windows-run = "dir" }                               # per-OS commands
 ```
 
-Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
+Run them with `kargo task ci` or just `kargo ci` (built-in commands such as `kargo fmt` take precedence over a task of the same name). Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
 
 ### Plugins
 
@@ -203,6 +216,7 @@ Run them with `kargo task ci` or just `kargo ci`. Dependencies run first, and cy
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
 | `BROWSER` | Browser for `kargo doc --open` |
+| `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
 
 ## Development
 

@@ -576,6 +576,26 @@ pub struct DocSettings {
     pub external_links: Vec<String>,
 }
 
+/// `[fmt]`: options for `kargo fmt` (ktlint).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FmtSettings {
+    /// ktlint version; `None` uses Kargo's pinned default.
+    pub ktlint_version: Option<String>,
+    /// Globs, relative to the project root, of files ktlint skips.
+    pub exclude: Vec<String>,
+}
+
+/// `[lint]`: options for `kargo lint` (detekt).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LintSettings {
+    /// detekt version; `None` uses Kargo's pinned default.
+    pub detekt_version: Option<String>,
+    /// detekt configuration files, relative to the project root; empty means `detekt.yml` if it exists.
+    pub config: Vec<PathBuf>,
+    /// detekt baseline file, relative to the project root; `None` means `detekt-baseline.xml`.
+    pub baseline: Option<PathBuf>,
+}
+
 /// A fully validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -593,6 +613,8 @@ pub struct Manifest {
     pub release_profile: Profile,
     pub toolchain: ToolchainSettings,
     pub doc: DocSettings,
+    pub fmt: FmtSettings,
+    pub lint: LintSettings,
 }
 
 impl Manifest {

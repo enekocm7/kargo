@@ -411,3 +411,34 @@ external-links = [\"https://kotlinlang.org/api/kotlinx.coroutines/\"]
     assert!(parse_err(&with("external-links = [\"file:///docs\"]")).contains("external-links"));
     assert!(parse_err(&with("format = \"html\"")).contains("format"));
 }
+
+#[test]
+fn fmt_and_lint_sections() {
+    let m = parse(MINIMAL);
+    assert_eq!(m.fmt, FmtSettings::default());
+    assert_eq!(m.lint, LintSettings::default());
+    let m = parse(&format!(
+        "{MINIMAL}
+[fmt]
+ktlint = \"1.7.1\"
+exclude = [\"src/generated/**\"]
+
+[lint]
+detekt = \"1.23.7\"
+config = [\"config/detekt.yml\"]
+baseline = \"config/baseline.xml\"
+"
+    ));
+    assert_eq!(m.fmt.ktlint_version.as_deref(), Some("1.7.1"));
+    assert_eq!(m.fmt.exclude, ["src/generated/**"]);
+    assert_eq!(m.lint.detekt_version.as_deref(), Some("1.23.7"));
+    assert_eq!(m.lint.config, [PathBuf::from("config/detekt.yml")]);
+    assert_eq!(m.lint.baseline, Some(PathBuf::from("config/baseline.xml")));
+    let with = |section: &str, body: &str| format!("{MINIMAL}\n[{section}]\n{body}\n");
+    assert!(parse_err(&with("fmt", "ktlint = \"[1.0,2.0)\"")).contains("exact ktlint version"));
+    assert!(parse_err(&with("fmt", "exclude = [\"!src/**\"]")).contains("exclude"));
+    assert!(parse_err(&with("fmt", "exclude = [\"/abs/**\"]")).contains("exclude"));
+    assert!(parse_err(&with("fmt", "indent = 2")).contains("indent"));
+    assert!(parse_err(&with("lint", "detekt = \"\"")).contains("exact detekt version"));
+    assert!(parse_err(&with("lint", "max-issues = 3")).contains("max-issues"));
+}

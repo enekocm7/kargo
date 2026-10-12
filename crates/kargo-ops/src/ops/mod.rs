@@ -5,11 +5,15 @@ pub mod build;
 pub mod check;
 pub mod context;
 pub mod doc;
+pub mod fmt;
+pub mod lint;
 pub mod new;
 pub mod run;
 pub mod test;
 pub mod toolchain;
 pub mod tree;
+pub mod update;
+pub mod upgrade;
 
 use std::path::PathBuf;
 
@@ -136,28 +140,6 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
         Ok(())
     });
     fetched.into_iter().collect()
-}
-
-/// `kargo update`: re-resolves every dependency, ignoring `kargo.lock`.
-pub fn update(ctx: &BuildContext) -> Result<()> {
-    ctx.reset_lockfile(None);
-    let targets: Vec<TargetKind> = ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
-    for target in targets {
-        for configuration in [Configuration::Compile, Configuration::Runtime, Configuration::Test] {
-            if target != TargetKind::Jvm && configuration == Configuration::Compile {
-                continue;
-            }
-            resolution_for(ctx, target, configuration)?;
-        }
-        if target == TargetKind::Jvm {
-            let setup = ctx.setup(target)?;
-            if !setup.contributions.annotation_processors.is_empty() {
-                let requests: Vec<_> = setup.contributions.annotation_processors.iter().map(context::to_request).collect();
-                ctx.resolve("jvm/annotation-processors", Platform::Jvm, &requests, &[])?;
-            }
-        }
-    }
-    ctx.save_lockfile()
 }
 
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target.
