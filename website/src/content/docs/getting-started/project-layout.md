@@ -44,6 +44,8 @@ actual fun platformName(): String = "Kotlin/Native"
 
 See [Multiplatform projects](../../guides/multiplatform/) for a complete example.
 
+`kargo target add <target>` creates `src-<target>/` (with a `.gitkeep`) when it does not exist yet, and `kargo target remove` leaves it in place.
+
 Subdirectories are fine. You don't need to mirror the package name in the folder structure, but it's a good habit.
 
 Kargo compiles `.kt` files (and `.java` files on the JVM). Kotlin scripts (`.kts`) are not compiled or run, and a target with no sources has nothing to build; `kargo build` prints a [warning](../../reference/warnings/) for both instead of staying silent.

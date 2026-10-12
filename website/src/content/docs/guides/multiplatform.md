@@ -27,10 +27,16 @@ platforms = ["host"]
 kind = "executable"
 ```
 
-Or add a target to an existing project by adding its `[target.<name>]` section.
+To add a target to an existing project, use `kargo target add`:
+
+```sh
+kargo target add wasm native
+```
+
+It appends the same `[target.<name>]` sections `kargo new` writes, without touching the rest of `kargo.toml`, and creates an empty `src-<target>/` for platform-specific code. `kargo target remove wasm` disables a target again (its sources stay on disk), and `kargo target list` shows what is enabled. See [`kargo target`](../../reference/commands/#kargo-target).
 
 :::note
-A project with **no** `[target]` sections is a JVM project. As soon as you add any `[target.*]` section, only the listed targets are built.
+A project with **no** `[target]` sections is a JVM project. As soon as you add any `[target.*]` section, only the listed targets are built. `kargo target add` handles this for you by also writing `[target.jvm]`; if you edit `kargo.toml` by hand, add it yourself.
 :::
 
 ## Sharing code with `expect`/`actual`

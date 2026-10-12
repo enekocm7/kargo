@@ -1,9 +1,9 @@
-//! Format-preserving edits of `kargo.toml` (used by `kargo add` / `kargo remove`).
+//! Format-preserving edits of `kargo.toml` (used by `kargo add` / `kargo remove`, `kargo upgrade` and `kargo target`).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{Decor, DocumentMut, InlineTable, Item, Table, Value};
 
 use super::{Scope, TargetKind};
 use kargo_maven::ModuleId;
@@ -219,6 +219,59 @@ impl ManifestEditor {
         Ok(key)
     }
 
+    /// The targets with a `[target.<name>]` table, in manifest order. Empty when the manifest has no
+    /// `[target]` section, which makes it an implicit JVM project.
+    pub fn targets(&self) -> Vec<TargetKind> {
+        let Some(targets) = self.doc.get("target").and_then(Item::as_table_like) else {
+            return Vec::new();
+        };
+        targets.iter().filter_map(|(key, _)| key.parse().ok()).collect()
+    }
+
+    /// Adds `[target.<kind>]` from `section`, a manifest fragment holding that table (as written by
+    /// `kargo new`). Returns `false`, changing nothing, when the target is already declared.
+    pub fn add_target(&mut self, kind: TargetKind, section: &str) -> Result<bool> {
+        if self.targets().contains(&kind) {
+            return Ok(false);
+        }
+        let fragment: DocumentMut = section.parse().context("invalid target section")?;
+        let mut table = fragment
+            .get("target")
+            .and_then(|t| t.get(kind.as_str()))
+            .and_then(Item::as_table)
+            .with_context(|| format!("the fragment has no [target.{kind}] table"))?
+            .clone();
+        // No position: the table is written after the last table of `[target]`.
+        table.set_position(None);
+        *table.decor_mut() = Decor::default();
+        let targets = self
+            .doc
+            .as_table_mut()
+            .entry("target")
+            .or_insert_with(|| {
+                let mut t = Table::new();
+                t.set_implicit(true);
+                Item::Table(t)
+            })
+            .as_table_mut()
+            .context("`target` in the manifest is not a table")?;
+        targets.insert(kind.as_str(), Item::Table(table));
+        Ok(true)
+    }
+
+    /// Removes `[target.<kind>]` with its sub-tables (dependencies, cinterop). Returns `false`
+    /// when the target is not declared.
+    pub fn remove_target(&mut self, kind: TargetKind) -> Result<bool> {
+        let Some(targets) = self.doc.get_mut("target").and_then(Item::as_table_like_mut) else {
+            return Ok(false);
+        };
+        let removed = targets.remove(kind.as_str()).is_some();
+        if targets.is_empty() {
+            self.doc.as_table_mut().remove("target");
+        }
+        Ok(removed)
+    }
+
     /// Enables a built-in framework (`[frameworks] name = true`) unless configured already.
     pub fn enable_framework(&mut self, name: &str) -> Result<bool> {
         let frameworks = self
@@ -386,6 +439,44 @@ alias = { coords = "com.b:y", version = "2.0" }
         assert!(!ed.enable_framework("serialization").unwrap());
         let m = crate::Manifest::parse(&ed.contents()).unwrap();
         assert!(m.frameworks.serialization.is_some());
+    }
+
+    #[test]
+    fn adds_and_removes_targets_preserving_format() {
+        let text = "# My project\n[package]\nname = \"demo\"   # keep this comment\nversion = \"0.1.0\"\n\n[target.jvm]\n\n[target.jvm.dependencies]\n\"com.a:x\" = \"1.0\"\n\n[dependencies]\n\"com.b:y\" = \"2.0\"\n";
+        let mut ed = ManifestEditor::from_str(Path::new("kargo.toml"), text).unwrap();
+        assert_eq!(ed.targets(), [TargetKind::Jvm]);
+        assert!(ed.add_target(TargetKind::Native, "[target.native]\nplatforms = [\"host\"]\nkind = \"executable\"\n").unwrap());
+        assert!(!ed.add_target(TargetKind::Native, "[target.native]\n").unwrap());
+        let out = ed.contents();
+        assert!(out.starts_with(text.split("[dependencies]").next().unwrap()), "{out}");
+        assert!(
+            out.contains("\"com.a:x\" = \"1.0\"\n\n[target.native]\nplatforms = [\"host\"]\nkind = \"executable\"\n\n[dependencies]"),
+            "new targets follow the existing ones: {out}"
+        );
+        let m = crate::Manifest::parse(&out).unwrap();
+        assert_eq!(m.targets.enabled(), [TargetKind::Jvm, TargetKind::Native]);
+
+        assert!(ed.remove_target(TargetKind::Jvm).unwrap());
+        assert!(!ed.remove_target(TargetKind::Jvm).unwrap());
+        let out = ed.contents();
+        assert!(!out.contains("com.a:x"), "{out}");
+        assert_eq!(ed.targets(), [TargetKind::Native]);
+        assert!(ed.remove_target(TargetKind::Native).unwrap());
+        assert!(!ed.contents().contains("target"), "{}", ed.contents());
+    }
+
+    #[test]
+    fn adds_a_target_to_an_implicit_jvm_manifest() {
+        let mut ed = editor();
+        assert!(ed.targets().is_empty());
+        ed.add_target(TargetKind::Jvm, "[target.jvm]\n").unwrap();
+        ed.add_target(TargetKind::Wasm, "[target.wasm]\nenvironment = \"js\"\n").unwrap();
+        let out = ed.contents();
+        assert!(out.starts_with(BASE), "{out}");
+        assert!(out.ends_with("\n[target.jvm]\n\n[target.wasm]\nenvironment = \"js\"\n"), "{out}");
+        let m = crate::Manifest::parse(&out).unwrap();
+        assert_eq!(m.targets.enabled(), [TargetKind::Jvm, TargetKind::Wasm]);
     }
 
     #[test]

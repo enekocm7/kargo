@@ -10,6 +10,7 @@ pub mod lint;
 pub mod local;
 pub mod new;
 pub mod run;
+pub mod target;
 pub mod test;
 pub mod toolchain;
 pub mod tree;
