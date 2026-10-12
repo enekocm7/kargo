@@ -30,13 +30,14 @@ Cargo workspace (edition 2024, MSRV 1.89). Crates depend downward in roughly thi
 | `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, the compiler daemon (`daemon.rs`, `daemon/KargoDaemon.java`), incremental compilation (`incremental.rs`, `daemon/KargoIc.java`), jar packaging, entry points, test reports (`testreport.rs`), compiler diagnostics (`diagnostics.rs`) |
 | `crates/kargo-ops`       | The build engine: `workspace.rs`, `ops/` (one module per command), `builtins.rs` (frameworks), `lockfile.rs`, `gradle.rs` (Android), `tasks.rs`, `plugins.rs`, `warnings.rs` (warnings about valid but suspicious projects) |
 | `src/`                   | The `kargo` binary: `cli.rs` (clap definitions and dispatch), `main.rs`                                                                                       |
-| `tests/`                 | `cli.rs` offline CLI integration tests, `e2e.rs` real-compiler tests, `common/` shared helpers                                                                |
+| `tests/`                 | `cli.rs` offline CLI integration tests, `e2e.rs` real-compiler tests, `schema.rs` checks of the `kargo.toml` JSON Schema, `common/` shared helpers             |
 | `website/`               | The documentation site (Astro + Starlight), deployed to GitHub Pages by `.github/workflows/website.yml`                                                       |
 
 Where things live when you need to change them:
 
 - **A command or flag**: `src/cli.rs` (clap), implemented in `crates/kargo-ops/src/ops/<command>.rs`.
-- **A `kargo.toml` key**: `crates/kargo-manifest/src/raw.rs` (all structs use `deny_unknown_fields`, so a new key must be added there), then the validated model in `lib.rs`, then `edit.rs` if `kargo add`/`remove` must write it.
+- **A `kargo.toml` key**: `crates/kargo-manifest/src/raw.rs` (all structs use `deny_unknown_fields`, so a new key must be added there), then the validated model in `lib.rs`, then `edit.rs` if `kargo add`/`remove` must write it, and the JSON Schema in `website/public/schemas/kargo.json` that editors use (`tests/schema.rs` checks every key it lists against the parser, and its enums and default versions against Kargo's).
+- **`kargo metadata`** (the project model for editors): `crates/kargo-ops/src/ops/metadata.rs`. Its output is versioned (`FORMAT_VERSION`): add fields freely, but removing or redefining one needs a new version.
 - **Wasm output and browser support**: compiler flags in `crates/kargo-compiler/src/wasm.rs`; the page of a browser app, the import map for npm packages, a library's `package.json`, `wasm-opt` and the size report in `crates/kargo-ops/src/wasm_output.rs`; the loopback server behind `kargo run` and the browser test page in `crates/kargo-ops/src/web.rs`; browser lookup in `crates/kargo-toolchain/src/browser.rs`; npm installs in `crates/kargo-ops/src/npm.rs`.
 - **A built-in framework**: `crates/kargo-ops/src/builtins.rs`; project templates for `kargo new` are in `crates/kargo-ops/src/ops/new.rs`.
 - **Dependency resolution**: `crates/kargo-maven/src/resolver.rs`; locking in `crates/kargo-ops/src/lockfile.rs`.
@@ -94,7 +95,7 @@ Refactors, internal tests and performance work with no visible effect don't need
 | If you change...                                                  | Update (under `website/src/content/docs/` unless noted)                                                                                                                                    |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | A command, flag, alias or its output (`src/cli.rs`, `ops/`)       | `reference/commands.md`, the `README.md` command table, and the guide that uses it                                                                                                         |
-| A `kargo.toml` key, default or validation rule                    | `reference/manifest.md`, the `README.md` `kargo.toml` section, and the relevant guide                                                                                                      |
+| A `kargo.toml` key, default or validation rule                    | `reference/manifest.md`, the `README.md` `kargo.toml` section, the relevant guide, and the JSON Schema `website/public/schemas/kargo.json`                                                 |
 | A built-in framework or its `kargo new --with` template           | `guides/frameworks.md`, the framework's own guide (`ktor.md`, `spring-boot.md`, `compose.md`), `reference/manifest.md`; keep the `--with` help text in `src/cli.rs` and the README in sync |
 | An environment variable Kargo reads or sets                       | `reference/environment.md` and the `README.md` environment table                                                                                                                           |
 | The lockfile format or resolution behavior                        | `reference/lockfile.md`, `guides/dependencies.md`                                                                                                                                          |
@@ -108,7 +109,7 @@ Refactors, internal tests and performance work with no visible effect don't need
 | Semantics people compare to Gradle, Maven or Cargo                | `migration/from-gradle.md`, `migration/from-maven.md`, `migration/from-cargo.md`                                                                                                           |
 | A common failure or workaround                                    | `reference/faq.md`                                                                                                                                                                         |
 | Crates added, removed or re-scoped; build or test workflow        | `reference/contributing.md`, the `README.md` Development section, and this file                                                                                                            |
-| A default version (Kotlin, JVM target, framework versions)        | Search `website/src` and `README.md` for the old value and update every occurrence                                                                                                         |
+| A default version (Kotlin, JVM target, framework versions)        | Search `website/src`, `website/public/schemas/kargo.json` and `README.md` for the old value and update every occurrence                                                                   |
 
 When unsure, `grep -rn` the old command, flag, key or value across `website/src/content` and `README.md` and fix every hit.
 

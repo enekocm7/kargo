@@ -137,6 +137,19 @@ pub enum Scope {
     Ksp,
 }
 
+impl Scope {
+    /// The name written in `kargo.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Compile => "compile",
+            Scope::Runtime => "runtime",
+            Scope::Provided => "provided",
+            Scope::Processor => "processor",
+            Scope::Ksp => "ksp",
+        }
+    }
+}
+
 impl FromStr for Scope {
     type Err = anyhow::Error;
 
@@ -396,6 +409,18 @@ pub enum NativeKind {
     Library,
     Shared,
     Static,
+}
+
+impl NativeKind {
+    /// The name written in `kind` of `[target.native]`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NativeKind::Executable => "executable",
+            NativeKind::Library => "library",
+            NativeKind::Shared => "shared",
+            NativeKind::Static => "static",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
