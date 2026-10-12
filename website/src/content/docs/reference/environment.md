@@ -8,7 +8,7 @@ description: Environment variables Kargo reads and sets.
 | Variable | Purpose |
 |---|---|
 | `KARGO_HOME` | Where Kargo keeps its cache, toolchains and `bin/` (default `~/.kargo`) |
-| `KARGO_TARGET_DIR` | Build output directory (default `target/` in the project) |
+| `KARGO_TARGET_DIR` | Build output directory (default `target/` next to the project's or workspace's `kargo.toml`) |
 | `KARGO_OFFLINE` | Same as `--offline` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon (or compiler process), e.g. `-Xmx4g` |
 | `KARGO_INCREMENTAL` | `false` (or `0`, `no`, `off`) recompiles whole targets instead of only the files a change affects ([incremental compilation](../../guides/build-performance/#incremental-compilation)) |

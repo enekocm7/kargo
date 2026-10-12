@@ -332,7 +332,8 @@ pub fn generate(ws: &Workspace) -> Result<PathBuf> {
     if !manifest_file.is_file() {
         bail!("Android builds need {}; `kargo new --target android` creates one", manifest_file.display());
     }
-    let dir = ws.target_dir().join("android");
+    crate::ops::local::unsupported(ws, TargetKind::Android)?;
+    let dir = ws.work_dir("android");
     std::fs::create_dir_all(&dir)?;
     let write = |name: &str, contents: &str| -> Result<()> {
         let path = dir.join(name);
@@ -383,7 +384,7 @@ pub fn gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
 /// The classpath of the Android main sources (`android.jar` first, then the
 /// dependencies' classes), as resolved by Gradle. Used by `kargo doc`.
 pub fn doc_classpath(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
-    let list = ctx.ws.target_dir().join("android/build/kargo/doc-classpath.txt");
+    let list = ctx.ws.work_dir("android").join("build/kargo/doc-classpath.txt");
     if !gradle(ctx, &[DOC_CLASSPATH_TASK.to_owned()])? {
         bail!("Gradle `{DOC_CLASSPATH_TASK}` failed; check that `kargo build --target android` works");
     }
@@ -399,7 +400,7 @@ pub fn build(ctx: &BuildContext) -> Result<PathBuf> {
     if !gradle(ctx, std::slice::from_ref(&task))? {
         bail!("Gradle `{task}` failed");
     }
-    let dir = ctx.ws.target_dir().join("android/build/outputs");
+    let dir = ctx.ws.work_dir("android").join("build/outputs");
     let lower = variant(ctx.profile).to_lowercase();
     let out = if android.config.kind == "application" { dir.join("apk").join(&lower) } else { dir.join("aar") };
     Ok(out)
@@ -427,7 +428,7 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
     if no_run {
         return gradle(ctx, &[format!("compile{}UnitTestSources", variant(ctx.profile))]);
     }
-    let results = ctx.ws.target_dir().join("android/build/test-results").join(&task);
+    let results = ctx.ws.work_dir("android").join("build/test-results").join(&task);
     if results.exists() {
         std::fs::remove_dir_all(&results).with_context(|| format!("failed to clear {}", results.display()))?;
     }

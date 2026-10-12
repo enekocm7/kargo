@@ -152,6 +152,31 @@ impl ManifestEditor {
         Ok(existing.is_some())
     }
 
+    /// Adds or updates a `name = { path = "..." }` dependency on another package. `path` is written
+    /// with forward slashes. Returns `true` if an existing entry was replaced.
+    pub fn add_path_dependency(&mut self, section: DependencySection, name: &str, path: &str, scope: Option<Scope>) -> Result<bool> {
+        let table = self.table_mut(section)?;
+        let mut inline = InlineTable::new();
+        inline.insert("path", Value::from(path.replace('\\', "/")));
+        match scope {
+            Some(Scope::Runtime) => {
+                inline.insert("scope", Value::from("runtime"));
+            }
+            Some(Scope::Provided) => {
+                inline.insert("scope", Value::from("provided"));
+            }
+            _ => {}
+        }
+        let replaced = table.contains_key(name);
+        table.insert(name, Item::Value(Value::InlineTable(inline)));
+        Ok(replaced)
+    }
+
+    /// Whether the dependency `key` in `section` is `{ workspace = true }`, inherited from the workspace.
+    pub fn is_inherited(&self, section: DependencySection, key: &str) -> bool {
+        self.table(section).and_then(|t| t.get(key)).and_then(|item| item.get("workspace")).is_some()
+    }
+
     /// Removes a dependency by `group:artifact` or by its manifest key.
     pub fn remove_dependency(&mut self, section: DependencySection, name: &str) -> Result<String> {
         let Some(table) = self.table(section) else {
@@ -238,6 +263,20 @@ alias = { coords = "com.b:y", version = "2.0" }
 
     fn editor() -> ManifestEditor {
         ManifestEditor::from_str(Path::new("kargo.toml"), BASE).unwrap()
+    }
+
+    #[test]
+    fn adds_path_dependency() {
+        let mut ed = editor();
+        assert!(!ed.add_path_dependency(DependencySection::Main, "mathlib", r"..\mathlib", None).unwrap());
+        assert!(ed.add_path_dependency(DependencySection::Dev, "fixtures", "../fixtures", Some(Scope::Runtime)).is_ok());
+        let out = ed.contents();
+        assert!(out.contains(r#"mathlib = { path = "../mathlib" }"#), "{out}");
+        assert!(out.contains(r#"fixtures = { path = "../fixtures", scope = "runtime" }"#), "{out}");
+        let m = crate::Manifest::parse(&out).unwrap();
+        assert_eq!(m.path_dependencies.len(), 2);
+        ed.remove_dependency(DependencySection::Main, "mathlib").unwrap();
+        assert!(!ed.contents().contains("mathlib"));
     }
 
     #[test]

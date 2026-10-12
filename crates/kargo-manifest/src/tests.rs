@@ -493,6 +493,93 @@ baseline = \"config/baseline.xml\"
 }
 
 #[test]
+fn path_dependencies() {
+    let m = parse(&format!(
+        "{MINIMAL}
+[dependencies]
+mathlib = {{ path = \"../mathlib\" }}
+\"com.a:x\" = \"1.0\"
+
+[dev-dependencies]
+fixtures = {{ path = \"../fixtures\", scope = \"runtime\" }}
+
+[target.jvm.dependencies]
+jvmonly = {{ path = \"libs/jvmonly\" }}
+"
+    ));
+    assert_eq!(m.dependencies.len(), 1);
+    let names: Vec<_> = m.path_dependencies.iter().map(|d| (d.name.as_str(), d.dev, d.target)).collect();
+    assert_eq!(names, [("jvmonly", false, Some(TargetKind::Jvm)), ("mathlib", false, None), ("fixtures", true, None)]);
+    let mathlib = &m.path_dependencies[1];
+    assert_eq!(mathlib.path, PathBuf::from("../mathlib"));
+    assert_eq!(mathlib.scope, Scope::Compile);
+    assert!(mathlib.applies_to(TargetKind::Wasm, false) && !mathlib.applies_to(TargetKind::Wasm, true));
+    assert!(!m.path_dependencies[0].applies_to(TargetKind::Native, false));
+    assert_eq!(m.path_dependencies[2].scope, Scope::Runtime);
+
+    let with = |entry: &str| format!("{MINIMAL}\n[dependencies]\n{entry}\n");
+    assert!(parse_err(&with("lib = { path = \"../lib\", version = \"1.0\" }")).contains("`version` does not apply to a `path` dependency"));
+    assert!(parse_err(&with("\"g:a\" = { path = \"../lib\" }")).contains("package name"));
+    assert!(parse_err(&with("lib = { path = \"\" }")).contains("must not be empty"));
+    assert!(parse_err(&with("lib = { path = \"../lib\", scope = \"ksp\" }")).contains("KSP processor"));
+    assert!(parse_err(&with("lib = { workspace = true }")).contains("needs a [workspace]"));
+}
+
+#[test]
+fn workspace_manifest() {
+    let root = Path::new("/ws");
+    let ws = WorkspaceManifest::parse(
+        "[workspace]
+members = [\"app\", \"libs/core\"]
+
+[workspace.kotlin]
+version = \"2.3.0\"
+
+[workspace.dependencies]
+\"com.a:x\" = \"1.0\"
+core = { path = \"libs/core\" }
+",
+        root,
+    )
+    .unwrap();
+    assert_eq!(ws.members, [PathBuf::from("app"), PathBuf::from("libs/core")]);
+    assert_eq!(ws.kotlin_version.as_deref(), Some("2.3.0"));
+    assert!(ws.has_dependency("core") && !ws.has_dependency("app"));
+    assert!(is_workspace("[workspace]\nmembers = [\"a\"]\n").unwrap());
+    assert!(!is_workspace(MINIMAL).unwrap());
+    assert!(
+        format!("{:#}", is_workspace(&format!("{MINIMAL}[workspace]\nmembers = [\"a\"]\n")).unwrap_err())
+            .contains("cannot also have [package]")
+    );
+    assert!(Manifest::parse("[workspace]\nmembers = [\"a\"]\n").unwrap_err().to_string().contains("workspace manifest"));
+
+    let ws_err = |text: &str| format!("{:#}", WorkspaceManifest::parse(text, root).unwrap_err());
+    assert!(ws_err("[workspace]\nmembers = []\n").contains("`members` is empty"));
+    assert!(ws_err("[workspace]\nmembers = [\"libs/*\"]\n").contains("must be directories"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\", \"a\"]\n").contains("more than once"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\nexclude = [\"b\"]\n").contains("exclude"));
+    assert!(
+        ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.dependencies]\nx = { workspace = true }\n").contains("only valid in a member")
+    );
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.dependencies]\nx = \"1.0\"\n").contains("`group:artifact`"));
+
+    // Members inherit entries, the Kotlin version and (only) override the scope.
+    let member = |deps: &str| Manifest::parse_in(&format!("{MINIMAL}\n[dependencies]\n{deps}\n"), Some(&ws));
+    let m = member("\"com.a:x\" = { workspace = true, scope = \"runtime\" }\ncore = { workspace = true }").unwrap();
+    assert_eq!(m.kotlin.version, "2.3.0");
+    assert!(m.kotlin.version_set);
+    assert_eq!(m.dependencies[0].version.as_deref(), Some("1.0"));
+    assert_eq!(m.dependencies[0].scope, Scope::Runtime);
+    assert_eq!(m.path_dependencies[0].path, root.join("libs/core"));
+    assert!(format!("{:#}", member("\"com.a:x\" = { workspace = true, version = \"2.0\" }").unwrap_err()).contains("cannot be combined"));
+    assert!(format!("{:#}", member("y = { workspace = true }").unwrap_err()).contains("not declared in [workspace.dependencies]"));
+    assert!(format!("{:#}", member("\"com.a:x\" = { workspace = false }").unwrap_err()).contains("can only be `true`"));
+    let own = Manifest::parse_in(&format!("{MINIMAL}\n[kotlin]\nversion = \"2.4.0\"\n"), Some(&ws)).unwrap_err();
+    assert!(format!("{own:#}").contains("differs from the workspace's"));
+    assert!(!parse(MINIMAL).kotlin.version_set);
+}
+
+#[test]
 fn test_section() {
     assert!(parse(MINIMAL).test.fail_fast, "targets stop at the first failure by default");
     assert!(!parse(&format!("{MINIMAL}\n[test]\nfail-fast = false\n")).test.fail_fast);

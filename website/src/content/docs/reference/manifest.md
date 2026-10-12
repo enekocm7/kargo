@@ -5,7 +5,7 @@ description: The complete reference for kargo.toml.
 
 `kargo.toml` is the only configuration file. Kargo looks for it in the current directory and its parents (or use `--manifest-path`). Unknown keys are errors, so typos are caught early.
 
-Only `[package]` with `name` and `version` is required.
+Only `[package]` with `name` and `version` is required. A workspace's `kargo.toml` has a [`[workspace]`](#workspace) table instead of `[package]`.
 
 ## `[package]`
 
@@ -225,6 +225,8 @@ short-name = { group = "g", artifact = "a", version = "1.0" }   # artifact defau
 other = { coords = "g:a:1.0" }
 full = { version = "1.0", scope = "runtime", classifier = "x", extension = "jar", exclude = ["g:a", "g2:*"], force = true, transitive = false }
 platform = { coords = "g:bom", version = "1.0", bom = true }
+mathlib = { path = "../mathlib" }                               # another Kargo package, built from source
+shared = { workspace = true }                                   # inherited from [workspace.dependencies]
 ```
 
 | Key | Default | Meaning |
@@ -239,8 +241,10 @@ platform = { coords = "g:bom", version = "1.0", bom = true }
 | `force` | `false` | Use this version even if a newer one is requested |
 | `transitive` | `true` | Include this dependency's dependencies |
 | `bom` | `false` | Import as a BOM |
+| `path` | | Directory of another Kargo package to build from source. The key must be its package name, and only `scope` can be set with it |
+| `workspace` | | `true` to inherit the entry of the same name from `[workspace.dependencies]`; only `scope` can be set with it |
 
-`[dev-dependencies]` are only used to compile and run tests.
+`[dev-dependencies]` are only used to compile and run tests. Path dependencies are described in [Workspaces and path dependencies](../../guides/workspaces/).
 
 See [Managing dependencies](../../guides/dependencies/).
 
@@ -308,6 +312,30 @@ portable = { run = "echo $KARGO_PKG_NAME", windows-run = "echo %KARGO_PKG_NAME%"
 `shell` picks the shell the commands run in: `sh`, `bash`, `cmd`, `powershell` or `pwsh`. The default is `sh` on Unix and `cmd` on Windows. `windows-run` (a command or a list) replaces `run` on Windows. When it is not set, `run` is used on every platform.
 
 See [Tasks and plugins](../../guides/tasks-and-plugins/).
+
+## `[workspace]`
+
+A workspace's `kargo.toml` has only a `[workspace]` table, no `[package]`. Its members share one `kargo.lock`, one `target/` and one Kotlin version.
+
+```toml
+[workspace]
+members = ["app", "libs/core"]       # required: member directories, relative to this file
+
+[workspace.kotlin]
+version = "2.4.21"                   # the Kotlin version of every member
+
+[workspace.dependencies]
+"org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"
+core = { path = "libs/core" }        # paths are relative to the workspace root
+```
+
+| Key | Meaning |
+|---|---|
+| `members` | Directories of the member packages. Globs are not supported |
+| `[workspace.kotlin] version` | Kotlin version for every member. A member's `[kotlin] version` must match it if set |
+| `[workspace.dependencies]` | Dependency entries members inherit with `name = { workspace = true }` |
+
+See [Workspaces and path dependencies](../../guides/workspaces/).
 
 ## `[profile.dev]` and `[profile.release]`
 
