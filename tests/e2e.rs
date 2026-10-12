@@ -611,3 +611,85 @@ fn pinned_jdk_is_downloaded_and_used() {
     t.kargo("pinned").arg("run").assert().success().stdout(predicate::str::contains("java 17"));
     t.kargo("pinned").args(["toolchain", "which"]).assert().success().stdout(predicate::str::contains("JDK 17"));
 }
+
+#[test]
+fn path_dependencies_and_workspaces() {
+    require_e2e!();
+    let t = E2e::new();
+    let package = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[target.jvm]\n\n[target.wasm]\n");
+    t.write("mathlib/kargo.toml", &format!("{}\n[frameworks]\ncoroutines = true\n", package("mathlib")));
+    t.write(
+        "mathlib/src/Lib.kt",
+        "package mathlib\n\nimport kotlinx.coroutines.Dispatchers\n\nfun add(a: Int, b: Int): Int = a + b\n\nfun dispatcher(): String = Dispatchers.Default.toString()\n",
+    );
+    t.write("calc/kargo.toml", &package("calc"));
+    t.write(
+        "calc/src/Main.kt",
+        "import mathlib.add\nimport mathlib.dispatcher\n\nfun main() {\n    dispatcher()\n    println(\"2 + 3 = ${add(2, 3)}\")\n}\n",
+    );
+    t.write(
+        "calc/tests/CalcTest.kt",
+        "import kotlin.test.*\n\nclass CalcTest {\n    @Test fun adds() = assertEquals(5, mathlib.add(2, 3))\n}\n",
+    );
+
+    // A single package with a path dependency: the dependency builds first, under target/<profile>/deps/.
+    t.kargo("calc").args(["add", "--path", "../mathlib"]).assert().success();
+    t.kargo("calc")
+        .args(["run", "-t", "jvm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 + 3 = 5"))
+        .stderr(predicate::str::contains("Compiling mathlib v0.1.0 (jvm)").and(predicate::str::contains("Compiling calc v0.1.0 (jvm)")));
+    assert!(t.dir.path().join("calc/target/debug/deps/mathlib/jvm/mathlib-0.1.0.jar").is_file());
+    let lock = std::fs::read_to_string(t.dir.path().join("calc/kargo.lock")).unwrap();
+    assert!(lock.contains("[resolution.\"mathlib/jvm/compile\"]") && lock.contains("kotlinx-coroutines-core"), "{lock}");
+    t.kargo("calc").args(["build", "-t", "jvm"]).assert().success().stderr(predicate::str::contains("Compiling").not());
+
+    // Changing the dependency rebuilds it and its consumer.
+    t.write("mathlib/src/Lib.kt", &std::fs::read_to_string(t.dir.path().join("mathlib/src/Lib.kt")).unwrap().replace("a + b", "b + a"));
+    t.kargo("calc")
+        .args(["build", "-t", "jvm"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Compiling mathlib v0.1.0 (jvm)").and(predicate::str::contains("Compiling calc v0.1.0 (jvm)")));
+
+    // Wasm links the dependency's klib; tests and the fat jar see it too.
+    t.kargo("calc").args(["run", "-t", "wasm"]).assert().success().stdout(predicate::str::contains("2 + 3 = 5"));
+    t.kargo("calc").arg("test").assert().success();
+    let fat = t.kargo("calc").args(["package", "-q"]).assert().success().get_output().stdout.clone();
+    let out = StdCommand::new("java").arg("-jar").arg(String::from_utf8(fat).unwrap().trim()).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("2 + 3 = 5"));
+
+    // The same packages as a workspace: one kargo.lock and one target/ at the root.
+    t.write("kargo.toml", "[workspace]\nmembers = [\"mathlib\", \"calc\"]\n");
+    t.kargo("").args(["build", "-t", "jvm"]).assert().success();
+    assert!(t.dir.path().join("target/debug/mathlib/jvm/mathlib-0.1.0.jar").is_file());
+    assert!(t.dir.path().join("target/debug/calc/jvm/calc-0.1.0.jar").is_file());
+    assert!(std::fs::read_to_string(t.dir.path().join("kargo.lock")).unwrap().contains("[resolution.\"calc/jvm/runtime\"]"));
+    t.kargo("").args(["run", "-p", "calc", "-t", "jvm"]).assert().success().stdout(predicate::str::contains("2 + 3 = 5"));
+    t.kargo("").args(["test", "--workspace", "-t", "jvm"]).assert().success();
+}
+
+#[test]
+fn native_path_dependency() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
+        eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
+        return;
+    }
+    let t = E2e::new();
+    // The dependency's own kind is an executable; consumers still link a klib of it.
+    t.write("nlib/kargo.toml", "[package]\nname = \"nlib\"\nversion = \"0.1.0\"\n\n[target.native]\n");
+    t.write("nlib/src/Lib.kt", "package nlib\n\nfun greet(name: String) = \"Hello, $name!\"\n");
+    t.write(
+        "ncalc/kargo.toml",
+        "[package]\nname = \"ncalc\"\nversion = \"0.1.0\"\n\n[target.native]\n\n[dependencies]\nnlib = { path = \"../nlib\" }\n",
+    );
+    t.write("ncalc/src/Main.kt", "fun main() = println(nlib.greet(\"native\"))\n");
+    t.kargo("ncalc")
+        .arg("run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello, native!"))
+        .stderr(predicate::str::contains("Compiling nlib v0.1.0 (native, "));
+}

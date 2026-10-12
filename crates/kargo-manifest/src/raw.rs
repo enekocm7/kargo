@@ -1,7 +1,7 @@
 //! Serde model of `kargo.toml` and its validation into [`super::Manifest`].
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -321,6 +321,7 @@ impl RawProfile {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct DetailedDependency {
+    path: Option<PathBuf>,
     group: Option<String>,
     artifact: Option<String>,
     coords: Option<String>,
@@ -398,14 +399,58 @@ fn parse_run(task: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<S
     })
 }
 
-fn parse_dependency(name: &str, value: &Value, section: &str) -> Result<Dependency> {
+/// A parsed `[dependencies]` entry: a Maven module or another Kargo package on disk.
+enum Entry {
+    Maven(Dependency),
+    Path(PathDependency),
+}
+
+/// Replaces a `{ workspace = true }` entry with the matching `[workspace.dependencies]` entry.
+fn inherit_dependency(name: &str, value: &Value, section: &str, workspace: Option<&WorkspaceManifest>) -> Result<Option<Value>> {
+    let Value::Table(table) = value else { return Ok(None) };
+    let Some(flag) = table.get("workspace") else { return Ok(None) };
     let ctx = || format!("invalid dependency `{name}` in [{section}]");
+    if flag.as_bool() != Some(true) {
+        bail!("{}: `workspace` can only be `true`", ctx());
+    }
+    if let Some(other) = table.keys().find(|k| !matches!(k.as_str(), "workspace" | "scope")) {
+        bail!("{}: `{other}` cannot be combined with `workspace = true`; set it in [workspace.dependencies] instead", ctx());
+    }
+    let Some(workspace) = workspace else {
+        bail!("{}: `workspace = true` needs a [workspace] that lists this package in `members`", ctx());
+    };
+    let Some(inherited) = workspace.dependencies.get(name) else {
+        bail!("{}: `{name}` is not declared in [workspace.dependencies]", ctx());
+    };
+    let mut inherited = match inherited {
+        Value::String(version) => toml::Table::from_iter([("version".to_owned(), Value::String(version.clone()))]),
+        Value::Table(t) => t.clone(),
+        _ => bail!("{}: the [workspace.dependencies] entry must be a version string or a table", ctx()),
+    };
+    // Workspace paths are relative to the workspace root, not to the member.
+    if let Some(Value::String(path)) = inherited.get("path") {
+        let absolute = workspace.root.join(path);
+        inherited.insert("path".to_owned(), Value::String(absolute.to_string_lossy().into_owned()));
+    }
+    if let Some(scope) = table.get("scope") {
+        inherited.insert("scope".to_owned(), scope.clone());
+    }
+    Ok(Some(Value::Table(inherited)))
+}
+
+fn parse_dependency(name: &str, value: &Value, section: &str, workspace: Option<&WorkspaceManifest>) -> Result<Entry> {
+    let ctx = || format!("invalid dependency `{name}` in [{section}]");
+    let inherited = inherit_dependency(name, value, section, workspace)?;
+    let value = inherited.as_ref().unwrap_or(value);
     let detailed: DetailedDependency = match value {
         Value::String(version) => DetailedDependency { version: Some(version.clone()), ..Default::default() },
         Value::Table(_) => value.clone().try_into().with_context(ctx)?,
         _ => bail!("{}: expected a version string or a table", ctx()),
     };
 
+    if let Some(path) = detailed.path.clone() {
+        return path_dependency(name, path, detailed, section).map(Entry::Path);
+    }
     let module: ModuleId = if name.contains(':') {
         if detailed.coords.is_some() || detailed.group.is_some() || detailed.artifact.is_some() {
             bail!("{}: `coords`, `group` and `artifact` are not allowed when the key is already `group:artifact`", ctx());
@@ -420,14 +465,46 @@ fn parse_dependency(name: &str, value: &Value, section: &str) -> Result<Dependen
             bail!("{}: version given both in `coords` and `version`", ctx());
         }
         let version = spec.version.clone().or(detailed.version.clone());
-        return finish_dependency(name, spec.module, version, detailed, section);
+        return finish_dependency(name, spec.module, version, detailed, section).map(Entry::Maven);
     } else if let Some(group) = &detailed.group {
         ModuleId::new(group, detailed.artifact.clone().unwrap_or_else(|| name.to_owned())).to_string().parse().with_context(ctx)?
     } else {
-        bail!("{}: the key must be `group:artifact`, or the table must specify `coords` or `group`", ctx());
+        bail!("{}: the key must be `group:artifact`, or the table must specify `coords`, `group` or `path`", ctx());
     };
     let version = detailed.version.clone();
-    finish_dependency(name, module, version, detailed, section)
+    finish_dependency(name, module, version, detailed, section).map(Entry::Maven)
+}
+
+/// `name = { path = "../name" }`: another Kargo package, built from source.
+fn path_dependency(name: &str, path: PathBuf, detailed: DetailedDependency, section: &str) -> Result<PathDependency> {
+    let ctx = || format!("invalid dependency `{name}` in [{section}]");
+    let maven_only = [
+        ("group", detailed.group.is_some()),
+        ("artifact", detailed.artifact.is_some()),
+        ("coords", detailed.coords.is_some()),
+        ("version", detailed.version.is_some()),
+        ("classifier", detailed.classifier.is_some()),
+        ("extension", detailed.extension.is_some()),
+        ("exclude", !detailed.exclude.is_empty()),
+        ("force", detailed.force),
+        ("transitive", detailed.transitive.is_some()),
+        ("bom", detailed.bom),
+    ];
+    if let Some((key, _)) = maven_only.iter().find(|(_, set)| *set) {
+        bail!("{}: `{key}` does not apply to a `path` dependency, which is built from source (only `scope` can be set)", ctx());
+    }
+    validate_package_name(name).with_context(|| format!("{}: the key of a `path` dependency is the package name", ctx()))?;
+    if path.as_os_str().is_empty() {
+        bail!("{}: `path` must not be empty", ctx());
+    }
+    let scope = match &detailed.scope {
+        Some(s) => s.parse().with_context(ctx)?,
+        None => Scope::Compile,
+    };
+    if scope == Scope::Processor {
+        bail!("{}: a `path` dependency can't be an annotation processor yet; depend on it as `compile` or `runtime`", ctx());
+    }
+    Ok(PathDependency { name: name.to_owned(), path, scope, dev: false, target: None })
 }
 
 fn finish_dependency(
@@ -474,14 +551,28 @@ fn finish_dependency(
     })
 }
 
-fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependency>> {
-    let deps = table.iter().map(|(name, value)| parse_dependency(name, value, section)).collect::<Result<Vec<_>>>()?;
-    for (i, dep) in deps.iter().enumerate() {
-        if deps[..i].iter().any(|d| d.module == dep.module && d.classifier == dep.classifier) {
-            bail!("dependency `{}` is declared more than once in [{section}]", dep.module);
+/// Parses the dependency tables of one manifest, collecting `path` dependencies on the side.
+struct DependencyParser<'a> {
+    workspace: Option<&'a WorkspaceManifest>,
+    paths: Vec<PathDependency>,
+}
+
+impl DependencyParser<'_> {
+    fn parse(&mut self, table: &toml::Table, section: &str, dev: bool, target: Option<TargetKind>) -> Result<Vec<Dependency>> {
+        let mut deps: Vec<Dependency> = Vec::new();
+        for (name, value) in table {
+            match parse_dependency(name, value, section, self.workspace)? {
+                Entry::Maven(dep) => {
+                    if deps.iter().any(|d| d.module == dep.module && d.classifier == dep.classifier) {
+                        bail!("dependency `{}` is declared more than once in [{section}]", dep.module);
+                    }
+                    deps.push(dep);
+                }
+                Entry::Path(path) => self.paths.push(PathDependency { dev, target, ..path }),
+            }
         }
+        Ok(deps)
     }
-    Ok(deps)
 }
 
 fn parse_hooks(hooks: &[String], ctx: &str) -> Result<Vec<Hook>> {
@@ -532,7 +623,7 @@ pub fn normalize_konan_target(name: &str) -> Result<String> {
 }
 
 impl RawManifest {
-    pub(super) fn validate(self) -> Result<Manifest> {
+    pub(super) fn validate(self, workspace: Option<&WorkspaceManifest>) -> Result<Manifest> {
         validate_package_name(&self.package.name)?;
         validate_version_string("package version", &self.package.version)?;
         if let Some(group) = &self.package.group
@@ -542,8 +633,16 @@ impl RawManifest {
             bail!("invalid package group `{group}` (expected something like `com.example`)");
         }
 
-        let kotlin_version = self.kotlin.version.unwrap_or_else(|| DEFAULT_KOTLIN_VERSION.to_owned());
+        let workspace_kotlin = workspace.and_then(|w| w.kotlin_version.clone());
+        let (kotlin_version, kotlin_version_set) = match (self.kotlin.version, workspace_kotlin) {
+            (Some(own), Some(shared)) if own != shared => bail!(
+                "[kotlin] version {own} differs from the workspace's [workspace.kotlin] version {shared};                  remove it to use the workspace's, since every member builds with the same Kotlin"
+            ),
+            (Some(v), _) | (None, Some(v)) => (v, true),
+            (None, None) => (DEFAULT_KOTLIN_VERSION.to_owned(), false),
+        };
         validate_version_string("Kotlin version", &kotlin_version)?;
+        let mut deps = DependencyParser { workspace, paths: Vec::new() };
 
         let mut targets = match self.target {
             // No [target] section means a plain JVM project.
@@ -569,7 +668,7 @@ impl RawManifest {
                                 main_class: j.main_class,
                                 jvm_args: j.jvm_args,
                                 javac_args: j.javac_args,
-                                dependencies: parse_dependencies(&j.dependencies, "target.jvm.dependencies")?,
+                                dependencies: deps.parse(&j.dependencies, "target.jvm.dependencies", false, Some(TargetKind::Jvm))?,
                             })
                         })
                         .transpose()?,
@@ -585,7 +684,7 @@ impl RawManifest {
                             Ok(WasmTarget {
                                 environment,
                                 package_manager,
-                                dependencies: parse_dependencies(&w.dependencies, "target.wasm.dependencies")?,
+                                dependencies: deps.parse(&w.dependencies, "target.wasm.dependencies", false, Some(TargetKind::Wasm))?,
                             })
                         })
                         .transpose()?,
@@ -634,7 +733,7 @@ impl RawManifest {
                                 entry_point: n.entry_point,
                                 linker_options: n.linker_options,
                                 cinterop,
-                                dependencies: parse_dependencies(&n.dependencies, "target.native.dependencies")?,
+                                dependencies: deps.parse(&n.dependencies, "target.native.dependencies", false, Some(TargetKind::Native))?,
                             })
                         })
                         .transpose()?,
@@ -656,7 +755,9 @@ impl RawManifest {
                             if config.min_sdk > config.target_sdk || config.target_sdk > config.compile_sdk {
                                 bail!("[target.android] expected min-sdk <= target-sdk <= compile-sdk");
                             }
-                            Ok(AndroidTarget { config, dependencies: parse_dependencies(&dependencies, "target.android.dependencies")? })
+                            let dependencies =
+                                deps.parse(&dependencies, "target.android.dependencies", false, Some(TargetKind::Android))?;
+                            Ok(AndroidTarget { config, dependencies })
                         })
                         .transpose()?,
                 };
@@ -830,6 +931,15 @@ impl RawManifest {
             }
         }
 
+        let dependencies = deps.parse(&self.dependencies, "dependencies", false, None)?;
+        let dev_dependencies = deps.parse(&self.dev_dependencies, "dev-dependencies", true, None)?;
+        let path_dependencies = deps.paths;
+        for (i, dep) in path_dependencies.iter().enumerate() {
+            if path_dependencies[..i].iter().any(|d| d.name == dep.name && d.dev == dep.dev && d.target == dep.target) {
+                bail!("path dependency `{}` is declared more than once", dep.name);
+            }
+        }
+
         let doc = self.doc.validate()?;
         let fmt = self.fmt.validate()?;
         let lint = self.lint.validate()?;
@@ -850,6 +960,7 @@ impl RawManifest {
             },
             kotlin: KotlinSettings {
                 version: kotlin_version,
+                version_set: kotlin_version_set,
                 language_version: self.kotlin.language_version,
                 api_version: self.kotlin.api_version,
                 opt_in: self.kotlin.opt_in,
@@ -857,8 +968,9 @@ impl RawManifest {
                 warnings_as_errors: self.kotlin.warnings_as_errors,
             },
             targets,
-            dependencies: parse_dependencies(&self.dependencies, "dependencies")?,
-            dev_dependencies: parse_dependencies(&self.dev_dependencies, "dev-dependencies")?,
+            dependencies,
+            dev_dependencies,
+            path_dependencies,
             repositories,
             frameworks,
             compiler_plugins,
@@ -878,6 +990,63 @@ fn validate_tool_version(section: &str, key: &str, tool: &str, example: &str, ve
         bail!("[{section}] `{key}` must be an exact {tool} version such as \"{example}\", got `{v}`");
     }
     Ok(())
+}
+
+/// `kargo.toml` of a workspace: only a `[workspace]` table.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct RawWorkspaceManifest {
+    workspace: RawWorkspace,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawWorkspace {
+    #[serde(default)]
+    members: Vec<String>,
+    #[serde(default)]
+    dependencies: toml::Table,
+    #[serde(default)]
+    kotlin: RawWorkspaceKotlin,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawWorkspaceKotlin {
+    version: Option<String>,
+}
+
+impl RawWorkspaceManifest {
+    pub(super) fn validate(self, root: &Path) -> Result<WorkspaceManifest> {
+        let raw = self.workspace;
+        if raw.members.is_empty() {
+            bail!("[workspace] `members` is empty; list the member directories, e.g. members = [\"app\", \"lib\"]");
+        }
+        let mut members: Vec<PathBuf> = Vec::new();
+        for member in &raw.members {
+            if member.is_empty() || member.contains(['*', '?', '[']) {
+                bail!("[workspace] `members` entries must be directories such as \"app\" or \"libs/core\", got `{member}`");
+            }
+            let path = PathBuf::from(member);
+            if members.contains(&path) {
+                bail!("[workspace] member `{member}` is listed more than once");
+            }
+            members.push(path);
+        }
+        if let Some(v) = &raw.kotlin.version {
+            validate_version_string("[workspace.kotlin] version", v)?;
+        }
+        let workspace =
+            WorkspaceManifest { root: root.to_path_buf(), members, kotlin_version: raw.kotlin.version, dependencies: raw.dependencies };
+        // Validate the shared entries once, so a typo is reported even before a member uses it.
+        for (name, value) in &workspace.dependencies {
+            if value.get("workspace").is_some() {
+                bail!("invalid dependency `{name}` in [workspace.dependencies]: `workspace` is only valid in a member's dependencies");
+            }
+            parse_dependency(name, value, "workspace.dependencies", None)?;
+        }
+        Ok(workspace)
+    }
 }
 
 impl RawFmt {

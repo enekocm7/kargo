@@ -65,7 +65,7 @@ pub fn lint(ctx: &BuildContext, opts: &LintOptions) -> Result<bool> {
 
     let jdk = ctx.jdk()?;
     let jar = ctx.tool_fat_jar(DETEKT_GROUP, "detekt-cli", version).with_context(|| format!("failed to fetch detekt {version}"))?;
-    let work = ws.target_dir().join("lint");
+    let work = ws.work_dir("lint");
     std::fs::create_dir_all(&work).with_context(|| format!("failed to create {}", work.display()))?;
     let kargo_config = work.join("kargo-detekt.yml");
     write_string_atomic(&kargo_config, KARGO_CONFIG)?;

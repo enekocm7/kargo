@@ -23,7 +23,7 @@ Yes, on the JVM and Android. `.java` files next to your Kotlin files are compile
 
 ### Are multi-module projects supported?
 
-Not yet. Each `kargo.toml` describes one package.
+Yes. A package can depend on another package on disk with `{ path = "../lib" }`, and a `[workspace]` builds several packages with one `kargo.lock` and one `target/`. See [Workspaces and path dependencies](../../guides/workspaces/). Path dependencies don't work for the Android target yet.
 
 ## Errors
 

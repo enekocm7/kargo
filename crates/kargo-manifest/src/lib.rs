@@ -153,10 +153,34 @@ impl Dependency {
     }
 }
 
+/// Another Kargo package that this one depends on, built from source:
+/// `name = { path = "../name" }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathDependency {
+    /// The manifest key, which must be the dependency's package name.
+    pub name: String,
+    /// As written: relative to the declaring package's directory, or absolute.
+    pub path: PathBuf,
+    pub scope: Scope,
+    /// Declared in `[dev-dependencies]`.
+    pub dev: bool,
+    /// Declared in `[target.<target>.dependencies]`.
+    pub target: Option<TargetKind>,
+}
+
+impl PathDependency {
+    /// Whether this dependency applies to `target`'s main (or, with `dev`, test) compilation.
+    pub fn applies_to(&self, target: TargetKind, dev: bool) -> bool {
+        self.dev == dev && self.target.is_none_or(|t| t == target)
+    }
+}
+
 /// Kotlin compiler settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KotlinSettings {
     pub version: String,
+    /// Whether the version was set in `[kotlin]` or `[workspace.kotlin]` (otherwise it is the default).
+    pub version_set: bool,
     pub language_version: Option<String>,
     pub api_version: Option<String>,
     pub opt_in: Vec<String>,
@@ -646,6 +670,8 @@ pub struct Manifest {
     pub targets: Targets,
     pub dependencies: Vec<Dependency>,
     pub dev_dependencies: Vec<Dependency>,
+    /// `path` dependencies from every dependency table.
+    pub path_dependencies: Vec<PathDependency>,
     pub repositories: Vec<Repository>,
     pub frameworks: Frameworks,
     pub compiler_plugins: Vec<CompilerPlugin>,
@@ -662,19 +688,82 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn load(path: &Path) -> Result<Self> {
+        Self::load_in(path, None)
+    }
+
+    /// Loads a package manifest; `workspace` supplies what `{ workspace = true }` entries inherit.
+    pub fn load_in(path: &Path, workspace: Option<&WorkspaceManifest>) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("failed to parse manifest at {}", path.display()))
+        Self::parse_in(&text, workspace).with_context(|| format!("failed to parse manifest at {}", path.display()))
     }
 
     pub fn parse(text: &str) -> Result<Self> {
+        Self::parse_in(text, None)
+    }
+
+    pub fn parse_in(text: &str, workspace: Option<&WorkspaceManifest>) -> Result<Self> {
+        if is_workspace(text)? {
+            bail!("this is a workspace manifest ([workspace]), not a package; select a member with `-p <name>`");
+        }
         let raw: raw::RawManifest = toml::from_str(text)?;
-        raw.validate()
+        raw.validate(workspace)
     }
 
     /// Dependencies for `target`, including the common ones.
     pub fn dependencies_for(&self, target: TargetKind) -> Vec<Dependency> {
         self.dependencies.iter().chain(self.targets.dependencies(target)).cloned().collect()
     }
+}
+
+/// A workspace's `kargo.toml`: `[workspace]` with its `members`, shared
+/// `[workspace.dependencies]` and `[workspace.kotlin]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceManifest {
+    /// The directory holding the workspace's `kargo.toml`.
+    pub root: PathBuf,
+    /// Member directories as written, relative to `root`.
+    pub members: Vec<PathBuf>,
+    /// The Kotlin version every member builds with.
+    pub kotlin_version: Option<String>,
+    /// Raw `[workspace.dependencies]` entries, inherited with `{ workspace = true }`.
+    dependencies: toml::Table,
+}
+
+impl WorkspaceManifest {
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let root = path.parent().unwrap_or(Path::new("."));
+        Self::parse(&text, root).with_context(|| format!("failed to parse manifest at {}", path.display()))
+    }
+
+    /// Parses a workspace manifest whose directory is `root`.
+    pub fn parse(text: &str, root: &Path) -> Result<Self> {
+        let raw: raw::RawWorkspaceManifest = toml::from_str(text)?;
+        raw.validate(root)
+    }
+
+    /// Whether `[workspace.dependencies]` declares `name`.
+    pub fn has_dependency(&self, name: &str) -> bool {
+        self.dependencies.contains_key(name)
+    }
+}
+
+/// Whether `text` is a workspace manifest (a `[workspace]` table) rather than a package.
+pub fn is_workspace(text: &str) -> Result<bool> {
+    let table: toml::Table = toml::from_str(text)?;
+    if !table.contains_key("workspace") {
+        return Ok(false);
+    }
+    if table.contains_key("package") {
+        bail!("a kargo.toml with [workspace] cannot also have [package] yet; move the package into a member directory");
+    }
+    Ok(true)
+}
+
+/// Whether the manifest at `path` is a workspace manifest.
+pub fn is_workspace_manifest(path: &Path) -> Result<bool> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    is_workspace(&text).with_context(|| format!("failed to parse manifest at {}", path.display()))
 }
 
 /// Validates a package name (used for artifact and binary names).

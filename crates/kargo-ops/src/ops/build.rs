@@ -6,6 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use super::context::{BuildContext, TargetSetup};
+use super::local::{self, LocalTarget};
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
@@ -52,6 +53,8 @@ pub struct WasmBuild {
     pub module: PathBuf,
     pub klib: PathBuf,
     pub environment: WasmEnvironment,
+    /// The klibs the module was compiled against.
+    pub libraries: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +167,20 @@ pub struct JvmClasspaths {
     pub runtime: Resolution,
 }
 
+/// The JVM compile classpath: path dependency jars, then the resolved Maven artifacts.
+pub fn jvm_compile_classpath(ctx: &BuildContext, classpaths: &JvmClasspaths) -> Result<Vec<PathBuf>> {
+    let mut files = local::artifacts(ctx, LocalTarget::Jvm, &[Scope::Compile, Scope::Provided], false)?;
+    files.extend(classpaths.compile.files());
+    Ok(files)
+}
+
+/// The JVM runtime classpath of dependencies: path dependency jars, then the resolved Maven artifacts.
+pub fn jvm_runtime_classpath(ctx: &BuildContext, classpaths: &JvmClasspaths) -> Result<Vec<PathBuf>> {
+    let mut files = local::artifacts(ctx, LocalTarget::Jvm, &[Scope::Compile, Scope::Runtime], false)?;
+    files.extend(classpaths.runtime.files());
+    Ok(files)
+}
+
 pub fn jvm_classpaths(ctx: &BuildContext, setup: &TargetSetup) -> Result<JvmClasspaths> {
     let (compile, runtime) = super::join(
         || ctx.resolve("jvm/compile", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Provided], false), &setup.boms),
@@ -224,6 +241,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     );
     let (jdk, compiler, plugins) = toolchain?;
     let classpaths = classpaths?;
+    let classpath = jvm_compile_classpath(ctx, &classpaths)?;
     let processor_path = jvm_processor_path(ctx, &setup, false)?;
     let javac_args = jvm_javac_args(&setup, jvm);
     let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
@@ -236,7 +254,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let unit = JvmCompilation {
         name: &manifest.package.name,
         sources: srcs.clone(),
-        classpath: classpaths.compile.files(),
+        classpath,
         friend_paths: Vec::new(),
         output: classes.clone(),
         jvm_target: &jvm.target_for(jdk.version),
@@ -267,7 +285,7 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
     };
 
     // Thin jar plus dependencies in lib/.
-    let runtime_classpath = classpaths.runtime.files();
+    let runtime_classpath = jvm_runtime_classpath(ctx, &classpaths)?;
     let lib_dir = out.join("lib");
     let lib_names = sync_lib_dir(&lib_dir, &runtime_classpath)?;
     let jar = out.join(format!("{}-{}.jar", manifest.package.name, manifest.package.version));
@@ -312,14 +330,33 @@ fn sync_lib_dir(lib_dir: &Path, jars: &[PathBuf]) -> Result<Vec<String>> {
     Ok(names)
 }
 
-pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Vec<PathBuf>> {
+/// The resolved Maven klibs of the Wasm target.
+pub fn wasm_resolution(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Resolution> {
     let env = ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
     let key = if include_dev { "wasm/test" } else { "wasm/main" };
-    let requests = setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], include_dev);
-    Ok(ctx.resolve(key, Platform::Wasm(env.as_str().to_owned()), &requests, &setup.boms)?.files())
+    let requests = setup.requests(&ALL_SCOPES, include_dev);
+    ctx.resolve(key, Platform::Wasm(env.as_str().to_owned()), &requests, &setup.boms)
 }
 
+/// Every klib the Wasm sources compile against: path dependencies first, then Maven libraries.
+pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Vec<PathBuf>> {
+    let mut libraries = local::artifacts(ctx, LocalTarget::Wasm, &ALL_SCOPES, include_dev)?;
+    libraries.extend(wasm_resolution(ctx, setup, include_dev)?.files());
+    Ok(libraries)
+}
+
+const ALL_SCOPES: [Scope; 3] = [Scope::Compile, Scope::Runtime, Scope::Provided];
+
 pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
+    let Some(build) = compile_wasm(ctx)? else { return Ok(None) };
+    // Outside the Wasm output directory, which is wiped on every recompile;
+    // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
+    crate::npm::install(ctx, &build.libraries, &ctx.ws.profile_dir(ctx.profile))?;
+    Ok(Some(build))
+}
+
+/// Compiles and links the Wasm target without installing npm packages (enough for a path dependency).
+pub fn compile_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
     let setup = ctx.setup(TargetKind::Wasm)?;
@@ -346,10 +383,7 @@ pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     if unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Wasm, ""))? == Outcome::Empty {
         return Ok(None);
     }
-    // Outside the Wasm output directory, which is wiped on every recompile;
-    // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
-    crate::npm::install(ctx, &unit.libraries, &ctx.ws.target_dir().join(ctx.profile.dir_name()))?;
-    Ok(Some(WasmBuild { module: unit.module_path(), klib: unit.klib_path(), environment: wasm.environment }))
+    Ok(Some(WasmBuild { module: unit.module_path(), klib: unit.klib_path(), environment: wasm.environment, libraries: unit.libraries }))
 }
 
 pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {
@@ -364,10 +398,58 @@ pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {
     Ok(out)
 }
 
-pub fn native_libraries(ctx: &BuildContext, setup: &TargetSetup, konan_target: &str, include_dev: bool) -> Result<Vec<PathBuf>> {
+/// The resolved Maven klibs of one Kotlin/Native platform.
+pub fn native_resolution(ctx: &BuildContext, setup: &TargetSetup, konan_target: &str, include_dev: bool) -> Result<Resolution> {
     let key = format!("native-{konan_target}/{}", if include_dev { "test" } else { "main" });
-    let requests = setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], include_dev);
-    Ok(ctx.resolve(&key, Platform::Native(konan_target.to_owned()), &requests, &setup.boms)?.files())
+    let requests = setup.requests(&ALL_SCOPES, include_dev);
+    ctx.resolve(&key, Platform::Native(konan_target.to_owned()), &requests, &setup.boms)
+}
+
+/// Every klib the Native sources compile against: path dependencies first, then Maven libraries.
+pub fn native_libraries(ctx: &BuildContext, setup: &TargetSetup, konan_target: &str, include_dev: bool) -> Result<Vec<PathBuf>> {
+    let mut libraries = local::artifacts(ctx, LocalTarget::Native(konan_target), &ALL_SCOPES, include_dev)?;
+    libraries.extend(native_resolution(ctx, setup, konan_target, include_dev)?.files());
+    Ok(libraries)
+}
+
+/// Compiles the Native main sources into a klib for `konan_target`, which is what a consumer
+/// of this package (as a path dependency) links. Returns `None` without Native sources.
+pub fn native_klib(ctx: &BuildContext, konan_target: &str) -> Result<Option<PathBuf>> {
+    let manifest = ctx.ws.manifest();
+    let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
+    let srcs = sources(ctx, TargetKind::Native, false, &["kt"]);
+    if srcs.kotlin_files().is_empty() {
+        return Ok(None);
+    }
+    let setup = ctx.setup(TargetKind::Native)?;
+    let toolchain = ctx.native_toolchain()?;
+    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    let profile = ctx.ws.profile(ctx.profile);
+    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let out = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(konan_target);
+    // A library's own build already produces the klib; anything else gets a separate one.
+    let (output_dir, fp_dir) = match native.kind {
+        NativeKind::Library => (out, ctx.fingerprint_dir(TargetKind::Native)),
+        _ => (out.join("klib"), ctx.fingerprint_dir(TargetKind::Native).join("klib")),
+    };
+    let unit = NativeCompilation {
+        name: &manifest.package.name,
+        konan_target: konan_target.to_owned(),
+        kind: NativeKind::Library,
+        sources: srcs,
+        libraries: native_libraries(ctx, &setup, konan_target, false)?,
+        plugins: &plugins,
+        kotlin_args: &kotlin_args,
+        entry_point: None,
+        linker_options: &native.linker_options,
+        output_dir,
+        debug: profile.debug,
+        optimize: profile.optimize,
+        test_runner: false,
+    };
+    let what = format!(", {konan_target}");
+    unit.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
+    Ok(Some(unit.artifact()))
 }
 
 /// The `.def` file of every `[target.native.cinterop]` entry (`None` for a headers-only one),

@@ -185,6 +185,21 @@ Libraries that only exist for one platform belong in that target's section:
 "com.zaxxer:HikariCP" = "6.2.1"
 ```
 
+## Local packages
+
+Another Kargo package on disk can be a dependency too, built from source with your project:
+
+```sh
+kargo add --path ../mathlib
+```
+
+```toml title="kargo.toml"
+[dependencies]
+mathlib = { path = "../mathlib" }
+```
+
+Its jar (or klib, for Wasm and Native) and its own Maven dependencies end up on your classpaths. To build several packages together with one `kargo.lock`, make them members of a workspace. See [Workspaces and path dependencies](../workspaces/).
+
 ## Repositories
 
 Maven Central is always used. Google's Maven repository is added automatically for Android and Compose. Add others in `[repositories]`:
