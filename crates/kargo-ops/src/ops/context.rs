@@ -1,14 +1,15 @@
 //! Shared state for one Kargo invocation that builds something.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
 use crate::builtins::{self, Contributions, PluginSpec};
 use crate::lockfile::Lockfile;
-use crate::workspace::{ProfileKind, Workspace};
+use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
 use kargo_manifest::{Dependency, Scope, TargetKind};
 use kargo_maven::{DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
@@ -20,22 +21,55 @@ use kargo_util::shell::Shell;
 /// Minimum JDK supported by the Kotlin compiler.
 pub const MIN_JDK: u32 = 11;
 
+/// The build of one package. Path dependencies are built through contexts of their own
+/// ([`BuildContext::for_package`]) that share the lockfile and toolchains.
 pub struct BuildContext<'a> {
     pub config: &'a Config,
+    pub project: &'a Project,
+    /// The package being built.
     pub ws: &'a Workspace,
+    /// Index of `ws` in the project.
+    pub package: usize,
     pub profile: ProfileKind,
-    pub client: MavenClient,
+    pub client: Arc<MavenClient>,
     /// Fail instead of updating `kargo.lock` (`--locked`).
     pub locked: bool,
     /// Never write `kargo.lock` (`kargo update --dry-run`).
     pub dry_run: bool,
     /// Set by a selective `kargo update`: which locked versions to keep.
     pub update: Option<UpdatePlan>,
+    shared: Arc<Shared>,
+    /// Only the context a command created writes `kargo.lock` when it is dropped.
+    owner: bool,
+}
+
+/// State shared by every package built in one invocation.
+struct Shared {
     lock: Mutex<Lockfile>,
     lock_dirty: AtomicBool,
     jdk: Lazy<Jdk>,
     compiler: Lazy<KotlinCompiler>,
     native: Lazy<NativeToolchain>,
+    /// Artifacts of path dependencies already built in this invocation, by package, target and platform.
+    built: Mutex<HashMap<String, Option<PathBuf>>>,
+}
+
+/// A package reached through path dependencies, with the scope it has for the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalDependency {
+    pub package: usize,
+    pub scope: Scope,
+}
+
+/// The scope a dependency's own dependency (`inner`) gets for the consumer, if any. These are
+/// Maven's rules: a provided dependency is not passed on, and a runtime one stays runtime.
+pub fn combine_scopes(outer: Scope, inner: Scope) -> Option<Scope> {
+    match (outer, inner) {
+        (_, Scope::Provided) => None,
+        (Scope::Provided, _) => Some(Scope::Provided),
+        (Scope::Runtime, _) | (_, Scope::Runtime) => Some(Scope::Runtime),
+        (Scope::Compile, Scope::Compile) => Some(Scope::Compile),
+    }
 }
 
 /// A value initialized at most once even when targets build in parallel, so two
@@ -146,23 +180,105 @@ fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
 }
 
 impl<'a> BuildContext<'a> {
-    pub fn new(config: &'a Config, ws: &'a Workspace, profile: ProfileKind) -> Result<Self> {
+    /// The context for building `package` of `project`; it owns `kargo.lock`.
+    pub fn new(config: &'a Config, project: &'a Project, package: usize, profile: ProfileKind) -> Result<Self> {
         kargo_compiler::daemon::configure(config.home());
-        let lock = Lockfile::load(&ws.lockfile_path())?;
+        let lock = Lockfile::load(&project.lockfile_path())?;
         Ok(Self {
             config,
-            ws,
+            project,
+            ws: project.package(package),
+            package,
             profile,
-            client: MavenClient::new(config, ws.manifest().repositories.clone()),
+            client: Arc::new(MavenClient::new(config, project.repositories())),
             locked: false,
             dry_run: false,
             update: None,
-            lock: Mutex::new(lock),
-            lock_dirty: AtomicBool::new(false),
-            jdk: Lazy::new(),
-            compiler: Lazy::new(),
-            native: Lazy::new(),
+            shared: Arc::new(Shared {
+                lock: Mutex::new(lock),
+                lock_dirty: AtomicBool::new(false),
+                jdk: Lazy::new(),
+                compiler: Lazy::new(),
+                native: Lazy::new(),
+                built: Mutex::new(HashMap::new()),
+            }),
+            owner: true,
         })
+    }
+
+    /// A context for another package of the project, sharing the lockfile, toolchains and settings.
+    pub fn for_package(&self, package: usize) -> BuildContext<'a> {
+        BuildContext {
+            config: self.config,
+            project: self.project,
+            ws: self.project.package(package),
+            package,
+            profile: self.profile,
+            client: self.client.clone(),
+            locked: self.locked,
+            dry_run: self.dry_run,
+            update: self.update.clone(),
+            shared: self.shared.clone(),
+            owner: false,
+        }
+    }
+
+    /// The artifact of a path dependency built earlier in this invocation, or builds it with `build`.
+    pub fn built_artifact(&self, key: String, build: impl FnOnce() -> Result<Option<PathBuf>>) -> Result<Option<PathBuf>> {
+        if let Some(artifact) = self.shared.built.lock().expect("lock poisoned").get(&key) {
+            return Ok(artifact.clone());
+        }
+        let artifact = build()?;
+        self.shared.built.lock().expect("lock poisoned").insert(key, artifact.clone());
+        Ok(artifact)
+    }
+
+    /// Every package this one reaches through path dependencies that apply to `target`, with its
+    /// effective scope; with `dev`, the ones only its dev-dependencies reach.
+    pub fn local_dependencies(&self, target: TargetKind, dev: bool) -> Result<Vec<LocalDependency>> {
+        let mut out: Vec<LocalDependency> = Vec::new();
+        let mut queue: VecDeque<(usize, usize, Scope)> = self
+            .ws
+            .path_dependencies()
+            .iter()
+            .filter(|(dep, _)| dep.applies_to(target, dev))
+            .map(|(dep, index)| (self.package, *index, dep.scope))
+            .collect();
+        while let Some((consumer, package, scope)) = queue.pop_front() {
+            let pkg = self.project.package(package);
+            if !pkg.manifest().targets.is_enabled(target) {
+                bail!(
+                    "`{}` depends on the path dependency `{}`, which does not enable the {target} target; add [target.{target}] to {}",
+                    self.project.package(consumer).name(),
+                    pkg.name(),
+                    pkg.manifest_path().display()
+                );
+            }
+            let scope = match out.iter_mut().find(|d| d.package == package) {
+                // Reached again: widen the scope when it is needed both to compile and at runtime.
+                Some(existing) if existing.scope == scope || existing.scope == Scope::Compile => continue,
+                Some(existing) => {
+                    existing.scope = Scope::Compile;
+                    Scope::Compile
+                }
+                None => {
+                    out.push(LocalDependency { package, scope });
+                    scope
+                }
+            };
+            for (dep, child) in pkg.path_dependencies().iter().filter(|(dep, _)| dep.applies_to(target, false)) {
+                if let Some(s) = combine_scopes(scope, dep.scope) {
+                    queue.push_back((package, *child, s));
+                }
+            }
+        }
+        // A package's tests may use a package that depends on it; it is never its own dependency.
+        out.retain(|d| d.package != self.package);
+        if dev {
+            let main = self.local_dependencies(target, false)?;
+            out.retain(|d| !main.iter().any(|m| m.package == d.package));
+        }
+        Ok(out)
     }
 
     pub fn shell(&self) -> &Shell {
@@ -170,7 +286,7 @@ impl<'a> BuildContext<'a> {
     }
 
     pub fn jdk(&self) -> Result<&Jdk> {
-        self.jdk.get_or_try_init(|| {
+        self.shared.jdk.get_or_try_init(|| {
             let request = &self.ws.manifest().toolchain.jdk;
             let jdk = kargo_toolchain::jdks::resolve(self.config, request)?;
             jdk.require_version(MIN_JDK)?;
@@ -189,21 +305,43 @@ impl<'a> BuildContext<'a> {
     }
 
     pub fn kotlin_compiler(&self) -> Result<&KotlinCompiler> {
-        self.compiler.get_or_try_init(|| KotlinCompiler::resolve(&self.client, &self.ws.manifest().kotlin.version))
+        self.shared.compiler.get_or_try_init(|| KotlinCompiler::resolve(&self.client, &self.ws.manifest().kotlin.version))
     }
 
     pub fn native_toolchain(&self) -> Result<&NativeToolchain> {
-        self.native.get_or_try_init(|| NativeToolchain::ensure(self.config, &self.client, &self.ws.manifest().kotlin.version))
+        self.shared.native.get_or_try_init(|| NativeToolchain::ensure(self.config, &self.client, &self.ws.manifest().kotlin.version))
     }
 
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {
         let manifest = self.ws.manifest();
         let contributions = builtins::contributions(manifest, target, self.ws.root())?;
         let user = manifest.dependencies_for(target);
-        let all = merge_deps(&user, &contributions.dependencies);
+        let mut all = merge_deps(&user, &contributions.dependencies);
+        let mut dev_all = merge_deps(&manifest.dev_dependencies, &contributions.dev_dependencies);
+        // Path dependencies bring their Maven dependencies (declared and framework ones) along,
+        // following Maven's scope rules. What the consumer declares itself comes first and wins.
+        for dev in [false, true] {
+            for local in self.local_dependencies(target, dev)? {
+                let pkg = self.project.package(local.package);
+                let theirs = builtins::contributions(pkg.manifest(), target, pkg.root())?;
+                let inherited: Vec<Dependency> = merge_deps(&pkg.manifest().dependencies_for(target), &theirs.dependencies)
+                    .into_iter()
+                    .filter_map(|mut d| {
+                        if !d.bom {
+                            d.scope = combine_scopes(local.scope, d.scope)?;
+                        }
+                        Some(d)
+                    })
+                    .collect();
+                if dev {
+                    dev_all = merge_deps(&dev_all, &inherited);
+                } else {
+                    all = merge_deps(&all, &inherited);
+                }
+            }
+        }
         let (boms, main): (Vec<_>, Vec<_>) = all.into_iter().partition(|d| d.bom);
-        let (dev_boms, dev): (Vec<_>, Vec<_>) =
-            merge_deps(&manifest.dev_dependencies, &contributions.dev_dependencies).into_iter().partition(|d| d.bom);
+        let (dev_boms, dev): (Vec<_>, Vec<_>) = dev_all.into_iter().partition(|d| d.bom);
         let mut boms = boms;
         boms.extend(dev_boms);
         Ok(TargetSetup { target, contributions, main, dev, boms })
@@ -229,9 +367,10 @@ impl<'a> BuildContext<'a> {
 
     /// Resolves `roots` for `platform`, reusing `kargo.lock` when possible.
     pub fn resolve(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
+        let key = &self.ws.lock_key(key);
         let inputs = self.inputs_fingerprint(&platform, roots, boms);
         if !self.config.refresh() {
-            let lock = self.lock.lock().expect("lock poisoned");
+            let lock = self.shared.lock.lock().expect("lock poisoned");
             if let Some(res) = lock.restore(key, &inputs, &self.client)? {
                 return Ok(res);
             }
@@ -251,8 +390,8 @@ impl<'a> BuildContext<'a> {
             resolver.import_bom(&bom.module, version)?;
         }
         let resolution = resolver.resolve(roots).with_context(|| format!("failed to resolve dependencies for `{key}`"))?;
-        self.lock.lock().expect("lock poisoned").record(key, &inputs, &resolution, &self.client)?;
-        self.lock_dirty.store(true, Ordering::SeqCst);
+        self.shared.lock.lock().expect("lock poisoned").record(key, &inputs, &resolution, &self.client)?;
+        self.shared.lock_dirty.store(true, Ordering::SeqCst);
         Ok(resolution)
     }
 
@@ -277,7 +416,7 @@ impl<'a> BuildContext<'a> {
 
     /// A copy of the lockfile as currently resolved.
     pub fn lockfile(&self) -> Lockfile {
-        self.lock.lock().expect("lock poisoned").clone()
+        self.shared.lock.lock().expect("lock poisoned").clone()
     }
 
     /// Fetches the self-contained (`-all` classifier) jar of a command-line tool such as ktlint or detekt.
@@ -288,9 +427,9 @@ impl<'a> BuildContext<'a> {
 
     /// Persists `kargo.lock` if any resolution changed it.
     pub fn save_lockfile(&self) -> Result<()> {
-        if self.lock_dirty.load(Ordering::SeqCst) && !self.dry_run {
-            let lock = self.lock.lock().expect("lock poisoned");
-            if lock.save(&self.ws.lockfile_path())? {
+        if self.shared.lock_dirty.load(Ordering::SeqCst) && !self.dry_run {
+            let lock = self.shared.lock.lock().expect("lock poisoned");
+            if lock.save(&self.project.lockfile_path())? {
                 self.shell().verbose("Updated", "kargo.lock");
             }
         }
@@ -299,12 +438,12 @@ impl<'a> BuildContext<'a> {
 
     /// Replaces the lockfile content (used by `kargo update`).
     pub fn reset_lockfile(&self, keep: Option<&[String]>) {
-        let mut lock = self.lock.lock().expect("lock poisoned");
+        let mut lock = self.shared.lock.lock().expect("lock poisoned");
         match keep {
             Some(keys) => lock.retain(keys),
             None => lock.resolutions.clear(),
         }
-        self.lock_dirty.store(true, Ordering::SeqCst);
+        self.shared.lock_dirty.store(true, Ordering::SeqCst);
     }
 
     pub fn fingerprint_dir(&self, target: TargetKind) -> PathBuf {
@@ -315,6 +454,9 @@ impl<'a> BuildContext<'a> {
 impl Drop for BuildContext<'_> {
     fn drop(&mut self) {
         // Keep successful resolutions even if a later step (e.g. compilation) failed.
+        if !self.owner {
+            return;
+        }
         if let Err(e) = self.save_lockfile() {
             self.shell().warn(format!("failed to write kargo.lock: {e:#}"));
         }
@@ -324,6 +466,102 @@ impl Drop for BuildContext<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::Project;
+
+    #[test]
+    fn scopes_combine_like_maven() {
+        use Scope::*;
+        assert_eq!(combine_scopes(Compile, Compile), Some(Compile));
+        assert_eq!(combine_scopes(Compile, Runtime), Some(Runtime));
+        assert_eq!(combine_scopes(Runtime, Compile), Some(Runtime));
+        assert_eq!(combine_scopes(Provided, Compile), Some(Provided));
+        assert_eq!(combine_scopes(Provided, Runtime), Some(Provided));
+        assert_eq!(combine_scopes(Compile, Provided), None);
+    }
+
+    #[test]
+    fn path_dependencies_bring_their_dependencies_with_scopes() {
+        use kargo_util::shell::{Shell, Verbosity};
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let write = |rel: &str, text: &str| {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                format!(
+                    "[package]
+name = \"{}\"
+version = \"0.1.0\"
+{text}",
+                    rel.split('/').next().unwrap()
+                ),
+            )
+            .unwrap();
+        };
+        write(
+            "app/kargo.toml",
+            "[dependencies]
+lib = { path = \"../lib\" }
+tool = { path = \"../tool\", scope = \"provided\" }
+\"g:shared\" = \"2.0\"
+             [dev-dependencies]
+fixtures = { path = \"../fixtures\" }
+[target.wasm]
+",
+        );
+        write(
+            "lib/kargo.toml",
+            "[dependencies]
+core = { path = \"../core\", scope = \"runtime\" }
+\"g:shared\" = \"1.0\"
+\"g:lib\" = \"1.0\"
+             \"g:hidden\" = { version = \"1.0\", scope = \"provided\" }
+",
+        );
+        write(
+            "core/kargo.toml",
+            "[dependencies]
+\"g:core\" = \"1.0\"
+",
+        );
+        write(
+            "tool/kargo.toml",
+            "[dependencies]
+\"g:tool\" = \"1.0\"
+",
+        );
+        write(
+            "fixtures/kargo.toml",
+            "[dependencies]
+\"g:fixture\" = \"1.0\"
+lib = { path = \"../lib\" }
+",
+        );
+
+        let project = Project::load(&dir.path().join("app/kargo.toml")).unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let ctx = BuildContext::new(&config, &project, 0, ProfileKind::Dev).unwrap();
+        let name = |d: &LocalDependency| (project.package(d.package).name().to_owned(), d.scope);
+        let main: Vec<_> = ctx.local_dependencies(TargetKind::Jvm, false).unwrap().iter().map(name).collect();
+        assert_eq!(main, [("lib".to_owned(), Scope::Compile), ("tool".to_owned(), Scope::Provided), ("core".to_owned(), Scope::Runtime)]);
+        // `lib` is already a main dependency, so the dev closure only adds `fixtures`.
+        let dev: Vec<_> = ctx.local_dependencies(TargetKind::Jvm, true).unwrap().iter().map(name).collect();
+        assert_eq!(dev, [("fixtures".to_owned(), Scope::Compile)]);
+
+        let setup = ctx.setup(TargetKind::Jvm).unwrap();
+        let find = |deps: &[Dependency], artifact: &str| deps.iter().find(|d| d.module.artifact == artifact).cloned();
+        // The consumer's own declaration wins over the dependency's.
+        assert_eq!(find(&setup.main, "shared").unwrap().version.as_deref(), Some("2.0"));
+        assert_eq!(find(&setup.main, "lib").unwrap().scope, Scope::Compile);
+        assert_eq!(find(&setup.main, "core").unwrap().scope, Scope::Runtime);
+        assert_eq!(find(&setup.main, "tool").unwrap().scope, Scope::Provided);
+        assert!(find(&setup.main, "hidden").is_none(), "provided dependencies are not passed on");
+        assert!(find(&setup.dev, "fixture").is_some());
+
+        let err = format!("{:#}", ctx.setup(TargetKind::Wasm).unwrap_err());
+        assert!(err.contains("`app` depends on the path dependency `lib`, which does not enable the wasm target"), "{err}");
+    }
 
     #[test]
     fn user_dependencies_override_framework_ones() {

@@ -5,11 +5,36 @@ use std::fmt::Write as _;
 
 use anyhow::Result;
 
+use super::Configuration;
+use super::context::BuildContext;
+use kargo_manifest::{Scope, TargetKind};
 use kargo_maven::{ModuleId, Resolution};
 
-/// Renders a resolution as a Cargo-style tree. Modules already printed are
-/// marked `(*)`; version conflicts show `requested -> selected`.
-pub fn render(title: &str, resolution: &Resolution, max_depth: Option<usize>) -> String {
+/// The packages a configuration of `target` uses through path dependencies, as tree lines such
+/// as `mathlib v0.1.0 (/home/me/mathlib)`. Their own Maven dependencies are part of the resolution.
+pub fn path_dependencies(ctx: &BuildContext, target: TargetKind, configuration: Configuration) -> Result<Vec<String>> {
+    let scopes: &[Scope] = match configuration {
+        Configuration::Compile => &[Scope::Compile, Scope::Provided],
+        Configuration::Runtime => &[Scope::Compile, Scope::Runtime],
+        Configuration::Test => &[Scope::Compile, Scope::Runtime, Scope::Provided],
+    };
+    let mut deps = ctx.local_dependencies(target, false)?;
+    if configuration == Configuration::Test {
+        deps.extend(ctx.local_dependencies(target, true)?);
+    }
+    Ok(deps
+        .iter()
+        .filter(|d| scopes.contains(&d.scope))
+        .map(|d| {
+            let pkg = ctx.project.package(d.package);
+            format!("{} v{} ({})", pkg.name(), pkg.manifest().package.version, pkg.root().display())
+        })
+        .collect())
+}
+
+/// Renders a resolution as a Cargo-style tree, after the `locals` (path dependency) lines.
+/// Modules already printed are marked `(*)`; version conflicts show `requested -> selected`.
+pub fn render(title: &str, locals: &[String], resolution: &Resolution, max_depth: Option<usize>) -> String {
     let versions: HashMap<&ModuleId, &str> = resolution.nodes.iter().map(|n| (&n.module, n.version.as_str())).collect();
     let deps: HashMap<&ModuleId, &Vec<(ModuleId, Option<String>)>> =
         resolution.nodes.iter().map(|n| (&n.module, &n.dependencies)).collect();
@@ -50,6 +75,10 @@ pub fn render(title: &str, resolution: &Resolution, max_depth: Option<usize>) ->
         }
     }
 
+    for (i, local) in locals.iter().enumerate() {
+        let last = i + 1 == locals.len() && resolution.roots.is_empty();
+        let _ = writeln!(out, "{}{local}", if last { "└── " } else { "├── " });
+    }
     for (i, root) in resolution.roots.iter().enumerate() {
         walk(&mut out, root, None, "", i + 1 == resolution.roots.len(), 1, max_depth, &versions, &deps, &mut expanded);
     }
@@ -109,7 +138,7 @@ mod tests {
 
     #[test]
     fn renders_tree() {
-        let text = render("demo (jvm)", &sample(), None);
+        let text = render("demo (jvm)", &[], &sample(), None);
         let expected = "\
 demo (jvm)
 ├── g:app:1
@@ -124,7 +153,7 @@ demo (jvm)
 
     #[test]
     fn depth_limit() {
-        let text = render("t", &sample(), Some(1));
+        let text = render("t", &[], &sample(), Some(1));
         assert!(!text.contains("g:shared"), "{text}");
         assert!(text.contains("g:other:1"));
     }

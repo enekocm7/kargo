@@ -57,9 +57,16 @@ pub fn update(ctx: &mut BuildContext, opts: &UpdateOptions) -> Result<Vec<LockCh
     Ok(previous.diff(&ctx.lockfile()))
 }
 
-/// Resolves every configuration of every enabled target into a fresh lockfile.
+/// Resolves every configuration of every enabled target of every package into a fresh lockfile.
 fn resolve_all(ctx: &BuildContext) -> Result<()> {
     ctx.reset_lockfile(None);
+    for package in 0..ctx.project.packages().len() {
+        resolve_package(&ctx.for_package(package))?;
+    }
+    Ok(())
+}
+
+fn resolve_package(ctx: &BuildContext) -> Result<()> {
     let targets: Vec<TargetKind> = ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
     for target in targets {
         for configuration in [Configuration::Compile, Configuration::Runtime, Configuration::Test] {

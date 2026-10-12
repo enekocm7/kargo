@@ -35,6 +35,7 @@ $ kargo test
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided] [--bom]` | Add dependencies (latest release when no version is given) |
+| `kargo add --path <dir> [--dev] [-t <target>]` | Depend on another Kargo package on disk, built from source |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
@@ -53,6 +54,8 @@ $ kargo test
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
 
+In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree` and `fetch` take `-p <member>` (repeatable) or `--workspace`; `run`, `package`, `add`, `remove`, `outdated` and `upgrade` take `-p <member>`.
+
 ## Project layout
 
 ```text
@@ -66,6 +69,8 @@ resources/           JVM resources (test-resources/ for tests)
 android/             AndroidManifest.xml, res/, assets/
 target/              build output: target/<debug|release>/<target>/
 ```
+
+A workspace is a directory whose `kargo.toml` has a `[workspace]` with `members` (each a package like the one above). Members share the workspace's `kargo.lock` and `target/`, and build into `target/<profile>/<member>/<target>/`.
 
 `expect` declarations in `src/` can have `actual` implementations in `src-<target>/`. On the JVM, `.java` files next to your Kotlin files are compiled together with them (set `[target.jvm] main-class` if your `main` is in Java).
 
@@ -106,7 +111,8 @@ min-sdk = 24                # target-sdk = 36, compile-sdk = 37, kind = "applica
 guava = { group = "com.google.guava", version = "33.4.0-jre", exclude = ["com.google.code.findbugs:jsr305"] }
 logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" }
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
-# Other keys: classifier, extension, force, transitive
+mathlib = { path = "../mathlib" }   # another Kargo package, built from source
+# Other keys: classifier, extension, force, transitive, workspace = true
 
 [target.jvm.dependencies]   # per-target dependencies
 
@@ -131,6 +137,23 @@ exclude = ["src/generated/**"]
 config = ["config/detekt.yml"]
 baseline = "detekt-baseline.xml"
 ```
+
+### Workspaces
+
+```toml
+# kargo.toml at the workspace root: no [package]
+[workspace]
+members = ["app", "mathlib"]          # directories; one kargo.lock and one target/ for all
+
+[workspace.kotlin]
+version = "2.4.21"                    # every member builds with this Kotlin version
+
+[workspace.dependencies]              # members inherit these with `name = { workspace = true }`
+"org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"
+mathlib = { path = "mathlib" }
+```
+
+A path dependency brings its own Maven dependencies along, and is built for the consumer's target: a jar for the JVM, a klib for Wasm and Native (Android is not supported yet). Packages built together use one Kotlin version and one JDK.
 
 ### Toolchains
 

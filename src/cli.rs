@@ -19,7 +19,7 @@ use kargo_ops::ops::run::RunOptions;
 use kargo_ops::ops::test::TestOptions;
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
-use kargo_ops::workspace::{ProfileKind, Workspace};
+use kargo_ops::workspace::{ProfileKind, Project, Selection, Workspace};
 use kargo_util::config::Config;
 use kargo_util::shell::{Shell, Verbosity};
 
@@ -163,6 +163,37 @@ enum ConfigurationArg {
     Test,
 }
 
+/// `-p` / `--workspace` for commands that work on several packages.
+#[derive(Debug, Args, Default)]
+struct PackageArgs {
+    /// Only this package (repeatable); defaults to the current member, or every member at a workspace root
+    #[arg(short, long = "package", value_name = "NAME")]
+    packages: Vec<String>,
+    /// Every member of the workspace
+    #[arg(long, conflicts_with = "packages")]
+    workspace: bool,
+}
+
+impl PackageArgs {
+    fn selection(&self) -> Selection {
+        Selection { packages: self.packages.clone(), workspace: self.workspace }
+    }
+}
+
+/// `-p` for commands that work on one package.
+#[derive(Debug, Args, Default)]
+struct OnePackageArg {
+    /// The package to work on (required at the root of a workspace with several members)
+    #[arg(short, long = "package", value_name = "NAME")]
+    package: Option<String>,
+}
+
+impl OnePackageArg {
+    fn selection(&self) -> Selection {
+        Selection { packages: self.package.iter().cloned().collect(), workspace: false }
+    }
+}
+
 #[derive(Debug, Args)]
 struct BuildArgs {
     /// Build with the release profile
@@ -171,6 +202,8 @@ struct BuildArgs {
     /// Only this target (repeatable); defaults to all enabled targets
     #[arg(short, long = "target", value_enum)]
     targets: Vec<TargetArg>,
+    #[command(flatten)]
+    packages: PackageArgs,
 }
 
 impl BuildArgs {
@@ -240,6 +273,8 @@ enum Command {
         /// Target to run (defaults to jvm, then native, wasm, android)
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
+        #[command(flatten)]
+        package: OnePackageArg,
         /// Arguments for the program
         #[arg(last = true)]
         args: Vec<String>,
@@ -264,24 +299,33 @@ enum Command {
         /// Open the documentation in a browser when it is generated
         #[arg(long)]
         open: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
     },
     /// Format Kotlin sources with ktlint
     Fmt {
         /// Report unformatted files without changing them; fail if there are any
         #[arg(long)]
         check: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
     },
     /// Analyze Kotlin sources with detekt
     Lint {
         /// Record the current issues in the baseline file instead of reporting them
         #[arg(long)]
         create_baseline: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
     },
     /// Add dependencies or built-in frameworks to kargo.toml
     Add {
         /// Coordinates: group:artifact[:version[:classifier]] (latest release if no version)
-        #[arg(required_unless_present = "frameworks")]
+        #[arg(required_unless_present_any = ["frameworks", "path"], conflicts_with = "path")]
         coordinates: Vec<String>,
+        /// Depend on the Kargo package in this directory, built from source
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["bom", "pre", "no_verify", "frameworks"])]
+        path: Option<PathBuf>,
         /// Add to [dev-dependencies]
         #[arg(long, conflicts_with = "target")]
         dev: bool,
@@ -309,6 +353,8 @@ enum Command {
             add = ArgValueCandidates::new(complete::frameworks)
         )]
         frameworks: Vec<String>,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Remove dependencies from kargo.toml
     #[command(visible_alias = "rm")]
@@ -322,6 +368,8 @@ enum Command {
         /// Remove from [target.<target>.dependencies]
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Show dependencies in kargo.toml that have newer versions
     Outdated {
@@ -330,6 +378,8 @@ enum Command {
         /// Consider pre-release versions
         #[arg(long)]
         pre: bool,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Raise the versions in kargo.toml to the newest compatible releases
     Upgrade {
@@ -344,6 +394,8 @@ enum Command {
         /// Show what would change without writing kargo.toml
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Display the dependency tree
     Tree {
@@ -358,11 +410,15 @@ enum Command {
         /// Only list modules requested in several versions
         #[arg(short, long)]
         duplicates: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
     },
     /// Download all dependencies and toolchains
     Fetch {
         #[arg(short, long = "target", value_enum)]
         targets: Vec<TargetArg>,
+        #[command(flatten)]
+        packages: PackageArgs,
     },
     /// Re-resolve dependencies and rewrite kargo.lock
     Update {
@@ -385,6 +441,8 @@ enum Command {
     Package {
         #[arg(short, long)]
         release: bool,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Run a task from [tasks], or list tasks
     Task {
@@ -525,10 +583,46 @@ fn load_workspace(global: &GlobalArgs) -> Result<Workspace> {
     Workspace::discover(&cwd, global.manifest_path.as_deref())
 }
 
-fn context<'a>(config: &'a Config, ws: &'a Workspace, global: &GlobalArgs, profile: ProfileKind) -> Result<BuildContext<'a>> {
-    let mut ctx = BuildContext::new(config, ws, profile)?;
+fn load_project(global: &GlobalArgs) -> Result<Project> {
+    let cwd = std::env::current_dir().context("failed to read the current directory")?;
+    Project::discover(&cwd, global.manifest_path.as_deref())
+}
+
+/// The package a single-package command such as `kargo add` works on.
+fn load_one(global: &GlobalArgs, package: &OnePackageArg, command: &str) -> Result<Workspace> {
+    let project = load_project(global)?;
+    let index = project.select_one(&package.selection(), command)?;
+    Ok(project.package(index).clone())
+}
+
+fn context<'a>(
+    config: &'a Config,
+    project: &'a Project,
+    package: usize,
+    global: &GlobalArgs,
+    profile: ProfileKind,
+) -> Result<BuildContext<'a>> {
+    let mut ctx = BuildContext::new(config, project, package, profile)?;
     ctx.locked = global.locked;
     Ok(ctx)
+}
+
+/// Runs `op` for every selected package in turn, sharing one lockfile and the toolchains.
+fn for_each_package<T>(
+    config: &Config,
+    project: &Project,
+    selection: &Selection,
+    global: &GlobalArgs,
+    profile: ProfileKind,
+    mut op: impl FnMut(&BuildContext) -> Result<T>,
+) -> Result<Vec<T>> {
+    let selected = project.select(selection)?;
+    let ctx = context(config, project, selected[0], global, profile)?;
+    let mut results = Vec::new();
+    for &index in &selected {
+        results.push(op(&ctx.for_package(index))?);
+    }
+    Ok(results)
 }
 
 fn profile(release: bool) -> ProfileKind {
@@ -596,48 +690,57 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Build(args) => {
-            let ws = load_workspace(&global)?;
+            let project = load_project(&global)?;
             let opts = args.options();
-            let ctx = context(&config, &ws, &global, opts.profile())?;
-            ops::build::build(&ctx, &opts)?;
+            for_each_package(&config, &project, &args.packages.selection(), &global, opts.profile(), |ctx| ops::build::build(ctx, &opts))?;
             Ok(0)
         }
         Command::Check { build, tests } => {
-            let ws = load_workspace(&global)?;
+            let project = load_project(&global)?;
             let opts = CheckOptions { build: build.options(), tests };
-            let ctx = context(&config, &ws, &global, opts.build.profile())?;
-            ops::check::check(&ctx, &opts)?;
+            for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
+                ops::check::check(ctx, &opts)
+            })?;
             Ok(0)
         }
-        Command::Run { release, target, args } => {
-            let ws = load_workspace(&global)?;
-            let ctx = context(&config, &ws, &global, profile(release))?;
+        Command::Run { release, target, package, args } => {
+            let project = load_project(&global)?;
+            let index = project.select_one(&package.selection(), "`kargo run`")?;
+            let ctx = context(&config, &project, index, &global, profile(release))?;
             let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, args })?;
             Ok(exit_code(code))
         }
         Command::Test { build, filter, no_run } => {
-            let ws = load_workspace(&global)?;
+            let project = load_project(&global)?;
             let opts = TestOptions { build: build.options(), filter, no_run };
-            let ctx = context(&config, &ws, &global, opts.build.profile())?;
-            if ops::test::test(&ctx, &opts)? {
+            let passed = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
+                ops::test::test(ctx, &opts)
+            })?;
+            if passed.iter().all(|ok| *ok) {
                 Ok(0)
             } else {
                 shell.error("test failed");
                 Ok(FAILURE)
             }
         }
-        Command::Doc { targets, open } => {
-            let ws = load_workspace(&global)?;
-            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
-            let targets = targets.into_iter().map(Into::into).collect();
-            ops::doc::doc(&ctx, &DocOptions { targets, open })?;
+        Command::Doc { targets, open, packages } => {
+            let project = load_project(&global)?;
+            let targets: Vec<TargetKind> = targets.into_iter().map(Into::into).collect();
+            let mut open = open;
+            for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+                // Only the first package's documentation opens in the browser.
+                let opts = DocOptions { targets: targets.clone(), open: std::mem::take(&mut open) };
+                ops::doc::doc(ctx, &opts)
+            })?;
             Ok(0)
         }
-        Command::Fmt { check } => {
-            let ws = load_workspace(&global)?;
-            note_shadowed_task(shell, &ws, "fmt");
-            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
-            if ops::fmt::fmt(&ctx, &FmtOptions { check })? {
+        Command::Fmt { check, packages } => {
+            let project = load_project(&global)?;
+            let ok = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+                note_shadowed_task(shell, ctx.ws, "fmt");
+                ops::fmt::fmt(ctx, &FmtOptions { check })
+            })?;
+            if ok.iter().all(|ok| *ok) {
                 Ok(0)
             } else if check {
                 shell.error("formatting check failed; `kargo fmt` fixes what ktlint can correct automatically");
@@ -647,11 +750,13 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                 Ok(FAILURE)
             }
         }
-        Command::Lint { create_baseline } => {
-            let ws = load_workspace(&global)?;
-            note_shadowed_task(shell, &ws, "lint");
-            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
-            if ops::lint::lint(&ctx, &LintOptions { create_baseline })? {
+        Command::Lint { create_baseline, packages } => {
+            let project = load_project(&global)?;
+            let ok = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+                note_shadowed_task(shell, ctx.ws, "lint");
+                ops::lint::lint(ctx, &LintOptions { create_baseline })
+            })?;
+            if ok.iter().all(|ok| *ok) {
                 Ok(0)
             } else {
                 shell.error(
@@ -660,10 +765,14 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                 Ok(FAILURE)
             }
         }
-        Command::Add { coordinates, dev, target, scope, bom, pre, no_verify, frameworks } => {
-            let ws = load_workspace(&global)?;
+        Command::Add { coordinates, path, dev, target, scope, bom, pre, no_verify, frameworks, package } => {
+            let ws = load_one(&global, &package, "`kargo add`")?;
             if !frameworks.is_empty() {
                 ops::add::add_frameworks(&config, &ws, &frameworks)?;
+            }
+            if let Some(path) = path {
+                let dir = std::env::current_dir().context("failed to read the current directory")?.join(path);
+                ops::add::add_path(&config, &ws, &dir, section(dev, target), scope.map(Into::into))?;
             }
             if !coordinates.is_empty() {
                 let opts = ops::add::AddOptions {
@@ -678,46 +787,48 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Remove { names, dev, target } => {
-            let ws = load_workspace(&global)?;
+        Command::Remove { names, dev, target, package } => {
+            let ws = load_one(&global, &package, "`kargo remove`")?;
             ops::add::remove(&config, &ws, &names, section(dev, target))?;
             Ok(0)
         }
-        Command::Tree { target, configuration, depth, duplicates } => {
-            let ws = load_workspace(&global)?;
-            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
-            let targets = match target {
-                Some(t) => vec![t.into()],
-                None => ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect(),
-            };
+        Command::Tree { target, configuration, depth, duplicates, packages } => {
+            let project = load_project(&global)?;
             let configuration = match configuration {
                 ConfigurationArg::Compile => Configuration::Compile,
                 ConfigurationArg::Runtime => Configuration::Runtime,
                 ConfigurationArg::Test => Configuration::Test,
             };
-            let pkg = &ws.manifest().package;
-            for t in targets {
-                for (label, res) in ops::resolution_for(&ctx, t, configuration)? {
-                    if duplicates {
-                        for line in ops::tree::conflicts(&res)? {
-                            println!("{line}");
+            for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+                let targets = match target {
+                    Some(t) => vec![t.into()],
+                    None => ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect(),
+                };
+                let pkg = &ctx.ws.manifest().package;
+                for t in targets {
+                    let locals = ops::tree::path_dependencies(ctx, t, configuration)?;
+                    for (label, res) in ops::resolution_for(ctx, t, configuration)? {
+                        if duplicates {
+                            for line in ops::tree::conflicts(&res)? {
+                                println!("{line}");
+                            }
+                        } else {
+                            print!("{}", ops::tree::render(&format!("{} v{} ({label})", pkg.name, pkg.version), &locals, &res, depth));
                         }
-                    } else {
-                        print!("{}", ops::tree::render(&format!("{} v{} ({label})", pkg.name, pkg.version), &res, depth));
                     }
                 }
-            }
+                Ok(())
+            })?;
             Ok(0)
         }
-        Command::Fetch { targets } => {
-            let ws = load_workspace(&global)?;
-            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+        Command::Fetch { targets, packages } => {
+            let project = load_project(&global)?;
             let targets: Vec<TargetKind> = targets.into_iter().map(Into::into).collect();
-            ops::fetch(&ctx, &targets)?;
+            for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| ops::fetch(ctx, &targets))?;
             Ok(0)
         }
-        Command::Outdated { names, pre } => {
-            let ws = load_workspace(&global)?;
+        Command::Outdated { names, pre, package } => {
+            let ws = load_one(&global, &package, "`kargo outdated`")?;
             let rows = ops::upgrade::outdated(&config, &ws, &names, pre)?;
             if rows.is_empty() {
                 shell.status("Fresh", "every dependency in kargo.toml is on its newest version");
@@ -726,8 +837,8 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Upgrade { names, incompatible, pre, dry_run } => {
-            let ws = load_workspace(&global)?;
+        Command::Upgrade { names, incompatible, pre, dry_run, package } => {
+            let ws = load_one(&global, &package, "`kargo upgrade`")?;
             let opts = ops::upgrade::UpgradeOptions { names, incompatible, prerelease: pre, dry_run };
             if ops::upgrade::upgrade(&config, &ws, &opts)?.is_empty() {
                 shell.status("Fresh", "no dependency in kargo.toml has a newer version to upgrade to");
@@ -735,9 +846,9 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Update { modules, precise, dry_run } => {
-            let ws = load_workspace(&global)?;
+            let project = load_project(&global)?;
             let config = config.with_refresh(true);
-            let mut ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            let mut ctx = context(&config, &project, project.members()[0], &global, ProfileKind::Dev)?;
             let modules = modules
                 .iter()
                 .map(|m| m.parse().with_context(|| format!("`{m}` is not a `group:artifact` module")))
@@ -757,14 +868,15 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Clean { release } => {
-            let ws = load_workspace(&global)?;
-            let removed = ops::clean(&ws, release.then_some(ProfileKind::Release))?;
+            let project = load_project(&global)?;
+            let removed = ops::clean(project.target_dir(), release.then_some(ProfileKind::Release))?;
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release } => {
-            let ws = load_workspace(&global)?;
-            let ctx = context(&config, &ws, &global, profile(release))?;
+        Command::Package { release, package } => {
+            let project = load_project(&global)?;
+            let index = project.select_one(&package.selection(), "`kargo package`")?;
+            let ctx = context(&config, &project, index, &global, profile(release))?;
             let jar = ops::package(&ctx)?;
             println!("{}", jar.display());
             Ok(0)
@@ -788,14 +900,18 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Android { args } => {
-            let ws = load_workspace(&global)?;
-            let ctx = context(&config, &ws, &global, ProfileKind::Dev)?;
+            let project = load_project(&global)?;
+            let index = project.select_one(&Selection::default(), "`kargo android`")?;
+            let ctx = context(&config, &project, index, &global, ProfileKind::Dev)?;
             let ok = kargo_ops::gradle::gradle(&ctx, &args)?;
             Ok(if ok { 0 } else { FAILURE })
         }
         Command::Info => {
-            let ws = load_workspace(&global)?;
-            print_info(&ws);
+            let project = load_project(&global)?;
+            match project.select_one(&Selection::default(), "`kargo info`") {
+                Ok(index) => print_info(&project, project.package(index)),
+                Err(_) => print_workspace_info(&project),
+            }
             Ok(0)
         }
         Command::Completions { shell } => {
@@ -833,9 +949,11 @@ fn note_shadowed_task(shell: &Shell, ws: &Workspace, command: &str) {
 }
 
 fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) -> Result<u8> {
-    // Toolchain commands also work outside a project.
-    let ws = load_workspace(global).ok();
-    let manifest = ws.as_ref().map(Workspace::manifest);
+    // Toolchain commands also work outside a project. Packages built together share their
+    // toolchains, so the first member stands for a whole workspace.
+    let project = load_project(global).ok();
+    let ws = project.as_ref().map(|p| p.package(p.current().unwrap_or(p.members()[0])));
+    let manifest = ws.map(Workspace::manifest);
     let shell = config.shell();
     match command {
         ToolchainCommand::List => print!("{}", toolchain_ops::list(config, manifest)?),
@@ -845,8 +963,17 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
         }
         ToolchainCommand::Install { kind: None, version: Some(_) } => bail!("specify what to install: `jdk` or `native`"),
         ToolchainCommand::Install { kind: None, version: None } => {
-            let manifest = manifest.context("not in a Kargo project; use `kargo toolchain install jdk <version>` or `native <version>`")?;
-            let done = toolchain_ops::install_for_project(config, manifest)?;
+            let project =
+                project.as_ref().context("not in a Kargo project; use `kargo toolchain install jdk <version>` or `native <version>`")?;
+            // Members share the JDK and Kotlin version, but any of them may have the Native target.
+            let mut done: Vec<String> = Vec::new();
+            for &member in project.members() {
+                for what in toolchain_ops::install_for_project(config, project.package(member).manifest())? {
+                    if !done.contains(&what) {
+                        done.push(what);
+                    }
+                }
+            }
             if done.is_empty() {
                 shell.status("Fresh", "this project uses the system JDK and no Kotlin/Native target");
             }
@@ -861,8 +988,9 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
         }
         ToolchainCommand::Available => print!("{}", toolchain_ops::available(config)?),
         ToolchainCommand::Which => {
+            let project = project.as_ref().context("`kargo toolchain which` must run inside a Kargo project")?;
             let ws = ws.context("`kargo toolchain which` must run inside a Kargo project")?;
-            let ctx = context(config, &ws, global, ProfileKind::Dev)?;
+            let ctx = context(config, project, project.current().unwrap_or(project.members()[0]), global, ProfileKind::Dev)?;
             let m = ws.manifest();
             let jdk = ctx.jdk()?;
             println!("jdk:           {} (JDK {} at {})", m.toolchain.jdk, jdk.version, jdk.home.display());
@@ -919,9 +1047,24 @@ fn list_plugins(config: &Config, global: &GlobalArgs) {
     }
 }
 
-fn print_info(ws: &Workspace) {
+fn print_workspace_info(project: &Project) {
+    let members: Vec<String> =
+        project.members().iter().map(|&i| project.package(i)).map(|p| format!("{} v{}", p.name(), p.manifest().package.version)).collect();
+    println!("workspace:    {}", project.root().display());
+    println!("members:      {}", members.join(", "));
+    if let Some(&first) = project.members().first() {
+        println!("kotlin:       {}", project.package(first).manifest().kotlin.version);
+    }
+    println!("lockfile:     {}", project.lockfile_path().display());
+    println!("target dir:   {}", project.target_dir().display());
+}
+
+fn print_info(project: &Project, ws: &Workspace) {
     let m = ws.manifest();
     println!("package:      {} v{}", m.package.name, m.package.version);
+    if project.is_workspace() {
+        println!("workspace:    {}", project.root().display());
+    }
     if let Some(g) = &m.package.group {
         println!("group:        {g}");
     }
@@ -944,6 +1087,11 @@ fn print_info(ws: &Workspace) {
         println!("frameworks:   {}", enabled.join(", "));
     }
     println!("dependencies: {} (+{} dev)", m.dependencies.len(), m.dev_dependencies.len());
+    if !ws.path_dependencies().is_empty() {
+        let paths: Vec<String> =
+            ws.path_dependencies().iter().map(|(d, i)| format!("{} ({})", d.name, project.package(*i).root().display())).collect();
+        println!("path deps:    {}", paths.join(", "));
+    }
     let repos: Vec<&str> = m.repositories.iter().map(|r| r.name.as_str()).collect();
     println!("repositories: {}", repos.join(", "));
     println!("root:         {}", ws.root().display());
@@ -1024,11 +1172,29 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "rm", "g:a", "-t", "wasm"]).unwrap();
         assert!(matches!(cli.command, Command::Remove { target: Some(TargetArg::Wasm), .. }));
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
-        assert!(matches!(cli.command, Command::Doc { ref targets, open: true } if matches!(targets[..], [TargetArg::Jvm])));
+        assert!(matches!(cli.command, Command::Doc { ref targets, open: true, .. } if matches!(targets[..], [TargetArg::Jvm])));
         let cli = Cli::try_parse_from(["kargo", "fmt", "--check"]).unwrap();
-        assert!(matches!(cli.command, Command::Fmt { check: true }));
+        assert!(matches!(cli.command, Command::Fmt { check: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "lint", "--create-baseline"]).unwrap();
-        assert!(matches!(cli.command, Command::Lint { create_baseline: true }));
+        assert!(matches!(cli.command, Command::Lint { create_baseline: true, .. }));
+    }
+
+    #[test]
+    fn parses_package_selection() {
+        let cli = Cli::try_parse_from(["kargo", "build", "-p", "app", "--package", "lib"]).unwrap();
+        assert!(matches!(cli.command, Command::Build(ref args) if args.packages.selection().packages == ["app", "lib"]));
+        let cli = Cli::try_parse_from(["kargo", "test", "--workspace"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { ref build, .. } if build.packages.workspace));
+        assert!(Cli::try_parse_from(["kargo", "build", "--workspace", "-p", "app"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "run", "-p", "app", "--", "x"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Run { ref package, ref args, .. } if package.package.as_deref() == Some("app") && args == &["x"])
+        );
+        assert!(Cli::try_parse_from(["kargo", "run", "-p", "a", "-p", "b"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "add", "--path", "../lib", "--dev"]).unwrap();
+        assert!(matches!(cli.command, Command::Add { ref path, dev: true, .. } if path.as_deref() == Some(Path::new("../lib"))));
+        assert!(Cli::try_parse_from(["kargo", "add", "--path", "../lib", "g:a"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "add", "--path", "../lib", "--bom"]).is_err());
     }
 
     #[test]

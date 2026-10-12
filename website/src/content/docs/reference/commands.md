@@ -24,6 +24,18 @@ These work with every command.
 
 Targets are `jvm`, `wasm`, `native` and `android`.
 
+## Package selection
+
+In a [workspace](../../guides/workspaces/), commands apply to every member at the workspace root and to the current member inside a member's directory. These options pick packages explicitly:
+
+| Option | Commands | Meaning |
+|---|---|---|
+| `-p, --package <name>` | `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` | Only this package (repeatable) |
+| `--workspace` | the same | Every member of the workspace |
+| `-p, --package <name>` | `run`, `package`, `add`, `remove`, `outdated`, `upgrade` | The one package to work on; required at the root of a workspace with several members |
+
+`-p` takes any package of the project, including a path dependency that is not a member. Outside a workspace there is one package, so you never need these options.
+
 ---
 
 ## `kargo new`
@@ -72,10 +84,14 @@ Compile all enabled targets, or the ones you name.
 |---|---|
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
+| `-p, --package <name>`, `--workspace` | Which packages to build ([package selection](#package-selection)) |
+
+[Path dependencies](../../guides/workspaces/) are built first, for the same targets.
 
 ```sh
 kargo build
 kargo build --release -t jvm -t native
+kargo build -p calc
 ```
 
 ## `kargo check` (`c`)
@@ -87,6 +103,7 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | `--tests` | Also check the test sources (`tests/`, `tests-<target>/`) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
+| `-p, --package <name>`, `--workspace` | Which packages to check |
 
 ```sh
 kargo check
@@ -112,6 +129,7 @@ Build and run the program. Arguments after `--` go to the program.
 |---|---|
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `android` |
+| `-p, --package <name>` | The package to run; required at the root of a workspace with several members |
 
 How each target runs:
 
@@ -136,6 +154,7 @@ kargo test [filter] [options]
 | `--no-run` | Compile tests but don't run them |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
+| `-p, --package <name>`, `--workspace` | Which packages to test, one after another. The command fails if any test failed |
 
 ## `kargo doc` (`d`)
 
@@ -149,6 +168,7 @@ kargo doc [--open] [-t <target>]
 |---|---|
 | `--open` | Open the documentation in a browser when it is generated (the browser in `BROWSER`, else the system default) |
 | `-t, --target <target>` | Only this target (repeatable); defaults to every enabled target |
+| `-p, --package <name>`, `--workspace` | Which packages to document. In a workspace, each goes to `target/debug/<name>/doc/`, and `--open` opens the first |
 
 Configure it with [`[doc]`](../manifest/#doc). See [API documentation](../../guides/documentation/).
 
@@ -163,6 +183,7 @@ kargo fmt [--check]
 | Option | Meaning |
 |---|---|
 | `--check` | Report unformatted code without changing files; exit with code 101 if there is any |
+| `-p, --package <name>`, `--workspace` | Which packages to format |
 
 Without `--check`, files are rewritten in place, and the command exits with code 101 if ktlint found problems it can't fix. ktlint reads `.editorconfig`; configure the rest with [`[fmt]`](../manifest/#fmt). See [Formatting and linting](../../guides/formatting-and-linting/).
 
@@ -177,6 +198,7 @@ kargo lint [--create-baseline]
 | Option | Meaning |
 |---|---|
 | `--create-baseline` | Record the current issues in the baseline file (`detekt-baseline.xml` by default) instead of reporting them |
+| `-p, --package <name>`, `--workspace` | Which packages to analyze |
 
 detekt reads `detekt.yml`; configure the rest with [`[lint]`](../manifest/#lint). See [Formatting and linting](../../guides/formatting-and-linting/).
 
@@ -186,11 +208,13 @@ Add dependencies to `kargo.toml`, or enable frameworks.
 
 ```sh
 kargo add <group:artifact[:version[:classifier]]>... [options]
+kargo add --path <dir> [--dev] [-t <target>] [--scope <scope>]
 kargo add -F <framework,...>
 ```
 
 | Option | Meaning |
 |---|---|
+| `--path <dir>` | Depend on the Kargo package in `<dir>` (relative to the current directory), built from source. The entry is named after that package, and its path is written relative to `kargo.toml`. See [path dependencies](../../guides/workspaces/) |
 | `--dev` | Add to `[dev-dependencies]` |
 | `-t, --target <target>` | Add to `[target.<target>.dependencies]` |
 | `--scope <scope>` | `compile`, `runtime` or `provided` |
@@ -198,6 +222,9 @@ kargo add -F <framework,...>
 | `--pre` | Allow pre-release versions when picking the latest |
 | `--no-verify` | Don't check that the artifact exists |
 | `-F, --framework <list>` | Enable built-in frameworks instead |
+| `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
+
+`kargo add --path` refuses a dependency that would form a cycle, reuse another package's name or bring a second Kotlin version, and leaves `kargo.toml` unchanged.
 
 Without a version, the latest release is used. Plain versions win over variants that some libraries publish next to them, such as `0.8.0-0.6.x-compat` or `33.0.0-jre`; Kargo prints a note naming the variant it skipped. When a library publishes only variants, the newest one is used.
 
@@ -213,8 +240,9 @@ kargo remove <group:artifact or key>... [--dev] [-t <target>]
 |---|---|
 | `--dev` | Remove from `[dev-dependencies]` |
 | `-t, --target <target>` | Remove from `[target.<target>.dependencies]` |
+| `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
-Without an option, the dependency is removed from `[dependencies]`.
+Path dependencies are removed by their key: `kargo remove mathlib`. Without an option, the dependency is removed from `[dependencies]`.
 
 ## `kargo outdated`
 
@@ -242,6 +270,7 @@ io.mockk:mockk                          1.13.0   1.14.11     1.14.11  dev-depend
 |---|---|
 | `names` | Only check these dependencies |
 | `--pre` | Consider pre-release versions. Dependencies already on a pre-release always consider them |
+| `-p, --package <name>` | The workspace member to check |
 
 A dependency stays on its variant: `33.0.0-jre` is compared with other `-jre` versions, and a plain version never moves to a `-compat` one. Dependencies declared with a version range or without a version (managed by a BOM) are skipped. The command only reads; nothing is changed.
 
@@ -266,8 +295,9 @@ note: `org.jetbrains.kotlinx:kotlinx-datetime` 0.8.0 is available but not compat
 | `-i, --incompatible` | Upgrade to the newest version even across a major version (or a `0.x` minor version) |
 | `--pre` | Consider pre-release versions |
 | `--dry-run` | Print the changes without writing `kargo.toml` |
+| `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
-"Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). `kargo.lock` is re-resolved on the next build because the manifest changed.
+Dependencies inherited with `workspace = true` are skipped; upgrade them in the workspace's `kargo.toml`. "Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). `kargo.lock` is re-resolved on the next build because the manifest changed.
 
 ## `kargo tree`
 
@@ -279,14 +309,18 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 | `-c, --configuration <c>` | `runtime` | `compile`, `runtime` or `test` |
 | `--depth <n>` | unlimited | Maximum depth |
 | `-d, --duplicates` | | Only modules requested in several versions |
+| `-p, --package <name>`, `--workspace` | current package | Which packages to show |
+
+Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`; their Maven dependencies appear in the graph next to yours.
 
 ## `kargo package`
 
-Build a self-contained, runnable fat jar with all runtime dependencies: `target/<profile>/jvm/<name>-<version>-all.jar`. JVM only.
+Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). JVM only.
 
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Use the release profile |
+| `-p, --package <name>` | The package to build the jar for; required at the root of a workspace with several members |
 
 ## `kargo fetch`
 
@@ -295,6 +329,7 @@ Download all dependencies and toolchains so later builds can run offline.
 | Option | Meaning |
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
+| `-p, --package <name>`, `--workspace` | Which packages to fetch for |
 
 ## `kargo update`
 
@@ -318,11 +353,11 @@ $ kargo update org.jetbrains.kotlinx:kotlinx-io-core --precise 0.7.0
      Updated kargo.lock
 ```
 
-`kargo update` changes only `kargo.lock`, never `kargo.toml`; use [`kargo upgrade`](#kargo-upgrade) to change the versions you declared. A `--precise` version stays locked until `kargo.toml` changes or you run `kargo update` for that module again. See [kargo.lock](../lockfile/#commands).
+In a workspace, or with path dependencies, `kargo update` re-resolves every package, since they share one `kargo.lock`. `kargo update` changes only `kargo.lock`, never `kargo.toml`; use [`kargo upgrade`](#kargo-upgrade) to change the versions you declared. A `--precise` version stays locked until `kargo.toml` changes or you run `kargo update` for that module again. See [kargo.lock](../lockfile/#commands).
 
 ## `kargo clean`
 
-Delete `target/`.
+Delete `target/` (the workspace's, in a workspace).
 
 | Option | Meaning |
 |---|---|
@@ -378,7 +413,7 @@ Show or stop the background compiler daemons that keep the Kotlin compiler warm 
 
 ## `kargo info`
 
-Print project information: package, targets, toolchains and paths.
+Print project information: package, targets, path dependencies and paths. At the root of a workspace, it prints the members, the Kotlin version, the lockfile and the target directory.
 
 ## `kargo completions`
 

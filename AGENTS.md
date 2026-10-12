@@ -40,6 +40,7 @@ Where things live when you need to change them:
 - **A built-in framework**: `crates/kargo-ops/src/builtins.rs`; project templates for `kargo new` are in `crates/kargo-ops/src/ops/new.rs`.
 - **Dependency resolution**: `crates/kargo-maven/src/resolver.rs`; locking in `crates/kargo-ops/src/lockfile.rs`.
 - **Source-layout conventions** (`src/`, `src-<target>/`, `tests-<target>/`, `resources/`, `android/`): `crates/kargo-ops/src/workspace.rs`.
+- **Workspaces and path dependencies**: `Project` in `crates/kargo-ops/src/workspace.rs` loads members and path dependencies (a `Workspace` there is one package); `BuildContext::for_package` and `local_dependencies` in `ops/context.rs` share state between packages; `ops/local.rs` builds dependency jars and klibs.
 
 ## Build, test, format
 

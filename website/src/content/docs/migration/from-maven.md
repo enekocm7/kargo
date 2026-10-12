@@ -149,4 +149,4 @@ Credentials that lived in `~/.m2/settings.xml` become environment variables name
 
 - **Conflict resolution.** Maven picks the *nearest* version in the tree; Kargo picks the *highest*, like Gradle. Usually this means fewer runtime `NoSuchMethodError`s, but check `kargo tree --duplicates` after migrating and use `force = true` if you need a specific version.
 - **Lockfile.** Kargo always writes `kargo.lock` with checksums. Commit it.
-- **Multi-module builds** (`<modules>`) aren't supported; each module becomes its own project.
+- **Multi-module builds.** `<modules>` becomes a [workspace](../../guides/workspaces/) with `members`, a dependency on a sibling module becomes `core = { path = "../core" }`, and `<dependencyManagement>` versions can move to `[workspace.dependencies]`. There is no parent POM inheritance of other settings.

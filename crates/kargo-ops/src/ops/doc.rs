@@ -16,7 +16,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use super::build::{finished, jvm_classpaths, native_libraries, native_platforms, select_targets, wasm_libraries};
+use super::build::{finished, jvm_classpaths, jvm_compile_classpath, native_libraries, native_platforms, select_targets, wasm_libraries};
 use super::context::BuildContext;
 use kargo_manifest::{DocSettings, TargetKind};
 use kargo_maven::{DependencyRequest, ModuleId, Platform, Resolver};
@@ -72,8 +72,8 @@ pub fn doc(ctx: &BuildContext, opts: &DocOptions) -> Result<PathBuf> {
     let (cli, plugins) = dokka(ctx, dokka_version)?;
 
     let pkg = &manifest.package;
-    let out = ws.target_dir().join(ctx.profile.dir_name()).join("doc");
-    let work = ws.target_dir().join(ctx.profile.dir_name()).join("dokka");
+    let out = ws.profile_dir(ctx.profile).join("doc");
+    let work = ws.profile_dir(ctx.profile).join("dokka");
     std::fs::create_dir_all(&work).with_context(|| format!("failed to create {}", work.display()))?;
     remove_dir_all_if_exists(&out)?;
 
@@ -177,7 +177,7 @@ fn existing(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
 fn classpath(ctx: &BuildContext, target: TargetKind) -> Result<(&'static str, Vec<PathBuf>)> {
     let setup = ctx.setup(target)?;
     Ok(match target {
-        TargetKind::Jvm => ("jvm", jvm_classpaths(ctx, &setup)?.compile.files()),
+        TargetKind::Jvm => ("jvm", jvm_compile_classpath(ctx, &jvm_classpaths(ctx, &setup)?)?),
         TargetKind::Wasm => ("wasm", wasm_libraries(ctx, &setup, false)?),
         TargetKind::Native => {
             // The API is the same on every platform, so the first one is enough.

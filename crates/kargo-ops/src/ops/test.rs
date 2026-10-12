@@ -158,9 +158,9 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let setup = ctx.setup(TargetKind::Jvm)?;
     // Make sure the main classpaths are locked too.
     let _ = jvm_classpaths(ctx, &setup)?;
-    let test_cp = ctx
-        .resolve("jvm/test", Platform::Jvm, &setup.requests(&[Scope::Compile, Scope::Runtime, Scope::Provided], true), &setup.boms)?
-        .files();
+    let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
+    let mut test_cp = super::local::artifacts(ctx, super::local::LocalTarget::Jvm, &all_scopes, true)?;
+    test_cp.extend(ctx.resolve("jvm/test", Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?.files());
     let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;

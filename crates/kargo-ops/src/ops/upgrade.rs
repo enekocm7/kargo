@@ -115,6 +115,14 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
     let mut editor = ManifestEditor::load(&ws.manifest_path())?;
     let mut changed = Vec::new();
     for (section, dep) in selected(ws.manifest(), &opts.names)? {
+        if editor.is_inherited(section, &dep.name) {
+            if opts.names.iter().any(|n| *n == dep.name || *n == dep.module.to_string()) {
+                config
+                    .shell()
+                    .note(format!("`{}` is inherited from [workspace.dependencies]; upgrade it in the workspace's kargo.toml", dep.name));
+            }
+            continue;
+        }
         let Some(o) = check(&client, section, dep, opts.prerelease)? else {
             if opts.names.iter().any(|n| *n == dep.name || *n == dep.module.to_string()) {
                 config.shell().note(format!("`{}` has no single version to upgrade (a range or a BOM-managed version)", dep.name));
@@ -141,7 +149,7 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
     if changed.is_empty() {
         return Ok(changed);
     }
-    Manifest::parse(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     editor.save()?;
     Ok(changed)
 }

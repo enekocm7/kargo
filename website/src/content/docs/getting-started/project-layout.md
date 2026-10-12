@@ -122,4 +122,18 @@ target/
 
 `kargo package` writes `target/<profile>/jvm/<name>-<version>-all.jar`.
 
+[Path dependencies](../../guides/workspaces/) build into `target/<profile>/deps/<name>/`. In a workspace, the root has the only `kargo.lock` and `target/`, and each member builds into `target/<profile>/<name>/` (its `lint/` and `android/` directories get a `<name>/` level too):
+
+```text
+myapp/
+├── kargo.toml                    [workspace] with members = ["calc", "mathlib"]
+├── kargo.lock
+├── calc/                         a member: kargo.toml, src/, tests/, ...
+├── mathlib/
+└── target/
+    └── debug/
+        ├── calc/jvm/calc-0.1.0.jar
+        └── mathlib/jvm/mathlib-0.1.0.jar
+```
+
 Change the output directory with the `KARGO_TARGET_DIR` environment variable.

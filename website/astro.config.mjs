@@ -35,6 +35,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Your first Kotlin app', slug: 'guides/first-app' },
 						{ label: 'Managing dependencies', slug: 'guides/dependencies' },
+						{ label: 'Workspaces', slug: 'guides/workspaces' },
 						{ label: 'Testing', slug: 'guides/testing' },
 						{ label: 'API documentation', slug: 'guides/documentation' },
 						{ label: 'Formatting and linting', slug: 'guides/formatting-and-linting' },
