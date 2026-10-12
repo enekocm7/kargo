@@ -278,6 +278,8 @@ impl<'a> BuildContext<'a> {
     /// A copy of the lockfile as currently resolved.
     pub fn lockfile(&self) -> Lockfile {
         self.lock.lock().expect("lock poisoned").clone()
+    }
+
     /// Fetches the self-contained (`-all` classifier) jar of a command-line tool such as ktlint or detekt.
     pub fn tool_fat_jar(&self, group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
         let jar = kargo_maven::Artifact::new(kargo_maven::ModuleId::new(group, artifact), version).with_classifier(Some("all".to_owned()));

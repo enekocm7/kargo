@@ -338,10 +338,17 @@ impl MavenClient {
                     .and_then(|t| SystemTime::now().duration_since(t).ok())
                     .is_some_and(|age| age < METADATA_TTL);
             if !fresh && !(self.offline && !repo.is_local()) {
-                // A failure here just means this repository doesn't know the module.
-                let _ = std::fs::remove_file(&cached);
-                if let Err(e) = self.fetch_from(repo, &rel, &cached) {
-                    self.shell.verbose("Skipping", format!("{} metadata from {}: {e:#}", module, repo.name));
+                // The download replaces the cached copy atomically, so a concurrent resolution of the same
+                // module never sees it missing. A failure just means this repository doesn't know the module.
+                match self.fetch_from(repo, &rel, &cached) {
+                    Ok(Fetch::Found) => {}
+                    Ok(_) => {
+                        let _ = std::fs::remove_file(&cached);
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&cached);
+                        self.shell.verbose("Skipping", format!("{} metadata from {}: {e:#}", module, repo.name));
+                    }
                 }
             }
             if let Ok(xml) = std::fs::read_to_string(&cached) {

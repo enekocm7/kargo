@@ -13,7 +13,6 @@ pub use module::Platform;
 pub use repo::{MavenClient, Repository};
 pub use resolver::{DependencyRequest, Exclusion, Resolution, Resolver};
 pub use version::{Version, VersionReq, select_latest};
-pub use version::{Version, VersionReq};
 
 /// Threads for network-bound work (metadata and artifact downloads), independent of the CPU count.
 const IO_THREADS: usize = 16;

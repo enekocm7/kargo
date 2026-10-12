@@ -43,8 +43,6 @@ $ kargo test
 | `kargo package [--release]` | Build a self-contained fat jar (JVM) |
 | `kargo fetch` | Pre-download everything |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
-| `kargo task [name] [args]`, `kargo <task>` | List or run tasks |
-| `kargo fetch` / `kargo update` | Pre-download everything / re-resolve `kargo.lock` |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
