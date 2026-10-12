@@ -147,8 +147,8 @@ pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Con
         TargetKind::Wasm => {
             let env = ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
             let key = if test { "wasm/test" } else { "wasm/main" };
-            let res = ctx.resolve(key, Platform::Wasm(env.as_str().to_owned()), &setup.requests(&all_scopes, test), &setup.boms)?;
-            Ok(vec![(format!("wasm-{}", env.as_str()), res)])
+            let res = ctx.resolve(key, Platform::Wasm(env.platform().to_owned()), &setup.requests(&all_scopes, test), &setup.boms)?;
+            Ok(vec![(format!("wasm-{}", env.platform()), res)])
         }
         TargetKind::Native => native_platforms(ctx)?
             .into_iter()

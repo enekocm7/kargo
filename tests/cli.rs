@@ -1027,6 +1027,52 @@ fn run_rejects_bins_on_targets_without_them() {
 }
 
 #[test]
+fn run_serving_options_need_a_wasm_browser_app() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", "[target.jvm]\n[target.wasm]\nenvironment = \"js\"\n"));
+    let message = "`--port` and `--open` serve a Wasm browser app; they need `-t wasm` with [target.wasm] environment = \"browser\"";
+    // The JVM program, and a Wasm program for Node.js, have nothing to serve.
+    p.kargo().args(["run", "--port", "9000"]).assert().failure().code(101).stderr(predicate::str::contains(message));
+    p.kargo().args(["run", "-t", "wasm", "--open"]).assert().failure().code(101).stderr(predicate::str::contains(message));
+}
+
+#[test]
+fn run_rejects_wasm_libraries() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("greeter", "[target.wasm]\nenvironment = \"browser\"\nkind = \"library\"\n"));
+    p.kargo()
+        .args(["run", "-t", "wasm"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("kind = \"library\" builds an npm package and has no program to run"));
+}
+
+#[test]
+fn wasm_target_options_are_validated() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("lib", "[target.wasm]\nenvironment = \"wasi\"\nkind = \"library\"\n"));
+    p.kargo()
+        .arg("build")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("kind = \"library\" builds an npm package, which needs environment = \"js\" or \"browser\""));
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"desktop\"\n"));
+    p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("expected `js`, `browser` or `wasi`"));
+}
+
+#[test]
+fn run_help_lists_the_serving_options() {
+    let p = Project::new();
+    p.kargo()
+        .args(["run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--port <PORT>").and(predicate::str::contains("--open")));
+}
+
+#[test]
 fn invalid_bin_sections_are_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("tools", "[[bin]]\nname = \"x\"\n"));

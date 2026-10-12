@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use kargo_manifest::{Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Dependency, Manifest, Scope, TargetKind};
 use kargo_maven::ModuleId;
 
 pub const COROUTINES_VERSION: &str = "1.11.0";
@@ -103,10 +103,8 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
         }
         TargetKind::Wasm => {
             let env = manifest.targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
-            let suffix = match env {
-                WasmEnvironment::Js => "wasm-js",
-                WasmEnvironment::Wasi => "wasm-wasi",
-            };
+            // Node.js and browsers share the `wasm-js` libraries.
+            let suffix = format!("wasm-{}", env.platform());
             c.dependencies.push(dep(&format!("org.jetbrains.kotlin:kotlin-stdlib-{suffix}"), Some(kotlin)));
             c.dev_dependencies.push(dep(&format!("org.jetbrains.kotlin:kotlin-test-{suffix}"), Some(kotlin)));
         }
@@ -336,6 +334,14 @@ mod tests {
         let m = manifest("[target.wasm]\nenvironment = \"wasi\"\n");
         let c = contributions(&m, TargetKind::Wasm, Path::new(".")).unwrap();
         assert_eq!(coords(&c.dependencies), ["org.jetbrains.kotlin:kotlin-stdlib-wasm-wasi"]);
+    }
+
+    #[test]
+    fn browser_uses_the_wasm_js_libraries() {
+        let m = manifest("[target.wasm]\nenvironment = \"browser\"\n");
+        let c = contributions(&m, TargetKind::Wasm, Path::new(".")).unwrap();
+        assert_eq!(coords(&c.dependencies), ["org.jetbrains.kotlin:kotlin-stdlib-wasm-js"]);
+        assert_eq!(coords(&c.dev_dependencies), ["org.jetbrains.kotlin:kotlin-test-wasm-js"]);
     }
 
     #[test]

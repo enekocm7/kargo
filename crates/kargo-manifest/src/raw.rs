@@ -148,7 +148,13 @@ struct RawJvm {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawWasm {
     environment: Option<String>,
+    kind: Option<String>,
+    module_name: Option<String>,
+    npm_name: Option<String>,
     package_manager: Option<String>,
+    #[serde(default)]
+    npm_dependencies: BTreeMap<String, String>,
+    wasm_opt: Option<Value>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -692,13 +698,49 @@ impl RawManifest {
                         .map(|w| -> Result<WasmTarget> {
                             let environment = match w.environment.as_deref() {
                                 None | Some("js") => WasmEnvironment::Js,
+                                Some("browser") => WasmEnvironment::Browser,
                                 Some("wasi") => WasmEnvironment::Wasi,
-                                Some(other) => bail!("unknown wasm environment `{other}` (expected `js` or `wasi`)"),
+                                Some(other) => bail!("unknown wasm environment `{other}` (expected `js`, `browser` or `wasi`)"),
+                            };
+                            let kind = match w.kind.as_deref() {
+                                None | Some("application") | Some("app") => WasmKind::Application,
+                                Some("library") | Some("lib") => WasmKind::Library,
+                                Some(other) => bail!("unknown wasm kind `{other}` (expected `application` or `library`)"),
+                            };
+                            if kind == WasmKind::Library && environment == WasmEnvironment::Wasi {
+                                bail!(
+                                    "[target.wasm] kind = \"library\" builds an npm package, which needs environment = \"js\" or \"browser\", not \"wasi\""
+                                );
+                            }
+                            if let Some(name) = &w.module_name {
+                                validate_module_name(name)?;
+                            }
+                            if let Some(name) = &w.npm_name {
+                                if kind != WasmKind::Library {
+                                    bail!("[target.wasm] `npm-name` names the package of a library; set kind = \"library\" or remove it");
+                                }
+                                validate_npm_name(name)?;
+                            }
+                            for (name, version) in &w.npm_dependencies {
+                                if name.trim().is_empty() || version.trim().is_empty() {
+                                    bail!("[target.wasm.npm-dependencies] needs a package name and a version for every entry");
+                                }
+                            }
+                            let wasm_opt = match w.wasm_opt {
+                                None | Some(Value::Boolean(true)) => WasmOpt::Auto,
+                                Some(Value::Boolean(false)) => WasmOpt::Off,
+                                Some(Value::String(path)) if !path.trim().is_empty() => WasmOpt::Path(PathBuf::from(path)),
+                                Some(_) => bail!("[target.wasm] `wasm-opt` must be true, false or the path of a wasm-opt executable"),
                             };
                             let package_manager = w.package_manager.as_deref().map(str::parse).transpose()?;
                             Ok(WasmTarget {
                                 environment,
+                                kind,
+                                module_name: w.module_name,
+                                npm_name: w.npm_name,
                                 package_manager,
+                                npm_dependencies: w.npm_dependencies,
+                                wasm_opt,
                                 dependencies: deps.parse(&w.dependencies, "target.wasm.dependencies", false, Some(TargetKind::Wasm))?,
                             })
                         })

@@ -78,7 +78,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
     let fp_dir = out.join(".fingerprint");
 
     let main = WasmCompilation {
-        name: &manifest.package.name,
+        name: wasm.module_name(&manifest.package),
         environment: wasm.environment,
         sources: sources(ctx, TargetKind::Wasm, false, &["kt"]),
         libraries: wasm_libraries(ctx, &setup, false)?,
@@ -87,6 +87,8 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         kotlin_args: &kotlin_args,
         output: out.clone(),
         debug: profile.debug,
+        optimize: false,
+        declarations: false,
         main_args: false,
     };
     main.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ""))?;
@@ -96,7 +98,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         return Ok(());
     }
     let main_klib = main.klib_path();
-    let name = format!("{}-test", manifest.package.name);
+    let name = format!("{}-test", main.name);
     let unit = WasmCompilation {
         name: &name,
         environment: wasm.environment,
@@ -107,6 +109,8 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         kotlin_args: &kotlin_args,
         output: out.join("test"),
         debug: true,
+        optimize: false,
+        declarations: false,
         main_args: false,
     };
     unit.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ", tests"))?;

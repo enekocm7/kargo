@@ -16,7 +16,7 @@ my-app/
 ├── src-android/         Android-only sources
 ├── tests/               common tests (kotlin.test)
 ├── tests-jvm/           JVM-only tests (likewise tests-wasm/, tests-native/, tests-android/)
-├── resources/           JVM resources, put on the classpath and in the jar
+├── resources/           JVM resources, put on the classpath and in the jar; also the files of a Wasm browser app
 ├── test-resources/      resources for JVM tests
 ├── android/             AndroidManifest.xml, res/, assets/
 ├── interop/             cinterop .def files for C libraries (Kotlin/Native)
@@ -119,7 +119,7 @@ target/
 │   │   ├── lib/                  runtime dependency jars
 │   │   ├── examples/             compiled examples, one directory each
 │   │   └── my-app-0.1.0.jar
-│   ├── wasm/
+│   ├── wasm/                     the module (.mjs, .wasm); for a browser app also index.html and resources/, for a library package.json and .d.mts
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
 │   ├── native/                   one directory per platform; cinterop/ holds C bindings, bin/ the [[bin]] executables
 │   └── doc/                      API documentation from kargo doc

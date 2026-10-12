@@ -16,7 +16,10 @@ description: Environment variables Kargo reads and sets.
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME` | JDK to use when `[toolchain] jdk` is `system` |
 | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android SDK location |
-| `BROWSER` | Browser that `kargo doc --open` starts (default: the system's default browser) |
+| `BROWSER` | Browser that `kargo doc --open` and `kargo run --open` start (default: the system's default browser) |
+| `KARGO_BROWSER` | Browser that runs [Wasm browser tests](../../guides/wasm/#testing-in-a-browser): the path of an executable, or a command on `PATH`. Default: Chrome, Chromium, Edge, Brave or Firefox, whichever Kargo finds first |
+| `KARGO_BROWSER_ARGS` | Extra arguments for that browser, separated by spaces, e.g. `--no-sandbox` for Chrome in a container |
+| `KARGO_BROWSER_TIMEOUT` | Seconds a browser running Wasm tests may stay silent before they count as hung (default `120`) |
 | Names in `username-env` / `password-env` | Repository credentials |
 | `COMPLETE` | Set by the `kargo completions` scripts when they ask Kargo for candidates; don't set it yourself |
 

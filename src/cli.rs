@@ -337,6 +337,12 @@ enum Command {
         /// Run examples/<NAME>.kt
         #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::examples))]
         example: Option<String>,
+        /// Port to serve a Wasm browser app on (default 8080; 0 picks a free one)
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+        /// Open the served page of a Wasm browser app in your browser
+        #[arg(long)]
+        open: bool,
         #[command(flatten)]
         package: OnePackageArg,
         /// How to print compiler diagnostics
@@ -792,7 +798,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, main, bin, example, message_format, package, args } => {
+        Command::Run { release, target, main, bin, example, port, open, message_format, package, args } => {
             set_message_format(message_format);
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
@@ -803,7 +809,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                 (_, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args })?;
+            let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open })?;
             Ok(exit_code(code))
         }
         Command::Test { build, filter, no_run, no_fail_fast, report } => {

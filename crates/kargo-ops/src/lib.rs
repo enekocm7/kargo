@@ -9,4 +9,6 @@ pub mod npm;
 pub mod ops;
 pub mod plugins;
 pub mod tasks;
+pub mod wasm_output;
+pub mod web;
 pub mod workspace;

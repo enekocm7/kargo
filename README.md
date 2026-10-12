@@ -15,7 +15,7 @@ $ kargo test
 
 ## How it works
 
-* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you).
+* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`).
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
 * **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and before a cached artifact is first locked, and against the lockfile on re-download.
 * **Incremental:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, only the affected Kotlin/JVM files are recompiled, in a warm compiler daemon, so an edit rebuilds in well under a second.
@@ -29,7 +29,7 @@ $ kargo test
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo build [--release] [-t <target>] [--keep-going] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
-| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt` |
+| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it |
 | `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports` |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
@@ -65,7 +65,7 @@ src/                 common sources (.kt, and .java on the JVM)
 src-jvm/             target-specific sources: src-wasm/, src-native/, src-android/
 tests/               common tests (kotlin.test)
 tests-jvm/ ...       target-specific tests
-resources/           JVM resources (test-resources/ for tests)
+resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm browser app
 android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
 examples/            example programs: kargo run --example <name>
@@ -98,8 +98,15 @@ jvm-target = "25"                     # default: 25, or your JDK's version if it
 # javac-args = ["-Xlint:all"]         # extra javac options for Java sources
 
 [target.wasm]
-environment = "js"          # or "wasi"
+environment = "js"          # or "browser" (serves a page, tests in a headless browser) or "wasi"
+# kind = "library"          # an npm package of @JsExport functions: package.json, .mjs, .wasm, .d.mts
+# module-name = "hello"     # name of the .mjs and .wasm files; default: the package name
+# npm-name = "@acme/hello"  # npm name of a library; default: the lowercase package name
 # package-manager = "pnpm"  # npm, pnpm or bun for npm packages of Wasm libraries; default: first on PATH
+# wasm-opt = false          # release builds run wasm-opt from PATH if there is one; or the path of one
+
+# [target.wasm.npm-dependencies]
+# "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for
 
 [target.native]
 platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...
@@ -255,7 +262,8 @@ Run them with `kargo task ci` or just `kargo ci` (built-in commands such as `kar
 | `KARGO_INCREMENTAL` | `false` turns off incremental compilation |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
-| `BROWSER` | Browser for `kargo doc --open` |
+| `BROWSER` | Browser for `kargo doc --open` and `kargo run --open` |
+| `KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT` | Browser, extra arguments and silence timeout (seconds) for Wasm browser tests |
 | `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
 
 ## Development
@@ -267,7 +275,7 @@ Kargo is a Cargo workspace:
 | `kargo-util` | Terminal output, configuration, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
-| `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, archives |
+| `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, commands |
 | `kargo` | The CLI binary |

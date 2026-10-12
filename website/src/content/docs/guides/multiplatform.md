@@ -87,6 +87,10 @@ $ kargo test --no-fail-fast   # keep testing the other targets when one fails
 
 `kargo test` stops at the first target that fails; `--no-fail-fast` (or `[test] fail-fast = false`) tests them all and prints a result per target. `kargo build --keep-going` builds every target and reports each failure. See [Testing every target](../testing/#testing-every-target).
 
+:::tip
+`environment = "js"` runs the Wasm target on Node.js. For a web front end use `environment = "browser"`: `kargo run -t wasm` then serves a page instead, and `kargo test -t wasm` runs the tests in a headless browser. See [WebAssembly](../wasm/#browser-apps).
+:::
+
 ## Dependencies
 
 Multiplatform libraries go in `[dependencies]`; Kargo picks the right artifact for each target using Gradle module metadata. Platform-specific libraries go in `[target.<name>.dependencies]`:

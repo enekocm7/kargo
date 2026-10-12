@@ -43,6 +43,10 @@ pub struct WasmCompilation<'a> {
     /// Directory receiving `<name>.klib` and the linked `<name>.mjs`/`.wasm`.
     pub output: PathBuf,
     pub debug: bool,
+    /// Remove code nothing reaches (`-Xir-dce`), which makes the module a lot smaller.
+    pub optimize: bool,
+    /// Write TypeScript declarations (`<name>.d.mts`) for the `@JsExport` functions.
+    pub declarations: bool,
     /// Pass the program arguments to `main(args)`, which Kotlin/Wasm itself
     /// always calls with an empty array. Only for the program being built,
     /// not for libraries or tests.
@@ -71,7 +75,7 @@ fn quoted_package(package: &str) -> String {
 fn main_wrapper(environment: WasmEnvironment, package: &str, suspend: bool) -> String {
     let prelude = match environment {
         // Node.js; elsewhere (a browser) there are no arguments.
-        WasmEnvironment::Js => {
+        WasmEnvironment::Js | WasmEnvironment::Browser => {
             r#"@file:Suppress("OPT_IN_USAGE")
 
 private fun kargoArgv(): JsArray<JsString> =
@@ -133,11 +137,7 @@ impl WasmCompilation<'_> {
         if legacy {
             args.push("-Xwasm".to_owned());
         }
-        let target = match self.environment {
-            WasmEnvironment::Js => "wasm-js",
-            WasmEnvironment::Wasi => "wasm-wasi",
-        };
-        args.push(format!("-Xwasm-target={target}"));
+        args.push(format!("-Xwasm-target=wasm-{}", self.environment.platform()));
         let mut libraries = self.libraries.clone();
         libraries.extend(self.friends.iter().cloned());
         if !libraries.is_empty() {
@@ -152,7 +152,8 @@ impl WasmCompilation<'_> {
 
     /// What the program's `main` needs to receive its arguments.
     fn main_args(&self) -> MainArgs {
-        if !self.main_args {
+        // A page has no command line.
+        if !self.main_args || self.environment == WasmEnvironment::Browser {
             return MainArgs::None;
         }
         // The compiler starts the `main` of the alphabetically first package.
@@ -173,6 +174,11 @@ impl WasmCompilation<'_> {
 
     pub fn module_path(&self) -> PathBuf {
         self.output.join(format!("{}.mjs", self.name))
+    }
+
+    /// The TypeScript declarations written next to the module when `declarations` is set.
+    pub fn declarations_path(&self) -> PathBuf {
+        self.output.join(format!("{}.d.mts", self.name))
     }
 
     /// Arguments of the first step: sources (and `wrapper`) -> `klib/<name>.klib`.
@@ -203,6 +209,12 @@ impl WasmCompilation<'_> {
         ]);
         if self.debug {
             args.push("-Xwasm-debug-info".to_owned());
+        }
+        if self.optimize {
+            args.push("-Xir-dce".to_owned());
+        }
+        if self.declarations {
+            args.push("-Xgenerate-dts".to_owned());
         }
         args
     }
@@ -417,6 +429,8 @@ mod tests {
             kotlin_args: &[],
             output: "out".into(),
             debug: true,
+            optimize: false,
+            declarations: false,
             main_args: false,
         };
         let args = unit.base_args("2.3.0");
@@ -432,6 +446,35 @@ mod tests {
         let link = unit.link_args("2.4.21");
         assert!(link.contains(&"-Xir-produce-js".to_owned()));
         assert!(link.contains(&"-Xwasm-debug-info".to_owned()));
+        assert!(!link.contains(&"-Xir-dce".to_owned()) && !link.contains(&"-Xgenerate-dts".to_owned()));
+    }
+
+    #[test]
+    fn release_and_library_link_flags() {
+        let unit = WasmCompilation {
+            name: "lib",
+            environment: WasmEnvironment::Browser,
+            sources: SourceSet::new(vec![], vec!["a.kt".into()], "wasm"),
+            libraries: vec![],
+            friends: vec![],
+            plugins: &[],
+            kotlin_args: &[],
+            output: "out".into(),
+            debug: false,
+            optimize: true,
+            declarations: true,
+            main_args: false,
+        };
+        // A browser runs the same Kotlin/Wasm target as Node.js.
+        assert!(unit.base_args("2.4.21").contains(&"-Xwasm-target=wasm-js".to_owned()));
+        let link = unit.link_args("2.4.21");
+        assert!(link.contains(&"-Xir-dce".to_owned()), "release links drop dead code: {link:?}");
+        assert!(link.contains(&"-Xgenerate-dts".to_owned()));
+        assert!(!link.contains(&"-Xwasm-debug-info".to_owned()));
+        // Only the link step removes code and writes declarations.
+        let klib = unit.klib_args("2.4.21", None);
+        assert!(!klib.contains(&"-Xir-dce".to_owned()) && !klib.contains(&"-Xgenerate-dts".to_owned()));
+        assert!(unit.declarations_path().ends_with("out/lib.d.mts") || unit.declarations_path().ends_with("out\\lib.d.mts"));
     }
 
     fn program(dir: &Path, files: &[(&str, &str)], environment: WasmEnvironment, main_args: bool) -> MainArgs {
@@ -453,6 +496,8 @@ mod tests {
             kotlin_args: &[],
             output: dir.join("out"),
             debug: false,
+            optimize: false,
+            declarations: false,
             main_args,
         };
         unit.main_args()
@@ -479,6 +524,8 @@ mod tests {
         assert_eq!(program(dir, &[with_args, other], WasmEnvironment::Js, true), MainArgs::None);
 
         assert_eq!(program(dir, &[with_args], WasmEnvironment::Js, false), MainArgs::None);
+        // A page has no command line, so `args` stays empty without a wrapper.
+        assert_eq!(program(dir, &[with_args], WasmEnvironment::Browser, true), MainArgs::None);
         assert_eq!(program(dir, &[("Main.kt", "package p\nfun main() {}\n")], WasmEnvironment::Js, true), MainArgs::None);
         assert_eq!(program(dir, &[("Lib.kt", "package p\nfun f() {}\n")], WasmEnvironment::Js, true), MainArgs::None);
         assert_eq!(program(dir, &[("Main.kt", "fun main(args: Array<String>) {}\n")], WasmEnvironment::Js, true), MainArgs::DefaultPackage);

@@ -26,7 +26,7 @@ Cargo workspace (edition 2024, MSRV 1.89). Crates depend downward in roughly thi
 | `crates/kargo-util`      | Terminal output (`Shell`), global `Config`, filesystem / hash / process helpers                                                                               |
 | `crates/kargo-maven`     | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, the resolver                                                                 |
 | `crates/kargo-manifest`  | The `kargo.toml` model (`raw.rs` is the serde layer, `lib.rs` the validated model), format-preserving edits (`edit.rs`)                                       |
-| `crates/kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, archives                                                                                 |
+| `crates/kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, browsers, archives                                                                       |
 | `crates/kargo-compiler`  | JVM / Wasm / Native compiler drivers, the compiler daemon (`daemon.rs`, `daemon/KargoDaemon.java`), incremental compilation (`incremental.rs`, `daemon/KargoIc.java`), jar packaging, entry points, test reports (`testreport.rs`), compiler diagnostics (`diagnostics.rs`) |
 | `crates/kargo-ops`       | The build engine: `workspace.rs`, `ops/` (one module per command), `builtins.rs` (frameworks), `lockfile.rs`, `gradle.rs` (Android), `tasks.rs`, `plugins.rs` |
 | `src/`                   | The `kargo` binary: `cli.rs` (clap definitions and dispatch), `main.rs`                                                                                       |
@@ -37,6 +37,7 @@ Where things live when you need to change them:
 
 - **A command or flag**: `src/cli.rs` (clap), implemented in `crates/kargo-ops/src/ops/<command>.rs`.
 - **A `kargo.toml` key**: `crates/kargo-manifest/src/raw.rs` (all structs use `deny_unknown_fields`, so a new key must be added there), then the validated model in `lib.rs`, then `edit.rs` if `kargo add`/`remove` must write it.
+- **Wasm output and browser support**: compiler flags in `crates/kargo-compiler/src/wasm.rs`; the page of a browser app, the import map for npm packages, a library's `package.json`, `wasm-opt` and the size report in `crates/kargo-ops/src/wasm_output.rs`; the loopback server behind `kargo run` and the browser test page in `crates/kargo-ops/src/web.rs`; browser lookup in `crates/kargo-toolchain/src/browser.rs`; npm installs in `crates/kargo-ops/src/npm.rs`.
 - **A built-in framework**: `crates/kargo-ops/src/builtins.rs`; project templates for `kargo new` are in `crates/kargo-ops/src/ops/new.rs`.
 - **Dependency resolution**: `crates/kargo-maven/src/resolver.rs`; locking in `crates/kargo-ops/src/lockfile.rs`.
 - **Source-layout conventions** (`src/`, `src-<target>/`, `tests-<target>/`, `resources/`, `android/`): `crates/kargo-ops/src/workspace.rs`.

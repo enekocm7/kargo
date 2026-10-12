@@ -1,26 +1,29 @@
 //! `kargo test`: compiles and runs tests for each target.
 
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
     BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, jvm_javac_args, jvm_processor_path,
-    native_cinterop, native_libraries, native_platforms, run_jvm_ksp, select_targets, sources, wasm_libraries,
+    native_cinterop, native_libraries, native_platforms, prepare_wasm, run_jvm_ksp, select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
+use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::testreport;
 use kargo_compiler::wasm::{WasmCompilation, npm_dependencies};
 use kargo_compiler::{Outcome, common_kotlin_args};
-use kargo_manifest::{Hook, NativeKind, Scope, TargetKind};
+use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::Platform;
+use kargo_toolchain::browser::{self, Browser};
 use kargo_toolchain::native::Host;
 use kargo_util::fs::join_paths;
 use kargo_util::process;
@@ -79,6 +82,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
             TestRun::Done(passed) => Ok(passed),
             TestRun::Junit(cmd) => run_junit(ctx, cmd, opts),
             TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts),
+            TestRun::Browser(run) => run_in_browser(ctx, run, opts),
             TestRun::Android => test_android(ctx, opts),
         });
         let outcome = match passed {
@@ -145,8 +149,19 @@ enum TestRun {
     Junit(Command),
     /// A test executable reporting TeamCity messages, with its label.
     Reported(Command, &'static str),
+    /// Kotlin/Wasm tests in a headless browser, which reports TeamCity messages to Kargo.
+    Browser(BrowserRun),
     /// Gradle compiles and runs Android tests in one step.
     Android,
+}
+
+/// Kotlin/Wasm tests that run in a browser.
+struct BrowserRun {
+    browser: Browser,
+    /// The test page and the module it loads, and the npm packages it imports.
+    site: Site,
+    /// Where the browser keeps its state while it runs.
+    profile: PathBuf,
 }
 
 fn no_tests(ctx: &BuildContext, target: TargetKind) -> TestRun {
@@ -354,8 +369,27 @@ fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str, target: Targe
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.stdout(Stdio::piped()).spawn().with_context(|| format!("failed to start {label}"))?;
     let stdout = child.stdout.take().context("missing test stdout")?;
-    let mut summary = testreport::report(BufReader::new(stdout), anstream::stdout())?;
+    let summary = testreport::report(BufReader::new(stdout), anstream::stdout())?;
     let status = child.wait()?;
+    // Runners exit non-zero when a test failed; without a failed test that means a crash.
+    let abnormal = (!status.success()).then(|| {
+        let how = format!("exited with {}", process::describe_status(status));
+        if summary.ran_tests() { how } else { format!("{how} before running any tests") }
+    });
+    finish_reported(ctx, summary, label, target, opts, abnormal)
+}
+
+/// Writes the reports and prints the summary of a test run. `abnormal` says how the runner
+/// ended when it did not finish normally (`exited with exit code 1`); that only counts as a crash
+/// when no test failed, since runners also end that way when a test failed.
+fn finish_reported(
+    ctx: &BuildContext,
+    mut summary: testreport::TestSummary,
+    label: &str,
+    target: TargetKind,
+    opts: &TestOptions,
+    abnormal: Option<String>,
+) -> Result<bool> {
     if opts.junit_report {
         let dir = reports_dir(ctx, target)?;
         let file = dir.join(format!("TEST-{target}.xml"));
@@ -364,17 +398,189 @@ fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str, target: Targe
             .with_context(|| format!("failed to write {}", file.display()))?;
         wrote_reports(ctx, &dir);
     }
-    // Runners exit non-zero when a test failed; without a failed test that means a crash.
-    summary.crashed = !status.success() && summary.failed == 0;
+    summary.crashed = abnormal.is_some() && summary.failed == 0;
     if summary.crashed && !summary.ran_tests() {
-        ctx.shell().error(format!("{label} exited with {} before running any tests", process::describe_status(status)));
+        ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
         return Ok(false);
     }
     testreport::print_summary(&summary, anstream::stdout())?;
     if summary.crashed {
-        ctx.shell().error(format!("{label} exited with {}", process::describe_status(status)));
+        ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
     }
     Ok(summary.success())
+}
+
+/// How long a browser may stay silent before its tests count as hung (`KARGO_BROWSER_TIMEOUT`, in seconds).
+fn browser_timeout() -> Duration {
+    let seconds = std::env::var(browser::BROWSER_TIMEOUT_ENV).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(120);
+    Duration::from_secs(seconds)
+}
+
+/// After the entry point returned and every suite ended, how long to wait for another suite to
+/// start before the run counts as finished (asynchronous tests may start the next suite late).
+const SETTLE: Duration = Duration::from_millis(400);
+
+/// Runs the tests in a headless browser: serves the test page, starts the browser on it and
+/// turns the console output the page reports into the usual test report.
+fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions) -> Result<bool> {
+    let (events_tx, events) = mpsc::channel();
+    let server = web::Server::start(web::bind(0)?, run.site, Some(events_tx))?;
+    let label = "Wasm tests (headless browser)";
+    ctx.shell().status("Running", label);
+    let mut cmd = run.browser.headless_command(&format!("{}index.html", server.url()), &run.profile);
+    ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
+    run.browser.prepare_profile(&run.profile)?;
+    let mut child = cmd.spawn().with_context(|| format!("failed to start {}", run.browser.exe.display()))?;
+
+    // The report is read on its own thread so tests print as they finish.
+    let (lines_tx, lines) = mpsc::channel::<String>();
+    let reporter = std::thread::spawn(move || testreport::report(BufReader::new(ChannelReader::new(lines)), anstream::stdout()));
+    let outcome = wait_for_page(&mut child, &events, &lines_tx, browser_timeout());
+    drop(lines_tx);
+    let summary = reporter.join().map_err(|_| anyhow::anyhow!("the test reporter panicked"))??;
+
+    // Ending the process stops most browsers. One that may have handed over to another process
+    // is asked to close its window instead, and given time to do so.
+    server.ask_to_quit();
+    let quits = run.browser.needs_to_be_asked_to_quit();
+    if quits {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && child.try_wait().ok().flatten().is_none() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(server);
+    // The browser may still hold files in its profile for a moment.
+    for _ in 0..if quits { 50 } else { 10 } {
+        if kargo_util::fs::remove_dir_all_if_exists(&run.profile).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    finish_reported(ctx, summary, label, TargetKind::Wasm, opts, outcome.err())
+}
+
+/// What a test page has reported so far.
+struct PageProgress {
+    /// Suites started and not finished yet.
+    open_suites: usize,
+    /// The entry point returned (asynchronous tests may still be running).
+    returned: bool,
+    last_event: Instant,
+}
+
+impl PageProgress {
+    fn new() -> Self {
+        Self { open_suites: 0, returned: false, last_event: Instant::now() }
+    }
+
+    /// Handles one report, forwarding test output to `lines`. `Some` ends the wait: how the page failed.
+    fn apply(&mut self, event: PageEvent, lines: &mpsc::Sender<String>) -> Option<String> {
+        self.last_event = Instant::now();
+        match event {
+            PageEvent::Stdout(text) => {
+                for line in text.lines() {
+                    match testreport::parse_message(line).map(|(name, _)| name).as_deref() {
+                        Some("testSuiteStarted") => self.open_suites += 1,
+                        Some("testSuiteFinished") => self.open_suites = self.open_suites.saturating_sub(1),
+                        _ => {}
+                    }
+                }
+                let _ = lines.send(text);
+            }
+            PageEvent::Stderr(text) => anstream::eprint!("{text}"),
+            PageEvent::Returned => self.returned = true,
+            PageEvent::Failed(message) => return Some(format!("failed: {}", message.trim())),
+        }
+        None
+    }
+
+    /// Whether every test has run: the entry point returned, no suite is open and none has started lately.
+    fn done(&self) -> bool {
+        self.returned && self.open_suites == 0 && self.last_event.elapsed() >= SETTLE
+    }
+}
+
+/// Forwards the page's test output to `lines` until its tests are done; the error says why they are not.
+fn wait_for_page(
+    child: &mut std::process::Child,
+    events: &Receiver<PageEvent>,
+    lines: &mpsc::Sender<String>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut progress = PageProgress::new();
+    // Set once the browser process has ended without failing.
+    let mut handed_over = false;
+    loop {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(event) => {
+                if let Some(failure) = progress.apply(event, lines) {
+                    return Err(failure);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if progress.done() {
+                    return Ok(());
+                }
+                if !handed_over && let Ok(Some(status)) = child.try_wait() {
+                    // Whatever it reported before it went away is still queued.
+                    while let Ok(event) = events.try_recv() {
+                        if let Some(failure) = progress.apply(event, lines) {
+                            return Err(failure);
+                        }
+                    }
+                    if progress.returned && progress.open_suites == 0 {
+                        return Ok(());
+                    }
+                    if !status.success() {
+                        return Err(format!("closed ({}) before the tests finished", process::describe_status(status)));
+                    }
+                    // A browser that ends successfully has handed over to another process (Firefox
+                    // starts again after applying an update), which still runs the page.
+                    handed_over = true;
+                }
+                if progress.last_event.elapsed() > timeout {
+                    return Err(format!(
+                        "timed out after {}s without output{}; set {} to wait longer",
+                        timeout.as_secs(),
+                        if handed_over { ", though the browser process had already exited" } else { "" },
+                        browser::BROWSER_TIMEOUT_ENV
+                    ));
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => return Err("lost contact with the page".to_owned()),
+        }
+    }
+}
+
+/// Reads text sent over a channel as a byte stream, which ends when the sender is dropped.
+struct ChannelReader {
+    chunks: Receiver<String>,
+    current: Vec<u8>,
+    position: usize,
+}
+
+impl ChannelReader {
+    fn new(chunks: Receiver<String>) -> Self {
+        Self { chunks, current: Vec::new(), position: 0 }
+    }
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.position >= self.current.len() {
+            match self.chunks.recv() {
+                Ok(text) => (self.current, self.position) = (text.into_bytes(), 0),
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.current.len() - self.position);
+        out[..n].copy_from_slice(&self.current[self.position..self.position + n]);
+        self.position += n;
+        Ok(n)
+    }
 }
 
 fn file_url(path: &Path) -> String {
@@ -400,7 +606,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     }
     // Tests link against the main klib as a friend module, so the program's
     // `main` is not part of the test binary.
-    let main = super::build::build_wasm(ctx)?;
+    let main = prepare_wasm(ctx)?;
     let setup = ctx.setup(TargetKind::Wasm)?;
     let libraries = wasm_libraries(ctx, &setup, true)?;
     let jdk = ctx.compiler_jdk()?;
@@ -408,7 +614,8 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
-    let name = format!("{}-test", manifest.package.name);
+    let name = format!("{}-test", wasm.module_name(&manifest.package));
+    let main_node_modules = main.as_ref().and_then(|m| m.node_modules.clone());
     let unit = WasmCompilation {
         name: &name,
         environment: wasm.environment,
@@ -419,13 +626,21 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(ctx.profile, TargetKind::Wasm).join("test"),
         debug: true,
+        optimize: false,
+        declarations: false,
         main_args: false,
     };
     unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Wasm), &|| compiling(ctx, TargetKind::Wasm, ", tests"))?;
-    // `build_wasm` installed the main npm packages one level up; dev-dependencies
+    // `prepare_wasm` installed the main npm packages one level up; dev-dependencies
     // that need more get their own `node_modules` next to the test module.
-    if npm_dependencies(&unit.libraries)? != npm_dependencies(&wasm_libraries(ctx, &setup, false)?)? {
-        crate::npm::install(ctx, &unit.libraries, &unit.output)?;
+    let node_modules =
+        if main_node_modules.is_none() || npm_dependencies(&unit.libraries)? != npm_dependencies(&wasm_libraries(ctx, &setup, false)?)? {
+            crate::npm::install(ctx, &unit.libraries, &unit.output)?
+        } else {
+            main_node_modules
+        };
+    if wasm.environment == WasmEnvironment::Browser {
+        return browser_tests(ctx, opts, &unit, node_modules);
     }
     if opts.no_run {
         return Ok(TestRun::Done(true));
@@ -436,6 +651,26 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let mut cmd = Command::new(kargo_toolchain::node()?);
     cmd.arg("-e").arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path()))).current_dir(ctx.ws.root());
     Ok(TestRun::Reported(cmd, "Wasm tests (Node.js)"))
+}
+
+/// Writes the page that runs the compiled Wasm tests and finds the browser to run it in.
+fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation, node_modules: Option<PathBuf>) -> Result<TestRun> {
+    let imports = node_modules.as_deref().map(crate::wasm_output::import_map).unwrap_or_default();
+    std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports))
+        .context("failed to write the test page")?;
+    if opts.no_run {
+        return Ok(TestRun::Done(true));
+    }
+    if opts.filter.is_some() {
+        ctx.shell().warn("test filters are not supported for the wasm target; running all tests");
+    }
+    let browser = browser::browser()?;
+    let mut site = Site::new(&unit.output);
+    if let Some(node_modules) = node_modules {
+        site = site.mount("node_modules", node_modules);
+    }
+    let profile = unit.output.join(format!(".browser-profile-{}", std::process::id()));
+    Ok(TestRun::Browser(BrowserRun { browser, site, profile }))
 }
 
 fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
