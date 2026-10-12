@@ -24,6 +24,9 @@ pub struct EntryPoint {
     /// JVM class holding `main`, e.g. `com.example.MainKt` or `com.example.Cli`.
     pub jvm_class: String,
     pub kind: EntryKind,
+    /// `main` declares a parameter (`args: Array<String>`).
+    pub takes_args: bool,
+    pub suspend: bool,
 }
 
 impl EntryPoint {
@@ -200,11 +203,29 @@ fn classify(header: &str, parent: &Scope) -> Scope {
     Scope::Type { binary, object: words[i] == "object" }
 }
 
-/// Whether a block's own text declares `fun main`; with `jvm_static`, only an
+/// How a `main` function is declared: whether it takes `args` and is `suspend`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Signature {
+    takes_args: bool,
+    suspend: bool,
+}
+
+/// Whether the parameter list of the `fun main` declared in `text` is non-empty.
+fn has_parameters(text: &str) -> bool {
+    let Some(fun) = text.find("fun") else { return false };
+    let Some(main) = text[fun..].find("main").map(|i| fun + i) else { return false };
+    let Some(open) = text[main..].find('(').map(|i| main + i) else { return false };
+    !text[open + 1..].trim_start().starts_with(')')
+}
+
+/// The `fun main` a block's own text declares; with `jvm_static`, only an
 /// `@JvmStatic` one counts.
-fn declares_main(direct: &str, jvm_static: bool) -> bool {
+fn declares_main(direct: &str, jvm_static: bool) -> Option<Signature> {
     let mut annotations: Vec<&str> = Vec::new();
-    for line in direct.lines() {
+    let mut offset = 0;
+    for line in direct.split('\n') {
+        let start = offset;
+        offset += line.len() + 1;
         let words: Vec<&str> = line.split_whitespace().collect();
         if words.is_empty() {
             continue;
@@ -224,22 +245,30 @@ fn declares_main(direct: &str, jvm_static: bool) -> bool {
         if !before.clone().all(|w| w.starts_with('@') || matches!(*w, "suspend" | "public" | "internal")) {
             continue;
         }
+        let suspend = before.clone().any(|w| *w == "suspend");
         if !jvm_static || before.any(|w| matches!(w.split('(').next(), Some("@JvmStatic" | "@kotlin.jvm.JvmStatic"))) {
-            return true;
+            // The parameters may continue on the following lines.
+            return Some(Signature { takes_args: has_parameters(&direct[start..]), suspend });
         }
     }
-    false
+    None
 }
 
 /// Finds the `main` functions in comment-stripped source. The class is `None`
 /// for a top-level `main` (it lives in the file facade) and otherwise the JVM
 /// binary name relative to the package.
-fn scan_mains(src: &str) -> Vec<(EntryKind, Option<String>)> {
-    fn collect(body: &Body, found: &mut Vec<(EntryKind, Option<String>)>) {
+fn scan_mains(src: &str) -> Vec<(EntryKind, Option<String>, Signature)> {
+    fn collect(body: &Body, found: &mut Vec<(EntryKind, Option<String>, Signature)>) {
         match &body.scope {
-            Scope::File if declares_main(&body.direct, false) => found.push((EntryKind::TopLevel, None)),
-            Scope::Type { binary: class, object: true } | Scope::Companion { owner: class } if declares_main(&body.direct, true) => {
-                found.push((EntryKind::JvmStatic, Some(class.clone())))
+            Scope::File => {
+                if let Some(sig) = declares_main(&body.direct, false) {
+                    found.push((EntryKind::TopLevel, None, sig));
+                }
+            }
+            Scope::Type { binary: class, object: true } | Scope::Companion { owner: class } => {
+                if let Some(sig) = declares_main(&body.direct, true) {
+                    found.push((EntryKind::JvmStatic, Some(class.clone()), sig));
+                }
             }
             _ => {}
         }
@@ -293,10 +322,17 @@ pub fn find_entry_points(files: &[PathBuf]) -> Vec<EntryPoint> {
             let package = package_of(&src);
             scan_mains(&src)
                 .into_iter()
-                .map(|(kind, class)| {
+                .map(|(kind, class, sig)| {
                     let class = class.unwrap_or_else(|| facade_class_name(f, &src));
                     let jvm_class = if package.is_empty() { class } else { format!("{package}.{class}") };
-                    EntryPoint { file: f.clone(), package: package.clone(), jvm_class, kind }
+                    EntryPoint {
+                        file: f.clone(),
+                        package: package.clone(),
+                        jvm_class,
+                        kind,
+                        takes_args: sig.takes_args,
+                        suspend: sig.suspend,
+                    }
                 })
                 .collect()
         })
@@ -361,7 +397,22 @@ mod tests {
     }
 
     fn classes(src: &str) -> Vec<(EntryKind, Option<String>)> {
-        scan_mains(&strip_comments(src))
+        scan_mains(&strip_comments(src)).into_iter().map(|(kind, class, _)| (kind, class)).collect()
+    }
+
+    fn signatures(src: &str) -> Vec<(bool, bool)> {
+        scan_mains(&strip_comments(src)).into_iter().map(|(_, _, s)| (s.takes_args, s.suspend)).collect()
+    }
+
+    #[test]
+    fn main_signatures() {
+        assert_eq!(signatures("fun main() {}"), [(false, false)]);
+        assert_eq!(signatures("fun main( ) = Unit"), [(false, false)]);
+        assert_eq!(signatures("fun main(args: Array<String>) {}"), [(true, false)]);
+        assert_eq!(signatures("suspend fun main(vararg args: String) {}"), [(true, true)]);
+        assert_eq!(signatures("@Suppress(\"x\")\nsuspend fun main() {}"), [(false, true)]);
+        assert_eq!(signatures("public fun main(\n    args: Array<String>,\n) {}"), [(true, false)]);
+        assert_eq!(signatures("object O { @JvmStatic fun main(a: Array<String>) {} }"), [(true, false)]);
     }
 
     #[test]

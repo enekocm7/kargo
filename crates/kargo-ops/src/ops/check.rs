@@ -87,6 +87,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         kotlin_args: &kotlin_args,
         output: out.clone(),
         debug: profile.debug,
+        main_args: false,
     };
     main.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ""))?;
 
@@ -106,6 +107,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         kotlin_args: &kotlin_args,
         output: out.join("test"),
         debug: true,
+        main_args: false,
     };
     unit.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ", tests"))?;
     Ok(())

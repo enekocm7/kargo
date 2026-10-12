@@ -32,6 +32,29 @@ Hello, Kotlin!
 
 Build output goes to `target/<profile>/wasm/`. It contains the `.wasm` module and the JavaScript glue that loads it.
 
+### Program arguments
+
+Arguments after `--` reach `main(args)`, as on the JVM and Native:
+
+```kotlin title="src/Main.kt"
+package com.example.hello
+
+fun main(args: Array<String>) = println("args=" + args.toList())
+```
+
+```console
+$ kargo run -- a "b c"
+     Running `node target/debug/wasm/hello.mjs a b c`
+args=[a, b c]
+```
+
+Kotlin/Wasm itself always calls `main` with an empty array. When your `main` takes `args`, Kargo compiles a small generated `main()` in the default package along with your sources (the compiler starts that one instead of yours), and it calls your `main` with the arguments:
+
+- With `environment = "js"` they come from `process.argv` after the script path. Outside Node.js, for example in a browser, `args` is empty.
+- With `environment = "wasi"` they come from the WASI `args_get` call, without the program name (and without the `.mjs` launcher when Node.js runs it).
+
+This works only when your `main` is in a named package, which `kargo new` always sets up. A `main(args)` in the default package gets an empty array, and Kargo warns about it when it compiles.
+
 ## npm packages
 
 Some Kotlin/Wasm libraries import npm packages at runtime. For example, `kotlinx-datetime` uses `@js-joda/core`. These libraries list their npm packages in a `package.json` inside the published klib, and Kargo installs them for you after compiling:
