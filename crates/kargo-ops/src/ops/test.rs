@@ -9,8 +9,8 @@ use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, jvm_javac_args, jvm_processor_path, native_cinterop,
-    native_libraries, native_platforms, select_targets, sources, wasm_libraries,
+    BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, jvm_javac_args, jvm_processor_path,
+    native_cinterop, native_libraries, native_platforms, run_jvm_ksp, select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
@@ -267,22 +267,34 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let test_classes = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-classes");
     let processor_path = jvm_processor_path(ctx, &setup, true)?;
     let javac_args = jvm_javac_args(&setup, jvm);
+    let jvm_target = jvm.target_for(jdk.version);
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(test_cp);
     let name = format!("{}-test", manifest.package.name);
+    let mut test_sources = test_sources;
+    let mut resources = vec![ctx.ws.test_resources()];
+    let ksp = JvmKspUnit {
+        name: &name,
+        test: true,
+        libraries: classpath.clone(),
+        friends: vec![main_classes.to_path_buf()],
+        jdk,
+        jvm_target: &jvm_target,
+    };
+    run_jvm_ksp(ctx, &setup, ksp, &mut test_sources, &mut resources)?;
     let unit = JvmCompilation {
         name: &name,
         sources: test_sources,
         classpath: classpath.clone(),
         friend_paths: vec![main_classes.to_path_buf()],
         output: test_classes.clone(),
-        jvm_target: &jvm.target_for(jdk.version),
+        jvm_target: &jvm_target,
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         javac_args: &javac_args,
         processor_path: &processor_path,
-        resources: vec![ctx.ws.test_resources()],
+        resources,
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, verb, TargetKind::Jvm, ", tests"))?;

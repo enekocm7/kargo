@@ -26,6 +26,7 @@ license = "MIT"
 version = "2.4.21"                        # default 2.4.21
 language-version = "2.4"
 api-version = "2.4"
+ksp = "2.3.12"                            # default 2.3.12
 opt-in = ["kotlin.ExperimentalStdlibApi"]
 compiler-args = ["-Xcontext-parameters"]
 warnings-as-errors = false
@@ -36,6 +37,7 @@ warnings-as-errors = false
 | `version` | `2.4.21` | Kotlin compiler and standard library version |
 | `language-version` | | `-language-version` |
 | `api-version` | | `-api-version` |
+| `ksp` | `2.3.12` | [KSP](../../guides/dependencies/#kotlin-symbol-processing-ksp) version for `scope = "ksp"` dependencies (the standalone tool on the JVM, the Gradle plugin on Android) |
 | `opt-in` | `[]` | Annotations to opt in to everywhere |
 | `compiler-args` | `[]` | Extra arguments for every compilation |
 | `warnings-as-errors` | `false` | Fail on warnings |
@@ -232,7 +234,7 @@ shared = { workspace = true }                                   # inherited from
 | `version` | | Version or Maven range. Optional when a BOM manages it. Required for BOMs. |
 | `group`, `artifact` | | Coordinates when the key isn't `group:artifact` |
 | `coords` | | `group:artifact[:version]` in one string |
-| `scope` | `compile` | `compile`, `runtime`, `provided` or `processor` (a Java [annotation processor](../../guides/dependencies/#annotation-processors), JVM and Android only) |
+| `scope` | `compile` | `compile`, `runtime`, `provided`, `processor` (a Java [annotation processor](../../guides/dependencies/#annotation-processors)) or `ksp` (a [KSP processor](../../guides/dependencies/#kotlin-symbol-processing-ksp)); `processor` and `ksp` apply to the JVM and Android only |
 | `classifier` | | Artifact classifier |
 | `extension` (alias `type`) | `jar` | Artifact extension |
 | `exclude` | `[]` | `group:artifact` or `group:*` to exclude transitively |

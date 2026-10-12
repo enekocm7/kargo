@@ -155,7 +155,9 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `compileOnly(...)` | `scope = "provided"` |
 | `annotationProcessor(...)` | `scope = "processor"` |
 | `options.compilerArgs` (`JavaCompile`) | `[target.jvm] javac-args` |
-| `ksp(...)`, `kapt(...)` | not supported yet |
+| `ksp(...)` (the `com.google.devtools.ksp` plugin) | `scope = "ksp"` |
+| `kspTest(...)` | `scope = "ksp"` in `[dev-dependencies]` |
+| `kapt(...)` | not supported; use the library's KSP processor (`scope = "ksp"`) |
 | `testImplementation(...)` | `[dev-dependencies]` |
 | `jvmMainImplementation(...)` / `sourceSets.jvmMain.dependencies` | `[target.jvm.dependencies]` |
 | `platform(...)` / `enforcedPlatform(...)` | `bom = true` |

@@ -524,6 +524,72 @@ fun main() = println(Person.create(\"Ada\"))
 }
 
 #[test]
+fn ksp_processor() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["ksp"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("ksp/kargo.toml")).unwrap();
+    t.write(
+        "ksp/kargo.toml",
+        &format!(
+            "{manifest}
+[dependencies]
+\"com.squareup.moshi:moshi\" = \"1.15.2\"
+\"com.squareup.moshi:moshi-kotlin-codegen\" = {{ version = \"1.15.2\", scope = \"ksp\" }}
+"
+        ),
+    );
+    t.write(
+        "ksp/src/Main.kt",
+        "package com.example.ksp
+
+import com.squareup.moshi.JsonClass
+import com.squareup.moshi.Moshi
+
+@JsonClass(generateAdapter = true)
+data class Person(val name: String, val age: Int)
+
+fun greeting(name: String) = \"Hello, $name!\"
+
+fun main() = println(Moshi.Builder().build().adapter(Person::class.java).toJson(Person(\"Ada\", 36)))
+",
+    );
+    t.write(
+        "ksp/tests/PersonTest.kt",
+        "package com.example.ksp
+
+import com.squareup.moshi.JsonClass
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+@JsonClass(generateAdapter = true)
+data class Pet(val name: String)
+
+class PersonTest {
+    @Test fun generatedAdapters() {
+        assertEquals(\"PersonJsonAdapter\", Class.forName(\"com.example.ksp.PersonJsonAdapter\").simpleName)
+        assertEquals(\"PetJsonAdapter\", Class.forName(\"com.example.ksp.PetJsonAdapter\").simpleName)
+    }
+}
+",
+    );
+    t.kargo("ksp")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Processing ksp v0.1.0 (jvm, ksp)"))
+        .stdout(predicate::str::contains(r#"{"name":"Ada","age":36}"#));
+    assert!(t.dir.path().join("ksp/target/debug/jvm/generated/ksp/main/kotlin/com/example/ksp/PersonJsonAdapter.kt").is_file());
+    // Processors are not packaged.
+    let lib = t.dir.path().join("ksp/target/debug/jvm/lib");
+    assert!(!std::fs::read_dir(lib).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("codegen")));
+    // Unchanged sources are not processed again.
+    t.kargo("ksp").arg("build").assert().success().stderr(predicate::str::contains("Processing").not());
+    t.kargo("ksp").arg("test").assert().success().stderr(predicate::str::contains("Processing ksp v0.1.0 (jvm, tests, ksp)"));
+    assert!(std::fs::read_to_string(t.dir.path().join("ksp/kargo.lock")).unwrap().contains("[resolution.\"jvm/ksp\"]"));
+}
+
+#[test]
 fn ktor_compiles() {
     require_e2e!();
     let t = E2e::new();

@@ -19,6 +19,7 @@ fn minimal_manifest_defaults_to_jvm() {
     let m = parse(MINIMAL);
     assert_eq!(m.package.name, "hello");
     assert_eq!(m.kotlin.version, DEFAULT_KOTLIN_VERSION);
+    assert_eq!(m.kotlin.ksp_version, None);
     assert_eq!(m.targets.enabled(), [TargetKind::Jvm]);
     assert_eq!(m.targets.jvm.as_ref().unwrap().jvm_target, DEFAULT_JVM_TARGET);
     assert_eq!(m.repositories.len(), 1);
@@ -42,6 +43,7 @@ license = "MIT"
 [kotlin]
 version = "2.4.0"
 language-version = "2.4"
+ksp = "2.3.10"
 opt-in = ["kotlin.ExperimentalStdlibApi"]
 compiler-args = ["-Xcontext-parameters"]
 warnings-as-errors = true
@@ -55,6 +57,7 @@ javac-args = ["-parameters", "-Xlint:all"]
 [target.jvm.dependencies]
 "ch.qos.logback:logback-classic" = { version = "1.5.0", scope = "runtime" }
 "com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }
+"com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }
 
 [target.wasm]
 environment = "wasi"
@@ -119,6 +122,7 @@ optimize = true
 
     assert_eq!(m.package.group.as_deref(), Some("com.example"));
     assert_eq!(m.kotlin.version, "2.4.0");
+    assert_eq!(m.kotlin.ksp_version.as_deref(), Some("2.3.10"));
     assert!(m.kotlin.warnings_as_errors);
     assert_eq!(m.targets.enabled(), [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Native, TargetKind::Android]);
 
@@ -127,6 +131,7 @@ optimize = true
     assert_eq!(jvm.main_class.as_deref(), Some("com.example.AppKt"));
     assert_eq!(jvm.dependencies[0].scope, Scope::Runtime);
     assert_eq!(jvm.dependencies[1].scope, Scope::Processor);
+    assert_eq!(jvm.dependencies[2].scope, Scope::Ksp);
     assert_eq!(jvm.javac_args, ["-parameters", "-Xlint:all"]);
 
     assert_eq!(m.targets.wasm.as_ref().unwrap().environment, WasmEnvironment::Wasi);
@@ -187,7 +192,7 @@ optimize = true
     assert!(m.dev_profile.optimize && m.dev_profile.debug);
 
     let jvm_deps = m.dependencies_for(TargetKind::Jvm);
-    assert_eq!(jvm_deps.len(), 7);
+    assert_eq!(jvm_deps.len(), 8);
     assert_eq!(m.dependencies_for(TargetKind::Wasm).len(), 5);
 }
 
@@ -334,6 +339,15 @@ fn version_validation() {
     assert!(parse_err("[package]\nname = \"a\"\nversion = \"\"\n").contains("version"));
     assert!(parse_err("[package]\nname = \"a\"\nversion = \"1\"\ngroup = \"com..x\"\n").contains("group"));
     assert!(parse_err(&format!("{MINIMAL}\n[kotlin]\nversion = \"(\"\n")).contains("Kotlin version"));
+    assert!(
+        parse_err(&format!(
+            "{MINIMAL}
+[kotlin]
+ksp = \"(\"
+"
+        ))
+        .contains("KSP version")
+    );
 }
 
 #[test]
@@ -507,6 +521,7 @@ jvmonly = {{ path = \"libs/jvmonly\" }}
     assert!(parse_err(&with("lib = { path = \"../lib\", version = \"1.0\" }")).contains("`version` does not apply to a `path` dependency"));
     assert!(parse_err(&with("\"g:a\" = { path = \"../lib\" }")).contains("package name"));
     assert!(parse_err(&with("lib = { path = \"\" }")).contains("must not be empty"));
+    assert!(parse_err(&with("lib = { path = \"../lib\", scope = \"ksp\" }")).contains("KSP processor"));
     assert!(parse_err(&with("lib = { workspace = true }")).contains("needs a [workspace]"));
 }
 

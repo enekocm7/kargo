@@ -51,6 +51,8 @@ struct Shared {
     jdk: Lazy<Jdk>,
     compiler: Lazy<KotlinCompiler>,
     native: Lazy<NativeToolchain>,
+    /// KSP tool classpaths by KSP version (members of a workspace may pick different ones).
+    ksp: Mutex<HashMap<String, Vec<PathBuf>>>,
     /// Artifacts of path dependencies already built in this invocation, by package, target and platform.
     built: Mutex<HashMap<String, Option<PathBuf>>>,
     /// The build-directory lock, held until [`BuildContext::unlock`] or drop.
@@ -68,10 +70,10 @@ pub struct LocalDependency {
 /// Maven's rules: a provided dependency is not passed on, and a runtime one stays runtime.
 pub fn combine_scopes(outer: Scope, inner: Scope) -> Option<Scope> {
     match (outer, inner) {
-        // Annotation processors only run for the package that declares them.
-        (_, Scope::Provided | Scope::Processor) => None,
+        // Annotation and KSP processors only run for the package that declares them.
+        (_, Scope::Provided | Scope::Processor | Scope::Ksp) => None,
         (Scope::Provided, _) => Some(Scope::Provided),
-        (Scope::Processor, _) => None,
+        (Scope::Processor | Scope::Ksp, _) => None,
         (Scope::Runtime, _) | (_, Scope::Runtime) => Some(Scope::Runtime),
         (Scope::Compile, Scope::Compile) => Some(Scope::Compile),
     }
@@ -207,6 +209,7 @@ impl<'a> BuildContext<'a> {
                 jdk: Lazy::new(),
                 compiler: Lazy::new(),
                 native: Lazy::new(),
+                ksp: Mutex::new(HashMap::new()),
                 built: Mutex::new(HashMap::new()),
                 build_lock: Mutex::new(Some(build_lock)),
             }),
@@ -318,6 +321,23 @@ impl<'a> BuildContext<'a> {
 
     pub fn native_toolchain(&self) -> Result<&NativeToolchain> {
         self.shared.native.get_or_try_init(|| NativeToolchain::ensure(self.config, &self.client, &self.ws.manifest().kotlin.version))
+    }
+
+    /// The KSP2 command-line tool's classpath (`symbol-processing-aa-embeddable` and its dependencies).
+    pub fn ksp_tool(&self) -> Result<Vec<PathBuf>> {
+        let version = builtins::ksp_version(self.ws.manifest());
+        // Held while resolving, so parallel targets never download KSP twice.
+        let mut tools = self.shared.ksp.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(classpath) = tools.get(version) {
+            return Ok(classpath.clone());
+        }
+        let root =
+            DependencyRequest::new(ModuleId::new("com.google.devtools.ksp", "symbol-processing-aa-embeddable"), Some(version.to_owned()));
+        let resolution =
+            Resolver::new(&self.client, Platform::Jvm).resolve(&[root]).with_context(|| format!("failed to obtain KSP {version}"))?;
+        let classpath = resolution.files();
+        tools.insert(version.to_owned(), classpath.clone());
+        Ok(classpath)
     }
 
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {
@@ -498,6 +518,9 @@ mod tests {
         assert_eq!(combine_scopes(Provided, Compile), Some(Provided));
         assert_eq!(combine_scopes(Provided, Runtime), Some(Provided));
         assert_eq!(combine_scopes(Compile, Provided), None);
+        // A dependency's KSP processors stay with it.
+        assert_eq!(combine_scopes(Compile, Ksp), None);
+        assert_eq!(combine_scopes(Ksp, Compile), None);
     }
 
     #[test]
@@ -604,11 +627,15 @@ lib = { path = \"../lib\" }
         processor.scope = Scope::Processor;
         let mut test_processor = Dependency::new("tp:tp".parse().unwrap(), Some("1".into()));
         test_processor.scope = Scope::Processor;
+        let mut ksp = Dependency::new("k:k".parse().unwrap(), Some("1".into()));
+        ksp.scope = Scope::Ksp;
+        let mut test_ksp = Dependency::new("tk:tk".parse().unwrap(), Some("1".into()));
+        test_ksp.scope = Scope::Ksp;
         let setup = TargetSetup {
             target: TargetKind::Jvm,
             contributions: Contributions::default(),
-            main: vec![Dependency::new("c:c".parse().unwrap(), Some("1".into())), provided, runtime, processor],
-            dev: vec![Dependency::new("t:t".parse().unwrap(), Some("1".into())), test_processor],
+            main: vec![Dependency::new("c:c".parse().unwrap(), Some("1".into())), provided, runtime, processor, ksp],
+            dev: vec![Dependency::new("t:t".parse().unwrap(), Some("1".into())), test_processor, test_ksp],
             boms: vec![],
         };
         let names = |r: Vec<DependencyRequest>| r.into_iter().map(|r| r.module.artifact).collect::<Vec<_>>();
@@ -618,5 +645,8 @@ lib = { path = \"../lib\" }
         // Processors never land on a classpath, only on the processor path.
         assert_eq!(names(setup.requests(&[Scope::Processor], false)), ["ap"]);
         assert_eq!(names(setup.requests(&[Scope::Processor], true)), ["ap", "tp"]);
+        // KSP processors get their own path too.
+        assert_eq!(names(setup.requests(&[Scope::Ksp], false)), ["k"]);
+        assert_eq!(names(setup.requests(&[Scope::Ksp], true)), ["k", "tk"]);
     }
 }

@@ -178,6 +178,10 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
                 test?;
                 build::jvm_processor_path(ctx, &setup, false)?;
                 build::jvm_processor_path(ctx, &setup, true)?;
+                build::jvm_ksp_path(ctx, &setup, false)?;
+                if !build::jvm_ksp_path(ctx, &setup, true)?.is_empty() {
+                    ctx.ksp_tool()?;
+                }
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
@@ -220,6 +224,8 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
             let setup = ctx.setup(target)?;
             build::jvm_processor_path(ctx, &setup, false)?;
             build::jvm_processor_path(ctx, &setup, true)?;
+            build::jvm_ksp_path(ctx, &setup, false)?;
+            build::jvm_ksp_path(ctx, &setup, true)?;
         }
     }
     ctx.save_lockfile()

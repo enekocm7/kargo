@@ -248,7 +248,7 @@ kargo add -F <framework,...>
 | `--path <dir>` | Depend on the Kargo package in `<dir>` (relative to the current directory), built from source. The entry is named after that package, and its path is written relative to `kargo.toml`. See [path dependencies](../../guides/workspaces/) |
 | `--dev` | Add to `[dev-dependencies]` |
 | `-t, --target <target>` | Add to `[target.<target>.dependencies]` |
-| `--scope <scope>` | `compile`, `runtime`, `provided` or `processor` |
+| `--scope <scope>` | `compile`, `runtime`, `provided`, `processor` (javac annotation processor) or `ksp` (KSP processor) |
 | `--bom` | Import as a BOM |
 | `--pre` | Allow pre-release versions when picking the latest |
 | `--no-verify` | Don't check that the artifact exists |

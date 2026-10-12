@@ -50,6 +50,10 @@ The class of a top-level function in `Main.kt` is `MainKt`; for `object Cli { @J
 
 The annotation processor didn't run. Kargo only runs processors you declare with `scope = "processor"`; a processor that is merely on the classpath is ignored (JDK 23 and newer ignore it too). Move the processor artifact to `scope = "processor"`, keep its annotations as a `provided` dependency, and see [Annotation processors](../../guides/dependencies/#annotation-processors).
 
+### `unresolved reference` for a class a KSP processor generates, such as `PersonJsonAdapter`
+
+The KSP processor didn't run. Declare it with `scope = "ksp"`, not `processor` (which only runs `javac` processors over Java sources), and see [Kotlin Symbol Processing](../../guides/dependencies/#kotlin-symbol-processing-ksp). With `-v`, Kargo prints the arguments it passes to KSP; the generated files are under `target/<profile>/jvm/generated/ksp/`.
+
 ### `Node.js is required to run Kotlin/Wasm programs`
 
 Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Building Wasm doesn't need it; running and testing do.

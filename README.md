@@ -35,7 +35,7 @@ $ kargo test
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
 | `kargo add --path <dir> [--dev] [-t <target>]` | Depend on another Kargo package on disk, built from source |
-| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor] [--bom]` | Add dependencies (latest release when no version is given) |
+| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor\|ksp] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
@@ -87,7 +87,7 @@ group = "com.example"
 version = "2.4.21"
 opt-in = ["kotlin.ExperimentalStdlibApi"]
 compiler-args = ["-Xcontext-parameters"]
-# language-version, api-version, warnings-as-errors
+# language-version, api-version, warnings-as-errors, ksp (KSP version, default 2.3.12)
 
 # Targets: no [target] section means a JVM project.
 [target.jvm]
@@ -120,7 +120,8 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 mathlib = { path = "../mathlib" }   # another Kargo package, built from source
 # Other keys: classifier, extension, force, transitive, workspace = true
 "com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
-# Scopes: compile (default), runtime, provided, processor. Other keys: classifier, extension, force, transitive
+"com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }  # KSP processor (JVM, Android)
+# Scopes: compile (default), runtime, provided, processor, ksp. Other keys: classifier, extension, force, transitive
 
 [target.jvm.dependencies]   # per-target dependencies
 
