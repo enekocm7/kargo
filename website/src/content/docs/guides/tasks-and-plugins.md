@@ -116,6 +116,9 @@ Hooks receive these environment variables:
 | `KARGO_CLASSPATH`, `KARGO_JVM_JAR` | after a JVM build |
 | `KARGO_PACKAGE` | after `kargo package` |
 | `KARGO_TEST_RESULT` | after tests |
+| `KARGO_BUILD_LOCK` | always; see below |
+
+Kargo holds the [build-directory lock](../../reference/commands/#concurrent-commands) while hooks run. A hook can still call `kargo` on the same project, because `KARGO_BUILD_LOCK` tells the nested command that its parent already holds the lock.
 
 ### Example: copy the jar after packaging
 

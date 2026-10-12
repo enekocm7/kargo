@@ -17,9 +17,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use kargo_manifest::{LOCKFILE_NAME, MANIFEST_NAME, Manifest, Profile, TargetKind};
+use kargo_util::flock::FileLock;
+use kargo_util::shell::Shell;
 
 /// Environment variable overriding the build output directory.
 pub const TARGET_DIR_ENV: &str = "KARGO_TARGET_DIR";
+
+/// The lock file inside the target directory that serializes Kargo processes.
+pub const BUILD_LOCK_NAME: &str = ".kargo-lock";
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -107,6 +112,12 @@ impl Workspace {
         &self.target_dir
     }
 
+    /// Takes the build-directory lock that guards `target/` and `kargo.lock`,
+    /// waiting (with a `Blocking` status) while another Kargo process holds it.
+    pub fn lock(&self, shell: &Shell) -> Result<FileLock> {
+        FileLock::exclusive(&self.target_dir.join(BUILD_LOCK_NAME), shell, "build directory")
+    }
+
     pub fn name(&self) -> &str {
         &self.manifest.package.name
     }
@@ -167,10 +178,10 @@ pub fn dunce_canonicalize(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         let s = canonical.to_string_lossy();
-        if let Some(stripped) = s.strip_prefix(r"\\?\") {
-            if !stripped.starts_with("UNC\\") {
-                return PathBuf::from(stripped);
-            }
+        if let Some(stripped) = s.strip_prefix(r"\\?\")
+            && !stripped.starts_with("UNC\\")
+        {
+            return PathBuf::from(stripped);
         }
     }
     canonical

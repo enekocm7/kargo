@@ -19,7 +19,7 @@ Users get the full picture from `README.md` and the website in `website/`. Read 
 
 ## Repository layout
 
-Cargo workspace (edition 2024, MSRV 1.85). Crates depend downward in roughly this order:
+Cargo workspace (edition 2024, MSRV 1.89). Crates depend downward in roughly this order:
 
 | Path                     | Responsibility                                                                                                                                                |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |

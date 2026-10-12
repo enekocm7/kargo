@@ -7,7 +7,7 @@ Kargo is a single binary written in Rust. Install it, then make sure a JDK is av
 
 ## 1. Install Kargo
 
-Kargo is installed from source with Cargo, Rust's package manager. If you don't have Rust yet, install it with [rustup](https://rustup.rs). Kargo needs **Rust 1.85 or newer**.
+Kargo is installed from source with Cargo, Rust's package manager. If you don't have Rust yet, install it with [rustup](https://rustup.rs). Kargo needs **Rust 1.89 or newer**.
 
 ```sh
 cargo install --locked --git https://github.com/enekocm7/kargo kargo

@@ -33,6 +33,7 @@ For tasks, hook plugins and `kargo-*` subcommands:
 | `KARGO_KOTLIN_VERSION` | From `[kotlin]` |
 | `KARGO_TASK` | The running task's name (tasks only) |
 | `KARGO_HOOK` | The hook being run (hooks only) |
+| `KARGO_BUILD_LOCK` | The build-directory lock this Kargo process holds (hooks only); a `kargo` command the hook runs on the same project uses that lock instead of waiting for it |
 | `KARGO_CLASSPATH`, `KARGO_JVM_JAR` | After a JVM build |
 | `KARGO_PACKAGE` | After `kargo package` |
 | `KARGO_TEST_RESULT` | After tests |

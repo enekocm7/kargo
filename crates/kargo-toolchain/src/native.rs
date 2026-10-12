@@ -166,10 +166,10 @@ fn migrate_all_legacy(config: &Config) {
     let suffix = format!("-{}", host.classifier);
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(version) = name.strip_prefix("kotlin-native-").and_then(|r| r.strip_suffix(&suffix)) {
-            if let Ok(toolchain) = NativeToolchain::at(config, version) {
-                migrate_legacy(config, &toolchain);
-            }
+        if let Some(version) = name.strip_prefix("kotlin-native-").and_then(|r| r.strip_suffix(&suffix))
+            && let Ok(toolchain) = NativeToolchain::at(config, version)
+        {
+            migrate_legacy(config, &toolchain);
         }
     }
 }

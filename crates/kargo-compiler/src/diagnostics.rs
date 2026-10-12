@@ -113,10 +113,10 @@ fn parse_location(location: &str) -> Option<(String, Option<u32>, Option<u32>)> 
     let number = |s: &str| s.parse::<u32>().ok();
     let (rest, last) = location.rsplit_once(':')?;
     let last = number(last)?;
-    if let Some((file, line)) = rest.rsplit_once(':').and_then(|(f, l)| Some((f, number(l)?))) {
-        if !file.is_empty() {
-            return Some((file.to_owned(), Some(line), Some(last)));
-        }
+    if let Some((file, line)) = rest.rsplit_once(':').and_then(|(f, l)| Some((f, number(l)?)))
+        && !file.is_empty()
+    {
+        return Some((file.to_owned(), Some(line), Some(last)));
     }
     (!rest.is_empty()).then(|| (rest.to_owned(), Some(last), None))
 }

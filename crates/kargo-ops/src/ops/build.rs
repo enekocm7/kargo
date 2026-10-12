@@ -132,7 +132,12 @@ pub fn hook_env(ctx: &BuildContext) -> Vec<(String, String)> {
         ProfileKind::Dev => "dev",
         ProfileKind::Release => "release",
     };
-    crate::plugins::base_env(ctx.ws, profile)
+    let mut env = crate::plugins::base_env(ctx.ws, profile);
+    // Hooks run while this process holds the build lock; a `kargo` they call must not wait on it.
+    if let Some(lock) = ctx.build_lock_path() {
+        env.push((kargo_util::flock::HELD_LOCK_ENV.to_owned(), lock.to_string_lossy().into_owned()));
+    }
+    env
 }
 
 pub fn finished(ctx: &BuildContext, start: Instant) {

@@ -24,6 +24,18 @@ These work with every command.
 
 Targets are `jvm`, `wasm`, `native` and `android`.
 
+### Concurrent commands
+
+Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `package`, `update`, `clean`, `android` and `toolchain which`) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
+
+```console
+$ kargo build
+    Blocking waiting for file lock on build directory
+   Compiling my-app v0.1.0 (jvm)
+```
+
+`kargo run` releases the lock once the build is done, so a long-running program doesn't block other commands. Downloads to the shared cache in `~/.kargo` don't need the lock: each file is written to a temporary name and renamed into place, so two projects can fetch the same artifact at the same time.
+
 ---
 
 ## `kargo new`
@@ -342,7 +354,7 @@ $ kargo update org.jetbrains.kotlinx:kotlinx-io-core --precise 0.7.0
 
 ## `kargo clean`
 
-Delete `target/`.
+Delete everything in `target/` except the build-directory lock, `target/.kargo-lock`.
 
 | Option | Meaning |
 |---|---|

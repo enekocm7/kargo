@@ -535,12 +535,11 @@ impl RawManifest {
     pub(super) fn validate(self) -> Result<Manifest> {
         validate_package_name(&self.package.name)?;
         validate_version_string("package version", &self.package.version)?;
-        if let Some(group) = &self.package.group {
-            if group.is_empty()
-                || group.split('.').any(|seg| seg.is_empty() || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-            {
-                bail!("invalid package group `{group}` (expected something like `com.example`)");
-            }
+        if let Some(group) = &self.package.group
+            && (group.is_empty()
+                || group.split('.').any(|seg| seg.is_empty() || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')))
+        {
+            bail!("invalid package group `{group}` (expected something like `com.example`)");
         }
 
         let kotlin_version = self.kotlin.version.unwrap_or_else(|| DEFAULT_KOTLIN_VERSION.to_owned());
@@ -614,10 +613,10 @@ impl RawManifest {
                                             "invalid cinterop name `{name}` in [target.native.cinterop] (use letters, digits, `_` and `-`)"
                                         );
                                     }
-                                    if let Some(pkg) = &c.package {
-                                        if pkg.is_empty() || !pkg.split('.').all(|part| !part.is_empty()) {
-                                            bail!("invalid package `{pkg}` in [target.native.cinterop.{name}]");
-                                        }
+                                    if let Some(pkg) = &c.package
+                                        && (pkg.is_empty() || !pkg.split('.').all(|part| !part.is_empty()))
+                                    {
+                                        bail!("invalid package `{pkg}` in [target.native.cinterop.{name}]");
                                     }
                                     Ok(Cinterop {
                                         name,
@@ -709,10 +708,11 @@ impl RawManifest {
         if frameworks.compose.is_some() && !repositories.iter().any(|r| r.url == kargo_maven::repo::GOOGLE) {
             repositories.insert(1, Repository::google());
         }
-        if let Some(ktor) = &frameworks.ktor {
-            if ktor.server.is_none() && ktor.client.is_none() {
-                bail!("[frameworks.ktor] enable at least one of `server = \"netty\"` or `client = \"cio\"`");
-            }
+        if let Some(ktor) = &frameworks.ktor
+            && ktor.server.is_none()
+            && ktor.client.is_none()
+        {
+            bail!("[frameworks.ktor] enable at least one of `server = \"netty\"` or `client = \"cio\"`");
         }
 
         let mut compiler_plugins = Vec::new();
