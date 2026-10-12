@@ -5,7 +5,8 @@
 //
 // Protocol (all integers big-endian, strings are u32 length + UTF-8 bytes):
 //   request:  u32 PROTOCOL, string token, string command, u32 n, n * string argument
-//             commands: `kotlin` (first argument is the compiler main class), `javac`, `stop`
+//             commands: `kotlin` (first argument is the compiler main class), `javac`,
+//             `kotlin-ic` (incremental compilation, see KargoIc.java), `stop`
 //   response: frames of u8 kind + payload: 'o' u32 length + bytes (compiler output),
 //             'x' i32 exit code (last frame).
 
@@ -35,17 +36,22 @@ public final class KargoDaemon {
     static final int PROTOCOL = 1;
     /** Exit code telling the client to run the tool as a separate process instead. */
     static final int UNSUPPORTED = -1000;
+    /** Exit code for an incremental compilation that failed for reasons other than compile errors. */
+    static final int IC_FAILED = -1001;
 
     /** Where `System.out`/`System.err` of the current request (and threads it starts) go. */
     static final InheritableThreadLocal<OutputStream> SINK = new InheritableThreadLocal<>();
     static final AtomicInteger ACTIVE = new AtomicInteger();
     static volatile long lastUse = System.currentTimeMillis();
+    /** The daemon's log (its original stderr), for problems that are not the client's output. */
+    static PrintStream log = System.err;
 
     public static void main(String[] args) throws Exception {
         Path info = Paths.get(args[0]);
         long idleMillis = Long.parseLong(args[1]) * 1000L;
         // Keeps the compiler's application environment alive between compilations, like the Kotlin daemon.
         System.setProperty("kotlin.environment.keepalive", "true");
+        log = System.err;
         System.setOut(new PrintStream(new Router(System.out), true));
         System.setErr(new PrintStream(new Router(System.err), true));
 
@@ -166,6 +172,25 @@ public final class KargoDaemon {
             Method exec = compilerClass.getMethod("exec", PrintStream.class, rendererClass, String[].class);
             Object exitCode = exec.invoke(compiler, output, renderer, (Object) Arrays.copyOfRange(arguments, 1, arguments.length));
             return (Integer) exitCode.getClass().getMethod("getCode").invoke(exitCode);
+        }
+        if (command.equals("kotlin-ic")) {
+            Method run;
+            try {
+                run = Class.forName("KargoIc").getMethod("run", String[].class, PrintStream.class);
+            } catch (ClassNotFoundException | LinkageError e) {
+                return UNSUPPORTED;
+            }
+            try {
+                return (Integer) run.invoke(null, arguments, output);
+            } catch (InvocationTargetException e) {
+                if (e.getCause() instanceof OutOfMemoryError) {
+                    throw (OutOfMemoryError) e.getCause();
+                }
+                // Not a compile error: the client recompiles everything from scratch instead.
+                log.println("incremental compilation failed:");
+                e.getCause().printStackTrace(log);
+                return IC_FAILED;
+            }
         }
         if (command.equals("javac")) {
             javax.tools.JavaCompiler javac = javax.tools.ToolProvider.getSystemJavaCompiler();

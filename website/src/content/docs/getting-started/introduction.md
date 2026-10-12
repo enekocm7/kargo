@@ -25,7 +25,7 @@ That is a complete project. There is no `build.gradle.kts`, no `settings.gradle.
 - **Four targets.** JVM, WebAssembly (`js` or `wasi`), Kotlin/Native (Linux, macOS, Windows, iOS and more) and Android. One project can enable several of them and share code between them with `expect`/`actual`.
 - **Maven dependencies.** Kargo resolves from Maven Central (plus any repositories you add) and understands POM inheritance, BOMs, exclusions, version ranges, relocations and Gradle module metadata. Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target.
 - **Reproducible builds.** `kargo.lock` pins every version and the SHA-256 of every downloaded file.
-- **Incremental compilation.** If sources, classpath and flags have not changed, nothing is recompiled.
+- **Incremental compilation.** If a target's sources, classpath and flags have not changed, it is not recompiled. On the JVM, an edit recompiles only the files it affects, in a warm [compiler daemon](../../guides/build-performance/#incremental-compilation).
 - **Built-in frameworks.** Compose, Ktor, Spring Boot, kotlinx.serialization, coroutines and Lombok each take one line to enable. Kargo adds the libraries, compiler plugins and flags.
 - **Managed toolchains.** Kargo can download a JDK for you, and it installs Kotlin/Native automatically.
 - **Extensibility.** Tasks, build hooks, compiler plugins and `kargo-<name>` subcommands.

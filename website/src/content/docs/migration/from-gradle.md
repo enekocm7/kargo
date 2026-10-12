@@ -183,6 +183,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `./gradlew ktlintFormat` / `ktlintCheck` (ktlint plugins, Spotless) | `kargo fmt` / `kargo fmt --check` |
 | `./gradlew detekt` (detekt plugin) | `kargo lint`; keep your config with `[lint] config = ["config/detekt/detekt.yml"]` |
 | `--offline` | `--offline` |
+| `kotlin.incremental=true` (incremental compilation) | On by default for the JVM; `KARGO_INCREMENTAL=false` turns it off |
 | Gradle daemon / Kotlin daemon (`--no-daemon`, `kotlin.compiler.execution.strategy`) | The [compiler daemon](../../guides/build-performance/#the-compiler-daemon) (`KARGO_DAEMON=false`, `kargo daemon stop`) |
 | `org.gradle.parallel=true` | Always on: targets and Native platforms build in parallel |
 | `gradle.lockfile` | `kargo.lock` (always on) |

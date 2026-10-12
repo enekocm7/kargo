@@ -129,6 +129,57 @@ fn compile_errors_are_reported() {
 }
 
 #[test]
+fn incremental_compilation() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["inc"]);
+    std::fs::remove_file(t.dir.path().join("inc/tests/GreetingTest.kt")).unwrap();
+    let run = |expected: &str| {
+        t.kargo("inc").args(["run", "-q"]).assert().success().stdout(predicate::str::contains(expected));
+    };
+    t.write("inc/src/Main.kt", "package com.example.inc\nfun main() = println(\"v=\" + value() + \" k=\" + K + \" s=\" + area())\n");
+    t.write("inc/src/Util.kt", "package com.example.inc\nfun value(): Int = 1\n");
+    t.write("inc/src/Const.kt", "package com.example.inc\nconst val K = 10\n");
+    t.write("inc/src/Shape.kt", "package com.example.inc\nfun area(): Int = 9\n");
+    run("v=1 k=10 s=9");
+    assert!(t.dir.path().join("inc/target/debug/jvm/.fingerprint/inc.ic/caches").is_dir(), "incremental caches are kept");
+
+    // A body change, and a constant inlined into another file.
+    t.write("inc/src/Util.kt", "package com.example.inc\nfun value(): Int = 2\n");
+    t.write("inc/src/Const.kt", "package com.example.inc\nconst val K = 11\n");
+    run("v=2 k=11 s=9");
+
+    // A signature change breaks the caller, which is recompiled and reported.
+    t.write("inc/src/Util.kt", "package com.example.inc\nfun value(x: Int): Int = x\n");
+    t.kargo("inc").arg("build").assert().failure().code(101).stderr(predicate::str::contains("src/Main.kt:2:"));
+    t.write("inc/src/Main.kt", "package com.example.inc\nfun main() = println(\"v=\" + value(5) + \" k=\" + K + \" s=\" + area())\n");
+    run("v=5 k=11 s=9");
+
+    // Deleting a file removes its classes.
+    std::fs::remove_file(t.dir.path().join("inc/src/Shape.kt")).unwrap();
+    t.write("inc/src/Main.kt", "package com.example.inc\nfun main() = println(\"v=\" + value(5) + \" k=\" + K)\n");
+    run("v=5 k=11");
+    assert!(!t.dir.path().join("inc/target/debug/jvm/classes/com/example/inc/ShapeKt.class").exists());
+
+    // Tests see changes to `internal` main declarations.
+    t.write("inc/src/Util.kt", "package com.example.inc\nfun value(x: Int): Int = x\ninternal fun secret() = 41\n");
+    t.write(
+        "inc/tests/SecretTest.kt",
+        "package com.example.inc\nimport kotlin.test.*\nclass SecretTest { @Test fun s() = assertEquals(41, secret()) }\n",
+    );
+    t.kargo("inc").arg("test").assert().success();
+    t.write("inc/src/Util.kt", "package com.example.inc\nfun value(x: Int): Int = x\ninternal fun secret() = 42\n");
+    t.kargo("inc").arg("test").assert().failure().code(101);
+
+    // KARGO_INCREMENTAL=false compiles from scratch and drops the caches.
+    t.write("inc/src/Util.kt", "package com.example.inc\nfun value(x: Int): Int = x + 1\n");
+    std::fs::remove_file(t.dir.path().join("inc/tests/SecretTest.kt")).unwrap();
+    t.kargo("inc").args(["run", "-q"]).env("KARGO_INCREMENTAL", "false").assert().success().stdout(predicate::str::contains("v=6"));
+    assert!(!t.dir.path().join("inc/target/debug/jvm/.fingerprint/inc.ic").exists());
+    run("v=6 k=11");
+}
+
+#[test]
 fn daemon_matches_standalone_compiler() {
     require_e2e!();
     let t = E2e::new();
