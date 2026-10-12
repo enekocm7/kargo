@@ -127,6 +127,9 @@ pub struct Resolver<'a> {
     platform: Platform,
     /// Versions managed by BOMs/platforms declared in the manifest.
     constraints: HashMap<ModuleId, String>,
+    /// Versions fixed by the caller (`kargo update` keeping locked versions), applied whenever
+    /// the module is in the graph and overriding everything else.
+    pins: HashMap<ModuleId, Version>,
     infos: Mutex<HashMap<(ModuleId, String), NodeInfo>>,
     poms: Mutex<HashMap<(ModuleId, String), Pom>>,
     effective: Mutex<HashMap<(ModuleId, String), EffectivePom>>,
@@ -163,6 +166,7 @@ impl<'a> Resolver<'a> {
             client,
             platform,
             constraints: HashMap::new(),
+            pins: HashMap::new(),
             infos: Mutex::new(HashMap::new()),
             poms: Mutex::new(HashMap::new()),
             effective: Mutex::new(HashMap::new()),
@@ -184,6 +188,11 @@ impl<'a> Resolver<'a> {
 
     pub fn add_constraint(&mut self, module: ModuleId, version: String) {
         self.constraints.insert(module, version);
+    }
+
+    /// Fixes `module` at `version` if it appears in the graph, without adding it.
+    pub fn pin(&mut self, module: ModuleId, version: &str) {
+        self.pins.insert(module, Version::parse(version));
     }
 
     pub fn managed_version(&self, module: &ModuleId) -> Option<&str> {
@@ -389,6 +398,9 @@ impl<'a> Resolver<'a> {
 
     /// Chooses the version for a module given everything that asked for it.
     fn choose(&self, module: &ModuleId, requests: &Requests) -> Result<Version> {
+        if let Some(pinned) = self.pins.get(module) {
+            return Ok(pinned.clone());
+        }
         if let Some(forced) = &requests.forced {
             return Ok(forced.clone());
         }
@@ -744,6 +756,20 @@ mod tests {
         pinned.force = true;
         let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("g:x", "1.0"), pinned]).unwrap();
         assert_eq!(res.node(&"g:shared".parse().unwrap()).unwrap().version, "1.0");
+    }
+
+    #[test]
+    fn pins_override_transitive_versions_without_adding_modules() {
+        let repo = TestRepo::new();
+        repo.publish("g:x", "1.0", &[("g:shared", "2.0", "")]);
+        repo.publish("g:shared", "1.0", &[]);
+        repo.publish("g:shared", "2.0", &[]);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        resolver.pin("g:shared".parse().unwrap(), "1.0");
+        resolver.pin("g:absent".parse().unwrap(), "9.9");
+        let res = resolver.resolve(&[req("g:x", "1.0")]).unwrap();
+        assert_eq!(versions(&res), ["x:1.0", "shared:1.0"]);
     }
 
     #[test]
