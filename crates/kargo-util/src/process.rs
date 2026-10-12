@@ -1,7 +1,7 @@
 //! Helpers for spawning external tools.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 
 use anyhow::{Context, Result, bail};
 
@@ -37,6 +37,80 @@ pub fn run(shell: &Shell, cmd: &mut Command, what: &str) -> Result<()> {
 pub fn status(shell: &Shell, cmd: &mut Command, what: &str) -> Result<ExitStatus> {
     shell.verbose("Running", format!("`{}`", describe(cmd)));
     cmd.status().with_context(|| format!("failed to start {what} (`{}`)", cmd.get_program().to_string_lossy()))
+}
+
+/// Spawns a background process that outlives Kargo: it gets its own process
+/// group (so the terminal's Ctrl-C doesn't reach it) and no console window.
+///
+/// The caller must redirect all three of `cmd`'s stdio streams. On Windows,
+/// `CreateProcess` also hands the child every inheritable handle Kargo holds,
+/// including Kargo's own stdin/stdout/stderr, so a long-lived child would keep a
+/// pipe Kargo writes to open and whoever reads it (`kargo build | tee`, CI log
+/// capture, test harnesses) would never see EOF. Kargo's std handles are made
+/// non-inheritable for the duration of the spawn. Unix needs nothing: the
+/// standard library opens every descriptor close-on-exec.
+pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        cmd.spawn()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        windows::spawn_without_std_handles(cmd)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        cmd.spawn()
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use std::os::windows::io::{AsRawHandle, RawHandle};
+    use std::process::{Child, Command};
+    use std::sync::Mutex;
+
+    const HANDLE_FLAG_INHERIT: u32 = 0x1;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetHandleInformation(handle: RawHandle, flags: *mut u32) -> i32;
+        fn SetHandleInformation(handle: RawHandle, mask: u32, flags: u32) -> i32;
+    }
+
+    /// Serializes detached spawns so one never restores a flag another just cleared.
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    pub(super) fn spawn_without_std_handles(cmd: &mut Command) -> std::io::Result<Child> {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let handles = [std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()];
+        // The handles to restore afterwards; one shared by two streams is listed once.
+        let mut cleared: Vec<RawHandle> = Vec::new();
+        for h in handles {
+            if h.is_null() || cleared.contains(&h) {
+                continue;
+            }
+            let mut flags = 0;
+            // SAFETY: `h` is one of this process's std handles; both calls only
+            // read or change its inheritance flag and fail harmlessly if it is invalid.
+            let inheritable = unsafe { GetHandleInformation(h, &mut flags) } != 0 && flags & HANDLE_FLAG_INHERIT != 0;
+            if inheritable && unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) } != 0 {
+                cleared.push(h);
+            }
+        }
+        let result = cmd.spawn();
+        for h in cleared {
+            // SAFETY: as above.
+            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        }
+        result
+    }
 }
 
 pub fn describe_status(status: ExitStatus) -> String {
@@ -163,5 +237,63 @@ mod tests {
     #[test]
     fn missing_executable_is_none() {
         assert!(find_on_path("definitely-not-a-real-kargo-binary").is_none());
+    }
+
+    /// A detached child must not keep the spawner's stdout pipe open (#82). The
+    /// test re-runs itself: the outer run reads a "parent" run's stdout through a
+    /// pipe, the parent detaches a long-lived "grandchild" and exits, and the pipe
+    /// must reach EOF while the grandchild is still running.
+    #[test]
+    fn detached_child_does_not_hold_parent_stdio() {
+        const ROLE: &str = "KARGO_TEST_DETACH_ROLE";
+        const STOP: &str = "KARGO_TEST_DETACH_STOP";
+        let exe = std::env::current_exe().unwrap();
+        let self_args = ["--exact", "process::tests::detached_child_does_not_hold_parent_stdio", "--test-threads=1"];
+        match std::env::var(ROLE).as_deref() {
+            Ok("grandchild") => {
+                let stop = PathBuf::from(std::env::var_os(STOP).unwrap());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while !stop.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            Ok("parent") => {
+                let mut cmd = Command::new(&exe);
+                cmd.args(self_args)
+                    .env(ROLE, "grandchild")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                // Deliberately left running: it must outlive this process.
+                #[allow(clippy::zombie_processes)]
+                let _grandchild = spawn_detached(&mut cmd).unwrap();
+            }
+            _ => {
+                let dir = tempfile::tempdir().unwrap();
+                let stop = dir.path().join("stop");
+                let mut parent = Command::new(&exe)
+                    .args(self_args)
+                    .env(ROLE, "parent")
+                    .env(STOP, &stop)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let mut out = parent.stdout.take().unwrap();
+                let mut err = parent.stderr.take().unwrap();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let mut sink = Vec::new();
+                    let _ = std::io::Read::read_to_end(&mut out, &mut sink);
+                    let _ = std::io::Read::read_to_end(&mut err, &mut sink);
+                    let _ = tx.send(());
+                });
+                let eof = rx.recv_timeout(std::time::Duration::from_secs(30));
+                std::fs::write(&stop, "").unwrap();
+                assert!(parent.wait().unwrap().success());
+                assert!(eof.is_ok(), "the detached grandchild kept the parent's stdout/stderr pipe open");
+            }
+        }
     }
 }

@@ -64,6 +64,9 @@ fn jvm_lifecycle() {
     t.kargo("app").arg("build").assert().success().stderr(predicate::str::contains("Compiling").not());
     t.kargo("app").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
     t.kargo("app").arg("test").assert().success();
+    t.kargo("app").args(["test", "--report", "junit"]).assert().success().stderr(predicate::str::contains("Reported JUnit XML"));
+    let report = std::fs::read_to_string(t.dir.path().join("app/target/debug/jvm/test-reports/TEST-junit-jupiter.xml")).unwrap();
+    assert!(report.contains("<testcase") && report.contains("GreetingTest"), "{report}");
 
     // A failing test fails the command.
     t.write("app/tests/FailTest.kt", "import kotlin.test.*\nclass FailTest { @Test fun nope() = assertEquals(1, 2) }\n");
@@ -186,12 +189,34 @@ fn daemon_matches_standalone_compiler() {
     t.create(&["both"]);
     let diagnostics = |daemon: &str| {
         let out = t.kargo("both").arg("build").env("KARGO_DAEMON", daemon).assert().failure().code(101).get_output().stderr.clone();
-        String::from_utf8_lossy(&out).lines().filter(|l| l.contains("error")).map(str::to_owned).collect::<Vec<_>>()
+        // Compilers print paths with the platform's separator.
+        String::from_utf8_lossy(&out).lines().filter(|l| l.contains("error")).map(|l| l.replace('\\', "/")).collect::<Vec<_>>()
     };
     t.write("both/src/Main.kt", "fun main() {\n    val x: Int = \"nope\"\n}\n");
     let standalone = diagnostics("false");
     assert!(standalone.iter().any(|l| l.starts_with("src/Main.kt:2:16: error:")), "{standalone:?}");
     assert_eq!(diagnostics("true"), standalone, "the daemon reports the same Kotlin diagnostics, with relative paths");
+
+    // `--message-format json` turns them into JSON messages on stdout, with or without the daemon.
+    let main = t.dir.path().join("both/src/Main.kt").canonicalize().unwrap();
+    for daemon in ["false", "true"] {
+        let out = t
+            .kargo("both")
+            .args(["build", "--message-format", "json"])
+            .env("KARGO_DAEMON", daemon)
+            .assert()
+            .failure()
+            .code(101)
+            .get_output()
+            .stdout
+            .clone();
+        let messages: Vec<serde_json::Value> = String::from_utf8_lossy(&out).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let error = messages.iter().find(|m| m["reason"] == "compiler-message" && m["severity"] == "error").expect("an error message");
+        assert_eq!((error["line"].as_u64(), error["column"].as_u64()), (Some(2), Some(16)), "{error}");
+        assert_eq!(std::path::Path::new(error["file"].as_str().unwrap()).canonicalize().unwrap(), main);
+        assert!(error["rendered"].as_str().unwrap().contains("val x: Int = \"nope\""), "{error}");
+        assert_eq!(messages.last().unwrap()["reason"], "build-finished");
+    }
 
     t.write("both/src/Main.kt", "fun main() = println(J.s())\n");
     t.write("both/src/J.java", "public class J { static String s() { return 1; } }\n");
@@ -263,6 +288,9 @@ fn multiplatform_expect_actual_on_wasm() {
         .success()
         .stdout(predicate::str::contains("GreetingTest.greetsByName ... ok"))
         .stdout(predicate::str::contains("Hello, wasm!").not());
+    t.kargo("mpp").args(["test", "--target", "wasm", "--report", "junit"]).assert().success();
+    let report = std::fs::read_to_string(t.dir.path().join("mpp/target/debug/wasm/test-reports/TEST-wasm.xml")).unwrap();
+    assert!(report.contains(r#"<testcase name="greetsByName""#), "{report}");
 }
 
 #[test]
@@ -426,6 +454,48 @@ fn spring_boot_with_lombok() {
 }
 
 #[test]
+fn java_annotation_processor() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["apt"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("apt/kargo.toml")).unwrap();
+    t.write(
+        "apt/kargo.toml",
+        &format!(
+            "{manifest}
+[target.jvm]
+javac-args = [\"-Xlint:-processing\"]
+
+[target.jvm.dependencies]
+             \"com.google.auto.value:auto-value-annotations\" = {{ version = \"1.11.0\", scope = \"provided\" }}
+             \"com.google.auto.value:auto-value\" = {{ version = \"1.11.0\", scope = \"processor\" }}
+"
+        ),
+    );
+    t.write(
+        "apt/src/Person.java",
+        "package com.example.apt;
+import com.google.auto.value.AutoValue;
+@AutoValue public abstract class Person {
+    public abstract String name();
+    public static Person create(String n) { return new AutoValue_Person(n); }
+}
+",
+    );
+    t.write(
+        "apt/src/Main.kt",
+        "package com.example.apt
+
+fun main() = println(Person.create(\"Ada\"))
+",
+    );
+    t.kargo("apt").arg("run").assert().success().stdout(predicate::str::contains("Person{name=Ada}"));
+    // The processor is not packaged.
+    let lib = t.dir.path().join("apt/target/debug/jvm/lib");
+    assert!(!std::fs::read_dir(lib).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("auto-value")));
+}
+
+#[test]
 fn ktor_and_compose_compile() {
     require_e2e!();
     let t = E2e::new();
@@ -447,7 +517,45 @@ fn native_executable_and_tests() {
     t.kargo("nat").args(["check", "--tests"]).assert().success().stderr(predicate::str::contains("Checking nat v0.1.0 (native, "));
     assert!(!t.dir.path().join("nat/target/debug/native").exists(), "check does not link an executable");
     t.kargo("nat").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
-    t.kargo("nat").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
+    t.kargo("nat").args(["test", "--report", "junit"]).assert().success().stdout(predicate::str::contains("1 passed"));
+    let report = std::fs::read_to_string(t.dir.path().join("nat/target/debug/native/test-reports/TEST-native.xml")).unwrap();
+    assert!(report.contains("<testcase") && report.contains(r#"failures="0""#), "{report}");
+}
+
+#[test]
+fn native_cinterop() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
+        eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["cin", "--target", "native"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("cin/kargo.toml")).unwrap();
+    t.write(
+        "cin/kargo.toml",
+        &format!("{manifest}\n[target.native.cinterop.mathx]\npackage = \"mathx\"\ncompiler-options = [\"-Iinclude\"]\n"),
+    );
+    t.write("cin/include/twice.h", "static inline int twice(int x) { return 2 * x; }\n");
+    t.write("cin/interop/mathx.def", "headers = twice.h\n---\nstatic int add(int a, int b) { return a + b; }\n");
+    t.write(
+        "cin/src/Main.kt",
+        "import kotlinx.cinterop.ExperimentalForeignApi\n\n@OptIn(ExperimentalForeignApi::class)\nfun main() = println(\"answer \" + mathx.twice(mathx.add(20, 1)))\n",
+    );
+    t.write(
+        "cin/tests/GreetingTest.kt",
+        "import kotlinx.cinterop.ExperimentalForeignApi\nimport kotlin.test.Test\nimport kotlin.test.assertEquals\n\n\
+         @OptIn(ExperimentalForeignApi::class)\nclass InteropTest {\n    @Test\n    fun callsC() = assertEquals(4, mathx.add(2, 2))\n}\n",
+    );
+    t.kargo("cin")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating mathx C bindings"))
+        .stdout(predicate::str::contains("answer 42"));
+    // Up to date: the bindings are not regenerated.
+    t.kargo("cin").arg("build").assert().success().stderr(predicate::str::contains("Generating").not());
+    t.kargo("cin").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
 }
 
 #[test]
@@ -478,7 +586,9 @@ fn android_app_with_compose() {
     });
     assert!(dexed, "MainActivity is missing from {}", apk.display());
 
-    t.kargo("droid").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
+    t.kargo("droid").args(["test", "--report", "junit"]).assert().success().stdout(predicate::str::contains("1 passed"));
+    let reports = std::fs::read_dir(t.dir.path().join("droid/target/debug/android/test-reports")).unwrap().count();
+    assert!(reports > 0, "Gradle's JUnit XML reports are copied");
     // A failing test must fail `kargo test`.
     let test = t.dir.path().join("droid/tests/GreetingTest.kt");
     let source = std::fs::read_to_string(&test).unwrap();

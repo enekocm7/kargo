@@ -86,6 +86,26 @@ fail-fast = false
 
 `kargo build --keep-going` and `kargo check --keep-going` do the same for builds: every target is built and each failure is reported.
 
+## Test reports for CI
+
+CI systems such as GitHub Actions, GitLab and Jenkins show per-test results from JUnit XML files. Pass `--report junit` and Kargo writes them next to each target's build output, in addition to the usual console report:
+
+```console
+$ kargo test --report junit
+     Running JVM tests (JUnit Platform)
+...
+    Reported JUnit XML in target/debug/jvm/test-reports
+```
+
+| Target | Report files in `target/<profile>/<target>/test-reports/` |
+|---|---|
+| JVM | Written by the JUnit console launcher: one `TEST-<engine>.xml` per test engine, such as `TEST-junit-jupiter.xml` |
+| Wasm | `TEST-wasm.xml`, built from the test runner's results |
+| Native | `TEST-native.xml`, built from the test runner's results |
+| Android | Gradle's `TEST-<class>.xml` files, copied from `target/android/build/test-results` |
+
+Each report has one `<testsuite>` per test class, with each test's time, failure message and stack trace, and what it printed. The directory is cleared at the start of every run, so it never holds results from an earlier one. See [CI](../ci/#test-results) for publishing the reports.
+
 ## Filtering tests
 
 The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on the JVM, Native and Android:

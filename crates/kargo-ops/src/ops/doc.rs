@@ -16,7 +16,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use super::build::{finished, jvm_classpaths, native_libraries, native_platforms, select_targets, wasm_libraries};
+use super::build::{finished, jvm_classpaths, native_cinterop, native_libraries, native_platforms, select_targets, wasm_libraries};
 use super::context::BuildContext;
 use kargo_manifest::{DocSettings, TargetKind};
 use kargo_maven::{DependencyRequest, ModuleId, Platform, Resolver};
@@ -183,6 +183,7 @@ fn classpath(ctx: &BuildContext, target: TargetKind) -> Result<(&'static str, Ve
             // The API is the same on every platform, so the first one is enough.
             let platform = native_platforms(ctx)?.into_iter().next().context("[target.native] lists no platforms")?;
             let mut libs = native_libraries(ctx, &setup, &platform, false)?;
+            libs.extend(native_cinterop(ctx, &platform)?);
             let home = &ctx.native_toolchain()?.home;
             libs.extend(klibs(&home.join("klib").join("common")));
             libs.extend(klibs(&home.join("klib").join("platform").join(&platform)));

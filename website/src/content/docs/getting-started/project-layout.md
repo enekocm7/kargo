@@ -19,6 +19,7 @@ my-app/
 ├── resources/           JVM resources, put on the classpath and in the jar
 ├── test-resources/      resources for JVM tests
 ├── android/             AndroidManifest.xml, res/, assets/
+├── interop/             cinterop .def files for C libraries (Kotlin/Native)
 └── target/              build output (git-ignored)
 ```
 
@@ -98,7 +99,8 @@ class GreeterTest {
 
 - **A full JDK is required.** If the JDK has no `javac` (a JRE-only install, for example), the build fails and tells you to install a full JDK. Pin one with `[toolchain] jdk = "21"` and Kargo downloads a Temurin JDK, which includes `javac`.
 - **Java is for the JVM and Android.** The Wasm and Native targets only compile `.kt` files and ignore `.java` files. In a multiplatform project, keep Java in `src-jvm/` so that common code in `src/` doesn't depend on it. On Android, the generated Gradle project compiles the Java files in `src/` and `src-android/`.
-- **Annotation processing is off by default.** `javac` runs with `-proc:none`. The `lombok` [framework](../../guides/frameworks/) turns annotation processing on for the main sources. You can't register your own processors yet, and processors don't run for tests.
+- **Annotation processing is off by default.** `javac` runs with `-proc:none`. Declare a processor with `scope = "processor"` (see [Annotation processors](../../guides/dependencies/#annotation-processors)) or turn on the `lombok` [framework](../../guides/frameworks/), and Kargo runs it for the main and test sources. Processors only see Java sources; Kotlin annotation processing (KSP, kapt) is not supported yet.
+- **Extra `javac` options** go in `[target.jvm] javac-args`, e.g. `javac-args = ["-Xlint:all"]`. The `--release` flag comes from `jvm-target`.
 - **Java-only projects work.** The Kotlin compiler step is skipped when there are no `.kt` files. But `kargo new` always creates Kotlin templates, and you must set `main-class` yourself.
 - **Compile errors** come straight from `javac`, followed by `could not compile Java sources of ... due to previous errors`.
 
@@ -113,7 +115,7 @@ target/
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
-│   ├── native/
+│   ├── native/                   one directory per platform; cinterop/ holds C bindings
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
 ├── lint/                         Kargo's detekt settings for kargo lint

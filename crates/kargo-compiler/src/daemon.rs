@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::diagnostics;
 use kargo_toolchain::Jdk;
 use kargo_util::hash::{Fingerprint, sha256_bytes};
 use kargo_util::shell::Shell;
@@ -290,9 +291,9 @@ fn start(shell: &Shell, root: &Path, dir: &Path, jdk: &Jdk, classpath: &[PathBuf
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    detach(&mut cmd);
     shell.verbose("Starting", format!("compiler daemon `{}`", kargo_util::process::describe(&cmd)));
-    let mut child = cmd.spawn().context("failed to start the compiler daemon")?;
+    // Detached so it outlives Kargo, without holding on to Kargo's stdio (#82).
+    let mut child = kargo_util::process::spawn_detached(&mut cmd).context("failed to start the compiler daemon")?;
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         // Wait for a new info file (a stale one may point at a dead daemon).
@@ -309,22 +310,6 @@ fn start(shell: &Shell, root: &Path, dir: &Path, jdk: &Jdk, classpath: &[PathBuf
             bail!("the compiler daemon did not start within {}s", START_TIMEOUT.as_secs());
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Keeps the daemon alive after Kargo exits and out of the terminal's Ctrl-C.
-fn detach(cmd: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 }
 
@@ -381,17 +366,25 @@ fn request(mut stream: TcpStream, token: &str, command: &str, args: &[&str]) -> 
     }
 }
 
-/// Writes compiler output to stderr line by line, making paths under the
-/// working directory relative as a standalone compiler would.
+/// Passes compiler output to [`diagnostics::Relay`] line by line, making paths under
+/// the working directory relative as a standalone compiler would.
 struct OutputRelay {
     pending: Vec<u8>,
-    prefix: Option<String>,
+    /// The working directory, as written natively and with forward slashes (how Kargo
+    /// passes source paths, so how the compiler prints them on Windows).
+    prefixes: Vec<String>,
+    relay: diagnostics::Relay,
 }
 
 impl OutputRelay {
     fn new() -> Self {
-        let prefix = std::env::current_dir().ok().map(|d| format!("{}{}", d.display(), std::path::MAIN_SEPARATOR));
-        Self { pending: Vec::new(), prefix }
+        let mut prefixes = Vec::new();
+        if let Ok(dir) = std::env::current_dir() {
+            prefixes.push(format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR));
+            prefixes.push(format!("{}/", kargo_util::process::slash(&dir)));
+            prefixes.dedup();
+        }
+        Self { pending: Vec::new(), prefixes, relay: diagnostics::Relay::new() }
     }
 
     fn push(&mut self, bytes: &[u8]) {
@@ -408,20 +401,17 @@ impl OutputRelay {
         if !rest.is_empty() {
             self.emit(&rest);
         }
+        self.relay.flush();
     }
 
-    fn emit(&self, bytes: &[u8]) {
+    fn emit(&mut self, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes);
-        let rendered = relativize(&text, self.prefix.as_deref());
-        let mut err = std::io::stderr().lock();
-        let _ = err.write_all(rendered.as_bytes());
-        let _ = err.flush();
+        self.relay.text(&relativize(&text, &self.prefixes));
     }
 }
 
-fn relativize(text: &str, prefix: Option<&str>) -> String {
-    let Some(prefix) = prefix else { return text.to_owned() };
-    text.split_inclusive('\n').map(|line| line.strip_prefix(prefix).unwrap_or(line)).collect()
+fn relativize(text: &str, prefixes: &[String]) -> String {
+    text.split_inclusive('\n').map(|line| prefixes.iter().find_map(|p| line.strip_prefix(p.as_str())).unwrap_or(line)).collect()
 }
 
 /// A running daemon, as listed by `kargo daemon status`.
@@ -466,13 +456,19 @@ mod tests {
     #[test]
     fn relativizes_paths_under_the_working_directory() {
         let text = "/p/src/Main.kt:2:16: error: x\n    val x = 1\n/other/A.kt:1:1: warning: y\n";
-        assert_eq!(relativize(text, Some("/p/")), "src/Main.kt:2:16: error: x\n    val x = 1\n/other/A.kt:1:1: warning: y\n");
-        assert_eq!(relativize("no newline", None), "no newline");
+        assert_eq!(relativize(text, &["/p/".to_owned()]), "src/Main.kt:2:16: error: x\n    val x = 1\n/other/A.kt:1:1: warning: y\n");
+        assert_eq!(relativize("no newline", &[]), "no newline");
+        // On Windows the compiler prints the forward-slash paths Kargo passes it.
+        let prefixes = [r"C:\p\".to_owned(), "C:/p/".to_owned()];
+        assert_eq!(
+            relativize("C:/p/src/A.kt:1:1: error: x\nC:\\p\\B.kt:2:2: error: y\n", &prefixes),
+            "src/A.kt:1:1: error: x\nB.kt:2:2: error: y\n"
+        );
     }
 
     #[test]
     fn relay_splits_lines_across_chunks() {
-        let mut relay = OutputRelay { pending: Vec::new(), prefix: None };
+        let mut relay = OutputRelay { pending: Vec::new(), prefixes: Vec::new(), relay: diagnostics::Relay::new() };
         relay.pending.extend_from_slice(b"partial");
         relay.push(b" line\nnext");
         assert_eq!(relay.pending, b"next");

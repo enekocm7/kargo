@@ -122,6 +122,20 @@ fn info_describes_the_project() {
 }
 
 #[test]
+fn info_as_json() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("infoapp", "[frameworks]\ncoroutines = true\n[target.jvm]\n[dev-dependencies]\n\"g:t\" = \"1\"\n"));
+    let out = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let info: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(info["package"]["name"], "infoapp");
+    assert_eq!(info["package"]["version"], "0.1.0");
+    assert_eq!(info["targets"], serde_json::json!(["jvm"]));
+    assert_eq!(info["frameworks"], serde_json::json!(["coroutines"]));
+    assert_eq!(info["dev-dependencies"][0], serde_json::json!({"name": "g:t", "module": "g:t", "version": "1", "scope": "compile"}));
+    assert!(info["target-dir"].as_str().unwrap().ends_with("target"), "{info}");
+}
+
+#[test]
 fn add_and_remove_dependencies() {
     let repo = LocalRepo::new();
     repo.publish("com.acme:widget", "1.0.0", &[]).publish("com.acme:widget", "1.2.0", &[]).publish("com.acme:widget", "2.0.0-beta1", &[]);
@@ -136,6 +150,9 @@ fn add_and_remove_dependencies() {
 
     p.kargo().args(["add", "com.acme:widget", "--target", "jvm", "--scope", "runtime"]).assert().success();
     assert!(p.read("kargo.toml").contains("[target.jvm.dependencies]"));
+
+    p.kargo().args(["add", "com.acme:widget:1.0.0", "--target", "jvm", "--scope", "processor"]).assert().success();
+    assert!(p.read("kargo.toml").contains(r#""com.acme:widget" = { version = "1.0.0", scope = "processor" }"#), "{}", p.read("kargo.toml"));
 
     p.kargo().args(["add", "com.acme:missing:1.0"]).assert().failure().stderr(predicate::str::contains("not found"));
     p.kargo().args(["add", "--framework", "coroutines"]).assert().success();
@@ -309,6 +326,18 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
         .assert()
         .success()
         .stdout(predicate::str::contains("g:util: requested 1.0, 2.0 -> selected 2.0"));
+
+    let out = p.kargo().args(["tree", "--offline", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let tree: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(tree["package"]["name"], "treeapp");
+    assert_eq!(tree["configuration"], "runtime");
+    let jvm = &tree["trees"][0];
+    assert_eq!(jvm["target"], "jvm");
+    assert!(jvm["roots"].as_array().unwrap().contains(&serde_json::json!("g:lib")), "{jvm}");
+    let lib = jvm["modules"].as_array().unwrap().iter().find(|m| m["id"] == "g:lib").unwrap();
+    assert_eq!(lib["dependencies"][0], serde_json::json!({"id": "g:util", "requested": "1.0", "version": "2.0"}));
+    assert!(lib["files"][0].as_str().unwrap().ends_with("lib-1.0.jar"), "{lib}");
+    p.kargo().args(["tree", "--format", "json", "--depth", "1"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
 
     // --locked succeeds while the lockfile is current, and fails after a manifest change.
     p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
@@ -603,6 +632,31 @@ fn fmt_and_lint_sections_are_validated() {
 }
 
 #[test]
+fn missing_cinterop_def_is_reported_before_compiling() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\npackage = \"sqlite3\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    // The default location is interop/<name>.def; nothing is downloaded before the check.
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args([cmd, "--target", "native"])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains("sqlite.def of [target.native.cinterop.sqlite] does not exist"));
+    }
+    // An explicit `def` must exist even when `headers` are listed.
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\ndef = \"c/sqlite.def\"\nheaders = [\"sqlite3.h\"]\n"));
+    p.kargo()
+        .args(["build", "--target", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sqlite.def of [target.native.cinterop.sqlite] does not exist"));
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.cinterop.sqlite]\nlibs = [\"x\"]\n"));
+    p.kargo().args(["build", "--target", "native"]).assert().failure().stderr(predicate::str::contains("unknown field `libs`"));
+}
+
+#[test]
 fn disabled_target_is_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("jvmonly", ""));
@@ -741,6 +795,18 @@ fn build_keep_going_reports_every_failed_target() {
             .stderr(predicate::str::contains(format!("could not {cmd} the jvm target")))
             .stderr(predicate::str::contains(format!("could not {cmd} the android target: Android builds need")))
             .stderr(predicate::str::contains(format!("could not {cmd} 2 of 2 targets (jvm, android)")));
+    }
+}
+
+#[test]
+fn json_message_format_ends_with_build_finished() {
+    let p = two_failing_targets();
+    for cmd in ["build", "check"] {
+        let out = p.kargo().args(["--offline", cmd, "--message-format", "json"]).assert().failure().code(101).get_output().stdout.clone();
+        let text = String::from_utf8(out).unwrap();
+        // stdout holds only JSON messages.
+        let messages: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(messages.last().unwrap(), &serde_json::json!({"reason": "build-finished", "success": false}), "{text}");
     }
 }
 

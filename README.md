@@ -27,19 +27,19 @@ $ kargo test
 |---|---|
 | `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...]` | Create a project |
 | `kargo init [dir]` | Create a project in an existing directory |
-| `kargo build [--release] [-t <target>] [--keep-going]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure |
+| `kargo build [--release] [-t <target>] [--keep-going] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [-- args]` | Build and run |
-| `kargo test [filter] [--no-run] [--no-fail-fast] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target |
+| `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports` |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
-| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided] [--bom]` | Add dependencies (latest release when no version is given) |
+| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
-| `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates]` | Show the dependency graph |
+| `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
 | `kargo package [--release]` | Build a self-contained fat jar (JVM) |
 | `kargo fetch` | Pre-download everything |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
@@ -48,7 +48,7 @@ $ kargo test
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs and Kotlin/Native distributions |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
-| `kargo clean`, `kargo info` | Remove `target/` (except its `.kargo-lock`), show project information |
+| `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
@@ -64,6 +64,7 @@ tests/               common tests (kotlin.test)
 tests-jvm/ ...       target-specific tests
 resources/           JVM resources (test-resources/ for tests)
 android/             AndroidManifest.xml, res/, assets/
+interop/             cinterop .def files for C libraries (Kotlin/Native)
 target/              build output: target/<debug|release>/<target>/
 ```
 
@@ -88,6 +89,7 @@ compiler-args = ["-Xcontext-parameters"]
 jvm-target = "25"                     # default: 25, or your JDK's version if it is older
 # main-class = "com.example.MainKt"   # detected from a top-level `fun main` or a `@JvmStatic fun main` in an object; set it for a Java main
 # jvm-args = ["-Xmx1g"]
+# javac-args = ["-Xlint:all"]         # extra javac options for Java sources
 
 [target.wasm]
 environment = "js"          # or "wasi"
@@ -96,6 +98,10 @@ environment = "js"          # or "wasi"
 [target.native]
 platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...
 kind = "executable"         # library, shared, static
+
+[target.native.cinterop.sqlite]   # C library bindings; def defaults to interop/sqlite.def
+package = "sqlite3"
+linker-options = ["-lsqlite3"]    # also: def, headers, compiler-options
 
 [target.android]
 namespace = "com.example.app"
@@ -106,7 +112,8 @@ min-sdk = 24                # target-sdk = 36, compile-sdk = 37, kind = "applica
 guava = { group = "com.google.guava", version = "33.4.0-jre", exclude = ["com.google.code.findbugs:jsr305"] }
 logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" }
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
-# Other keys: classifier, extension, force, transitive
+"com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
+# Scopes: compile (default), runtime, provided, processor. Other keys: classifier, extension, force, transitive
 
 [target.jvm.dependencies]   # per-target dependencies
 
@@ -231,7 +238,7 @@ Kargo is a Cargo workspace:
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, archives |
-| `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports |
+| `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, commands |
 | `kargo` | The CLI binary |
 

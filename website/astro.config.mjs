@@ -67,6 +67,7 @@ export default defineConfig({
 						{ label: 'kargo.toml', slug: 'reference/manifest' },
 						{ label: 'kargo.lock', slug: 'reference/lockfile' },
 						{ label: 'Environment variables', slug: 'reference/environment' },
+						{ label: 'Machine-readable output', slug: 'reference/machine-readable-output' },
 						{ label: 'FAQ & troubleshooting', slug: 'reference/faq' },
 						{ label: 'Contributing', slug: 'reference/contributing' },
 					],

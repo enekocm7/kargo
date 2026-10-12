@@ -127,6 +127,8 @@ struct RawJvm {
     #[serde(default)]
     jvm_args: Vec<String>,
     #[serde(default)]
+    javac_args: Vec<String>,
+    #[serde(default)]
     dependencies: toml::Table,
 }
 
@@ -149,7 +151,22 @@ struct RawNative {
     #[serde(default)]
     linker_options: Vec<String>,
     #[serde(default)]
+    cinterop: BTreeMap<String, RawCinterop>,
+    #[serde(default)]
     dependencies: toml::Table,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawCinterop {
+    def: Option<PathBuf>,
+    package: Option<String>,
+    #[serde(default)]
+    headers: Vec<String>,
+    #[serde(default)]
+    compiler_options: Vec<String>,
+    #[serde(default)]
+    linker_options: Vec<String>,
 }
 
 /// Android build settings (rendered into the generated Gradle project).
@@ -536,6 +553,7 @@ impl RawManifest {
                     jvm_target_set: false,
                     main_class: None,
                     jvm_args: Vec::new(),
+                    javac_args: Vec::new(),
                     dependencies: Vec::new(),
                 }),
                 ..Default::default()
@@ -550,6 +568,7 @@ impl RawManifest {
                                 jvm_target: j.jvm_target.unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
                                 main_class: j.main_class,
                                 jvm_args: j.jvm_args,
+                                javac_args: j.javac_args,
                                 dependencies: parse_dependencies(&j.dependencies, "target.jvm.dependencies")?,
                             })
                         })
@@ -585,11 +604,36 @@ impl RawManifest {
                                 Some("static") => NativeKind::Static,
                                 Some(other) => bail!("unknown native kind `{other}` (expected executable, library, shared or static)"),
                             };
+                            let cinterop = n
+                                .cinterop
+                                .into_iter()
+                                .map(|(name, c)| -> Result<Cinterop> {
+                                    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                                        bail!(
+                                            "invalid cinterop name `{name}` in [target.native.cinterop] (use letters, digits, `_` and `-`)"
+                                        );
+                                    }
+                                    if let Some(pkg) = &c.package
+                                        && (pkg.is_empty() || !pkg.split('.').all(|part| !part.is_empty()))
+                                    {
+                                        bail!("invalid package `{pkg}` in [target.native.cinterop.{name}]");
+                                    }
+                                    Ok(Cinterop {
+                                        name,
+                                        def: c.def,
+                                        package: c.package,
+                                        headers: c.headers,
+                                        compiler_options: c.compiler_options,
+                                        linker_options: c.linker_options,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?;
                             Ok(NativeTarget {
                                 platforms,
                                 kind,
                                 entry_point: n.entry_point,
                                 linker_options: n.linker_options,
+                                cinterop,
                                 dependencies: parse_dependencies(&n.dependencies, "target.native.dependencies")?,
                             })
                         })

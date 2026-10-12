@@ -16,8 +16,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, announce, compile_jvm, finished, hook_env, native_entry_point, native_libraries, native_platforms, select_targets,
-    sources, wasm_libraries,
+    BuildOptions, announce, compile_jvm, finished, hook_env, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries,
+    native_platforms, select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
@@ -123,6 +123,7 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     if !main_sources.kotlin_files().is_empty() {
         native_entry_point(native, &main_sources)?;
     }
+    native_cinterop_defs(ctx)?;
     let setup = ctx.setup(TargetKind::Native)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
@@ -149,7 +150,13 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
             optimize: false,
             test_runner: false,
         };
-        let main = unit(&manifest.package.name, main_sources.clone(), native_libraries(ctx, &setup, konan_target, false)?);
+        // The C bindings are needed to analyze code that calls them.
+        let bindings = native_cinterop(ctx, konan_target)?;
+        let with_bindings = |mut libs: Vec<PathBuf>| {
+            libs.extend(bindings.iter().cloned());
+            libs
+        };
+        let main = unit(&manifest.package.name, main_sources.clone(), with_bindings(native_libraries(ctx, &setup, konan_target, false)?));
         main.compile(ctx.shell(), toolchain, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Native, &what))?;
 
         if tests && !test_sources.kotlin_files().is_empty() {
@@ -157,7 +164,7 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
             let mut all = main_sources.clone();
             all.extend(&test_sources);
             let name = format!("{}-test", manifest.package.name);
-            let test = unit(&name, all, native_libraries(ctx, &setup, konan_target, true)?);
+            let test = unit(&name, all, with_bindings(native_libraries(ctx, &setup, konan_target, true)?));
             let what = format!("{what}, tests");
             test.compile(ctx.shell(), toolchain, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Native, &what))?;
         }
