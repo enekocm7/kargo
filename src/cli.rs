@@ -175,7 +175,7 @@ struct BuildArgs {
 
 impl BuildArgs {
     fn options(&self) -> BuildOptions {
-        BuildOptions { targets: self.targets.iter().map(|t| (*t).into()).collect(), release: self.release }
+        BuildOptions { targets: self.targets.iter().map(|t| (*t).into()).collect(), release: self.release, keep_going: false }
     }
 }
 
@@ -222,7 +222,13 @@ enum Command {
     },
     /// Compile the project
     #[command(visible_alias = "b")]
-    Build(BuildArgs),
+    Build {
+        #[command(flatten)]
+        build: BuildArgs,
+        /// Build every target even if one fails, then report all failures
+        #[arg(long)]
+        keep_going: bool,
+    },
     /// Type-check the project without packaging or linking
     #[command(visible_alias = "c")]
     Check {
@@ -231,6 +237,9 @@ enum Command {
         /// Also check the test sources
         #[arg(long)]
         tests: bool,
+        /// Check every target even if one fails, then report all failures
+        #[arg(long)]
+        keep_going: bool,
     },
     /// Build and run the program
     #[command(visible_alias = "r")]
@@ -254,6 +263,9 @@ enum Command {
         /// Compile tests but do not run them
         #[arg(long)]
         no_run: bool,
+        /// Test every target even if one fails, then print a result per target
+        #[arg(long)]
+        no_fail_fast: bool,
     },
     /// Generate API documentation from KDoc with Dokka
     #[command(visible_alias = "d")]
@@ -562,16 +574,16 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             shell.status("Created", format!("{} `{}` package", if opts.lib { "library" } else { "application" }, opts.name));
             Ok(0)
         }
-        Command::Build(args) => {
+        Command::Build { build, keep_going } => {
             let ws = load_workspace(&global)?;
-            let opts = args.options();
+            let opts = BuildOptions { keep_going, ..build.options() };
             let ctx = context(&config, &ws, &global, opts.profile())?;
             ops::build::build(&ctx, &opts)?;
             Ok(0)
         }
-        Command::Check { build, tests } => {
+        Command::Check { build, tests, keep_going } => {
             let ws = load_workspace(&global)?;
-            let opts = CheckOptions { build: build.options(), tests };
+            let opts = CheckOptions { build: BuildOptions { keep_going, ..build.options() }, tests };
             let ctx = context(&config, &ws, &global, opts.build.profile())?;
             ops::check::check(&ctx, &opts)?;
             Ok(0)
@@ -582,9 +594,9 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, args })?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run } => {
+        Command::Test { build, filter, no_run, no_fail_fast } => {
             let ws = load_workspace(&global)?;
-            let opts = TestOptions { build: build.options(), filter, no_run };
+            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast };
             let ctx = context(&config, &ws, &global, opts.build.profile())?;
             if ops::test::test(&ctx, &opts)? {
                 Ok(0)
@@ -918,9 +930,10 @@ mod tests {
     fn parses_common_invocations() {
         let cli = Cli::try_parse_from(["kargo", "build", "--release", "-t", "jvm", "-t", "native"]).unwrap();
         match cli.command {
-            Command::Build(args) => {
-                let o = args.options();
+            Command::Build { build, keep_going } => {
+                let o = build.options();
                 assert!(o.release);
+                assert!(!keep_going);
                 assert_eq!(o.targets, [TargetKind::Jvm, TargetKind::Native]);
             }
             other => panic!("{other:?}"),
@@ -947,8 +960,14 @@ mod tests {
         assert!(matches!(cli.command, Command::Test { ref filter, no_run: true, .. } if filter.as_deref() == Some("MathTest")));
         let cli = Cli::try_parse_from(["kargo", "c", "--tests", "-r", "-t", "native"]).unwrap();
         assert!(
-            matches!(cli.command, Command::Check { ref build, tests: true } if build.release && build.options().targets == [TargetKind::Native])
+            matches!(cli.command, Command::Check { ref build, tests: true, keep_going: false } if build.release && build.options().targets == [TargetKind::Native])
         );
+        assert!(matches!(Cli::try_parse_from(["kargo", "b", "--keep-going"]).unwrap().command, Command::Build { keep_going: true, .. }));
+        assert!(matches!(
+            Cli::try_parse_from(["kargo", "check", "--keep-going"]).unwrap().command,
+            Command::Check { keep_going: true, .. }
+        ));
+        assert!(matches!(Cli::try_parse_from(["kargo", "t", "--no-fail-fast"]).unwrap().command, Command::Test { no_fail_fast: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
         assert!(matches!(cli.command, Command::Doc { ref targets, open: true } if matches!(targets[..], [TargetArg::Jvm])));
         let cli = Cli::try_parse_from(["kargo", "fmt", "--check"]).unwrap();

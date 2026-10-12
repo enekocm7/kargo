@@ -39,6 +39,46 @@ pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -
     })
 }
 
+/// Collects the per-target results of a multi-target operation.
+///
+/// Without `keep_going` the first failure (in target order) is returned as is. With it,
+/// every failed target's error is printed and the operation fails with a summary naming
+/// the targets that failed and those that succeeded, like `cargo build --keep-going`.
+pub(crate) fn collect_targets<R>(
+    ctx: &BuildContext,
+    action: &str,
+    keep_going: bool,
+    results: impl IntoIterator<Item = (TargetKind, Result<R>)>,
+) -> Result<Vec<R>> {
+    let (mut ok, mut succeeded, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+    for (target, result) in results {
+        match result {
+            Ok(r) => {
+                ok.push(r);
+                succeeded.push(target);
+            }
+            Err(e) if !keep_going => return Err(e),
+            Err(e) => failed.push((target, e)),
+        }
+    }
+    if failed.len() == 1 && succeeded.is_empty() {
+        return Err(failed.remove(0).1);
+    }
+    if failed.is_empty() {
+        return Ok(ok);
+    }
+    for (target, err) in &failed {
+        ctx.shell().error(format!("could not {action} the {target} target: {err:#}"));
+    }
+    let names = |targets: &[TargetKind]| targets.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ");
+    let failed: Vec<TargetKind> = failed.into_iter().map(|(t, _)| t).collect();
+    let total = failed.len() + succeeded.len();
+    if succeeded.is_empty() {
+        bail!("could not {action} {} of {total} targets ({})", failed.len(), names(&failed));
+    }
+    bail!("could not {action} {} of {total} targets ({}); {} succeeded", failed.len(), names(&failed), names(&succeeded))
+}
+
 /// Runs `a` and `b` at the same time, e.g. fetching the compiler while dependencies resolve.
 pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) {
     std::thread::scope(|s| {

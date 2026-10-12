@@ -535,3 +535,59 @@ fn daemon_status_and_stop() {
     p.kargo().args(["daemon", "status"]).assert().success().stdout(predicate::str::contains("No compiler daemons are running."));
     p.kargo().args(["daemon", "stop"]).assert().success().stderr(predicate::str::contains("Stopped 0 compiler daemons"));
 }
+
+/// A JVM + Android project that fails both targets offline: the Kotlin compiler is not
+/// cached and there is no `android/AndroidManifest.xml`.
+fn two_failing_targets() -> Project {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("twin", "[target.jvm]\n\n[target.android]\nnamespace = \"com.example.twin\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("tests/MainTest.kt", "class MainTest\n");
+    p
+}
+
+#[test]
+fn build_keep_going_reports_every_failed_target() {
+    let p = two_failing_targets();
+    // By default the first failure is the error.
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("could not build").not().and(predicate::str::contains("offline mode")));
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args(["--offline", cmd, "--keep-going"])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains(format!("could not {cmd} the jvm target")))
+            .stderr(predicate::str::contains(format!("could not {cmd} the android target: Android builds need")))
+            .stderr(predicate::str::contains(format!("could not {cmd} 2 of 2 targets (jvm, android)")));
+    }
+}
+
+#[test]
+fn test_fail_fast_skips_the_remaining_targets() {
+    let p = two_failing_targets();
+    p.kargo()
+        .args(["--offline", "test"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("skipped the android target after a failure; pass `--no-fail-fast`"))
+        .stderr(predicate::str::contains("Running Android").not());
+    let table =
+        || predicate::str::contains("test results by target:\n    jvm      error").and(predicate::str::contains("    android  error"));
+    p.kargo()
+        .args(["--offline", "test", "--no-fail-fast"])
+        .assert()
+        .failure()
+        .code(101)
+        .stdout(table())
+        .stderr(predicate::str::contains("could not test the android target: Android builds need"));
+    // `[test] fail-fast = false` makes it the default.
+    p.file("kargo.toml", &(p.read("kargo.toml") + "\n[test]\nfail-fast = false\n"));
+    p.kargo().args(["--offline", "test"]).assert().failure().code(101).stdout(table());
+}

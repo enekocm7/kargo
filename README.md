@@ -27,10 +27,10 @@ $ kargo test
 |---|---|
 | `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...]` | Create a project |
 | `kargo init [dir]` | Create a project in an existing directory |
-| `kargo build [--release] [-t <target>]` | Compile all (or selected) targets |
-| `kargo check [--tests] [--release] [-t <target>]` | Type-check without packaging or linking |
+| `kargo build [--release] [-t <target>] [--keep-going]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure |
+| `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [-- args]` | Build and run |
-| `kargo test [filter] [--no-run] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native) |
+| `kargo test [filter] [--no-run] [--no-fail-fast] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
@@ -127,6 +127,9 @@ exclude = ["src/generated/**"]
 [lint]                      # kargo lint (detekt); detekt.yml is picked up when present
 config = ["config/detekt.yml"]
 baseline = "detekt-baseline.xml"
+
+[test]                      # kargo test
+fail-fast = false           # test every target even if one fails (default: true)
 ```
 
 ### Toolchains

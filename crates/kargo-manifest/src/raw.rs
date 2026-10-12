@@ -40,6 +40,8 @@ pub(super) struct RawManifest {
     fmt: RawFmt,
     #[serde(default)]
     lint: RawLint,
+    #[serde(default)]
+    test: RawTest,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -65,6 +67,12 @@ struct RawFmt {
     ktlint: Option<String>,
     #[serde(default)]
     exclude: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawTest {
+    fail_fast: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -787,6 +795,7 @@ impl RawManifest {
             doc,
             fmt,
             lint,
+            test: TestSettings { fail_fast: self.test.fail_fast.unwrap_or(true) },
             package: Package {
                 name: self.package.name,
                 version: self.package.version,

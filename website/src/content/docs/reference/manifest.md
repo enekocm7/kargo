@@ -104,6 +104,21 @@ detekt = "1.23.8"
 
 See [Formatting and linting](../../guides/formatting-and-linting/).
 
+## `[test]`
+
+Options for `kargo test`. Every key is optional.
+
+```toml
+[test]
+fail-fast = false
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `fail-fast` | `true` | Stop at the first target whose tests fail or don't compile. `false` tests every target and prints a result per target, like `kargo test --no-fail-fast` |
+
+See [Testing every target](../../guides/testing/#testing-every-target).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.
