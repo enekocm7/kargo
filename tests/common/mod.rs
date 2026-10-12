@@ -92,6 +92,16 @@ impl LocalRepo {
     }
 }
 
+impl LocalRepo {
+    /// Publishes the `classifier` jar of a module already published with [`LocalRepo::publish`].
+    pub fn publish_classifier(&self, coord: &str, version: &str, classifier: &str) -> &Self {
+        let (group, artifact) = coord.split_once(':').unwrap();
+        let rel = format!("{}/{artifact}/{version}/{artifact}-{version}-{classifier}.jar", group.replace('.', "/"));
+        self.write(&rel, &format!("jar {coord} {version} {classifier}"));
+        self
+    }
+}
+
 pub fn manifest(name: &str, extra: &str) -> String {
     format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n{extra}")
 }

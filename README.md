@@ -119,6 +119,7 @@ guava = { group = "com.google.guava", version = "33.4.0-jre", exclude = ["com.go
 logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" }
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
 mathlib = { path = "../mathlib" }   # another Kargo package, built from source
+lwjgl-natives = { coords = "org.lwjgl:lwjgl:3.3.6", classifier = "natives-windows", scope = "runtime" }  # a classifier jar, next to the module's own
 # Other keys: classifier, extension, force, transitive, workspace = true
 "com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
 "com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }  # KSP processor (JVM, Android)

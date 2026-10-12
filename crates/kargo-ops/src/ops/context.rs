@@ -154,10 +154,10 @@ impl TargetSetup {
         }
         let mut out: Vec<DependencyRequest> = Vec::new();
         for d in deps {
-            if out.iter().any(|r| r.module == d.module && r.classifier == d.classifier) {
-                continue;
+            let request = to_request(d);
+            if !out.iter().any(|r| r.same_artifact(&request)) {
+                out.push(request);
             }
-            out.push(to_request(d));
         }
         out
     }
@@ -175,11 +175,11 @@ pub fn to_request(d: &Dependency) -> DependencyRequest {
     }
 }
 
-/// Appends `extra` dependencies unless the user already declared the module.
+/// Appends `extra` dependencies unless the user already declared that artifact of the module.
 fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
     let mut out: Vec<Dependency> = user.to_vec();
     for d in extra {
-        if !out.iter().any(|u| u.module == d.module && u.classifier == d.classifier) {
+        if !out.iter().any(|u| u.same_artifact(d)) {
             out.push(d.clone());
         }
     }

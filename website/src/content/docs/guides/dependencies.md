@@ -73,8 +73,8 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 # Don't pull in any transitive dependencies
 "com.example:standalone" = { version = "1.0", transitive = false }
 
-# Classifier and extension (type)
-"org.lwjgl:lwjgl" = { version = "3.3.6", classifier = "natives-linux" }
+# A specific file of a module: a classifier and/or an extension (type)
+"com.example:tool" = { version = "1.0", classifier = "all" }
 
 # Version ranges use Maven syntax
 "com.example:ranged" = "[1.2,2.0)"
@@ -88,8 +88,28 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 | `exclude` | `group:artifact` (or `group:*`) entries to drop from this dependency's tree. |
 | `transitive` | `false` to ignore this dependency's own dependencies. |
 | `force` | `true` to pin this version even if something else asks for a newer one. |
-| `classifier`, `extension` | Select a specific file, such as `natives-linux` or `aar`. |
+| `classifier`, `extension` | Select a specific file, such as `natives-linux` or `aar` (see [Classifiers and native libraries](#classifiers-and-native-libraries)). |
 | `bom` | `true` to import this POM as a BOM (see below). |
+
+### Classifiers and native libraries
+
+A dependency with a `classifier` or `extension` selects one file of a module, such as `lwjgl-3.3.6-natives-windows.jar`. Libraries with native code publish those files next to their main jar, so you declare the module twice: once for its classes, and once for each native classifier. TOML keys are unique, so give the second declaration a key of your own and spell out the coordinates:
+
+```toml title="kargo.toml"
+[dependencies]
+"org.lwjgl:lwjgl" = "3.3.6"
+lwjgl-natives = { coords = "org.lwjgl:lwjgl:3.3.6", classifier = "natives-windows", scope = "runtime" }
+```
+
+Both jars are on the runtime classpath, in the [`kargo package`](../../reference/commands/) jar and in [`kargo.lock`](../../reference/lockfile/). The natives are only needed at runtime, so `scope = "runtime"` keeps their jar off the compile classpath. Every dependency is identified by `group:artifact:classifier:extension`; declaring the same one twice is an error.
+
+A module still has **one version**, however many classifiers you declare. If the declarations, or other libraries, ask for different versions, the highest wins (or the one with `force = true`), and every classifier uses it.
+
+:::note
+A module that you only declare with a `classifier` gets just that file, as in Gradle. Its main jar is added when you also declare the module without a classifier, or when another dependency needs it.
+:::
+
+`transitive = false` on the classifier declaration only affects that declaration: the plain one still brings in the module's own dependencies. `kargo tree` lists the module once, and `kargo tree --format json` lists every file it contributes.
 
 ### Scopes
 

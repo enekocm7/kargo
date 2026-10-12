@@ -155,6 +155,12 @@ impl Dependency {
             bom: false,
         }
     }
+
+    /// Whether both declare the same artifact: `group:artifact:classifier:extension`. The version is
+    /// not part of the key, and one module may be declared once per classifier (native libraries).
+    pub fn same_artifact(&self, other: &Dependency) -> bool {
+        self.module == other.module && self.classifier == other.classifier && self.extension == other.extension
+    }
 }
 
 /// Another Kargo package that this one depends on, built from source:
