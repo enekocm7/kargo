@@ -20,6 +20,7 @@ my-app/
 ├── test-resources/      resources for JVM tests
 ├── android/             AndroidManifest.xml, res/, assets/
 ├── interop/             cinterop .def files for C libraries (Kotlin/Native)
+├── examples/            example programs, run with kargo run --example <name>
 └── target/              build output (git-ignored)
 ```
 
@@ -44,6 +45,10 @@ actual fun platformName(): String = "Kotlin/Native"
 See [Multiplatform projects](../../guides/multiplatform/) for a complete example.
 
 Subdirectories are fine. You don't need to mirror the package name in the folder structure, but it's a good habit.
+
+## Several programs
+
+A project can hold more than one `fun main`. Run any of them with `kargo run --main <class>`, give them names with [`[[bin]]`](../../reference/manifest/#bin) tables, and keep example programs in `examples/<name>.kt` for `kargo run --example <name>`. See [Several programs in one project](../../guides/multiple-programs/).
 
 ## Java interop
 
@@ -112,10 +117,11 @@ target/
 │   ├── jvm/
 │   │   ├── classes/              compiled classes
 │   │   ├── lib/                  runtime dependency jars
+│   │   ├── examples/             compiled examples, one directory each
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
-│   ├── native/                   one directory per platform; cinterop/ holds C bindings
+│   ├── native/                   one directory per platform; cinterop/ holds C bindings, bin/ the [[bin]] executables
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
 ├── lint/                         Kargo's detekt settings for kargo lint
@@ -123,7 +129,7 @@ target/
 └── .kargo-lock                   build-directory lock (see below)
 ```
 
-`kargo package` writes `target/<profile>/jvm/<name>-<version>-all.jar`.
+`kargo package` writes `target/<profile>/jvm/<name>-<version>-all.jar` (`<bin>-<version>-all.jar` with `--bin`).
 
 [Path dependencies](../../guides/workspaces/) build into `target/<profile>/deps/<name>/`. In a workspace, the root has the only `kargo.lock` and `target/`, and each member builds into `target/<profile>/<name>/` (its `lint/` and `android/` directories get a `<name>/` level too):
 

@@ -155,7 +155,12 @@ Build and run the program. Arguments after `--` go to the program.
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `android` |
 | `-p, --package <name>` | The package to run; required at the root of a workspace with several members |
+| `--main <name>` | Run another `main`: a JVM class such as `com.example.tools.MigrateKt`, or on Native an entry function such as `com.example.tools.main`. `--entry-point` is an alias |
+| `--bin <name>` | Run the [`[[bin]]`](../manifest/#bin) with this name |
+| `--example <name>` | Compile and run `examples/<name>.kt` against the project and its dev-dependencies |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
+
+`--main`, `--bin` and `--example` exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
 
 How each target runs:
 
@@ -347,12 +352,13 @@ Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`; their Mav
 
 ## `kargo package`
 
-Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). JVM only.
+Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). JVM only. The path of the jar is printed on stdout.
 
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Use the release profile |
 | `-p, --package <name>` | The package to build the jar for; required at the root of a workspace with several members |
+| `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` |
 
 ## `kargo fetch`
 

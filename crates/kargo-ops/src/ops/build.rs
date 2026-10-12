@@ -11,11 +11,11 @@ use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::ksp::KspRun;
-use kargo_compiler::mainclass::{find_jvm_main_class, find_single_entry_point};
+use kargo_compiler::mainclass::{find_entry_point_in, find_jvm_main_class, find_single_entry_point};
 use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
-use kargo_manifest::{Cinterop, Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Bin, Cinterop, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::{Platform, Resolution};
 use kargo_toolchain::native::resolve_platform;
 use kargo_util::fs::collect_files;
@@ -63,6 +63,8 @@ pub struct NativeBuild {
     pub konan_target: String,
     pub artifact: PathBuf,
     pub kind: NativeKind,
+    /// The `[[bin]]` this executable is, or `None` for the project's own artifact.
+    pub bin: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -590,6 +592,72 @@ pub fn native_entry_point(native: &kargo_manifest::NativeTarget, srcs: &SourceSe
     })
 }
 
+/// The `[[bin]]` named `name`, or an error listing the declared ones.
+pub fn find_bin<'a>(manifest: &'a Manifest, name: &str) -> Result<&'a Bin> {
+    if let Some(bin) = manifest.bin(name) {
+        return Ok(bin);
+    }
+    if manifest.bins.is_empty() {
+        bail!("no bin named `{name}`: kargo.toml declares no [[bin]] programs");
+    }
+    let names: Vec<&str> = manifest.bins.iter().map(|b| b.name.as_str()).collect();
+    bail!("no bin named `{name}` in kargo.toml; available bins: {}", names.join(", "))
+}
+
+/// The JVM main class of a `[[bin]]`: its `main`, or the class of the `main` in its `path`.
+pub fn bin_main_class(root: &Path, bin: &Bin) -> Result<String> {
+    match (&bin.main, &bin.path) {
+        (Some(main), _) => Ok(main.clone()),
+        (None, Some(path)) => {
+            Ok(find_entry_point_in(&root.join(path), false).with_context(|| format!("[[bin]] `{}`", bin.name))?.jvm_class)
+        }
+        (None, None) => bail!("[[bin]] `{}` has no JVM main class; set `main` or `path` in kargo.toml", bin.name),
+    }
+}
+
+/// The Kotlin/Native entry function of a `[[bin]]`: its `entry-point`, or the top-level
+/// `main` in its `path`; `None` for a JVM-only bin.
+pub fn bin_entry_point(root: &Path, bin: &Bin) -> Result<Option<String>> {
+    match (&bin.entry_point, &bin.path) {
+        (Some(entry), _) => Ok(Some(entry.clone())),
+        (None, Some(path)) => {
+            Ok(Some(find_entry_point_in(&root.join(path), true).with_context(|| format!("[[bin]] `{}`", bin.name))?.native_entry()))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// One Kotlin/Native artifact a build links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeProgram {
+    /// The `[[bin]]` it is, or `None` for the project's own artifact (named after the package).
+    pub bin: Option<String>,
+    pub entry_point: Option<String>,
+}
+
+/// What a native build links: the project's own artifact and, for an executable, one per
+/// `[[bin]]` with a native entry point. When bins exist and the sources hold several `main`
+/// functions without an `entry-point`, the project's own executable is left out: each bin picks one.
+pub fn native_programs(ctx: &BuildContext, native: &kargo_manifest::NativeTarget, srcs: &SourceSet) -> Result<Vec<NativeProgram>> {
+    if native.kind != NativeKind::Executable {
+        return Ok(vec![NativeProgram { bin: None, entry_point: native_entry_point(native, srcs)? }]);
+    }
+    let mut bins = Vec::new();
+    for bin in &ctx.ws.manifest().bins {
+        if let Some(entry) = bin_entry_point(ctx.ws.root(), bin)? {
+            bins.push(NativeProgram { bin: Some(bin.name.clone()), entry_point: Some(entry) });
+        }
+    }
+    let mut programs = Vec::new();
+    match native_entry_point(native, srcs) {
+        Ok(entry_point) => programs.push(NativeProgram { bin: None, entry_point }),
+        Err(e) if bins.is_empty() => return Err(e),
+        Err(_) => {}
+    }
+    programs.extend(bins);
+    Ok(programs)
+}
+
 pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
@@ -598,7 +666,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     if srcs.kotlin_files().is_empty() {
         return Ok(Vec::new());
     }
-    let entry_point = native_entry_point(native, &srcs)?;
+    let programs = native_programs(ctx, native, &srcs)?;
     native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
@@ -607,30 +675,49 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
 
     let platforms = native_platforms(ctx)?;
     // Each platform is a separate Kotlin/Native compiler process.
-    super::parallel_map(&platforms, |konan_target| -> Result<NativeBuild> {
-        let konan_target = konan_target.clone();
-        let mut libraries = native_libraries(ctx, &setup, &konan_target, false)?;
-        libraries.extend(native_cinterop(ctx, &konan_target)?);
-        let unit = NativeCompilation {
-            name: &manifest.package.name,
-            konan_target: konan_target.clone(),
-            kind: native.kind,
-            sources: srcs.clone(),
-            libraries,
-            plugins: &plugins,
-            kotlin_args: &kotlin_args,
-            entry_point: entry_point.clone(),
-            linker_options: &native.linker_options,
-            output_dir: ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(&konan_target),
-            debug: profile.debug,
-            optimize: profile.optimize,
-            test_runner: false,
-        };
-        let what = format!(", {konan_target}");
-        let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
-        unit.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
-        Ok(NativeBuild { konan_target, artifact: unit.artifact(), kind: native.kind })
-    })
-    .into_iter()
-    .collect()
+    let built = super::parallel_map(&platforms, |konan_target| -> Result<Vec<NativeBuild>> {
+        let mut libraries = native_libraries(ctx, &setup, konan_target, false)?;
+        libraries.extend(native_cinterop(ctx, konan_target)?);
+        let out = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(konan_target);
+        let mut builds = Vec::new();
+        for program in &programs {
+            // Bins link into `bin/` with their own fingerprints, so one named like the package does not clash.
+            let (name, output_dir, fp_dir, what) = match &program.bin {
+                None => (manifest.package.name.as_str(), out.clone(), ctx.fingerprint_dir(TargetKind::Native), format!(", {konan_target}")),
+                Some(bin) => {
+                    let fp_dir = ctx.fingerprint_dir(TargetKind::Native).join("bin");
+                    std::fs::create_dir_all(&fp_dir)?;
+                    (bin.as_str(), out.join("bin"), fp_dir, format!(", {konan_target}, bin {bin}"))
+                }
+            };
+            let unit = NativeCompilation {
+                name,
+                konan_target: konan_target.clone(),
+                kind: native.kind,
+                sources: srcs.clone(),
+                libraries: libraries.clone(),
+                plugins: &plugins,
+                kotlin_args: &kotlin_args,
+                entry_point: program.entry_point.clone(),
+                linker_options: &native.linker_options,
+                output_dir,
+                debug: profile.debug,
+                optimize: profile.optimize,
+                test_runner: false,
+            };
+            unit.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
+            builds.push(NativeBuild {
+                konan_target: konan_target.clone(),
+                artifact: unit.artifact(),
+                kind: native.kind,
+                bin: program.bin.clone(),
+            });
+        }
+        Ok(builds)
+    });
+    let mut builds = Vec::new();
+    for b in built {
+        builds.extend(b?);
+    }
+    Ok(builds)
 }

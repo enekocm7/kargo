@@ -134,7 +134,58 @@ fn main_class_detection() {
         .code(101)
         .stderr(predicate::str::contains("found multiple `main` functions"))
         .stderr(predicate::str::contains("m.MainKt"))
-        .stderr(predicate::str::contains("m.other.OtherKt"));
+        .stderr(predicate::str::contains("m.other.OtherKt"))
+        .stderr(predicate::str::contains("kargo run --main <class>"));
+}
+
+#[test]
+fn multiple_entry_points() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["multi"]);
+    std::fs::remove_file(t.dir.path().join("multi/tests/GreetingTest.kt")).unwrap();
+    t.write("multi/src/Main.kt", "package m\nfun main(args: Array<String>) = println(\"app \" + args.joinToString())\n");
+    t.write("multi/src/tools/Migrate.kt", "package m.tools\nfun main(args: Array<String>) = println(\"migrate \" + args.joinToString())\n");
+    t.write("multi/src/tools/Seed.kt", "package m.seed\nobject Seed { @JvmStatic fun main(args: Array<String>) = println(\"seed\") }\n");
+
+    // Without a pick, the error lists the mains; `--main` picks one.
+    t.kargo("multi").arg("run").assert().code(101).stderr(predicate::str::contains("m.tools.MigrateKt"));
+    t.kargo("multi")
+        .args(["run", "--main", "m.tools.MigrateKt", "--", "up"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("migrate up"));
+
+    let manifest = std::fs::read_to_string(t.dir.path().join("multi/kargo.toml")).unwrap();
+    t.write(
+        "multi/kargo.toml",
+        &format!(
+            "{manifest}\n[target.jvm]\nmain-class = \"m.MainKt\"\n\n[[bin]]\nname = \"migrate\"\nmain = \"m.tools.MigrateKt\"\n\n\
+             [[bin]]\nname = \"seed\"\npath = \"src/tools/Seed.kt\"\n"
+        ),
+    );
+    t.kargo("multi").arg("run").assert().success().stdout(predicate::str::contains("app"));
+    t.kargo("multi").args(["run", "--bin", "migrate", "--", "down"]).assert().success().stdout(predicate::str::contains("migrate down"));
+    t.kargo("multi").args(["run", "--bin", "seed"]).assert().success().stdout(predicate::str::contains("seed"));
+
+    // `kargo package --bin` writes a launcher jar for the bin.
+    let jar = t.kargo("multi").args(["package", "-q", "--bin", "migrate"]).assert().success().get_output().stdout.clone();
+    let jar = String::from_utf8(jar).unwrap();
+    assert!(jar.trim().ends_with("migrate-0.1.0-all.jar"), "{jar}");
+    let out = StdCommand::new("java").arg("-jar").arg(jar.trim()).arg("x").output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("migrate x"));
+
+    // Examples compile on their own against the main classes, each with its own `main`.
+    t.write("multi/examples/hello.kt", "fun main() = println(\"example \" + m.tools.Api.NAME)\n");
+    t.write("multi/examples/bye.kt", "fun main() = println(\"bye\")\n");
+    t.write("multi/src/tools/Api.kt", "package m.tools\nobject Api { const val NAME = \"api\" }\n");
+    t.kargo("multi")
+        .args(["run", "--example", "hello"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Compiling multi v0.1.0 (jvm, example hello)"))
+        .stdout(predicate::str::contains("example api"));
+    t.kargo("multi").args(["run", "--example", "bye"]).assert().success().stdout(predicate::str::contains("bye"));
 }
 
 #[test]
@@ -635,6 +686,40 @@ fn native_tests() {
     t.kargo("nat").args(["test", "--report", "junit"]).assert().success().stdout(predicate::str::contains("1 passed"));
     let report = std::fs::read_to_string(t.dir.path().join("nat/target/debug/native/test-reports/TEST-native.xml")).unwrap();
     assert!(report.contains("<testcase") && report.contains(r#"failures="0""#), "{report}");
+}
+
+#[test]
+fn native_multiple_entry_points() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_NATIVE").is_none() {
+        eprintln!("skipping: set KARGO_E2E_NATIVE=1 to run Kotlin/Native tests");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["nm", "--target", "native"]);
+    std::fs::remove_file(t.dir.path().join("nm/tests/GreetingTest.kt")).unwrap();
+    t.write("nm/src/Main.kt", "package m\nfun main() = println(\"app\")\n");
+    t.write("nm/src/tools/Tool.kt", "package m.tools\nfun main(args: Array<String>) = println(\"tool \" + args.joinToString())\n");
+    t.kargo("nm").arg("build").assert().code(101).stderr(predicate::str::contains("kargo run --entry-point <function>"));
+    t.kargo("nm").args(["run", "--entry-point", "m.tools.main", "--", "x"]).assert().success().stdout(predicate::str::contains("tool x"));
+
+    // With a bin per `main`, `kargo build` links each one.
+    let manifest = std::fs::read_to_string(t.dir.path().join("nm/kargo.toml")).unwrap();
+    t.write(
+        "nm/kargo.toml",
+        &format!(
+            "{manifest}\n[[bin]]\nname = \"app\"\nentry-point = \"m.main\"\n\n[[bin]]\nname = \"tool\"\npath = \"src/tools/Tool.kt\"\n"
+        ),
+    );
+    t.kargo("nm").arg("build").assert().success().stderr(predicate::str::contains("bin tool)"));
+    t.kargo("nm").args(["run", "--bin", "tool", "--", "y"]).assert().success().stdout(predicate::str::contains("tool y"));
+    t.kargo("nm").args(["run", "--bin", "app"]).assert().success().stdout(predicate::str::contains("app"));
+    t.kargo("nm").arg("run").assert().code(101).stderr(predicate::str::contains("available bins: app, tool"));
+
+    // An example links against the main sources as a library.
+    t.write("nm/src/Api.kt", "package m\nfun api() = \"api\"\n");
+    t.write("nm/examples/demo.kt", "fun main() = println(\"demo \" + m.api())\n");
+    t.kargo("nm").args(["run", "--example", "demo"]).assert().success().stdout(predicate::str::contains("demo api"));
 }
 
 /// A native project that binds a C header and a function defined in its `.def` file.

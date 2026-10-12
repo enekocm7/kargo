@@ -9,6 +9,7 @@
 //! src-<target>/        target-specific sources (src-jvm, src-wasm, src-native, src-android)
 //! tests/               common tests
 //! tests-<target>/      target-specific tests
+//! examples/            example programs (`kargo run --example <name>`)
 //! resources/           JVM resources
 //! test-resources/      JVM test resources
 //! target/              build output
@@ -221,14 +222,34 @@ impl Workspace {
         self.root.join(format!("tests-{}", target.as_str()))
     }
 
-    /// Every existing source and test directory (`src/`, `src-<target>/`, `tests/`,
-    /// `tests-<target>/`) for any target, enabled or not, relative to the root.
+    /// Example programs: `examples/<name>.kt`, run with `kargo run --example <name>`.
+    pub fn examples_dir(&self) -> PathBuf {
+        self.root.join("examples")
+    }
+
+    /// The names of the example programs, sorted.
+    pub fn examples(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.examples_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "kt"))
+            .filter_map(|p| Some(p.file_stem()?.to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Every existing source, test and example directory (`src/`, `src-<target>/`, `tests/`,
+    /// `tests-<target>/`, `examples/`) for any target, enabled or not, relative to the root.
     /// Used by `kargo fmt` and `kargo lint`, which never look inside `target/`.
     pub fn source_roots(&self) -> Vec<PathBuf> {
         let mut dirs = vec![PathBuf::from("src")];
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(t.source_dir_name())));
         dirs.push(PathBuf::from("tests"));
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("tests-{}", t.as_str()))));
+        dirs.push(PathBuf::from("examples"));
         dirs.into_iter().filter(|d| self.root.join(d).is_dir()).collect()
     }
 
@@ -592,7 +613,13 @@ mod tests {
         assert!(!ws.root().to_string_lossy().starts_with(r"\\?\"));
         std::fs::create_dir_all(dir.path().join("tests-jvm")).unwrap();
         std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
-        assert_eq!(ws.source_roots(), [PathBuf::from("src"), PathBuf::from("tests-jvm")]);
+        std::fs::create_dir_all(dir.path().join("examples/assets")).unwrap();
+        assert_eq!(ws.source_roots(), [PathBuf::from("src"), PathBuf::from("tests-jvm"), PathBuf::from("examples")]);
+        assert!(ws.examples().is_empty());
+        std::fs::write(dir.path().join("examples/zeta.kt"), "fun main() {}").unwrap();
+        std::fs::write(dir.path().join("examples/alpha.kt"), "fun main() {}").unwrap();
+        std::fs::write(dir.path().join("examples/notes.md"), "").unwrap();
+        assert_eq!(ws.examples(), ["alpha", "zeta"]);
     }
 
     #[test]

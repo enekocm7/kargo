@@ -124,7 +124,14 @@ fn info_describes_the_project() {
 #[test]
 fn info_as_json() {
     let p = Project::new();
-    p.file("kargo.toml", &manifest("infoapp", "[frameworks]\ncoroutines = true\n[target.jvm]\n[dev-dependencies]\n\"g:t\" = \"1\"\n"));
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "infoapp",
+            "[frameworks]\ncoroutines = true\n[target.jvm]\n[dev-dependencies]\n\"g:t\" = \"1\"\n[[bin]]\nname = \"tool\"\nmain = \"t.ToolKt\"\n",
+        ),
+    );
+    p.file("examples/demo.kt", "fun main() {}\n");
     let out = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
     let info: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(info["package"]["name"], "infoapp");
@@ -133,6 +140,8 @@ fn info_as_json() {
     assert_eq!(info["frameworks"], serde_json::json!(["coroutines"]));
     assert_eq!(info["dev-dependencies"][0], serde_json::json!({"name": "g:t", "module": "g:t", "version": "1", "scope": "compile"}));
     assert!(info["target-dir"].as_str().unwrap().ends_with("target"), "{info}");
+    assert_eq!(info["bins"], serde_json::json!([{"name": "tool", "main": "t.ToolKt", "entry-point": null, "path": null}]));
+    assert_eq!(info["examples"], serde_json::json!(["demo"]));
 }
 
 #[test]
@@ -958,4 +967,68 @@ fn test_fail_fast_skips_the_remaining_targets() {
     // `[test] fail-fast = false` makes it the default.
     p.file("kargo.toml", &(p.read("kargo.toml") + "\n[test]\nfail-fast = false\n"));
     p.kargo().args(["--offline", "test"]).assert().failure().code(101).stdout(table());
+}
+
+#[test]
+fn run_selects_bins_and_examples_before_compiling() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tools",
+            "[[bin]]\nname = \"migrate\"\nmain = \"com.example.MigrateKt\"\n\n[[bin]]\nname = \"seed\"\npath = \"src/Seed.kt\"\n",
+        ),
+    );
+    p.file("src/Main.kt", "package com.example\n\nfun main() {}\n");
+    // Each mistake is reported before any toolchain is downloaded, so this stays offline.
+    p.kargo()
+        .args(["run", "--bin", "nope"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no bin named `nope` in kargo.toml; available bins: migrate, seed"));
+    p.kargo()
+        .args(["run", "--example", "demo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no example named `demo`: add examples/demo.kt"));
+    p.file("examples/hello.kt", "fun main() {}\n");
+    p.kargo().args(["run", "--example", "demo"]).assert().failure().stderr(predicate::str::contains("available examples: hello"));
+    p.kargo().args(["package", "--bin", "nope"]).assert().failure().stderr(predicate::str::contains("no bin named `nope`"));
+    p.kargo()
+        .args(["package", "--bin", "seed"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[[bin]] `seed`").and(predicate::str::contains("Seed.kt does not exist")));
+    p.kargo()
+        .args(["run", "--bin", "migrate", "--example", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn run_rejects_bins_on_targets_without_them() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("web", "[target.wasm]\n[target.native]\n\n[[bin]]\nname = \"jvm-only\"\nmain = \"com.example.ToolKt\"\n"),
+    );
+    p.kargo()
+        .args(["run", "--target", "wasm", "--main", "x.MainKt"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`kargo run --main` only works for the jvm and native targets, not wasm"));
+    p.kargo()
+        .args(["run", "--target", "native", "--bin", "jvm-only"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[[bin]] `jvm-only` has no Kotlin/Native entry point"));
+}
+
+#[test]
+fn invalid_bin_sections_are_rejected() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tools", "[[bin]]\nname = \"x\"\n"));
+    p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("[[bin]] `x` needs an entry point"));
 }

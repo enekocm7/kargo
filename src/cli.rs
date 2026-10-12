@@ -15,7 +15,7 @@ use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::doc::DocOptions;
 use kargo_ops::ops::fmt::FmtOptions;
 use kargo_ops::ops::lint::LintOptions;
-use kargo_ops::ops::run::RunOptions;
+use kargo_ops::ops::run::{Program, RunOptions};
 use kargo_ops::ops::test::TestOptions;
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
@@ -328,6 +328,15 @@ enum Command {
         /// Target to run (defaults to jvm, then native, wasm, android)
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
+        /// Run this main instead: a JVM class (com.example.ToolKt) or a native entry function (com.example.main)
+        #[arg(long, visible_alias = "entry-point", value_name = "NAME", conflicts_with_all = ["bin", "example"])]
+        main: Option<String>,
+        /// Run the [[bin]] with this name
+        #[arg(long, value_name = "NAME", conflicts_with = "example", add = ArgValueCandidates::new(complete::bins))]
+        bin: Option<String>,
+        /// Run examples/<NAME>.kt
+        #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::examples))]
+        example: Option<String>,
         #[command(flatten)]
         package: OnePackageArg,
         /// How to print compiler diagnostics
@@ -508,6 +517,9 @@ enum Command {
     Package {
         #[arg(short, long)]
         release: bool,
+        /// Launch the [[bin]] with this name instead of the main class (writes <NAME>-<version>-all.jar)
+        #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::bins))]
+        bin: Option<String>,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -780,12 +792,18 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, message_format, package, args } => {
+        Command::Run { release, target, main, bin, example, message_format, package, args } => {
             set_message_format(message_format);
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             let ctx = context(&config, &project, index, &global, profile(release))?;
-            let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, args })?;
+            let program = match (main, bin, example) {
+                (Some(main), _, _) => Program::Main(main),
+                (_, Some(bin), _) => Program::Bin(bin),
+                (_, _, Some(example)) => Program::Example(example),
+                _ => Program::Default,
+            };
+            let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args })?;
             Ok(exit_code(code))
         }
         Command::Test { build, filter, no_run, no_fail_fast, report } => {
@@ -977,11 +995,11 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, package } => {
+        Command::Package { release, bin, package } => {
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             let ctx = context(&config, &project, index, &global, profile(release))?;
-            let jar = ops::package(&ctx)?;
+            let jar = ops::package(&ctx, bin.as_deref())?;
             println!("{}", jar.display());
             Ok(0)
         }
@@ -1269,6 +1287,12 @@ fn info_json(ws: &Workspace) -> serde_json::Value {
         "dependencies": dependencies(&m.dependencies),
         "dev-dependencies": dependencies(&m.dev_dependencies),
         "repositories": m.repositories.iter().map(|r| serde_json::json!({ "name": r.name, "url": r.url })).collect::<Vec<_>>(),
+        "bins": m
+            .bins
+            .iter()
+            .map(|b| serde_json::json!({ "name": b.name, "main": b.main, "entry-point": b.entry_point, "path": b.path }))
+            .collect::<Vec<_>>(),
+        "examples": ws.examples(),
         "root": ws.root().display().to_string(),
         "manifest": ws.manifest_path().display().to_string(),
         "target-dir": ws.target_dir().display().to_string(),
@@ -1318,6 +1342,14 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["kargo", "run", "--", "--flag", "x"]).unwrap();
         assert!(matches!(cli.command, Command::Run { ref args, .. } if args == &["--flag", "x"]));
+        let cli = Cli::try_parse_from(["kargo", "run", "--entry-point", "com.x.main"]).unwrap();
+        assert!(matches!(cli.command, Command::Run { main: Some(ref m), .. } if m == "com.x.main"));
+        let cli = Cli::try_parse_from(["kargo", "run", "--bin", "migrate", "--", "up"]).unwrap();
+        assert!(matches!(cli.command, Command::Run { bin: Some(ref b), ref args, .. } if b == "migrate" && args == &["up"]));
+        assert!(Cli::try_parse_from(["kargo", "run", "--bin", "a", "--example", "b"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "run", "--main", "A", "--bin", "b"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "package", "--bin", "migrate"]).unwrap();
+        assert!(matches!(cli.command, Command::Package { bin: Some(ref b), .. } if b == "migrate"));
         let cli = Cli::try_parse_from(["kargo", "new", "app", "--target", "jvm,wasm", "--with", "serialization,coroutines"]).unwrap();
         assert!(matches!(cli.command, Command::New { ref args, .. } if args.targets.len() == 2 && args.frameworks.len() == 2));
         let cli = Cli::try_parse_from(["kargo", "add", "--framework", "compose"]).unwrap();

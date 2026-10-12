@@ -11,7 +11,7 @@ Kotlin/Native compiles Kotlin to machine code. The result is a self-contained ex
 [target.native]
 platforms = ["host"]       # the machine you're building on
 kind = "executable"        # or "library", "shared", "static"
-# entry-point = "com.example.app.main"   # defaults to the top-level `fun main`
+# entry-point = "com.example.app.main"   # defaults to the top-level `fun main`; see also [[bin]]
 # linker-options = ["-lcurl"]
 
 # [target.native.cinterop.sqlite]       # bind a C library, see below
@@ -55,6 +55,18 @@ Apple targets can only be built on macOS. `kargo run` runs the build for the hos
 | `library` | A `.klib` that other Kotlin/Native code can depend on |
 | `shared` | A shared C library (`.so`, `.dylib`, `.dll`) plus a C header |
 | `static` | A static C library (`.a`, `.lib`) plus a C header |
+
+## Several executables
+
+Kotlin/Native needs one entry function per executable. With several top-level `fun main`s (each in its own package), run any of them with `kargo run --entry-point com.example.tools.main`, or declare a `[[bin]]` per program:
+
+```toml title="kargo.toml"
+[[bin]]
+name = "migrate"
+path = "src/tools/Migrate.kt"   # or entry-point = "com.example.tools.main"
+```
+
+`kargo build` then also links `target/<profile>/native/<platform>/bin/migrate.kexe` (`migrate.exe` on Windows), and `kargo run --bin migrate` runs it. See [Several programs in one project](../multiple-programs/).
 
 ## Using C libraries
 

@@ -46,6 +46,8 @@ main-class = "com.example.app.MainKt"
 
 The class of a top-level function in `Main.kt` is `MainKt`; for `object Cli { @JvmStatic fun main(...) }` it is `Cli`. If your `main` is in a Java class, give its fully qualified name, such as `com.example.app.App`. Kargo doesn't look for `main` in Java files.
 
+If the project really has several programs, keep them all: run one with `kargo run --main com.example.tools.MigrateKt`, or declare each as a `[[bin]]` and use `kargo run --bin <name>`. See [Several programs in one project](../../guides/multiple-programs/).
+
 ### `cannot find symbol` for a generated class such as `AutoValue_Person`
 
 The annotation processor didn't run. Kargo only runs processors you declare with `scope = "processor"`; a processor that is merely on the classpath is ignored (JDK 23 and newer ignore it too). Move the processor artifact to `scope = "processor"`, keep its annotations as a `provided` dependency, and see [Annotation processors](../../guides/dependencies/#annotation-processors).

@@ -586,3 +586,37 @@ fn test_section() {
     assert!(parse_err(&format!("{MINIMAL}\n[test]\nfail-fast = \"no\"\n")).contains("fail-fast"));
     assert!(parse_err(&format!("{MINIMAL}\n[test]\nthreads = 2\n")).contains("threads"));
 }
+
+#[test]
+fn bin_sections() {
+    assert!(parse(MINIMAL).bins.is_empty());
+    let m = parse(&format!(
+        "{MINIMAL}
+[[bin]]
+name = \"migrate\"
+main = \"com.example.tools.MigrateKt\"
+entry-point = \"com.example.tools.main\"
+
+[[bin]]
+name = \"seed\"
+path = \"src/tools/Seed.kt\"
+"
+    ));
+    assert_eq!(m.bins.len(), 2);
+    let migrate = m.bin("migrate").unwrap();
+    assert_eq!(migrate.main.as_deref(), Some("com.example.tools.MigrateKt"));
+    assert_eq!(migrate.entry_point.as_deref(), Some("com.example.tools.main"));
+    assert_eq!(migrate.path, None);
+    assert_eq!(m.bin("seed").unwrap().path, Some(PathBuf::from("src/tools/Seed.kt")));
+    assert!(m.bin("nope").is_none());
+
+    let bin = |body: &str| format!("{MINIMAL}\n[[bin]]\n{body}\n");
+    assert!(parse_err(&bin("name = \"x\"")).contains("needs an entry point"));
+    assert!(parse_err(&bin("name = \"x\"\nmain = \"a.B\"\npath = \"src/B.kt\"")).contains("not both"));
+    assert!(parse_err(&bin("name = \"1x\"\nmain = \"a.B\"")).contains("invalid [[bin]] name"));
+    assert!(parse_err(&bin("name = \"x\"\nmain = \"a..B\"")).contains("invalid `main`"));
+    assert!(parse_err(&bin("name = \"x\"\npath = \"src/B.java\"")).contains("Kotlin source file"));
+    assert!(parse_err(&bin("name = \"x\"\nmain = \"a.B\"\nargs = []")).contains("unknown field"));
+    let twice = format!("{}[[bin]]\nname = \"x\"\nmain = \"a.C\"\n", bin("name = \"x\"\nmain = \"a.B\""));
+    assert!(parse_err(&twice).contains("declared more than once"));
+}

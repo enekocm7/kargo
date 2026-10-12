@@ -44,6 +44,9 @@ A `compiler-message` is one diagnostic from the Kotlin compiler (JVM, Wasm or Na
 ```console
 $ kargo info --format json
 {
+  "bins": [
+    { "entry-point": null, "main": null, "name": "migrate", "path": "src/tools/Migrate.kt" }
+  ],
   "dependencies": [
     {
       "module": "org.jetbrains.kotlinx:kotlinx-datetime",
@@ -53,6 +56,7 @@ $ kargo info --format json
     }
   ],
   "dev-dependencies": [],
+  "examples": ["greet"],
   "frameworks": ["serialization"],
   "jdk": "system",
   "kotlin": "2.4.21",
@@ -73,6 +77,8 @@ $ kargo info --format json
 ```
 
 `dependencies` and `dev-dependencies` are what `kargo.toml` declares: `name` is the key in `kargo.toml`, `version` is `null` when a BOM manages it. Target-specific dependencies are not listed; `kargo tree --format json` shows everything that was resolved.
+
+`bins` are the [`[[bin]]`](../manifest/#bin) tables as written (unset keys are `null`), and `examples` the names of the `examples/<name>.kt` programs: what `kargo run --bin` and `kargo run --example` accept.
 
 ## `kargo tree --format json`
 

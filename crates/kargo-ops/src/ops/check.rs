@@ -16,8 +16,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, announce, compile_jvm, finished, hook_env, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries,
-    native_platforms, select_targets, sources, wasm_libraries,
+    BuildOptions, announce, compile_jvm, finished, hook_env, native_cinterop, native_cinterop_defs, native_libraries, native_platforms,
+    native_programs, select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
@@ -119,9 +119,9 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     if main_sources.kotlin_files().is_empty() && (!tests || test_sources.kotlin_files().is_empty()) {
         return Ok(());
     }
-    // `kargo build` needs a single `main` for an executable; report a missing one here too.
+    // `kargo build` needs a single `main` (or a `[[bin]]` per `main`) for an executable; report a missing one here too.
     if !main_sources.kotlin_files().is_empty() {
-        native_entry_point(native, &main_sources)?;
+        native_programs(ctx, native, &main_sources)?;
     }
     native_cinterop_defs(ctx)?;
     let setup = ctx.setup(TargetKind::Native)?;

@@ -303,14 +303,19 @@ pub fn find_entry_points(files: &[PathBuf]) -> Vec<EntryPoint> {
         .collect()
 }
 
-/// Picks the only entry point or explains how to choose one.
-fn single(mut found: Vec<EntryPoint>, setting: &str, none: &str) -> Result<EntryPoint> {
+/// Picks the only entry point or explains how to choose one: `flag` is the
+/// `kargo run` option that names one, `name` how it is shown in that option.
+fn single(mut found: Vec<EntryPoint>, setting: &str, flag: &str, name: fn(&EntryPoint) -> String, none: &str) -> Result<EntryPoint> {
     match found.len() {
         0 => bail!("{none}, or set `{setting}` in kargo.toml"),
         1 => Ok(found.remove(0)),
         _ => {
-            let list: Vec<String> = found.iter().map(|e| format!("  {} ({})", e.jvm_class, e.file.display())).collect();
-            bail!("found multiple `main` functions; set `{setting}` in kargo.toml to pick one:\n{}", list.join("\n"))
+            let list: Vec<String> = found.iter().map(|e| format!("  {} ({})", name(e), e.file.display())).collect();
+            bail!(
+                "found multiple `main` functions; pick one with `kargo run {flag}`, declare each as a [[bin]], \
+                 or set `{setting}` in kargo.toml:\n{}",
+                list.join("\n")
+            )
         }
     }
 }
@@ -319,14 +324,30 @@ fn single(mut found: Vec<EntryPoint>, setting: &str, none: &str) -> Result<Entry
 /// use) or explains how to choose.
 pub fn find_single_entry_point(files: &[PathBuf], setting: &str) -> Result<EntryPoint> {
     let found = find_entry_points(files).into_iter().filter(|e| e.kind == EntryKind::TopLevel).collect();
-    single(found, setting, "no top-level `fun main` found in the sources; add one")
+    single(found, setting, "--entry-point <function>", EntryPoint::native_entry, "no top-level `fun main` found in the sources; add one")
 }
 
 /// Finds the JVM main class: the class of exactly one top-level `fun main` or
 /// `@JvmStatic fun main` in an object or companion object.
 pub fn find_jvm_main_class(files: &[PathBuf], setting: &str) -> Result<String> {
     let none = "no `main` function found in the sources; add a top-level `fun main` or a `@JvmStatic fun main` in an object";
-    Ok(single(find_entry_points(files), setting, none)?.jvm_class)
+    Ok(single(find_entry_points(files), setting, "--main <class>", |e| e.jvm_class.clone(), none)?.jvm_class)
+}
+
+/// Finds the one `main` function declared in `file` (a `[[bin]]` `path` or an
+/// example); `native` only accepts a top-level `fun main`.
+pub fn find_entry_point_in(file: &Path, native: bool) -> Result<EntryPoint> {
+    if !file.is_file() {
+        bail!("{} does not exist", file.display());
+    }
+    let mut found: Vec<EntryPoint> =
+        find_entry_points(&[file.to_path_buf()]).into_iter().filter(|e| !native || e.kind == EntryKind::TopLevel).collect();
+    match found.len() {
+        0 if native => bail!("no top-level `fun main` found in {}; add one", file.display()),
+        0 => bail!("no `main` function found in {}; add a top-level `fun main` or a `@JvmStatic fun main` in an object", file.display()),
+        1 => Ok(found.remove(0)),
+        _ => bail!("{} declares more than one `main` function; keep one per file", file.display()),
+    }
 }
 
 #[cfg(test)]
@@ -419,13 +440,51 @@ mod tests {
         std::fs::create_dir(dir.path().join("other")).unwrap();
         let a = write(dir.path(), "Main.kt", "package m\nfun main() {}\n");
         let b = write(dir.path(), "other/Other.kt", "package m.other\nfun main() {}\n");
-        let err = find_jvm_main_class(&[a, b], "[target.jvm] main-class").unwrap_err().to_string();
-        assert!(err.starts_with("found multiple `main` functions; set `[target.jvm] main-class`"), "{err}");
+        let err = find_jvm_main_class(&[a.clone(), b.clone()], "[target.jvm] main-class").unwrap_err().to_string();
+        assert!(err.starts_with("found multiple `main` functions; pick one with `kargo run --main <class>`"), "{err}");
+        assert!(err.contains("set `[target.jvm] main-class`") && err.contains("[[bin]]"), "{err}");
         assert!(err.contains("m.MainKt") && err.contains("m.other.OtherKt"), "{err}");
+        let err = find_single_entry_point(&[a, b], "[target.native] entry-point").unwrap_err().to_string();
+        assert!(err.contains("`kargo run --entry-point <function>`"), "{err}");
+        assert!(err.contains("  m.main (") && err.contains("  m.other.main ("), "{err}");
         let err = find_jvm_main_class(&[], "main-class").unwrap_err().to_string();
         assert!(err.contains("no `main` function found"), "{err}");
         let err = find_single_entry_point(&[], "main-class").unwrap_err().to_string();
         assert!(err.contains("no top-level `fun main`"), "{err}");
+    }
+
+    #[test]
+    fn entry_point_in_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(
+            dir.path(),
+            "Tool.kt",
+            "package t
+fun main() {}
+",
+        );
+        assert_eq!(find_entry_point_in(&a, true).unwrap().native_entry(), "t.main");
+        assert_eq!(find_entry_point_in(&a, false).unwrap().jvm_class, "t.ToolKt");
+        let cli = write(
+            dir.path(),
+            "Cli.kt",
+            "package t
+object Cli { @JvmStatic fun main(args: Array<String>) {} }
+",
+        );
+        assert_eq!(find_entry_point_in(&cli, false).unwrap().jvm_class, "t.Cli");
+        let err = find_entry_point_in(&cli, true).unwrap_err().to_string();
+        assert!(err.contains("no top-level `fun main`"), "{err}");
+        let two = write(
+            dir.path(),
+            "Two.kt",
+            "package t
+fun main() {}
+object O { @JvmStatic fun main(args: Array<String>) {} }
+",
+        );
+        assert!(find_entry_point_in(&two, false).unwrap_err().to_string().contains("more than one"));
+        assert!(find_entry_point_in(&dir.path().join("Missing.kt"), false).unwrap_err().to_string().contains("does not exist"));
     }
 
     #[test]

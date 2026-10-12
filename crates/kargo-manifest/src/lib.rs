@@ -668,12 +668,26 @@ impl Default for TestSettings {
     }
 }
 
+/// A named program from `[[bin]]`, run with `kargo run --bin <name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bin {
+    pub name: String,
+    /// JVM main class (`main`), e.g. `com.example.tools.MigrateKt`.
+    pub main: Option<String>,
+    /// Kotlin/Native entry function (`entry-point`), e.g. `com.example.tools.main`.
+    pub entry_point: Option<String>,
+    /// Source file, relative to the project root, whose `main` function is the entry point (`path`).
+    pub path: Option<PathBuf>,
+}
+
 /// A fully validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub package: Package,
     pub kotlin: KotlinSettings,
     pub targets: Targets,
+    /// Extra programs from `[[bin]]`, in declaration order.
+    pub bins: Vec<Bin>,
     pub dependencies: Vec<Dependency>,
     pub dev_dependencies: Vec<Dependency>,
     /// `path` dependencies from every dependency table.
@@ -713,6 +727,11 @@ impl Manifest {
         }
         let raw: raw::RawManifest = toml::from_str(text)?;
         raw.validate(workspace)
+    }
+
+    /// The `[[bin]]` named `name`.
+    pub fn bin(&self, name: &str) -> Option<&Bin> {
+        self.bins.iter().find(|b| b.name == name)
     }
 
     /// Dependencies for `target`, including the common ones.
