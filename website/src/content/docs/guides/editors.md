@@ -97,6 +97,8 @@ Kotlin language servers don't read `kargo.toml`, so Kargo writes the project des
 
 [`kargo ide`](#without-kargo-lsp) writes the same files without running a server. They hold paths on your machine, so keep them out of version control; `kargo new` adds them to `.gitignore`. Kargo only replaces a file while it still holds what Kargo last wrote: a `workspace.json` you wrote yourself, or one another tool generated, is left alone, and `kargo lsp` tells you so. Delete it to let Kargo manage it. Kargo remembers the last complete import in `target/lsp`, so a restart with an unchanged `kargo.toml` and `kargo.lock` starts the Kotlin server right away.
 
+When a folder has both, the Kotlin LSP imports an IDE's `.idea/` (IntelliJ) instead of `workspace.json`, and `.idea/` describes none of your libraries. `kargo lsp` therefore tells the server to use `workspace.json` for the project (the `buildTools` initialization option, unless your editor sets its own), so you can keep IntelliJ's `.idea/` next to Zed or another editor. This does not apply to a server you start yourself; see [Without `kargo lsp`](#without-kargo-lsp).
+
 If the dependencies can't be resolved (offline, a broken `kargo.toml`), Kargo describes the project without them and says why. It imports again once `kargo.toml` or `kargo.lock` change.
 
 ### Multiplatform projects
@@ -135,6 +137,10 @@ You don't need to run `kargo ide` again: once the file exists, `kargo build`, `c
 
 :::note
 Kargo remembers what it wrote in `target/lsp`, which `kargo clean` deletes. Run `kargo ide` after a clean to resume the updates. If it says the file was not written by Kargo, delete the file and run `kargo ide` again.
+:::
+
+:::caution
+If the project folder also has an IDE's `.idea/`, a Kotlin LSP you run yourself imports that instead of `workspace.json` and your libraries don't resolve. Set its `buildTools` initialization option for the project folder to `json` (`{"buildTools": {"file:///path/to/project": "json"}}`), or move `.idea/` away. `kargo lsp` does this for you.
 :::
 
 For any other tool, [`kargo classpath`](../../reference/commands/#kargo-classpath) prints a target's classpath:
