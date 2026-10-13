@@ -484,6 +484,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "kargo-compiler",
+ "kargo-lsp",
  "kargo-manifest",
  "kargo-maven",
  "kargo-ops",
@@ -510,6 +511,21 @@ dependencies = [
  "tempfile",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "kargo-lsp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kargo-manifest",
+ "kargo-ops",
+ "kargo-toolchain",
+ "kargo-util",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "toml_edit",
 ]
 
 [[package]]
