@@ -46,6 +46,8 @@ pub struct Options {
     pub server: Option<ServerKind>,
     /// Runs this executable as the server instead of the one Kargo manages.
     pub server_path: Option<PathBuf>,
+    /// Which targets `workspace.json` describes to the Kotlin LSP.
+    pub targets: project::Targets,
     /// Kargo's built-in commands, for the warning about tasks they hide.
     pub builtin_commands: Vec<String>,
     /// The Maven Central search API; default: `KARGO_MAVEN_SEARCH_URL` or [`deps::DEFAULT_SEARCH_URL`].
@@ -597,14 +599,14 @@ impl Server {
         let mut imported = false;
         if let Some(root) = self.root.clone() {
             self.fingerprint = project::fingerprint(&root).ok();
-            let fresh = kind == Some(ServerKind::KotlinLsp) && project::is_fresh(&root, ServerKind::KotlinLsp);
+            let fresh = kind == Some(ServerKind::KotlinLsp) && project::is_fresh(&root, ServerKind::KotlinLsp, self.opts.targets);
             if kind.is_some() && !fresh {
                 imported = true;
                 let token = params.get("workDoneToken").filter(|t| !t.is_null()).cloned();
                 if let Some(token) = &token {
                     self.notify("$/progress", json!({ "token": token, "value": { "kind": "begin", "title": "Importing Kargo project" } }))?;
                 }
-                let outcome = project::import(&self.config, &root, kind);
+                let outcome = project::import(&self.config, &root, kind, self.opts.targets);
                 if let Some(token) = &token {
                     self.notify("$/progress", json!({ "token": token, "value": { "kind": "end" } }))?;
                 }
@@ -786,9 +788,9 @@ impl Server {
             self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })))?;
             self.progress = Some(Progress { token, create_id, begun: false });
         }
-        let (config, tx, kind) = (self.config.clone(), self.tx.clone(), self.opts.server);
+        let (config, tx, kind, targets) = (self.config.clone(), self.tx.clone(), self.opts.server, self.opts.targets);
         thread::spawn(move || {
-            let outcome = project::import(&config, &root, kind);
+            let outcome = project::import(&config, &root, kind, targets);
             let _ = tx.send(Event::Imported(outcome));
         });
         Ok(())

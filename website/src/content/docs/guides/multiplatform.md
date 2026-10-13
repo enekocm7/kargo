@@ -118,4 +118,5 @@ Using a JVM-only library in `src/` fails to compile on the other targets. That's
 - Prefer multiplatform libraries ([klibs.io](https://klibs.io) lists them) over `java.*` APIs in common code. For example, use `kotlinx-datetime` instead of `java.time`, and `okio` or `kotlinx-io` for files.
 - Tests in `tests/` run on every target, which is a cheap way to catch platform differences.
 - `kargo doc` documents `src/` as common code and shows which platforms each declaration is available on. See [API documentation](../documentation/).
+- In an editor, `kargo lsp` describes `src/` and `src-jvm/` as separate source sets, so `expect` and `actual` declarations link up. Common code is analyzed as JVM code, and Wasm and Native code gets no Kotlin code intelligence yet. See [Multiplatform projects](../editors/#multiplatform-projects).
 - `kargo publish` publishes a multiplatform library the way the Kotlin Gradle Plugin does, with one module per platform, so Gradle and Kargo projects pick the right artifact. See [Publishing a library](../publishing/#multiplatform-libraries).

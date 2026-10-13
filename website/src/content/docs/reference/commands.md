@@ -572,6 +572,7 @@ kargo lsp --server none         # kargo.toml support and runnables only
 |---|---|---|
 | `--server <name>` | `kotlin-lsp` | The Kotlin language server: `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
 | `--server-path <path>` | | Run this server executable instead of the one Kargo downloads |
+| `--klib-targets` | | Also describe Wasm and Native sources to the Kotlin LSP. The pinned Kotlin LSP can't read klibs yet, so their libraries don't resolve. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
 
 With `{ "checkOnSave": true }` in the editor's `initializationOptions`, saving a Kotlin or Java file runs `kargo check` in the background and adds its diagnostics for every target to the Kotlin server's; `checkTargets` limits the targets. See [Check on save](../../guides/editors/#check-on-save).
 

@@ -3,8 +3,9 @@
 //!
 //! - The JetBrains Kotlin LSP reads `workspace.json` at the project root (its format for build
 //!   systems it doesn't know) and reloads it when it changes. Kargo writes one module per
-//!   package for main and one for test code, with the JVM target's classpaths as libraries
-//!   (with their sources jars), the JDK and the Kotlin compiler settings and plugins.
+//!   package for main and one for test code, with the target's classpath as libraries (with
+//!   their sources jars), the JDK and the Kotlin compiler settings and plugins. A multiplatform
+//!   package gets a module per source set instead (see [`workspace_json`]).
 //! - fwcd's kotlin-language-server runs a `kls-classpath` script at the project root. Kargo
 //!   writes one that prints the test classpath it keeps in `target/lsp/classpath.txt`.
 //!
@@ -51,7 +52,7 @@ pub struct Outcome {
 
 /// Imports the project at `root` and writes the description `kind` reads. When dependencies
 /// can't be resolved (offline, a broken `kargo.toml`), the project is described without them.
-pub fn import(config: &Config, root: &Path, kind: Option<ServerKind>) -> Outcome {
+pub fn import(config: &Config, root: &Path, kind: Option<ServerKind>, targets: Targets) -> Outcome {
     let fingerprint = fingerprint(root).ok();
     let (metadata, mut error) = match metadata(config, root, false) {
         Ok(m) => (Some(m), None),
@@ -59,7 +60,7 @@ pub fn import(config: &Config, root: &Path, kind: Option<ServerKind>) -> Outcome
     };
     let mut written = Written::default();
     if let (Some(kind), Some(m)) = (kind, &metadata) {
-        match write(kind, m) {
+        match write(kind, m, targets) {
             Ok(w) => written = w,
             Err(e) => {
                 error.get_or_insert(format!("{e:#}"));
@@ -71,7 +72,7 @@ pub fn import(config: &Config, root: &Path, kind: Option<ServerKind>) -> Outcome
             let record = format!(
                 "{} {fingerprint}
 ",
-                kind.as_str()
+                description(kind, targets)
             );
             let _ = kargo_util::fs::write_string_atomic(&state_dir(m).join("fingerprint"), &record);
         }
@@ -81,14 +82,23 @@ pub fn import(config: &Config, root: &Path, kind: Option<ServerKind>) -> Outcome
 
 /// Whether the last complete import of the project at `root` for `kind` saw the project as it
 /// is now, so its description is up to date.
-pub fn is_fresh(root: &Path, kind: ServerKind) -> bool {
+pub fn is_fresh(root: &Path, kind: ServerKind, targets: Targets) -> bool {
     let Ok(project) = Project::discover(root, None) else { return false };
     let generated = match kind {
         ServerKind::KotlinLsp => project.root().join("workspace.json"),
         ServerKind::Kls => project.root().join(if cfg!(windows) { "kls-classpath.bat" } else { "kls-classpath" }),
     };
     let stored = std::fs::read_to_string(project.target_dir().join("lsp").join("fingerprint")).unwrap_or_default();
-    generated.is_file() && stored.trim() == format!("{} {}", kind.as_str(), metadata::fingerprint(&project))
+    generated.is_file() && stored.trim() == format!("{} {}", description(kind, targets), metadata::fingerprint(&project))
+}
+
+/// What an import wrote, as its fingerprint record names it: the server, and for the Kotlin LSP
+/// which targets `workspace.json` describes.
+fn description(kind: ServerKind, targets: Targets) -> String {
+    match kind {
+        ServerKind::KotlinLsp => format!("{}{}", kind.as_str(), targets.record_suffix()),
+        ServerKind::Kls => kind.as_str().to_owned(),
+    }
 }
 
 /// What an import wrote.
@@ -101,13 +111,13 @@ pub struct Written {
 }
 
 /// Writes the description `kind` reads of the project described by `metadata`.
-pub fn write(kind: ServerKind, metadata: &Value) -> Result<Written> {
+pub fn write(kind: ServerKind, metadata: &Value, targets: Targets) -> Result<Written> {
     let root = PathBuf::from(metadata["root"].as_str().unwrap_or_default());
     let state = state_dir(metadata);
     let mut written = Written::default();
     match kind {
         ServerKind::KotlinLsp => {
-            let text = serde_json::to_string_pretty(&workspace_json(metadata))? + "\n";
+            let text = serde_json::to_string_pretty(&workspace_json(metadata, targets))? + "\n";
             generate(&root.join("workspace.json"), &text, &state, &mut written)?;
         }
         ServerKind::Kls => {
@@ -178,9 +188,10 @@ fn jvm_target(package: &Value) -> Option<&Value> {
     package["targets"].as_array()?.iter().find(|t| t["kind"] == "jvm")
 }
 
-/// The `kotlinc` `-classpath` of a scope: Maven artifacts' paths; path dependencies are left out.
+/// The classpath (or klib path) of a scope: Maven artifacts with their paths, path dependencies
+/// by package name. A Native target's is that of its first platform.
 fn classpath<'a>(target: &'a Value, scope: &str) -> impl Iterator<Item = &'a Value> {
-    target["dependencies"].as_array().into_iter().flatten().flat_map(move |platform| platform[scope].as_array().into_iter().flatten())
+    target["dependencies"][0][scope].as_array().into_iter().flatten()
 }
 
 /// Every jar on the test classpaths of the project's JVM targets, for fwcd's server, plus the
@@ -214,96 +225,364 @@ fn url(path: &str) -> String {
     if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") }
 }
 
+/// Which targets `workspace.json` describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Targets {
+    /// The JVM target. The common code of a multiplatform package is analyzed as JVM code.
+    #[default]
+    Jvm,
+    /// Wasm and Native as well (`kargo lsp --klib-targets`). The Kotlin LSP doesn't read klibs
+    /// yet, so their libraries don't resolve.
+    All,
+}
+
+impl Targets {
+    /// How the fingerprint record of an import names the description, after the server's name.
+    fn record_suffix(self) -> &'static str {
+        match self {
+            Targets::Jvm => "",
+            Targets::All => "+klib",
+        }
+    }
+}
+
+/// The targets of a package that get modules: the JVM, and Wasm and Native with [`Targets::All`].
+fn analyzed_targets(package: &Value, targets: Targets) -> Vec<&Value> {
+    let analyzed = |t: &&Value| match t["kind"].as_str() {
+        Some("jvm") => true,
+        Some("wasm" | "native") => targets == Targets::All,
+        _ => false,
+    };
+    package["targets"].as_array().into_iter().flatten().filter(analyzed).collect()
+}
+
+/// Whether a package has several targets, so its `src/` is common code compiled for each of
+/// them, refined by `src-<target>/`.
+fn is_multiplatform(package: &Value) -> bool {
+    package["targets"].as_array().is_some_and(|t| t.len() > 1)
+}
+
+/// The modules holding a package's main code for `kind`: `<name>.main` for a package with one
+/// target, `<name>.<kind>.main` and `<name>.common.main` for a multiplatform one.
+fn code_modules(package: &Value, kind: &str, targets: Targets) -> Vec<String> {
+    let name = str_of(package, "name");
+    let analyzed = analyzed_targets(package, targets);
+    let has_kind = analyzed.iter().any(|t| t["kind"] == kind);
+    match (is_multiplatform(package), analyzed.is_empty()) {
+        (_, true) => Vec::new(),
+        (false, _) if has_kind => vec![format!("{name}.main")],
+        (false, _) => Vec::new(),
+        (true, _) if has_kind => vec![format!("{name}.{kind}.main"), format!("{name}.common.main")],
+        (true, _) => vec![format!("{name}.common.main")],
+    }
+}
+
+/// How the Kotlin plugin sees a target: its platform, the class of its compiler arguments and
+/// the kind of its libraries.
+struct Platform {
+    /// The `targetPlatform` of its modules, as the Kotlin plugin serializes it: `JVM [21]`,
+    /// `Wasm [JS]`, `Native [linux_x64]`; several are joined by `/`.
+    name: String,
+    /// The compiler arguments' class: `J`VM, `W`asm, `N`ative or `M`etadata (common code).
+    arguments: &'static str,
+    /// The type of its libraries: Kotlin's library kinds for klibs.
+    library_type: &'static str,
+}
+
+fn platform(target: &Value) -> Platform {
+    match str_of(target, "kind") {
+        "jvm" => Platform { name: format!("JVM [{}]", str_of(target, "jvm-target")), arguments: "J", library_type: "COMPILE" },
+        "wasm" if target["environment"] == "wasi" => {
+            Platform { name: "Wasm [WASI]".into(), arguments: "W", library_type: "kotlin.wasm.wasi" }
+        }
+        "wasm" => Platform { name: "Wasm [JS]".into(), arguments: "W", library_type: "kotlin.wasm.js" },
+        _ => Platform { name: format!("Native [{}]", konan_target(target)), arguments: "N", library_type: "kotlin.native" },
+    }
+}
+
+/// The Kotlin/Native platform a Native target is analyzed for: the first of its platforms.
+fn konan_target(target: &Value) -> &str {
+    target["platforms"][0].as_str().unwrap_or_default()
+}
+
+/// Which source directories of a target a module gets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Roots {
+    /// Common and target code, and the resources.
+    All,
+    /// Common code: `src/` or `tests/`.
+    Common,
+    /// The target's own code (`src-<target>/` or `tests-<target>/`) and the resources.
+    Own,
+}
+
+/// A target's main or test source and resource directories, with their source root types.
+fn roots(target: &Value, test: bool, part: Roots) -> Vec<(String, &'static str)> {
+    let (sources, resources) = if test { ("test-roots", "test-resource-roots") } else { ("source-roots", "resource-roots") };
+    let (source_type, resource_type) = if test { ("java-test", "java-test-resource") } else { ("java-source", "java-resource") };
+    let dirs = |key: &str| target[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+    // `kargo metadata` lists the common directory first.
+    let mut out: Vec<(String, &str)> = Vec::new();
+    for (i, dir) in dirs(sources).into_iter().enumerate() {
+        let keep = match part {
+            Roots::All => true,
+            Roots::Common => i == 0,
+            Roots::Own => i > 0,
+        };
+        if keep {
+            out.push((dir, source_type));
+        }
+    }
+    if part != Roots::Common {
+        out.extend(dirs(resources).into_iter().map(|dir| (dir, resource_type)));
+    }
+    out
+}
+
+/// One module of `workspace.json`: a package's main or test code, all of it or one source set.
+struct SourceSet<'a> {
+    module: String,
+    /// The target whose libraries and compiler settings the module gets.
+    target: &'a Value,
+    platform: Platform,
+    roots: Vec<(String, &'static str)>,
+    test: bool,
+    /// Modules it depends on before its libraries: its main code, the common code it refines.
+    modules: Vec<String>,
+    /// The common source set it refines, whose `expect` declarations it implements.
+    depends_on: Vec<String>,
+    /// Modules whose `internal` declarations it sees.
+    visible: Vec<String>,
+    /// A source set of a multiplatform package.
+    multiplatform: bool,
+    /// Whether it gets the target's libraries; common code compiled for several platforms has none.
+    libraries: bool,
+    /// Whether it gets the target's output directories.
+    outputs: bool,
+}
+
+/// `workspace.json` while it is being written.
+struct Workspace<'a> {
+    metadata: &'a Value,
+    targets: Targets,
+    sdk: Value,
+    modules: Vec<Value>,
+    libraries: Vec<Value>,
+    kotlin_settings: Vec<Value>,
+    java_settings: Vec<Value>,
+}
+
 /// The JetBrains Kotlin LSP's `workspace.json` for the project.
-pub fn workspace_json(metadata: &Value) -> Value {
-    let mut modules: Vec<Value> = Vec::new();
-    let mut libraries: Vec<Value> = Vec::new();
-    let mut kotlin_settings: Vec<Value> = Vec::new();
-    let mut java_settings: Vec<Value> = Vec::new();
+///
+/// A package with one target gets a module for its main and one for its test code. A
+/// multiplatform package gets one per source set: `<name>.common.main` for `src/` and
+/// `<name>.<target>.main` for `src-<target>/` (and the same for tests), each refining the common
+/// one, so `expect` and `actual` declarations find each other. Only the targets of [`Targets`]
+/// get modules; Android code is left to Android Studio.
+pub fn workspace_json(metadata: &Value, targets: Targets) -> Value {
     let jdk = &metadata["toolchain"]["jdk"];
     let sdk_name = jdk["version"].as_u64().map(|v| v.to_string());
     let mut sdks: Vec<Value> = Vec::new();
     if let (Some(name), Some(home)) = (&sdk_name, jdk["home"].as_str()) {
         sdks.push(json!({ "name": name, "type": "JavaSDK", "version": format!("JDK_{name}"), "homePath": home, "additionalData": "" }));
     }
-    let sdk = || match &sdk_name {
+    let sdk = match &sdk_name {
         Some(name) => json!({ "type": "sdk", "name": name, "kind": "JavaSDK" }),
         None => json!({ "type": "inheritedSdk" }),
     };
+    let mut ws = Workspace {
+        metadata,
+        targets,
+        sdk,
+        modules: Vec::new(),
+        libraries: Vec::new(),
+        kotlin_settings: Vec::new(),
+        java_settings: Vec::new(),
+    };
     for package in metadata["packages"].as_array().into_iter().flatten() {
+        ws.package(package);
+    }
+    json!({
+        "modules": ws.modules,
+        "libraries": ws.libraries,
+        "sdks": sdks,
+        "kotlinSettings": ws.kotlin_settings,
+        "javaSettings": ws.java_settings,
+    })
+}
+
+impl<'a> Workspace<'a> {
+    fn package(&mut self, package: &'a Value) {
         let name = str_of(package, "name");
         let root = str_of(package, "root");
-        modules.push(json!({
+        self.modules.push(json!({
             "name": name,
-            "dependencies": [{ "type": "moduleSource" }, sdk()],
+            "dependencies": [{ "type": "moduleSource" }, self.sdk.clone()],
             "contentRoots": [{ "path": root, "excludedUrls": [url(&Path::new(root).join("target").to_string_lossy())] }],
             "externalProjectPath": root,
             "externalProjectId": name,
         }));
-        let Some(jvm) = jvm_target(package) else { continue };
+        let analyzed = analyzed_targets(package, self.targets);
+        let suffix = |test: bool| if test { "test" } else { "main" };
+        if !is_multiplatform(package)
+            && let [target] = analyzed.as_slice()
+        {
+            for test in [false, true] {
+                let main = format!("{name}.main");
+                let own = if test { vec![main] } else { Vec::new() };
+                self.add(
+                    package,
+                    SourceSet {
+                        module: format!("{name}.{}", suffix(test)),
+                        target,
+                        platform: platform(target),
+                        roots: roots(target, test, Roots::All),
+                        test,
+                        modules: own.clone(),
+                        depends_on: Vec::new(),
+                        visible: own,
+                        multiplatform: false,
+                        libraries: true,
+                        outputs: true,
+                    },
+                );
+            }
+            return;
+        }
+        let Some(&first) = analyzed.first() else { return };
+        // Common code is analyzed as JVM code when there is a JVM target: the Kotlin LSP gives
+        // common code compiled for several platforms no libraries.
+        let jvm = analyzed.iter().copied().find(|t| t["kind"] == "jvm");
+        let common_main = format!("{name}.common.main");
         for test in [false, true] {
-            let module = format!("{name}.{}", if test { "test" } else { "main" });
-            let (sources, resources) = if test { ("test-roots", "test-resource-roots") } else { ("source-roots", "resource-roots") };
-            let (source_type, resource_type) = if test { ("java-test", "java-test-resource") } else { ("java-source", "java-resource") };
-            let mut roots: Vec<(String, &str)> = Vec::new();
-            for (key, ty) in [(sources, source_type), (resources, resource_type)] {
-                roots.extend(jvm[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(|p| (p.to_owned(), ty)));
+            let common = format!("{name}.common.{}", suffix(test));
+            let (target, common_platform, libraries) = match jvm {
+                Some(jvm) => (jvm, platform(jvm), true),
+                None => {
+                    let mut names: Vec<String> = analyzed.iter().map(|t| platform(t).name).collect();
+                    names.sort();
+                    (first, Platform { name: names.join("/"), arguments: "M", library_type: "" }, false)
+                }
+            };
+            let own = if test { vec![common_main.clone()] } else { Vec::new() };
+            self.add(
+                package,
+                SourceSet {
+                    module: common.clone(),
+                    target,
+                    platform: common_platform,
+                    roots: roots(target, test, Roots::Common),
+                    test,
+                    modules: own.clone(),
+                    depends_on: Vec::new(),
+                    visible: own,
+                    multiplatform: true,
+                    libraries,
+                    outputs: false,
+                },
+            );
+            for &target in &analyzed {
+                let kind = str_of(target, "kind");
+                let main = format!("{name}.{kind}.main");
+                let (modules, visible) = if test {
+                    (vec![main.clone(), common.clone(), common_main.clone()], vec![main, common_main.clone()])
+                } else {
+                    (vec![common.clone()], Vec::new())
+                };
+                self.add(
+                    package,
+                    SourceSet {
+                        module: format!("{name}.{kind}.{}", suffix(test)),
+                        target,
+                        platform: platform(target),
+                        roots: roots(target, test, Roots::Own),
+                        test,
+                        modules,
+                        depends_on: vec![common.clone()],
+                        visible,
+                        multiplatform: true,
+                        libraries: true,
+                        outputs: true,
+                    },
+                );
             }
-            let mut dependencies: Vec<Value> = Vec::new();
-            if test {
-                dependencies.push(json!({ "type": "module", "name": format!("{name}.main"), "scope": "compile" }));
-            }
-            let scopes: &[(&str, &str)] = if test { &[("test", "compile")] } else { &[("compile", "compile"), ("runtime", "runtime")] };
+        }
+    }
+
+    fn add(&mut self, package: &Value, set: SourceSet) {
+        let mut dependencies: Vec<Value> = set.modules.iter().map(|m| json!({ "type": "module", "name": m, "scope": "compile" })).collect();
+        if set.libraries {
+            let kind = str_of(set.target, "kind");
+            let scopes: &[(&str, &str)] = if set.test { &[("test", "compile")] } else { &[("compile", "compile"), ("runtime", "runtime")] };
             for (scope, ide_scope) in scopes {
-                for entry in classpath(jvm, scope) {
-                    let dependency = match entry["path"].as_str() {
-                        Some(jar) => {
-                            let library = library_name(entry, &libraries, jar);
-                            if !libraries.iter().any(|l| l["name"] == library.as_str()) {
-                                libraries.push(library_entry(&library, entry));
-                            }
-                            json!({ "type": "library", "name": library, "scope": ide_scope })
+                for entry in classpath(set.target, scope) {
+                    let found: Vec<Value> = match entry["path"].as_str() {
+                        Some(file) => {
+                            let library = self.library(entry, file, set.platform.library_type);
+                            vec![json!({ "type": "library", "name": library, "scope": ide_scope })]
                         }
-                        None => json!({ "type": "module", "name": format!("{}.main", str_of(entry, "package")), "scope": ide_scope }),
+                        None => package_named(self.metadata, str_of(entry, "package"))
+                            .map(|dep| code_modules(dep, kind, self.targets))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|m| json!({ "type": "module", "name": m, "scope": ide_scope }))
+                            .collect(),
                     };
                     // A library on both the compile and runtime classpath is a compile dependency.
-                    if !dependencies.iter().any(|d| d["name"] == dependency["name"]) {
-                        dependencies.push(dependency);
+                    for dependency in found {
+                        if !dependencies.iter().any(|d| d["name"] == dependency["name"]) {
+                            dependencies.push(dependency);
+                        }
                     }
                 }
             }
-            dependencies.push(json!({ "type": "moduleSource" }));
-            dependencies.push(sdk());
-            modules.push(json!({
-                "name": module,
-                "dependencies": dependencies,
-                "contentRoots": roots.iter().map(|(path, ty)| json!({ "path": path, "sourceRoots": [{ "path": path, "type": ty }] })).collect::<Vec<_>>(),
-                "externalProjectPath": root,
-                "externalProjectId": name,
-            }));
-            kotlin_settings.push(kotlin_settings_entry(package, jvm, &module, &roots, test));
-            let jvm_target = str_of(jvm, "jvm-target");
-            let language_level = format!("JDK_{}", jvm_target.replace('.', "_"));
-            let classes = str_of(jvm, if test { "test-classes-dir" } else { "classes-dir" });
+            if kind == "native" {
+                for library in native_distribution(self.metadata, konan_target(set.target)) {
+                    dependencies.push(json!({ "type": "library", "name": library["name"], "scope": "compile" }));
+                    if !self.libraries.iter().any(|l| l["name"] == library["name"]) {
+                        self.libraries.push(library);
+                    }
+                }
+            }
+        }
+        dependencies.push(json!({ "type": "moduleSource" }));
+        dependencies.push(self.sdk.clone());
+        let name = str_of(package, "name");
+        let root = str_of(package, "root");
+        self.modules.push(json!({
+            "name": set.module,
+            "dependencies": dependencies,
+            "contentRoots": set.roots.iter().map(|(path, ty)| json!({ "path": path, "sourceRoots": [{ "path": path, "type": ty }] })).collect::<Vec<_>>(),
+            "externalProjectPath": root,
+            "externalProjectId": name,
+        }));
+        self.kotlin_settings.push(kotlin_settings_entry(package, &set));
+        if set.platform.arguments == "J" {
+            let jvm_target = str_of(set.target, "jvm-target");
             let mut java = json!({
-                "module": module,
+                "module": set.module,
                 "inheritedCompilerOutput": false,
                 "excludeOutput": true,
-                "languageLevelId": language_level,
+                "languageLevelId": format!("JDK_{}", jvm_target.replace('.', "_")),
                 "manifestAttributes": {},
-                "compilerArguments": jvm["javac-args"],
+                "compilerArguments": set.target["javac-args"],
             });
-            java[if test { "compilerOutputsForTests" } else { "compilerOutputs" }] = json!([classes]);
-            java_settings.push(java);
+            if set.outputs {
+                let classes = str_of(set.target, if set.test { "test-classes-dir" } else { "classes-dir" });
+                java[if set.test { "compilerOutputsForTests" } else { "compilerOutputs" }] = json!([classes]);
+            }
+            self.java_settings.push(java);
         }
     }
-    json!({
-        "modules": modules,
-        "libraries": libraries,
-        "sdks": sdks,
-        "kotlinSettings": kotlin_settings,
-        "javaSettings": java_settings,
-    })
+
+    /// The name of the library for a classpath entry, added to the project's libraries.
+    fn library(&mut self, entry: &Value, file: &str, library_type: &str) -> String {
+        let name = library_name(entry, &self.libraries, file);
+        if !self.libraries.iter().any(|l| l["name"] == name.as_str()) {
+            self.libraries.push(library_entry(&name, entry, library_type));
+        }
+        name
+    }
 }
 
 /// A library's name: `Kargo: group:artifact:version`, with the file name when a module has
@@ -320,7 +599,7 @@ fn library_name(entry: &Value, libraries: &[Value], jar: &str) -> String {
     }
 }
 
-fn library_entry(name: &str, entry: &Value) -> Value {
+fn library_entry(name: &str, entry: &Value, library_type: &str) -> Value {
     let mut roots = vec![json!({ "path": entry["path"] })];
     if let Some(sources) = entry["sources"].as_str() {
         roots.push(json!({ "path": sources, "type": "SOURCES" }));
@@ -330,51 +609,91 @@ fn library_entry(name: &str, entry: &Value) -> Value {
     let version = str_of(entry, "version");
     json!({
         "name": name,
-        "type": "COMPILE",
+        "type": library_type,
         "roots": roots,
         "properties": { "attributes": { "groupId": group, "artifactId": artifact, "version": version, "baseVersion": version } },
     })
 }
 
-fn kotlin_settings_entry(package: &Value, jvm: &Value, module: &str, roots: &[(String, &str)], test: bool) -> Value {
+/// The klibs of the Kotlin/Native distribution for `konan_target`: the standard library and
+/// the platform libraries (`posix`, ...), which Native code compiles against without
+/// declaring them.
+fn native_distribution(metadata: &Value, konan_target: &str) -> Vec<Value> {
+    let native = &metadata["toolchain"]["kotlin-native"];
+    let Some(home) = native["home"].as_str() else { return Vec::new() };
+    let version = str_of(native, "version");
+    let klib = Path::new(home).join("klib");
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    if klib.join("common").join("stdlib").is_dir() {
+        found.push(("stdlib".to_owned(), klib.join("common").join("stdlib")));
+    }
+    if let Ok(dir) = std::fs::read_dir(klib.join("platform").join(konan_target)) {
+        let mut platform: Vec<PathBuf> = dir.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
+        platform.sort();
+        for path in platform {
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            found.push((format!("{file} [{konan_target}]"), path));
+        }
+    }
+    found
+        .into_iter()
+        .map(|(name, path)| {
+            json!({
+                "name": format!("Kotlin/Native {version}: {name}"),
+                "type": "kotlin.native",
+                "roots": [{ "path": path.display().to_string() }],
+            })
+        })
+        .collect()
+}
+
+fn kotlin_settings_entry(package: &Value, set: &SourceSet) -> Value {
     let kotlin = &package["kotlin"];
-    let plugins: Vec<&Value> = jvm["compiler-plugins"].as_array().into_iter().flatten().collect();
-    let mut arguments = json!({
-        "jvmTarget": jvm["jvm-target"],
-        "pluginOptions": plugins.iter().flat_map(|p| p["options"].as_array().into_iter().flatten()).collect::<Vec<_>>(),
-        "pluginClasspaths": plugins.iter().filter_map(|p| p["jar"].as_str()).collect::<Vec<_>>(),
-    });
+    let target = set.target;
+    let plugins: Vec<&Value> = target["compiler-plugins"].as_array().into_iter().flatten().collect();
+    let mut arguments = json!({});
+    if set.platform.arguments == "J" {
+        arguments["jvmTarget"] = target["jvm-target"].clone();
+    }
+    arguments["pluginOptions"] = json!(plugins.iter().flat_map(|p| p["options"].as_array().into_iter().flatten()).collect::<Vec<_>>());
+    arguments["pluginClasspaths"] = json!(plugins.iter().filter_map(|p| p["jar"].as_str()).collect::<Vec<_>>());
     for (key, field) in [("language-version", "languageVersion"), ("api-version", "apiVersion")] {
         if let Some(v) = kotlin[key].as_str() {
             arguments[field] = json!(v);
         }
     }
-    let additional: Vec<String> = jvm["compiler-args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(shell_word).collect();
-    let name = str_of(package, "name");
+    // Without it, the compiler front end rejects `expect` and `actual` declarations.
+    if set.multiplatform {
+        arguments["multiPlatform"] = json!(true);
+    }
+    let additional: Vec<String> =
+        target["compiler-args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(shell_word).collect();
+    // A single JVM module keeps the JVM platform the compiler arguments imply.
+    let target_platform = if !set.multiplatform && set.platform.arguments == "J" { Value::Null } else { json!(set.platform.name) };
     json!({
         "name": "Kotlin",
-        "sourceRoots": roots.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        "sourceRoots": set.roots.iter().map(|(p, _)| p).collect::<Vec<_>>(),
         "configFileItems": [],
-        "module": module,
+        "module": set.module,
         "useProjectSettings": false,
         "implementedModuleNames": [],
-        "dependsOnModuleNames": [],
-        "additionalVisibleModuleNames": if test { vec![format!("{name}.main")] } else { Vec::new() },
+        "dependsOnModuleNames": set.depends_on,
+        "additionalVisibleModuleNames": set.visible,
         "productionOutputPath": null,
         "testOutputPath": null,
         "sourceSetNames": [],
-        "isTestModule": test,
-        "externalProjectId": module,
+        "isTestModule": set.test,
+        "externalProjectId": set.module,
         "isHmppEnabled": true,
         "pureKotlinSourceFolders": [],
-        "kind": "default",
-        "compilerArguments": format!("J{arguments}"),
+        "kind": if set.multiplatform { "source_set_holder" } else { "default" },
+        "compilerArguments": format!("{}{arguments}", set.platform.arguments),
         "additionalArguments": if additional.is_empty() { Value::Null } else { json!(additional.join(" ")) },
         "scriptTemplates": null,
         "scriptTemplatesClasspath": null,
         "copyJsLibraryFiles": false,
         "outputDirectoryForJsLibraryFiles": null,
-        "targetPlatform": null,
+        "targetPlatform": target_platform,
         "externalSystemRunTasks": [],
         "version": 5,
         "flushNeeded": false,
@@ -515,7 +834,9 @@ mod tests {
 
     #[test]
     fn describes_modules_libraries_and_settings() {
-        let ws = workspace_json(&sample());
+        let mut metadata = sample();
+        metadata["packages"][0]["targets"].as_array_mut().unwrap().truncate(1);
+        let ws = workspace_json(&metadata, Targets::Jvm);
         let names: Vec<&str> = ws["modules"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["app", "app.main", "app.test", "lib", "lib.main", "lib.test"]);
         let main = &ws["modules"][1];
@@ -551,6 +872,231 @@ mod tests {
         assert_eq!(ws["javaSettings"][0]["languageLevelId"], "JDK_21");
     }
 
+    /// The sample with Wasm and Native targets that have klibs, and `lib` as a JVM + Wasm package.
+    fn multiplatform(native_home: &str) -> Value {
+        let mut metadata = sample();
+        metadata["toolchain"]["kotlin-native"] = json!({ "home": native_home, "version": "2.4.21" });
+        let targets = metadata["packages"][0]["targets"].as_array_mut().unwrap();
+        targets[1] = json!({
+            "kind": "wasm",
+            "environment": "browser",
+            "source-roots": ["/p/src", "/p/src-wasm"],
+            "test-roots": ["/p/tests", "/p/tests-wasm"],
+            "compiler-plugins": [],
+            "dependencies": [{
+                "platform": "wasm-js",
+                "compile": [
+                    { "package": "lib", "scope": "compile" },
+                    { "module": "g:a-wasm-js", "version": "1", "path": "/c/a-wasm-js-1.klib", "sources": null }
+                ],
+                "runtime": [],
+                "test": [{ "module": "g:t-wasm-js", "version": "3", "path": "/c/t-wasm-js-3.klib", "sources": null }]
+            }]
+        });
+        targets.push(json!({
+            "kind": "native",
+            "platforms": ["linux_x64", "mingw_x64"],
+            "source-roots": ["/p/src", "/p/src-native"],
+            "test-roots": ["/p/tests", "/p/tests-native"],
+            "dependencies": [
+                { "platform": "native-linux_x64", "compile": [{ "module": "g:a-linuxx64", "version": "1", "path": "/c/a-linuxx64-1.klib" }], "runtime": [], "test": [] },
+                { "platform": "native-mingw_x64", "compile": [{ "module": "g:a-mingwx64", "version": "1", "path": "/c/a-mingwx64-1.klib" }], "runtime": [], "test": [] }
+            ]
+        }));
+        metadata["packages"][1]["targets"].as_array_mut().unwrap().push(json!({ "kind": "wasm" }));
+        metadata
+    }
+
+    fn names(values: &Value, key: &str) -> Vec<String> {
+        values.as_array().unwrap().iter().map(|v| v[key].as_str().unwrap().to_owned()).collect()
+    }
+
+    fn module<'a>(ws: &'a Value, name: &str) -> &'a Value {
+        ws["modules"].as_array().unwrap().iter().find(|m| m["name"] == name).unwrap_or_else(|| panic!("no module {name}"))
+    }
+
+    fn settings<'a>(ws: &'a Value, name: &str) -> &'a Value {
+        ws["kotlinSettings"].as_array().unwrap().iter().find(|s| s["module"] == name).unwrap_or_else(|| panic!("no settings for {name}"))
+    }
+
+    fn arguments(settings: &Value) -> (char, Value) {
+        let text = settings["compilerArguments"].as_str().unwrap();
+        (text.chars().next().unwrap(), serde_json::from_str(&text[1..]).unwrap())
+    }
+
+    #[test]
+    fn describes_the_source_sets_of_a_multiplatform_package() {
+        let ws = workspace_json(&multiplatform("/none"), Targets::Jvm);
+        assert_eq!(
+            names(&ws["modules"], "name"),
+            [
+                "app",
+                "app.common.main",
+                "app.jvm.main",
+                "app.common.test",
+                "app.jvm.test",
+                "lib",
+                "lib.common.main",
+                "lib.jvm.main",
+                "lib.common.test",
+                "lib.jvm.test"
+            ]
+        );
+
+        // src/ is analyzed as JVM code, with the JVM classpath, so the standard library resolves.
+        let common = module(&ws, "app.common.main");
+        assert_eq!(common["contentRoots"].as_array().unwrap().len(), 1);
+        assert_eq!(common["contentRoots"][0]["sourceRoots"][0], json!({ "path": "/p/src", "type": "java-source" }));
+        let deps: Vec<String> = common["dependencies"].as_array().unwrap().iter().map(|d| format!("{}:{}", d["type"], d["name"])).collect();
+        assert_eq!(
+            deps,
+            [
+                "\"module\":\"lib.jvm.main\"",
+                "\"module\":\"lib.common.main\"",
+                "\"library\":\"Kargo: g:a:1\"",
+                "\"library\":\"Kargo: g:r:2\"",
+                "\"moduleSource\":null",
+                "\"sdk\":\"21\""
+            ]
+        );
+        let common_settings = settings(&ws, "app.common.main");
+        assert_eq!(common_settings["targetPlatform"], "JVM [21]");
+        assert_eq!(common_settings["kind"], "source_set_holder");
+        let (class, args) = arguments(common_settings);
+        assert_eq!(class, 'J');
+        assert_eq!(args["multiPlatform"], true, "expect and actual are only allowed in multiplatform code");
+
+        // src-jvm/ refines it and gets the resources.
+        let jvm = module(&ws, "app.jvm.main");
+        assert_eq!(names(&jvm["contentRoots"], "path"), ["/p/src-jvm", "/p/resources"]);
+        assert_eq!(jvm["dependencies"][0], json!({ "type": "module", "name": "app.common.main", "scope": "compile" }));
+        assert_eq!(settings(&ws, "app.jvm.main")["dependsOnModuleNames"], json!(["app.common.main"]));
+
+        let test = module(&ws, "app.jvm.test");
+        let modules: Vec<&Value> = test["dependencies"].as_array().unwrap().iter().take(3).map(|d| &d["name"]).collect();
+        assert_eq!(modules, [&json!("app.jvm.main"), &json!("app.common.test"), &json!("app.common.main")]);
+        let test_settings = settings(&ws, "app.jvm.test");
+        assert_eq!(test_settings["dependsOnModuleNames"], json!(["app.common.test"]));
+        assert_eq!(test_settings["additionalVisibleModuleNames"], json!(["app.jvm.main", "app.common.main"]));
+        assert_eq!(settings(&ws, "app.common.test")["additionalVisibleModuleNames"], json!(["app.common.main"]));
+
+        // Only the JVM source set gets the output directories.
+        let java: Vec<&Value> = ws["javaSettings"].as_array().unwrap().iter().filter(|j| j["module"] == "app.jvm.main").collect();
+        assert_eq!(java[0]["compilerOutputs"], json!(["/p/target/dev/jvm/classes"]));
+        let common_java = ws["javaSettings"].as_array().unwrap().iter().find(|j| j["module"] == "app.common.main").unwrap();
+        assert!(common_java.get("compilerOutputs").is_none(), "{common_java}");
+    }
+
+    #[test]
+    fn describes_wasm_and_native_source_sets_with_their_klibs() {
+        let home = tempfile::tempdir().unwrap();
+        for dir in ["klib/common/stdlib", "klib/platform/linux_x64/posix", "klib/platform/mingw_x64/windows"] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        let ws = workspace_json(&multiplatform(&home.path().display().to_string()), Targets::All);
+        let modules = names(&ws["modules"], "name");
+        assert_eq!(
+            modules[..9],
+            [
+                "app",
+                "app.common.main",
+                "app.jvm.main",
+                "app.wasm.main",
+                "app.native.main",
+                "app.common.test",
+                "app.jvm.test",
+                "app.wasm.test",
+                "app.native.test"
+            ]
+        );
+        assert!(modules.contains(&"lib.wasm.main".to_owned()), "{modules:?}");
+
+        let wasm = module(&ws, "app.wasm.main");
+        assert_eq!(names(&wasm["contentRoots"], "path"), ["/p/src-wasm"]);
+        let deps: Vec<String> = wasm["dependencies"].as_array().unwrap().iter().map(|d| format!("{}:{}", d["type"], d["name"])).collect();
+        assert_eq!(
+            deps,
+            [
+                "\"module\":\"app.common.main\"",
+                "\"module\":\"lib.wasm.main\"",
+                "\"module\":\"lib.common.main\"",
+                "\"library\":\"Kargo: g:a-wasm-js:1\"",
+                "\"moduleSource\":null",
+                "\"sdk\":\"21\""
+            ]
+        );
+        let library = ws["libraries"].as_array().unwrap().iter().find(|l| l["name"] == "Kargo: g:a-wasm-js:1").unwrap();
+        assert_eq!(library["type"], "kotlin.wasm.js");
+        let wasm_settings = settings(&ws, "app.wasm.main");
+        assert_eq!(wasm_settings["targetPlatform"], "Wasm [JS]");
+        assert_eq!(wasm_settings["dependsOnModuleNames"], json!(["app.common.main"]));
+        let (class, args) = arguments(wasm_settings);
+        assert_eq!(class, 'W');
+        assert!(args.get("jvmTarget").is_none());
+        assert!(!ws["javaSettings"].as_array().unwrap().iter().any(|j| j["module"] == "app.wasm.main"));
+
+        // Native code is analyzed for its first platform, with the distribution's klibs.
+        let native = module(&ws, "app.native.main");
+        let libraries: Vec<&str> = native["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["type"] == "library")
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(libraries, ["Kargo: g:a-linuxx64:1", "Kotlin/Native 2.4.21: stdlib", "Kotlin/Native 2.4.21: posix [linux_x64]"]);
+        let stdlib = ws["libraries"].as_array().unwrap().iter().find(|l| l["name"] == "Kotlin/Native 2.4.21: stdlib").unwrap();
+        assert_eq!(stdlib["type"], "kotlin.native");
+        assert_eq!(stdlib["roots"][0]["path"], home.path().join("klib").join("common").join("stdlib").display().to_string());
+        let (class, _) = arguments(settings(&ws, "app.native.main"));
+        assert_eq!(class, 'N');
+        assert_eq!(settings(&ws, "app.native.main")["targetPlatform"], "Native [linux_x64]");
+    }
+
+    #[test]
+    fn common_code_without_a_jvm_target_is_analyzed_for_every_platform() {
+        let mut metadata = multiplatform("/none");
+        metadata["packages"][0]["targets"].as_array_mut().unwrap().remove(0);
+        metadata["packages"].as_array_mut().unwrap().truncate(1);
+
+        // Without --klib-targets, nothing describes the package's code.
+        let ws = workspace_json(&metadata, Targets::Jvm);
+        assert_eq!(names(&ws["modules"], "name"), ["app"]);
+
+        let ws = workspace_json(&metadata, Targets::All);
+        let common = settings(&ws, "app.common.main");
+        assert_eq!(common["targetPlatform"], "Native [linux_x64]/Wasm [JS]");
+        assert_eq!(arguments(common).0, 'M');
+        let libraries =
+            module(&ws, "app.common.main")["dependencies"].as_array().unwrap().iter().filter(|d| d["type"] == "library").count();
+        assert_eq!(libraries, 0, "the Kotlin LSP has no common variants of libraries");
+        assert!(!ws["javaSettings"].as_array().unwrap().iter().any(|j| j["module"] == "app.common.main"));
+    }
+
+    #[test]
+    fn a_single_wasm_target_gets_one_module_for_its_platform() {
+        let mut metadata = multiplatform("/none");
+        let targets = metadata["packages"][0]["targets"].as_array_mut().unwrap();
+        targets.retain(|t| t["kind"] == "wasm");
+        targets[0]["environment"] = json!("wasi");
+        metadata["packages"].as_array_mut().unwrap().truncate(1);
+        let ws = workspace_json(&metadata, Targets::All);
+        assert_eq!(names(&ws["modules"], "name"), ["app", "app.main", "app.test"]);
+        assert_eq!(names(&module(&ws, "app.main")["contentRoots"], "path"), ["/p/src", "/p/src-wasm"]);
+        let main = settings(&ws, "app.main");
+        assert_eq!(main["targetPlatform"], "Wasm [WASI]");
+        assert_eq!(main["kind"], "default");
+        assert!(arguments(main).1.get("multiPlatform").is_none());
+        assert_eq!(ws["libraries"][0]["type"], "kotlin.wasm.wasi");
+    }
+
+    #[test]
+    fn names_the_description_in_the_fingerprint_record() {
+        assert_eq!(description(ServerKind::KotlinLsp, Targets::Jvm), "kotlin-lsp");
+        assert_eq!(description(ServerKind::KotlinLsp, Targets::All), "kotlin-lsp+klib");
+        assert_eq!(description(ServerKind::Kls, Targets::All), "kls");
+    }
+
     #[test]
     fn lists_the_test_classpath_for_kls() {
         let cp = test_classpath(&sample());
@@ -580,19 +1126,19 @@ mod tests {
         metadata["root"] = json!(root.display().to_string());
         metadata["target-dir"] = json!(root.join("target").display().to_string());
 
-        let written = write(ServerKind::KotlinLsp, &metadata).unwrap();
+        let written = write(ServerKind::KotlinLsp, &metadata, Targets::Jvm).unwrap();
         assert_eq!(written.changed, [root.join("workspace.json")]);
-        assert!(write(ServerKind::KotlinLsp, &metadata).unwrap().changed.is_empty(), "unchanged");
+        assert!(write(ServerKind::KotlinLsp, &metadata, Targets::Jvm).unwrap().changed.is_empty(), "unchanged");
         metadata["packages"][0]["name"] = json!("renamed");
-        assert_eq!(write(ServerKind::KotlinLsp, &metadata).unwrap().changed.len(), 1, "Kargo's own file is replaced");
+        assert_eq!(write(ServerKind::KotlinLsp, &metadata, Targets::Jvm).unwrap().changed.len(), 1, "Kargo's own file is replaced");
 
         std::fs::write(root.join("workspace.json"), "{}").unwrap();
-        let written = write(ServerKind::KotlinLsp, &metadata).unwrap();
+        let written = write(ServerKind::KotlinLsp, &metadata, Targets::Jvm).unwrap();
         assert!(written.changed.is_empty());
         assert_eq!(written.foreign, [root.join("workspace.json")]);
         assert_eq!(std::fs::read_to_string(root.join("workspace.json")).unwrap(), "{}");
 
-        let written = write(ServerKind::Kls, &metadata).unwrap();
+        let written = write(ServerKind::Kls, &metadata, Targets::Jvm).unwrap();
         let script = root.join(if cfg!(windows) { "kls-classpath.bat" } else { "kls-classpath" });
         assert_eq!(written.changed, std::slice::from_ref(&script));
         assert!(std::fs::read_to_string(&script).unwrap().contains("classpath.txt"));
