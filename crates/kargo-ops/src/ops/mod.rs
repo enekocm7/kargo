@@ -3,6 +3,7 @@
 pub mod add;
 pub mod build;
 pub mod check;
+pub mod classpath;
 pub mod context;
 pub mod doc;
 pub mod fmt;

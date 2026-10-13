@@ -11,6 +11,7 @@ use kargo_manifest::edit::DependencySection;
 use kargo_manifest::{Scope, TargetKind};
 use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::check::CheckOptions;
+use kargo_ops::ops::classpath::ClasspathScope;
 use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::doc::DocOptions;
 use kargo_ops::ops::fmt::FmtOptions;
@@ -270,6 +271,18 @@ enum LspServerArg {
     Kls,
     /// No Kotlin server: only kargo.toml support and runnables
     None,
+}
+
+/// Output format of `kargo classpath`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum ClasspathFormatArg {
+    /// One line, the entries joined with the platform's path separator (`:` or `;`)
+    #[default]
+    Path,
+    /// One entry per line
+    Lines,
+    /// A JSON object with the package, target, platform, scope and entries
+    Json,
 }
 
 /// Output format of `kargo metadata`.
@@ -696,6 +709,41 @@ classpath or klib path of every target and scope. The `version` field is the for
         #[arg(long, conflicts_with_all = ["no_deps", "release"])]
         fingerprint: bool,
     },
+    /// Print the resolved classpath of a target, for editors, scripts and tools
+    #[command(long_about = "Print the resolved classpath (JVM) or klib path (Wasm, Native) of a target.
+
+Prints the jars the build compiles with, in order: path dependencies (built if needed), then the
+resolved Maven artifacts, including the Kotlin stdlib and what frameworks add. The package's own
+classes are not part of it. Resolution respects kargo.lock, --locked and --offline. Without
+--target, the JVM target is used, or the package's only Wasm or Native target.")]
+    Classpath {
+        #[arg(short, long, value_enum)]
+        target: Option<TargetArg>,
+        /// Which classpath: the main code's compile or runtime classpath, or the tests' (with dev-dependencies)
+        #[arg(short, long, value_enum, default_value = "compile")]
+        scope: ConfigurationArg,
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: ClasspathFormatArg,
+        #[command(flatten)]
+        package: OnePackageArg,
+    },
+    /// Write the project description a Kotlin language server reads: workspace.json or kls-classpath
+    #[command(long_about = "Write the project description a Kotlin language server reads, for editors that run
+the server themselves instead of `kargo lsp`.
+
+Writes workspace.json for JetBrains' Kotlin LSP, or with --kls a kls-classpath script for fwcd's
+kotlin-language-server, from `kargo metadata`. Kargo keeps the file up to date: `kargo build`,
+`check`, `test`, `fetch`, `add`, `remove`, `update`, `upgrade` and `target` write it again when
+kargo.toml or kargo.lock changed. A file Kargo didn't write is never replaced.")]
+    Ide {
+        /// Write kls-classpath for fwcd's kotlin-language-server instead of workspace.json
+        #[arg(long)]
+        kls: bool,
+        /// Also describe Wasm and Native sources in workspace.json (the Kotlin LSP doesn't read klibs yet)
+        #[arg(long, conflicts_with = "kls")]
+        klib_targets: bool,
+    },
     /// Run the language server for editors (LSP over stdin and stdout)
     #[command(long_about = "Run the language server for editors: LSP over stdin and stdout.
 
@@ -744,6 +792,15 @@ const STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Entry point used by `main.rs`.
 pub fn main() -> ExitCode {
+    // Debug builds of `execute` and clap's command builder need more stack than the 1 MiB
+    // main thread on Windows has.
+    match std::thread::Builder::new().name("kargo".into()).stack_size(STACK_SIZE).spawn(run) {
+        Ok(thread) => thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        Err(_) => run(),
+    }
+}
+
+fn run() -> ExitCode {
     complete::complete_if_requested();
     let cli = parse();
     let verbosity = if cli.global.verbose {
@@ -754,17 +811,7 @@ pub fn main() -> ExitCode {
         Verbosity::Normal
     };
     let shell = Shell::new(verbosity);
-    // Debug builds of `execute` and clap's command builder need more stack than the 1 MiB
-    // main thread on Windows has.
-    let result = std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("kargo".into())
-            .stack_size(STACK_SIZE)
-            .spawn_scoped(scope, || execute(cli, &shell))
-            .map_err(anyhow::Error::from)
-            .and_then(|thread| thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
-    });
-    match result {
+    match execute(cli, &shell) {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
             report_error(&shell, &err);
@@ -841,6 +888,28 @@ fn builtin_commands() -> Vec<String> {
         names.extend(command.get_all_aliases().map(str::to_owned));
     }
     names
+}
+
+/// Writes the files `kargo lsp` or `kargo ide` generated for a Kotlin language server again if
+/// kargo.toml or kargo.lock changed since. A failure is only a warning: the command succeeded.
+fn refresh_editor_files(config: &Config, global: &GlobalArgs, shell: &Shell) {
+    let Ok(project) = load_project(global) else { return };
+    let Some(outcome) = kargo_lsp::project::refresh(config, project.root()) else { return };
+    report_editor_files(shell, project.root(), &outcome.written);
+    if let Some(error) = outcome.error {
+        shell.warn(format!("could not update the project description for the Kotlin language server: {error}"));
+    }
+}
+
+/// Reports what an import for a language server wrote, with paths relative to the project root.
+fn report_editor_files(shell: &Shell, root: &Path, written: &kargo_lsp::project::Written) {
+    let shown = |path: &Path| path.strip_prefix(root).unwrap_or(path).display().to_string();
+    for path in &written.changed {
+        shell.status("Wrote", shown(path));
+    }
+    for path in &written.foreign {
+        shell.warn(format!("{} was not written by Kargo, so it was left alone; delete it to let Kargo generate it", shown(path)));
+    }
 }
 
 /// Warns about `kargo.toml` settings that work but are probably mistakes.
@@ -951,7 +1020,28 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
     let config =
         Config::from_env(shell.clone())?.with_offline(global.offline).with_refresh(global.refresh).with_system_gradle(global.system_gradle);
 
-    match cli.command {
+    // Commands that may change kargo.toml or kargo.lock keep the files for language servers current.
+    let refreshes_editor_files = matches!(
+        cli.command,
+        Command::Build { .. }
+            | Command::Check { .. }
+            | Command::Test { .. }
+            | Command::Fetch { .. }
+            | Command::Add { .. }
+            | Command::Remove { .. }
+            | Command::Update { .. }
+            | Command::Upgrade { .. }
+            | Command::Target { .. }
+    );
+    let result = run_command(cli.command, &global, &config, shell);
+    if refreshes_editor_files && result.is_ok() {
+        refresh_editor_files(&config, &global, shell);
+    }
+    result
+}
+
+fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &Shell) -> Result<u8> {
+    match command {
         Command::New { path, args } => {
             if path.exists() && path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(true) {
                 bail!("destination `{}` already exists; use `kargo init` to initialize an existing directory", path.display());
@@ -975,9 +1065,9 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         }
         Command::Build { build, keep_going } => {
             set_message_format(build.message_format);
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let opts = BuildOptions { keep_going, ..build.options() };
-            let results = for_each_package(&config, &project, &build.packages.selection(), &global, opts.profile(), |ctx| {
+            let results = for_each_package(config, &project, &build.packages.selection(), global, opts.profile(), |ctx| {
                 ops::build::build(ctx, &opts)
             });
             build_finished(build.message_format, results.map(|_| ()))?;
@@ -985,9 +1075,9 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         }
         Command::Check { build, tests, keep_going } => {
             set_message_format(build.message_format);
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let opts = CheckOptions { build: BuildOptions { keep_going, ..build.options() }, tests };
-            let results = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
+            let results = for_each_package(config, &project, &build.packages.selection(), global, opts.build.profile(), |ctx| {
                 ops::check::check(ctx, &opts)
             });
             build_finished(build.message_format, results.map(|_| ()))?;
@@ -995,10 +1085,10 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         }
         Command::Run { release, target, main, bin, example, port, open, debug, message_format, package, args } => {
             set_message_format(message_format);
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             warn_manifest(shell, &project, project.package(index));
-            let ctx = context(&config, &project, index, &global, profile(release))?;
+            let ctx = context(config, &project, index, global, profile(release))?;
             let program = match (main, bin, example) {
                 (Some(main), _, _) => Program::Main(main),
                 (_, Some(bin), _) => Program::Bin(bin),
@@ -1010,11 +1100,11 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         }
         Command::Test { build, filter, no_run, no_fail_fast, report, debug, list, format } => {
             set_message_format(build.message_format);
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let junit_report = report == Some(ReportArg::Junit);
             let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
             let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug, list };
-            let passed = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
+            let passed = for_each_package(config, &project, &build.packages.selection(), global, opts.build.profile(), |ctx| {
                 ops::test::test(ctx, &opts)
             })?;
             if passed.iter().all(|ok| *ok) {
@@ -1025,10 +1115,10 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             }
         }
         Command::Doc { targets, open, packages } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let targets: Vec<TargetKind> = targets.into_iter().map(Into::into).collect();
             let mut open = open;
-            for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+            for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 // Only the first package's documentation opens in the browser.
                 let opts = DocOptions { targets: targets.clone(), open: std::mem::take(&mut open) };
                 ops::doc::doc(ctx, &opts)
@@ -1036,8 +1126,8 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Fmt { check, packages } => {
-            let project = load_project(&global)?;
-            let ok = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+            let project = load_project(global)?;
+            let ok = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 ops::fmt::fmt(ctx, &FmtOptions { check })
             })?;
             if ok.iter().all(|ok| *ok) {
@@ -1051,8 +1141,8 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             }
         }
         Command::Lint { create_baseline, packages } => {
-            let project = load_project(&global)?;
-            let ok = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+            let project = load_project(global)?;
+            let ok = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 ops::lint::lint(ctx, &LintOptions { create_baseline })
             })?;
             if ok.iter().all(|ok| *ok) {
@@ -1065,13 +1155,13 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             }
         }
         Command::Add { coordinates, path, dev, target, scope, bom, pre, no_verify, frameworks, package } => {
-            let ws = load_one(&global, &package, "`kargo add`")?;
+            let ws = load_one(global, &package, "`kargo add`")?;
             if !frameworks.is_empty() {
-                ops::add::add_frameworks(&config, &ws, &frameworks)?;
+                ops::add::add_frameworks(config, &ws, &frameworks)?;
             }
             if let Some(path) = path {
                 let dir = std::env::current_dir().context("failed to read the current directory")?.join(path);
-                ops::add::add_path(&config, &ws, &dir, section(dev, target), scope.map(Into::into))?;
+                ops::add::add_path(config, &ws, &dir, section(dev, target), scope.map(Into::into))?;
             }
             if !coordinates.is_empty() {
                 let opts = ops::add::AddOptions {
@@ -1082,18 +1172,18 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                     prerelease: pre,
                     no_verify,
                 };
-                ops::add::add(&config, &ws, &opts)?;
+                ops::add::add(config, &ws, &opts)?;
             }
             Ok(0)
         }
         Command::Remove { names, dev, target, package } => {
-            let ws = load_one(&global, &package, "`kargo remove`")?;
-            ops::add::remove(&config, &ws, &names, section(dev, target))?;
+            let ws = load_one(global, &package, "`kargo remove`")?;
+            ops::add::remove(config, &ws, &names, section(dev, target))?;
             Ok(0)
         }
-        Command::Target { command } => target(shell, &global, command),
+        Command::Target { command } => target(shell, global, command),
         Command::Tree { target, configuration, depth, duplicates, packages, format } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let configuration = match configuration {
                 ConfigurationArg::Compile => Configuration::Compile,
                 ConfigurationArg::Runtime => Configuration::Runtime,
@@ -1101,7 +1191,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             };
             if format == FormatArg::Json {
                 let mut documents = Vec::new();
-                for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+                for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                     let mut trees = Vec::new();
                     for t in tree_targets(ctx, target) {
                         for (label, res) in ops::resolution_for(ctx, t, configuration)? {
@@ -1126,7 +1216,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(0);
             }
-            for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+            for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 let targets = tree_targets(ctx, target);
                 let pkg = &ctx.ws.manifest().package;
                 for t in targets {
@@ -1146,9 +1236,9 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Fetch { targets, sources, packages } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let targets: Vec<TargetKind> = targets.into_iter().map(Into::into).collect();
-            let found = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+            let found = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 ops::fetch(ctx, &targets)?;
                 if !sources {
                     return Ok(0);
@@ -1163,14 +1253,59 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Metadata { format: MetadataFormatArg::Json, no_deps, release, fingerprint } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             if fingerprint {
                 println!("{}", ops::metadata::fingerprint(&project));
                 return Ok(0);
             }
-            let ctx = context(&config, &project, project.members()[0], &global, profile(release))?;
+            let ctx = context(config, &project, project.members()[0], global, profile(release))?;
             let doc = ops::metadata::metadata(&ctx, &ops::metadata::MetadataOptions { no_deps })?;
             println!("{}", serde_json::to_string_pretty(&doc)?);
+            Ok(0)
+        }
+        Command::Classpath { target, scope, format, package } => {
+            let project = load_project(global)?;
+            let index = project.select_one(&package.selection(), "`kargo classpath`")?;
+            let ctx = context(config, &project, index, global, ProfileKind::Dev)?;
+            let scope = match scope {
+                ConfigurationArg::Compile => ClasspathScope::Compile,
+                ConfigurationArg::Runtime => ClasspathScope::Runtime,
+                ConfigurationArg::Test => ClasspathScope::Test,
+            };
+            let classpath = ops::classpath::classpath(&ctx, target.map(Into::into), scope)?;
+            match format {
+                ClasspathFormatArg::Path => println!("{}", kargo_util::fs::join_paths(&classpath.entries)),
+                ClasspathFormatArg::Lines => {
+                    for entry in &classpath.entries {
+                        println!("{}", entry.display());
+                    }
+                }
+                ClasspathFormatArg::Json => {
+                    let doc = serde_json::json!({
+                        "package": ctx.ws.name(),
+                        "target": classpath.target.as_str(),
+                        "platform": classpath.platform,
+                        "scope": scope.as_str(),
+                        "classpath": classpath.entries.iter().map(|e| e.display().to_string()).collect::<Vec<_>>(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&doc)?);
+                }
+            }
+            Ok(0)
+        }
+        Command::Ide { kls, klib_targets } => {
+            let project = load_project(global)?;
+            let kind = if kls { ServerKind::Kls } else { ServerKind::KotlinLsp };
+            let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
+            let outcome = kargo_lsp::project::import(config, project.root(), Some(kind), targets);
+            report_editor_files(shell, project.root(), &outcome.written);
+            if let Some(error) = outcome.error {
+                bail!("could not describe the project completely for the {}: {error}", kind.title());
+            }
+            if outcome.written.changed.is_empty() && outcome.written.foreign.is_empty() {
+                let file = if kls { "kls-classpath" } else { "workspace.json" };
+                shell.status("Fresh", format!("{file} is up to date"));
+            }
             Ok(0)
         }
         Command::Lsp { server, server_path, klib_targets, stdio: _ } => {
@@ -1188,8 +1323,8 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(if clean { 0 } else { 1 })
         }
         Command::Outdated { names, pre, package } => {
-            let ws = load_one(&global, &package, "`kargo outdated`")?;
-            let rows = ops::upgrade::outdated(&config, &ws, &names, pre)?;
+            let ws = load_one(global, &package, "`kargo outdated`")?;
+            let rows = ops::upgrade::outdated(config, &ws, &names, pre)?;
             if rows.is_empty() {
                 shell.status("Fresh", "every dependency in kargo.toml is on its newest version");
             } else {
@@ -1198,17 +1333,17 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Upgrade { names, incompatible, pre, dry_run, package } => {
-            let ws = load_one(&global, &package, "`kargo upgrade`")?;
+            let ws = load_one(global, &package, "`kargo upgrade`")?;
             let opts = ops::upgrade::UpgradeOptions { names, incompatible, prerelease: pre, dry_run };
-            if ops::upgrade::upgrade(&config, &ws, &opts)?.is_empty() {
+            if ops::upgrade::upgrade(config, &ws, &opts)?.is_empty() {
                 shell.status("Fresh", "no dependency in kargo.toml has a newer version to upgrade to");
             }
             Ok(0)
         }
         Command::Update { modules, precise, dry_run } => {
-            let project = load_project(&global)?;
-            let config = config.with_refresh(true);
-            let mut ctx = context(&config, &project, project.members()[0], &global, ProfileKind::Dev)?;
+            let project = load_project(global)?;
+            let config = config.clone().with_refresh(true);
+            let mut ctx = context(&config, &project, project.members()[0], global, ProfileKind::Dev)?;
             let modules = modules
                 .iter()
                 .map(|m| m.parse().with_context(|| format!("`{m}` is not a `group:artifact` module")))
@@ -1228,22 +1363,22 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Clean { release } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let removed = ops::clean(project.package(project.members()[0]), shell, release.then_some(ProfileKind::Release))?;
             shell.status("Removed", removed.display());
             Ok(0)
         }
         Command::Package { release, bin, fat, package } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
-            let ctx = context(&config, &project, index, &global, profile(release))?;
+            let ctx = context(config, &project, index, global, profile(release))?;
             let jar = ops::package(&ctx, bin.as_deref(), fat)?;
             println!("{}", jar.display());
             Ok(0)
         }
         Command::Publish { repository, local, dry_run, packages } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let repository = if local { Some(kargo_maven::repo::MAVEN_LOCAL.to_owned()) } else { repository };
             let opts = PublishOptions { repository, dry_run };
             let mut selected = project.select(&packages.selection())?;
@@ -1261,7 +1396,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                 }
             }
             let ordered = ops::publish::publish_order(&project, &selected);
-            let ctx = context(&config, &project, ordered[0], &global, ProfileKind::Release)?;
+            let ctx = context(config, &project, ordered[0], global, ProfileKind::Release)?;
             for index in ordered {
                 warn_manifest(shell, &project, project.package(index));
                 ops::publish::publish(&ctx.for_package(index), &opts)?;
@@ -1269,7 +1404,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             Ok(0)
         }
         Command::Task { name, list: _, args } => {
-            let ws = load_workspace(&global)?;
+            let ws = load_workspace(global)?;
             match name {
                 None => {
                     list_tasks(&ws);
@@ -1283,18 +1418,18 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             }
         }
         Command::Plugins => {
-            list_plugins(&config, &global);
+            list_plugins(config, global);
             Ok(0)
         }
         Command::Android { args } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             let index = project.select_one(&Selection::default(), "`kargo android`")?;
-            let ctx = context(&config, &project, index, &global, ProfileKind::Dev)?;
+            let ctx = context(config, &project, index, global, ProfileKind::Dev)?;
             let ok = kargo_ops::gradle::gradle(&ctx, &args)?;
             Ok(if ok { 0 } else { FAILURE })
         }
         Command::Info { format } => {
-            let project = load_project(&global)?;
+            let project = load_project(global)?;
             match format {
                 FormatArg::Text => match project.select_one(&Selection::default(), "`kargo info`") {
                     Ok(index) => print_info(&project, project.package(index)),
@@ -1311,7 +1446,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             complete::write_script(shell, &mut std::io::stdout().lock())?;
             Ok(0)
         }
-        Command::Toolchain { command } => toolchain(&config, &global, command),
+        Command::Toolchain { command } => toolchain(config, global, command),
         Command::Daemon { command } => {
             match command {
                 DaemonCommand::Status => {
@@ -1330,7 +1465,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::External(argv) => external(&config, &global, argv),
+        Command::External(argv) => external(config, global, argv),
     }
 }
 
