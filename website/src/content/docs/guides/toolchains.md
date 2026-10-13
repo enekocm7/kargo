@@ -78,14 +78,9 @@ Android builds run the Android Gradle Plugin on Gradle. Kargo downloads the Grad
 | Server | `kargo lsp --server` | Version | Installed under |
 |---|---|---|---|
 | JetBrains' [Kotlin LSP](https://github.com/Kotlin/kotlin-lsp) (default) | `kotlin-lsp` | 263.6379.0 | `~/.kargo/toolchains/kotlin-lsp/<version>` |
-| [Kargo's own Kotlin server](../editors/#kargos-kotlin-server-preview) (preview) | `kargo` | 0.1.0 | `~/.kargo/toolchains/kargo-kotlin-server/<version>` |
 | fwcd's [kotlin-language-server](https://github.com/fwcd/kotlin-language-server) | `kls` | 1.3.13 | `~/.kargo/toolchains/kotlin-language-server/<version>` |
 
-Kargo pins one version of each and checks the download's SHA-256: the one JetBrains publishes next to the archive for the Kotlin LSP, and one built into Kargo for the others. The Kotlin LSP brings its own Java runtime. kotlin-language-server runs on the project's JDK, or, when that is newer than 21 (its Kotlin compiler doesn't support newer ones), on a Temurin 21 that Kargo [installs](#pinning-a-jdk) like any managed JDK. Kargo's own server runs on the project's JDK when that is 17 or newer, else on a managed Temurin 21. `kargo toolchain install kotlin-lsp` (or `kargo-kotlin-server`, `kls`) downloads one ahead of time, for example before going offline.
-
-:::note
-Kargo's own server, `kargo-kotlin-server`, has no release yet, so `kargo toolchain install kargo-kotlin-server` and `kargo lsp --server kargo` stop with an error that says how to run a local build. [Contributing](../../reference/contributing/#the-kotlin-server) shows how to build it.
-:::
+Kargo pins one version of each and checks the download's SHA-256: the one JetBrains publishes next to the archive for the Kotlin LSP, and one built into Kargo for kotlin-language-server. The Kotlin LSP brings its own Java runtime. kotlin-language-server runs on the project's JDK, or, when that is newer than 21 (its Kotlin compiler doesn't support newer ones), on a Temurin 21 that Kargo [installs](#pinning-a-jdk) like any managed JDK. `kargo toolchain install kotlin-lsp` downloads it ahead of time, for example before going offline.
 
 [`kargo dap`](../editors/#debugging), the debug adapter, runs fwcd's [kotlin-debug-adapter](https://github.com/fwcd/kotlin-debug-adapter) 0.4.4 the same way: Kargo downloads it on first use into `~/.kargo/toolchains/kotlin-debug-adapter/<version>`, checks it against a SHA-256 built into Kargo, and runs it on the project's JDK. `kargo toolchain install kotlin-debug-adapter` downloads it ahead of time.
 

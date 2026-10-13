@@ -537,8 +537,8 @@ Manage JDKs, Kotlin/Native and Gradle distributions, and the Kotlin language ser
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses |
-| `install [jdk\|native\|gradle\|kargo-kotlin-server\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kargo-kotlin-server`, `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
-| `remove` (`rm`) `<jdk\|native\|gradle\|kargo-kotlin-server\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs, a major version removes all its releases |
+| `install [jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
+| `remove` (`rm`) `<jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 
@@ -584,20 +584,17 @@ Run the language server for editors, speaking LSP over stdin and stdout. Kargo a
 
 ```sh
 kargo lsp                       # JetBrains' Kotlin LSP behind Kargo's server
-kargo lsp --server kargo        # Kargo's own Kotlin server (preview)
 kargo lsp --server kls          # fwcd's kotlin-language-server instead
 kargo lsp --server none         # kargo.toml support and runnables only
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--server <name>` | `kotlin-lsp` | The Kotlin language server: `kotlin-lsp` (JetBrains), `kargo` ([Kargo's own](../../guides/editors/#kargos-kotlin-server-preview), a preview), `kls` (fwcd) or `none` |
+| `--server <name>` | `kotlin-lsp` | The Kotlin language server: `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
 | `--server-path <path>` | | Run this server executable instead of the one Kargo downloads |
-| `--klib-targets` | | Also describe Wasm and Native sources to the Kotlin LSP. The pinned Kotlin LSP can't read klibs yet, so their libraries don't resolve. See [Multiplatform projects](../../guides/editors/#multiplatform-projects). Kargo's own server always gets every target, so it ignores the flag |
+| `--klib-targets` | | Also describe Wasm and Native sources to the Kotlin LSP. The pinned Kotlin LSP can't read klibs yet, so their libraries don't resolve. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
 
 With `{ "checkOnSave": true }` in the editor's `initializationOptions`, saving a Kotlin or Java file runs `kargo check` in the background and adds its diagnostics for every target to the Kotlin server's; `checkTargets` limits the targets. See [Check on save](../../guides/editors/#check-on-save).
-
-A Kotlin server that exits without being shut down is started again after 1, 2 and 4 seconds, with the documents open in the editor; after three crashes within five minutes Kargo stops trying, says so, and keeps serving `kargo.toml` and runnables.
 
 Editors that pass `--stdio` may keep it; Kargo always uses stdio. The exit code is 0 after `shutdown` and `exit`, 1 if the editor exits without `shutdown`. See [Editor integration](../../guides/editors/#language-server) for editor setups, the files it writes, the [code actions](../../guides/editors/#code-actions-in-kargotoml) and the `kargo/runnables` request.
 

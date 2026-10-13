@@ -6,17 +6,9 @@
 //! `initialize` response is the backend's with Kargo's capabilities merged in.
 //!
 //! Before the backend starts, Kargo imports the project and writes the description the
-//! backend reads (see [`crate::project`]); Kargo's own Kotlin server gets the project model
-//! (see [`crate::model`]) in `initializationOptions.kargo.project` instead. When `kargo.toml` or
-//! `kargo.lock` change and the project's fingerprint with them, it imports the project again in
-//! the background, reports it with `$/progress`, and tells the backend which generated files
-//! changed, or sends Kargo's server the new model in a `kargo/projectChanged` notification.
-//! Kargo's server reports its own state (indexing, ready, degraded) with `kargo/status`
-//! notifications, which become `$/progress`.
-//!
-//! A backend that exits without being shut down is started again, after 1, 2 and 4 seconds:
-//! Kargo replays `initialize` and the documents open in the editor. After three crashes within
-//! five minutes it gives up, says so, and keeps serving `kargo.toml` and runnables.
+//! backend reads (see [`crate::project`]). When `kargo.toml` or `kargo.lock` change and the
+//! project's fingerprint with them, it imports the project again in the background, reports
+//! it with `$/progress`, and tells the backend which generated files changed.
 //!
 //! Work that may use the network (completing dependencies, hints at newer versions; see
 //! [`crate::deps`]) runs on worker threads that send their results back as events, so neither
@@ -40,30 +32,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use kargo_toolchain::language_server::{
-    KARGO_KOTLIN_SERVER_MAIN_CLASS, KARGO_KOTLIN_SERVER_MANAGED_JDK, KARGO_KOTLIN_SERVER_MIN_JDK, KLS_MAIN_CLASS, KLS_MAX_JDK,
-};
+use kargo_toolchain::language_server::{KLS_MAIN_CLASS, KLS_MAX_JDK};
 use kargo_toolchain::{LanguageServer, ServerKind};
 use kargo_util::config::Config;
 
 use crate::jsonrpc::{self, Kind};
-use crate::{actions, check, deps, manifest, model, project, text};
-
-/// The JVM options of Kargo's Kotlin server unless `kotlinServer.jvmArgs` or
-/// `KARGO_LSP_JVM_OPTS` set others.
-pub const DEFAULT_JVM_ARGS: [&str; 3] = ["-Xmx2g", "-XX:+UseG1GC", "-XX:SoftRefLRUPolicyMSPerMB=50"];
-
-/// How many crashes within [`CRASH_WINDOW`] make Kargo stop restarting the backend.
-const MAX_CRASHES: usize = 3;
-
-/// The window in which [`MAX_CRASHES`] crashes make Kargo give up.
-const CRASH_WINDOW: Duration = Duration::from_secs(5 * 60);
-
-/// The wait before the first restart; it doubles with every crash in [`CRASH_WINDOW`].
-const RESTART_DELAY: Duration = Duration::from_secs(1);
-
-/// LSP's `ContentModified` error, for requests that arrive while the backend restarts.
-const CONTENT_MODIFIED: i64 = -32801;
+use crate::{actions, check, deps, manifest, project, text};
 
 /// How `kargo lsp` runs.
 #[derive(Debug, Clone, Default)]
@@ -83,9 +57,6 @@ pub struct Options {
 /// A backend talking over in-memory streams, for tests.
 pub(crate) type BackendIo = (Box<dyn BufRead + Send>, Box<dyn Write + Send>);
 
-/// Starts a backend over in-memory streams in place of the server process, for tests.
-pub(crate) type Launcher = Box<dyn FnMut() -> Result<BackendIo> + Send>;
-
 enum Event {
     /// A message from the editor; `None` when it closed the stream.
     Client(Option<Value>),
@@ -102,14 +73,12 @@ enum Event {
     Edited { id: Value, uri: String, original: String, outcome: Result<(String, Value)> },
     /// The check of the `kargo.toml` at `manifest` started as number `generation` finished.
     Checked { generation: u64, manifest: PathBuf, outcome: Result<check::Output> },
-    /// Time to start the backend again after a crash.
-    Restart,
 }
 
 /// Runs the server until the editor sends `exit` or closes the stream. Returns whether the
 /// editor shut it down properly (`shutdown` before `exit`).
 pub fn serve(config: Config, opts: Options, input: impl BufRead + Send + 'static, output: impl Write + Send + 'static) -> Result<bool> {
-    serve_with(config, opts, input, output, None, check::kargo_runner(), RESTART_DELAY)
+    serve_with(config, opts, input, output, None, check::kargo_runner())
 }
 
 pub(crate) fn serve_with(
@@ -117,9 +86,8 @@ pub(crate) fn serve_with(
     opts: Options,
     input: impl BufRead + Send + 'static,
     output: impl Write + Send + 'static,
-    launcher: Option<Launcher>,
+    backend: Option<BackendIo>,
     runner: check::Runner,
-    restart_delay: Duration,
 ) -> Result<bool> {
     let (tx, rx) = mpsc::channel();
     let client_tx = tx.clone();
@@ -140,8 +108,9 @@ pub(crate) fn serve_with(
         }
     });
     let mut server = Server::new(config, opts, Box::new(output), tx, runner);
-    server.launcher = launcher;
-    server.restart_delay = restart_delay;
+    if let Some((reader, writer)) = backend {
+        server.attach(reader, writer, None);
+    }
     for event in rx {
         if let Some(clean) = server.handle(event)? {
             server.cancel_check();
@@ -220,30 +189,6 @@ struct Server {
     /// Documents Kargo pushed check diagnostics for while their diagnostics are pulled (they
     /// were closed), by [`check::uri_key`].
     pushed: HashSet<String>,
-    /// Starts test backends in place of the server process.
-    launcher: Option<Launcher>,
-    /// The project's metadata from the last import that had one.
-    metadata: Option<Value>,
-    /// The project model last given to Kargo's Kotlin server.
-    model: Option<Value>,
-    /// The editor's `initializationOptions`.
-    init_options: Value,
-    /// The `initialize` params the backend got, replayed when it is started again.
-    backend_init: Option<Value>,
-    /// Documents open in the editor that the backend handles (Kotlin, Java), by URI: their
-    /// `TextDocumentItem` as it is now, replayed when the backend is started again.
-    backend_docs: HashMap<String, Value>,
-    /// When the backend crashed lately, within [`CRASH_WINDOW`].
-    crashes: Vec<Instant>,
-    /// The wait before the first restart.
-    restart_delay: Duration,
-    /// A restart is scheduled.
-    restart_scheduled: bool,
-    /// The id of the replayed `initialize` of a restarted backend, until it answers.
-    restart_init_id: Option<String>,
-    /// The `$/progress` of the `kargo/status` Kargo's server reports, and its latest message.
-    status_progress: Option<Progress>,
-    status_message: String,
 }
 
 /// The editor's `textDocument.uri` of a message, if any.
@@ -263,11 +208,6 @@ fn is_lockfile(uri: &str) -> bool {
 /// (editors send all of them to a server registered for TOML; only `kargo.toml` gets features).
 fn is_kargo_document(uri: &str) -> bool {
     is_lockfile(uri) || uri.ends_with(".toml")
-}
-
-/// Files whose changes Kargo's Kotlin server hears about: sources and klibs.
-fn is_watched_source(uri: &str) -> bool {
-    [".kt", ".java", ".klib"].iter().any(|ext| uri.ends_with(ext))
 }
 
 /// The key of a request id in [`Server::pending`].
@@ -395,24 +335,7 @@ impl Server {
             client_refresh: false,
             open_sources: HashSet::new(),
             pushed: HashSet::new(),
-            launcher: None,
-            metadata: None,
-            model: None,
-            init_options: Value::Null,
-            backend_init: None,
-            backend_docs: HashMap::new(),
-            crashes: Vec::new(),
-            restart_delay: RESTART_DELAY,
-            restart_scheduled: false,
-            restart_init_id: None,
-            status_progress: None,
-            status_message: String::new(),
         }
-    }
-
-    /// Whether the backend is being started again after a crash.
-    fn restarting(&self) -> bool {
-        self.restart_scheduled || self.restart_init_id.is_some()
     }
 
     fn send(&mut self, message: &Value) -> Result<()> {
@@ -435,37 +358,6 @@ impl Server {
         if jsonrpc::write(&mut backend.stdin, message).is_err() {
             // Its exit arrives as an event.
             self.backend.as_mut().map(|b| b.child.as_mut().map(Child::kill));
-        }
-    }
-
-    /// Passes a notification from the editor to the backend, unless it is being restarted: the
-    /// restarted backend gets the open documents as they are then.
-    fn pass_to_backend(&mut self, message: &Value) {
-        if !self.restarting() {
-            self.send_backend(message);
-        }
-    }
-
-    /// Keeps [`Server::backend_docs`] up to date.
-    fn track_backend_document(&mut self, method: &str, message: &Value) {
-        let Some(uri) = document_uri(message).map(str::to_owned) else { return };
-        let params = &message["params"];
-        match method {
-            "textDocument/didOpen" => {
-                self.backend_docs.insert(uri, params["textDocument"].clone());
-            }
-            "textDocument/didChange" => {
-                if let Some(doc) = self.backend_docs.get_mut(&uri) {
-                    let mut text = doc["text"].as_str().unwrap_or_default().to_owned();
-                    text::apply_changes(&mut text, params["contentChanges"].as_array().map(Vec::as_slice).unwrap_or_default());
-                    doc["text"] = json!(text);
-                    doc["version"] = params["textDocument"]["version"].clone();
-                }
-            }
-            "textDocument/didClose" => {
-                self.backend_docs.remove(&uri);
-            }
-            _ => {}
         }
     }
 
@@ -505,10 +397,6 @@ impl Server {
             }
             Event::Checked { generation, manifest, outcome } => {
                 self.checked_event(generation, manifest, outcome)?;
-                Ok(None)
-            }
-            Event::Restart => {
-                self.restart()?;
                 Ok(None)
             }
             Event::Hints { uri, hints } => {
@@ -573,21 +461,12 @@ impl Server {
                         return Ok(Some(self.shutdown));
                     }
                     "initialized" => {
-                        self.pass_to_backend(&message);
+                        self.send_backend(&message);
                         self.watch_manifests()?;
                     }
                     "workspace/didChangeWatchedFiles" => {
+                        self.send_backend(&message);
                         let changes = message["params"]["changes"].as_array().cloned().unwrap_or_default();
-                        if self.opts.server == Some(ServerKind::Kargo) {
-                            // Kargo's server learns about kargo.toml and kargo.lock through the model.
-                            let sources: Vec<Value> =
-                                changes.iter().filter(|c| c["uri"].as_str().is_some_and(is_watched_source)).cloned().collect();
-                            if !sources.is_empty() {
-                                self.pass_to_backend(&jsonrpc::notification(method.as_str(), json!({ "changes": sources })));
-                            }
-                        } else {
-                            self.pass_to_backend(&message);
-                        }
                         if changes.iter().filter_map(|c| c["uri"].as_str()).any(|u| is_manifest(u) || is_lockfile(u)) {
                             self.maybe_reimport()?;
                         }
@@ -595,12 +474,11 @@ impl Server {
                     _ if document_uri(&message).is_some_and(is_kargo_document) => {
                         self.manifest_notification(&method, &message)?;
                     }
-                    "textDocument/didOpen" | "textDocument/didChange" | "textDocument/didClose" | "textDocument/didSave" => {
-                        self.track_backend_document(&method, &message);
-                        self.pass_to_backend(&message);
+                    "textDocument/didOpen" | "textDocument/didClose" | "textDocument/didSave" => {
+                        self.send_backend(&message);
                         self.source_notification(&method, &message)?;
                     }
-                    _ => self.pass_to_backend(&message),
+                    _ => self.send_backend(&message),
                 }
                 Ok(None)
             }
@@ -611,9 +489,6 @@ impl Server {
     /// not found" when there is none.
     fn forward_request(&mut self, message: Value, fallback: Value) -> Result<()> {
         let id = message["id"].clone();
-        if self.restarting() && jsonrpc::method(&message) != "shutdown" {
-            return self.send(&jsonrpc::error(&id, CONTENT_MODIFIED, "the Kotlin language server is restarting; try again"));
-        }
         if self.backend.is_some() {
             self.pending.insert(id_key(&id));
             if jsonrpc::method(&message) == "textDocument/diagnostic"
@@ -634,12 +509,6 @@ impl Server {
 
     fn on_backend(&mut self, mut message: Value) -> Result<()> {
         match jsonrpc::kind(&message) {
-            Kind::Response if message["id"].as_str().is_some() && message["id"].as_str() == self.restart_init_id.as_deref() => {
-                return self.restarted(&message);
-            }
-            Kind::Notification if jsonrpc::method(&message) == "kargo/status" => {
-                return self.backend_status(&message["params"]);
-            }
             Kind::Response => {
                 self.pending.remove(&id_key(&message["id"]));
                 if self.initialize_id.as_ref() == Some(&message["id"]) {
@@ -703,115 +572,10 @@ impl Server {
             let id: Value = serde_json::from_str(&id).unwrap_or(Value::Null);
             self.send(&jsonrpc::error(&id, -32603, "the Kotlin language server exited"))?;
         }
-        self.pulls.clear();
-        self.restart_init_id = None;
-        self.end_status_progress("stopped")?;
-        if self.shutdown {
-            return Ok(());
+        if !self.shutdown {
+            self.message(1, "kargo lsp: the Kotlin language server exited; kargo.toml support keeps working", false)?;
         }
-        let now = Instant::now();
-        self.crashes.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
-        self.crashes.push(now);
-        if self.crashes.len() >= MAX_CRASHES || self.backend_init.is_none() {
-            let text = format!(
-                "kargo lsp: the Kotlin language server exited {} time{} in five minutes and is not started again; see {} \
-                 for why. kargo.toml support keeps working",
-                self.crashes.len(),
-                if self.crashes.len() == 1 { "" } else { "s" },
-                self.backend_log()
-            );
-            return self.message(1, text, false);
-        }
-        let delay = self.restart_delay * (1u32 << (self.crashes.len() - 1));
-        self.restart_scheduled = true;
-        let tx = self.tx.clone();
-        thread::spawn(move || {
-            thread::sleep(delay);
-            let _ = tx.send(Event::Restart);
-        });
-        self.message(2, format!("kargo lsp: the Kotlin language server exited; starting it again in {}s", delay.as_secs()), true)
-    }
-
-    /// Where the backend's own log is, for messages about its crashes.
-    fn backend_log(&self) -> String {
-        match (&self.opts.server, &self.metadata) {
-            (Some(ServerKind::Kargo), Some(metadata)) => project::state_dir(metadata).join("kotlin-server.log").display().to_string(),
-            _ => "the editor's log of the language server".to_owned(),
-        }
-    }
-
-    /// Starts the backend again after a crash and replays `initialize`; [`Server::restarted`]
-    /// goes on once it answers.
-    fn restart(&mut self) -> Result<()> {
-        self.restart_scheduled = false;
-        let (Some(kind), Some(mut params)) = (self.opts.server, self.backend_init.clone()) else { return Ok(()) };
-        if self.shutdown || self.backend.is_some() {
-            return Ok(());
-        }
-        if let Err(e) = self.spawn_backend(kind) {
-            return self.message(1, format!("kargo lsp: could not start the Kotlin language server again: {e:#}"), false);
-        }
-        if let Some(model) = &self.model {
-            params["initializationOptions"]["kargo"]["project"] = model.clone();
-        }
-        let id = self.next_id();
-        self.send_backend(&jsonrpc::request(&id, "initialize", params));
-        self.restart_init_id = Some(id);
         Ok(())
-    }
-
-    /// The restarted backend answered `initialize`: tell it the editor is ready and which
-    /// documents are open.
-    fn restarted(&mut self, response: &Value) -> Result<()> {
-        self.restart_init_id = None;
-        let capabilities = &response["result"]["capabilities"];
-        self.backend_pull = !capabilities["diagnosticProvider"].is_null();
-        self.send_backend(&jsonrpc::notification("initialized", json!({})));
-        let docs: Vec<Value> = self.backend_docs.values().cloned().collect();
-        for doc in docs {
-            self.send_backend(&jsonrpc::notification("textDocument/didOpen", json!({ "textDocument": doc })));
-        }
-        self.message(3, "kargo lsp: the Kotlin language server is running again", true)
-    }
-
-    /// A `kargo/status` notification of Kargo's server: `indexing` shows as `$/progress` until
-    /// it is `ready`; `degraded` also goes to the log with its reason.
-    fn backend_status(&mut self, params: &Value) -> Result<()> {
-        let state = params["state"].as_str().unwrap_or_default();
-        self.status_message = params["message"].as_str().unwrap_or_default().to_owned();
-        match state {
-            "ready" => self.end_status_progress("ready"),
-            "degraded" => {
-                let message = self.status_message.clone();
-                self.end_status_progress(&message)?;
-                self.message(2, format!("kargo lsp: the Kotlin language server works with limits: {message}"), true)
-            }
-            _ => match &self.status_progress {
-                Some(progress) if progress.begun => {
-                    let token = progress.token.clone();
-                    let message = self.status_message.clone();
-                    self.notify("$/progress", json!({ "token": token, "value": { "kind": "report", "message": message } }))
-                }
-                Some(_) => Ok(()),
-                None if self.client_progress => {
-                    let create_id = self.next_id();
-                    let token = format!("{create_id}/status");
-                    self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })))?;
-                    self.status_progress = Some(Progress { token, create_id, begun: false });
-                    Ok(())
-                }
-                None => Ok(()),
-            },
-        }
-    }
-
-    fn end_status_progress(&mut self, message: &str) -> Result<()> {
-        match self.status_progress.take() {
-            Some(progress) if progress.begun => {
-                self.notify("$/progress", json!({ "token": progress.token, "value": { "kind": "end", "message": message } }))
-            }
-            _ => Ok(()),
-        }
     }
 
     fn initialize(&mut self, message: Value) -> Result<()> {
@@ -821,7 +585,6 @@ impl Server {
         self.client_apply_edit = params["capabilities"]["workspace"]["applyEdit"] == true;
         self.client_refresh = params["capabilities"]["workspace"]["diagnostics"]["refreshSupport"] == true;
         self.check = check::Settings::from_options(&params["initializationOptions"]);
-        self.init_options = params["initializationOptions"].clone();
         let dir = params["rootUri"]
             .as_str()
             .and_then(text::uri_to_path)
@@ -851,13 +614,9 @@ impl Server {
                 metadata = outcome.metadata;
             }
         }
-        if kind == Some(ServerKind::Kargo) {
-            self.model = metadata.as_ref().map(model::kargo_model);
-        }
-        self.metadata = metadata;
         if self.backend.is_none()
             && let Some(kind) = kind
-            && let Err(e) = self.spawn_backend(kind)
+            && let Err(e) = self.start_backend(kind, metadata.as_ref())
         {
             self.message(1, format!("kargo lsp: could not start the Kotlin language server: {e:#}"), false)?;
         }
@@ -865,12 +624,6 @@ impl Server {
             self.initialize_id = Some(message["id"].clone());
             self.pending.insert(id_key(&message["id"]));
             let mut message = message;
-            if let Some(model) = &self.model {
-                if !message["params"]["initializationOptions"].is_object() {
-                    message["params"]["initializationOptions"] = json!({});
-                }
-                message["params"]["initializationOptions"]["kargo"] = json!({ "project": model });
-            }
             if let Some(params) = message["params"].as_object_mut() {
                 // Kargo reported its import with the editor's token and ended it.
                 if imported {
@@ -888,7 +641,6 @@ impl Server {
                     params.insert("workspaceFolders".into(), json!([{ "uri": uri, "name": name }]));
                 }
             }
-            self.backend_init = Some(message["params"].clone());
             self.send_backend(&message);
             return Ok(());
         }
@@ -896,75 +648,33 @@ impl Server {
         self.send(&jsonrpc::response(&message["id"], result))
     }
 
-    /// Starts the backend: the server process, or a test's in-memory one.
-    fn spawn_backend(&mut self, kind: ServerKind) -> Result<()> {
-        if let Some(launcher) = &mut self.launcher {
-            let (reader, writer) = launcher()?;
-            self.attach(reader, writer, None);
-            return Ok(());
-        }
-        self.start_backend(kind)
-    }
-
-    /// The JVM options of Kargo's Kotlin server: `kotlinServer.jvmArgs` from the editor, else
-    /// `KARGO_LSP_JVM_OPTS`, else [`DEFAULT_JVM_ARGS`].
-    fn jvm_args(&self) -> Vec<String> {
-        if let Some(args) = self.init_options["kotlinServer"]["jvmArgs"].as_array() {
-            return args.iter().filter_map(Value::as_str).map(str::to_owned).collect();
-        }
-        match std::env::var("KARGO_LSP_JVM_OPTS") {
-            Ok(opts) if !opts.trim().is_empty() => opts.split_whitespace().map(str::to_owned).collect(),
-            _ => DEFAULT_JVM_ARGS.iter().map(|a| (*a).to_owned()).collect(),
-        }
-    }
-
-    fn start_backend(&mut self, kind: ServerKind) -> Result<()> {
-        let installed = match &self.opts.server_path {
-            Some(_) => None,
-            None => Some(LanguageServer::ensure(&self.config, kind, kind.default_version())?),
-        };
-        let jdk = &self.metadata.as_ref().unwrap_or(&Value::Null)["toolchain"]["jdk"];
+    fn start_backend(&mut self, kind: ServerKind, metadata: Option<&Value>) -> Result<()> {
+        let jdk = &metadata.unwrap_or(&Value::Null)["toolchain"]["jdk"];
         let mut java_home = jdk["home"].as_str().map(PathBuf::from);
-        let version = jdk["version"].as_u64();
-        // kotlin-language-server's compiler can't run on newer JDKs, and Kargo's server needs a
-        // recent one: use a managed JDK then.
-        let managed = match kind {
-            ServerKind::Kls if self.opts.server_path.is_none() && !version.is_some_and(|v| v <= u64::from(KLS_MAX_JDK)) => {
-                Some(KLS_MAX_JDK)
-            }
-            ServerKind::Kargo if !version.is_some_and(|v| v >= u64::from(KARGO_KOTLIN_SERVER_MIN_JDK)) => {
-                Some(KARGO_KOTLIN_SERVER_MANAGED_JDK)
-            }
-            _ => None,
-        };
-        if let Some(major) = managed {
-            let request = kargo_manifest::JdkRequest::Major(major);
+        // kotlin-language-server's compiler can't run on newer JDKs: use a managed one then.
+        if kind == ServerKind::Kls
+            && self.opts.server_path.is_none()
+            && !jdk["version"].as_u64().is_some_and(|v| v <= u64::from(KLS_MAX_JDK))
+        {
+            let request = kargo_manifest::JdkRequest::Major(KLS_MAX_JDK);
             java_home = Some(kargo_toolchain::jdks::resolve(&self.config, &request)?.home);
         }
-        let java = match &java_home {
-            Some(home) => home.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" }),
-            None => PathBuf::from("java"),
-        };
-        let (exe, mut cmd) = match (&self.opts.server_path, installed) {
-            (Some(path), _) => (path.clone(), Command::new(path)),
-            (None, None) => unreachable!("installed without --server-path"),
-            (None, Some(server)) => {
+        let (exe, mut cmd) = match &self.opts.server_path {
+            Some(path) => (path.clone(), Command::new(path)),
+            None => {
+                let server = LanguageServer::ensure(&self.config, kind, kind.default_version())?;
                 match kind {
                     // kotlin-language-server's Windows launcher lists every jar on one command
                     // line, which is too long for cmd.exe; start its main class on `java` instead.
                     ServerKind::Kls => {
+                        let java = match &java_home {
+                            Some(home) => home.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" }),
+                            None => PathBuf::from("java"),
+                        };
                         let mut cmd = Command::new(&java);
                         cmd.arg(format!("-DkotlinLanguageServer.version={}", server.version));
                         cmd.arg("-cp").arg(server.home.join("lib").join("*")).arg(KLS_MAIN_CLASS);
-                        (java.clone(), cmd)
-                    }
-                    // The same for Kargo's server, whose jars are next to its launcher's `bin/`.
-                    ServerKind::Kargo => {
-                        let launcher = server.executable().context("the language server has no launcher")?;
-                        let home = launcher.parent().and_then(Path::parent).unwrap_or(&server.home);
-                        let mut cmd = Command::new(&java);
-                        cmd.args(self.jvm_args()).arg("-cp").arg(home.join("lib").join("*")).arg(KARGO_KOTLIN_SERVER_MAIN_CLASS);
-                        (java.clone(), cmd)
+                        (java, cmd)
                     }
                     ServerKind::KotlinLsp => {
                         let exe = server.executable().context("the language server has no launcher")?;
@@ -982,10 +692,6 @@ impl Server {
             && let Some(home) = &java_home
         {
             cmd.env("JAVA_HOME", home);
-        }
-        // A launcher given with `--server-path` reads its JVM options from there.
-        if kind == ServerKind::Kargo {
-            cmd.env("KARGO_LSP_JVM_OPTS", self.jvm_args().join(" "));
         }
         self.config.shell().verbose("Running", kargo_util::process::describe(&cmd));
         let mut child = cmd.spawn().with_context(|| format!("failed to run {}", exe.display()))?;
@@ -1025,35 +731,18 @@ impl Server {
         }
     }
 
-    /// Asks the editor to tell Kargo when any `kargo.toml` or `kargo.lock` changes, and for
-    /// Kargo's Kotlin server, any source or klib.
+    /// Asks the editor to tell Kargo when any `kargo.toml` or `kargo.lock` changes.
     fn watch_manifests(&mut self) -> Result<()> {
         if !self.client_watches {
             return Ok(());
         }
         let id = self.next_id();
-        let mut watchers = vec![json!({ "globPattern": "**/kargo.toml" }), json!({ "globPattern": "**/kargo.lock" })];
-        if self.opts.server == Some(ServerKind::Kargo) {
-            watchers.extend(["**/*.kt", "**/*.java", "**/*.klib"].map(|glob| json!({ "globPattern": glob })));
-        }
+        let watchers = json!([{ "globPattern": "**/kargo.toml" }, { "globPattern": "**/kargo.lock" }]);
         let params = json!({ "registrations": [{ "id": "kargo-watch", "method": "workspace/didChangeWatchedFiles", "registerOptions": { "watchers": watchers } }] });
         self.send(&jsonrpc::request(&id, "client/registerCapability", params))
     }
 
     fn own_response(&mut self, id: String, _message: &Value) -> Result<()> {
-        // The editor accepted the token of Kargo's server's status: show it while it lasts.
-        if let Some(progress) = &mut self.status_progress
-            && progress.create_id == id
-            && !progress.begun
-        {
-            progress.begun = true;
-            let token = progress.token.clone();
-            let message = self.status_message.clone();
-            self.notify(
-                "$/progress",
-                json!({ "token": token, "value": { "kind": "begin", "title": "Kotlin", "message": message, "cancellable": false } }),
-            )?;
-        }
         // The editor accepted the token of a check that is still running.
         if let Some(progress) = &mut self.check_progress
             && progress.create_id == id
@@ -1122,21 +811,6 @@ impl Server {
         let changes: Vec<Value> = outcome.written.changed.iter().map(|path| json!({ "uri": text::path_to_uri(path), "type": 2 })).collect();
         if !changes.is_empty() {
             self.send_backend(&jsonrpc::notification("workspace/didChangeWatchedFiles", json!({ "changes": changes })));
-        }
-        if let Some(metadata) = outcome.metadata {
-            if self.opts.server == Some(ServerKind::Kargo) {
-                let new = model::kargo_model(&metadata);
-                if self.model.as_ref() != Some(&new) {
-                    let changed = model::changed_modules(self.model.as_ref().unwrap_or(&Value::Null), &new);
-                    // A restarting backend gets the new model with its `initialize`.
-                    if !self.restarting() {
-                        let params = json!({ "project": new, "changedModules": changed });
-                        self.send_backend(&jsonrpc::notification("kargo/projectChanged", params));
-                    }
-                    self.model = Some(new);
-                }
-            }
-            self.metadata = Some(metadata);
         }
         let open: Vec<String> = self.docs.keys().cloned().collect();
         for uri in open {
@@ -1521,40 +1195,12 @@ mod tests {
         }
 
         fn start_with(opts: Options, backend: Option<BackendIo>, runner: check::Runner) -> (Self, tempfile::TempDir) {
-            let launcher = backend.map(|backend| {
-                let mut backend = Some(backend);
-                Box::new(move || backend.take().context("the test has no more backends")) as Launcher
-            });
-            Self::launch(opts, launcher, runner)
-        }
-
-        /// Starts with a launcher that hands out `backends` in turn, for tests of restarts.
-        fn start_backends(opts: Options, backends: Vec<BackendIo>) -> (Self, tempfile::TempDir) {
-            let mut backends = backends.into_iter();
-            let launcher: Launcher = Box::new(move || backends.next().context("the test has no more backends"));
-            Self::launch(opts, Some(launcher), Arc::new(|_: &check::Run, _: &AtomicBool| anyhow::bail!("no checks in this test")))
-        }
-
-        fn launch(opts: Options, launcher: Option<Launcher>, runner: check::Runner) -> (Self, tempfile::TempDir) {
             let home = tempfile::tempdir().unwrap();
             let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_offline(true);
             let (server_in, input) = io::pipe().unwrap();
             let (output, server_out) = io::pipe().unwrap();
-            let delay = Duration::from_millis(10);
-            let server = thread::spawn(move || serve_with(config, opts, BufReader::new(server_in), server_out, launcher, runner, delay));
+            let server = thread::spawn(move || serve_with(config, opts, BufReader::new(server_in), server_out, backend, runner));
             (Self { input, output: BufReader::new(output), server: Some(server) }, home)
-        }
-
-        /// Reads until a message with `method`, returning it and the messages before it.
-        fn until(&mut self, method: &str) -> (Value, Vec<Value>) {
-            let mut before = Vec::new();
-            loop {
-                let message = self.recv();
-                if message["method"] == method {
-                    return (message, before);
-                }
-                before.push(message);
-            }
         }
 
         fn send(&mut self, message: Value) {
@@ -1747,12 +1393,6 @@ local = \"{url}\"
     /// A fake Kotlin server: answers `initialize`, `textDocument/hover` and `shutdown`, and
     /// reports every method it receives.
     fn fake_backend() -> (BackendIo, mpsc::Receiver<Value>) {
-        scripted_backend(|_, _| true)
-    }
-
-    /// [`fake_backend`] that first passes every message to `script`, which may write messages
-    /// of its own; the backend exits without answering when it returns `false`.
-    fn scripted_backend(mut script: impl FnMut(&Value, &mut PipeWriter) -> bool + Send + 'static) -> (BackendIo, mpsc::Receiver<Value>) {
         let (from_kargo, to_backend) = io::pipe().unwrap();
         let (from_backend, to_kargo) = io::pipe().unwrap();
         let (seen_tx, seen) = mpsc::channel();
@@ -1760,22 +1400,18 @@ local = \"{url}\"
             let mut input = BufReader::new(from_kargo);
             let mut output = to_kargo;
             while let Ok(Some(message)) = jsonrpc::read(&mut input) {
-                let _ = seen_tx.send(message.clone());
-                if !script(&message, &mut output) {
-                    break;
-                }
                 let reply = match jsonrpc::method(&message) {
                     "initialize" => Some(json!({ "capabilities": { "textDocumentSync": 2, "definitionProvider": true } })),
                     "textDocument/hover" => Some(json!({ "contents": "kotlin" })),
                     "shutdown" => Some(Value::Null),
                     _ => None,
                 };
-                if let Some(result) = reply
-                    && jsonrpc::write(&mut output, &jsonrpc::response(&message["id"], result)).is_err()
-                {
-                    break;
+                if let Some(result) = reply {
+                    jsonrpc::write(&mut output, &jsonrpc::response(&message["id"], result)).unwrap();
                 }
-                if jsonrpc::method(&message) == "exit" {
+                let exit = jsonrpc::method(&message) == "exit";
+                let _ = seen_tx.send(message);
+                if exit {
                     break;
                 }
             }
@@ -1852,131 +1488,8 @@ local = \"{url}\"
         let (mut editor, _home) = Editor::start(opts, Some(backend));
         let (init, _) = editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} }));
         assert_eq!(init["result"]["capabilities"], own_capabilities());
-        // It is started again, which fails here.
-        let (warning, before) = editor.until("window/showMessage");
-        assert!(before.iter().any(|m| m["params"]["message"].as_str().unwrap_or_default().contains("starting it again")), "{before:?}");
-        assert!(warning["params"]["message"].as_str().unwrap().contains("could not start"), "{warning}");
-        assert!(editor.finish());
-    }
-
-    #[test]
-    fn restarts_a_crashed_backend_and_replays_open_documents() {
-        let dir = project(MANIFEST);
-        let kotlin_uri = text::path_to_uri(&dir.path().join("src/Main.kt"));
-        // The first backend crashes on hover.
-        let (first, _) = scripted_backend(|message, _| jsonrpc::method(message) != "textDocument/hover");
-        let (second, seen) = fake_backend();
-        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
-        let (mut editor, _home) = Editor::start_backends(opts, vec![first, second]);
-        editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} }));
-        editor.send(jsonrpc::notification("initialized", json!({})));
-        open(&mut editor, &kotlin_uri, "fun main() {}\n");
-        let change = json!({ "textDocument": { "uri": kotlin_uri, "version": 2 }, "contentChanges": [{ "text": "fun main() { }\n" }] });
-        editor.send(jsonrpc::notification("textDocument/didChange", change));
-        let hover = json!({ "textDocument": { "uri": kotlin_uri }, "position": { "line": 0, "character": 0 } });
-        let (failed, _) = editor.request(2, "textDocument/hover", hover.clone());
-        assert_eq!(failed["error"]["message"], "the Kotlin language server exited");
-
-        let (running, _) = editor.until("window/logMessage");
-        assert!(running["params"]["message"].as_str().unwrap().contains("starting it again"), "{running}");
-        let (running, _) = editor.until("window/logMessage");
-        assert!(running["params"]["message"].as_str().unwrap().contains("running again"), "{running}");
-        let (answered, _) = editor.request(3, "textDocument/hover", hover);
-        assert_eq!(answered["result"]["contents"], "kotlin");
-
-        let received: Vec<Value> = (0..4).map(|_| seen.recv_timeout(Duration::from_secs(10)).unwrap()).collect();
-        let methods: Vec<&str> = received.iter().map(jsonrpc::method).collect();
-        assert_eq!(methods, ["initialize", "initialized", "textDocument/didOpen", "textDocument/hover"]);
-        assert_eq!(received[0]["params"]["rootUri"], text::path_to_uri(dir.path()), "the editor's initialize, replayed");
-        let doc = &received[2]["params"]["textDocument"];
-        assert_eq!(doc["text"], "fun main() { }\n", "the document as it is now");
-        assert_eq!(doc["version"], 2);
-        assert!(editor.finish());
-    }
-
-    #[test]
-    fn gives_up_after_three_crashes() {
-        let dir = project(MANIFEST);
-        let crashing = || scripted_backend(|message, _| jsonrpc::method(message) != "initialize").0;
-        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
-        let (mut editor, _home) = Editor::start_backends(opts, vec![crashing(), crashing(), crashing()]);
-        editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} }));
-        let (gave_up, before) = editor.until("window/showMessage");
-        let message = gave_up["params"]["message"].as_str().unwrap();
-        assert!(message.contains("exited 3 times in five minutes") && message.contains("not started again"), "{message}");
-        let restarts = before.iter().filter(|m| m["params"]["message"].as_str().unwrap_or_default().contains("starting it again")).count();
-        assert_eq!(restarts, 2);
-        // Kargo's own features keep working.
-        let (runnables, _) = editor.request(2, "kargo/runnables", json!({}));
-        assert!(runnables["result"].is_array());
-        let (definition, _) = editor.request(3, "textDocument/definition", json!({ "textDocument": { "uri": "file:///x/Main.kt" } }));
-        assert_eq!(definition["error"]["code"], jsonrpc::METHOD_NOT_FOUND);
-        assert!(editor.finish());
-    }
-
-    #[test]
-    fn gives_kargos_server_the_project_model_and_its_changes() {
-        let dir = project(MANIFEST);
-        let manifest_uri = text::path_to_uri(&dir.path().join("kargo.toml"));
-        let kotlin_uri = text::path_to_uri(&dir.path().join("src/Main.kt"));
-        // It reports indexing once the editor is ready, and is ready on hover.
-        let (backend, seen) = scripted_backend(|message, output| {
-            let state = match jsonrpc::method(message) {
-                "initialized" => "indexing",
-                "textDocument/hover" => "ready",
-                _ => return true,
-            };
-            let status = json!({ "state": state, "message": "3 libraries" });
-            jsonrpc::write(output, &jsonrpc::notification("kargo/status", status)).unwrap();
-            true
-        });
-        let opts = Options { server: Some(ServerKind::Kargo), ..Options::default() };
-        let (mut editor, _home) = Editor::start(opts, Some(backend));
-        let capabilities = json!({
-            "window": { "workDoneProgress": true },
-            "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } },
-        });
-        let params = json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": capabilities, "initializationOptions": { "checkOnSave": false } });
-        editor.request(1, "initialize", params);
-        let initialize = seen.recv_timeout(Duration::from_secs(10)).unwrap();
-        let options = &initialize["params"]["initializationOptions"];
-        assert_eq!(options["checkOnSave"], false, "the editor's options stay");
-        let model = &options["kargo"]["project"];
-        assert_eq!(model["modelVersion"], model::MODEL_VERSION);
-        let ids: Vec<&str> = model["modules"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["app.jvm.main", "app.jvm.test"]);
-        assert!(!dir.path().join("workspace.json").exists(), "nothing is written into the project");
-
-        editor.send(jsonrpc::notification("initialized", json!({})));
-        let (register, _) = editor.until("client/registerCapability");
-        let watchers = &register["params"]["registrations"][0]["registerOptions"]["watchers"];
-        assert!(watchers.as_array().unwrap().iter().any(|w| w["globPattern"] == "**/*.kt"), "{watchers}");
-        editor.send(jsonrpc::response(&register["id"], Value::Null));
-        let (create, _) = editor.until("window/workDoneProgress/create");
-        editor.send(jsonrpc::response(&create["id"], Value::Null));
-        let (begin, _) = editor.until("$/progress");
-        assert_eq!(begin["params"]["value"], json!({ "kind": "begin", "title": "Kotlin", "message": "3 libraries", "cancellable": false }));
-        // The backend reports ready before it answers.
-        let hover = json!({ "textDocument": { "uri": kotlin_uri }, "position": { "line": 0, "character": 0 } });
-        let (_, before) = editor.request(2, "textDocument/hover", hover);
-        let end = before.iter().find(|m| m["method"] == "$/progress").expect("the end of the progress");
-        assert_eq!(end["params"]["value"], json!({ "kind": "end", "message": "ready" }));
-
-        // A changed kargo.toml: the server hears about the sources, then gets the new model.
-        std::fs::write(dir.path().join("kargo.toml"), format!("{MANIFEST}\n[target.jvm]\n[target.wasm]\n")).unwrap();
-        let changes = json!({ "changes": [{ "uri": manifest_uri, "type": 2 }, { "uri": kotlin_uri, "type": 2 }] });
-        editor.send(jsonrpc::notification("workspace/didChangeWatchedFiles", changes));
-        let mut received: Vec<Value> = Vec::new();
-        while received.last().is_none_or(|m| jsonrpc::method(m) != "kargo/projectChanged") {
-            received.push(seen.recv_timeout(Duration::from_secs(30)).unwrap());
-        }
-        let watched = received.iter().find(|m| jsonrpc::method(m) == "workspace/didChangeWatchedFiles").unwrap();
-        assert_eq!(watched["params"]["changes"], json!([{ "uri": kotlin_uri, "type": 2 }]), "kargo.toml is left out");
-        let changed = &received.last().unwrap()["params"];
-        let ids: Vec<&str> = changed["project"]["modules"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-        assert!(ids.contains(&"app.common.main") && ids.contains(&"app.wasm.main"), "{ids:?}");
-        let modules = changed["changedModules"].as_array().unwrap();
-        assert!(modules.contains(&json!("app.jvm.main")) && modules.contains(&json!("app.wasm.test")), "{modules:?}");
+        let warning = editor.recv();
+        assert_eq!(warning["method"], "window/showMessage");
         assert!(editor.finish());
     }
 

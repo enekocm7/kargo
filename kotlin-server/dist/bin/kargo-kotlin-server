@@ -1,8 +1,0 @@
-#!/bin/sh
-# Starts Kargo's Kotlin language server: LSP over stdin and stdout.
-# JAVA_HOME selects the JDK (17 or newer); KARGO_LSP_JVM_OPTS holds the JVM options.
-home=$(cd "$(dirname "$0")/.." && pwd)
-if [ -n "${JAVA_HOME:-}" ]; then java="$JAVA_HOME/bin/java"; else java=java; fi
-# shellcheck disable=SC2086 # the options are split into words on purpose
-exec "$java" ${KARGO_LSP_JVM_OPTS:--Xmx2g -XX:+UseG1GC -XX:SoftRefLRUPolicyMSPerMB=50} \
-    -cp "$home/lib/*" io.github.enekocm7.kargo.server.MainKt "$@"
