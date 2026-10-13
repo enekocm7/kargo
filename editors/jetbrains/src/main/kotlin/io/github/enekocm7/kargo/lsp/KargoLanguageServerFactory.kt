@@ -1,12 +1,9 @@
-// `kargo lsp` as an LSP4IJ language server: how it starts, the options it gets, and the requests
-// Kargo adds to LSP.
+// `kargo lsp` as an LSP4IJ language server: how it starts and the requests Kargo adds to LSP. The IDE
+// keeps its own Kotlin support, so the server only handles `kargo.toml`.
 
 package io.github.enekocm7.kargo.lsp
 
-import com.google.gson.JsonArray
-import com.google.gson.JsonObject
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.VirtualFile
 import com.redhat.devtools.lsp4ij.LanguageServerEnablementSupport
 import com.redhat.devtools.lsp4ij.LanguageServerFactory
 import com.redhat.devtools.lsp4ij.server.OSProcessStreamConnectionProvider
@@ -30,30 +27,11 @@ class KargoLanguageServerFactory : LanguageServerFactory, LanguageServerEnableme
     }
 }
 
-/** Runs `kargo lsp` in the project root with the options from the settings. */
-class KargoConnectionProvider(project: Project) : OSProcessStreamConnectionProvider(Kargo.commandLine(project, lspArgs())) {
-    override fun getInitializationOptions(rootUri: VirtualFile?): Any = initializationOptions()
-
-    companion object {
-        fun lspArgs(): List<String> {
-            val options = KargoSettings.getInstance().state
-            val args = mutableListOf("lsp")
-            val server = options.server ?: KargoSettings.DEFAULT_SERVER
-            if (server != KargoSettings.DEFAULT_SERVER) args += listOf("--server", server)
-            if (options.klibTargets) args += "--klib-targets"
-            return args
-        }
-
-        fun initializationOptions(): JsonObject {
-            val options = KargoSettings.getInstance().state
-            return JsonObject().apply {
-                addProperty("checkOnSave", options.checkOnSave)
-                val targets = options.checkTargets.orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }
-                if (targets.isNotEmpty()) add("checkTargets", JsonArray().apply { targets.forEach { add(it) } })
-            }
-        }
-    }
-}
+/**
+ * Runs `kargo lsp` in the project root without a Kotlin server (`--server none`): completion, hover,
+ * validation and quick fixes for `kargo.toml`, plus `kargo/runnables` and the `kargo/addDependency` and `kargo/addTarget` commands.
+ */
+class KargoConnectionProvider(project: Project) : OSProcessStreamConnectionProvider(Kargo.commandLine(project, listOf("lsp", "--server", "none")))
 
 /** `kargo lsp`'s requests beyond LSP. */
 interface KargoLanguageServer : LanguageServer {

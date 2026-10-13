@@ -27,7 +27,7 @@ The first start downloads the Kotlin LSP (about 360 MB) and resolves the project
 
 ### Editor setup
 
-**IntelliJ IDEA** and **Android Studio**: install the Kargo plugin, which runs `kargo lsp` for you and adds a New Project wizard, run configurations, a test tree and debugging. See [IntelliJ IDEA and Android Studio](../jetbrains/).
+**IntelliJ IDEA** and **Android Studio**: install the Kargo plugin, which runs `kargo lsp` for `kargo.toml` and adds a New Project wizard, run configurations, a test tree and debugging. See [IntelliJ IDEA and Android Studio](../jetbrains/).
 
 **Zed**: install the Kargo extension, which runs `kargo lsp` for Kotlin files and `kargo.toml` and debugs programs and tests through [`kargo dap`](#debug-adapter). See [Zed](../zed/).
 
@@ -224,7 +224,7 @@ To apply it to every `kargo.toml` without editing them:
   }
   ```
 
-- **IntelliJ IDEA** and Android Studio: the [Kargo plugin](../jetbrains/) gives you all of this through `kargo lsp`. Without it, with the TOML plugin: in *Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings*, add a mapping with the schema URL and the file pattern `kargo.toml`.
+- **IntelliJ IDEA** and Android Studio: the [Kargo plugin](../jetbrains/) gives you the `kargo.toml` support through `kargo lsp`. Without it, with the TOML plugin: in *Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings*, add a mapping with the schema URL and the file pattern `kargo.toml`.
 
 :::note
 The schema checks the shape of `kargo.toml`. Some rules need Kargo itself, such as a `path` dependency's directory existing or `min-sdk <= target-sdk`. `kargo check` still reports those.

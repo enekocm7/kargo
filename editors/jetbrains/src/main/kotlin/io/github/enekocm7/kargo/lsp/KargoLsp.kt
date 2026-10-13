@@ -36,7 +36,7 @@ object KargoLsp {
     fun executeCommand(project: Project, command: String, manifest: VirtualFile, arguments: JsonObject): CompletableFuture<Any?> =
         server(project).thenCompose { server ->
             if (server == null) {
-                CompletableFuture.failedFuture(IllegalStateException("kargo lsp is not running; open a Kotlin file or kargo.toml to start it"))
+                CompletableFuture.failedFuture(IllegalStateException("kargo lsp is not running; open kargo.toml to start it"))
             } else {
                 arguments.addProperty("uri", LSPIJUtils.toUriAsString(manifest))
                 server.workspaceService.executeCommand(ExecuteCommandParams(command, listOf(arguments)))
