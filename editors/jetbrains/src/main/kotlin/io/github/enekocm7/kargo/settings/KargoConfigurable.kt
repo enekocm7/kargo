@@ -5,7 +5,6 @@ package io.github.enekocm7.kargo.settings
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.BoundConfigurable
 import com.intellij.openapi.project.ProjectManager
-import com.intellij.ui.dsl.builder.bindItem
 import com.intellij.ui.dsl.builder.bindSelected
 import com.intellij.ui.dsl.builder.bindText
 import com.intellij.ui.dsl.builder.columns
@@ -28,26 +27,9 @@ class KargoConfigurable : BoundConfigurable("Kargo") {
         }
         group("Language Server (kargo lsp)") {
             row {
-                checkBox("Run kargo lsp for Kotlin files and kargo.toml")
+                checkBox("Run kargo lsp for kargo.toml")
                     .bindSelected({ options.languageServer }, { options.languageServer = it })
-            }
-            row("Kotlin server:") {
-                comboBox(KargoSettings.SERVERS)
-                    .bindItem({ options.server ?: KargoSettings.DEFAULT_SERVER }, { options.server = it ?: KargoSettings.DEFAULT_SERVER })
-                    .comment("kotlin-lsp: JetBrains' Kotlin LSP; kls: kotlin-language-server; none: only kargo.toml support and runnables")
-            }
-            row {
-                checkBox("Describe Wasm and Native sources to the Kotlin LSP (--klib-targets)")
-                    .bindSelected({ options.klibTargets }, { options.klibTargets = it })
-            }
-            row {
-                checkBox("Check on save: run kargo check when a Kotlin file is saved")
-                    .bindSelected({ options.checkOnSave }, { options.checkOnSave = it })
-            }
-            row("Targets to check:") {
-                textField()
-                    .bindText({ options.checkTargets ?: "" }, { options.checkTargets = it.trim().ifEmpty { null } })
-                    .comment("Comma-separated, for example wasm,native. Empty: every enabled target")
+                    .comment("Completion, documentation, validation and quick fixes in kargo.toml. Kotlin files use the IDE's own support")
             }
         }
     }

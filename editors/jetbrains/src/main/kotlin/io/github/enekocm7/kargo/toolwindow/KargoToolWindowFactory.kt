@@ -49,7 +49,7 @@ class KargoRunnablesPanel(private val project: Project) : SimpleToolWindowPanel(
     private val tree = Tree(model).apply {
         isRootVisible = false
         cellRenderer = Renderer()
-        emptyText.text = "Open a Kotlin file or kargo.toml to start kargo lsp, then refresh"
+        emptyText.text = "Open kargo.toml to start kargo lsp, then refresh"
     }
 
     init {
