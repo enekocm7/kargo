@@ -39,7 +39,7 @@ In a [workspace](../../guides/workspaces/), commands apply to every member at th
 
 ### Concurrent commands
 
-Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `metadata`, `package`, `publish`, `update`, `clean`, `android`, `toolchain which`, and `lsp` while it imports the project) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
+Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `classpath`, `fetch`, `metadata`, `ide`, `package`, `publish`, `update`, `clean`, `android`, `toolchain which`, and `lsp` while it imports the project) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
 
 ```console
 $ kargo build
@@ -403,6 +403,26 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 
 Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`; their Maven dependencies appear in the graph next to yours.
 
+## `kargo classpath`
+
+Print the resolved classpath (JVM) or klib path (Wasm, Native) of a target: the jars on disk, where `kargo tree` shows coordinates. Use it to point any tool, script or editor at a project's libraries.
+
+```console
+$ kargo classpath --format lines
+/home/me/.kargo/cache/maven/io/ktor/ktor-server-core-jvm/3.2.3/ktor-server-core-jvm-3.2.3.jar
+/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar
+...
+```
+
+The entries are the ones the build compiles with, in the same order: path dependencies first (built if needed), then the resolved Maven artifacts, including the Kotlin stdlib and what [frameworks](../../guides/frameworks/) add. The package's own classes are not included. Resolution follows `kargo.lock`, `--locked` and `--offline`, and may download dependencies and update `kargo.lock`, as `kargo tree` does.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-t, --target <target>` | `jvm` | Which target. Without it, the JVM target, or the package's only Wasm or Native target. A Native target prints the klibs of its first platform; Android's classpath comes from Gradle (`kargo android -- dependencies`) |
+| `-s, --scope <scope>` | `compile` | `compile` (what the main code compiles against), `runtime` (what it runs with) or `test` (what the tests compile and run against, dev-dependencies included) |
+| `--format <fmt>` | `path` | `path`: one line joined with the platform's path separator (`:`, or `;` on Windows), ready for `-cp`. `lines`: one entry per line. `json`: an object with `package`, `target`, `platform`, `scope` and `classpath` |
+| `-p, --package <name>` | current package | Which package |
+
 ## `kargo package`
 
 Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). JVM only. The path of the jar is printed on stdout.
@@ -577,6 +597,22 @@ kargo lsp --server none         # kargo.toml support and runnables only
 With `{ "checkOnSave": true }` in the editor's `initializationOptions`, saving a Kotlin or Java file runs `kargo check` in the background and adds its diagnostics for every target to the Kotlin server's; `checkTargets` limits the targets. See [Check on save](../../guides/editors/#check-on-save).
 
 Editors that pass `--stdio` may keep it; Kargo always uses stdio. The exit code is 0 after `shutdown` and `exit`, 1 if the editor exits without `shutdown`. See [Editor integration](../../guides/editors/#language-server) for editor setups, the files it writes, the [code actions](../../guides/editors/#code-actions-in-kargotoml) and the `kargo/runnables` request.
+
+## `kargo ide`
+
+Write the project description a Kotlin language server reads, for editors that run JetBrains' Kotlin LSP or fwcd's kotlin-language-server themselves instead of [`kargo lsp`](#kargo-lsp). The files are the ones `kargo lsp` writes.
+
+```sh
+kargo ide           # workspace.json, for the Kotlin LSP
+kargo ide --kls     # kls-classpath (kls-classpath.bat on Windows), for kotlin-language-server
+```
+
+| Option | Meaning |
+|---|---|
+| `--kls` | Write `kls-classpath` instead of `workspace.json` |
+| `--klib-targets` | Also describe Wasm and Native sources in `workspace.json`. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
+
+Kargo keeps the file current: after `kargo build`, `check`, `test`, `fetch`, `add`, `remove`, `update`, `upgrade` and `target`, it writes it again if `kargo.toml` or `kargo.lock` changed, and prints `Wrote workspace.json`. A file Kargo didn't write is left alone, with a warning. If the dependencies can't be resolved, the project is described without them and the command fails with the reason. See [Without `kargo lsp`](../../guides/editors/#without-kargo-lsp).
 
 ## `kargo completions`
 

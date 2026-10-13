@@ -91,7 +91,7 @@ Kotlin language servers don't read `kargo.toml`, so Kargo writes the project des
 | Kotlin LSP | `workspace.json` | A module per package for main code and one for tests (a module per source set for a [multiplatform](#multiplatform-projects) package), with their source and resource roots, the JVM target's classpaths as libraries (with sources jars once downloaded with `kargo fetch --sources`), path dependencies as modules, the JDK, `jvm-target`, compiler arguments and compiler plugins |
 | kotlin-language-server | `kls-classpath` (`kls-classpath.bat` on Windows) | A script printing the test classpath, which Kargo keeps in `target/lsp/classpath.txt` |
 
-They hold paths on your machine, so keep them out of version control; `kargo new` adds them to `.gitignore`. Kargo only replaces a file while it still holds what Kargo last wrote: a `workspace.json` you wrote yourself, or one another tool generated, is left alone, and `kargo lsp` tells you so. Delete it to let Kargo manage it. Kargo remembers the last complete import in `target/lsp`, so a restart with an unchanged `kargo.toml` and `kargo.lock` starts the Kotlin server right away.
+[`kargo ide`](#without-kargo-lsp) writes the same files without running a server. They hold paths on your machine, so keep them out of version control; `kargo new` adds them to `.gitignore`. Kargo only replaces a file while it still holds what Kargo last wrote: a `workspace.json` you wrote yourself, or one another tool generated, is left alone, and `kargo lsp` tells you so. Delete it to let Kargo manage it. Kargo remembers the last complete import in `target/lsp`, so a restart with an unchanged `kargo.toml` and `kargo.lock` starts the Kotlin server right away.
 
 If the dependencies can't be resolved (offline, a broken `kargo.toml`), Kargo describes the project without them and says why. It imports again once `kargo.toml` or `kargo.lock` change.
 
@@ -115,6 +115,31 @@ The Kotlin LSP analyzes JVM code only. Kargo therefore analyzes `src/` as JVM co
 :::caution
 Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence from the Kotlin LSP yet. Use Android Studio for Android code. `kargo.toml` support, runnables and check on save work for every target.
 :::
+
+### Without `kargo lsp`
+
+If your editor already runs JetBrains' Kotlin LSP or kotlin-language-server itself (the `kotlin_lsp` or `kotlin_language_server` configurations of nvim-lspconfig, the Kotlin extensions of VS Code and Zed), give it the project description with `kargo ide` instead of switching to `kargo lsp`:
+
+```sh
+kargo ide           # writes workspace.json, which the Kotlin LSP imports
+kargo ide --kls     # writes kls-classpath, which kotlin-language-server runs
+```
+
+Then open the project root in the editor. The Kotlin LSP finds `workspace.json` there (nvim-lspconfig uses it as a root marker for `kotlin_lsp`), and kotlin-language-server runs `kls-classpath` to get the classpath. Run `kargo fetch --sources` once to navigate into library sources.
+
+You don't need to run `kargo ide` again: once the file exists, `kargo build`, `check`, `test`, `fetch`, `add`, `remove`, `update`, `upgrade` and `target` write it again when `kargo.toml` or `kargo.lock` changed. So after `kargo add`, the new library resolves once the server reloads: the Kotlin LSP reloads `workspace.json` when it changes, and kotlin-language-server reads `kls-classpath` again when you restart it.
+
+:::note
+Kargo remembers what it wrote in `target/lsp`, which `kargo clean` deletes. Run `kargo ide` after a clean to resume the updates. If it says the file was not written by Kargo, delete the file and run `kargo ide` again.
+:::
+
+For any other tool, [`kargo classpath`](../../reference/commands/#kargo-classpath) prints a target's classpath:
+
+```sh
+kargo classpath                          # compile classpath of the JVM target, joined with : or ;
+kargo classpath --scope test --format lines
+kargo classpath -t wasm --format json    # the Wasm target's klibs
+```
 
 ### Runnables
 

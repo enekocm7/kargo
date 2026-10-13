@@ -281,6 +281,28 @@ $ kargo info --format json
 
 `bins` are the [`[[bin]]`](../manifest/#bin) tables as written (unset keys are `null`), and `examples` the names of the `examples/<name>.kt` programs: what `kargo run --bin` and `kargo run --example` accept.
 
+## `kargo classpath --format json`
+
+```json
+{
+  "package": "my-app",
+  "target": "jvm",
+  "platform": "jvm",
+  "scope": "compile",
+  "classpath": [
+    "/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar"
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `package` | The package's name |
+| `target` | `jvm`, `wasm` or `native` |
+| `platform` | `jvm`, `wasm-<environment>` (`wasm-js`, `wasm-wasi`) or `native-<platform>`, the platform whose libraries are listed |
+| `scope` | `compile`, `runtime` or `test` |
+| `classpath` | The jars or klibs, in the order the compiler gets them: path dependencies, then Maven artifacts |
+
 ## `kargo tree --format json`
 
 ```console

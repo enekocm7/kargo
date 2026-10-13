@@ -1972,6 +1972,94 @@ fn lsp_code_actions_edit_kargo_toml_like_the_cli() {
 }
 
 #[test]
+fn classpath_prints_the_resolved_jars_of_each_scope() {
+    let repo = LocalRepo::new();
+    repo.publish("g:util", "1.0", &[])
+        .publish("g:rt", "1.0", &[])
+        .publish("g:check", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+    let p = Project::new();
+    let extra = format!(
+        "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n\"g:rt\" = {{ version = \"1.0\", scope = \"runtime\" }}\n\
+         [dev-dependencies]\n\"g:check\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n",
+        repo.url()
+    );
+    p.file("kargo.toml", &manifest("app", &extra)).file("src/Main.kt", "fun main() {}\n");
+    let lines = |args: &[&str]| -> Vec<String> {
+        let out = p.kargo().args(["--offline", "classpath", "--format", "lines"]).args(args).assert().success().get_output().stdout.clone();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| std::path::Path::new(l).file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    };
+    let compile = lines(&[]);
+    assert!(compile.contains(&"util-1.0.jar".to_owned()) && compile.contains(&"kotlin-stdlib-2.4.21.jar".to_owned()), "{compile:?}");
+    assert!(!compile.contains(&"rt-1.0.jar".to_owned()) && !compile.contains(&"check-1.0.jar".to_owned()), "{compile:?}");
+    let runtime = lines(&["--scope", "runtime"]);
+    assert!(runtime.contains(&"rt-1.0.jar".to_owned()) && !runtime.contains(&"check-1.0.jar".to_owned()), "{runtime:?}");
+    let test = lines(&["-s", "test", "-t", "jvm"]);
+    assert!(test.contains(&"check-1.0.jar".to_owned()) && test.contains(&"junit-jupiter-6.1.3.jar".to_owned()), "{test:?}");
+    assert!(p.path().join("kargo.lock").is_file(), "the resolution is locked");
+
+    // The default format is one line joined with the platform's path separator.
+    let out = p.kargo().args(["--offline", "classpath"]).assert().success().get_output().stdout.clone();
+    let joined = String::from_utf8(out).unwrap();
+    assert_eq!(std::env::split_paths(joined.trim_end()).count(), compile.len(), "{joined}");
+
+    let out = p.kargo().args(["--offline", "classpath", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!((doc["package"].as_str(), doc["target"].as_str(), doc["scope"].as_str()), (Some("app"), Some("jvm"), Some("compile")));
+    assert_eq!(doc["classpath"].as_array().unwrap().len(), compile.len());
+
+    p.kargo()
+        .args(["--offline", "classpath", "-t", "wasm"])
+        .assert()
+        .code(101)
+        .stderr(predicates::str::contains("target `wasm` is not enabled"));
+}
+
+#[test]
+fn ide_writes_workspace_json_and_keeps_it_current() {
+    let repo = LocalRepo::new();
+    repo.publish("g:util", "1.0", &[])
+        .publish("g:extra", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+    let p = Project::new();
+    let extra =
+        format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url());
+    p.file("kargo.toml", &manifest("app", &extra)).file("src/Main.kt", "fun main() {}\n");
+    let libraries = || -> Vec<String> {
+        let workspace: serde_json::Value = serde_json::from_str(&p.read("workspace.json")).unwrap();
+        workspace["libraries"].as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap().to_owned()).collect()
+    };
+
+    p.kargo().args(["--offline", "ide"]).assert().success().stderr(predicates::str::contains("Wrote workspace.json"));
+    assert!(libraries().contains(&"Kargo: g:util:1.0".to_owned()), "{:?}", libraries());
+    p.kargo().args(["--offline", "ide"]).assert().success().stderr(predicates::str::contains("workspace.json is up to date"));
+
+    // A command that changes kargo.toml writes it again.
+    p.kargo().args(["add", "g:extra:1.0", "--dev"]).assert().success().stderr(predicates::str::contains("Wrote workspace.json"));
+    assert!(libraries().contains(&"Kargo: g:extra:1.0".to_owned()), "{:?}", libraries());
+
+    // fwcd's server gets a script printing the test classpath.
+    p.kargo().args(["--offline", "ide", "--kls"]).assert().success();
+    let script = if cfg!(windows) { "kls-classpath.bat" } else { "kls-classpath" };
+    assert!(p.read(script).contains("kargo ide"), "{}", p.read(script));
+    let classpath = p.read("target/lsp/classpath.txt");
+    assert!(classpath.contains("util-1.0.jar") && classpath.contains("extra-1.0.jar"), "{classpath}");
+
+    // A workspace.json Kargo didn't write is left alone.
+    p.file("workspace.json", "{}");
+    p.kargo().args(["--offline", "ide"]).assert().success().stderr(predicates::str::contains("was not written by Kargo"));
+    assert_eq!(p.read("workspace.json"), "{}");
+}
+
+#[test]
 fn lsp_describes_the_project_for_the_kotlin_lsp() {
     use serde_json::json;
     let repo = LocalRepo::new();
