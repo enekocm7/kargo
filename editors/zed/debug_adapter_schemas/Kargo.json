@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Kargo debug configuration",
+  "description": "Debug a Kargo program or its tests on the JVM with `kargo dap`.",
+  "type": "object",
+  "required": ["request"],
+  "properties": {
+    "request": {
+      "type": "string",
+      "enum": ["launch", "attach"],
+      "description": "`launch` runs a Kargo command under the debugger; `attach` attaches to a JVM started with `kargo run --debug`."
+    },
+    "args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["run"],
+      "description": "launch: the arguments of `kargo`, starting with `run` or `test`, such as [\"run\", \"--bin\", \"server\"] or [\"test\", \"com.example.MathTest\"]. Kargo adds `--debug` and, unless they name a target, `-t jvm`."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "launch: the directory to run `kargo` in, relative to the project root; default: the project root."
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "launch: environment variables for `kargo` and the program."
+    },
+    "port": {
+      "type": "integer",
+      "default": 5005,
+      "description": "attach: the port the JVM listens on."
+    },
+    "hostName": {
+      "type": "string",
+      "default": "127.0.0.1",
+      "description": "attach: the host the JVM listens on."
+    },
+    "timeout": {
+      "type": "integer",
+      "default": 10000,
+      "description": "How long to try to connect to the JVM, in milliseconds."
+    },
+    "logLevel": {
+      "type": "string",
+      "enum": ["NONE", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
+      "description": "How much kotlin-debug-adapter logs to the debug console."
+    }
+  }
+}

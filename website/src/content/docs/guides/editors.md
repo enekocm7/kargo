@@ -1,6 +1,6 @@
 ---
 title: Editor integration
-description: Run kargo lsp in your editor, get completion, validation and quick fixes in kargo.toml, import a project into a language server, browse library sources, drive a test explorer and attach a debugger.
+description: Run kargo lsp in your editor, get completion, validation and quick fixes in kargo.toml, import a project into a language server, browse library sources, drive a test explorer and debug with kargo dap.
 ---
 
 Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a language server, a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
@@ -28,6 +28,8 @@ The first start downloads the Kotlin LSP (about 360 MB) and resolves the project
 ### Editor setup
 
 **IntelliJ IDEA** and **Android Studio**: install the Kargo plugin, which runs `kargo lsp` for you and adds a New Project wizard, run configurations, a test tree and debugging. See [IntelliJ IDEA and Android Studio](../jetbrains/).
+
+**Zed**: install the Kargo extension, which runs `kargo lsp` for Kotlin files and `kargo.toml` and debugs programs and tests through [`kargo dap`](#debug-adapter). See [Zed](../zed/).
 
 **Neovim** (0.11 or newer):
 
@@ -120,7 +122,7 @@ Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/`
 
 ### Without `kargo lsp`
 
-If your editor already runs JetBrains' Kotlin LSP or kotlin-language-server itself (the `kotlin_lsp` or `kotlin_language_server` configurations of nvim-lspconfig, the Kotlin extensions of VS Code and Zed), give it the project description with `kargo ide` instead of switching to `kargo lsp`:
+If your editor already runs JetBrains' Kotlin LSP or kotlin-language-server itself (the `kotlin_lsp` or `kotlin_language_server` configurations of nvim-lspconfig, the Kotlin extensions of VS Code and Zed without the [Kargo extension](../zed/)), give it the project description with `kargo ide` instead of switching to `kargo lsp`:
 
 ```sh
 kargo ide           # writes workspace.json, which the Kotlin LSP imports
@@ -407,5 +409,52 @@ Attach with any JDWP debugger:
   ```
 
 - **jdb**: `jdb -attach 127.0.0.1:5005`.
+- **Zed**: the [Kargo extension](../zed/#debug) debugs through `kargo dap`, below.
+
+### Debug adapter
+
+`kargo dap` is a debug adapter: editors with a [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) client start it, and it starts the program for them. It runs fwcd's [kotlin-debug-adapter](https://github.com/fwcd/kotlin-debug-adapter), which Kargo downloads on first use, on the project's JDK.
+
+A `launch` request names a Kargo command line in `args`. Kargo builds and runs it with `--debug`, shows what the program prints in the debug console, and attaches when the JVM is ready, so a breakpoint on the first line of `main` is hit. An `attach` request attaches to a program you started with `kargo run --debug`:
+
+```json title="Launch"
+{ "request": "launch", "args": ["run", "--bin", "server"] }
+```
+
+```json title="Attach"
+{ "request": "attach", "port": 5005 }
+```
+
+Tests are debugged the same way, with `["test", "com.example.app.MathTest.adds"]`. The arguments are listed in [`kargo dap`](../../reference/commands/#kargo-dap).
+
+kotlin-debug-adapter expects Gradle's directory layout to find classes and source files. Kargo makes your layout fit: it rewrites the source paths between the editor and the adapter, so breakpoints in `src/`, `src-jvm/` and `tests/` resolve, and stack frames open your files. A breakpoint resolves in the top-level functions of its file, in the classes, objects and interfaces the file declares at the top level, and in the class an `@file:JvmName` names.
+
+**Neovim** with [nvim-dap](https://github.com/mfussenegger/nvim-dap):
+
+```lua title="init.lua"
+local dap = require('dap')
+dap.adapters.kargo = { type = 'executable', command = 'kargo', args = { 'dap' } }
+dap.configurations.kotlin = {
+  { type = 'kargo', request = 'launch', name = 'kargo run', args = { 'run' } },
+  { type = 'kargo', request = 'launch', name = 'kargo test', args = { 'test' } },
+  { type = 'kargo', request = 'attach', name = 'Attach to port 5005', port = 5005 },
+}
+```
+
+**Helix**:
+
+```toml title="~/.config/helix/languages.toml"
+[[language]]
+name = "kotlin"
+debugger = { name = "kargo", transport = "stdio", command = "kargo", args = ["dap"], templates = [
+  { name = "kargo run", request = "launch", completion = [], args = { args = ["run"] } },
+] }
+```
+
+Start the editor in the project, or in a directory inside it: `kargo dap` debugs the project of its working directory.
+
+:::note
+Debugging works for JVM programs and tests. kotlin-debug-adapter doesn't support conditional breakpoints or logpoints, and evaluates variable names only, not arbitrary expressions.
+:::
 
 Breakpoints in library code resolve once [library sources](#library-sources) are downloaded.

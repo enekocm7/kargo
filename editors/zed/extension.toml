@@ -1,0 +1,25 @@
+id = "kargo"
+name = "Kargo"
+version = "0.1.0"
+schema_version = 1
+authors = ["Eneko Cañedo <149537780+enekocm7@users.noreply.github.com>"]
+description = "Kargo projects in Zed: kargo lsp for Kotlin and kargo.toml, debugging with kargo dap, and project context for the assistant."
+repository = "https://github.com/enekocm7/kargo"
+
+[language_servers.kargo]
+name = "Kargo"
+languages = ["Kotlin", "TOML"]
+
+[debug_adapters.Kargo]
+schema_path = "debug_adapter_schemas/Kargo.json"
+
+[debug_locators.kargo]
+
+[slash_commands.kargo-metadata]
+description = "Insert the Kargo project's layout, targets and dependencies"
+requires_argument = false
+
+[[capabilities]]
+kind = "process:exec"
+command = "*"
+args = ["--manifest-path", "*", "metadata", "--no-deps"]

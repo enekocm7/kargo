@@ -537,8 +537,8 @@ Manage JDKs, Kotlin/Native and Gradle distributions, and the Kotlin language ser
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses |
-| `install [jdk\|native\|gradle\|kotlin-lsp\|kls] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses |
-| `remove` (`rm`) `<jdk\|native\|gradle\|kotlin-lsp\|kls> <version>` | Remove one. For JDKs, a major version removes all its releases |
+| `install [jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
+| `remove` (`rm`) `<jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 
@@ -605,14 +605,44 @@ Write the project description a Kotlin language server reads, for editors that r
 ```sh
 kargo ide           # workspace.json, for the Kotlin LSP
 kargo ide --kls     # kls-classpath (kls-classpath.bat on Windows), for kotlin-language-server
+kargo ide --zed     # .zed/tasks.json, for Zed's run buttons
 ```
 
 | Option | Meaning |
 |---|---|
 | `--kls` | Write `kls-classpath` instead of `workspace.json` |
 | `--klib-targets` | Also describe Wasm and Native sources in `workspace.json`. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
+| `--zed` | Write `.zed/tasks.json` instead: tasks that run `kargo run` and `kargo test` from the run buttons of Zed's Kotlin extension, the project's programs, tests and tasks, and everyday commands. Needs no dependency resolution. See [Zed](../../guides/zed/#run-and-test) |
 
-Kargo keeps the file current: after `kargo build`, `check`, `test`, `fetch`, `add`, `remove`, `update`, `upgrade` and `target`, it writes it again if `kargo.toml` or `kargo.lock` changed, and prints `Wrote workspace.json`. A file Kargo didn't write is left alone, with a warning. If the dependencies can't be resolved, the project is described without them and the command fails with the reason. See [Without `kargo lsp`](../../guides/editors/#without-kargo-lsp).
+Kargo keeps the file current: after `kargo build`, `check`, `test`, `fetch`, `add`, `remove`, `update`, `upgrade` and `target`, it writes it again if `kargo.toml` or `kargo.lock` changed, and prints `Wrote workspace.json` (or `Wrote .zed/tasks.json`). A file Kargo didn't write is left alone, with a warning. If the dependencies can't be resolved, the project is described without them and the command fails with the reason. See [Without `kargo lsp`](../../guides/editors/#without-kargo-lsp).
+
+## `kargo dap`
+
+Run the debug adapter for editors: the [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) over stdin and stdout, in the project of the current directory.
+
+```sh
+kargo dap
+```
+
+Kargo runs [fwcd's kotlin-debug-adapter](https://github.com/fwcd/kotlin-debug-adapter) on the project's JDK, downloading it on first use like a [toolchain](../../guides/toolchains/#kotlin-language-servers), and passes the editor's messages through. It adds what the adapter lacks for a Kargo project:
+
+| Request | What Kargo does |
+|---|---|
+| `launch` | Runs `kargo <args>` with `--debug` (and `-t jvm` unless `args` names a target), sends what the program prints to the editor's debug console, and attaches once the JVM waits for the debugger. A program that exits first fails the request with its exit code |
+| `attach` | Attaches to a JVM started with `kargo run --debug` or `kargo test --debug` |
+
+| Launch argument | Default | Meaning |
+|---|---|---|
+| `args` | `["run"]` | The arguments of `kargo`, starting with `run` or `test`: `["run", "--bin", "server"]`, `["test", "com.example.MathTest.adds"]` |
+| `cwd` | the project root | The directory to run `kargo` in, relative to the project root |
+| `env` | | Environment variables for `kargo` and the program |
+
+| Attach argument | Default | Meaning |
+|---|---|---|
+| `port` | `5005` | The port the JVM listens on |
+| `hostName` | `127.0.0.1` | Its host |
+
+Both take `timeout` (milliseconds to try connecting, default 10000) and `logLevel` (`INFO`, `DEBUG`, `TRACE`, ...), which kotlin-debug-adapter logs to the debug console. Disconnecting stops a launched program. `--adapter-path <path>` runs another debug adapter executable instead of the one Kargo downloads. See [Debugging](../../guides/editors/#debugging).
 
 ## `kargo completions`
 

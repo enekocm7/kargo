@@ -2060,6 +2060,56 @@ fn ide_writes_workspace_json_and_keeps_it_current() {
 }
 
 #[test]
+fn ide_zed_writes_tasks_for_the_run_buttons_and_keeps_them_current() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", ""))
+        .file(
+            "src/Main.kt",
+            "fun main() {}
+",
+        )
+        .file(
+            "examples/demo.kt",
+            "fun main() {}
+",
+        );
+    let tasks = || -> serde_json::Value {
+        let text = p.read(".zed/tasks.json");
+        let json: String = text.lines().filter(|l| !l.starts_with("//")).collect::<Vec<_>>().join("\n");
+        serde_json::from_str(&json).unwrap()
+    };
+    let labels = |tag: Option<&str>| -> Vec<String> {
+        tasks()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| tag.is_none_or(|tag| t["tags"].as_array().is_some_and(|tags| tags.iter().any(|x| x == tag))))
+            .map(|t| t["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    p.kargo()
+        .args(["--offline", "ide", "--zed"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Wrote .zed/tasks.json").or(predicates::str::contains("Wrote .zed\\tasks.json")));
+    assert_eq!(labels(Some("kotlin-main")), ["kargo run -t jvm", "kargo run --example demo"]);
+    assert_eq!(labels(Some("kotlin-test")).len(), 1);
+    assert!(!p.path().join("workspace.json").exists(), "--zed writes only the tasks");
+    p.kargo().args(["--offline", "ide", "--zed"]).assert().success().stderr(predicates::str::contains(".zed/tasks.json is up to date"));
+
+    // A command that changes kargo.toml writes it again.
+    p.kargo().args(["--offline", "target", "add", "wasm"]).assert().success();
+    assert!(labels(None).contains(&"kargo test -t wasm".to_owned()), "{:?}", labels(None));
+
+    // Tasks someone else wrote are left alone.
+    p.file(".zed/tasks.json", "[]");
+    p.kargo().args(["--offline", "ide", "--zed"]).assert().success().stderr(predicates::str::contains("was not written by Kargo"));
+    assert_eq!(p.read(".zed/tasks.json"), "[]");
+    p.kargo().args(["ide", "--zed", "--kls"]).assert().failure();
+}
+
+#[test]
 fn lsp_describes_the_project_for_the_kotlin_lsp() {
     use serde_json::json;
     let repo = LocalRepo::new();
@@ -2133,7 +2183,12 @@ fn toolchain_lists_language_servers() {
         .args(["toolchain", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Kotlin language servers (").and(predicate::str::contains("(none installed)")));
+        .stdout(predicate::str::contains("Kotlin language servers and debug adapter (").and(predicate::str::contains("(none installed)")));
     p.kargo().args(["--offline", "toolchain", "install", "kotlin-lsp"]).assert().failure().stderr(predicate::str::contains("offline"));
+    p.kargo()
+        .args(["--offline", "toolchain", "install", "kotlin-debug-adapter"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("offline"));
     p.kargo().args(["toolchain", "remove", "kls", "1.3.13"]).assert().failure().stderr(predicate::str::contains("not installed"));
 }

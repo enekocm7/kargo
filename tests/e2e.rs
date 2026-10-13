@@ -1445,3 +1445,132 @@ fn zip_names(path: &std::path::Path) -> Vec<String> {
     let archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
     archive.file_names().map(|n| n.unwrap().into_owned()).collect()
 }
+
+/// A DAP client talking to `kargo dap`.
+struct Dap {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    messages: std::sync::mpsc::Receiver<serde_json::Value>,
+    seq: u64,
+    output: String,
+}
+
+impl Dap {
+    fn start(dir: &std::path::Path) -> Self {
+        use std::io::{BufRead, Read};
+        let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("kargo"))
+            .arg("dap")
+            .current_dir(dir)
+            .env_remove("KARGO_TARGET_DIR")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let (tx, messages) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            loop {
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if stdout.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let line = line.trim();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.strip_prefix("Content-Length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                stdout.read_exact(&mut body).unwrap();
+                if tx.send(serde_json::from_slice(&body).unwrap()).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { child, stdin, messages, seq: 0, output: String::new() }
+    }
+
+    fn send(&mut self, command: &str, arguments: serde_json::Value) {
+        use std::io::Write;
+        self.seq += 1;
+        let body = serde_json::json!({ "seq": self.seq, "type": "request", "command": command, "arguments": arguments }).to_string();
+        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    /// Waits for a message matching `want`, collecting the program's output on the way.
+    fn wait(&mut self, want: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        loop {
+            let message = self
+                .messages
+                .recv_timeout(std::time::Duration::from_secs(300))
+                .unwrap_or_else(|_| panic!("no answer from kargo dap; output so far:\n{}", self.output));
+            if message["event"] == "output" {
+                self.output.push_str(message["body"]["output"].as_str().unwrap_or_default());
+            }
+            if want(&message) {
+                return message;
+            }
+        }
+    }
+
+    /// Launches `kargo <args>` with a breakpoint, and checks the program stops there with the
+    /// stack frame in the real source file.
+    fn stops_at(&mut self, args: &[&str], file: &std::path::Path, line: u64) {
+        self.send(
+            "initialize",
+            serde_json::json!({ "adapterID": "kargo", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path" }),
+        );
+        self.wait(|m| m["command"] == "initialize");
+        self.send("launch", serde_json::json!({ "args": args }));
+        let source = serde_json::json!({ "name": file.file_name().unwrap().to_str(), "path": file.display().to_string() });
+        self.send("setBreakpoints", serde_json::json!({ "source": source, "breakpoints": [{ "line": line }] }));
+        self.wait(|m| m["command"] == "setBreakpoints");
+        self.send("configurationDone", serde_json::json!({}));
+        let launched = self.wait(|m| m["command"] == "launch");
+        assert_eq!(launched["success"], true, "{launched}\n{}", self.output);
+        let stopped = self.wait(|m| m["event"] == "stopped");
+        let thread = stopped["body"]["threadId"].clone();
+        self.send("stackTrace", serde_json::json!({ "threadId": thread }));
+        let trace = self.wait(|m| m["command"] == "stackTrace");
+        let top = &trace["body"]["stackFrames"][0];
+        assert_eq!(top["line"], line, "{trace}");
+        assert_eq!(top["source"]["path"], file.display().to_string(), "{trace}");
+        self.send("continue", serde_json::json!({ "threadId": thread }));
+        self.wait(|m| m["event"] == "terminated" || m["event"] == "exited");
+        self.send("disconnect", serde_json::json!({}));
+    }
+}
+
+impl Drop for Dap {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn dap_debugs_programs_and_tests() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["dbg"]);
+    t.write("dbg/src/Main.kt", "package com.example.dbg\n\nfun greeting(name: String): String = \"Hello, $name!\"\n\nfun main() {\n    println(greeting(\"Kotlin\"))\n}\n");
+    t.write(
+        "dbg/tests/GreetingTest.kt",
+        "package com.example.dbg\n\nimport kotlin.test.Test\nimport kotlin.test.assertEquals\n\nclass GreetingTest {\n    @Test\n    fun greets() {\n        assertEquals(\"Hello, Kargo!\", greeting(\"Kargo\"))\n    }\n}\n",
+    );
+    let dir = t.dir.path().join("dbg");
+    let main = dir.join("src").join("Main.kt");
+
+    let mut dap = Dap::start(&dir);
+    dap.stops_at(&["run"], &main, 3);
+    assert!(dap.output.contains("Hello, Kotlin!"), "the program ran to the end after continuing:\n{}", dap.output);
+
+    let mut dap = Dap::start(&dir);
+    dap.stops_at(&["test"], &dir.join("tests").join("GreetingTest.kt"), 9);
+}

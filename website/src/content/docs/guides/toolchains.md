@@ -82,6 +82,8 @@ Android builds run the Android Gradle Plugin on Gradle. Kargo downloads the Grad
 
 Kargo pins one version of each and checks the download's SHA-256: the one JetBrains publishes next to the archive for the Kotlin LSP, and one built into Kargo for kotlin-language-server. The Kotlin LSP brings its own Java runtime. kotlin-language-server runs on the project's JDK, or, when that is newer than 21 (its Kotlin compiler doesn't support newer ones), on a Temurin 21 that Kargo [installs](#pinning-a-jdk) like any managed JDK. `kargo toolchain install kotlin-lsp` downloads it ahead of time, for example before going offline.
 
+[`kargo dap`](../editors/#debugging), the debug adapter, runs fwcd's [kotlin-debug-adapter](https://github.com/fwcd/kotlin-debug-adapter) 0.4.4 the same way: Kargo downloads it on first use into `~/.kargo/toolchains/kotlin-debug-adapter/<version>`, checks it against a SHA-256 built into Kargo, and runs it on the project's JDK. `kargo toolchain install kotlin-debug-adapter` downloads it ahead of time.
+
 ## The Kotlin compiler
 
 You don't install the Kotlin compiler. Kargo downloads the version in `[kotlin] version` from Maven Central into its cache. To try a new Kotlin release, change the version and rebuild.

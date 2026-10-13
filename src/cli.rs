@@ -129,6 +129,8 @@ enum ToolArg {
     KotlinLsp,
     /// fwcd's kotlin-language-server, run by `kargo lsp --server kls`
     Kls,
+    /// fwcd's kotlin-debug-adapter, run by `kargo dap`
+    KotlinDebugAdapter,
 }
 
 impl From<ToolArg> for ToolKind {
@@ -139,6 +141,7 @@ impl From<ToolArg> for ToolKind {
             ToolArg::Gradle => ToolKind::Gradle,
             ToolArg::KotlinLsp => ToolKind::Server(ServerKind::KotlinLsp),
             ToolArg::Kls => ToolKind::Server(ServerKind::Kls),
+            ToolArg::KotlinDebugAdapter => ToolKind::Server(ServerKind::Kda),
         }
     }
 }
@@ -153,7 +156,7 @@ enum DaemonCommand {
 
 #[derive(Debug, Subcommand)]
 enum ToolchainCommand {
-    /// List installed JDKs, Kotlin/Native and Gradle distributions and Kotlin language servers
+    /// List installed JDKs, Kotlin/Native and Gradle distributions, Kotlin language servers and the debug adapter
     #[command(visible_alias = "ls")]
     List,
     /// Install a toolchain (without arguments: everything this project needs)
@@ -161,7 +164,7 @@ enum ToolchainCommand {
         #[arg(value_enum)]
         kind: Option<ToolArg>,
         /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's);
-        /// kotlin-lsp, kls: a server version (default: the one `kargo lsp` uses)
+        /// kotlin-lsp, kls, kotlin-debug-adapter: a version (default: the one `kargo lsp` or `kargo dap` uses)
         version: Option<String>,
     },
     /// Remove an installed toolchain
@@ -169,7 +172,7 @@ enum ToolchainCommand {
     Remove {
         #[arg(value_enum)]
         kind: ToolArg,
-        /// JDK: a major version (removes all its releases) or a release; Native, Gradle, kotlin-lsp, kls: a version
+        /// JDK: a major version (removes all its releases) or a release; Native, Gradle, kotlin-lsp, kls, kotlin-debug-adapter: a version
         #[arg(add = ArgValueCandidates::new(complete::installed_toolchains))]
         version: String,
     },
@@ -733,7 +736,9 @@ classes are not part of it. Resolution respects kargo.lock, --locked and --offli
 the server themselves instead of `kargo lsp`.
 
 Writes workspace.json for JetBrains' Kotlin LSP, or with --kls a kls-classpath script for fwcd's
-kotlin-language-server, from `kargo metadata`. Kargo keeps the file up to date: `kargo build`,
+kotlin-language-server, from `kargo metadata`. With --zed, writes .zed/tasks.json instead: tasks
+for the Zed editor that run, test and debug with Kargo from its run buttons. Kargo keeps the
+file up to date: `kargo build`,
 `check`, `test`, `fetch`, `add`, `remove`, `update`, `upgrade` and `target` write it again when
 kargo.toml or kargo.lock changed. A file Kargo didn't write is never replaced.")]
     Ide {
@@ -743,6 +748,9 @@ kargo.toml or kargo.lock changed. A file Kargo didn't write is never replaced.")
         /// Also describe Wasm and Native sources in workspace.json (the Kotlin LSP doesn't read klibs yet)
         #[arg(long, conflicts_with = "kls")]
         klib_targets: bool,
+        /// Write .zed/tasks.json for the Zed editor instead: Kargo tasks for its run buttons
+        #[arg(long, conflicts_with_all = ["kls", "klib_targets"])]
+        zed: bool,
     },
     /// Run the language server for editors (LSP over stdin and stdout)
     #[command(long_about = "Run the language server for editors: LSP over stdin and stdout.
@@ -765,6 +773,19 @@ kotlin-language-server) and again whenever kargo.toml or kargo.lock change.")]
         /// Accepted for editors that pass it; Kargo always talks over stdio
         #[arg(long, hide = true)]
         stdio: bool,
+    },
+    /// Run the debug adapter for editors (DAP over stdin and stdout)
+    #[command(long_about = "Run the debug adapter for editors: the Debug Adapter Protocol over stdin and stdout.
+
+Kargo runs fwcd's kotlin-debug-adapter on the project's JDK (downloading it on first use) and
+passes the editor's messages through. A `launch` request runs the Kargo command line in its
+`args`, `run` or `test`, with --debug and attaches once the JVM waits for the debugger; an
+`attach` request attaches to a program started with `kargo run --debug`. Kargo maps its source
+layout for the adapter, so breakpoints and stack frames find your files.")]
+    Dap {
+        /// Run this debug adapter executable instead of the one Kargo downloads
+        #[arg(long, value_name = "PATH")]
+        adapter_path: Option<PathBuf>,
     },
     /// Print project information
     Info {
@@ -890,10 +911,15 @@ fn builtin_commands() -> Vec<String> {
     names
 }
 
-/// Writes the files `kargo lsp` or `kargo ide` generated for a Kotlin language server again if
-/// kargo.toml or kargo.lock changed since. A failure is only a warning: the command succeeded.
+/// Writes the files `kargo lsp` or `kargo ide` generated for a Kotlin language server, and the
+/// Zed tasks `kargo ide --zed` wrote, again if kargo.toml or kargo.lock changed since. A failure is only a warning: the command succeeded.
 fn refresh_editor_files(config: &Config, global: &GlobalArgs, shell: &Shell) {
     let Ok(project) = load_project(global) else { return };
+    match kargo_lsp::zed::refresh(config, project.root()) {
+        Some(Ok(written)) => report_editor_files(shell, project.root(), &written),
+        Some(Err(error)) => shell.warn(format!("could not update .zed/tasks.json: {error:#}")),
+        None => {}
+    }
     let Some(outcome) = kargo_lsp::project::refresh(config, project.root()) else { return };
     report_editor_files(shell, project.root(), &outcome.written);
     if let Some(error) = outcome.error {
@@ -1293,7 +1319,17 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Ide { kls, klib_targets } => {
+        Command::Ide { zed: true, .. } => {
+            let project = load_project(global)?;
+            let metadata = kargo_lsp::project::metadata(config, project.root(), true)?;
+            let written = kargo_lsp::zed::write(&metadata)?;
+            report_editor_files(shell, project.root(), &written);
+            if written.changed.is_empty() && written.foreign.is_empty() {
+                shell.status("Fresh", ".zed/tasks.json is up to date");
+            }
+            Ok(0)
+        }
+        Command::Ide { kls, klib_targets, zed: false } => {
             let project = load_project(global)?;
             let kind = if kls { ServerKind::Kls } else { ServerKind::KotlinLsp };
             let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
@@ -1320,6 +1356,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
             let opts = kargo_lsp::Options { server, server_path, targets, builtin_commands: builtin_commands(), search_url: None };
             let clean = kargo_lsp::run(config.clone(), opts)?;
+            Ok(if clean { 0 } else { 1 })
+        }
+        Command::Dap { adapter_path } => {
+            let clean = kargo_lsp::dap::run(config.clone(), kargo_lsp::dap::Options { adapter_path })?;
             Ok(if clean { 0 } else { 1 })
         }
         Command::Outdated { names, pre, package } => {
