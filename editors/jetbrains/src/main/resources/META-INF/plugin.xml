@@ -1,0 +1,80 @@
+<idea-plugin>
+    <id>io.github.enekocm7.kargo</id>
+    <name>Kargo</name>
+    <vendor url="https://github.com/enekocm7/kargo">Kargo</vendor>
+    <description><![CDATA[
+    Support for <a href="https://enekocm7.github.io/kargo/">Kargo</a>, Cargo for Kotlin, in IntelliJ IDEA and Android Studio.
+    <ul>
+      <li>Kotlin code intelligence and <code>kargo.toml</code> completion, validation, quick fixes and dependency
+          hints from <code>kargo lsp</code>, which imports the project from <code>kargo.toml</code> and re-imports it when it changes.</li>
+      <li>Errors from <code>kargo check</code> for every target when you save.</li>
+      <li>File | New | Project | Kargo, and Tools | Kargo | Initialize Kargo Project for an existing folder.</li>
+      <li>Kargo run configurations, Run and Debug icons on <code>main</code> and tests, a test tree with per-test results,
+          and JVM debugging through <code>--debug</code>.</li>
+      <li>A Kargo tool window listing the project's programs, tests and tasks, and Tools | Kargo actions for
+          build, check, test, clean, fetch, update, add and remove dependencies, add targets and run tasks.</li>
+    </ul>
+    Kargo must be installed; see the <a href="https://enekocm7.github.io/kargo/guides/jetbrains/">setup guide</a>.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
+    <depends>com.redhat.devtools.lsp4ij</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationService serviceImplementation="io.github.enekocm7.kargo.settings.KargoSettings"/>
+        <applicationConfigurable parentId="language" id="io.github.enekocm7.kargo.settings" displayName="Kargo"
+                                 instance="io.github.enekocm7.kargo.settings.KargoConfigurable"/>
+        <notificationGroup id="Kargo" displayType="BALLOON"/>
+        <postStartupActivity implementation="io.github.enekocm7.kargo.KargoStartupActivity"/>
+
+        <configurationType implementation="io.github.enekocm7.kargo.run.KargoConfigurationType"/>
+        <programRunner implementation="io.github.enekocm7.kargo.run.KargoDebugRunner"/>
+        <runLineMarkerContributor language="kotlin" implementationClass="io.github.enekocm7.kargo.run.KargoRunLineMarkerContributor"/>
+
+        <newProjectWizard.generator implementation="io.github.enekocm7.kargo.wizard.KargoNewProjectWizard"/>
+
+        <toolWindow id="Kargo" anchor="right" icon="/icons/kargo.svg"
+                    factoryClass="io.github.enekocm7.kargo.toolwindow.KargoToolWindowFactory"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+        <server id="kargo" name="Kargo" factoryClass="io.github.enekocm7.kargo.lsp.KargoLanguageServerFactory">
+            <description><![CDATA[
+            <code>kargo lsp</code>: Kotlin code intelligence from a Kotlin language server Kargo downloads and pins,
+            and completion, validation and code actions for <code>kargo.toml</code>.
+            ]]></description>
+        </server>
+        <languageMapping language="kotlin" serverId="kargo" languageId="kotlin"/>
+        <fileNamePatternMapping patterns="kargo.toml" serverId="kargo" languageId="toml"/>
+    </extensions>
+
+    <actions>
+        <group id="Kargo.Tools" text="Kargo" popup="true" icon="/icons/kargo.svg">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="Kargo.Build" class="io.github.enekocm7.kargo.actions.KargoBuildAction" text="Build" description="kargo build"/>
+            <action id="Kargo.Check" class="io.github.enekocm7.kargo.actions.KargoCheckAction" text="Check" description="kargo check"/>
+            <action id="Kargo.Test" class="io.github.enekocm7.kargo.actions.KargoTestAction" text="Test" description="kargo test"/>
+            <action id="Kargo.Clean" class="io.github.enekocm7.kargo.actions.KargoCleanAction" text="Clean" description="kargo clean"/>
+            <action id="Kargo.RunCommand" class="io.github.enekocm7.kargo.actions.KargoRunCommandAction" text="Run Command…"
+                    description="Run any kargo command"/>
+            <action id="Kargo.RunTask" class="io.github.enekocm7.kargo.actions.KargoRunTaskAction" text="Run Task…" description="kargo task"/>
+            <separator/>
+            <action id="Kargo.AddDependency" class="io.github.enekocm7.kargo.actions.KargoAddDependencyAction" text="Add Dependency…"
+                    description="kargo add"/>
+            <action id="Kargo.RemoveDependency" class="io.github.enekocm7.kargo.actions.KargoRemoveDependencyAction"
+                    text="Remove Dependency…" description="kargo remove"/>
+            <action id="Kargo.AddTarget" class="io.github.enekocm7.kargo.actions.KargoAddTargetAction" text="Add Target…"
+                    description="kargo target add"/>
+            <action id="Kargo.Fetch" class="io.github.enekocm7.kargo.actions.KargoFetchAction" text="Fetch Dependencies and Sources"
+                    description="kargo fetch --sources"/>
+            <action id="Kargo.Update" class="io.github.enekocm7.kargo.actions.KargoUpdateAction" text="Update Dependencies"
+                    description="kargo update"/>
+            <separator/>
+            <action id="Kargo.Reload" class="io.github.enekocm7.kargo.actions.KargoReloadAction" text="Reload Kargo Project"
+                    description="Restart kargo lsp, which imports the project again" icon="AllIcons.Actions.Refresh"/>
+            <action id="Kargo.Init" class="io.github.enekocm7.kargo.actions.KargoInitAction" text="Initialize Kargo Project"
+                    description="kargo init in the project root"/>
+        </group>
+    </actions>
+</idea-plugin>
