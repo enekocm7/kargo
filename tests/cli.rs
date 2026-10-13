@@ -2177,6 +2177,38 @@ fn lsp_describes_multiplatform_source_sets() {
 }
 
 #[test]
+fn lsp_with_kargos_server_writes_nothing_into_the_project() {
+    use serde_json::json;
+    let repo = LocalRepo::new();
+    repo.publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+    let p = Project::new();
+    let extra = format!("[kotlin]\nversion = \"2.4.21\"\n[repositories]\nlocal = \"{}\"\n", repo.url());
+    p.file("kargo.toml", &manifest("app", &extra)).file("src/Main.kt", "fun main() {}\n");
+    let input = lsp_input(&[
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(p.path()), "capabilities": {} } }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "shutdown" }),
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    ]);
+    // The server has no release yet: Kargo says how to run a local build and keeps serving kargo.toml.
+    let out =
+        p.kargo().args(["--offline", "lsp", "--server", "kargo"]).write_stdin(input.clone()).assert().success().get_output().stdout.clone();
+    let messages = lsp_output(&out);
+    let shown = messages.iter().find(|m| m["method"] == "window/showMessage").unwrap_or_else(|| panic!("{messages:?}"));
+    assert!(shown["params"]["message"].as_str().unwrap().contains("could not start the Kotlin language server"), "{shown}");
+    assert_eq!(messages.iter().find(|m| m["id"] == 1).unwrap()["result"]["capabilities"]["hoverProvider"], true);
+    assert!(!p.path().join("workspace.json").exists());
+    assert!(p.read("target/lsp/fingerprint").starts_with("kargo-kotlin-server "), "a complete import is remembered");
+
+    let missing = p.path().join("no-such-server");
+    let args = ["--offline", "lsp", "--server", "kargo", "--server-path", missing.to_str().unwrap()];
+    let out = p.kargo().args(args).write_stdin(input).assert().success().get_output().stdout.clone();
+    let shown = lsp_output(&out).into_iter().find(|m| m["method"] == "window/showMessage").unwrap();
+    assert!(shown["params"]["message"].as_str().unwrap().contains("could not start the Kotlin language server"), "{shown}");
+}
+
+#[test]
 fn toolchain_lists_language_servers() {
     let p = Project::new();
     p.kargo()
@@ -2191,4 +2223,9 @@ fn toolchain_lists_language_servers() {
         .failure()
         .stderr(predicate::str::contains("offline"));
     p.kargo().args(["toolchain", "remove", "kls", "1.3.13"]).assert().failure().stderr(predicate::str::contains("not installed"));
+    p.kargo()
+        .args(["--offline", "toolchain", "install", "kargo-kotlin-server"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--server-path"));
 }

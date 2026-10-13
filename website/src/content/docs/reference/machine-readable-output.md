@@ -160,7 +160,9 @@ $ kargo metadata
                   "module": "org.jetbrains.kotlin:kotlin-stdlib",
                   "version": "2.4.21",
                   "path": "/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar",
-                  "sources": "/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21-sources.jar"
+                  "sources": "/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21-sources.jar",
+                  "kind": "jar",
+                  "sha256": "5f1c..."
                 },
                 ...
               ],
@@ -238,7 +240,7 @@ Each platform in `dependencies` has three lists:
 | `runtime` | Runs the program: `compile` and `runtime` dependencies | The same as `compile` |
 | `test` | Compiles and runs the tests: all of the above plus `[dev-dependencies]` | `compile` plus `[dev-dependencies]` |
 
-The entries are in classpath order. A path dependency is `{ "package": "<name>", "scope": "..." }`; use that package's roots. A Maven artifact has its `module`, the resolved `version`, the downloaded file's `path`, and its `sources` jar if that is in Kargo's cache, else `null`. [`kargo fetch --sources`](../commands/#kargo-fetch) downloads the sources jars.
+The entries are in classpath order. A path dependency is `{ "package": "<name>", "scope": "..." }`; use that package's roots. A Maven artifact has its `module`, the resolved `version`, the downloaded file's `path`, its `sources` jar if that is in Kargo's cache (else `null`), its `kind` (`jar`, `klib`, or the file's extension) and the `sha256` that [`kargo.lock`](../lockfile/) pins for the file (`null` if it isn't locked). Tools can key caches of a library on its `sha256`. [`kargo fetch --sources`](../commands/#kargo-fetch) downloads the sources jars.
 
 ## `kargo info --format json`
 

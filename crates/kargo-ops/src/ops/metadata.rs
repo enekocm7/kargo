@@ -5,6 +5,7 @@
 //! output directories, compiler arguments and plugins, entry points and tasks, and, unless
 //! `--no-deps` is given, the resolved classpath (or klib path) of every target and scope.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -304,21 +305,33 @@ fn klib_entry(platform: &str, main: Vec<Value>, test: Vec<Value>) -> Value {
     json!({ "platform": platform, "compile": main, "runtime": main, "test": test })
 }
 
-/// One entry per downloaded artifact, in classpath order, with its sources jar if it is cached.
+/// One entry per downloaded artifact, in classpath order, with its sources jar if it is cached,
+/// its kind and the SHA-256 `kargo.lock` pins for it.
 fn maven_entries(ctx: &BuildContext, res: &Resolution) -> Vec<Value> {
+    let checksums: HashMap<String, String> =
+        ctx.lockfile().resolutions.into_values().flat_map(|r| r.packages).flat_map(|p| p.files).map(|f| (f.path, f.sha256)).collect();
+    let cache = ctx.client.cache_dir();
     let mut out = Vec::new();
     for node in &res.nodes {
         let sources = ctx.client.cached_sources(&node.module, &node.version, &node.files);
         for file in &node.files {
+            let locked = file.strip_prefix(cache).ok().map(|rel| rel.to_string_lossy().replace('\\', "/"));
             out.push(json!({
                 "module": node.module.to_string(),
                 "version": node.version,
                 "path": path(file),
                 "sources": sources.as_deref().map(path),
+                "kind": library_kind(file),
+                "sha256": locked.and_then(|rel| checksums.get(&rel)),
             }));
         }
     }
     out
+}
+
+/// What a library file is: a `jar`, a `klib`, or the file's extension.
+fn library_kind(file: &Path) -> String {
+    file.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
 }
 
 /// `kargo fetch --sources`: downloads the sources jar of every resolved module of `targets`,
@@ -401,6 +414,8 @@ mod tests {
         let lib = jvm["compile"].as_array().unwrap().iter().find(|e| e["module"] == "g:lib").unwrap();
         assert!(lib["path"].as_str().unwrap().ends_with("lib-1.0.jar"), "{lib}");
         assert_eq!(lib["sources"], Value::Null, "sources are only listed once they are downloaded");
+        assert_eq!(lib["kind"], "jar");
+        assert_eq!(lib["sha256"], kargo_util::hash::sha256_bytes(b"jar"), "the checksum kargo.lock pins");
 
         // Only g:lib publishes a sources jar.
         assert_eq!(fetch_sources(&ctx, &[TargetKind::Jvm]).unwrap(), 1);
