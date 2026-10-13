@@ -17,11 +17,12 @@ use kargo_ops::ops::fmt::FmtOptions;
 use kargo_ops::ops::lint::LintOptions;
 use kargo_ops::ops::publish::PublishOptions;
 use kargo_ops::ops::run::{Program, RunOptions};
-use kargo_ops::ops::test::TestOptions;
+use kargo_ops::ops::test::{ListFormat, TestOptions};
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
 use kargo_ops::warnings;
 use kargo_ops::workspace::{ProfileKind, Project, Selection, Workspace};
+use kargo_toolchain::ServerKind;
 use kargo_util::config::Config;
 use kargo_util::shell::{Shell, Verbosity};
 
@@ -123,6 +124,10 @@ enum ToolArg {
     Native,
     /// A Gradle distribution (runs Android builds)
     Gradle,
+    /// JetBrains' Kotlin language server, run by `kargo lsp`
+    KotlinLsp,
+    /// fwcd's kotlin-language-server, run by `kargo lsp --server kls`
+    Kls,
 }
 
 impl From<ToolArg> for ToolKind {
@@ -131,6 +136,8 @@ impl From<ToolArg> for ToolKind {
             ToolArg::Jdk => ToolKind::Jdk,
             ToolArg::Native => ToolKind::Native,
             ToolArg::Gradle => ToolKind::Gradle,
+            ToolArg::KotlinLsp => ToolKind::Server(ServerKind::KotlinLsp),
+            ToolArg::Kls => ToolKind::Server(ServerKind::Kls),
         }
     }
 }
@@ -145,14 +152,15 @@ enum DaemonCommand {
 
 #[derive(Debug, Subcommand)]
 enum ToolchainCommand {
-    /// List installed JDKs, Kotlin/Native and Gradle distributions
+    /// List installed JDKs, Kotlin/Native and Gradle distributions and Kotlin language servers
     #[command(visible_alias = "ls")]
     List,
     /// Install a toolchain (without arguments: everything this project needs)
     Install {
         #[arg(value_enum)]
         kind: Option<ToolArg>,
-        /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's)
+        /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's);
+        /// kotlin-lsp, kls: a server version (default: the one `kargo lsp` uses)
         version: Option<String>,
     },
     /// Remove an installed toolchain
@@ -160,7 +168,7 @@ enum ToolchainCommand {
     Remove {
         #[arg(value_enum)]
         kind: ToolArg,
-        /// JDK: a major version (removes all its releases) or a release; Native, Gradle: a version
+        /// JDK: a major version (removes all its releases) or a release; Native, Gradle, kotlin-lsp, kls: a version
         #[arg(add = ArgValueCandidates::new(complete::installed_toolchains))]
         version: String,
     },
@@ -250,6 +258,18 @@ enum FormatArg {
     #[default]
     Text,
     Json,
+}
+
+/// The Kotlin language server behind `kargo lsp`.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum LspServerArg {
+    /// JetBrains' Kotlin LSP
+    #[default]
+    KotlinLsp,
+    /// fwcd's kotlin-language-server
+    Kls,
+    /// No Kotlin server: only kargo.toml support and runnables
+    None,
 }
 
 /// Output format of `kargo metadata`.
@@ -428,6 +448,12 @@ enum Command {
         /// Start the JVM tests suspended, waiting for a debugger on this port (default 5005)
         #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
         debug: Option<u16>,
+        /// Compile the tests and list them instead of running them (JVM and Native)
+        #[arg(long, conflicts_with_all = ["no_run", "report", "debug"])]
+        list: bool,
+        /// Output format of `--list`; `json` prints one JSON object per test
+        #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
+        format: FormatArg,
     },
     /// Generate API documentation from KDoc with Dokka
     #[command(visible_alias = "d")]
@@ -669,6 +695,25 @@ classpath or klib path of every target and scope. The `version` field is the for
         /// Only print the fingerprint of kargo.toml and kargo.lock (changes when the metadata may have changed)
         #[arg(long, conflicts_with_all = ["no_deps", "release"])]
         fingerprint: bool,
+    },
+    /// Run the language server for editors (LSP over stdin and stdout)
+    #[command(long_about = "Run the language server for editors: LSP over stdin and stdout.
+
+Kargo answers for kargo.toml itself (diagnostics, completion and hover from its schema and
+Kargo's own validation) and the `kargo/runnables` request, and passes everything about Kotlin
+code to a Kotlin language server it downloads on first use. It describes the project to that
+server from `kargo metadata` (workspace.json for the Kotlin LSP, kls-classpath for
+kotlin-language-server) and again whenever kargo.toml or kargo.lock change.")]
+    Lsp {
+        /// The Kotlin language server: JetBrains' `kotlin-lsp`, fwcd's `kls`, or `none` for kargo.toml support only
+        #[arg(long, value_enum, default_value_t)]
+        server: LspServerArg,
+        /// Run this language server executable instead of the one Kargo downloads
+        #[arg(long, value_name = "PATH")]
+        server_path: Option<PathBuf>,
+        /// Accepted for editors that pass it; Kargo always talks over stdio
+        #[arg(long, hide = true)]
+        stdio: bool,
     },
     /// Print project information
     Info {
@@ -947,11 +992,12 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug })?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run, no_fail_fast, report, debug } => {
+        Command::Test { build, filter, no_run, no_fail_fast, report, debug, list, format } => {
             set_message_format(build.message_format);
             let project = load_project(&global)?;
             let junit_report = report == Some(ReportArg::Junit);
-            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug };
+            let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
+            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug, list };
             let passed = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
                 ops::test::test(ctx, &opts)
             })?;
@@ -1110,6 +1156,19 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             let doc = ops::metadata::metadata(&ctx, &ops::metadata::MetadataOptions { no_deps })?;
             println!("{}", serde_json::to_string_pretty(&doc)?);
             Ok(0)
+        }
+        Command::Lsp { server, server_path, stdio: _ } => {
+            let server = match server {
+                LspServerArg::KotlinLsp => Some(ServerKind::KotlinLsp),
+                LspServerArg::Kls => Some(ServerKind::Kls),
+                LspServerArg::None => None,
+            };
+            if server.is_none() && server_path.is_some() {
+                bail!("`--server-path` needs a Kotlin language server; use `--server kotlin-lsp` or `--server kls`");
+            }
+            let opts = kargo_lsp::Options { server, server_path, builtin_commands: builtin_commands() };
+            let clean = kargo_lsp::run(config.clone(), opts)?;
+            Ok(if clean { 0 } else { 1 })
         }
         Command::Outdated { names, pre, package } => {
             let ws = load_one(&global, &package, "`kargo outdated`")?;
@@ -1579,6 +1638,10 @@ mod tests {
             Command::Check { keep_going: true, .. }
         ));
         assert!(matches!(Cli::try_parse_from(["kargo", "t", "--no-fail-fast"]).unwrap().command, Command::Test { no_fail_fast: true, .. }));
+        let cli = Cli::try_parse_from(["kargo", "test", "--list", "--format", "json", "MathTest"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { list: true, format: FormatArg::Json, .. }));
+        assert!(Cli::try_parse_from(["kargo", "test", "--format", "json"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "test", "--list", "--no-run"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "test", "--report", "junit", "--message-format", "json"]).unwrap();
         assert!(matches!(
             cli.command,

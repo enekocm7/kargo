@@ -25,6 +25,7 @@ use anyhow::{Context, Result, bail};
 use crate::builtins;
 use crate::ops::build::{announce, compiling};
 use crate::ops::context::BuildContext;
+use crate::ops::test::{emit_report_event, emit_summary, human_out};
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::testreport::{self, TestSummary};
 use kargo_manifest::{AndroidConfig, AndroidTarget, Dependency, Manifest, Scope, TargetKind};
@@ -540,6 +541,10 @@ pub fn gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
     }
     cmd.env("JAVA_HOME", &jdk.home);
     cmd.args(tasks).current_dir(ctx.ws.root());
+    if kargo_compiler::diagnostics::is_json() {
+        // Stdout carries only JSON messages.
+        cmd.stdout(std::io::stderr());
+    }
     let status = process::status(ctx.shell(), &mut cmd, "Gradle")?;
     Ok(status.success())
 }
@@ -614,8 +619,14 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
         if let (Some(dir), Some(name)) = (report_dir, report.file_name()) {
             std::fs::write(dir.join(name), &xml).with_context(|| format!("failed to copy {} to {}", report.display(), dir.display()))?;
         }
-        let part =
-            testreport::report_junit_xml(&xml, anstream::stdout()).with_context(|| format!("failed to parse {}", report.display()))?;
+        let json = kargo_compiler::diagnostics::is_json();
+        let package = &ctx.ws.manifest().package.name;
+        let part = testreport::report_junit_xml_with(&xml, human_out(), |event| {
+            if json {
+                emit_report_event(package, TargetKind::Android, event);
+            }
+        })
+        .with_context(|| format!("failed to parse {}", report.display()))?;
         summary.merge(part);
     }
     if summary == TestSummary::default() && (filter.is_none() || !gradle_ok) {
@@ -627,7 +638,8 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
         }
         return Ok(false);
     }
-    testreport::print_summary(&summary, anstream::stdout())?;
+    emit_summary(ctx, TargetKind::Android, summary.passed, summary.failed, summary.ignored, gradle_ok && summary.success());
+    testreport::print_summary(&summary, human_out())?;
     if !gradle_ok && summary.success() {
         ctx.shell().error(format!("Gradle `{task}` failed"));
     }

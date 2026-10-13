@@ -201,7 +201,7 @@ fn ic_bridge(root: &Path, jdk: &Jdk, classpath: &[PathBuf]) -> Result<PathBuf> {
     }
     let mut javac_cp = vec![api.clone()];
     javac_cp.extend(find_jar(classpath, "kotlin-stdlib-").cloned());
-    if let Err(e) = compile_java(root, jdk, "KargoIc.java", IC_SOURCE, &javac_cp, &classes) {
+    if let Err(e) = compile_java(root, jdk, "KargoIc.java", IC_SOURCE, &javac_cp, &[], &classes) {
         let _ = std::fs::create_dir_all(root);
         let _ = std::fs::write(&failed, format!("{e:#}\n"));
         return Err(e);
@@ -209,10 +209,19 @@ fn ic_bridge(root: &Path, jdk: &Jdk, classpath: &[PathBuf]) -> Result<PathBuf> {
     Ok(classes)
 }
 
-/// Compiles one Java source into `classes` (atomically, so concurrent builds don't clash).
-fn compile_java(root: &Path, jdk: &Jdk, file_name: &str, source: &str, classpath: &[PathBuf], classes: &Path) -> Result<()> {
+/// Compiles one Java source into `classes` (atomically, so concurrent builds don't clash),
+/// next to `resources` (relative path and contents).
+pub(crate) fn compile_java(
+    root: &Path,
+    jdk: &Jdk,
+    file_name: &str,
+    source: &str,
+    classpath: &[PathBuf],
+    resources: &[(&str, &str)],
+    classes: &Path,
+) -> Result<()> {
     if !jdk.has_javac() {
-        bail!("{} has no `javac` to build the daemon", jdk.home.display());
+        bail!("{} has no `javac` to build {file_name}", jdk.home.display());
     }
     let staging = root.join(format!(".staging-{}-{}", std::process::id(), file_name.trim_end_matches(".java")));
     kargo_util::fs::remove_dir_all_if_exists(&staging)?;
@@ -230,9 +239,16 @@ fn compile_java(root: &Path, jdk: &Jdk, file_name: &str, source: &str, classpath
         let _ = std::fs::remove_dir_all(&staging);
         bail!("javac failed to build {file_name}: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
+    for (path, contents) in resources {
+        let path = out.join(path);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, contents)?;
+    }
     let main_class = format!("{}.class", file_name.trim_end_matches(".java"));
     if std::fs::rename(&out, classes).is_err() && !classes.join(&main_class).is_file() {
-        bail!("failed to install the daemon classes into {}", classes.display());
+        bail!("failed to install the classes of {file_name} into {}", classes.display());
     }
     let _ = std::fs::remove_dir_all(&staging);
     Ok(())
@@ -267,7 +283,7 @@ fn connect(info: &Path) -> Option<(TcpStream, String)> {
 fn daemon_classes(root: &Path, jdk: &Jdk) -> Result<PathBuf> {
     let classes = root.join(format!("classes-{}-{}", &sha256_bytes(SOURCE.as_bytes())[..12], jdk.version));
     if !classes.join("KargoDaemon.class").is_file() {
-        compile_java(root, jdk, "KargoDaemon.java", SOURCE, &[], &classes)?;
+        compile_java(root, jdk, "KargoDaemon.java", SOURCE, &[], &[], &classes)?;
     }
     Ok(classes)
 }

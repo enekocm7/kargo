@@ -146,6 +146,61 @@ fn jvm_test_failures_and_filters() {
     t.kargo("app").args(["test", "nothing_matches"]).assert().code(101).stderr(predicate::str::contains("no JVM tests match"));
 }
 
+/// The JSON messages on a command's stdout, which must hold nothing else.
+fn json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
+    let text = String::from_utf8_lossy(stdout);
+    text.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}\n{text}"))).collect()
+}
+
+#[test]
+fn jvm_tests_are_listed_and_reported_as_json() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write(
+        "app/tests/MathTest.kt",
+        "package com.example.app\n\nimport kotlin.test.*\n\nclass MathTest {\n    @Test\n    fun `adds numbers`() {\n        \
+         println(\"from a test\")\n        assertEquals(4, 2 + 2)\n    }\n\n    @Test fun fails() = assertEquals(5, 2 + 2, \"math\")\n\n    \
+         @Ignore @Test fun later() {}\n}\n",
+    );
+
+    // `--list` compiles the tests and prints them without running them.
+    t.kargo("app")
+        .args(["test", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("jvm: com.example.app.MathTest.adds numbers\n"))
+        .stdout(predicate::str::contains("jvm: com.example.app.GreetingTest.greetsByName\n"))
+        .stderr(predicate::str::contains("Listed 4 jvm tests"));
+    let out = t.kargo("app").args(["test", "--list", "--format", "json", "MathTest"]).assert().success().get_output().stdout.clone();
+    let listed = json_lines(&out);
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    let adds = listed.iter().find(|m| m["name"] == "adds numbers").unwrap();
+    assert_eq!(adds["reason"], "test-discovered");
+    assert_eq!((adds["package"].as_str(), adds["target"].as_str()), (Some("app"), Some("jvm")));
+    assert_eq!(adds["suite"], "com.example.app.MathTest");
+    assert!(adds["id"].as_str().unwrap().contains("[method:adds numbers()]"), "{adds}");
+    assert!(adds["file"].as_str().unwrap().ends_with("MathTest.kt"), "{adds}");
+    assert_eq!(adds["line"], 7);
+
+    // `--message-format json` reports each test as it runs; the human report goes to stderr.
+    let out = t.kargo("app").args(["test", "--message-format", "json"]).assert().code(101).get_output().clone();
+    let messages = json_lines(&out.stdout);
+    let finished = |name: &str| messages.iter().find(|m| m["reason"] == "test-finished" && m["name"] == name).unwrap().clone();
+    assert!(messages.iter().any(|m| m["reason"] == "test-started" && m["name"] == "adds numbers" && m["id"] == adds["id"]));
+    assert_eq!(finished("adds numbers")["outcome"], "passed");
+    assert_eq!(finished("adds numbers")["stdout"].as_str().map(str::trim_end), Some("from a test"));
+    let fails = finished("fails");
+    assert_eq!(fails["outcome"], "failed");
+    assert!(fails["message"].as_str().unwrap().contains("math"), "{fails}");
+    assert!(fails["details"].as_str().unwrap().contains("MathTest.kt"), "{fails}");
+    assert_eq!(finished("later")["outcome"], "ignored");
+    let summary = messages.last().unwrap();
+    assert_eq!(summary["reason"], "test-summary");
+    assert_eq!((summary["passed"].as_u64(), summary["failed"].as_u64(), summary["ignored"].as_u64()), (Some(2), Some(1), Some(1)));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("fails()"));
+}
+
 #[test]
 fn main_class_detection() {
     require_e2e!();
@@ -432,6 +487,15 @@ fn multiplatform_expect_actual_on_wasm() {
     t.kargo("mpp").args(["test", "--target", "wasm", "--report", "junit"]).assert().success();
     let report = std::fs::read_to_string(t.dir.path().join("mpp/target/debug/wasm/test-reports/TEST-wasm.xml")).unwrap();
     assert!(report.contains(r#"<testcase name="greetsByName""#), "{report}");
+    // The runner's TeamCity messages become JSON messages too.
+    let out = t.kargo("mpp").args(["test", "--target", "wasm", "--message-format", "json"]).assert().success().get_output().stdout.clone();
+    let messages = json_lines(&out);
+    let finished = messages.iter().find(|m| m["reason"] == "test-finished").expect("a test-finished message");
+    assert_eq!(
+        (finished["target"].as_str(), finished["name"].as_str(), finished["outcome"].as_str()),
+        (Some("wasm"), Some("greetsByName"), Some("passed"))
+    );
+    assert!(messages.iter().any(|m| m["reason"] == "test-started" && m["id"] == finished["id"]));
 }
 
 #[test]
@@ -1028,6 +1092,18 @@ fn native_tests() {
     t.kargo("nat").args(["test", "--report", "junit"]).assert().success().stdout(predicate::str::contains("1 passed"));
     let report = std::fs::read_to_string(t.dir.path().join("nat/target/debug/native/test-reports/TEST-native.xml")).unwrap();
     assert!(report.contains("<testcase") && report.contains(r#"failures="0""#), "{report}");
+
+    let out = t.kargo("nat").args(["test", "--list", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let listed = json_lines(&out);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!((listed[0]["target"].as_str(), listed[0]["reason"].as_str()), (Some("native"), Some("test-discovered")));
+    assert!(listed[0]["file"].as_str().is_some_and(|f| f.ends_with(".kt")), "{listed:?}");
+    let out = t.kargo("nat").args(["test", "--message-format", "json"]).assert().success().get_output().stdout.clone();
+    let messages = json_lines(&out);
+    assert!(
+        messages.iter().any(|m| m["reason"] == "test-finished" && m["id"] == listed[0]["id"] && m["outcome"] == "passed"),
+        "{messages:?}"
+    );
 }
 
 #[test]

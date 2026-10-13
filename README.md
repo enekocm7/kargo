@@ -30,7 +30,7 @@ $ kargo test
 | `kargo build [--release] [-t <target>] [--keep-going] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005) |
-| `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests |
+| `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
@@ -46,11 +46,12 @@ $ kargo test
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo fetch [--sources]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors |
 | `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
+| `kargo lsp [--server kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion and hover, `kargo/runnables`, and Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
-| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, Kotlin/Native and Gradle distributions |
+| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, Kotlin/Native and Gradle distributions, and the Kotlin language servers behind `kargo lsp` |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
 | `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
@@ -213,7 +214,7 @@ Android builds run on a Gradle that Kargo downloads from `services.gradle.org` (
 
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
-$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0
+$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0, kotlin-lsp, kls
 $ kargo toolchain install            # whatever the current project needs
 $ kargo toolchain list               # installed JDKs/Kotlin/Native/Gradle, disk usage, what the project uses
 $ kargo toolchain which              # toolchains resolved for this project
@@ -301,9 +302,10 @@ Kargo is a Cargo workspace:
 | `kargo-util` | Terminal output, configuration, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver, uploads and the Maven Central Portal |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
-| `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, browsers, archives |
+| `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, commands |
+| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, project import for Kotlin language servers, runnables |
 | `kargo` | The CLI binary |
 
 ```bash

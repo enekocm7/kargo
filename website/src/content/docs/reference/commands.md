@@ -39,7 +39,7 @@ In a [workspace](../../guides/workspaces/), commands apply to every member at th
 
 ### Concurrent commands
 
-Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `metadata`, `package`, `publish`, `update`, `clean`, `android` and `toolchain which`) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
+Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `metadata`, `package`, `publish`, `update`, `clean`, `android`, `toolchain which`, and `lsp` while it imports the project) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
 
 ```console
 $ kargo build
@@ -196,7 +196,9 @@ kargo test [filter] [options]
 | `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
 | `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
 | `--debug[=<port>]` | Start the JVM tests suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`). Needs `-t jvm` in a project with several targets. See [Debugging tests](../../guides/testing/#debugging-tests) |
-| `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build` |
+| `--list` | Compile the tests and print them (`<target>: <Class>.<name>`) instead of running them. JVM and Native only. See [Listing tests](../../guides/testing/#listing-tests) |
+| `--format <fmt>` | With `--list`: `text` (default) or `json`, one [`test-discovered`](../machine-readable-output/#test-discovery) object per test |
+| `--message-format <fmt>` | `human` (default) or `json`: compiler diagnostics and each test's start and result as [JSON messages](../machine-readable-output/#test-results) on stdout; the test report moves to stderr |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace` | Which packages to test, one after another. The command fails if any test failed |
@@ -510,13 +512,13 @@ kargo android connectedAndroidTest
 
 ## `kargo toolchain`
 
-Manage JDKs, Kotlin/Native and Gradle distributions.
+Manage JDKs, Kotlin/Native and Gradle distributions, and the Kotlin language servers [`kargo lsp`](#kargo-lsp) runs.
 
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses |
-| `install [jdk\|native\|gradle] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses |
-| `remove` (`rm`) `<jdk\|native\|gradle> <version>` | Remove one. For JDKs, a major version removes all its releases |
+| `install [jdk\|native\|gradle\|kotlin-lsp\|kls] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses |
+| `remove` (`rm`) `<jdk\|native\|gradle\|kotlin-lsp\|kls> <version>` | Remove one. For JDKs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 
@@ -555,6 +557,23 @@ kargo metadata --fingerprint
 | `--fingerprint` | Only print a hash of every `kargo.toml` and `kargo.lock`. It is the `fingerprint` of the document, and it changes when the metadata may have changed |
 
 The output has a `"version": 1` field and is described in [Machine-readable output](../machine-readable-output/#kargo-metadata). See [Editor integration](../../guides/editors/) for how editors use it.
+
+## `kargo lsp`
+
+Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover) and the `kargo/runnables` request itself, and passes Kotlin code to a Kotlin language server it downloads on first use and describes the project to.
+
+```sh
+kargo lsp                       # JetBrains' Kotlin LSP behind Kargo's server
+kargo lsp --server kls          # fwcd's kotlin-language-server instead
+kargo lsp --server none         # kargo.toml support and runnables only
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--server <name>` | `kotlin-lsp` | The Kotlin language server: `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
+| `--server-path <path>` | | Run this server executable instead of the one Kargo downloads |
+
+Editors that pass `--stdio` may keep it; Kargo always uses stdio. The exit code is 0 after `shutdown` and `exit`, 1 if the editor exits without `shutdown`. See [Editor integration](../../guides/editors/#language-server) for editor setups, the files it writes and the `kargo/runnables` request.
 
 ## `kargo completions`
 

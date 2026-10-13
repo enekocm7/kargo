@@ -15,6 +15,7 @@ kargo-manifest = { path = "crates/kargo-manifest" }
 kargo-toolchain = { path = "crates/kargo-toolchain" }
 kargo-compiler = { path = "crates/kargo-compiler" }
 kargo-ops = { path = "crates/kargo-ops" }
+kargo-lsp = { path = "crates/kargo-lsp" }
 
 anstream = "1.0.0"
 anstyle = "1.0.14"
@@ -64,6 +65,7 @@ kargo-manifest.workspace = true
 kargo-toolchain.workspace = true
 kargo-compiler.workspace = true
 kargo-ops.workspace = true
+kargo-lsp.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

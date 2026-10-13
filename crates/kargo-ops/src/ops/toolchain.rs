@@ -1,4 +1,5 @@
-//! `kargo toolchain`: managing JDKs, Kotlin/Native and Gradle distributions.
+//! `kargo toolchain`: managing JDKs, Kotlin/Native and Gradle distributions, and the Kotlin
+//! language servers behind `kargo lsp`.
 
 use std::fmt::Write as _;
 
@@ -8,7 +9,7 @@ use kargo_manifest::{JdkRequest, Manifest, TargetKind};
 use kargo_maven::MavenClient;
 use kargo_toolchain::archive::{dir_size, human_size};
 use kargo_toolchain::jdks::{self, ManagedJdk};
-use kargo_toolchain::{GradleDistribution, Jdk, NativeToolchain, adoptium};
+use kargo_toolchain::{GradleDistribution, Jdk, LanguageServer, NativeToolchain, ServerKind, adoptium};
 use kargo_util::config::Config;
 
 /// Kinds of toolchains Kargo manages.
@@ -17,6 +18,8 @@ pub enum ToolKind {
     Jdk,
     Native,
     Gradle,
+    /// A Kotlin language server for `kargo lsp`.
+    Server(ServerKind),
 }
 
 /// The managed Gradle version an Android project uses, if it uses one: none for a
@@ -116,6 +119,28 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
             if used { "  (used by this project)" } else { "" }
         );
     }
+
+    let servers = LanguageServer::installed(config)?;
+    let _ = writeln!(
+        out,
+        "
+Kotlin language servers ({}):",
+        config.toolchains_dir().display()
+    );
+    if servers.is_empty() {
+        let _ = writeln!(out, "    (none installed)");
+    }
+    for server in &servers {
+        let pinned = server.version == server.kind.default_version();
+        let _ = writeln!(
+            out,
+            "    {:<10} {:<11} {:>10}{}",
+            server.kind.as_str(),
+            server.version,
+            human_size(dir_size(&server.home)),
+            if pinned { "  (used by kargo lsp)" } else { "" }
+        );
+    }
     Ok(out)
 }
 
@@ -151,6 +176,10 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
             let dist = GradleDistribution::ensure(config, &version)?;
             Ok(format!("Gradle {} at {}", dist.version, dist.home.display()))
         }
+        ToolKind::Server(kind) => {
+            let server = LanguageServer::ensure(config, kind, version.unwrap_or(kind.default_version()))?;
+            Ok(format!("{} {} at {}", kind.title(), server.version, server.home.display()))
+        }
     }
 }
 
@@ -180,6 +209,10 @@ pub fn remove(config: &Config, kind: ToolKind, selector: &str) -> Result<Vec<Str
         ToolKind::Gradle => {
             let removed = GradleDistribution::remove(config, selector)?;
             Ok(vec![format!("Gradle {}", removed.version)])
+        }
+        ToolKind::Server(kind) => {
+            let removed = LanguageServer::remove(config, kind, selector)?;
+            Ok(vec![format!("{} {}", kind.title(), removed.version)])
         }
     }
 }
