@@ -353,7 +353,13 @@ pub fn version_items(text: &str, request: &Request, versions: &[Version]) -> Vec
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hint {
     pub section: DependencySection,
+    /// The dependency's key in the table.
     pub name: String,
+    pub module: ModuleId,
+    /// The newest compatible version, if newer.
+    pub compatible: Option<String>,
+    /// The newest version, if newer.
+    pub latest: Option<String>,
     pub message: String,
 }
 
@@ -373,9 +379,16 @@ pub fn hints(config: &Config, path: &Path) -> Vec<Hint> {
                 (None, Some(latest)) => format!("`{}` {latest} is available (not compatible with {})", row.module, row.current),
                 (None, None) => return None,
             };
-            Some(Hint { section: row.section, name: row.name, message })
+            let module = row.module.parse().ok()?;
+            Some(Hint { section: row.section, name: row.name, module, compatible: row.compatible, latest: row.latest, message })
         })
         .collect()
+}
+
+/// The information diagnostic of a hint, if its dependency is still in `text`.
+pub fn diagnostic(text: &str, hint: &Hint) -> Option<Value> {
+    let span = locate(text, hint)?;
+    Some(json!({ "range": crate::text::range(text, span), "severity": 3, "source": "kargo", "message": hint.message }))
 }
 
 /// Where the key of the dependency a hint is about is in `text`, if it is still there.
@@ -544,6 +557,9 @@ mod tests {
             [Hint {
                 section: DependencySection::Main,
                 name: "com.acme:widget".into(),
+                module: module("com.acme:widget"),
+                compatible: Some("1.10.0".into()),
+                latest: Some("1.10.0".into()),
                 message: "`com.acme:widget` 1.10.0 is available".into()
             }]
         );

@@ -26,32 +26,17 @@ pub struct AddedTargets {
 /// Native and Android; `None` infers it from the sources (a `main` function makes an application).
 pub fn add(shell: &Shell, ws: &Workspace, targets: &[TargetKind], lib: Option<bool>) -> Result<AddedTargets> {
     let mut editor = ManifestEditor::load(&ws.manifest_path())?;
-    let enabled = ws.manifest().targets.enabled();
-    let mut added = AddedTargets::default();
-    let mut new_targets: Vec<TargetKind> = Vec::new();
     for &target in targets {
-        if enabled.contains(&target) {
+        if ws.manifest().targets.is_enabled(target) {
             shell.note(format!("the {target} target is already enabled"));
-        } else if !new_targets.contains(&target) {
-            new_targets.push(target);
         }
     }
-    if new_targets.is_empty() {
-        return Ok(added);
-    }
-    let lib = lib.unwrap_or_else(|| !has_main(ws));
-    let opts = new_options(ws.manifest(), lib);
-    if editor.targets().is_empty() {
-        // Without a [target] section the project is implicitly JVM; a [target.<other>] table alone
-        // would turn the JVM target off.
-        editor.add_target(TargetKind::Jvm, &target_section(TargetKind::Jvm, lib, &opts.package()))?;
-        added.materialized_jvm = true;
-    }
-    for &target in &new_targets {
-        editor.add_target(target, &target_section(target, lib, &opts.package()))?;
-    }
-    let manifest = ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    let Some(edit) = edit(ws, ws.manifest(), &mut editor, targets, lib)? else {
+        return Ok(AddedTargets::default());
+    };
+    let TargetEdit { targets: new_targets, lib, materialized_jvm, manifest } = edit;
     editor.save()?;
+    let mut added = AddedTargets { materialized_jvm, ..AddedTargets::default() };
     if added.materialized_jvm {
         shell.status("Adding", "jvm target");
         shell.note("kargo.toml had no [target] section, which means jvm only; [target.jvm] keeps the jvm target enabled");
@@ -67,9 +52,7 @@ pub fn add(shell: &Shell, ws: &Workspace, targets: &[TargetKind], lib: Option<bo
         shell.status("Adding", format!("{target} target{kind}"));
     }
 
-    for &target in &new_targets {
-        added.created.extend(scaffold(ws, &opts, target)?);
-    }
+    added.created = scaffold_targets(ws, &manifest, &new_targets, lib)?;
     for path in &added.created {
         shell.note(format!("created {}", path.to_string_lossy().replace('\\', "/")));
     }
@@ -93,6 +76,65 @@ pub fn add(shell: &Shell, ws: &Workspace, targets: &[TargetKind], lib: Option<bo
     Ok(added)
 }
 
+/// The `kargo.toml` edit of `kargo target add`.
+#[derive(Debug, Clone)]
+pub struct TargetEdit {
+    /// The targets added, without the ones already enabled.
+    pub targets: Vec<TargetKind>,
+    /// Whether they were added as libraries.
+    pub lib: bool,
+    /// Whether `[target.jvm]` was written to keep an implicit JVM project building for the JVM.
+    pub materialized_jvm: bool,
+    /// The edited manifest.
+    pub manifest: Manifest,
+}
+
+/// Adds the `[target.<name>]` tables of `kargo target add` to `editor`, which holds `manifest`
+/// (the package's `kargo.toml`, possibly with unsaved changes). Writes nothing. Returns `None`
+/// when every target is already enabled, and fails when the result would not be valid.
+pub fn edit(
+    ws: &Workspace,
+    manifest: &Manifest,
+    editor: &mut ManifestEditor,
+    targets: &[TargetKind],
+    lib: Option<bool>,
+) -> Result<Option<TargetEdit>> {
+    let mut new_targets: Vec<TargetKind> = Vec::new();
+    for &target in targets {
+        if !manifest.targets.is_enabled(target) && !new_targets.contains(&target) {
+            new_targets.push(target);
+        }
+    }
+    if new_targets.is_empty() {
+        return Ok(None);
+    }
+    let lib = lib.unwrap_or_else(|| !has_main(ws, manifest));
+    let opts = new_options(manifest, lib);
+    let mut materialized_jvm = false;
+    if editor.targets().is_empty() {
+        // Without a [target] section the project is implicitly JVM; a [target.<other>] table alone
+        // would turn the JVM target off.
+        editor.add_target(TargetKind::Jvm, &target_section(TargetKind::Jvm, lib, &opts.package()))?;
+        materialized_jvm = true;
+    }
+    for &target in &new_targets {
+        editor.add_target(target, &target_section(target, lib, &opts.package()))?;
+    }
+    let manifest = ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    Ok(Some(TargetEdit { targets: new_targets, lib, materialized_jvm, manifest }))
+}
+
+/// Writes the files `kargo target add` scaffolds for `targets` in the package of `manifest`,
+/// never overwriting one. Returns them relative to the package root.
+pub fn scaffold_targets(ws: &Workspace, manifest: &Manifest, targets: &[TargetKind], lib: bool) -> Result<Vec<PathBuf>> {
+    let opts = new_options(manifest, lib);
+    let mut created = Vec::new();
+    for &target in targets {
+        created.extend(scaffold(ws, &opts, target)?);
+    }
+    Ok(created)
+}
+
 /// The options `kargo new` would use for this package, for the target defaults and templates.
 fn new_options(manifest: &Manifest, lib: bool) -> NewOptions {
     let mut opts = NewOptions::new(manifest.package.name.clone());
@@ -107,8 +149,7 @@ fn new_options(manifest: &Manifest, lib: bool) -> NewOptions {
 }
 
 /// Whether the sources of the enabled targets declare a `main` function (or the manifest names one).
-fn has_main(ws: &Workspace) -> bool {
-    let m = ws.manifest();
+fn has_main(ws: &Workspace, m: &Manifest) -> bool {
     if m.targets.jvm.as_ref().is_some_and(|j| j.main_class.is_some()) || !m.bins.is_empty() {
         return true;
     }

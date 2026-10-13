@@ -1,6 +1,6 @@
 ---
 title: Editor integration
-description: Run kargo lsp in your editor, get completion and validation in kargo.toml, import a project into a language server, browse library sources, drive a test explorer and attach a debugger.
+description: Run kargo lsp in your editor, get completion, validation and quick fixes in kargo.toml, import a project into a language server, browse library sources, drive a test explorer and attach a debugger.
 ---
 
 Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a language server, a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
@@ -18,6 +18,7 @@ It speaks LSP over stdin and stdout and gives you:
 - **Kotlin code intelligence** (completion, go to definition, references, hover, rename, quick fixes, diagnostics) from [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp). Kargo downloads the server on first use, describes your project to it, and passes Kotlin traffic through unchanged.
 - **`kargo.toml` support**: completion of keys, tables and values, documentation on hover, and errors as you type. Errors come from the [JSON Schema](#completion-and-validation-in-kargotoml) first (unknown keys with a "did you mean", wrong types, invalid values), then from Kargo's own validation and [warnings](../../reference/warnings/), the same messages `kargo build` prints.
 - **Dependencies in `kargo.toml`**: completion of `group:artifact` coordinates from Maven Central and of versions from your repositories, and a hint on every dependency with a newer version. See [Dependency completion and update hints](#dependency-completion-and-update-hints).
+- **Code actions in `kargo.toml`**: quick fixes for its errors, and the edits of `kargo add`, `kargo add --framework`, `kargo target add` and `kargo upgrade` from the editor. See [Code actions in `kargo.toml`](#code-actions-in-kargotoml).
 - **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
 - **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
 
@@ -198,6 +199,52 @@ The schema checks the shape of `kargo.toml`. Some rules need Kargo itself, such 
 All of this runs in the background: Kotlin traffic and `kargo.toml` errors never wait for the network. Searches wait for a pause in your typing, and their results are kept in `~/.kargo/cache/maven-search` for a day. Versions come from the `maven-metadata.xml` files Kargo caches for [dependency resolution](../dependencies/). Hints are worked out when you open `kargo.toml` and after each [re-import](#language-server), not on every keystroke.
 
 With `kargo --offline lsp`, coordinates aren't searched, and versions and hints come from what is already cached and from repositories on disk. Set `KARGO_MAVEN_SEARCH_URL` to search a mirror of the Maven Central search API instead (see [Environment](../../reference/environment/)).
+
+## Code actions in `kargo.toml`
+
+`kargo lsp` fixes and edits `kargo.toml` for you through your editor's code actions (the light bulb, or *Quick Fix* / *Source Action*). Each action makes the same change as the Kargo command it stands for, with the same format-preserving editor, so comments and layout stay as you wrote them.
+
+**Quick fixes**, offered on the line of an error or hint:
+
+| On | Fix |
+|---|---|
+| An unknown key with a "did you mean" | Rename it to the suggestion: `mian-class` becomes `main-class` |
+| A value that isn't allowed | Change it to each allowed value, the closest one first: `environment = "browsr"` becomes `"browser"` |
+| A missing required key | Add it under the table's header: `version = "0.1.0"` in `[package]`, a `name` in `[[bin]]` (taken from its `path`), or a whole `[package]` table |
+| An [update hint](#dependency-completion-and-update-hints) | Upgrade the dependency to the newest compatible version, as `kargo upgrade` does, or to the latest one, as `kargo upgrade --incompatible` does |
+| A line holding only `"group:artifact"` in a dependency table | Add it at its latest version, as `kargo add group:artifact` does |
+
+```toml title="kargo.toml"
+[target.wasm]
+environment = "browsr"          # ← Change to `browser`
+
+[dependencies]
+"io.ktor:ktor-server-core"      # ← Add `io.ktor:ktor-server-core` at its latest version
+```
+
+**Adding frameworks and targets**, offered anywhere in a package's `kargo.toml` once it parses:
+
+- *Enable the `<name>` framework* for each [built-in framework](../frameworks/) that isn't enabled, writing `<name> = true` under `[frameworks]` as `kargo add --framework <name>` does. Ktor isn't offered, since it needs an engine: write `ktor = { server = "netty" }` yourself.
+- *Add the `<target>` target* for each target that isn't enabled. It runs `kargo target add <target>`: it writes `[target.<target>]` with the defaults `kargo new` uses (and `[target.jvm]` first, if `kargo.toml` had no `[target]` section) and scaffolds the target's files, such as `src-native/` or the Android manifest.
+
+Inside `[frameworks]` or a `[target.*]` table they are refactorings, so they show in the light bulb; elsewhere they are source actions, which editors list under *Source Action* instead.
+
+Adding a dependency picks its version from your [`[repositories]`](../../reference/manifest/#repositories), so it runs in the background like completion. Edits to a `kargo.toml` open in the editor arrive as a `workspace/applyEdit`, so you can undo them and save when you like; a `kargo.toml` that isn't open is written directly.
+
+### Commands for editor plugins
+
+Actions that need the network or write files are LSP commands, which plugins can also run directly with `workspace/executeCommand`, for example after asking for coordinates in an input box:
+
+| Command | Arguments | Does |
+|---|---|---|
+| `kargo/addDependency` | `{ "uri", "coords", "section"?, "line"? }` | `kargo add`: `coords` is one coordinate (optionally with `:version`) or a list. `section` is `dependencies` (the default), `dev-dependencies` or `target.<target>.dependencies`. `line`, zero-based, is a half-typed dependency line to replace. Replies with `{ "added": ["group:artifact:version"], "section" }` |
+| `kargo/addTarget` | `{ "uri", "target" }` | `kargo target add <target>`. Replies with `{ "targets", "jvmMaterialized", "created" }`, `created` listing the scaffolded files relative to the package |
+
+```json title="Request"
+{ "jsonrpc": "2.0", "id": 9, "method": "workspace/executeCommand", "params": { "command": "kargo/addDependency", "arguments": [{ "uri": "file:///home/me/app/kargo.toml", "coords": "io.ktor:ktor-server-core" }] } }
+```
+
+`uri` is the package's `kargo.toml`. Kargo lists both commands in `executeCommandProvider`. A command fails with an error reply, leaving `kargo.toml` alone, when the result would not be a valid manifest, when `kargo.toml` changed while the version was being looked up, or when the document is open in an editor that doesn't support `workspace/applyEdit`.
 
 ## Importing a project
 

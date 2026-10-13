@@ -560,7 +560,7 @@ The output has a `"version": 1` field and is described in [Machine-readable outp
 
 ## `kargo lsp`
 
-Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover, Maven coordinates and versions, hints at newer versions) and the `kargo/runnables` request itself, and passes Kotlin code to a Kotlin language server it downloads on first use and describes the project to.
+Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover, Maven coordinates and versions, hints at newer versions, code actions that make the edits of `kargo add`, `kargo target add` and `kargo upgrade`) and the `kargo/runnables` request itself, and passes Kotlin code to a Kotlin language server it downloads on first use and describes the project to.
 
 ```sh
 kargo lsp                       # JetBrains' Kotlin LSP behind Kargo's server
@@ -573,7 +573,7 @@ kargo lsp --server none         # kargo.toml support and runnables only
 | `--server <name>` | `kotlin-lsp` | The Kotlin language server: `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
 | `--server-path <path>` | | Run this server executable instead of the one Kargo downloads |
 
-Editors that pass `--stdio` may keep it; Kargo always uses stdio. The exit code is 0 after `shutdown` and `exit`, 1 if the editor exits without `shutdown`. See [Editor integration](../../guides/editors/#language-server) for editor setups, the files it writes and the `kargo/runnables` request.
+Editors that pass `--stdio` may keep it; Kargo always uses stdio. The exit code is 0 after `shutdown` and `exit`, 1 if the editor exits without `shutdown`. See [Editor integration](../../guides/editors/#language-server) for editor setups, the files it writes, the [code actions](../../guides/editors/#code-actions-in-kargotoml) and the `kargo/runnables` request.
 
 ## `kargo completions`
 

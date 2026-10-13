@@ -17,6 +17,8 @@ pub struct Problem {
     pub span: Range<usize>,
     pub message: String,
     pub warning: bool,
+    /// How to fix it, for a code action.
+    pub fix: Option<schema::Fix>,
 }
 
 /// Every problem in the manifest at `path` with contents `text`. `is_builtin_command` names
@@ -26,12 +28,12 @@ pub fn problems(text: &str, path: &Path, is_builtin_command: &dyn Fn(&str) -> bo
         Ok(doc) => doc,
         Err(e) => {
             let span = e.span().unwrap_or(0..0);
-            return vec![Problem { span, message: e.message().trim().to_owned(), warning: false }];
+            return vec![Problem { span, message: e.message().trim().to_owned(), warning: false, fix: None }];
         }
     };
     let violations = schema::validate(&schema::from_document(&doc));
     if !violations.is_empty() {
-        return violations.into_iter().map(|v| Problem { span: v.span, message: v.message, warning: false }).collect();
+        return violations.into_iter().map(|v| Problem { span: v.span, message: v.message, warning: false, fix: v.fix }).collect();
     }
     let dir = path.parent().unwrap_or(Path::new("."));
     let result = match kargo_manifest::is_workspace(text) {
@@ -43,7 +45,9 @@ pub fn problems(text: &str, path: &Path, is_builtin_command: &dyn Fn(&str) -> bo
         Err(e) => Err(e),
     };
     match result {
-        Ok(warnings) => warnings.into_iter().map(|message| Problem { span: locate(text, &message), message, warning: true }).collect(),
+        Ok(warnings) => {
+            warnings.into_iter().map(|message| Problem { span: locate(text, &message), message, warning: true, fix: None }).collect()
+        }
         Err(e) => {
             let span = e.downcast_ref::<toml::de::Error>().and_then(toml::de::Error::span);
             let message = match e.downcast_ref::<toml::de::Error>() {
@@ -51,9 +55,14 @@ pub fn problems(text: &str, path: &Path, is_builtin_command: &dyn Fn(&str) -> bo
                 None => format!("{e:#}"),
             };
             let span = span.unwrap_or_else(|| locate(text, &message));
-            vec![Problem { span, message, warning: false }]
+            vec![Problem { span, message, warning: false, fix: None }]
         }
     }
+}
+
+/// The LSP diagnostic of a problem.
+pub fn diagnostic(text: &str, problem: &Problem) -> Value {
+    json!({ "range": crate::text::range(text, problem.span.clone()), "severity": if problem.warning { 2 } else { 1 }, "source": "kargo", "message": problem.message })
 }
 
 /// The workspace manifest a package at `dir` inherits from, if one of its parents has one.
@@ -105,7 +114,7 @@ pub(crate) enum Context {
 }
 
 /// The key path of the last `[table]` or `[[array]]` header on the lines before `line_start`.
-fn current_table(text: &str, line_start: usize) -> Vec<String> {
+pub(crate) fn current_table(text: &str, line_start: usize) -> Vec<String> {
     text[..line_start]
         .lines()
         .rev()
@@ -274,7 +283,7 @@ fn item(key: &str, kind: u32, node: &Value, insert: String) -> Value {
     item
 }
 
-fn quote_key(key: &str) -> String {
+pub(crate) fn quote_key(key: &str) -> String {
     if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { key.to_owned() } else { format!("\"{key}\"") }
 }
 

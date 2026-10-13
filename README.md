@@ -46,7 +46,7 @@ $ kargo test
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo fetch [--sources]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors |
 | `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
-| `kargo lsp [--server kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion and hover (including Maven coordinates, versions and newer-version hints), `kargo/runnables`, and Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into |
+| `kargo lsp [--server kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion, hover (including Maven coordinates, versions and newer-version hints) and code actions (quick fixes, add a dependency, framework or target, upgrade), `kargo/runnables`, and Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
@@ -306,7 +306,7 @@ Kargo is a Cargo workspace:
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, commands |
-| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, project import for Kotlin language servers, runnables |
+| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, project import for Kotlin language servers, runnables |
 | `kargo` | The CLI binary |
 
 ```bash

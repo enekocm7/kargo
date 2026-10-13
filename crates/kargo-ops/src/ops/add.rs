@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::workspace::{Project, Workspace, dunce_canonicalize};
 use kargo_manifest::edit::{DependencySection, ManifestEditor, NewDependency};
 use kargo_manifest::{MANIFEST_NAME, Scope};
-use kargo_maven::{Artifact, CoordSpec, MavenClient, VersionReq, select_latest};
+use kargo_maven::{Artifact, CoordSpec, MavenClient, Repository, VersionReq, select_latest};
 use kargo_util::config::Config;
 
 #[derive(Debug, Clone)]
@@ -25,11 +25,31 @@ pub struct AddOptions {
 /// Adds dependencies to the manifest, picking the latest release when no
 /// version is given. Returns the coordinates written.
 pub fn add(config: &Config, ws: &Workspace, opts: &AddOptions) -> Result<Vec<String>> {
+    let mut editor = ManifestEditor::load(&ws.manifest_path())?;
+    let added = add_to(config, ws.manifest().repositories.clone(), &mut editor, opts)?;
+    // Never write a manifest that no longer parses.
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    editor.save()?;
+    for (coords, replaced) in &added {
+        let verb = if *replaced { "Updating" } else { "Adding" };
+        config.shell().status(verb, format!("{coords} to [{}]", opts.section.display()));
+    }
+    Ok(added.into_iter().map(|(coords, _)| coords).collect())
+}
+
+/// The edit of `kargo add`, made to `editor` without saving it: picks each dependency's version
+/// from `repositories` and writes its entry. Returns the `group:artifact:version` of each, and
+/// whether it replaced an entry.
+pub fn add_to(
+    config: &Config,
+    repositories: Vec<Repository>,
+    editor: &mut ManifestEditor,
+    opts: &AddOptions,
+) -> Result<Vec<(String, bool)>> {
     if opts.specs.is_empty() {
         bail!("nothing to add; pass coordinates like `org.jetbrains.kotlinx:kotlinx-datetime`");
     }
-    let client = MavenClient::new(config, ws.manifest().repositories.clone());
-    let mut editor = ManifestEditor::load(&ws.manifest_path())?;
+    let client = MavenClient::new(config, repositories);
     let mut added = Vec::new();
     for raw in &opts.specs {
         let spec: CoordSpec = raw.parse()?;
@@ -68,13 +88,8 @@ pub fn add(config: &Config, ws: &Workspace, opts: &AddOptions) -> Result<Vec<Str
         }
         let dep = NewDependency { version: Some(version.clone()), scope: opts.scope, classifier: spec.classifier.clone(), bom: opts.bom };
         let replaced = editor.add_dependency(opts.section, &spec.module, &dep)?;
-        let verb = if replaced { "Updating" } else { "Adding" };
-        config.shell().status(verb, format!("{}:{version} to [{}]", spec.module, opts.section.display()));
-        added.push(format!("{}:{version}", spec.module));
+        added.push((format!("{}:{version}", spec.module), replaced));
     }
-    // Never write a manifest that no longer parses.
-    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
-    editor.save()?;
     Ok(added)
 }
 

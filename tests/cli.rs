@@ -1931,6 +1931,47 @@ fn lsp_serves_kargo_toml_and_runnables() {
 }
 
 #[test]
+fn lsp_code_actions_edit_kargo_toml_like_the_cli() {
+    use serde_json::json;
+    let body = "# my app\n[package]\nname = \"app\"   # keep this\nversion = \"0.1.0\"\n\n[target.jvm]\n";
+    let editor = Project::new();
+    editor.file("kargo.toml", body).file("src/Main.kt", "fun main() {}\n");
+    let cli = Project::new();
+    cli.file("kargo.toml", body).file("src/Main.kt", "fun main() {}\n");
+    let uri = file_uri(&editor.path().join("kargo.toml"));
+    let typo = body.replace("[target.jvm]", "[target.wasm]\nenvironment = \"browsr\"");
+    let line = |text: &str, needle: &str| text.lines().position(|l| l.contains(needle)).unwrap();
+    let at = |l: usize| json!({ "start": { "line": l, "character": 0 }, "end": { "line": l, "character": 0 } });
+    let input = lsp_input(&[
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(editor.path()), "capabilities": { "workspace": { "applyEdit": true } } } }),
+        json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": { "uri": uri, "languageId": "toml", "version": 1, "text": typo } } }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/codeAction", "params": { "textDocument": { "uri": uri }, "range": at(line(&typo, "browsr")), "context": { "diagnostics": [] } } }),
+        json!({ "jsonrpc": "2.0", "method": "textDocument/didClose", "params": { "textDocument": { "uri": uri } } }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "workspace/executeCommand", "params": { "command": "kargo/addTarget", "arguments": [{ "uri": uri, "target": "native" }] } }),
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "shutdown" }),
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    ]);
+    let out = editor.kargo().args(["lsp", "--server", "none"]).write_stdin(input).assert().success().get_output().stdout.clone();
+    let messages = lsp_output(&out);
+    let reply = |id: i64| messages.iter().find(|m| m["id"] == id && m.get("method").is_none()).unwrap_or_else(|| panic!("{messages:?}"));
+    assert_eq!(reply(1)["result"]["capabilities"]["executeCommandProvider"]["commands"], json!(["kargo/addDependency", "kargo/addTarget"]));
+
+    let found = reply(2)["result"].as_array().unwrap();
+    let fix = found.iter().find(|a| a["isPreferred"] == true).unwrap_or_else(|| panic!("{found:?}"));
+    assert_eq!(fix["title"], "Change to `browser`");
+    // The smallest edit: `browsr` gets its `e`.
+    assert_eq!(fix["edit"]["changes"][&uri][0]["newText"], "e");
+    let framework = found.iter().find(|a| a["title"] == "Enable the `serialization` framework").unwrap_or_else(|| panic!("{found:?}"));
+    assert_eq!(framework["kind"], "source");
+
+    // Not open in the editor: Kargo writes kargo.toml and scaffolds, as `kargo target add` does.
+    assert_eq!(reply(3)["result"]["targets"], json!(["native"]), "{messages:?}");
+    cli.kargo().args(["target", "add", "native"]).assert().success();
+    assert_eq!(editor.read("kargo.toml"), cli.read("kargo.toml"));
+    assert!(editor.path().join("src-native").is_dir() && cli.path().join("src-native").is_dir());
+}
+
+#[test]
 fn lsp_describes_the_project_for_the_kotlin_lsp() {
     use serde_json::json;
     let repo = LocalRepo::new();
