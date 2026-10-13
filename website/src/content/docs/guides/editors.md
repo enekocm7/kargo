@@ -27,7 +27,7 @@ The first start downloads the Kotlin LSP (about 360 MB) and resolves the project
 
 ### Editor setup
 
-**IntelliJ IDEA** and **Android Studio**: install the Kargo plugin, which runs `kargo lsp` for `kargo.toml` and adds a New Project wizard, run configurations, a test tree and debugging. See [IntelliJ IDEA and Android Studio](../jetbrains/).
+**IntelliJ IDEA** and **Android Studio**: install the Kargo plugin, which runs `kargo lsp` for `kargo.toml`, sets up the IDE's Kotlin support from `kargo metadata` and adds a New Project wizard, run configurations, a test tree and debugging. See [IntelliJ IDEA and Android Studio](../jetbrains/).
 
 **Zed**: install the Kargo extension, which runs `kargo lsp` for Kotlin files and `kargo.toml` and debugs programs and tests through [`kargo dap`](#debug-adapter). See [Zed](../zed/).
 
