@@ -294,6 +294,20 @@ fn merge_plugins(plugins: &mut Vec<PluginSpec>) {
 /// Names of the built-in frameworks, for `kargo add --framework` and `kargo new --with`.
 pub const FRAMEWORK_NAMES: &[&str] = &["compose", "serialization", "coroutines", "ktor", "lombok", "spring-boot"];
 
+/// The names of the frameworks `[frameworks]` enables, in [`FRAMEWORK_NAMES`] order.
+pub fn enabled_frameworks(manifest: &Manifest) -> Vec<&'static str> {
+    let fw = &manifest.frameworks;
+    let enabled = [
+        fw.compose.is_some(),
+        fw.serialization.is_some(),
+        fw.coroutines.is_some(),
+        fw.ktor.is_some(),
+        fw.lombok.is_some(),
+        fw.spring_boot.is_some(),
+    ];
+    FRAMEWORK_NAMES.iter().zip(enabled).filter_map(|(name, on)| on.then_some(*name)).collect()
+}
+
 /// Summary of plugin options as `-P` arguments.
 pub fn plugin_option_args(plugin: &PluginSpec) -> Vec<String> {
     let Some(id) = &plugin.id else { return Vec::new() };

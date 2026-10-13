@@ -119,6 +119,19 @@ The filter keeps the tests whose fully qualified `package.Class.method` name con
 
 On the JVM, a filter that matches a test class name selects whole classes, which works with every JUnit Platform engine. A filter that matches no class name is matched against method names, which only finds tests of method-based engines such as JUnit Jupiter (what `kotlin.test` uses), not Kotest specs.
 
+## Debugging tests
+
+`--debug` starts the JVM that runs the tests suspended, waiting for a debugger to attach over JDWP on port 5005 of `127.0.0.1` (`--debug=<port>` for another one). Combine it with a filter to stop in one test:
+
+```console
+$ kargo test --debug CalculatorTest.adds
+     Running JVM tests (JUnit Platform)
+note: the test JVM waits for a debugger: attach one over JDWP to 127.0.0.1 on port 5005
+Listening for transport dt_socket at address: 5005
+```
+
+Attach your editor's debugger as described in [Debugging](../editors/#debugging). `--debug` only debugs JVM tests, so a project with several targets needs `-t jvm`.
+
 ## What runs where
 
 | Target | Test runner | Default test libraries |

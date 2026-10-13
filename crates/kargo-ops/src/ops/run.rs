@@ -59,6 +59,20 @@ pub struct RunOptions {
     pub port: Option<u16>,
     /// Open the served page in a browser (`--open`).
     pub open: bool,
+    /// Start the JVM suspended, waiting for a JDWP debugger on this port (`--debug`).
+    pub debug: Option<u16>,
+}
+
+/// The JVM option that waits for a debugger to attach over JDWP on `port` of the loopback
+/// interface before running anything. Port 0 lets the JVM pick one; it prints the port it uses.
+pub fn jdwp_option(port: u16) -> String {
+    format!("-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:{port}")
+}
+
+/// Tells the user how to attach to a JVM started with [`jdwp_option`].
+pub fn note_debugger(shell: &kargo_util::shell::Shell, port: u16, what: &str) {
+    let port = if port == 0 { "the port it prints".to_owned() } else { format!("port {port}") };
+    shell.note(format!("{what} waits for a debugger: attach one over JDWP to 127.0.0.1 on {port}"));
 }
 
 /// The port `kargo run` serves a Wasm browser app on unless told otherwise.
@@ -103,6 +117,9 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
     }
     if (opts.port.is_some() || opts.open) && !wasm.is_some_and(|w| w.environment == WasmEnvironment::Browser) {
         bail!("`--port` and `--open` serve a Wasm browser app; they need `-t wasm` with [target.wasm] environment = \"browser\"");
+    }
+    if opts.debug.is_some() && target != TargetKind::Jvm {
+        bail!("`--debug` starts the JVM under a debugger and only works for the jvm target, not {target}");
     }
     if *program != Program::Default && !matches!(target, TargetKind::Jvm | TargetKind::Native) {
         bail!("`kargo run {}` only works for the jvm and native targets, not {target}", program.flag());
@@ -164,6 +181,10 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
             let jdk = ctx.jdk()?;
             let mut cmd = Command::new(jdk.java());
+            if let Some(port) = opts.debug {
+                cmd.arg(jdwp_option(port));
+                note_debugger(ctx.shell(), port, "the program");
+            }
             cmd.args(&jvm.jvm_args).arg("-cp").arg(join_paths(&classpath)).arg(&main);
             label = format!("java {main}");
             cmd
@@ -403,5 +424,10 @@ mod tests {
         assert_eq!(runnable_target(&[TargetKind::Wasm, TargetKind::Jvm], Some(TargetKind::Wasm)).unwrap(), TargetKind::Wasm);
         assert!(runnable_target(&[TargetKind::Jvm], Some(TargetKind::Native)).is_err());
         assert!(runnable_target(&[], None).is_err());
+    }
+
+    #[test]
+    fn debugger_listens_on_loopback() {
+        assert_eq!(jdwp_option(5005), "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:5005");
     }
 }

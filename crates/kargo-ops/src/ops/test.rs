@@ -41,6 +41,8 @@ pub struct TestOptions {
     pub no_fail_fast: bool,
     /// Write JUnit XML reports to `target/<profile>/<target>/test-reports` (`--report junit`).
     pub junit_report: bool,
+    /// Start the JVM tests suspended, waiting for a JDWP debugger on this port (`--debug`).
+    pub debug: Option<u16>,
 }
 
 /// What happened to one target in a `kargo test` run.
@@ -59,6 +61,9 @@ enum TargetOutcome {
 pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.build.targets)?;
+    if opts.debug.is_some() && targets != [TargetKind::Jvm] {
+        anyhow::bail!("`--debug` runs the JVM tests under a debugger; select the JVM target with `-t jvm`");
+    }
     let env = hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
     // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
@@ -213,6 +218,9 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let mut run_cp = vec![test_classes.clone()];
     run_cp.extend(classpath);
     let mut cmd = Command::new(jdk.java());
+    if let Some(port) = opts.debug {
+        cmd.arg(super::run::jdwp_option(port));
+    }
     // The launcher loads the tests in its own class loader, so its JVM classpath is just the launcher.
     cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)))
         .args(&jvm.jvm_args)
@@ -239,6 +247,9 @@ fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions) -> Result
         cmd.arg("--reports-dir").arg(dir);
     }
     ctx.shell().status("Running", "JVM tests (JUnit Platform)");
+    if let Some(port) = opts.debug {
+        super::run::note_debugger(ctx.shell(), port, "the test JVM");
+    }
     let status = process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?;
     if let Some(dir) = &reports {
         wrote_reports(ctx, dir);

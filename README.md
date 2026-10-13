@@ -29,8 +29,8 @@ $ kargo test
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo build [--release] [-t <target>] [--keep-going] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
-| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it |
-| `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports` |
+| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005) |
+| `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
@@ -44,7 +44,8 @@ $ kargo test
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
 | `kargo package [--release] [--bin <name>] [--fat]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar) |
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
-| `kargo fetch` | Pre-download everything |
+| `kargo fetch [--sources]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors |
+| `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
@@ -177,6 +178,8 @@ baseline = "detekt-baseline.xml"
 [test]                      # kargo test
 fail-fast = false           # test every target even if one fails (default: true)
 ```
+
+Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekocm7.github.io/kargo/schemas/kargo.json`: put `#:schema <url>` on the first line for Taplo-based editors (Even Better TOML, Zed, Helix), or map the URL to `kargo.toml` in your editor. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/).
 
 ### Workspaces
 
