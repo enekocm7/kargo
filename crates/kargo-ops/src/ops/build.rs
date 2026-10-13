@@ -121,7 +121,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
 
     let mut results = BuildResults::default();
     // Targets don't depend on each other, so they build at the same time.
-    let built = super::parallel_map(&targets, |&target| -> Result<BuildResults> {
+    let built = super::parallel_targets(&targets, |target| -> Result<BuildResults> {
         let mut r = BuildResults::default();
         match target {
             TargetKind::Jvm => r.jvm = Some(build_jvm(ctx)?),

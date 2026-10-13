@@ -21,6 +21,7 @@ It speaks LSP over stdin and stdout and gives you:
 - **Code actions in `kargo.toml`**: quick fixes for its errors, and the edits of `kargo add`, `kargo add --framework`, `kargo target add` and `kargo upgrade` from the editor. See [Code actions in `kargo.toml`](#code-actions-in-kargotoml).
 - **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
 - **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
+- **Check on save** (opt-in): when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear next to the Kotlin server's. See [Check on save](#check-on-save).
 
 The first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
 
@@ -269,9 +270,48 @@ kargo fetch --sources
 
 `kargo metadata` then lists each library's sources jar next to its jar, in the `sources` field. Libraries that don't publish sources are skipped.
 
-## Compiler errors in the editor
+## Check on save
 
-For check-on-save, run [`kargo check`](../../reference/commands/#kargo-check-c), which type-checks without packaging or linking, and ask for JSON:
+The Kotlin server analyzes your code for the JVM, with the compiler plugins and flags it knows about. Errors only the real build finds don't show until you run `kargo build`: type errors in `src-wasm/` or `src-native/`, errors from compiler plugins, and [`warnings-as-errors`](../../reference/manifest/#kotlin) failures. With check on save, `kargo lsp` finds them for you. Turn it on in the editor's `initializationOptions`:
+
+```lua title="init.lua"
+vim.lsp.config('kargo', {
+  cmd = { 'kargo', 'lsp' },
+  filetypes = { 'kotlin', 'toml' },
+  root_markers = { 'kargo.lock', 'kargo.toml' },
+  init_options = { checkOnSave = true },
+})
+```
+
+```toml title="~/.config/helix/languages.toml"
+[language-server.kargo]
+command = "kargo"
+args = ["lsp"]
+config = { checkOnSave = true }
+```
+
+When you save a `.kt` or `.java` file, Kargo runs `kargo check --tests --keep-going --message-format json` for the package that contains it (every member, when the nearest `kargo.toml` is a workspace root) and shows the result:
+
+- Each error and warning is a diagnostic with source `kargo` and the targets that report it as its code, for example `kargo(native, wasm)`. Messages without a file, such as the `-Werror` summary, go on `kargo.toml`.
+- Diagnostics the Kotlin server already reports (same line, same message) are left out, so a JVM error shows once.
+- The next check replaces them: fix the error, save, and it goes away.
+- The check is reported with `$/progress`. Saving again while a check runs stops it and starts a new one.
+- If the check fails before compiling (a dependency that can't be resolved, a broken `kargo.toml`), the diagnostics stay as they were and the reason goes to the language server log.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `checkOnSave` | `false` | Run `kargo check` when a Kotlin or Java file is saved |
+| `checkTargets` | every enabled target | The targets to check, for example `["wasm", "native"]` to leave the JVM to the Kotlin server |
+
+Kargo merges its diagnostics into the Kotlin server's whether that server pushes them (`textDocument/publishDiagnostics`, kotlin-language-server) or the editor pulls them (`textDocument/diagnostic`, the Kotlin LSP). With pulled diagnostics, Kargo asks the editor to pull again with `workspace/diagnostic/refresh` after a check, and pushes the diagnostics of files that aren't open. Android sources are checked through Gradle, whose errors are not converted, so they show only in the log.
+
+:::note
+A check takes the same lock on `target/` as any other build, so a `kargo build` in a terminal waits for it, and the other way round.
+:::
+
+## Compiler errors in other tools
+
+For check-on-save in an editor or tool that doesn't use `kargo lsp`, run [`kargo check`](../../reference/commands/#kargo-check-c), which type-checks without packaging or linking, and ask for JSON:
 
 ```sh
 kargo check --message-format json

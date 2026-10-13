@@ -34,16 +34,25 @@ use kargo_util::shell::Shell;
 
 /// Runs `f` on every item on its own thread and returns the results in item order.
 /// A single item runs inline. Used to build independent targets (and Native platforms)
-/// at the same time: their compilers are separate processes or daemon requests.
+/// at the same time: their compilers are separate processes or daemon requests. The threads
+/// keep the target that `--message-format json` messages are tagged with.
 pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     if items.len() <= 1 {
         return items.iter().map(&f).collect();
     }
     let f = &f;
+    let target = kargo_compiler::diagnostics::current_target();
+    let target = target.as_deref();
     std::thread::scope(|s| {
-        let handles: Vec<_> = items.iter().map(|item| s.spawn(move || f(item))).collect();
+        let handles: Vec<_> =
+            items.iter().map(|item| s.spawn(move || kargo_compiler::diagnostics::with_target(target, || f(item)))).collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))).collect()
     })
+}
+
+/// [`parallel_map`] over targets, with each target's compiler messages tagged with its name.
+pub fn parallel_targets<R: Send>(targets: &[TargetKind], f: impl Fn(TargetKind) -> R + Sync) -> Vec<R> {
+    parallel_map(targets, |&target| kargo_compiler::diagnostics::with_target(Some(target.as_str()), || f(target)))
 }
 
 /// Collects the per-target results of a multi-target operation.

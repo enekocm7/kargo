@@ -13,12 +13,18 @@
 //! Work that may use the network (completing dependencies, hints at newer versions; see
 //! [`crate::deps`]) runs on worker threads that send their results back as events, so neither
 //! Kotlin traffic nor `kargo.toml` diagnostics wait for it.
+//!
+//! With `checkOnSave` (see [`crate::check`]), saving a Kotlin or Java file runs `kargo check` on
+//! a worker thread, cancelling the one still running. Its diagnostics are merged into the
+//! backend's: into the `textDocument/publishDiagnostics` it pushes and the
+//! `textDocument/diagnostic` reports the editor pulls, leaving out what the backend already reports.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,7 +37,7 @@ use kargo_toolchain::{LanguageServer, ServerKind};
 use kargo_util::config::Config;
 
 use crate::jsonrpc::{self, Kind};
-use crate::{actions, deps, manifest, project, text};
+use crate::{actions, check, deps, manifest, project, text};
 
 /// How `kargo lsp` runs.
 #[derive(Debug, Clone, Default)]
@@ -63,12 +69,14 @@ enum Event {
     /// A command's new contents for the `kargo.toml` at `uri`, worked out on a worker thread from
     /// `original`, with the reply to request `id`.
     Edited { id: Value, uri: String, original: String, outcome: Result<(String, Value)> },
+    /// The check of the `kargo.toml` at `manifest` started as number `generation` finished.
+    Checked { generation: u64, manifest: PathBuf, outcome: Result<check::Output> },
 }
 
 /// Runs the server until the editor sends `exit` or closes the stream. Returns whether the
 /// editor shut it down properly (`shutdown` before `exit`).
 pub fn serve(config: Config, opts: Options, input: impl BufRead + Send + 'static, output: impl Write + Send + 'static) -> Result<bool> {
-    serve_with(config, opts, input, output, None)
+    serve_with(config, opts, input, output, None, check::kargo_runner())
 }
 
 pub(crate) fn serve_with(
@@ -77,6 +85,7 @@ pub(crate) fn serve_with(
     input: impl BufRead + Send + 'static,
     output: impl Write + Send + 'static,
     backend: Option<BackendIo>,
+    runner: check::Runner,
 ) -> Result<bool> {
     let (tx, rx) = mpsc::channel();
     let client_tx = tx.clone();
@@ -96,16 +105,18 @@ pub(crate) fn serve_with(
             }
         }
     });
-    let mut server = Server::new(config, opts, Box::new(output), tx);
+    let mut server = Server::new(config, opts, Box::new(output), tx, runner);
     if let Some((reader, writer)) = backend {
         server.attach(reader, writer, None);
     }
     for event in rx {
         if let Some(clean) = server.handle(event)? {
+            server.cancel_check();
             server.stop_backend();
             return Ok(clean);
         }
     }
+    server.cancel_check();
     server.stop_backend();
     Ok(false)
 }
@@ -115,7 +126,7 @@ struct Backend {
     child: Option<Child>,
 }
 
-/// An import's `$/progress`, once the editor accepted its token.
+/// The `$/progress` of an import or a check, once the editor accepted its token.
 struct Progress {
     token: String,
     create_id: String,
@@ -150,6 +161,32 @@ struct Server {
     searcher: Arc<deps::Searcher>,
     /// Newer-version hints by `kargo.toml` URI.
     hints: HashMap<String, Vec<deps::Hint>>,
+    /// Check on save: what the editor asked for and how a check runs.
+    check: check::Settings,
+    runner: check::Runner,
+    /// The number of the latest check; results of older ones are dropped.
+    check_generation: u64,
+    /// Stops the running check.
+    check_cancel: Option<Arc<AtomicBool>>,
+    check_progress: Option<Progress>,
+    /// The diagnostics of the last check of each `kargo.toml`, by [`check::uri_key`]: the URI
+    /// to publish under and the diagnostics.
+    checked: HashMap<PathBuf, HashMap<String, (String, Vec<Value>)>>,
+    /// The backend's last pushed diagnostics, by [`check::uri_key`].
+    backend_pushed: HashMap<String, Vec<Value>>,
+    /// The items of the backend's last full `textDocument/diagnostic` report, by [`check::uri_key`].
+    backend_pulled: HashMap<String, Vec<Value>>,
+    /// `textDocument/diagnostic` requests the backend hasn't answered, with their URI.
+    pulls: HashMap<String, String>,
+    /// Whether the backend's diagnostics are pulled (`diagnosticProvider`) rather than pushed.
+    backend_pull: bool,
+    /// Whether the editor re-pulls on `workspace/diagnostic/refresh`.
+    client_refresh: bool,
+    /// Kotlin and Java documents open in the editor, by [`check::uri_key`].
+    open_sources: HashSet<String>,
+    /// Documents Kargo pushed check diagnostics for while their diagnostics are pulled (they
+    /// were closed), by [`check::uri_key`].
+    pushed: HashSet<String>,
 }
 
 /// The editor's `textDocument.uri` of a message, if any.
@@ -259,7 +296,7 @@ pub(crate) fn merge_capabilities(backend: &Value) -> Value {
 }
 
 impl Server {
-    fn new(config: Config, opts: Options, out: Box<dyn Write + Send>, tx: Sender<Event>) -> Self {
+    fn new(config: Config, opts: Options, out: Box<dyn Write + Send>, tx: Sender<Event>, runner: check::Runner) -> Self {
         let searcher = Arc::new(deps::Searcher::new(&config, opts.search_url.clone()));
         Self {
             config,
@@ -283,6 +320,19 @@ impl Server {
             warned_foreign: false,
             searcher,
             hints: HashMap::new(),
+            check: check::Settings::default(),
+            runner,
+            check_generation: 0,
+            check_cancel: None,
+            check_progress: None,
+            checked: HashMap::new(),
+            backend_pushed: HashMap::new(),
+            backend_pulled: HashMap::new(),
+            pulls: HashMap::new(),
+            backend_pull: false,
+            client_refresh: false,
+            open_sources: HashSet::new(),
+            pushed: HashSet::new(),
         }
     }
 
@@ -341,6 +391,10 @@ impl Server {
                     Err(e) => jsonrpc::error(&id, -32603, format!("{e:#}")),
                 };
                 self.send(&reply)?;
+                Ok(None)
+            }
+            Event::Checked { generation, manifest, outcome } => {
+                self.checked_event(generation, manifest, outcome)?;
                 Ok(None)
             }
             Event::Hints { uri, hints } => {
@@ -418,6 +472,10 @@ impl Server {
                     _ if document_uri(&message).is_some_and(is_kargo_document) => {
                         self.manifest_notification(&method, &message)?;
                     }
+                    "textDocument/didOpen" | "textDocument/didClose" | "textDocument/didSave" => {
+                        self.send_backend(&message);
+                        self.source_notification(&method, &message)?;
+                    }
                     _ => self.send_backend(&message),
                 }
                 Ok(None)
@@ -431,6 +489,11 @@ impl Server {
         let id = message["id"].clone();
         if self.backend.is_some() {
             self.pending.insert(id_key(&id));
+            if jsonrpc::method(&message) == "textDocument/diagnostic"
+                && let Some(uri) = document_uri(&message)
+            {
+                self.pulls.insert(id_key(&id), uri.to_owned());
+            }
             self.send_backend(&message);
             return Ok(());
         }
@@ -442,19 +505,53 @@ impl Server {
         self.send(&reply)
     }
 
-    fn on_backend(&mut self, message: Value) -> Result<()> {
-        if jsonrpc::kind(&message) == Kind::Response {
-            self.pending.remove(&id_key(&message["id"]));
-            if self.initialize_id.as_ref() == Some(&message["id"]) {
-                self.initialize_id = None;
-                let mut message = message;
-                if message["result"].is_object() {
-                    message["result"]["capabilities"] = merge_capabilities(&message["result"]["capabilities"]);
+    fn on_backend(&mut self, mut message: Value) -> Result<()> {
+        match jsonrpc::kind(&message) {
+            Kind::Response => {
+                self.pending.remove(&id_key(&message["id"]));
+                if self.initialize_id.as_ref() == Some(&message["id"]) {
+                    self.initialize_id = None;
+                    if message["result"].is_object() {
+                        let capabilities = &message["result"]["capabilities"];
+                        self.backend_pull = !capabilities["diagnosticProvider"].is_null();
+                        message["result"]["capabilities"] = merge_capabilities(capabilities);
+                    }
+                } else if let Some(uri) = self.pulls.remove(&id_key(&message["id"])) {
+                    self.merge_pulled(&uri, &mut message["result"]);
                 }
-                return self.send(&message);
             }
+            Kind::Notification if jsonrpc::method(&message) == "textDocument/publishDiagnostics" => {
+                let uri = message["params"]["uri"].as_str().unwrap_or_default().to_owned();
+                let theirs = message["params"]["diagnostics"].as_array().cloned().unwrap_or_default();
+                let key = check::uri_key(&uri);
+                let ours = self.check_diagnostics(&key);
+                message["params"]["diagnostics"] = json!(check::merge(&theirs, &ours));
+                self.backend_pushed.insert(key, theirs);
+            }
+            _ => {}
         }
         self.send(&message)
+    }
+
+    /// Adds the check's diagnostics to the backend's report for `uri` (a
+    /// `DocumentDiagnosticReport`). An `unchanged` report becomes a full one again, since the
+    /// check's part may have changed since.
+    fn merge_pulled(&mut self, uri: &str, report: &mut Value) {
+        let key = check::uri_key(uri);
+        match report["kind"].as_str() {
+            Some("full") => {
+                let theirs = report["items"].as_array().cloned().unwrap_or_default();
+                report["items"] = json!(check::merge(&theirs, &self.check_diagnostics(&key)));
+                self.backend_pulled.insert(key, theirs);
+            }
+            Some("unchanged") => {
+                if let Some(theirs) = self.backend_pulled.get(&key) {
+                    let items = check::merge(theirs, &self.check_diagnostics(&key));
+                    *report = json!({ "kind": "full", "resultId": report["resultId"], "items": items });
+                }
+            }
+            _ => {}
+        }
     }
 
     fn backend_exited(&mut self) -> Result<()> {
@@ -484,6 +581,8 @@ impl Server {
         self.client_progress = params["capabilities"]["window"]["workDoneProgress"] == true;
         self.client_watches = params["capabilities"]["workspace"]["didChangeWatchedFiles"]["dynamicRegistration"] == true;
         self.client_apply_edit = params["capabilities"]["workspace"]["applyEdit"] == true;
+        self.client_refresh = params["capabilities"]["workspace"]["diagnostics"]["refreshSupport"] == true;
+        self.check = check::Settings::from_options(&params["initializationOptions"]);
         let dir = params["rootUri"]
             .as_str()
             .and_then(text::uri_to_path)
@@ -641,6 +740,18 @@ impl Server {
     }
 
     fn own_response(&mut self, id: String, _message: &Value) -> Result<()> {
+        // The editor accepted the token of a check that is still running.
+        if let Some(progress) = &mut self.check_progress
+            && progress.create_id == id
+            && !progress.begun
+        {
+            progress.begun = true;
+            let token = progress.token.clone();
+            self.notify(
+                "$/progress",
+                json!({ "token": token, "value": { "kind": "begin", "title": "kargo check", "cancellable": false } }),
+            )?;
+        }
         // The editor accepted a progress token: report the import if it is still running.
         if let Some(progress) = &mut self.progress
             && progress.create_id == id
@@ -881,6 +992,149 @@ impl Server {
         Ok(())
     }
 
+    /// Tracks the Kotlin and Java documents the editor opens and closes, and checks on save.
+    fn source_notification(&mut self, method: &str, message: &Value) -> Result<()> {
+        let Some(uri) = document_uri(message).map(str::to_owned) else { return Ok(()) };
+        let key = check::uri_key(&uri);
+        match method {
+            "textDocument/didOpen" => {
+                self.open_sources.insert(key.clone());
+                // Pulled reports carry the check's diagnostics from now on.
+                if self.backend_pull && self.pushed.remove(&key) {
+                    self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] }))?;
+                }
+            }
+            "textDocument/didClose" => {
+                self.open_sources.remove(&key);
+                self.backend_pulled.remove(&key);
+                // The editor forgets pulled diagnostics of a closed document; push the check's.
+                if self.backend_pull && !self.check_diagnostics(&key).is_empty() {
+                    self.publish_checked(&key, &uri)?;
+                }
+            }
+            "textDocument/didSave" if check::is_checked_source(&uri) => self.start_check(&uri)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Checks the package of the file at `uri` on a worker thread, cancelling the running check.
+    fn start_check(&mut self, uri: &str) -> Result<()> {
+        if !self.check.enabled {
+            return Ok(());
+        }
+        let Some(manifest) = text::uri_to_path(uri).as_deref().and_then(check::manifest_for) else { return Ok(()) };
+        self.cancel_check();
+        self.end_check_progress("cancelled")?;
+        self.check_generation += 1;
+        let generation = self.check_generation;
+        if self.client_progress {
+            let create_id = self.next_id();
+            let token = format!("{create_id}/check");
+            self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })))?;
+            self.check_progress = Some(Progress { token, create_id, begun: false });
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.check_cancel = Some(Arc::clone(&cancel));
+        let run = check::Run { manifest: manifest.clone(), targets: self.check.targets.clone(), offline: self.config.offline() };
+        let (runner, tx) = (Arc::clone(&self.runner), self.tx.clone());
+        thread::spawn(move || {
+            let outcome = runner(&run, &cancel);
+            let _ = tx.send(Event::Checked { generation, manifest, outcome });
+        });
+        Ok(())
+    }
+
+    /// Stops the running check, if any.
+    fn cancel_check(&mut self) {
+        if let Some(cancel) = self.check_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn end_check_progress(&mut self, message: &str) -> Result<()> {
+        match self.check_progress.take() {
+            Some(progress) if progress.begun => {
+                self.notify("$/progress", json!({ "token": progress.token, "value": { "kind": "end", "message": message } }))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn checked_event(&mut self, generation: u64, manifest: PathBuf, outcome: Result<check::Output>) -> Result<()> {
+        if generation != self.check_generation {
+            return Ok(());
+        }
+        self.check_cancel = None;
+        let output = match outcome {
+            Ok(output) if !output.failed_elsewhere() => output,
+            Ok(output) => {
+                // Not about the sources (an unresolvable dependency, a broken kargo.toml): keep
+                // the diagnostics there are and say why in the log.
+                self.end_check_progress("failed")?;
+                let lines: Vec<&str> = output.stderr.lines().collect();
+                let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+                return self.message(2, format!("kargo lsp: `kargo check` failed:\n{tail}"), true);
+            }
+            Err(e) => {
+                self.end_check_progress("failed")?;
+                return self.message(2, format!("kargo lsp: could not run `kargo check`: {e:#}"), true);
+            }
+        };
+        let found = check::diagnostics(&output.messages, &manifest);
+        let errors = found.values().flat_map(|(_, list)| list).filter(|d| d["severity"] == 1).count();
+        self.end_check_progress(&match errors {
+            0 => "done".to_owned(),
+            1 => "1 error".to_owned(),
+            n => format!("{n} errors"),
+        })?;
+        let previous = self.checked.insert(manifest, found.clone()).unwrap_or_default();
+        // Publish where diagnostics appeared, changed or went away.
+        let mut affected: Vec<(String, String)> = found.into_iter().map(|(key, (uri, _))| (key, uri)).collect();
+        for (key, (uri, _)) in previous {
+            if !affected.iter().any(|(k, _)| *k == key) {
+                affected.push((key, uri));
+            }
+        }
+        let mut refresh = false;
+        for (key, uri) in affected {
+            if self.backend_pull && self.open_sources.contains(&key) {
+                refresh = true;
+            } else {
+                self.publish_checked(&key, &uri)?;
+            }
+        }
+        if refresh && self.client_refresh {
+            let id = self.next_id();
+            self.send(&jsonrpc::request(&id, "workspace/diagnostic/refresh", Value::Null))?;
+        }
+        Ok(())
+    }
+
+    /// The check diagnostics for the document with [`check::uri_key`] `key`, from every package.
+    fn check_diagnostics(&self, key: &str) -> Vec<Value> {
+        self.checked.values().filter_map(|files| files.get(key)).flat_map(|(_, list)| list.iter().cloned()).collect()
+    }
+
+    /// Pushes the diagnostics of the document at `uri` again, with the check's merged in.
+    fn publish_checked(&mut self, key: &str, uri: &str) -> Result<()> {
+        // An open kargo.toml has Kargo's own diagnostics, which `publish` merges with the check's.
+        if let Some(open) = self.docs.keys().find(|d| check::uri_key(d) == key).cloned() {
+            return self.publish(&open);
+        }
+        let ours = self.check_diagnostics(key);
+        let theirs = self.backend_pushed.get(key).cloned().unwrap_or_default();
+        if self.backend_pull {
+            if ours.is_empty() && !self.pushed.remove(key) {
+                return Ok(());
+            }
+            if !ours.is_empty() {
+                self.pushed.insert(key.to_owned());
+            }
+        }
+        self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": check::merge(&theirs, &ours) }))
+    }
+
     fn publish(&mut self, uri: &str) -> Result<()> {
         let Some(text) = self.docs.get(uri) else { return Ok(()) };
         let path = text::uri_to_path(uri).unwrap_or_else(|| PathBuf::from(kargo_manifest::MANIFEST_NAME));
@@ -889,6 +1143,8 @@ impl Server {
         let mut diagnostics: Vec<Value> = problems.iter().map(|p| manifest::diagnostic(text, p)).collect();
         // Newer versions, as information; a hint whose dependency was edited away is dropped.
         diagnostics.extend(self.hints.get(uri).into_iter().flatten().filter_map(|hint| deps::diagnostic(text, hint)));
+        // Messages of `kargo check` without a file, such as the `-Werror` summary.
+        diagnostics.extend(self.check_diagnostics(&check::uri_key(uri)));
         self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics }))
     }
 }
@@ -930,11 +1186,15 @@ mod tests {
 
     impl Editor {
         fn start(opts: Options, backend: Option<BackendIo>) -> (Self, tempfile::TempDir) {
+            Self::start_with(opts, backend, Arc::new(|_: &check::Run, _: &AtomicBool| anyhow::bail!("no checks in this test")))
+        }
+
+        fn start_with(opts: Options, backend: Option<BackendIo>, runner: check::Runner) -> (Self, tempfile::TempDir) {
             let home = tempfile::tempdir().unwrap();
             let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_offline(true);
             let (server_in, input) = io::pipe().unwrap();
             let (output, server_out) = io::pipe().unwrap();
-            let server = thread::spawn(move || serve_with(config, opts, BufReader::new(server_in), server_out, backend));
+            let server = thread::spawn(move || serve_with(config, opts, BufReader::new(server_in), server_out, backend, runner));
             (Self { input, output: BufReader::new(output), server: Some(server) }, home)
         }
 
@@ -1225,6 +1485,226 @@ local = \"{url}\"
         assert_eq!(init["result"]["capabilities"], own_capabilities());
         let warning = editor.recv();
         assert_eq!(warning["method"], "window/showMessage");
+        assert!(editor.finish());
+    }
+
+    /// A fake Kotlin server that reports `Unresolved reference 'x'.` on the second line of every
+    /// document it opens: pushed, or with `pull`, in `textDocument/diagnostic` reports (full the
+    /// first time, unchanged after).
+    fn diagnosing_backend(pull: bool) -> BackendIo {
+        let (from_kargo, to_backend) = io::pipe().unwrap();
+        let (from_backend, to_kargo) = io::pipe().unwrap();
+        thread::spawn(move || {
+            let mut input = BufReader::new(from_kargo);
+            let mut output = to_kargo;
+            let reported = json!([{
+                "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 5 } },
+                "severity": 1, "source": "kotlin", "message": "Unresolved reference 'x'.",
+            }]);
+            while let Ok(Some(message)) = jsonrpc::read(&mut input) {
+                let params = &message["params"];
+                let reply = match jsonrpc::method(&message) {
+                    "initialize" if pull => Some(
+                        json!({ "capabilities": { "textDocumentSync": 2, "diagnosticProvider": { "interFileDependencies": true, "workspaceDiagnostics": false } } }),
+                    ),
+                    "initialize" => Some(json!({ "capabilities": { "textDocumentSync": 2 } })),
+                    "textDocument/diagnostic" if params["previousResultId"].is_string() => {
+                        Some(json!({ "kind": "unchanged", "resultId": "1" }))
+                    }
+                    "textDocument/diagnostic" => Some(json!({ "kind": "full", "resultId": "1", "items": reported })),
+                    "shutdown" => Some(Value::Null),
+                    "textDocument/didOpen" if !pull => {
+                        let params = json!({ "uri": params["textDocument"]["uri"], "diagnostics": reported });
+                        jsonrpc::write(&mut output, &jsonrpc::notification("textDocument/publishDiagnostics", params)).unwrap();
+                        None
+                    }
+                    "exit" => break,
+                    _ => None,
+                };
+                if let Some(result) = reply {
+                    jsonrpc::write(&mut output, &jsonrpc::response(&message["id"], result)).unwrap();
+                }
+            }
+        });
+        (Box::new(BufReader::new(from_backend)), Box::new(to_backend))
+    }
+
+    /// A check runner that answers with the next of `outputs` once the test sends on the returned
+    /// channel; a cancelled check answers at once with `stale` diagnostics the server must drop.
+    fn gated_runner(outputs: Vec<Vec<Value>>, stale: Value) -> (check::Runner, mpsc::Sender<()>, mpsc::Receiver<check::Run>) {
+        let (gate_tx, gate) = mpsc::channel::<()>();
+        let (runs_tx, runs) = mpsc::channel();
+        let state = std::sync::Mutex::new((gate, outputs.into_iter(), runs_tx));
+        let runner: check::Runner = Arc::new(move |run: &check::Run, cancel: &AtomicBool| {
+            let state = state.lock().unwrap();
+            state.2.send(run.clone()).unwrap();
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    let finished = json!({ "reason": "build-finished", "success": false });
+                    return Ok(check::Output { messages: vec![stale.clone(), finished], stderr: String::new() });
+                }
+                if state.0.recv_timeout(Duration::from_millis(20)).is_ok() {
+                    break;
+                }
+            }
+            let mut state = state;
+            Ok(check::Output { messages: state.1.next().unwrap_or_default(), stderr: String::new() })
+        });
+        (runner, gate_tx, runs)
+    }
+
+    fn compiler_message(file: &Path, line: u32, target: &str, message: &str) -> Value {
+        json!({
+            "reason": "compiler-message", "severity": "error", "message": message,
+            "file": file.display().to_string(), "line": line, "column": 5, "target": target,
+        })
+    }
+
+    /// Reads until `publishDiagnostics` for `count` documents, answering the editor's side of
+    /// requests. Returns the last diagnostics of each document by URI.
+    fn publishes(editor: &mut Editor, count: usize) -> HashMap<String, Vec<Value>> {
+        let mut found = HashMap::new();
+        while found.len() < count {
+            let message = editor.recv();
+            assert_ne!(message["params"]["diagnostics"][0]["message"], "stale", "a cancelled check is dropped");
+            if jsonrpc::kind(&message) == Kind::Request {
+                editor.send(jsonrpc::response(&message["id"], Value::Null));
+            }
+            if message["method"] == "textDocument/publishDiagnostics" {
+                let uri = message["params"]["uri"].as_str().unwrap().to_owned();
+                found.insert(uri, message["params"]["diagnostics"].as_array().cloned().unwrap());
+            }
+        }
+        found
+    }
+
+    /// Reads until a `publishDiagnostics` for `uri`.
+    fn diagnostics_for(editor: &mut Editor, uri: &str) -> Vec<Value> {
+        let found = publishes(editor, 1);
+        assert!(found.contains_key(uri), "{found:?}");
+        found[uri].clone()
+    }
+
+    fn open(editor: &mut Editor, uri: &str, text: &str) {
+        editor.send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }),
+        ));
+    }
+
+    fn save(editor: &mut Editor, uri: &str) {
+        editor.send(jsonrpc::notification("textDocument/didSave", json!({ "textDocument": { "uri": uri } })));
+    }
+
+    const SOURCE: &str = "fun main() {\n    x()\n    val s: String = 1\n}\n";
+
+    fn multiplatform_project() -> tempfile::TempDir {
+        let dir = project("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.jvm]\n[target.wasm]\n");
+        std::fs::write(dir.path().join("src/Main.kt"), SOURCE).unwrap();
+        std::fs::create_dir_all(dir.path().join("src-wasm")).unwrap();
+        std::fs::write(dir.path().join("src-wasm/Web.kt"), SOURCE).unwrap();
+        dir
+    }
+
+    #[test]
+    fn merges_check_diagnostics_into_pushed_ones() {
+        let dir = multiplatform_project();
+        let (common, web) = (dir.path().join("src/Main.kt"), dir.path().join("src-wasm/Web.kt"));
+        let (common_uri, web_uri) = (text::path_to_uri(&common), text::path_to_uri(&web));
+        let failing = vec![
+            // The Kotlin server reports this one already.
+            compiler_message(&common, 2, "jvm", "Unresolved reference 'x'."),
+            compiler_message(&common, 3, "wasm", "initializer type mismatch"),
+            compiler_message(&web, 2, "wasm", "unresolved reference 'x'."),
+            json!({ "reason": "build-finished", "success": false }),
+        ];
+        let passing = vec![json!({ "reason": "build-finished", "success": true })];
+        let stale = compiler_message(&common, 1, "wasm", "stale");
+        let (runner, gate, runs) = gated_runner(vec![failing, passing], stale);
+        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+        let (mut editor, _home) = Editor::start_with(opts, Some(diagnosing_backend(false)), runner);
+        let params = json!({
+            "rootUri": text::path_to_uri(dir.path()),
+            "capabilities": { "window": { "workDoneProgress": true } },
+            "initializationOptions": { "checkOnSave": true, "checkTargets": ["wasm"] },
+        });
+        editor.request(1, "initialize", params);
+        open(&mut editor, &common_uri, SOURCE);
+        assert_eq!(diagnostics_for(&mut editor, &common_uri).len(), 1, "the Kotlin server's own");
+
+        // A second save cancels the first check; its results never show.
+        save(&mut editor, &common_uri);
+        let first = runs.recv_timeout(Duration::from_secs(10)).unwrap();
+        save(&mut editor, &common_uri);
+        let second = runs.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second.manifest, dir.path().join("kargo.toml"));
+        assert_eq!(second.targets, ["wasm"]);
+        gate.send(()).unwrap();
+
+        let found = publishes(&mut editor, 2);
+        let web_diagnostics = &found[&web_uri];
+        assert_eq!(web_diagnostics.len(), 1);
+        assert_eq!(web_diagnostics[0]["source"], "kargo");
+        assert_eq!(web_diagnostics[0]["code"], "wasm");
+        assert_eq!(web_diagnostics[0]["range"]["start"], json!({ "line": 1, "character": 4 }));
+        let messages: Vec<&str> = found[&common_uri].iter().map(|d| d["message"].as_str().unwrap()).collect();
+        assert_eq!(messages, ["Unresolved reference 'x'.", "initializer type mismatch"], "not duplicated");
+
+        // The next check passes: Kargo's diagnostics go, the Kotlin server's stay.
+        save(&mut editor, &common_uri);
+        runs.recv_timeout(Duration::from_secs(10)).unwrap();
+        gate.send(()).unwrap();
+        let cleared = publishes(&mut editor, 2);
+        assert!(cleared[&web_uri].is_empty());
+        assert_eq!(cleared[&common_uri].len(), 1);
+        assert!(editor.finish());
+    }
+
+    #[test]
+    fn merges_check_diagnostics_into_pulled_reports() {
+        let dir = multiplatform_project();
+        let (common, web) = (dir.path().join("src/Main.kt"), dir.path().join("src-wasm/Web.kt"));
+        let (common_uri, web_uri) = (text::path_to_uri(&common), text::path_to_uri(&web));
+        let failing = vec![
+            compiler_message(&common, 2, "jvm", "Unresolved reference 'x'."),
+            compiler_message(&common, 3, "wasm", "initializer type mismatch"),
+            compiler_message(&web, 3, "wasm", "initializer type mismatch"),
+            json!({ "reason": "build-finished", "success": false }),
+        ];
+        let (runner, gate, runs) = gated_runner(vec![failing], Value::Null);
+        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+        let (mut editor, _home) = Editor::start_with(opts, Some(diagnosing_backend(true)), runner);
+        let capabilities = json!({ "workspace": { "diagnostics": { "refreshSupport": true } } });
+        let params = json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": capabilities, "initializationOptions": { "checkOnSave": true } });
+        editor.request(1, "initialize", params);
+        open(&mut editor, &common_uri, SOURCE);
+        let pull = |editor: &mut Editor, id: i64, previous: Option<&str>| {
+            let mut params = json!({ "textDocument": { "uri": common_uri } });
+            if let Some(previous) = previous {
+                params["previousResultId"] = json!(previous);
+            }
+            editor.request(id, "textDocument/diagnostic", params).0["result"].clone()
+        };
+        assert_eq!(pull(&mut editor, 2, None)["items"].as_array().unwrap().len(), 1);
+
+        save(&mut editor, &common_uri);
+        assert!(runs.recv_timeout(Duration::from_secs(10)).unwrap().targets.is_empty(), "every enabled target");
+        gate.send(()).unwrap();
+        // The closed file's diagnostics are pushed; the open one's are pulled again.
+        let web_diagnostics = diagnostics_for(&mut editor, &web_uri);
+        assert_eq!(web_diagnostics[0]["message"], "initializer type mismatch");
+        let refresh = editor.recv();
+        assert_eq!(refresh["method"], "workspace/diagnostic/refresh");
+        editor.send(jsonrpc::response(&refresh["id"], Value::Null));
+        let report = pull(&mut editor, 3, Some("1"));
+        assert_eq!(report["kind"], "full", "an unchanged report gains the check's diagnostics");
+        let messages: Vec<&str> = report["items"].as_array().unwrap().iter().map(|d| d["message"].as_str().unwrap()).collect();
+        assert_eq!(messages, ["Unresolved reference 'x'.", "initializer type mismatch"]);
+
+        // Once open, the pushed diagnostics give way to the pulled ones.
+        open(&mut editor, &web_uri, SOURCE);
+        assert_eq!(diagnostics_for(&mut editor, &web_uri), Vec::<Value>::new());
         assert!(editor.finish());
     }
 }
