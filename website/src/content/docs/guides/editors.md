@@ -1,9 +1,137 @@
 ---
 title: Editor integration
-description: Get completion and validation in kargo.toml, import a project into an editor or language server, browse library sources, drive a test explorer and attach a debugger.
+description: Run kargo lsp in your editor, get completion and validation in kargo.toml, import a project into a language server, browse library sources, drive a test explorer and attach a debugger.
 ---
 
-Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
+Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a language server, a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
+
+## Language server
+
+`kargo lsp` is one language server for a whole Kargo project. Point your editor at it for Kotlin files and `kargo.toml`:
+
+```sh
+kargo lsp
+```
+
+It speaks LSP over stdin and stdout and gives you:
+
+- **Kotlin code intelligence** (completion, go to definition, references, hover, rename, quick fixes, diagnostics) from [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp). Kargo downloads the server on first use, describes your project to it, and passes Kotlin traffic through unchanged.
+- **`kargo.toml` support**: completion of keys, tables and values, documentation on hover, and errors as you type. Errors come from the [JSON Schema](#completion-and-validation-in-kargotoml) first (unknown keys with a "did you mean", wrong types, invalid values), then from Kargo's own validation and [warnings](../../reference/warnings/), the same messages `kargo build` prints.
+- **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
+- **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
+
+The first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
+
+### Editor setup
+
+**Neovim** (0.11 or newer):
+
+```lua title="init.lua"
+vim.lsp.config('kargo', {
+  cmd = { 'kargo', 'lsp' },
+  filetypes = { 'kotlin', 'toml' },
+  root_markers = { 'kargo.lock', 'kargo.toml' },
+})
+vim.lsp.enable('kargo')
+```
+
+**Helix**:
+
+```toml title="~/.config/helix/languages.toml"
+[language-server.kargo]
+command = "kargo"
+args = ["lsp"]
+
+[[language]]
+name = "kotlin"
+language-servers = ["kargo"]
+
+[[language]]
+name = "toml"
+language-servers = ["kargo", "taplo"]
+```
+
+**Emacs** with Eglot:
+
+```elisp title="init.el"
+(with-eval-after-load 'eglot
+  (add-to-list 'eglot-server-programs
+               '((kotlin-mode kotlin-ts-mode conf-toml-mode toml-ts-mode) . ("kargo" "lsp"))))
+```
+
+Any other editor with a generic LSP client works the same way: run `kargo lsp` for Kotlin and TOML files. Kargo answers for every TOML file it is sent but only gives `kargo.toml` features, so other TOML files are unaffected.
+
+:::note
+Open the project root or any directory in it. Kargo finds the project from the folder the editor opens and points the Kotlin server at the project root, so opening a workspace member works too.
+:::
+
+### Choosing the Kotlin server
+
+| Command | Kotlin server |
+|---|---|
+| `kargo lsp` | JetBrains' Kotlin LSP (the default) |
+| `kargo lsp --server kls` | fwcd's [kotlin-language-server](https://github.com/fwcd/kotlin-language-server), for setups that still use it. It runs on the project's JDK, or on a Temurin 21 Kargo installs when that is newer than 21 |
+| `kargo lsp --server none` | No Kotlin server: only `kargo.toml` support and runnables |
+| `kargo lsp --server-path <path>` | The server executable at `<path>` instead of the one Kargo downloads |
+
+kotlin-language-server is no longer maintained and its last release bundles Kotlin 2.1, so it understands code and libraries built with newer Kotlin versions only partly. Prefer the default server.
+
+Kargo pins the version of each server and installs it like any other [toolchain](../toolchains/#kotlin-language-servers). `kargo toolchain install kotlin-lsp` downloads it ahead of time; `kargo --offline lsp` uses what is installed and the dependencies already in the cache.
+
+### Files it writes
+
+Kotlin language servers don't read `kargo.toml`, so Kargo writes the project description each one understands at the project root, from [`kargo metadata`](#importing-a-project):
+
+| Server | File | Contents |
+|---|---|---|
+| Kotlin LSP | `workspace.json` | A module per package for main code and one for tests, with their source and resource roots, the JVM target's classpaths as libraries (with sources jars once downloaded with `kargo fetch --sources`), path dependencies as modules, the JDK, `jvm-target`, compiler arguments and compiler plugins |
+| kotlin-language-server | `kls-classpath` (`kls-classpath.bat` on Windows) | A script printing the test classpath, which Kargo keeps in `target/lsp/classpath.txt` |
+
+They hold paths on your machine, so keep them out of version control; `kargo new` adds them to `.gitignore`. Kargo only replaces a file while it still holds what Kargo last wrote: a `workspace.json` you wrote yourself, or one another tool generated, is left alone, and `kargo lsp` tells you so. Delete it to let Kargo manage it. Kargo remembers the last complete import in `target/lsp`, so a restart with an unchanged `kargo.toml` and `kargo.lock` starts the Kotlin server right away.
+
+If the dependencies can't be resolved (offline, a broken `kargo.toml`), Kargo describes the project without them and says why. It imports again once `kargo.toml` or `kargo.lock` change.
+
+:::caution
+The Kotlin LSP understands JVM code. Kargo describes each package's JVM target to it, so code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence yet. `kargo.toml` support and runnables work for every target.
+:::
+
+### Runnables
+
+The `kargo/runnables` request lists what can be run in the project, with the command line for each. Editor plugins use it for Run, Test and Debug buttons.
+
+```json title="Request"
+{ "jsonrpc": "2.0", "id": 7, "method": "kargo/runnables", "params": { "textDocument": { "uri": "file:///home/me/app/src/Main.kt" } } }
+```
+
+`textDocument` is optional. With it, only the runnables of the package containing that file are listed; without it, those of every workspace member. Each entry looks like this:
+
+```json
+{
+  "label": "Run app (jvm)",
+  "kind": "run",
+  "package": "app",
+  "target": "jvm",
+  "cwd": "/home/me/app",
+  "program": "/home/me/.cargo/bin/kargo",
+  "args": ["run", "-t", "jvm"],
+  "debugArgs": ["run", "-t", "jvm", "--debug"],
+  "mainClass": "com.example.app.MainKt",
+  "entryPoint": null
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `label` | A name to show |
+| `kind` | `run` (a program), `test` (a target's tests) or `task` (a [task](../tasks-and-plugins/)) |
+| `package`, `target` | The package, and the target of `run -t` and `test -t` entries (`null` otherwise) |
+| `cwd`, `program`, `args` | Run `program` with `args` in `cwd`. `program` is the `kargo` running the server |
+| `debugArgs` | JVM programs and tests only: the same command with [`--debug`](#debugging), which waits for a debugger on port 5005 |
+| `mainClass`, `entryPoint` | The JVM main class or Kotlin/Native entry function, when known |
+| `path` | The source file of a `[[bin]]` with a `path`, or of an example |
+| `description` | A task's `description` |
+
+Programs are listed per target (`run -t <target>`), then each `[[bin]]` (`run --bin <name>`) and example (`run --example <name>`); tests per target (`test -t <target>`, append a filter to run one test); and tasks as `task <name>`. Kargo advertises `"experimental": { "kargo": { "runnables": true } }` in its capabilities so plugins can check for the request.
 
 ## Completion and validation in `kargo.toml`
 

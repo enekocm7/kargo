@@ -27,7 +27,7 @@ fn new_creates_a_project() {
     assert!(manifest.contains("serialization = true"));
     assert!(root.join("src/Main.kt").is_file());
     assert!(root.join("tests/GreetingTest.kt").is_file());
-    assert!(root.join(".gitignore").is_file());
+    assert!(std::fs::read_to_string(root.join(".gitignore")).unwrap().contains("/workspace.json\n"), "kargo lsp's generated files");
     assert!(!root.join(".git").exists(), "--no-vcs");
 
     p.kargo().args(["new", "my-app"]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));
@@ -1862,4 +1862,125 @@ fn debug_needs_the_jvm_target() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("select the JVM target with `-t jvm`"));
+}
+
+/// LSP messages, framed for `kargo lsp`'s stdin.
+fn lsp_input(messages: &[serde_json::Value]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for message in messages {
+        let body = serde_json::to_vec(message).unwrap();
+        out.extend(format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes());
+        out.extend(body);
+    }
+    out
+}
+
+/// The messages `kargo lsp` wrote to stdout.
+fn lsp_output(stdout: &[u8]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut rest = stdout;
+    while let Some(start) = rest.windows(4).position(|w| w == b"\r\n\r\n") {
+        let header = std::str::from_utf8(&rest[..start]).unwrap();
+        let length: usize = header.trim().strip_prefix("Content-Length: ").unwrap().parse().unwrap();
+        let body = &rest[start + 4..start + 4 + length];
+        out.push(serde_json::from_slice(body).unwrap());
+        rest = &rest[start + 4 + length..];
+    }
+    out
+}
+
+fn file_uri(path: &std::path::Path) -> String {
+    let text = path.display().to_string().replace('\\', "/").replace(' ', "%20");
+    if text.starts_with('/') { format!("file://{text}") } else { format!("file:///{text}") }
+}
+
+#[test]
+fn lsp_serves_kargo_toml_and_runnables() {
+    use serde_json::json;
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[tasks]\nhello = \"echo hi\"\n")).file("src/Main.kt", "fun main() {}\n");
+    let uri = file_uri(&p.path().join("kargo.toml"));
+    let broken = format!("{}[target.wasm]\nenvironment = \"web\"\n", manifest("app", ""));
+    let input = lsp_input(&[
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(p.path()), "capabilities": {} } }),
+        json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+        json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": { "uri": uri, "languageId": "toml", "version": 1, "text": broken } } }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/completion", "params": { "textDocument": { "uri": uri }, "position": { "line": 4, "character": 14 } } }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "kargo/runnables", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "shutdown" }),
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    ]);
+    let out = p.kargo().args(["lsp", "--server", "none"]).write_stdin(input).assert().success().get_output().stdout.clone();
+    let messages = lsp_output(&out);
+    let reply = |id: i64| messages.iter().find(|m| m["id"] == id && m.get("method").is_none()).unwrap_or_else(|| panic!("{messages:?}"));
+    assert_eq!(reply(1)["result"]["capabilities"]["experimental"]["kargo"]["runnables"], true);
+    let diagnostics = messages.iter().find(|m| m["method"] == "textDocument/publishDiagnostics").unwrap();
+    let diagnostic = &diagnostics["params"]["diagnostics"][0];
+    assert_eq!(diagnostic["message"], "`target.wasm.environment` must be one of `js`, `browser`, `wasi`, found `web`");
+    assert_eq!(diagnostic["range"]["start"], json!({ "line": 4, "character": 14 }));
+    let labels: Vec<&str> = reply(2)["result"]["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["js", "browser", "wasi"]);
+    let runnables = reply(3)["result"].as_array().unwrap();
+    let args: Vec<&serde_json::Value> = runnables.iter().map(|r| &r["args"]).collect();
+    assert_eq!(args, [&json!(["run", "-t", "jvm"]), &json!(["test", "-t", "jvm"]), &json!(["task", "hello"])]);
+    assert_eq!(runnables[0]["mainClass"], "MainKt");
+
+    // Without `shutdown` first, `exit` is an error, as LSP specifies.
+    let input = lsp_input(&[json!({ "jsonrpc": "2.0", "method": "exit" })]);
+    p.kargo().args(["lsp", "--server", "none"]).write_stdin(input).assert().code(1);
+}
+
+#[test]
+fn lsp_describes_the_project_for_the_kotlin_lsp() {
+    use serde_json::json;
+    let repo = LocalRepo::new();
+    repo.publish("g:util", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+    let p = Project::new();
+    let extra =
+        format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url());
+    p.file("kargo.toml", &manifest("app", &extra)).file("src/Main.kt", "fun main() {}\n");
+    let input = lsp_input(&[
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(p.path()), "capabilities": {} } }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "shutdown" }),
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    ]);
+    // Offline, the Kotlin LSP can't be downloaded: Kargo says so and keeps serving kargo.toml.
+    let out = p.kargo().args(["--offline", "lsp"]).write_stdin(input).assert().success().get_output().stdout.clone();
+    let messages = lsp_output(&out);
+    let shown = messages.iter().find(|m| m["method"] == "window/showMessage").unwrap_or_else(|| panic!("{messages:?}"));
+    assert!(shown["params"]["message"].as_str().unwrap().contains("offline"), "{shown}");
+    assert_eq!(messages.iter().find(|m| m["id"] == 1).unwrap()["result"]["capabilities"]["hoverProvider"], true);
+
+    let workspace: serde_json::Value = serde_json::from_str(&p.read("workspace.json")).unwrap();
+    let modules: Vec<&str> = workspace["modules"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(modules, ["app", "app.main", "app.test"]);
+    let libraries: Vec<&str> = workspace["libraries"].as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap()).collect();
+    assert!(libraries.contains(&"Kargo: g:util:1.0"), "{libraries:?}");
+    assert!(p.path().join("target/lsp/fingerprint").is_file(), "a complete import is remembered");
+
+    // A workspace.json Kargo didn't write is left alone.
+    p.file("workspace.json", "{}");
+    p.file("kargo.toml", &format!("{}# changed\n", manifest("app", &extra)));
+    let input = lsp_input(&[
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(p.path()), "capabilities": {} } }),
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    ]);
+    p.kargo().args(["--offline", "lsp", "--server", "kls"]).write_stdin(input.clone()).assert().code(1);
+    p.kargo().args(["--offline", "lsp"]).write_stdin(input).assert().code(1);
+    assert_eq!(p.read("workspace.json"), "{}");
+}
+
+#[test]
+fn toolchain_lists_language_servers() {
+    let p = Project::new();
+    p.kargo()
+        .args(["toolchain", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Kotlin language servers (").and(predicate::str::contains("(none installed)")));
+    p.kargo().args(["--offline", "toolchain", "install", "kotlin-lsp"]).assert().failure().stderr(predicate::str::contains("offline"));
+    p.kargo().args(["toolchain", "remove", "kls", "1.3.13"]).assert().failure().stderr(predicate::str::contains("not installed"));
 }

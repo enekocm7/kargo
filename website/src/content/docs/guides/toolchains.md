@@ -58,6 +58,7 @@ $ kargo toolchain remove jdk 17      # every JDK 17 release
 $ kargo toolchain remove jdk 17.0.13+11
 $ kargo toolchain remove native 2.4.10
 $ kargo toolchain remove gradle 9.5.0
+$ kargo toolchain install kotlin-lsp # the Kotlin language server `kargo lsp` runs (or: kls)
 ```
 
 `kargo toolchain ls` and `kargo toolchain rm` are aliases.
@@ -69,6 +70,17 @@ Kotlin/Native distributions are tied to `[kotlin] version` and installed automat
 ## Gradle
 
 Android builds run the Android Gradle Plugin on Gradle. Kargo downloads the Gradle version that plugin needs on the first Android build, verifies its SHA-256 and installs it under `~/.kargo/toolchains/gradle/<version>`. A `gradlew` in the project root takes precedence, and `gradle-version` under `[target.android]` pins another version. See [Android](../android/#gradle).
+
+## Kotlin language servers
+
+[`kargo lsp`](../editors/#language-server) runs a Kotlin language server behind its own, downloaded on first use like the other toolchains:
+
+| Server | `kargo lsp --server` | Version | Installed under |
+|---|---|---|---|
+| JetBrains' [Kotlin LSP](https://github.com/Kotlin/kotlin-lsp) (default) | `kotlin-lsp` | 263.6379.0 | `~/.kargo/toolchains/kotlin-lsp/<version>` |
+| fwcd's [kotlin-language-server](https://github.com/fwcd/kotlin-language-server) | `kls` | 1.3.13 | `~/.kargo/toolchains/kotlin-language-server/<version>` |
+
+Kargo pins one version of each and checks the download's SHA-256: the one JetBrains publishes next to the archive for the Kotlin LSP, and one built into Kargo for kotlin-language-server. The Kotlin LSP brings its own Java runtime. kotlin-language-server runs on the project's JDK, or, when that is newer than 21 (its Kotlin compiler doesn't support newer ones), on a Temurin 21 that Kargo [installs](#pinning-a-jdk) like any managed JDK. `kargo toolchain install kotlin-lsp` downloads it ahead of time, for example before going offline.
 
 ## The Kotlin compiler
 

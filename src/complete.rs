@@ -131,6 +131,9 @@ pub fn installed_toolchains() -> Vec<CompletionCandidate> {
     for gradle in kargo_toolchain::GradleDistribution::installed(&config).unwrap_or_default() {
         out.push(CompletionCandidate::new(gradle.version).help(Some("Gradle".into())));
     }
+    for server in kargo_toolchain::LanguageServer::installed(&config).unwrap_or_default() {
+        out.push(CompletionCandidate::new(server.version).help(Some(server.kind.title().into())));
+    }
     out
 }
 
