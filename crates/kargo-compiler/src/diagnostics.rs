@@ -1,8 +1,10 @@
 //! Compiler diagnostics. By default compiler output goes to stderr unchanged, except
 //! that the `-Werror` summary the compilers print first comes last; with
 //! `--message-format json` it is parsed into one JSON object per diagnostic (file,
-//! line, column, severity, message) on stdout, so editors don't scrape text.
+//! line, column, severity, message and the target being compiled) on stdout, so editors
+//! don't scrape text.
 
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -18,6 +20,31 @@ static JSON: AtomicBool = AtomicBool::new(false);
 
 /// Serializes JSON lines from compilations running in parallel.
 static STDOUT: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// The target this thread compiles, for the `target` field of JSON messages.
+    static TARGET: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` with JSON messages from this thread tagged with `target` (`jvm`, `wasm`, ...);
+/// `None` leaves them untagged. Threads a build spawns for one target inherit it through
+/// `kargo_ops::ops::parallel_map`.
+pub fn with_target<R>(target: Option<&str>, f: impl FnOnce() -> R) -> R {
+    let previous = TARGET.with(|t| t.replace(target.map(str::to_owned)));
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TARGET.with(|t| *t.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(previous);
+    f()
+}
+
+/// The target set by [`with_target`] on this thread.
+pub fn current_target() -> Option<String> {
+    TARGET.with(|t| t.borrow().clone())
+}
 
 /// Switches compiler output to JSON messages on stdout (`--message-format json`).
 pub fn set_json(json: bool) {
@@ -52,7 +79,8 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// The `compiler-message` JSON object. Relative paths are resolved against the
     /// current directory, where the compilers report them from, and use the
-    /// platform's separators.
+    /// platform's separators. `target` is the target being compiled on this thread
+    /// (see [`with_target`]), or `null`.
     pub fn to_json(&self) -> serde_json::Value {
         let file = self.file.as_ref().map(|f| {
             let path = Path::new(f);
@@ -70,6 +98,7 @@ impl Diagnostic {
             "line": self.line,
             "column": self.column,
             "rendered": self.rendered,
+            "target": current_target(),
         })
     }
 }
@@ -350,5 +379,17 @@ mod tests {
         let relative = parse_header("src/Main.kt:1:1: error: x").unwrap().to_json();
         assert!(Path::new(relative["file"].as_str().unwrap()).is_absolute());
         assert!(parse_header("error: x").unwrap().to_json()["file"].is_null());
+        assert!(d.to_json()["target"].is_null());
+    }
+
+    #[test]
+    fn json_message_names_the_target() {
+        let d = parse_header("/abs/Main.kt:3:5: error: boom").unwrap();
+        let json = with_target(Some("wasm"), || {
+            assert_eq!(with_target(Some("native"), || d.to_json())["target"], "native");
+            d.to_json()
+        });
+        assert_eq!(json["target"], "wasm", "the outer target is restored");
+        assert!(d.to_json()["target"].is_null());
     }
 }

@@ -21,7 +21,7 @@ JSON goes to stdout. Kargo's status lines (`Compiling`, `Finished`, ...) stay on
 
 ```console
 $ kargo build --message-format json 2>/dev/null
-{"column":16,"file":"/home/me/app/src/Main.kt","line":2,"message":"initializer type mismatch: expected 'Int', actual 'String'.","reason":"compiler-message","rendered":"src/Main.kt:2:16: error: initializer type mismatch: expected 'Int', actual 'String'.\n    val x: Int = \"nope\"\n               ^","severity":"error"}
+{"column":16,"file":"/home/me/app/src/Main.kt","line":2,"message":"initializer type mismatch: expected 'Int', actual 'String'.","reason":"compiler-message","rendered":"src/Main.kt:2:16: error: initializer type mismatch: expected 'Int', actual 'String'.\n    val x: Int = \"nope\"\n               ^","severity":"error","target":"jvm"}
 {"reason":"build-finished","success":false}
 ```
 
@@ -37,6 +37,7 @@ A `compiler-message` is one diagnostic from the Kotlin compiler (JVM, Wasm or Na
 | `line` | 1-based line, or `null` |
 | `column` | 1-based column, or `null` (javac reports none) |
 | `rendered` | The diagnostic as the compiler printed it, with the source line and a caret |
+| `target` | The target being compiled: `jvm`, `wasm` or `native`. A source in `src/` is compiled for every target, so the same error can come once per target |
 
 With [`warnings-as-errors`](../manifest/#kotlin), the compiler's `warnings found and -Werror specified` summary is the last `compiler-message`, after the diagnostics it counts. Kargo's own [warnings](../warnings/), such as a target without sources, are plain text on stderr, not JSON messages.
 

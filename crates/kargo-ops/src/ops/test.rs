@@ -90,7 +90,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
 
     // Compile every target's tests at the same time, then run them one target at a
     // time so their output doesn't interleave.
-    let prepared = super::parallel_map(&targets, |&target| match target {
+    let prepared = super::parallel_targets(&targets, |target| match target {
         TargetKind::Jvm => test_jvm(ctx, opts),
         TargetKind::Wasm => test_wasm(ctx, opts),
         TargetKind::Native => test_native(ctx, opts),
@@ -923,7 +923,7 @@ impl ListedTest {
 /// `kargo test --list`: compiles the tests of each target and prints them without running them.
 fn list(ctx: &BuildContext, opts: &TestOptions, format: ListFormat) -> Result<()> {
     let targets = select_targets(ctx, &opts.build.targets)?;
-    let listed = super::parallel_map(&targets, |&target| match target {
+    let listed = super::parallel_targets(&targets, |target| match target {
         TargetKind::Jvm => list_jvm(ctx, opts),
         TargetKind::Native => list_native(ctx, opts),
         TargetKind::Wasm | TargetKind::Android => {

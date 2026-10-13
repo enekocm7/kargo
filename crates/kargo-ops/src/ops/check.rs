@@ -47,7 +47,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx))?;
     warn_about_sources(ctx, &targets);
 
-    let checked = super::parallel_map(&targets, |&target| match target {
+    let checked = super::parallel_targets(&targets, |target| match target {
         TargetKind::Jvm => check_jvm(ctx, opts.tests),
         TargetKind::Wasm => check_wasm(ctx, opts.tests),
         TargetKind::Native => check_native(ctx, opts.tests),
