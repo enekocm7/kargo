@@ -19,7 +19,7 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FilenameIndex
 import com.intellij.psi.search.GlobalSearchScope
-import jetbrains.buildServer.messages.serviceMessages.ServiceMessageBuilder
+import com.intellij.execution.testframework.sm.ServiceMessageBuilder
 import jetbrains.buildServer.messages.serviceMessages.ServiceMessageVisitor
 
 class KargoTestConsoleProperties(configuration: KargoRunConfiguration, executor: Executor) :
