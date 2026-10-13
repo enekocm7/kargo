@@ -46,7 +46,7 @@ $ kargo test
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo fetch [--sources]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors |
 | `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
-| `kargo lsp [--server kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion and hover, `kargo/runnables`, and Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into |
+| `kargo lsp [--server kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion and hover (including Maven coordinates, versions and newer-version hints), `kargo/runnables`, and Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
@@ -290,6 +290,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT` | Browser, extra arguments and silence timeout (seconds) for Wasm browser tests |
 | `KARGO_MAVEN_LOCAL` | The local Maven repository for `kargo publish --local` and `"maven-local"` (default `~/.m2/repository`) |
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | Central Portal user token for `kargo publish` to Maven Central (`KARGO_MAVEN_CENTRAL_URL` overrides the Portal) |
+| `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API `kargo lsp` completes coordinates from |
 | `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_PASSPHRASE`, `KARGO_SIGNING_KEY_ID`, `KARGO_GPG` | Signing key (ASCII-armored), its passphrase, which key, and the `gpg` to sign published files with |
 | `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
 
@@ -305,7 +306,7 @@ Kargo is a Cargo workspace:
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, commands |
-| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, project import for Kotlin language servers, runnables |
+| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, project import for Kotlin language servers, runnables |
 | `kargo` | The CLI binary |
 
 ```bash

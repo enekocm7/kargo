@@ -9,11 +9,16 @@
 //! backend reads (see [`crate::project`]). When `kargo.toml` or `kargo.lock` change and the
 //! project's fingerprint with them, it imports the project again in the background, reports
 //! it with `$/progress`, and tells the backend which generated files changed.
+//!
+//! Work that may use the network (completing dependencies, hints at newer versions; see
+//! [`crate::deps`]) runs on worker threads that send their results back as events, so neither
+//! Kotlin traffic nor `kargo.toml` diagnostics wait for it.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,7 +31,7 @@ use kargo_toolchain::{LanguageServer, ServerKind};
 use kargo_util::config::Config;
 
 use crate::jsonrpc::{self, Kind};
-use crate::{manifest, project, text};
+use crate::{deps, manifest, project, text};
 
 /// How `kargo lsp` runs.
 #[derive(Debug, Clone, Default)]
@@ -37,6 +42,8 @@ pub struct Options {
     pub server_path: Option<PathBuf>,
     /// Kargo's built-in commands, for the warning about tasks they hide.
     pub builtin_commands: Vec<String>,
+    /// The Maven Central search API; default: `KARGO_MAVEN_SEARCH_URL` or [`deps::DEFAULT_SEARCH_URL`].
+    pub search_url: Option<String>,
 }
 
 /// A backend talking over in-memory streams, for tests.
@@ -49,6 +56,10 @@ enum Event {
     Backend(Option<Value>),
     /// A background import finished.
     Imported(project::Outcome),
+    /// A response computed on a worker thread, ready for the editor.
+    Reply(Value),
+    /// The newer-version hints for an open `kargo.toml`.
+    Hints { uri: String, hints: Vec<deps::Hint> },
 }
 
 /// Runs the server until the editor sends `exit` or closes the stream. Returns whether the
@@ -131,6 +142,9 @@ struct Server {
     reimport: bool,
     progress: Option<Progress>,
     warned_foreign: bool,
+    searcher: Arc<deps::Searcher>,
+    /// Newer-version hints by `kargo.toml` URI.
+    hints: HashMap<String, Vec<deps::Hint>>,
 }
 
 /// The editor's `textDocument.uri` of a message, if any.
@@ -215,6 +229,7 @@ pub(crate) fn merge_capabilities(backend: &Value) -> Value {
 
 impl Server {
     fn new(config: Config, opts: Options, out: Box<dyn Write + Send>, tx: Sender<Event>) -> Self {
+        let searcher = Arc::new(deps::Searcher::new(&config, opts.search_url.clone()));
         Self {
             config,
             opts,
@@ -234,6 +249,8 @@ impl Server {
             reimport: false,
             progress: None,
             warned_foreign: false,
+            searcher,
+            hints: HashMap::new(),
         }
     }
 
@@ -282,6 +299,17 @@ impl Server {
                 self.imported(outcome)?;
                 Ok(None)
             }
+            Event::Reply(message) => {
+                self.send(&message)?;
+                Ok(None)
+            }
+            Event::Hints { uri, hints } => {
+                // Republish only when they changed, so a project without updates sends nothing more.
+                if self.docs.contains_key(&uri) && self.hints.insert(uri.clone(), hints.clone()).unwrap_or_default() != hints {
+                    self.publish(&uri)?;
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -313,8 +341,10 @@ impl Server {
                         self.send(&reply)?;
                     }
                     _ if document_uri(&message).is_some_and(is_kargo_document) => {
-                        let result = self.manifest_request(&method, &message);
-                        self.send(&jsonrpc::response(&id, result))?;
+                        if !self.dependency_completion(&method, &message) {
+                            let result = self.manifest_request(&method, &message);
+                            self.send(&jsonrpc::response(&id, result))?;
+                        }
                     }
                     _ => self.forward_request(message, Value::Null)?,
                 }
@@ -617,6 +647,10 @@ impl Server {
         if !changes.is_empty() {
             self.send_backend(&jsonrpc::notification("workspace/didChangeWatchedFiles", json!({ "changes": changes })));
         }
+        let open: Vec<String> = self.docs.keys().cloned().collect();
+        for uri in open {
+            self.compute_hints(&uri);
+        }
         if std::mem::take(&mut self.reimport) {
             self.maybe_reimport()?;
         }
@@ -651,6 +685,47 @@ impl Server {
         Ok(project::runnables(&metadata, &kargo, file.as_deref()))
     }
 
+    /// Answers a completion on a dependency's coordinate or version from a worker thread, since
+    /// it may search Maven Central or read the repositories. Returns whether it did.
+    fn dependency_completion(&mut self, method: &str, message: &Value) -> bool {
+        if method != "textDocument/completion" {
+            return false;
+        }
+        let uri = document_uri(message).unwrap_or_default();
+        let Some(text) = self.docs.get(uri).filter(|_| is_manifest(uri)) else { return false };
+        let offset = text::offset(text, &message["params"]["position"]);
+        let Some(request) = deps::request(text, offset) else { return false };
+        let (text, id, tx) = (text.clone(), message["id"].clone(), self.tx.clone());
+        let path = text::uri_to_path(uri).unwrap_or_else(|| PathBuf::from(kargo_manifest::MANIFEST_NAME));
+        let (config, searcher) = (self.config.clone(), Arc::clone(&self.searcher));
+        thread::spawn(move || {
+            let result = match &request {
+                deps::Request::Coordinate { partial, .. } => {
+                    let hits = searcher.search(partial);
+                    // Results depend on what is typed, so the editor asks again on every keystroke.
+                    json!({ "isIncomplete": true, "items": deps::coordinate_items(&text, &request, &hits.unwrap_or_default()) })
+                }
+                deps::Request::Version { module, .. } => {
+                    let versions = deps::versions(&config, deps::repositories(&text, &path), module);
+                    json!({ "isIncomplete": false, "items": deps::version_items(&text, &request, &versions) })
+                }
+            };
+            let _ = tx.send(Event::Reply(jsonrpc::response(&id, result)));
+        });
+        true
+    }
+
+    /// Works out the newer-version hints of the open `kargo.toml` at `uri` on a worker thread,
+    /// from the manifest on disk.
+    fn compute_hints(&self, uri: &str) {
+        let Some(path) = text::uri_to_path(uri) else { return };
+        let (config, tx, uri) = (self.config.clone(), self.tx.clone(), uri.to_owned());
+        thread::spawn(move || {
+            let hints = deps::hints(&config, &path);
+            let _ = tx.send(Event::Hints { uri, hints });
+        });
+    }
+
     fn manifest_request(&mut self, method: &str, message: &Value) -> Value {
         let uri = document_uri(message).unwrap_or_default();
         let Some(text) = self.docs.get(uri).filter(|_| is_manifest(uri)) else { return Value::Null };
@@ -669,6 +744,7 @@ impl Server {
             "textDocument/didOpen" if is_manifest(&uri) => {
                 self.docs.insert(uri.clone(), params["textDocument"]["text"].as_str().unwrap_or_default().to_owned());
                 self.publish(&uri)?;
+                self.compute_hints(&uri);
             }
             "textDocument/didChange" if is_manifest(&uri) => {
                 if let Some(text) = self.docs.get_mut(&uri) {
@@ -678,6 +754,7 @@ impl Server {
             }
             "textDocument/didClose" if is_manifest(&uri) => {
                 self.docs.remove(&uri);
+                self.hints.remove(&uri);
                 self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] }))?;
             }
             "textDocument/didSave" => self.maybe_reimport()?,
@@ -691,10 +768,16 @@ impl Server {
         let path = text::uri_to_path(uri).unwrap_or_else(|| PathBuf::from(kargo_manifest::MANIFEST_NAME));
         let builtins = &self.opts.builtin_commands;
         let problems = manifest::problems(text, Path::new(&path), &|name| builtins.iter().any(|b| b == name));
-        let diagnostics: Vec<Value> = problems
+        let mut diagnostics: Vec<Value> = problems
             .into_iter()
             .map(|p| json!({ "range": text::range(text, p.span), "severity": if p.warning { 2 } else { 1 }, "source": "kargo", "message": p.message }))
             .collect();
+        // Newer versions, as information; a hint whose dependency was edited away is dropped.
+        for hint in self.hints.get(uri).into_iter().flatten() {
+            if let Some(span) = deps::locate(text, hint) {
+                diagnostics.push(json!({ "range": text::range(text, span), "severity": 3, "source": "kargo", "message": hint.message }));
+            }
+        }
         self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics }))
     }
 }
@@ -831,6 +914,62 @@ mod tests {
         let (missing, _) = editor.request(5, "textDocument/definition", json!({ "textDocument": { "uri": "file:///x/Main.kt" } }));
         assert_eq!(missing["error"]["code"], jsonrpc::METHOD_NOT_FOUND);
         assert!(editor.finish(), "shutdown, then exit");
+    }
+
+    #[test]
+    fn completes_versions_and_hints_at_newer_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = dir.path().join("repo/com/acme/widget");
+        std::fs::create_dir_all(&meta).unwrap();
+        let versions: String = ["1.0.0", "1.1.0", "2.0.0-RC1"].iter().map(|v| format!("<version>{v}</version>")).collect();
+        std::fs::write(
+            meta.join("maven-metadata.xml"),
+            format!("<metadata><versioning><versions>{versions}</versions></versioning></metadata>"),
+        )
+        .unwrap();
+        let url = format!("file://{}", dir.path().join("repo").display()).replace('\\', "/");
+        let text = format!(
+            "[package]
+name = \"app\"
+version = \"0.1.0\"
+
+[repositories]
+local = \"{url}\"
+
+[dependencies]
+\"com.acme:widget\" = \"1.0.0\"
+"
+        );
+        std::fs::write(dir.path().join("kargo.toml"), &text).unwrap();
+        let uri = text::path_to_uri(&dir.path().join("kargo.toml"));
+        let (mut editor, _home) = Editor::start(Options::default(), None);
+        editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} }));
+        editor.send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "toml", "version": 1, "text": text } }),
+        ));
+        assert_eq!(editor.recv()["params"]["diagnostics"], json!([]));
+        let hint = editor.recv();
+        let diagnostic = &hint["params"]["diagnostics"][0];
+        assert_eq!(diagnostic["severity"], 3);
+        assert_eq!(diagnostic["message"], "`com.acme:widget` 1.1.0 is available");
+        assert_eq!(diagnostic["range"]["start"], json!({ "line": 8, "character": 0 }));
+
+        let (completion, _) = editor.request(
+            2,
+            "textDocument/completion",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": 8, "character": 21 } }),
+        );
+        let labels: Vec<&str> = completion["result"]["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["1.1.0", "1.0.0", "2.0.0-RC1"]);
+        // Offline, coordinates aren't searched.
+        let (completion, _) = editor.request(
+            3,
+            "textDocument/completion",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": 8, "character": 9 } }),
+        );
+        assert_eq!(completion["result"], json!({ "isIncomplete": true, "items": [] }));
+        assert!(editor.finish());
     }
 
     /// A fake Kotlin server: answers `initialize`, `textDocument/hover` and `shutdown`, and

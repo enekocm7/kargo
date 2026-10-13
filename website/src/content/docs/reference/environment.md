@@ -26,6 +26,7 @@ description: Environment variables Kargo reads and sets.
 | `KARGO_MAVEN_LOCAL` | The local Maven repository that `kargo publish --local` writes and `"maven-local"` in `[repositories]` reads (default `~/.m2/repository`) |
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | The two parts of a Central Portal user token, for [publishing to Maven Central](../../guides/publishing/#maven-central) |
 | `KARGO_MAVEN_CENTRAL_URL` | The Central Portal to publish to (default `https://central.sonatype.com`) |
+| `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API that [`kargo lsp` completes coordinates from](../../guides/editors/#dependency-completion-and-update-hints) (default `https://search.maven.org/solrsearch/select`) |
 | `KARGO_SIGNING_KEY` | An ASCII-armored secret key (`gpg --export-secret-keys --armor <id>`), as is or base64-encoded, that `kargo publish` [signs with](../../guides/publishing/#signing). Without it, GnuPG's own keyring is used |
 | `KARGO_SIGNING_KEY_ID` | The key to sign with (`gpg --local-user`); default: GnuPG's default key |
 | `KARGO_SIGNING_KEY_PASSPHRASE` | The signing key's passphrase |

@@ -519,6 +519,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "kargo-manifest",
+ "kargo-maven",
  "kargo-ops",
  "kargo-toolchain",
  "kargo-util",
@@ -526,6 +527,7 @@ dependencies = [
  "tempfile",
  "toml",
  "toml_edit",
+ "ureq",
 ]
 
 [[package]]

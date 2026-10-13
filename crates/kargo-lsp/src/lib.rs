@@ -6,6 +6,7 @@
 //! describes the project to that server from `kargo metadata` and describes it again when
 //! `kargo.toml` or `kargo.lock` change.
 
+pub mod deps;
 pub mod jsonrpc;
 pub mod manifest;
 pub mod project;
