@@ -77,7 +77,6 @@ Open the project root or any directory in it. Kargo finds the project from the f
 | Command | Kotlin server |
 |---|---|
 | `kargo lsp` | JetBrains' Kotlin LSP (the default) |
-| `kargo lsp --server kargo` | [Kargo's own Kotlin server](#kargos-kotlin-server-preview), a preview |
 | `kargo lsp --server kls` | fwcd's [kotlin-language-server](https://github.com/fwcd/kotlin-language-server), for setups that still use it. It runs on the project's JDK, or on a Temurin 21 Kargo installs when that is newer than 21 |
 | `kargo lsp --server none` | No Kotlin server: only `kargo.toml` support and runnables |
 | `kargo lsp --server-path <path>` | The server executable at `<path>` instead of the one Kargo downloads |
@@ -87,29 +86,6 @@ kotlin-language-server is no longer maintained and its last release bundles Kotl
 
 Kargo pins the version of each server and installs it like any other [toolchain](../toolchains/#kotlin-language-servers). `kargo toolchain install kotlin-lsp` downloads it ahead of time; `kargo --offline lsp` uses what is installed and the dependencies already in the cache.
 
-If the Kotlin server crashes, Kargo starts it again after 1, 2 and 4 seconds and reopens the documents you have open. After three crashes within five minutes it stops trying and shows a message that says where the server's log is; `kargo.toml` support and runnables keep working.
-
-### Kargo's Kotlin server (preview)
-
-`kargo lsp --server kargo` runs `kargo-kotlin-server`, Kargo's own Kotlin language server. It is built on the [Kotlin Analysis API](https://kotlin.github.io/analysis-api/), the K2 compiler frontend that the Kotlin plugin of IntelliJ IDEA uses, so its errors are the ones `kargo build` reports, at the same positions. It is meant to replace the Kotlin LSP as the default once it can do as much.
-
-Instead of writing a file into the project, Kargo hands this server the project [model](../../reference/lsp-project-model/) directly: every package and source set as a module, the libraries once each with the checksum `kargo.lock` pins, the JDK and the compiler settings. It sends the model again whenever `kargo.toml` or `kargo.lock` change, and tells the server about changed `.kt`, `.java` and `.klib` files. While the server builds its analysis session, the editor shows a "Kotlin" progress.
-
-What it does so far:
-
-- Errors and warnings as you type, from the compiler frontend.
-- Hover: the declaration rendered as Kotlin, its KDoc, and where it is declared.
-
-Completion, navigation and the other features are still to come; until then use the default server for them. The server runs on the project's JDK when that is 17 or newer, else on a managed Temurin 21. Set its JVM options with `kotlinServer.jvmArgs` in the editor's `initializationOptions` or with [`KARGO_LSP_JVM_OPTS`](../../reference/environment/); the default is `-Xmx2g -XX:+UseG1GC -XX:SoftRefLRUPolicyMSPerMB=50`. It logs to `target/lsp/kotlin-server.log`.
-
-```json title="initializationOptions"
-{ "kotlinServer": { "jvmArgs": ["-Xmx3g"] } }
-```
-
-:::note
-The server has no release yet. Build it from `kotlin-server/` in Kargo's repository (see [Contributing](../../reference/contributing/#the-kotlin-server)) and run `kargo lsp --server kargo --server-path <its bin/kargo-kotlin-server>`.
-:::
-
 ### Files it writes
 
 Kotlin language servers don't read `kargo.toml`, so Kargo writes the project description each one understands at the project root, from [`kargo metadata`](#importing-a-project):
@@ -118,7 +94,6 @@ Kotlin language servers don't read `kargo.toml`, so Kargo writes the project des
 |---|---|---|
 | Kotlin LSP | `workspace.json` | A module per package for main code and one for tests (a module per source set for a [multiplatform](#multiplatform-projects) package), with their source and resource roots, the JVM target's classpaths as libraries (with sources jars once downloaded with `kargo fetch --sources`), path dependencies as modules, the JDK, `jvm-target`, compiler arguments and compiler plugins |
 | kotlin-language-server | `kls-classpath` (`kls-classpath.bat` on Windows) | A script printing the test classpath, which Kargo keeps in `target/lsp/classpath.txt` |
-| Kargo's Kotlin server | none | The [project model](../../reference/lsp-project-model/) goes to the server over LSP |
 
 [`kargo ide`](#without-kargo-lsp) writes the same files without running a server. They hold paths on your machine, so keep them out of version control; `kargo new` adds them to `.gitignore`. Kargo only replaces a file while it still holds what Kargo last wrote: a `workspace.json` you wrote yourself, or one another tool generated, is left alone, and `kargo lsp` tells you so. Delete it to let Kargo manage it. Kargo remembers the last complete import in `target/lsp`, so a restart with an unchanged `kargo.toml` and `kargo.lock` starts the Kotlin server right away.
 

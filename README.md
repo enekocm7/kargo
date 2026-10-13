@@ -48,7 +48,7 @@ $ kargo test
 | `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
 | `kargo ide [--kls\|--zed]` | Write `workspace.json` (Kotlin LSP) or `kls-classpath` (kotlin-language-server) for editors that run the server themselves, or `.zed/tasks.json` with Kargo tasks for Zed's run buttons; kept current by later commands |
 | `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
-| `kargo lsp [--server kotlin-lsp\|kargo\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion, hover (including Maven coordinates, versions and newer-version hints) and code actions (quick fixes, add a dependency, framework or target, upgrade), `kargo/runnables`, Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into (multiplatform packages as source sets, so `expect`/`actual` link up; `--klib-targets` adds Wasm and Native), opt-in `kargo check` on save (`checkOnSave`) with errors for every target, and a crashed Kotlin server started again. `--server kargo` previews Kargo's own Kotlin server on the Kotlin Analysis API, which gets the project model over LSP and writes nothing into the project |
+| `kargo lsp [--server kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion, hover (including Maven coordinates, versions and newer-version hints) and code actions (quick fixes, add a dependency, framework or target, upgrade), `kargo/runnables`, Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into (multiplatform packages as source sets, so `expect`/`actual` link up; `--klib-targets` adds Wasm and Native), and opt-in `kargo check` on save (`checkOnSave`) with errors for every target |
 | `kargo dap` | Debug adapter for editors over stdio: kotlin-debug-adapter on the project's JDK, launching `kargo run` or `kargo test` with `--debug` and mapping Kargo's source layout so breakpoints and stack frames find your files |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
@@ -221,7 +221,7 @@ Android builds run on a Gradle that Kargo downloads from `services.gradle.org` (
 
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
-$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0, kotlin-lsp, kargo-kotlin-server, kls, kotlin-debug-adapter
+$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0, kotlin-lsp, kls, kotlin-debug-adapter
 $ kargo toolchain install            # whatever the current project needs
 $ kargo toolchain list               # installed JDKs/Kotlin/Native/Gradle, disk usage, what the project uses
 $ kargo toolchain which              # toolchains resolved for this project
@@ -298,7 +298,6 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_MAVEN_LOCAL` | The local Maven repository for `kargo publish --local` and `"maven-local"` (default `~/.m2/repository`) |
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | Central Portal user token for `kargo publish` to Maven Central (`KARGO_MAVEN_CENTRAL_URL` overrides the Portal) |
 | `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API `kargo lsp` completes coordinates from |
-| `KARGO_LSP_JVM_OPTS` | JVM options of Kargo's Kotlin server (`kargo lsp --server kargo`); default `-Xmx2g -XX:+UseG1GC -XX:SoftRefLRUPolicyMSPerMB=50` |
 | `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_PASSPHRASE`, `KARGO_SIGNING_KEY_ID`, `KARGO_GPG` | Signing key (ASCII-armored), its passphrase, which key, and the `gpg` to sign published files with |
 | `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
 
@@ -314,7 +313,7 @@ Kargo is a Cargo workspace:
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, commands |
-| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, project import for Kotlin language servers (and the project model of Kargo's own), runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |
+| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, project import for Kotlin language servers, runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |
 | `kargo` | The CLI binary |
 
 ```bash
@@ -329,14 +328,6 @@ The JetBrains plugin in `editors/jetbrains` is a Gradle project written in Kotli
 cd editors/jetbrains
 ./gradlew buildPlugin test                   # the plugin zip in build/distributions
 ./gradlew runIde                             # an IDE with the plugin installed
-```
-
-Kargo's own Kotlin language server in `kotlin-server` (a preview, behind `kargo lsp --server kargo`) is a Kargo project written in Kotlin on the Kotlin Analysis API:
-
-```bash
-cd kotlin-server
-../target/debug/kargo test                   # after cargo build
-KARGO=../target/debug/kargo sh dist/package.sh  # target/dist/kargo-kotlin-server-<version>.zip
 ```
 
 The Zed extension in `editors/zed` is a Rust crate of its own, compiled to WebAssembly:

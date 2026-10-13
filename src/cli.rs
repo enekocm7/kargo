@@ -125,8 +125,6 @@ enum ToolArg {
     Native,
     /// A Gradle distribution (runs Android builds)
     Gradle,
-    /// Kargo's own Kotlin language server, run by `kargo lsp --server kargo`
-    KargoKotlinServer,
     /// JetBrains' Kotlin language server, run by `kargo lsp`
     KotlinLsp,
     /// fwcd's kotlin-language-server, run by `kargo lsp --server kls`
@@ -141,7 +139,6 @@ impl From<ToolArg> for ToolKind {
             ToolArg::Jdk => ToolKind::Jdk,
             ToolArg::Native => ToolKind::Native,
             ToolArg::Gradle => ToolKind::Gradle,
-            ToolArg::KargoKotlinServer => ToolKind::Server(ServerKind::Kargo),
             ToolArg::KotlinLsp => ToolKind::Server(ServerKind::KotlinLsp),
             ToolArg::Kls => ToolKind::Server(ServerKind::Kls),
             ToolArg::KotlinDebugAdapter => ToolKind::Server(ServerKind::Kda),
@@ -273,8 +270,6 @@ enum LspServerArg {
     /// JetBrains' Kotlin LSP
     #[default]
     KotlinLsp,
-    /// Kargo's own Kotlin server on the Kotlin Analysis API (preview)
-    Kargo,
     /// fwcd's kotlin-language-server
     Kls,
     /// No Kotlin server: only kargo.toml support and runnables
@@ -764,17 +759,15 @@ Kargo answers for kargo.toml itself (diagnostics, completion and hover from its 
 Kargo's own validation) and the `kargo/runnables` request, and passes everything about Kotlin
 code to a Kotlin language server it downloads on first use. It describes the project to that
 server from `kargo metadata` (workspace.json for the Kotlin LSP, kls-classpath for
-kotlin-language-server, the project model in its initialize request for Kargo's own server)
-and again whenever kargo.toml or kargo.lock change. A server that crashes is started again,
-up to three times in five minutes.")]
+kotlin-language-server) and again whenever kargo.toml or kargo.lock change.")]
     Lsp {
-        /// The Kotlin language server: JetBrains' `kotlin-lsp`, Kargo's own `kargo` (preview), fwcd's `kls`, or `none` for kargo.toml support only
+        /// The Kotlin language server: JetBrains' `kotlin-lsp`, fwcd's `kls`, or `none` for kargo.toml support only
         #[arg(long, value_enum, default_value_t)]
         server: LspServerArg,
         /// Run this language server executable instead of the one Kargo downloads
         #[arg(long, value_name = "PATH")]
         server_path: Option<PathBuf>,
-        /// Also describe Wasm and Native sources to the Kotlin LSP (it doesn't read klibs yet, so their libraries don't resolve); Kargo's server always gets every target
+        /// Also describe Wasm and Native sources to the Kotlin LSP (it doesn't read klibs yet, so their libraries don't resolve)
         #[arg(long)]
         klib_targets: bool,
         /// Accepted for editors that pass it; Kargo always talks over stdio
@@ -1354,12 +1347,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
         Command::Lsp { server, server_path, klib_targets, stdio: _ } => {
             let server = match server {
                 LspServerArg::KotlinLsp => Some(ServerKind::KotlinLsp),
-                LspServerArg::Kargo => Some(ServerKind::Kargo),
                 LspServerArg::Kls => Some(ServerKind::Kls),
                 LspServerArg::None => None,
             };
             if server.is_none() && server_path.is_some() {
-                bail!("`--server-path` needs a Kotlin language server; use `--server kotlin-lsp`, `--server kargo` or `--server kls`");
+                bail!("`--server-path` needs a Kotlin language server; use `--server kotlin-lsp` or `--server kls`");
             }
             let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
             let opts = kargo_lsp::Options { server, server_path, targets, builtin_commands: builtin_commands(), search_url: None };
