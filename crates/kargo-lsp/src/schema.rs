@@ -273,6 +273,20 @@ fn value(v: &toml_edit::Value, fallback: Range<usize>) -> Spanned {
 pub struct Violation {
     pub span: Range<usize>,
     pub message: String,
+    /// How to fix it, when the schema knows.
+    pub fix: Option<Fix>,
+}
+
+/// A fix for a [`Violation`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fix {
+    /// Rename the unknown key at the violation's span to this one.
+    RenameKey(String),
+    /// Replace the value at the violation's span with one of these, in the schema's order.
+    ReplaceValue(Vec<Value>),
+    /// Add the missing `key` to the table at `table`, whose header ends at byte `header_end` (the
+    /// root table has none). `example` is a value for it, from the schema or the table's other keys.
+    AddKey { table: Vec<String>, key: String, header_end: Option<usize>, example: Option<Value> },
 }
 
 /// Validates a manifest against the schema.
@@ -314,7 +328,7 @@ fn check(node: &Value, value: &Spanned, path: &[&str], key_span: &Range<usize>, 
     if typed.is_empty() {
         let mut expected: Vec<&str> = alts.iter().flat_map(|a| types(a)).collect();
         expected.dedup();
-        out.push(Violation { span: value.span.clone(), message: type_message(path, &expected, &value.value) });
+        out.push(Violation { span: value.span.clone(), message: type_message(path, &expected, &value.value), fix: None });
         return;
     }
     let best = typed.into_iter().min_by_key(|&i| results[i].1.len()).expect("one alternative matches the type");
@@ -379,7 +393,7 @@ fn json_text(value: &Value) -> String {
 
 fn check_keywords(node: &Value, value: &Spanned, path: &[&str], key_span: &Range<usize>, out: &mut Vec<Violation>) {
     if !accepts_type(node, &value.value) && node.get("type").is_some() {
-        out.push(Violation { span: value.span.clone(), message: type_message(path, &types(node), &value.value) });
+        out.push(Violation { span: value.span.clone(), message: type_message(path, &types(node), &value.value), fix: None });
         return;
     }
     if let Some(values) = node.get("enum").and_then(Value::as_array)
@@ -387,28 +401,32 @@ fn check_keywords(node: &Value, value: &Spanned, path: &[&str], key_span: &Range
     {
         let list: Vec<String> = values.iter().map(|v| format!("`{}`", json_text(v))).collect();
         let message = format!("`{}` must be one of {}, found `{}`", describe(path), list.join(", "), short(&value.value));
-        out.push(Violation { span: value.span.clone(), message });
+        out.push(Violation { span: value.span.clone(), message, fix: Some(Fix::ReplaceValue(values.clone())) });
         return;
     }
     if let Some(constant) = node.get("const")
         && !value.value.equals(constant)
     {
         let message = format!("`{}` must be `{}`", describe(path), json_text(constant));
-        out.push(Violation { span: value.span.clone(), message });
+        out.push(Violation { span: value.span.clone(), message, fix: None });
     }
     match &value.value {
         Tv::String(s) => {
             if let Some(min) = node.get("minLength").and_then(Value::as_u64)
                 && (s.chars().count() as u64) < min
             {
-                out.push(Violation { span: value.span.clone(), message: format!("`{}` must not be empty", describe(path)) });
+                out.push(Violation { span: value.span.clone(), message: format!("`{}` must not be empty", describe(path)), fix: None });
             }
         }
         Tv::Integer(i) => {
             if let Some(min) = node.get("minimum").and_then(Value::as_i64)
                 && *i < min
             {
-                out.push(Violation { span: value.span.clone(), message: format!("`{}` must be at least {min}", describe(path)) });
+                out.push(Violation {
+                    span: value.span.clone(),
+                    message: format!("`{}` must be at least {min}", describe(path)),
+                    fix: None,
+                });
             }
         }
         Tv::Array(items) => {
@@ -416,7 +434,7 @@ fn check_keywords(node: &Value, value: &Spanned, path: &[&str], key_span: &Range
                 && (items.len() as u64) < min
             {
                 let message = format!("`{}` needs at least {min} element{}", describe(path), if min == 1 { "" } else { "s" });
-                out.push(Violation { span: value.span.clone(), message });
+                out.push(Violation { span: value.span.clone(), message, fix: None });
             }
             if let Some(schema) = node.get("items") {
                 for item in items {
@@ -462,7 +480,9 @@ fn check_table(
                     }
                     (None, _) => message,
                 };
-                out.push(Violation { span: span.clone(), message });
+                // Not to a key the table already has: that would be a duplicate.
+                let fix = closest.filter(|(_, k)| !entries.iter().any(|(e, _, _)| e == **k)).map(|(_, k)| Fix::RenameKey((*k).clone()));
+                out.push(Violation { span: span.clone(), message, fix });
             }
             Some(schema @ Value::Object(_)) => check(schema, child, &child_path, span, out),
             _ => {}
@@ -478,7 +498,20 @@ fn check_table(
                 [] => format!("missing `{required}`"),
                 _ => format!("missing `{required}` in `{}`", describe(path)),
             };
-            out.push(Violation { span: at.clone(), message });
+            let schema = properties.and_then(|p| p.get(required));
+            let mut example = schema.and_then(|s| values(s).into_iter().find(|(_, what)| *what != "const").map(|(v, _)| v.clone()));
+            // A `[[bin]]` without a name: the one its `path` suggests.
+            if example.is_none()
+                && required == "name"
+                && let Some((_, _, Spanned { value: Tv::String(file), .. })) = entries.iter().find(|(k, _, _)| k == "path")
+            {
+                let stem = std::path::Path::new(file).file_stem().map(|s| s.to_string_lossy().to_lowercase());
+                example = stem.filter(|s| !s.is_empty()).map(Value::String);
+            }
+            let header_end = (!value.span.is_empty()).then_some(value.span.end);
+            let table = path.iter().map(|k| (*k).to_owned()).collect();
+            let fix = Fix::AddKey { table, key: required.to_owned(), header_end, example };
+            out.push(Violation { span: at.clone(), message, fix: Some(fix) });
         }
     }
     if let Some(max) = node.get("maxProperties").and_then(Value::as_u64)
@@ -488,21 +521,21 @@ fn check_table(
             [] => format!("this table can only have {max} key{}", if max == 1 { "" } else { "s" }),
             _ => format!("`{}` can only have {max} key{}", describe(path), if max == 1 { "" } else { "s" }),
         };
-        out.push(Violation { span: at.clone(), message });
+        out.push(Violation { span: at.clone(), message, fix: None });
     }
     if let Some(forbidden) = node.get("not").and_then(|n| n.get("required")).and_then(Value::as_array) {
         let names: Vec<&str> = forbidden.iter().filter_map(Value::as_str).collect();
         if names.iter().all(|k| has(k)) {
             for name in names {
                 let span = entries.iter().find(|(k, _, _)| k == name).map_or(at.clone(), |(_, s, _)| s.clone());
-                out.push(Violation { span, message: format!("`{name}` is not allowed here") });
+                out.push(Violation { span, message: format!("`{name}` is not allowed here"), fix: None });
             }
         }
     }
 }
 
 /// The Levenshtein distance between two keys.
-fn distance(a: &str, b: &str) -> usize {
+pub(crate) fn distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut row: Vec<usize> = (0..=b.len()).collect();
     for (i, ca) in a.chars().enumerate() {

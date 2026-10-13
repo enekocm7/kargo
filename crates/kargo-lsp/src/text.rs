@@ -48,6 +48,24 @@ pub fn range(text: &str, span: std::ops::Range<usize>) -> Value {
     json!({ "start": position(text, span.start), "end": position(text, span.end) })
 }
 
+/// The one `TextEdit` that turns `old` into `new`: the text between their common prefix and
+/// suffix. `None` when they are equal.
+pub fn edit(old: &str, new: &str) -> Option<Value> {
+    if old == new {
+        return None;
+    }
+    let mut prefix = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(prefix) || !new.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let max_suffix = old.len().min(new.len()) - prefix;
+    let mut suffix = old.bytes().rev().zip(new.bytes().rev()).take(max_suffix).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix) {
+        suffix -= 1;
+    }
+    Some(json!({ "range": range(old, prefix..old.len() - suffix), "newText": &new[prefix..new.len() - suffix] }))
+}
+
 /// Applies the `contentChanges` of a `textDocument/didChange` to `text`.
 pub fn apply_changes(text: &mut String, changes: &[Value]) {
     for change in changes {
@@ -140,6 +158,23 @@ mod tests {
         assert_eq!(text, "[package]\nname = \"app\"\n");
         apply_changes(&mut text, &[json!({ "text": "x" })]);
         assert_eq!(text, "x");
+    }
+
+    #[test]
+    fn makes_minimal_edits() {
+        let old = "[package]\nname = \"a\"\n";
+        let new = "[package]\nname = \"a\"\nversion = \"1\"\n";
+        let edit = edit(old, new).unwrap();
+        assert_eq!(edit["range"], range(old, old.len()..old.len()));
+        assert_eq!(edit["newText"], "version = \"1\"\n");
+        let mut applied = old.to_owned();
+        apply_changes(&mut applied, &[json!({ "range": edit["range"], "text": edit["newText"] })]);
+        assert_eq!(applied, new);
+        // Repeated text and multi-byte characters stay whole.
+        let edit = super::edit("aé", "aè").unwrap();
+        assert_eq!(edit["newText"], "è");
+        assert_eq!(super::edit("aaa", "aa").unwrap()["newText"], "");
+        assert!(super::edit("x", "x").is_none());
     }
 
     #[test]

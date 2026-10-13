@@ -1,8 +1,8 @@
 //! The `kargo lsp` message loop.
 //!
 //! Kargo sits between the editor and a Kotlin language server (the backend). Everything about
-//! `kargo.toml` (diagnostics, completion, hover) and the `kargo/runnables` request is answered
-//! here; every other message is passed through unchanged in both directions. The
+//! `kargo.toml` (diagnostics, completion, hover, code actions), Kargo's commands for
+//! `workspace/executeCommand` and the `kargo/runnables` request are answered here; every other message is passed through unchanged in both directions. The
 //! `initialize` response is the backend's with Kargo's capabilities merged in.
 //!
 //! Before the backend starts, Kargo imports the project and writes the description the
@@ -31,7 +31,7 @@ use kargo_toolchain::{LanguageServer, ServerKind};
 use kargo_util::config::Config;
 
 use crate::jsonrpc::{self, Kind};
-use crate::{deps, manifest, project, text};
+use crate::{actions, deps, manifest, project, text};
 
 /// How `kargo lsp` runs.
 #[derive(Debug, Clone, Default)]
@@ -60,6 +60,9 @@ enum Event {
     Reply(Value),
     /// The newer-version hints for an open `kargo.toml`.
     Hints { uri: String, hints: Vec<deps::Hint> },
+    /// A command's new contents for the `kargo.toml` at `uri`, worked out on a worker thread from
+    /// `original`, with the reply to request `id`.
+    Edited { id: Value, uri: String, original: String, outcome: Result<(String, Value)> },
 }
 
 /// Runs the server until the editor sends `exit` or closes the stream. Returns whether the
@@ -135,6 +138,8 @@ struct Server {
     initialize_id: Option<Value>,
     client_progress: bool,
     client_watches: bool,
+    /// Whether the editor applies `workspace/applyEdit`.
+    client_apply_edit: bool,
     shutdown: bool,
     next_id: u64,
     fingerprint: Option<String>,
@@ -177,8 +182,24 @@ fn own_capabilities() -> Value {
         "textDocumentSync": { "openClose": true, "change": 2, "save": { "includeText": false } },
         "completionProvider": { "triggerCharacters": ["[", ".", "\"", "=", " ", ","] },
         "hoverProvider": true,
+        "codeActionProvider": { "codeActionKinds": CODE_ACTION_KINDS },
+        "executeCommandProvider": { "commands": actions::COMMANDS },
         "experimental": { "kargo": { "runnables": true } },
     })
+}
+
+/// The kinds of code actions Kargo offers in `kargo.toml`.
+const CODE_ACTION_KINDS: [&str; 3] = ["quickfix", "refactor", "source"];
+
+/// Adds the strings of `ours` that `list` lacks.
+fn union(list: &Value, ours: &Value) -> Value {
+    let mut out: Vec<Value> = list.as_array().cloned().unwrap_or_default();
+    for item in ours.as_array().into_iter().flatten() {
+        if !out.contains(item) {
+            out.push(item.clone());
+        }
+    }
+    json!(out)
 }
 
 /// The backend's capabilities with Kargo's merged in: Kargo needs open, change and save
@@ -207,19 +228,29 @@ pub(crate) fn merge_capabilities(backend: &Value) -> Value {
     };
     match caps["completionProvider"].as_object_mut() {
         Some(completion) => {
-            let mut triggers: Vec<Value> = completion.get("triggerCharacters").and_then(Value::as_array).cloned().unwrap_or_default();
-            for t in ours["completionProvider"]["triggerCharacters"].as_array().into_iter().flatten() {
-                if !triggers.contains(t) {
-                    triggers.push(t.clone());
-                }
-            }
-            completion.insert("triggerCharacters".into(), json!(triggers));
+            let triggers =
+                union(completion.get("triggerCharacters").unwrap_or(&Value::Null), &ours["completionProvider"]["triggerCharacters"]);
+            completion.insert("triggerCharacters".into(), triggers);
         }
         None => caps["completionProvider"] = ours["completionProvider"].clone(),
     }
     if caps["hoverProvider"].is_null() || caps["hoverProvider"] == false {
         caps["hoverProvider"] = json!(true);
     }
+    // `true` already offers every kind; a list of kinds gains Kargo's.
+    match &caps["codeActionProvider"] {
+        Value::Object(provider) if provider.contains_key("codeActionKinds") => {
+            caps["codeActionProvider"]["codeActionKinds"] =
+                union(&backend["codeActionProvider"]["codeActionKinds"], &ours["codeActionProvider"]["codeActionKinds"]);
+        }
+        Value::Object(_) | Value::Bool(true) => {}
+        _ => caps["codeActionProvider"] = ours["codeActionProvider"].clone(),
+    }
+    let commands = union(&backend["executeCommandProvider"]["commands"], &ours["executeCommandProvider"]["commands"]);
+    if !caps["executeCommandProvider"].is_object() {
+        caps["executeCommandProvider"] = json!({});
+    }
+    caps["executeCommandProvider"]["commands"] = commands;
     if !caps["experimental"].is_object() {
         caps["experimental"] = json!({});
     }
@@ -242,6 +273,7 @@ impl Server {
             initialize_id: None,
             client_progress: false,
             client_watches: false,
+            client_apply_edit: false,
             shutdown: false,
             next_id: 0,
             fingerprint: None,
@@ -303,6 +335,14 @@ impl Server {
                 self.send(&message)?;
                 Ok(None)
             }
+            Event::Edited { id, uri, original, outcome } => {
+                let reply = match outcome.and_then(|(new, result)| self.write_manifest(&uri, &original, &new).map(|()| result)) {
+                    Ok(result) => jsonrpc::response(&id, result),
+                    Err(e) => jsonrpc::error(&id, -32603, format!("{e:#}")),
+                };
+                self.send(&reply)?;
+                Ok(None)
+            }
             Event::Hints { uri, hints } => {
                 // Republish only when they changed, so a project without updates sends nothing more.
                 if self.docs.contains_key(&uri) && self.hints.insert(uri.clone(), hints.clone()).unwrap_or_default() != hints {
@@ -332,6 +372,14 @@ impl Server {
                     "shutdown" => {
                         self.shutdown = true;
                         self.forward_request(message, json!(null))?;
+                    }
+                    "workspace/executeCommand" if message["params"]["command"].as_str().is_some_and(|c| actions::COMMANDS.contains(&c)) => {
+                        match self.execute_command(&message) {
+                            Ok(Some(result)) => self.send(&jsonrpc::response(&id, result))?,
+                            // Answered when the worker thread is done.
+                            Ok(None) => {}
+                            Err(e) => self.send(&jsonrpc::error(&id, -32603, format!("{e:#}")))?,
+                        }
                     }
                     "kargo/runnables" => {
                         let reply = match self.runnables(&message) {
@@ -435,6 +483,7 @@ impl Server {
         let params = &message["params"];
         self.client_progress = params["capabilities"]["window"]["workDoneProgress"] == true;
         self.client_watches = params["capabilities"]["workspace"]["didChangeWatchedFiles"]["dynamicRegistration"] == true;
+        self.client_apply_edit = params["capabilities"]["workspace"]["applyEdit"] == true;
         let dir = params["rootUri"]
             .as_str()
             .and_then(text::uri_to_path)
@@ -730,11 +779,80 @@ impl Server {
         let uri = document_uri(message).unwrap_or_default();
         let Some(text) = self.docs.get(uri).filter(|_| is_manifest(uri)) else { return Value::Null };
         let offset = text::offset(text, &message["params"]["position"]);
+        if method == "textDocument/codeAction" {
+            let params = &message["params"];
+            let path = text::uri_to_path(uri).unwrap_or_else(|| PathBuf::from(kargo_manifest::MANIFEST_NAME));
+            let start = text::offset(text, &params["range"]["start"]);
+            let end = text::offset(text, &params["range"]["end"]).max(start);
+            let only = params["context"]["only"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            let builtins = &self.opts.builtin_commands;
+            let request = actions::Request {
+                uri,
+                text,
+                path: &path,
+                range: start..end,
+                only,
+                hints: self.hints.get(uri).map(Vec::as_slice).unwrap_or_default(),
+                is_builtin_command: &|name| builtins.iter().any(|b| b == name),
+            };
+            return json!(actions::code_actions(&request));
+        }
         match method {
             "textDocument/completion" => json!({ "isIncomplete": false, "items": manifest::completion(text, offset) }),
             "textDocument/hover" => manifest::hover(text, offset).unwrap_or(Value::Null),
             _ => Value::Null,
         }
+    }
+
+    /// Runs one of [`actions::COMMANDS`]. Returns the reply, or `None` when a worker thread
+    /// answers later.
+    fn execute_command(&mut self, message: &Value) -> Result<Option<Value>> {
+        let params = &message["params"];
+        let uri = actions::command_uri(params)?;
+        let path = actions::command_path(&uri)?;
+        let original = match self.docs.get(&uri) {
+            Some(text) => text.clone(),
+            None => std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?,
+        };
+        if self.docs.contains_key(&uri) && !self.client_apply_edit {
+            anyhow::bail!("the editor can't apply edits from the server; save kargo.toml and run the kargo command instead");
+        }
+        match params["command"].as_str().unwrap_or_default() {
+            actions::ADD_TARGET => {
+                let (new, scaffold) = actions::add_target(&path, &original, params)?;
+                self.write_manifest(&uri, &original, &new)?;
+                Ok(Some(scaffold()?))
+            }
+            _ => {
+                // Picking versions may use the network.
+                let (config, tx, id, params) = (self.config.clone(), self.tx.clone(), message["id"].clone(), params.clone());
+                thread::spawn(move || {
+                    let outcome = actions::add_dependency(&config, &path, &original, &params);
+                    let _ = tx.send(Event::Edited { id, uri, original, outcome });
+                });
+                Ok(None)
+            }
+        }
+    }
+
+    /// Changes the `kargo.toml` at `uri` from `original` to `new`: through the editor when it has
+    /// the document open, else on disk. Fails if it changed since `original` was read.
+    fn write_manifest(&mut self, uri: &str, original: &str, new: &str) -> Result<()> {
+        let path = actions::command_path(uri)?;
+        let current = match self.docs.get(uri) {
+            Some(text) => text.clone(),
+            None => std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?,
+        };
+        if current != original {
+            anyhow::bail!("kargo.toml changed in the meantime; nothing was changed, try again");
+        }
+        let Some(edit) = text::edit(original, new) else { return Ok(()) };
+        if !self.docs.contains_key(uri) {
+            return kargo_util::fs::write_string_atomic(&path, new);
+        }
+        let id = self.next_id();
+        let params = json!({ "label": "Edit kargo.toml", "edit": { "changes": { uri: [edit] } } });
+        self.send(&jsonrpc::request(&id, "workspace/applyEdit", params))
     }
 
     fn manifest_notification(&mut self, method: &str, message: &Value) -> Result<()> {
@@ -768,16 +886,9 @@ impl Server {
         let path = text::uri_to_path(uri).unwrap_or_else(|| PathBuf::from(kargo_manifest::MANIFEST_NAME));
         let builtins = &self.opts.builtin_commands;
         let problems = manifest::problems(text, Path::new(&path), &|name| builtins.iter().any(|b| b == name));
-        let mut diagnostics: Vec<Value> = problems
-            .into_iter()
-            .map(|p| json!({ "range": text::range(text, p.span), "severity": if p.warning { 2 } else { 1 }, "source": "kargo", "message": p.message }))
-            .collect();
+        let mut diagnostics: Vec<Value> = problems.iter().map(|p| manifest::diagnostic(text, p)).collect();
         // Newer versions, as information; a hint whose dependency was edited away is dropped.
-        for hint in self.hints.get(uri).into_iter().flatten() {
-            if let Some(span) = deps::locate(text, hint) {
-                diagnostics.push(json!({ "range": text::range(text, span), "severity": 3, "source": "kargo", "message": hint.message }));
-            }
-        }
+        diagnostics.extend(self.hints.get(uri).into_iter().flatten().filter_map(|hint| deps::diagnostic(text, hint)));
         self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics }))
     }
 }
@@ -969,6 +1080,48 @@ local = \"{url}\"
             json!({ "textDocument": { "uri": uri }, "position": { "line": 8, "character": 9 } }),
         );
         assert_eq!(completion["result"], json!({ "isIncomplete": true, "items": [] }));
+        assert!(editor.finish());
+    }
+
+    #[test]
+    fn answers_code_actions_and_runs_commands() {
+        let dir = project(MANIFEST);
+        let uri = text::path_to_uri(&dir.path().join("kargo.toml"));
+        let (mut editor, _home) = Editor::start(Options::default(), None);
+        let capabilities = json!({ "workspace": { "applyEdit": true } });
+        let (init, _) = editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": capabilities }));
+        assert_eq!(init["result"]["capabilities"]["executeCommandProvider"]["commands"], json!(actions::COMMANDS));
+        let text = MANIFEST.replace("version = ", "verison = ");
+        editor.send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "toml", "version": 1, "text": text } }),
+        ));
+        editor.recv();
+
+        let range = json!({ "start": { "line": 0, "character": 0 }, "end": { "line": 2, "character": 1 } });
+        let params = json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [], "only": ["quickfix"] } });
+        let (found, _) = editor.request(2, "textDocument/codeAction", params);
+        let titles: Vec<&str> = found["result"].as_array().unwrap().iter().map(|a| a["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, ["Rename to `version`", "Add `version = \"0.1.0\"`"]);
+
+        let change = json!({ "text": MANIFEST });
+        editor.send(jsonrpc::notification(
+            "textDocument/didChange",
+            json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [change] }),
+        ));
+        assert_eq!(editor.recv()["params"]["diagnostics"], json!([]));
+        // The document is open, so the edit goes through the editor and the file on disk stays.
+        let args = json!([{ "uri": uri, "target": "native" }]);
+        editor.send(json!({ "jsonrpc": "2.0", "id": 3, "method": "workspace/executeCommand", "params": { "command": actions::ADD_TARGET, "arguments": args } }));
+        let apply = editor.recv();
+        assert_eq!(apply["method"], "workspace/applyEdit");
+        let edit = &apply["params"]["edit"]["changes"][&uri][0];
+        assert!(edit["newText"].as_str().unwrap().contains("[target.native]"), "{edit}");
+        editor.send(jsonrpc::response(&apply["id"], json!({ "applied": true })));
+        let (reply, _) = editor.response(3);
+        assert_eq!(reply["result"]["targets"], json!(["native"]));
+        assert!(dir.path().join("src-native").is_dir());
+        assert_eq!(std::fs::read_to_string(dir.path().join("kargo.toml")).unwrap(), MANIFEST);
         assert!(editor.finish());
     }
 

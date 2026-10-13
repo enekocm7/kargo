@@ -17,7 +17,7 @@ Kargo is a Cargo workspace of focused crates:
 | `kargo-toolchain` | JDK detection and Temurin downloads, the Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications (`publication.rs`) and GnuPG signing (`signing.rs`), commands |
-| `kargo-lsp` | `kargo lsp`: the message loop in front of a Kotlin language server (`server.rs`), `kargo.toml` diagnostics, completion and hover (`manifest.rs`, `schema.rs`), Maven coordinate and version completion and newer-version hints (`deps.rs`), `workspace.json`, `kls-classpath` and runnables from `kargo metadata` (`project.rs`) |
+| `kargo-lsp` | `kargo lsp`: the message loop in front of a Kotlin language server (`server.rs`), `kargo.toml` diagnostics, completion and hover (`manifest.rs`, `schema.rs`), Maven coordinate and version completion and newer-version hints (`deps.rs`), code actions and the `kargo/addDependency` / `kargo/addTarget` commands (`actions.rs`), `workspace.json`, `kls-classpath` and runnables from `kargo metadata` (`project.rs`) |
 | `kargo` | The CLI binary |
 
 ## Building and testing
