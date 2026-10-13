@@ -17,6 +17,7 @@ It speaks LSP over stdin and stdout and gives you:
 
 - **Kotlin code intelligence** (completion, go to definition, references, hover, rename, quick fixes, diagnostics) from [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp). Kargo downloads the server on first use, describes your project to it, and passes Kotlin traffic through unchanged.
 - **`kargo.toml` support**: completion of keys, tables and values, documentation on hover, and errors as you type. Errors come from the [JSON Schema](#completion-and-validation-in-kargotoml) first (unknown keys with a "did you mean", wrong types, invalid values), then from Kargo's own validation and [warnings](../../reference/warnings/), the same messages `kargo build` prints.
+- **Dependencies in `kargo.toml`**: completion of `group:artifact` coordinates from Maven Central and of versions from your repositories, and a hint on every dependency with a newer version. See [Dependency completion and update hints](#dependency-completion-and-update-hints).
 - **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
 - **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
 
@@ -179,6 +180,24 @@ To apply it to every `kargo.toml` without editing them:
 :::note
 The schema checks the shape of `kargo.toml`. Some rules need Kargo itself, such as a `path` dependency's directory existing or `min-sdk <= target-sdk`. `kargo check` still reports those.
 :::
+
+## Dependency completion and update hints
+
+`kargo lsp` also knows about the libraries you depend on. In any dependency table (`[dependencies]`, `[dev-dependencies]`, `[target.<target>.dependencies]` and `[workspace.dependencies]`):
+
+- **Coordinates**: start typing a key such as `"io.ktor:ktor-server-c` and Kargo offers the matching artifacts from the [Maven Central search](https://central.sonatype.com/search), with the artifact names that start with what you typed first. Choosing one writes `"io.ktor:ktor-server-core" = `, ready for a version. Without a `:`, the words you typed are searched. The same works in a `coords = "..."` value.
+- **Versions**: in a dependency's version (`"g:a" = "|"`, `version = "|"`, or the `version` next to `coords`), Kargo offers every version the project's [`[repositories]`](../../reference/manifest/#repositories) publish, newest stable version first and pre-releases after them.
+- **Update hints**: a dependency with a newer version gets an information diagnostic on its key, such as ``"`io.ktor:ktor-server-core` 3.2.3 is available (latest: 4.0.0)"``. The rules are those of [`kargo outdated`](../../reference/commands/#kargo-outdated): the newest compatible version (same major, or same minor for `0.x`), and the latest one when it differs. Ranges and BOM-managed versions get no hint. Run `kargo upgrade` to apply them.
+
+```toml title="kargo.toml"
+[dependencies]
+"io.ktor:ktor-server-core" = "3.1.0"   # ← `io.ktor:ktor-server-core` 3.2.3 is available
+"io.ktor:ktor-server-c|"               # ← offers ktor-server-cio, ktor-server-core, ...
+```
+
+All of this runs in the background: Kotlin traffic and `kargo.toml` errors never wait for the network. Searches wait for a pause in your typing, and their results are kept in `~/.kargo/cache/maven-search` for a day. Versions come from the `maven-metadata.xml` files Kargo caches for [dependency resolution](../dependencies/). Hints are worked out when you open `kargo.toml` and after each [re-import](#language-server), not on every keystroke.
+
+With `kargo --offline lsp`, coordinates aren't searched, and versions and hints come from what is already cached and from repositories on disk. Set `KARGO_MAVEN_SEARCH_URL` to search a mirror of the Maven Central search API instead (see [Environment](../../reference/environment/)).
 
 ## Importing a project
 

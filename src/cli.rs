@@ -1166,7 +1166,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             if server.is_none() && server_path.is_some() {
                 bail!("`--server-path` needs a Kotlin language server; use `--server kotlin-lsp` or `--server kls`");
             }
-            let opts = kargo_lsp::Options { server, server_path, builtin_commands: builtin_commands() };
+            let opts = kargo_lsp::Options { server, server_path, builtin_commands: builtin_commands(), search_url: None };
             let clean = kargo_lsp::run(config.clone(), opts)?;
             Ok(if clean { 0 } else { 1 })
         }

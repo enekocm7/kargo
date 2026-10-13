@@ -9,12 +9,14 @@ rust-version.workspace = true
 [dependencies]
 kargo-util.workspace = true
 kargo-manifest.workspace = true
+kargo-maven.workspace = true
 kargo-toolchain.workspace = true
 kargo-ops.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

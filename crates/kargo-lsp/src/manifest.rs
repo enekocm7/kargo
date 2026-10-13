@@ -57,7 +57,7 @@ pub fn problems(text: &str, path: &Path, is_builtin_command: &dyn Fn(&str) -> bo
 }
 
 /// The workspace manifest a package at `dir` inherits from, if one of its parents has one.
-fn enclosing_workspace(dir: &Path) -> Option<kargo_manifest::WorkspaceManifest> {
+pub(crate) fn enclosing_workspace(dir: &Path) -> Option<kargo_manifest::WorkspaceManifest> {
     dir.ancestors().skip(1).find_map(|parent| {
         let path = parent.join(kargo_manifest::MANIFEST_NAME);
         match kargo_manifest::is_workspace_manifest(&path) {
@@ -95,7 +95,7 @@ fn locate(text: &str, message: &str) -> Range<usize> {
 
 /// Where the cursor is, as far as the schema is concerned.
 #[derive(Debug, Clone, PartialEq)]
-enum Context {
+pub(crate) enum Context {
     /// Inside a `[header]`: completing a table name under `parent`.
     Header { parent: Vec<String>, partial: String },
     /// Typing a key in the table at `table`.
@@ -117,7 +117,7 @@ fn current_table(text: &str, line_start: usize) -> Vec<String> {
 }
 
 /// The key path of a header line such as `[target.jvm]` or `[[bin]]`.
-fn header_path(line: &str) -> Vec<String> {
+pub(crate) fn header_path(line: &str) -> Vec<String> {
     let inner = line.trim_start_matches('[');
     let end = inner.find(']').unwrap_or(inner.len());
     split_key(&inner[..end])
@@ -142,7 +142,8 @@ fn split_key(key: &str) -> Vec<String> {
     parts
 }
 
-fn context(text: &str, offset: usize) -> Context {
+/// What the cursor at byte `offset` is on.
+pub(crate) fn context(text: &str, offset: usize) -> Context {
     let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
     let line = &text[line_start..offset];
     let table = current_table(text, line_start);
