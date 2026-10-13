@@ -1355,6 +1355,22 @@ fn run_rejects_wasm_libraries() {
 }
 
 #[test]
+fn test_list_says_which_targets_it_cannot_list() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\n"));
+    p.file("tests/WebTest.kt", "import kotlin.test.*\nclass WebTest { @Test fun works() {} }\n");
+    // Nothing is compiled for a target whose tests can't be listed, so this runs offline.
+    p.kargo()
+        .args(["--offline", "test", "--list", "--format", "json"])
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicate::str::contains("`--list` does not list wasm tests yet"));
+    p.kargo().args(["test", "--format", "json"]).assert().failure().stderr(predicate::str::contains("--list"));
+    p.kargo().args(["test", "--list", "--no-run"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
 fn wasm_target_options_are_validated() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("lib", "[target.wasm]\nenvironment = \"wasi\"\nkind = \"library\"\n"));
@@ -1750,4 +1766,100 @@ fn publish_requires_published_path_dependencies() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("depends on `core`, which has `publish = false`"));
+}
+
+#[test]
+fn metadata_describes_a_workspace_for_editors() {
+    let repo = LocalRepo::new();
+    repo.publish("g:util", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n")
+        .file(
+            "app/kargo.toml",
+            &manifest(
+                "app",
+                &format!(
+                    "[kotlin]\nversion = \"2.4.21\"\nopt-in = [\"kotlin.ExperimentalStdlibApi\"]\n[dependencies]\nlib = {{ path = \"../lib\" }}\n\
+                     [repositories]\nlocal = \"{}\"\n[tasks]\ngen = {{ run = \"echo gen\", description = \"Generate\" }}\n",
+                    repo.url()
+                ),
+            ),
+        )
+        .file("app/src/Main.kt", "package com.example\n\nfun main() {}\n")
+        .file("lib/kargo.toml", &manifest("lib", "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n"))
+        .file("lib/src/Lib.kt", "package com.example.lib\n\nfun answer() = 42\n");
+
+    let metadata = |args: &[&str]| -> serde_json::Value {
+        let out = p.kargo().args(["--offline", "metadata"]).args(args).assert().success().get_output().stdout.clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let doc = metadata(&["--no-deps"]);
+    assert_eq!(doc["version"], 1);
+    assert_eq!(doc["workspace"], true);
+    assert_eq!(doc["resolved"], false);
+    assert_eq!(doc["members"], serde_json::json!(["app", "lib"]));
+    assert_eq!(doc["toolchain"]["jdk"]["home"], serde_json::Value::Null);
+    let watch: Vec<&str> = doc["watch"].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+    assert_eq!(watch.len(), 4, "the workspace manifest, both members' and kargo.lock: {watch:?}");
+    let app = &doc["packages"][0];
+    assert_eq!(app["name"], "app");
+    assert_eq!(app["member"], true);
+    assert_eq!(
+        app["path-dependencies"][0],
+        serde_json::json!({"name": "lib", "package": "lib", "scope": "compile", "dev": false, "target": null})
+    );
+    assert_eq!(app["tasks"][0]["name"], "gen");
+    assert_eq!(app["tasks"][0]["description"], "Generate");
+    let jvm = &app["targets"][0];
+    assert_eq!(jvm["kind"], "jvm");
+    assert_eq!(jvm["main-class"], "com.example.MainKt");
+    assert_eq!(jvm["compiler-args"], serde_json::json!(["-opt-in=kotlin.ExperimentalStdlibApi"]));
+    assert_eq!(jvm["dependencies"], serde_json::Value::Null);
+    let root = |s: &serde_json::Value| std::path::PathBuf::from(s.as_str().unwrap());
+    assert!(root(&jvm["source-roots"][0]).ends_with(std::path::Path::new("app").join("src")), "{jvm}");
+    assert!(root(&jvm["source-roots"][1]).ends_with(std::path::Path::new("app").join("src-jvm")), "{jvm}");
+    assert!(root(&jvm["test-roots"][0]).ends_with(std::path::Path::new("app").join("tests")), "{jvm}");
+    assert!(root(&jvm["classes-dir"]).ends_with(std::path::Path::new("target").join("debug").join("app").join("jvm").join("classes")));
+    assert_eq!(doc["packages"][1]["name"], "lib");
+    assert!(!p.path().join("kargo.lock").exists(), "--no-deps resolves nothing");
+
+    // With dependencies: the path dependency is listed by package, Maven modules by file.
+    let doc = metadata(&[]);
+    assert_eq!(doc["resolved"], true);
+    let compile = doc["packages"][0]["targets"][0]["dependencies"][0]["compile"].as_array().unwrap().clone();
+    assert_eq!(compile[0], serde_json::json!({"package": "lib", "scope": "compile"}));
+    let util = compile.iter().find(|e| e["module"] == "g:util").unwrap_or_else(|| panic!("{compile:?}"));
+    assert_eq!(util["version"], "1.0");
+    assert!(util["path"].as_str().unwrap().ends_with("util-1.0.jar"), "{util}");
+    assert_eq!(util["sources"], serde_json::Value::Null);
+    assert!(p.path().join("kargo.lock").exists());
+
+    // The fingerprint changes with kargo.toml.
+    let fingerprint = |p: &Project| {
+        String::from_utf8(p.kargo().args(["metadata", "--fingerprint"]).assert().success().get_output().stdout.clone()).unwrap()
+    };
+    let before = fingerprint(&p);
+    assert_eq!(before.trim(), doc["fingerprint"].as_str().unwrap());
+    assert_eq!(before, fingerprint(&p));
+    p.file("lib/kargo.toml", &manifest("lib", "[kotlin]\nversion = \"2.4.21\"\n"));
+    assert_ne!(before, fingerprint(&p));
+}
+
+#[test]
+fn debug_needs_the_jvm_target() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("dbg", "[target.jvm]\n[target.wasm]\n")).file("src/Main.kt", "fun main() {}\n");
+    p.kargo()
+        .args(["--offline", "run", "-t", "wasm", "--debug"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--debug` starts the JVM under a debugger and only works for the jvm target, not wasm"));
+    p.kargo()
+        .args(["--offline", "test", "--debug=6000"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("select the JVM target with `-t jvm`"));
 }

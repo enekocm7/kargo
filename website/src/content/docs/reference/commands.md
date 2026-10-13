@@ -39,7 +39,7 @@ In a [workspace](../../guides/workspaces/), commands apply to every member at th
 
 ### Concurrent commands
 
-Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `package`, `publish`, `update`, `clean`, `android` and `toolchain which`) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
+Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `metadata`, `package`, `publish`, `update`, `clean`, `android` and `toolchain which`) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
 
 ```console
 $ kargo build
@@ -165,6 +165,7 @@ Build and run the program. Arguments after `--` go to the program.
 | `--example <name>` | Compile and run `examples/<name>.kt` against the project and its dev-dependencies |
 | `--port <port>` | Wasm browser apps: the port to serve on (default `8080`; `0` picks a free one) |
 | `--open` | Wasm browser apps: open the served page in your browser |
+| `--debug[=<port>]` | JVM: start the program suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`; `0` lets the JVM pick and print one). See [Debugging](../../guides/editors/#debugging) |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 
 `--main`, `--bin` and `--example` exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
@@ -194,7 +195,10 @@ kargo test [filter] [options]
 | `--no-run` | Compile tests but don't run them |
 | `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
 | `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
-| `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build` |
+| `--debug[=<port>]` | Start the JVM tests suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`). Needs `-t jvm` in a project with several targets. See [Debugging tests](../../guides/testing/#debugging-tests) |
+| `--list` | Compile the tests and print them (`<target>: <Class>.<name>`) instead of running them. JVM and Native only. See [Listing tests](../../guides/testing/#listing-tests) |
+| `--format <fmt>` | With `--list`: `text` (default) or `json`, one [`test-discovered`](../machine-readable-output/#test-discovery) object per test |
+| `--message-format <fmt>` | `human` (default) or `json`: compiler diagnostics and each test's start and result as [JSON messages](../machine-readable-output/#test-results) on stdout; the test report moves to stderr |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace` | Which packages to test, one after another. The command fails if any test failed |
@@ -438,7 +442,14 @@ Download all dependencies and toolchains so later builds can run offline. For An
 | Option | Meaning |
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
+| `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. Libraries that publish none are skipped. Sources jars are not recorded in `kargo.lock` |
 | `-p, --package <name>`, `--workspace` | Which packages to fetch for |
+
+```console
+$ kargo fetch --sources
+ Downloading kotlin-stdlib-2.4.21-sources.jar
+     Fetched 12 sources jars
+```
 
 ## `kargo update`
 
@@ -527,6 +538,25 @@ Print project information: package, targets, path dependencies and paths. At the
 | Option | Default | Meaning |
 |---|---|---|
 | `--format <fmt>` | `text` | `text` or `json`. `json` also lists every dependency and repository. See [Machine-readable output](../machine-readable-output/#kargo-info---format-json) |
+
+## `kargo metadata`
+
+Print a JSON description of the whole project for editors, language servers and other tools: every package with its source, test and resource roots, output directories, compiler arguments and plugins, entry points, tasks, and the resolved classpath (JVM) or klib path (Wasm, Native) of every target and scope. Resolving may download dependencies and update `kargo.lock`, as `kargo tree` does.
+
+```sh
+kargo metadata
+kargo metadata --no-deps
+kargo metadata --fingerprint
+```
+
+| Option | Meaning |
+|---|---|
+| `--format <fmt>` | `json`, the only format (default) |
+| `--no-deps` | Leave out the resolved dependencies, plugin jars and the JDK. Nothing is downloaded or locked |
+| `-r, --release` | Describe the release profile's output directories and compiler arguments |
+| `--fingerprint` | Only print a hash of every `kargo.toml` and `kargo.lock`. It is the `fingerprint` of the document, and it changes when the metadata may have changed |
+
+The output has a `"version": 1` field and is described in [Machine-readable output](../machine-readable-output/#kargo-metadata). See [Editor integration](../../guides/editors/) for how editors use it.
 
 ## `kargo completions`
 

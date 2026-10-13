@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod diagnostics;
 pub mod incremental;
 pub mod jar;
+pub mod junit;
 pub mod jvm;
 pub mod ksp;
 pub mod mainclass;

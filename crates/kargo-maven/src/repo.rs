@@ -548,6 +548,30 @@ impl MavenClient {
         Ok(artifact.repo_path())
     }
 
+    /// Downloads the sources jar (`-sources.jar`) of `module:version`, or returns `None` when no
+    /// repository publishes one. Sources jars are for editors; they are not locked. Offline,
+    /// one that is neither cached nor in a repository on disk counts as missing.
+    pub fn fetch_sources(&self, module: &ModuleId, version: &str) -> Result<Option<PathBuf>> {
+        let artifact = Artifact::new(module.clone(), version).with_classifier(Some("sources".to_owned()));
+        match self.fetch(&self.artifact_path(&artifact)?) {
+            Err(_) if self.offline => Ok(None),
+            result => result,
+        }
+    }
+
+    /// The sources jar of `module:version` if it is already in the cache, without any network
+    /// access. `files` are the module's downloaded artifacts, whose names give a SNAPSHOT's build.
+    pub fn cached_sources(&self, module: &ModuleId, version: &str, files: &[PathBuf]) -> Option<PathBuf> {
+        let artifact = Artifact::new(module.clone(), version).with_classifier(Some("sources".to_owned()));
+        let builds = files.iter().filter_map(|f| {
+            let stamp = super::snapshot::build_stamp(f.file_name()?.to_str()?, &module.artifact, version)?;
+            Some(format!("{}-{stamp}", version.strip_suffix("-SNAPSHOT")?))
+        });
+        let mut candidates: Vec<String> = builds.map(|b| artifact.repo_path_for_build(&b)).collect();
+        candidates.push(artifact.repo_path());
+        candidates.into_iter().filter(|rel| validate_rel_path(rel).is_ok()).map(|rel| self.cache_path(&rel)).find(|p| p.is_file())
+    }
+
     /// Fixes SNAPSHOT `module:version` at the build whose files are named `build` (`1.0-20240101.120000-1`),
     /// so a locked build is kept while the repository moves on.
     pub fn pin_snapshot_build(&self, module: &ModuleId, version: &str, build: &str) {
@@ -670,6 +694,35 @@ mod tests {
     fn local_client(repo_dir: &Path, cache: &Path) -> MavenClient {
         let config = Config::new(cache.to_path_buf(), Shell::new(Verbosity::Quiet));
         MavenClient::new(&config, vec![Repository::new("local", format!("file://{}", repo_dir.display()))])
+    }
+
+    #[test]
+    fn finds_sources_jars() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let write = |rel: &str| {
+            let path = repo.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"zip").unwrap();
+        };
+        write("com/acme/lib/1.0/lib-1.0-sources.jar");
+        write("com/acme/lib/2.0-SNAPSHOT/lib-2.0-20240101.120000-1-sources.jar");
+        let client = local_client(repo.path(), home.path());
+        let lib = ModuleId::new("com.acme", "lib");
+        // Nothing is cached until the sources are fetched.
+        assert_eq!(client.cached_sources(&lib, "1.0", &[]), None);
+        let fetched = client.fetch_sources(&lib, "1.0").unwrap().unwrap();
+        assert!(fetched.ends_with("lib-1.0-sources.jar"));
+        assert_eq!(client.cached_sources(&lib, "1.0", &[]), Some(fetched));
+        assert_eq!(client.fetch_sources(&ModuleId::new("com.acme", "other"), "1.0").unwrap(), None);
+
+        // A SNAPSHOT's sources belong to the build its jar came from.
+        let rel = "com/acme/lib/2.0-SNAPSHOT/lib-2.0-20240101.120000-1-sources.jar";
+        client.fetch(rel).unwrap().unwrap();
+        let jar = home.path().join("lib-2.0-20240101.120000-1.jar");
+        let found = client.cached_sources(&lib, "2.0-SNAPSHOT", &[jar]).unwrap();
+        assert!(found.ends_with("lib-2.0-20240101.120000-1-sources.jar"));
+        assert_eq!(client.cached_sources(&lib, "2.0-SNAPSHOT", &[]), None);
     }
 
     #[test]

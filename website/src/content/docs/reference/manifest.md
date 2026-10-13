@@ -7,6 +7,10 @@ description: The complete reference for kargo.toml.
 
 Only `[package]` with `name` and `version` is required. A workspace's `kargo.toml` has a [`[workspace]`](#workspace) table instead of `[package]`.
 
+:::tip
+Your editor can complete and check these keys as you type with Kargo's JSON Schema for `kargo.toml`. See [Editor integration](../../guides/editors/#completion-and-validation-in-kargotoml).
+:::
+
 ## `[package]`
 
 ```toml

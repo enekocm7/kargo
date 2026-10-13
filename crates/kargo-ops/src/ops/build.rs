@@ -446,7 +446,7 @@ pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool
     Ok(libraries)
 }
 
-const ALL_SCOPES: [Scope; 3] = [Scope::Compile, Scope::Runtime, Scope::Provided];
+pub(crate) const ALL_SCOPES: [Scope; 3] = [Scope::Compile, Scope::Runtime, Scope::Provided];
 
 /// Compiles the Wasm target and adds what surrounds the module: the page of a browser app, the
 /// `package.json` of a library, and in a release build `wasm-opt` and the size report.

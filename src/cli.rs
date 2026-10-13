@@ -17,7 +17,7 @@ use kargo_ops::ops::fmt::FmtOptions;
 use kargo_ops::ops::lint::LintOptions;
 use kargo_ops::ops::publish::PublishOptions;
 use kargo_ops::ops::run::{Program, RunOptions};
-use kargo_ops::ops::test::TestOptions;
+use kargo_ops::ops::test::{ListFormat, TestOptions};
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
 use kargo_ops::warnings;
@@ -252,6 +252,16 @@ enum FormatArg {
     Json,
 }
 
+/// Output format of `kargo metadata`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum MetadataFormatArg {
+    #[default]
+    Json,
+}
+
+/// The port `--debug` listens on when none is given.
+const DEFAULT_DEBUG_PORT: &str = "5005";
+
 /// How compiler diagnostics are printed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 enum MessageFormatArg {
@@ -387,6 +397,9 @@ enum Command {
         /// Open the served page of a Wasm browser app in your browser
         #[arg(long)]
         open: bool,
+        /// Start the JVM suspended, waiting for a debugger on this port (default 5005)
+        #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
+        debug: Option<u16>,
         #[command(flatten)]
         package: OnePackageArg,
         /// How to print compiler diagnostics
@@ -412,6 +425,15 @@ enum Command {
         /// Also write test reports: `junit` writes JUnit XML to target/<profile>/<target>/test-reports
         #[arg(long, value_enum, value_name = "FORMAT")]
         report: Option<ReportArg>,
+        /// Start the JVM tests suspended, waiting for a debugger on this port (default 5005)
+        #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
+        debug: Option<u16>,
+        /// Compile the tests and list them instead of running them (JVM and Native)
+        #[arg(long, conflicts_with_all = ["no_run", "report", "debug"])]
+        list: bool,
+        /// Output format of `--list`; `json` prints one JSON object per test
+        #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
+        format: FormatArg,
     },
     /// Generate API documentation from KDoc with Dokka
     #[command(visible_alias = "d")]
@@ -548,6 +570,9 @@ enum Command {
     Fetch {
         #[arg(short, long = "target", value_enum)]
         targets: Vec<TargetArg>,
+        /// Also download the sources jars of the dependencies, for editors
+        #[arg(long)]
+        sources: bool,
         #[command(flatten)]
         packages: PackageArgs,
     },
@@ -630,6 +655,26 @@ sources and javadoc jars, checksums and, when signing is on, GnuPG signatures. T
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
+    },
+    /// Print a JSON description of the project for editors and tools
+    #[command(long_about = "Print a JSON description of the project for editors, language servers and other tools.
+
+Lists every package with its source, test and resource roots, output directories, compiler
+arguments and plugins, entry points, tasks and, unless --no-deps is given, the resolved
+classpath or klib path of every target and scope. The `version` field is the format version.")]
+    Metadata {
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: MetadataFormatArg,
+        /// Leave out the resolved dependencies, plugin jars and JDK; nothing is downloaded
+        #[arg(long)]
+        no_deps: bool,
+        /// Describe the release profile instead of the dev profile
+        #[arg(short, long)]
+        release: bool,
+        /// Only print the fingerprint of kargo.toml and kargo.lock (changes when the metadata may have changed)
+        #[arg(long, conflicts_with_all = ["no_deps", "release"])]
+        fingerprint: bool,
     },
     /// Print project information
     Info {
@@ -893,7 +938,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, main, bin, example, port, open, message_format, package, args } => {
+        Command::Run { release, target, main, bin, example, port, open, debug, message_format, package, args } => {
             set_message_format(message_format);
             let project = load_project(&global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
@@ -905,14 +950,15 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
                 (_, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open })?;
+            let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug })?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run, no_fail_fast, report } => {
+        Command::Test { build, filter, no_run, no_fail_fast, report, debug, list, format } => {
             set_message_format(build.message_format);
             let project = load_project(&global)?;
             let junit_report = report == Some(ReportArg::Junit);
-            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report };
+            let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
+            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug, list };
             let passed = for_each_package(&config, &project, &build.packages.selection(), &global, opts.build.profile(), |ctx| {
                 ops::test::test(ctx, &opts)
             })?;
@@ -1044,10 +1090,32 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             })?;
             Ok(0)
         }
-        Command::Fetch { targets, packages } => {
+        Command::Fetch { targets, sources, packages } => {
             let project = load_project(&global)?;
             let targets: Vec<TargetKind> = targets.into_iter().map(Into::into).collect();
-            for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| ops::fetch(ctx, &targets))?;
+            let found = for_each_package(&config, &project, &packages.selection(), &global, ProfileKind::Dev, |ctx| {
+                ops::fetch(ctx, &targets)?;
+                if !sources {
+                    return Ok(0);
+                }
+                let selected = ops::build::select_targets(ctx, &targets)?;
+                ops::metadata::fetch_sources(ctx, &selected)
+            })?;
+            if sources {
+                let found: usize = found.iter().sum();
+                shell.status("Fetched", format!("{found} sources jar{}", if found == 1 { "" } else { "s" }));
+            }
+            Ok(0)
+        }
+        Command::Metadata { format: MetadataFormatArg::Json, no_deps, release, fingerprint } => {
+            let project = load_project(&global)?;
+            if fingerprint {
+                println!("{}", ops::metadata::fingerprint(&project));
+                return Ok(0);
+            }
+            let ctx = context(&config, &project, project.members()[0], &global, profile(release))?;
+            let doc = ops::metadata::metadata(&ctx, &ops::metadata::MetadataOptions { no_deps })?;
+            println!("{}", serde_json::to_string_pretty(&doc)?);
             Ok(0)
         }
         Command::Outdated { names, pre, package } => {
@@ -1381,7 +1449,7 @@ fn print_info(project: &Project, ws: &Workspace) {
     println!("kotlin:       {}", m.kotlin.version);
     let targets: Vec<&str> = m.targets.enabled().iter().map(|t| t.as_str()).collect();
     println!("targets:      {}", targets.join(", "));
-    let enabled = enabled_frameworks(m);
+    let enabled = kargo_ops::builtins::enabled_frameworks(m);
     if !enabled.is_empty() {
         println!("frameworks:   {}", enabled.join(", "));
     }
@@ -1397,36 +1465,12 @@ fn print_info(project: &Project, ws: &Workspace) {
     println!("target dir:   {}", ws.target_dir().display());
 }
 
-fn enabled_frameworks(m: &kargo_manifest::Manifest) -> Vec<&'static str> {
-    let fw = &m.frameworks;
-    [
-        ("compose", fw.compose.is_some()),
-        ("serialization", fw.serialization.is_some()),
-        ("coroutines", fw.coroutines.is_some()),
-        ("ktor", fw.ktor.is_some()),
-        ("lombok", fw.lombok.is_some()),
-        ("spring-boot", fw.spring_boot.is_some()),
-    ]
-    .into_iter()
-    .filter_map(|(n, on)| on.then_some(n))
-    .collect()
-}
-
 /// `kargo info --format json`.
 fn info_json(ws: &Workspace) -> serde_json::Value {
     let m = ws.manifest();
     let dependencies = |deps: &[kargo_manifest::Dependency]| -> Vec<serde_json::Value> {
         deps.iter()
-            .map(|d| {
-                let scope = match d.scope {
-                    Scope::Compile => "compile",
-                    Scope::Runtime => "runtime",
-                    Scope::Provided => "provided",
-                    Scope::Processor => "processor",
-                    Scope::Ksp => "ksp",
-                };
-                serde_json::json!({ "name": d.name, "module": d.module.to_string(), "version": d.version, "scope": scope })
-            })
+            .map(|d| serde_json::json!({ "name": d.name, "module": d.module.to_string(), "version": d.version, "scope": d.scope.as_str() }))
             .collect()
     };
     serde_json::json!({
@@ -1439,7 +1483,7 @@ fn info_json(ws: &Workspace) -> serde_json::Value {
         "kotlin": m.kotlin.version,
         "jdk": m.toolchain.jdk.to_string(),
         "targets": m.targets.enabled().iter().map(|t| t.as_str()).collect::<Vec<_>>(),
-        "frameworks": enabled_frameworks(m),
+        "frameworks": kargo_ops::builtins::enabled_frameworks(m),
         "dependencies": dependencies(&m.dependencies),
         "dev-dependencies": dependencies(&m.dev_dependencies),
         "repositories": m.repositories.iter().map(|r| serde_json::json!({ "name": r.name, "url": r.url })).collect::<Vec<_>>(),
@@ -1542,6 +1586,10 @@ mod tests {
             Command::Check { keep_going: true, .. }
         ));
         assert!(matches!(Cli::try_parse_from(["kargo", "t", "--no-fail-fast"]).unwrap().command, Command::Test { no_fail_fast: true, .. }));
+        let cli = Cli::try_parse_from(["kargo", "test", "--list", "--format", "json", "MathTest"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { list: true, format: FormatArg::Json, .. }));
+        assert!(Cli::try_parse_from(["kargo", "test", "--format", "json"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "test", "--list", "--no-run"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "test", "--report", "junit", "--message-format", "json"]).unwrap();
         assert!(matches!(
             cli.command,
@@ -1577,6 +1625,19 @@ mod tests {
         assert!(matches!(cli.command, Command::Target { command: TargetCommand::Remove { .. } }));
         let cli = Cli::try_parse_from(["kargo", "target", "ls", "--format", "json"]).unwrap();
         assert!(matches!(cli.command, Command::Target { command: TargetCommand::List { format: FormatArg::Json, .. } }));
+        let cli = Cli::try_parse_from(["kargo", "run", "--debug", "--", "x"]).unwrap();
+        assert!(matches!(cli.command, Command::Run { debug: Some(5005), ref args, .. } if args == &["x"]));
+        let cli = Cli::try_parse_from(["kargo", "test", "--debug=6000", "MathTest"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { debug: Some(6000), ref filter, .. } if filter.as_deref() == Some("MathTest")));
+        // `--debug` never takes the next word as its port.
+        let cli = Cli::try_parse_from(["kargo", "test", "--debug", "MathTest"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { debug: Some(5005), ref filter, .. } if filter.as_deref() == Some("MathTest")));
+        let cli = Cli::try_parse_from(["kargo", "metadata", "--no-deps", "--format", "json"]).unwrap();
+        assert!(matches!(cli.command, Command::Metadata { no_deps: true, fingerprint: false, .. }));
+        assert!(Cli::try_parse_from(["kargo", "metadata", "--format", "text"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "metadata", "--fingerprint", "--no-deps"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "fetch", "--sources"]).unwrap();
+        assert!(matches!(cli.command, Command::Fetch { sources: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "lint", "--create-baseline"]).unwrap();
         assert!(matches!(cli.command, Command::Lint { create_baseline: true, .. }));
     }

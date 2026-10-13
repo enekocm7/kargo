@@ -8,6 +8,7 @@ pub mod doc;
 pub mod fmt;
 pub mod lint;
 pub mod local;
+pub mod metadata;
 pub mod new;
 pub mod publish;
 pub mod run;
