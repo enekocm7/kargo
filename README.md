@@ -184,6 +184,8 @@ fail-fast = false           # test every target even if one fails (default: true
 
 Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekocm7.github.io/kargo/schemas/kargo.json`: put `#:schema <url>` on the first line for Taplo-based editors (Even Better TOML, Zed, Helix), or map the URL to `kargo.toml` in your editor. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/).
 
+IntelliJ IDEA and Android Studio get a plugin in [`editors/jetbrains`](editors/jetbrains) that runs `kargo lsp` and adds a New Project wizard, run configurations, Run/Debug gutter icons, a test tree, JVM debugging and a Kargo tool window. See [IntelliJ IDEA and Android Studio](https://enekocm7.github.io/kargo/guides/jetbrains/).
+
 ### Workspaces
 
 ```toml
@@ -315,4 +317,12 @@ Kargo is a Cargo workspace:
 cargo test --workspace                       # unit + CLI integration tests (offline)
 KARGO_E2E=1 cargo test --test e2e            # end-to-end: JVM, Wasm, Spring, Ktor, Compose, pinned JDK
 KARGO_E2E=1 KARGO_E2E_NATIVE=1 KARGO_E2E_ANDROID=1 cargo test --test e2e
+```
+
+The JetBrains plugin in `editors/jetbrains` is a Gradle project written in Kotlin, built on [LSP4IJ](https://github.com/redhat-developer/lsp4ij):
+
+```bash
+cd editors/jetbrains
+./gradlew buildPlugin test                   # the plugin zip in build/distributions
+./gradlew runIde                             # an IDE with the plugin installed
 ```

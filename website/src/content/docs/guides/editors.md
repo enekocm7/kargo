@@ -27,6 +27,8 @@ The first start downloads the Kotlin LSP (about 360 MB) and resolves the project
 
 ### Editor setup
 
+**IntelliJ IDEA** and **Android Studio**: install the Kargo plugin, which runs `kargo lsp` for you and adds a New Project wizard, run configurations, a test tree and debugging. See [IntelliJ IDEA and Android Studio](../jetbrains/).
+
 **Neovim** (0.11 or newer):
 
 ```lua title="init.lua"
@@ -220,7 +222,7 @@ To apply it to every `kargo.toml` without editing them:
   }
   ```
 
-- **IntelliJ IDEA** and Android Studio (with the TOML plugin): in *Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings*, add a mapping with the schema URL and the file pattern `kargo.toml`.
+- **IntelliJ IDEA** and Android Studio: the [Kargo plugin](../jetbrains/) gives you all of this through `kargo lsp`. Without it, with the TOML plugin: in *Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings*, add a mapping with the schema URL and the file pattern `kargo.toml`.
 
 :::note
 The schema checks the shape of `kargo.toml`. Some rules need Kargo itself, such as a `path` dependency's directory existing or `min-sdk <= target-sdk`. `kargo check` still reports those.
@@ -392,7 +394,7 @@ Pick another port with `--debug=8000`, or let the JVM choose one with `--debug=0
 
 Attach with any JDWP debugger:
 
-- **IntelliJ IDEA**: *Run → Edit Configurations → + → Remote JVM Debug*, host `localhost`, port `5005`. Start `kargo run --debug`, then debug that configuration.
+- **IntelliJ IDEA**: with the [Kargo plugin](../jetbrains/#run-test-and-debug), *Debug* a Kargo run configuration and the debugger attaches by itself. Without it: *Run → Edit Configurations → + → Remote JVM Debug*, host `localhost`, port `5005`. Start `kargo run --debug`, then debug that configuration.
 - **VS Code** with the Debugger for Java extension: add an attach configuration.
 
   ```json title=".vscode/launch.json"
