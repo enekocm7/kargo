@@ -2015,6 +2015,30 @@ fn lsp_describes_the_project_for_the_kotlin_lsp() {
 }
 
 #[test]
+fn lsp_describes_multiplatform_source_sets() {
+    use serde_json::json;
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.wasm]\n"))
+        .file("src/Platform.kt", "expect fun platformName(): String\n")
+        .file("src-jvm/Platform.kt", "actual fun platformName(): String = \"JVM\"\n");
+    let input = lsp_input(&[
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(p.path()), "capabilities": {} } }),
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    ]);
+    let modules = |args: &[&str]| -> Vec<String> {
+        p.kargo().args(args).write_stdin(input.clone()).assert().code(1);
+        let workspace: serde_json::Value = serde_json::from_str(&p.read("workspace.json")).unwrap();
+        workspace["modules"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect()
+    };
+    // Offline, nothing resolves: the source sets are described without libraries.
+    assert_eq!(modules(&["--offline", "lsp"]), ["app", "app.common.main", "app.jvm.main", "app.common.test", "app.jvm.test"]);
+    assert_eq!(
+        modules(&["--offline", "lsp", "--klib-targets"]),
+        ["app", "app.common.main", "app.jvm.main", "app.wasm.main", "app.common.test", "app.jvm.test", "app.wasm.test"]
+    );
+}
+
+#[test]
 fn toolchain_lists_language_servers() {
     let p = Project::new();
     p.kargo()

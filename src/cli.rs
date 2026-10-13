@@ -711,6 +711,9 @@ kotlin-language-server) and again whenever kargo.toml or kargo.lock change.")]
         /// Run this language server executable instead of the one Kargo downloads
         #[arg(long, value_name = "PATH")]
         server_path: Option<PathBuf>,
+        /// Also describe Wasm and Native sources to the Kotlin LSP (it doesn't read klibs yet, so their libraries don't resolve)
+        #[arg(long)]
+        klib_targets: bool,
         /// Accepted for editors that pass it; Kargo always talks over stdio
         #[arg(long, hide = true)]
         stdio: bool,
@@ -736,6 +739,9 @@ the current project's tasks, `kargo-*` plugins and installed toolchains as you t
     External(Vec<String>),
 }
 
+/// The stack size of the thread commands run on.
+const STACK_SIZE: usize = 16 * 1024 * 1024;
+
 /// Entry point used by `main.rs`.
 pub fn main() -> ExitCode {
     complete::complete_if_requested();
@@ -748,7 +754,17 @@ pub fn main() -> ExitCode {
         Verbosity::Normal
     };
     let shell = Shell::new(verbosity);
-    match execute(cli, &shell) {
+    // Debug builds of `execute` and clap's command builder need more stack than the 1 MiB
+    // main thread on Windows has.
+    let result = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("kargo".into())
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, || execute(cli, &shell))
+            .map_err(anyhow::Error::from)
+            .and_then(|thread| thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+    });
+    match result {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
             report_error(&shell, &err);
@@ -1157,7 +1173,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             println!("{}", serde_json::to_string_pretty(&doc)?);
             Ok(0)
         }
-        Command::Lsp { server, server_path, stdio: _ } => {
+        Command::Lsp { server, server_path, klib_targets, stdio: _ } => {
             let server = match server {
                 LspServerArg::KotlinLsp => Some(ServerKind::KotlinLsp),
                 LspServerArg::Kls => Some(ServerKind::Kls),
@@ -1166,7 +1182,8 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
             if server.is_none() && server_path.is_some() {
                 bail!("`--server-path` needs a Kotlin language server; use `--server kotlin-lsp` or `--server kls`");
             }
-            let opts = kargo_lsp::Options { server, server_path, builtin_commands: builtin_commands(), search_url: None };
+            let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
+            let opts = kargo_lsp::Options { server, server_path, targets, builtin_commands: builtin_commands(), search_url: None };
             let clean = kargo_lsp::run(config.clone(), opts)?;
             Ok(if clean { 0 } else { 1 })
         }

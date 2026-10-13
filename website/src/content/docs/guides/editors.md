@@ -76,6 +76,7 @@ Open the project root or any directory in it. Kargo finds the project from the f
 | `kargo lsp --server kls` | fwcd's [kotlin-language-server](https://github.com/fwcd/kotlin-language-server), for setups that still use it. It runs on the project's JDK, or on a Temurin 21 Kargo installs when that is newer than 21 |
 | `kargo lsp --server none` | No Kotlin server: only `kargo.toml` support and runnables |
 | `kargo lsp --server-path <path>` | The server executable at `<path>` instead of the one Kargo downloads |
+| `kargo lsp --klib-targets` | Also describe Wasm and Native code to the Kotlin LSP. See [Multiplatform projects](#multiplatform-projects) |
 
 kotlin-language-server is no longer maintained and its last release bundles Kotlin 2.1, so it understands code and libraries built with newer Kotlin versions only partly. Prefer the default server.
 
@@ -87,15 +88,32 @@ Kotlin language servers don't read `kargo.toml`, so Kargo writes the project des
 
 | Server | File | Contents |
 |---|---|---|
-| Kotlin LSP | `workspace.json` | A module per package for main code and one for tests, with their source and resource roots, the JVM target's classpaths as libraries (with sources jars once downloaded with `kargo fetch --sources`), path dependencies as modules, the JDK, `jvm-target`, compiler arguments and compiler plugins |
+| Kotlin LSP | `workspace.json` | A module per package for main code and one for tests (a module per source set for a [multiplatform](#multiplatform-projects) package), with their source and resource roots, the JVM target's classpaths as libraries (with sources jars once downloaded with `kargo fetch --sources`), path dependencies as modules, the JDK, `jvm-target`, compiler arguments and compiler plugins |
 | kotlin-language-server | `kls-classpath` (`kls-classpath.bat` on Windows) | A script printing the test classpath, which Kargo keeps in `target/lsp/classpath.txt` |
 
 They hold paths on your machine, so keep them out of version control; `kargo new` adds them to `.gitignore`. Kargo only replaces a file while it still holds what Kargo last wrote: a `workspace.json` you wrote yourself, or one another tool generated, is left alone, and `kargo lsp` tells you so. Delete it to let Kargo manage it. Kargo remembers the last complete import in `target/lsp`, so a restart with an unchanged `kargo.toml` and `kargo.lock` starts the Kotlin server right away.
 
 If the dependencies can't be resolved (offline, a broken `kargo.toml`), Kargo describes the project without them and says why. It imports again once `kargo.toml` or `kargo.lock` change.
 
+### Multiplatform projects
+
+In a package with several [targets](../multiplatform/), `workspace.json` has a module per source set, the way Gradle describes a Kotlin Multiplatform project to IntelliJ:
+
+| Module | Sources | Refines |
+|---|---|---|
+| `<name>.common.main` | `src/` | |
+| `<name>.jvm.main` | `src-jvm/`, `resources/` | `<name>.common.main` |
+| `<name>.common.test` | `tests/` | |
+| `<name>.jvm.test` | `tests-jvm/`, `test-resources/` | `<name>.common.test` |
+
+Because `src-jvm/` refines `src/`, an `expect` declaration and its `actual` find each other: go to implementation on an `expect` lists its `actual` declarations, and neither side reports a missing or duplicate declaration. A package with one target keeps one module for its main code and one for its tests.
+
+The Kotlin LSP analyzes JVM code only. Kargo therefore analyzes `src/` as JVM code with the JVM classpath, so common code resolves the standard library and your dependencies, but completion in `src/` also offers JVM-only APIs. `kargo check` still compiles `src/` for every target and reports what doesn't exist on one of them; turn on [check on save](#check-on-save) to see those errors in the editor.
+
+`kargo lsp --klib-targets` also writes `<name>.wasm.main`, `<name>.native.main` and their test modules, with their klibs and, for Native, the Kotlin/Native distribution's standard and platform libraries. The Kotlin LSP Kargo pins doesn't support them yet: it can't read klibs, so library calls in `src-wasm/` show as unresolved, and it rejects Native modules. Use the option with a newer server (`--server-path`) that supports them. Without a JVM target, `src/` is then analyzed for all of the package's platforms, with no libraries.
+
 :::caution
-The Kotlin LSP understands JVM code. Kargo describes each package's JVM target to it, so code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence yet. `kargo.toml` support and runnables work for every target.
+Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence from the Kotlin LSP yet. Use Android Studio for Android code. `kargo.toml` support, runnables and check on save work for every target.
 :::
 
 ### Runnables
