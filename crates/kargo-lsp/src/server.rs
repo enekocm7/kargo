@@ -680,6 +680,7 @@ impl Server {
                         let exe = server.executable().context("the language server has no launcher")?;
                         (exe.clone(), Command::new(exe))
                     }
+                    ServerKind::Kda => anyhow::bail!("kotlin-debug-adapter is not a language server"),
                 }
             }
         };
@@ -791,6 +792,8 @@ impl Server {
         let (config, tx, kind, targets) = (self.config.clone(), self.tx.clone(), self.opts.server, self.opts.targets);
         thread::spawn(move || {
             let outcome = project::import(&config, &root, kind, targets);
+            // Keep the Zed tasks `kargo ide --zed` wrote current too.
+            let _ = crate::zed::refresh(&config, &root);
             let _ = tx.send(Event::Imported(outcome));
         });
         Ok(())

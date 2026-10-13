@@ -159,6 +159,8 @@ Listening for transport dt_socket at address: 5005
 
 Attach your editor's debugger as described in [Debugging](../editors/#debugging). `--debug` only debugs JVM tests, so a project with several targets needs `-t jvm`.
 
+Editors that use the [`kargo dap`](../editors/#debug-adapter) debug adapter do this for you: a launch with `"args": ["test", "CalculatorTest.adds"]` runs the test under the debugger and attaches.
+
 ## What runs where
 
 | Target | Test runner | Default test libraries |

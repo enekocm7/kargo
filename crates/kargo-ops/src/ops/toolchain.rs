@@ -124,7 +124,7 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
     let _ = writeln!(
         out,
         "
-Kotlin language servers ({}):",
+Kotlin language servers and debug adapter ({}):",
         config.toolchains_dir().display()
     );
     if servers.is_empty() {
@@ -134,11 +134,11 @@ Kotlin language servers ({}):",
         let pinned = server.version == server.kind.default_version();
         let _ = writeln!(
             out,
-            "    {:<10} {:<11} {:>10}{}",
+            "    {:<20} {:<11} {:>10}{}",
             server.kind.as_str(),
             server.version,
             human_size(dir_size(&server.home)),
-            if pinned { "  (used by kargo lsp)" } else { "" }
+            if pinned { format!("  (used by {})", server.kind.used_by()) } else { String::new() }
         );
     }
     Ok(out)

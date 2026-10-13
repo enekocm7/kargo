@@ -293,7 +293,11 @@ fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses,
         cmd.arg(super::run::jdwp_option(port));
     }
     // The launcher loads the tests in its own class loader, so its JVM classpath is just the launcher.
-    cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher))).args(&jvm.jvm_args);
+    // The JVM can't dump a class data archive with the debugger's agent loaded.
+    if opts.debug.is_none() {
+        cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)));
+    }
+    cmd.args(&jvm.jvm_args);
     if mode == JunitMode::List {
         cmd.arg(format!("-D{}=true", junit::LIST_PROPERTY));
     }

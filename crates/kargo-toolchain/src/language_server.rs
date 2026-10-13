@@ -1,6 +1,7 @@
-//! Kotlin language servers, which `kargo lsp` runs behind its own server.
+//! Kotlin language servers, which `kargo lsp` runs behind its own server, and the Kotlin debug
+//! adapter `kargo dap` runs behind its own.
 //!
-//! Two servers are supported, each pinned to one version like the compiler:
+//! Each is pinned to one version like the compiler:
 //!
 //! - [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp) (`kotlin-lsp`, the default),
 //!   downloaded from `download.jetbrains.com` and checked against the SHA-256 published next
@@ -8,8 +9,10 @@
 //! - [fwcd's kotlin-language-server](https://github.com/fwcd/kotlin-language-server) (`kls`),
 //!   downloaded from GitHub and checked against [`KLS_SHA256`]. It runs on the project's JDK,
 //!   or on a managed JDK [`KLS_MAX_JDK`] when that is newer.
+//! - [fwcd's kotlin-debug-adapter](https://github.com/fwcd/kotlin-debug-adapter) (`kotlin-debug-adapter`),
+//!   downloaded from GitHub and checked against [`KDA_SHA256`]. It runs on the project's JDK.
 //!
-//! Both are installed into `~/.kargo/toolchains/<server>/<version>`.
+//! All are installed into `~/.kargo/toolchains/<server>/<version>`.
 
 use std::path::{Path, PathBuf};
 
@@ -40,23 +43,35 @@ pub const KLS_MAX_JDK: u32 = 21;
 /// The main class of kotlin-language-server, started on `java` with its `lib/*` jars.
 pub const KLS_MAIN_CLASS: &str = "org.javacs.kt.MainKt";
 
-/// A Kotlin language server Kargo can download and run.
+/// The fwcd kotlin-debug-adapter version `kargo dap` uses.
+pub const KDA_VERSION: &str = "0.4.4";
+
+/// SHA-256 of the `adapter.zip` of [`KDA_VERSION`], which GitHub releases don't publish.
+pub const KDA_SHA256: &str = "3874cbaded0fdb8229a381167895b0a6caf88b7adffabc690fcf5a6fb65d11b6";
+
+/// The main class of kotlin-debug-adapter, started on `java` with its `lib/*` jars.
+pub const KDA_MAIN_CLASS: &str = "org.javacs.ktda.KDAMainKt";
+
+/// A Kotlin language server, or the Kotlin debug adapter, Kargo can download and run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerKind {
     /// JetBrains' Kotlin LSP.
     KotlinLsp,
     /// fwcd's kotlin-language-server.
     Kls,
+    /// fwcd's kotlin-debug-adapter, behind `kargo dap`.
+    Kda,
 }
 
 impl ServerKind {
-    pub const ALL: [ServerKind; 2] = [ServerKind::KotlinLsp, ServerKind::Kls];
+    pub const ALL: [ServerKind; 3] = [ServerKind::KotlinLsp, ServerKind::Kls, ServerKind::Kda];
 
     /// The name used on the command line and as the install directory.
     pub fn as_str(self) -> &'static str {
         match self {
             ServerKind::KotlinLsp => "kotlin-lsp",
             ServerKind::Kls => "kls",
+            ServerKind::Kda => "kotlin-debug-adapter",
         }
     }
 
@@ -65,6 +80,15 @@ impl ServerKind {
         match self {
             ServerKind::KotlinLsp => "Kotlin LSP",
             ServerKind::Kls => "kotlin-language-server",
+            ServerKind::Kda => "kotlin-debug-adapter",
+        }
+    }
+
+    /// The Kargo command that runs it.
+    pub fn used_by(self) -> &'static str {
+        match self {
+            ServerKind::KotlinLsp | ServerKind::Kls => "kargo lsp",
+            ServerKind::Kda => "kargo dap",
         }
     }
 
@@ -73,6 +97,7 @@ impl ServerKind {
         match self {
             ServerKind::KotlinLsp => KOTLIN_LSP_VERSION,
             ServerKind::Kls => KLS_VERSION,
+            ServerKind::Kda => KDA_VERSION,
         }
     }
 
@@ -81,6 +106,7 @@ impl ServerKind {
         config.toolchains_dir().join(match self {
             ServerKind::KotlinLsp => "kotlin-lsp",
             ServerKind::Kls => "kotlin-language-server",
+            ServerKind::Kda => "kotlin-debug-adapter",
         })
     }
 
@@ -91,6 +117,8 @@ impl ServerKind {
             (ServerKind::KotlinLsp, false) => "intellij-server",
             (ServerKind::Kls, true) => "kotlin-language-server.bat",
             (ServerKind::Kls, false) => "kotlin-language-server",
+            (ServerKind::Kda, true) => "kotlin-debug-adapter.bat",
+            (ServerKind::Kda, false) => "kotlin-debug-adapter",
         }
     }
 
@@ -98,13 +126,13 @@ impl ServerKind {
     pub fn stdio_args(self) -> &'static [&'static str] {
         match self {
             ServerKind::KotlinLsp => &["--stdio"],
-            ServerKind::Kls => &[],
+            ServerKind::Kls | ServerKind::Kda => &[],
         }
     }
 
     /// Whether the server needs a JDK (`JAVA_HOME`) to run.
     pub fn needs_jdk(self) -> bool {
-        self == ServerKind::Kls
+        matches!(self, ServerKind::Kls | ServerKind::Kda)
     }
 }
 
@@ -115,6 +143,7 @@ impl std::str::FromStr for ServerKind {
         match s {
             "kotlin-lsp" => Ok(ServerKind::KotlinLsp),
             "kls" | "kotlin-language-server" => Ok(ServerKind::Kls),
+            "kotlin-debug-adapter" => Ok(ServerKind::Kda),
             _ => bail!("unknown Kotlin language server `{s}`; use `kotlin-lsp` or `kls`"),
         }
     }
@@ -188,6 +217,13 @@ impl LanguageServer {
                 }
                 let url = format!("https://github.com/fwcd/kotlin-language-server/releases/download/{version}/server.zip");
                 (url, format!("kotlin-language-server-{version}.zip"), ArchiveKind::Zip, KLS_SHA256.to_owned())
+            }
+            ServerKind::Kda => {
+                if version != KDA_VERSION {
+                    bail!("Kargo only knows the checksum of kotlin-debug-adapter {KDA_VERSION}; install that version");
+                }
+                let url = format!("https://github.com/fwcd/kotlin-debug-adapter/releases/download/{version}/adapter.zip");
+                (url, format!("kotlin-debug-adapter-{version}.zip"), ArchiveKind::Zip, KDA_SHA256.to_owned())
             }
         };
         if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -272,13 +308,16 @@ mod tests {
         assert!(LanguageServer::installed(&config).unwrap().is_empty());
         fake(&config, ServerKind::KotlinLsp, KOTLIN_LSP_VERSION, "Kotlin LSP.app/Contents");
         fake(&config, ServerKind::Kls, KLS_VERSION, "");
+        fake(&config, ServerKind::Kda, KDA_VERSION, "adapter");
         std::fs::create_dir_all(ServerKind::KotlinLsp.dir(&config).join("1.0")).unwrap(); // incomplete
 
         let installed = LanguageServer::installed(&config).unwrap();
         assert_eq!(
             installed.iter().map(|s| (s.kind, s.version.as_str())).collect::<Vec<_>>(),
-            [(ServerKind::KotlinLsp, KOTLIN_LSP_VERSION), (ServerKind::Kls, KLS_VERSION)]
+            [(ServerKind::KotlinLsp, KOTLIN_LSP_VERSION), (ServerKind::Kls, KLS_VERSION), (ServerKind::Kda, KDA_VERSION)]
         );
+        let err = LanguageServer::ensure(&config, ServerKind::Kda, "0.1.0").unwrap_err().to_string();
+        assert!(err.contains("only knows the checksum"), "{err}");
         let lsp = LanguageServer::ensure(&config, ServerKind::KotlinLsp, KOTLIN_LSP_VERSION).unwrap();
         assert!(lsp.executable().unwrap().ends_with(Path::new("Contents").join("bin").join(ServerKind::KotlinLsp.launcher())));
 
@@ -290,7 +329,7 @@ mod tests {
 
         LanguageServer::remove(&config, ServerKind::Kls, KLS_VERSION).unwrap();
         assert!(LanguageServer::remove(&config, ServerKind::Kls, KLS_VERSION).is_err());
-        assert_eq!(LanguageServer::installed(&config).unwrap().len(), 1);
+        assert_eq!(LanguageServer::installed(&config).unwrap().len(), 2);
     }
 
     #[test]

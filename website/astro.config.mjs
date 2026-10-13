@@ -55,6 +55,7 @@ export default defineConfig({
 						{ label: 'Build performance', slug: 'guides/build-performance' },
 						{ label: 'Editor integration', slug: 'guides/editors' },
 						{ label: 'IntelliJ IDEA and Android Studio', slug: 'guides/jetbrains' },
+						{ label: 'Zed', slug: 'guides/zed' },
 					],
 				},
 				{

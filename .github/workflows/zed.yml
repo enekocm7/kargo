@@ -1,0 +1,33 @@
+name: Zed extension
+
+on:
+  push:
+    branches: [master]
+    paths: ["editors/zed/**", ".github/workflows/zed.yml"]
+  pull_request:
+    paths: ["editors/zed/**", ".github/workflows/zed.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/zed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Test
+        run: cargo test
+      - name: Build
+        run: cargo build --release --target wasm32-wasip2
+      - name: Lint
+        run: cargo clippy --target wasm32-wasip2 -- -D warnings

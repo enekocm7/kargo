@@ -14,10 +14,10 @@ Kargo is a Cargo workspace of focused crates:
 | `kargo-util` | Terminal output, configuration, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, the resolver, uploads (`deploy.rs`) and the Maven Central Portal (`central.rs`) |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
-| `kargo-toolchain` | JDK detection and Temurin downloads, the Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers, browsers, archives |
+| `kargo-toolchain` | JDK detection and Temurin downloads, the Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications (`publication.rs`) and GnuPG signing (`signing.rs`), commands |
-| `kargo-lsp` | `kargo lsp`: the message loop in front of a Kotlin language server (`server.rs`), `kargo.toml` diagnostics, completion and hover (`manifest.rs`, `schema.rs`), Maven coordinate and version completion and newer-version hints (`deps.rs`), code actions and the `kargo/addDependency` / `kargo/addTarget` commands (`actions.rs`), `workspace.json`, `kls-classpath` and runnables from `kargo metadata` (`project.rs`), check on save (`check.rs`) |
+| `kargo-lsp` | `kargo lsp`: the message loop in front of a Kotlin language server (`server.rs`), `kargo.toml` diagnostics, completion and hover (`manifest.rs`, `schema.rs`), Maven coordinate and version completion and newer-version hints (`deps.rs`), code actions and the `kargo/addDependency` / `kargo/addTarget` commands (`actions.rs`), `workspace.json`, `kls-classpath` and runnables from `kargo metadata` (`project.rs`), check on save (`check.rs`), the `kargo dap` debug adapter (`dap.rs`), Zed tasks for `kargo ide --zed` (`zed.rs`) |
 | `kargo` | The CLI binary |
 
 ## Building and testing
@@ -51,6 +51,18 @@ cd editors/jetbrains
 ```
 
 It needs JDK 21. The *JetBrains plugin* workflow builds and verifies it on every change to `editors/jetbrains`.
+
+## The Zed extension
+
+The [Zed](../../guides/zed/) extension in `editors/zed` is a Rust crate of its own (not a member of Kargo's workspace), compiled to WebAssembly against [`zed_extension_api`](https://crates.io/crates/zed_extension_api). `extension.toml` declares the language server for Kotlin and TOML, the `Kargo` debug adapter (its configuration schema is `debug_adapter_schemas/Kargo.json`), the `kargo` debug locator and the `/kargo-metadata` slash command; `src/lib.rs` implements them by running `kargo lsp`, `kargo dap` and `kargo metadata`.
+
+```sh
+cd editors/zed
+cargo test                                     # unit tests, on the host
+cargo build --release --target wasm32-wasip2   # the extension Zed builds
+```
+
+To try it, run *zed: install dev extension* in Zed and pick `editors/zed`. The *Zed extension* workflow formats, tests, builds and lints it on every change to `editors/zed`.
 
 ## This website
 
