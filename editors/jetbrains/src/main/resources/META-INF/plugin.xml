@@ -6,7 +6,10 @@
     Support for <a href="https://enekocm7.github.io/kargo/">Kargo</a>, Cargo for Kotlin, in IntelliJ IDEA and Android Studio.
     <ul>
       <li><code>kargo.toml</code> completion, documentation, validation, quick fixes and dependency hints from
-          <code>kargo lsp</code>. Kotlin files use the IDE's own Kotlin support.</li>
+          <code>kargo lsp</code>.</li>
+      <li>Kotlin code intelligence from the IDE's own Kotlin support, which the plugin sets up from
+          <code>kargo.toml</code>: source roots, the JDK and the resolved libraries with their sources, imported again
+          when <code>kargo.toml</code> or <code>kargo.lock</code> change.</li>
       <li>File | New | Project | Kargo, and Tools | Kargo | Initialize Kargo Project for an existing folder.</li>
       <li>Kargo run configurations, Run and Debug icons on <code>main</code> and tests, a test tree with per-test results,
           and JVM debugging through <code>--debug</code>.</li>
@@ -26,6 +29,7 @@
                                  instance="io.github.enekocm7.kargo.settings.KargoConfigurable"/>
         <notificationGroup id="Kargo" displayType="BALLOON"/>
         <postStartupActivity implementation="io.github.enekocm7.kargo.KargoStartupActivity"/>
+        <postStartupActivity implementation="io.github.enekocm7.kargo.project.KargoImportStartup"/>
 
         <configurationType implementation="io.github.enekocm7.kargo.run.KargoConfigurationType"/>
         <programRunner implementation="io.github.enekocm7.kargo.run.KargoDebugRunner"/>
@@ -70,7 +74,7 @@
                     description="kargo update"/>
             <separator/>
             <action id="Kargo.Reload" class="io.github.enekocm7.kargo.actions.KargoReloadAction" text="Reload Kargo Project"
-                    description="Restart kargo lsp, which imports the project again" icon="AllIcons.Actions.Refresh"/>
+                    description="Import the project into the IDE again and restart kargo lsp" icon="AllIcons.Actions.Refresh"/>
             <action id="Kargo.Init" class="io.github.enekocm7.kargo.actions.KargoInitAction" text="Initialize Kargo Project"
                     description="kargo init in the project root"/>
         </group>

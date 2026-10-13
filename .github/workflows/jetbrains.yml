@@ -18,6 +18,10 @@ jobs:
       run:
         working-directory: editors/jetbrains
     steps:
+      # verifyPlugin downloads several IDEs; the runner's disk is too small for them without this.
+      - name: Free disk space
+        working-directory: .
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:

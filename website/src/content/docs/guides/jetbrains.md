@@ -3,7 +3,7 @@ title: IntelliJ IDEA and Android Studio
 description: Install the Kargo plugin for JetBrains IDEs to create, open, run, test and debug Kargo projects in IntelliJ IDEA and Android Studio.
 ---
 
-The Kargo plugin makes IntelliJ IDEA and Android Studio understand Kargo projects. It runs [`kargo lsp`](../editors/#language-server) inside the IDE for `kargo.toml` support, leaves Kotlin code to the IDE's own Kotlin support, and adds what an IDE needs on top: a New Project wizard, run configurations, Run and Debug icons, a test tree and a Kargo tool window.
+The Kargo plugin makes IntelliJ IDEA and Android Studio understand Kargo projects. It runs [`kargo lsp`](../editors/#language-server) inside the IDE for `kargo.toml` support, describes your project to the IDE's own Kotlin support, and adds what an IDE needs on top: a New Project wizard, run configurations, Run and Debug icons, a test tree and a Kargo tool window.
 
 Open a folder that contains a `kargo.toml` and the plugin takes over. You don't need a `build.gradle.kts` or a `pom.xml`.
 
@@ -48,7 +48,15 @@ For a folder you already opened, *Tools → Kargo → Initialize Kargo Project* 
 
 When you open `kargo.toml`, the plugin starts `kargo lsp --server none` in the project root, which is `kargo lsp` without a Kotlin language server. It gives you the `kargo.toml` half of [Editor integration](../editors/#language-server): completion, documentation, validation and quick fixes, with Maven coordinate and version completion and hints at newer versions. It also answers [`kargo/runnables`](../editors/#runnables) for the tool window and the commands behind *Add Dependency* and *Add Target*.
 
-Kotlin files are not sent to `kargo lsp`. They use the IDE's own Kotlin support, which needs the IDE to know your dependencies and doesn't read them from `kargo.toml`. Errors from `kargo check` are not shown in the editor either; run *Tools → Kargo → Check*. LSP4IJ shows the server's log in *View → Tool Windows → Language Servers*.
+Kotlin files are not sent to `kargo lsp`. They use the IDE's own Kotlin support (completion, navigation, find usages, rename, inspections), and the plugin tells the IDE what it would otherwise get from Gradle or Maven. When you open the project it runs [`kargo metadata`](../../reference/machine-readable-output/#kargo-metadata) and sets up one IDE module per package:
+
+- The source, test and resource roots (`src/`, `src-jvm/`, `tests/`, `resources/`, ...). `examples/` is a test source root, and `target/` is excluded.
+- The JDK Kargo resolves for the project, registered in the IDE if it isn't known yet.
+- The resolved libraries with their sources jars, as compile or test dependencies, and a module dependency for each [path dependency](../workspaces/).
+
+It does this again when a `kargo.toml` or `kargo.lock` changes, and after `kargo fetch`, `update`, `add` and `remove` run from the IDE. Run *Tools → Kargo → Fetch Dependencies and Sources* to navigate into library sources, or *Reload Kargo Project* to import by hand. The first import resolves your dependencies, so it takes a while; the progress is in the status bar, and a failure is reported in a notification.
+
+A package gets the roots and libraries of its JVM target, or of its first other target when it has none. Libraries of Wasm and Native targets are klibs, which the plugin doesn't give to the IDE, so those packages have source roots but their libraries don't resolve. Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are not applied by the IDE either, so it can report errors that `kargo build` doesn't. Errors from `kargo check` are not shown in the editor; run *Tools → Kargo → Check*. LSP4IJ shows `kargo lsp`'s log in *View → Tool Windows → Language Servers*.
 
 ## Run, test and debug
 
@@ -94,7 +102,7 @@ Compiler errors and file locations in the output are links to the source.
 | Add Target… | `kargo target add <target>` |
 | Fetch Dependencies and Sources | `kargo fetch --sources`, for navigation into library sources |
 | Update Dependencies | `kargo update` |
-| Reload Kargo Project | Restarts `kargo lsp`, which imports the project again |
+| Reload Kargo Project | Imports the project into the IDE again and restarts `kargo lsp` |
 | Initialize Kargo Project | `kargo init`, in a project without `kargo.toml` |
 
 *Add Dependency* and *Add Target* go through `kargo lsp`'s [commands](../editors/#commands-for-editor-plugins), so they edit `kargo.toml` the same way the quick fixes do. You can assign any of these actions a shortcut in *Settings → Keymap*.
@@ -116,4 +124,4 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, ru
 
 - *Build → Build Project* doesn't run `kargo build`; use *Tools → Kargo → Build*, or check on save for errors in the editor.
 - *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
-- Kotlin code intelligence comes from the IDE, not from Kargo, so libraries from `kargo.toml` don't resolve in the editor. Use *Tools → Kargo → Check* for the compiler's errors, or a Kargo-aware editor such as [Zed](../zed/).
+- Kotlin code intelligence comes from the IDE, not from Kargo. It only knows what the import above tells it, so a library the IDE's Kotlin version can't read (one compiled by a newer Kotlin than the IDE bundles) or a compiler plugin can show errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
