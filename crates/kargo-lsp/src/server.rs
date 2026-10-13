@@ -215,6 +215,31 @@ fn id_key(id: &Value) -> String {
     id.to_string()
 }
 
+/// Asks the Kotlin LSP to import each workspace folder from `workspace.json`. Left alone, it
+/// picks the importer by what it finds in the folder, and an IDE's `.idea/` (IntelliJ, which
+/// describes none of Kargo's libraries) wins over `workspace.json`. An editor's own
+/// `buildTools` entry for a folder is kept.
+fn prefer_workspace_json(params: &mut serde_json::Map<String, Value>) {
+    let mut folders: Vec<String> = params
+        .get("workspaceFolders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f["uri"].as_str())
+        .map(str::to_owned)
+        .collect();
+    folders.extend(params.get("rootUri").and_then(Value::as_str).map(str::to_owned));
+    let options = params.entry("initializationOptions").or_insert_with(|| json!({}));
+    if options.is_null() {
+        *options = json!({});
+    }
+    let Some(options) = options.as_object_mut() else { return };
+    let Some(tools) = options.entry("buildTools").or_insert_with(|| json!({})).as_object_mut() else { return };
+    for folder in folders {
+        tools.entry(folder).or_insert_with(|| json!("json"));
+    }
+}
+
 /// The capabilities Kargo's own server has.
 fn own_capabilities() -> Value {
     json!({
@@ -639,6 +664,9 @@ impl Server {
                     params.insert("rootUri".into(), json!(uri));
                     params.insert("rootPath".into(), json!(root.display().to_string()));
                     params.insert("workspaceFolders".into(), json!([{ "uri": uri, "name": name }]));
+                }
+                if kind == Some(ServerKind::KotlinLsp) && self.root.as_ref().is_some_and(|r| r.join("workspace.json").is_file()) {
+                    prefer_workspace_json(params);
                 }
             }
             self.send_backend(&message);
@@ -1420,6 +1448,22 @@ local = \"{url}\"
     }
 
     #[test]
+    fn prefers_workspace_json_but_keeps_the_editors_choice() {
+        let mut params = json!({
+            "rootUri": "file:///p",
+            "workspaceFolders": [{ "uri": "file:///p", "name": "p" }, { "uri": "file:///q", "name": "q" }],
+            "initializationOptions": { "checkOnSave": true, "buildTools": { "file:///q": "gradle" } },
+        });
+        prefer_workspace_json(params.as_object_mut().unwrap());
+        assert_eq!(params["initializationOptions"]["buildTools"], json!({ "file:///p": "json", "file:///q": "gradle" }));
+        assert_eq!(params["initializationOptions"]["checkOnSave"], true);
+
+        let mut bare = json!({ "rootUri": "file:///p", "initializationOptions": null });
+        prefer_workspace_json(bare.as_object_mut().unwrap());
+        assert_eq!(bare["initializationOptions"], json!({ "buildTools": { "file:///p": "json" } }));
+    }
+
+    #[test]
     fn passes_kotlin_traffic_through_and_keeps_kargo_toml() {
         let dir = project(MANIFEST);
         let root = text::path_to_uri(dir.path());
@@ -1464,6 +1508,7 @@ local = \"{url}\"
         }
         assert!(received[0]["params"].get("workDoneToken").is_none(), "Kargo already ended the editor's progress");
         assert_eq!(received[0]["params"]["rootUri"], root, "the server opens the project root");
+        assert_eq!(received[0]["params"]["initializationOptions"]["buildTools"][&root], "json", "workspace.json beats an IDE's .idea");
         let methods: Vec<&str> = received.iter().map(jsonrpc::method).collect();
         assert_eq!(
             methods,
