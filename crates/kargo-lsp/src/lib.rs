@@ -16,6 +16,7 @@ pub mod dap;
 pub mod deps;
 pub mod jsonrpc;
 pub mod manifest;
+pub mod model;
 pub mod project;
 pub mod schema;
 pub mod server;

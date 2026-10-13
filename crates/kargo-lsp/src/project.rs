@@ -1,6 +1,8 @@
 //! Importing a Kargo project for a Kotlin language server: `kargo metadata`, turned into the
 //! server's own project description.
 //!
+//! - Kargo's own Kotlin server gets the project model ([`kargo_model`]) in its `initialize`
+//!   request and in `kargo/projectChanged` notifications. Nothing is written into the project.
 //! - The JetBrains Kotlin LSP reads `workspace.json` at the project root (its format for build
 //!   systems it doesn't know) and reloads it when it changes. Kargo writes one module per
 //!   package for main and one for test code, with the target's classpath as libraries (with
@@ -87,7 +89,8 @@ pub fn is_fresh(root: &Path, kind: ServerKind, targets: Targets) -> bool {
     let generated = match kind {
         ServerKind::KotlinLsp => project.root().join("workspace.json"),
         ServerKind::Kls => project.root().join(if cfg!(windows) { "kls-classpath.bat" } else { "kls-classpath" }),
-        ServerKind::Kda => return false,
+        // Kargo's server gets the model from `kargo lsp`, which needs the metadata for it.
+        ServerKind::Kargo | ServerKind::Kda => return false,
     };
     let stored = std::fs::read_to_string(project.target_dir().join("lsp").join("fingerprint")).unwrap_or_default();
     generated.is_file() && stored.trim() == format!("{} {}", description(kind, targets), metadata::fingerprint(&project))
@@ -113,7 +116,7 @@ pub fn refresh(config: &Config, root: &Path) -> Option<Outcome> {
 fn description(kind: ServerKind, targets: Targets) -> String {
     match kind {
         ServerKind::KotlinLsp => format!("{}{}", kind.as_str(), targets.record_suffix()),
-        ServerKind::Kls | ServerKind::Kda => kind.as_str().to_owned(),
+        ServerKind::Kargo | ServerKind::Kls | ServerKind::Kda => kind.as_str().to_owned(),
     }
 }
 
@@ -161,8 +164,8 @@ pub fn write(kind: ServerKind, metadata: &Value, targets: Targets) -> Result<Wri
                 written.changed.push(script);
             }
         }
-        // The debug adapter reads no project description.
-        ServerKind::Kda => {}
+        // Kargo's server gets its model over LSP; the debug adapter reads no project description.
+        ServerKind::Kargo | ServerKind::Kda => {}
     }
     Ok(written)
 }
@@ -637,32 +640,49 @@ fn library_entry(name: &str, entry: &Value, library_type: &str) -> Value {
 /// the platform libraries (`posix`, ...), which Native code compiles against without
 /// declaring them.
 fn native_distribution(metadata: &Value, konan_target: &str) -> Vec<Value> {
-    let native = &metadata["toolchain"]["kotlin-native"];
-    let Some(home) = native["home"].as_str() else { return Vec::new() };
-    let version = str_of(native, "version");
+    let version = str_of(&metadata["toolchain"]["kotlin-native"], "version");
+    native_klibs(metadata, konan_target)
+        .into_iter()
+        .map(|klib| {
+            let name = match &klib.platform {
+                Some(platform) => format!("{} [{platform}]", klib.name),
+                None => klib.name,
+            };
+            json!({
+                "name": format!("Kotlin/Native {version}: {name}"),
+                "type": "kotlin.native",
+                "roots": [{ "path": klib.path.display().to_string() }],
+            })
+        })
+        .collect()
+}
+
+/// A klib of the Kotlin/Native distribution.
+pub(crate) struct NativeKlib {
+    /// `stdlib`, or a platform library's name (`posix`).
+    pub name: String,
+    /// The Kotlin/Native platform of a platform library; `None` for the standard library.
+    pub platform: Option<String>,
+    pub path: PathBuf,
+}
+
+/// The klibs of the Kotlin/Native distribution in `metadata` for `konan_target`, if it is installed.
+pub(crate) fn native_klibs(metadata: &Value, konan_target: &str) -> Vec<NativeKlib> {
+    let Some(home) = metadata["toolchain"]["kotlin-native"]["home"].as_str() else { return Vec::new() };
     let klib = Path::new(home).join("klib");
-    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let mut found = Vec::new();
     if klib.join("common").join("stdlib").is_dir() {
-        found.push(("stdlib".to_owned(), klib.join("common").join("stdlib")));
+        found.push(NativeKlib { name: "stdlib".to_owned(), platform: None, path: klib.join("common").join("stdlib") });
     }
     if let Ok(dir) = std::fs::read_dir(klib.join("platform").join(konan_target)) {
         let mut platform: Vec<PathBuf> = dir.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
         platform.sort();
         for path in platform {
-            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            found.push((format!("{file} [{konan_target}]"), path));
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            found.push(NativeKlib { name, platform: Some(konan_target.to_owned()), path });
         }
     }
     found
-        .into_iter()
-        .map(|(name, path)| {
-            json!({
-                "name": format!("Kotlin/Native {version}: {name}"),
-                "type": "kotlin.native",
-                "roots": [{ "path": path.display().to_string() }],
-            })
-        })
-        .collect()
 }
 
 fn kotlin_settings_entry(package: &Value, set: &SourceSet) -> Value {

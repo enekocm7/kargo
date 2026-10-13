@@ -3,6 +3,11 @@
 //!
 //! Each is pinned to one version like the compiler:
 //!
+//! - Kargo's own Kotlin server (`kargo-kotlin-server`, built from `kotlin-server/` in Kargo's
+//!   repository on the Kotlin Analysis API), downloaded from Kargo's GitHub releases and
+//!   checked against [`KARGO_KOTLIN_SERVER_SHA256`]. It runs on the project's JDK when that is
+//!   [`KARGO_KOTLIN_SERVER_MIN_JDK`] or newer, else on a managed JDK
+//!   [`KARGO_KOTLIN_SERVER_MANAGED_JDK`].
 //! - [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp) (`kotlin-lsp`, the default),
 //!   downloaded from `download.jetbrains.com` and checked against the SHA-256 published next
 //!   to it. It bundles its own Java runtime.
@@ -22,6 +27,27 @@ use kargo_maven::Version;
 use kargo_util::config::Config;
 
 use crate::archive::{self, ArchiveKind};
+
+/// The version of Kargo's own Kotlin server `kargo lsp --server kargo` uses.
+pub const KARGO_KOTLIN_SERVER_VERSION: &str = "0.1.0";
+
+/// SHA-256 of `kargo-kotlin-server-<version>.zip` of [`KARGO_KOTLIN_SERVER_VERSION`], or `None`
+/// while that version has no release: run a local build with `--server-path` then.
+pub const KARGO_KOTLIN_SERVER_SHA256: Option<&str> = None;
+
+/// Where Kargo's GitHub releases are: the server's zip is the asset of the release tagged
+/// `kotlin-server-v<version>`.
+pub const KARGO_KOTLIN_SERVER_URL: &str = "https://github.com/enekocm7/kargo/releases/download";
+
+/// The main class of Kargo's Kotlin server, started on `java` with its `lib/*` jars.
+pub const KARGO_KOTLIN_SERVER_MAIN_CLASS: &str = "io.github.enekocm7.kargo.server.MainKt";
+
+/// The oldest JDK Kargo's Kotlin server runs on (the Kotlin Analysis API needs it).
+pub const KARGO_KOTLIN_SERVER_MIN_JDK: u32 = 17;
+
+/// The managed JDK Kargo's Kotlin server runs on when the project's JDK is older than
+/// [`KARGO_KOTLIN_SERVER_MIN_JDK`] or unknown.
+pub const KARGO_KOTLIN_SERVER_MANAGED_JDK: u32 = 21;
 
 /// The JetBrains Kotlin LSP version `kargo lsp` uses.
 pub const KOTLIN_LSP_VERSION: &str = "263.6379.0";
@@ -55,6 +81,8 @@ pub const KDA_MAIN_CLASS: &str = "org.javacs.ktda.KDAMainKt";
 /// A Kotlin language server, or the Kotlin debug adapter, Kargo can download and run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerKind {
+    /// Kargo's own Kotlin server, on the Kotlin Analysis API.
+    Kargo,
     /// JetBrains' Kotlin LSP.
     KotlinLsp,
     /// fwcd's kotlin-language-server.
@@ -64,11 +92,12 @@ pub enum ServerKind {
 }
 
 impl ServerKind {
-    pub const ALL: [ServerKind; 3] = [ServerKind::KotlinLsp, ServerKind::Kls, ServerKind::Kda];
+    pub const ALL: [ServerKind; 4] = [ServerKind::Kargo, ServerKind::KotlinLsp, ServerKind::Kls, ServerKind::Kda];
 
-    /// The name used on the command line and as the install directory.
+    /// The name used on the command line (`kargo toolchain`) and in `kargo toolchain list`.
     pub fn as_str(self) -> &'static str {
         match self {
+            ServerKind::Kargo => "kargo-kotlin-server",
             ServerKind::KotlinLsp => "kotlin-lsp",
             ServerKind::Kls => "kls",
             ServerKind::Kda => "kotlin-debug-adapter",
@@ -78,6 +107,7 @@ impl ServerKind {
     /// The human-readable name.
     pub fn title(self) -> &'static str {
         match self {
+            ServerKind::Kargo => "Kargo Kotlin Server",
             ServerKind::KotlinLsp => "Kotlin LSP",
             ServerKind::Kls => "kotlin-language-server",
             ServerKind::Kda => "kotlin-debug-adapter",
@@ -87,7 +117,7 @@ impl ServerKind {
     /// The Kargo command that runs it.
     pub fn used_by(self) -> &'static str {
         match self {
-            ServerKind::KotlinLsp | ServerKind::Kls => "kargo lsp",
+            ServerKind::Kargo | ServerKind::KotlinLsp | ServerKind::Kls => "kargo lsp",
             ServerKind::Kda => "kargo dap",
         }
     }
@@ -95,6 +125,7 @@ impl ServerKind {
     /// The version Kargo pins.
     pub fn default_version(self) -> &'static str {
         match self {
+            ServerKind::Kargo => KARGO_KOTLIN_SERVER_VERSION,
             ServerKind::KotlinLsp => KOTLIN_LSP_VERSION,
             ServerKind::Kls => KLS_VERSION,
             ServerKind::Kda => KDA_VERSION,
@@ -104,6 +135,7 @@ impl ServerKind {
     /// Directory holding the installed versions.
     pub fn dir(self, config: &Config) -> PathBuf {
         config.toolchains_dir().join(match self {
+            ServerKind::Kargo => "kargo-kotlin-server",
             ServerKind::KotlinLsp => "kotlin-lsp",
             ServerKind::Kls => "kotlin-language-server",
             ServerKind::Kda => "kotlin-debug-adapter",
@@ -113,6 +145,8 @@ impl ServerKind {
     /// The launcher, relative to the installation.
     fn launcher(self) -> &'static str {
         match (self, cfg!(windows)) {
+            (ServerKind::Kargo, true) => "kargo-kotlin-server.bat",
+            (ServerKind::Kargo, false) => "kargo-kotlin-server",
             (ServerKind::KotlinLsp, true) => "intellij-server.exe",
             (ServerKind::KotlinLsp, false) => "intellij-server",
             (ServerKind::Kls, true) => "kotlin-language-server.bat",
@@ -126,13 +160,13 @@ impl ServerKind {
     pub fn stdio_args(self) -> &'static [&'static str] {
         match self {
             ServerKind::KotlinLsp => &["--stdio"],
-            ServerKind::Kls | ServerKind::Kda => &[],
+            ServerKind::Kargo | ServerKind::Kls | ServerKind::Kda => &[],
         }
     }
 
     /// Whether the server needs a JDK (`JAVA_HOME`) to run.
     pub fn needs_jdk(self) -> bool {
-        matches!(self, ServerKind::Kls | ServerKind::Kda)
+        matches!(self, ServerKind::Kargo | ServerKind::Kls | ServerKind::Kda)
     }
 }
 
@@ -141,10 +175,11 @@ impl std::str::FromStr for ServerKind {
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
+            "kargo" | "kargo-kotlin-server" => Ok(ServerKind::Kargo),
             "kotlin-lsp" => Ok(ServerKind::KotlinLsp),
             "kls" | "kotlin-language-server" => Ok(ServerKind::Kls),
             "kotlin-debug-adapter" => Ok(ServerKind::Kda),
-            _ => bail!("unknown Kotlin language server `{s}`; use `kotlin-lsp` or `kls`"),
+            _ => bail!("unknown Kotlin language server `{s}`; use `kargo`, `kotlin-lsp` or `kls`"),
         }
     }
 }
@@ -203,6 +238,20 @@ impl LanguageServer {
         }
         let server = Self::at(config, kind, version)?;
         let (url, file, archive_kind, sha256) = match kind {
+            ServerKind::Kargo => {
+                if version != KARGO_KOTLIN_SERVER_VERSION {
+                    bail!("Kargo only knows the checksum of kargo-kotlin-server {KARGO_KOTLIN_SERVER_VERSION}; install that version");
+                }
+                let Some(sha256) = KARGO_KOTLIN_SERVER_SHA256 else {
+                    bail!(
+                        "kargo-kotlin-server {version} is not released yet; build it from kotlin-server/ in Kargo's repository \
+                         and run `kargo lsp --server kargo --server-path <its bin/kargo-kotlin-server>`"
+                    );
+                };
+                let file = format!("kargo-kotlin-server-{version}.zip");
+                let url = format!("{KARGO_KOTLIN_SERVER_URL}/kotlin-server-v{version}/{file}");
+                (url, file, ArchiveKind::Zip, sha256.to_owned())
+            }
             ServerKind::KotlinLsp => {
                 let (file, archive_kind) = kotlin_lsp_archive(version)?;
                 let url = format!("{KOTLIN_LSP_URL}/{version}/{file}");
@@ -325,6 +374,12 @@ mod tests {
         assert!(err.contains("offline"), "{err}");
         let err = LanguageServer::ensure(&config, ServerKind::Kls, "1.0.0").unwrap_err().to_string();
         assert!(err.contains("only knows the checksum"), "{err}");
+        let err = format!("{:#}", LanguageServer::ensure(&config, ServerKind::Kargo, KARGO_KOTLIN_SERVER_VERSION).unwrap_err());
+        let expected = if KARGO_KOTLIN_SERVER_SHA256.is_some() { "offline" } else { "--server-path" };
+        assert!(err.contains(expected), "{err}");
+        fake(&config, ServerKind::Kargo, KARGO_KOTLIN_SERVER_VERSION, "kargo-kotlin-server-0.1.0");
+        assert!(LanguageServer::find(&config, ServerKind::Kargo, KARGO_KOTLIN_SERVER_VERSION).unwrap().is_some());
+        LanguageServer::remove(&config, ServerKind::Kargo, KARGO_KOTLIN_SERVER_VERSION).unwrap();
         assert!(LanguageServer::find(&config, ServerKind::Kls, "../x").is_err());
 
         LanguageServer::remove(&config, ServerKind::Kls, KLS_VERSION).unwrap();
@@ -336,6 +391,7 @@ mod tests {
     fn parses_server_names() {
         assert_eq!("kotlin-lsp".parse::<ServerKind>().unwrap(), ServerKind::KotlinLsp);
         assert_eq!("kls".parse::<ServerKind>().unwrap(), ServerKind::Kls);
+        assert_eq!("kargo".parse::<ServerKind>().unwrap(), ServerKind::Kargo);
         assert!("x".parse::<ServerKind>().unwrap_err().to_string().contains("kotlin-lsp"));
         for kind in ServerKind::ALL {
             assert_eq!(kind.as_str().parse::<ServerKind>().unwrap(), kind);

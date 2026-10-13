@@ -1,0 +1,16 @@
+kargo-kotlin-server
+Kargo's Kotlin language server. Licensed under the MIT License or the Apache License 2.0, at
+your option, like Kargo.
+
+It bundles, in lib/, components under their own licenses:
+
+- The Kotlin Analysis API, the Kotlin compiler frontend and the IntelliJ Platform core, as
+  packaged in com.google.devtools.ksp:symbol-processing-aa (Apache License 2.0).
+  https://github.com/JetBrains/kotlin, https://github.com/google/ksp
+- The Kotlin standard library and kotlinx.coroutines (Apache License 2.0).
+- Eclipse LSP4J (Eclipse Public License 2.0 or Eclipse Distribution License 1.0).
+  https://github.com/eclipse-lsp4j/lsp4j
+- Gson (Apache License 2.0). https://github.com/google/gson
+
+The license texts are at https://www.apache.org/licenses/LICENSE-2.0,
+https://www.eclipse.org/legal/epl-2.0/ and https://www.eclipse.org/org/documents/edl-v10.php.
