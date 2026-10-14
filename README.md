@@ -185,7 +185,7 @@ fail-fast = false           # test every target even if one fails (default: true
 
 Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekocm7.github.io/kargo/schemas/kargo.json`: put `#:schema <url>` on the first line for Taplo-based editors (Even Better TOML, Zed, Helix), or map the URL to `kargo.toml` in your editor. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/).
 
-IntelliJ IDEA and Android Studio get a plugin in [`editors/jetbrains`](editors/jetbrains) that runs `kargo lsp` for `kargo.toml` and adds a New Project wizard, run configurations, Run/Debug gutter icons, a test tree, JVM debugging and a Kargo tool window. See [IntelliJ IDEA and Android Studio](https://enekocm7.github.io/kargo/guides/jetbrains/).
+IntelliJ IDEA and Android Studio get a plugin in [`editors/jetbrains`](editors/jetbrains) that imports the project from `kargo metadata` (modules, source roots and the libraries of `kargo.toml`, including Kotlin/Native klibs) so the IDE resolves your dependencies, runs `kargo lsp` for `kargo.toml` and adds a New Project wizard, run configurations, Run/Debug gutter icons, a test tree, JVM debugging and a Kargo tool window. See [IntelliJ IDEA and Android Studio](https://enekocm7.github.io/kargo/guides/jetbrains/).
 
 Zed gets an extension in [`editors/zed`](editors/zed) that runs `kargo lsp` for Kotlin and `kargo.toml`, debugs programs and tests through `kargo dap`, and adds a `/kargo-metadata` slash command; `kargo ide --zed` writes the tasks behind its run buttons. See [Zed](https://enekocm7.github.io/kargo/guides/zed/).
 

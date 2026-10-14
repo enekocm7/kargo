@@ -19,6 +19,7 @@ import com.intellij.util.execution.ParametersListUtil
 import io.github.enekocm7.kargo.Kargo
 import io.github.enekocm7.kargo.KargoNotifications
 import io.github.enekocm7.kargo.lsp.KargoLsp
+import io.github.enekocm7.kargo.project.KargoProjectSync
 import io.github.enekocm7.kargo.run.runKargo
 
 /** The package of the file in the editor or selected in the project view, else the project root. */
@@ -128,10 +129,12 @@ class KargoRunTaskAction : KargoProjectAction() {
     }
 }
 
-/** Restarts `kargo lsp`, which imports the project again. */
+/** Imports the project into the IDE again (modules, source roots, libraries) and restarts `kargo lsp`. */
 class KargoReloadAction : KargoProjectAction() {
     override fun actionPerformed(e: AnActionEvent) {
-        KargoLsp.restart(e.project ?: return)
+        val project = e.project ?: return
+        KargoLsp.restart(project)
+        KargoProjectSync.getInstance(project).requestSync(force = true, delayMs = 0)
     }
 }
 

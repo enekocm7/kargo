@@ -6,7 +6,10 @@
     Support for <a href="https://enekocm7.github.io/kargo/">Kargo</a>, Cargo for Kotlin, in IntelliJ IDEA and Android Studio.
     <ul>
       <li><code>kargo.toml</code> completion, documentation, validation, quick fixes and dependency hints from
-          <code>kargo lsp</code>. Kotlin files use the IDE's own Kotlin support.</li>
+          <code>kargo lsp</code>.</li>
+      <li>The project model from <code>kargo metadata</code>: modules, source roots and the libraries of
+          <code>kargo.toml</code> (JVM jars, Kotlin/Native and Wasm klibs), so the IDE's own Kotlin support resolves
+          them. It is imported again when <code>kargo.toml</code> or <code>kargo.lock</code> change.</li>
       <li>File | New | Project | Kargo, and Tools | Kargo | Initialize Kargo Project for an existing folder.</li>
       <li>Kargo run configurations, Run and Debug icons on <code>main</code> and tests, a test tree with per-test results,
           and JVM debugging through <code>--debug</code>.</li>
@@ -19,6 +22,16 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.java</depends>
     <depends>com.redhat.devtools.lsp4ij</depends>
+    <depends>org.jetbrains.kotlin</depends>
+
+    <projectListeners>
+        <listener class="io.github.enekocm7.kargo.project.KargoFileListener" topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+    </projectListeners>
+
+    <!-- The import only uses the Kotlin plugin's facets and library kinds, which both Kotlin plugin modes share. -->
+    <extensions defaultExtensionNs="org.jetbrains.kotlin">
+        <supportsKotlinPluginMode supportsK1="true" supportsK2="true"/>
+    </extensions>
 
     <extensions defaultExtensionNs="com.intellij">
         <applicationService serviceImplementation="io.github.enekocm7.kargo.settings.KargoSettings"/>
@@ -70,7 +83,7 @@
                     description="kargo update"/>
             <separator/>
             <action id="Kargo.Reload" class="io.github.enekocm7.kargo.actions.KargoReloadAction" text="Reload Kargo Project"
-                    description="Restart kargo lsp, which imports the project again" icon="AllIcons.Actions.Refresh"/>
+                    description="Import the project again (modules, source roots, libraries) and restart kargo lsp" icon="AllIcons.Actions.Refresh"/>
             <action id="Kargo.Init" class="io.github.enekocm7.kargo.actions.KargoInitAction" text="Initialize Kargo Project"
                     description="kargo init in the project root"/>
         </group>

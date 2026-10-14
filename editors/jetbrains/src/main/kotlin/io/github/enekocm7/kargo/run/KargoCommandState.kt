@@ -11,13 +11,16 @@ import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.executors.DefaultDebugExecutor
 import com.intellij.execution.filters.TextConsoleBuilderFactory
 import com.intellij.execution.process.KillableColoredProcessHandler
+import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessHandler
+import com.intellij.execution.process.ProcessListener
 import com.intellij.execution.process.ProcessTerminatedListener
 import com.intellij.execution.runners.ExecutionEnvironment
 import com.intellij.execution.runners.ProgramRunner
 import com.intellij.execution.testframework.sm.SMTestRunnerConnectionUtil
 import com.intellij.util.net.NetUtils
 import io.github.enekocm7.kargo.Kargo
+import io.github.enekocm7.kargo.project.KargoProjectSync
 
 class KargoCommandState(environment: ExecutionEnvironment, private val configuration: KargoRunConfiguration) : CommandLineState(environment) {
     /** The port `--debug` makes the JVM listen on, when running under the debugger. */
@@ -42,6 +45,12 @@ class KargoCommandState(environment: ExecutionEnvironment, private val configura
     override fun startProcess(): ProcessHandler {
         val handler = KillableColoredProcessHandler(commandLine())
         ProcessTerminatedListener.attach(handler)
+        // `kargo add`, `update` and builds change kargo.toml and kargo.lock, and `fetch --sources` the sources jars; the project model follows.
+        handler.addProcessListener(object : ProcessListener {
+            override fun processTerminated(event: ProcessEvent) {
+                KargoProjectSync.getInstance(environment.project).refreshAndSync(force = configuration.subcommand == "fetch")
+            }
+        })
         return handler
     }
 
