@@ -973,7 +973,8 @@ mod tests {
             { "kind": "jvm", "source-roots": [root.join("src").display().to_string()], "test-roots": [root.join("tests").display().to_string()] },
             { "kind": "wasm", "source-roots": [root.join("src-wasm").display().to_string()] },
         ] }] });
-        let mirror = Mirror::build(&metadata, &root.join("target/dap")).unwrap();
+        // Joined per component, as `Project::target_dir` does, so the paths use the platform's separator.
+        let mirror = Mirror::build(&metadata, &root.join("target").join("dap")).unwrap();
         (tmp, Proxy::new(mirror, root))
     }
 
