@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -41,6 +42,33 @@ fn rename_replacing(from: &Path, to: &Path) -> Result<()> {
         }
         Err(e) => Err(e).with_context(|| format!("failed to move {} to {}", from.display(), to.display())),
     }
+}
+
+/// How many times [`rename_with_retries`] tries again after a rename that failed because a file was in use.
+const RENAME_RETRIES: u32 = 6;
+
+/// Renames `from` to `to`, retrying briefly when Windows refuses because a file in the tree is
+/// in use. Antivirus and the search indexer hold handles on freshly written files, which fails
+/// the rename with "Access is denied" (or a sharing violation) for a moment; rustup retries the
+/// same way.
+pub fn rename_with_retries(from: &Path, to: &Path) -> io::Result<()> {
+    let mut retry = 0;
+    loop {
+        match fs::rename(from, to) {
+            // Once the destination exists the rename is hopeless: the caller decides what that means.
+            Err(e) if retry < RENAME_RETRIES && !to.exists() && is_in_use(&e) => {
+                std::thread::sleep(Duration::from_millis(100 << retry));
+                retry += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Whether a failed rename means a file in the tree is in use: `ERROR_ACCESS_DENIED` (5) or
+/// `ERROR_SHARING_VIOLATION` (32). Other platforms don't refuse renames for this reason.
+fn is_in_use(err: &io::Error) -> bool {
+    cfg!(windows) && matches!(err.raw_os_error(), Some(5 | 32))
 }
 
 fn unique_suffix() -> u128 {
@@ -172,5 +200,38 @@ mod tests {
         let joined = join_paths(&[PathBuf::from("a.jar"), PathBuf::from("b.jar")]);
         assert!(joined == "a.jar;b.jar" || joined == "a.jar:b.jar");
         assert_eq!(join_paths(&[]), "");
+    }
+
+    #[test]
+    fn renames_directory_trees() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("from/sub")).unwrap();
+        fs::write(dir.path().join("from/sub/f"), "x").unwrap();
+        rename_with_retries(&dir.path().join("from"), &dir.path().join("to")).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("to/sub/f")).unwrap(), "x");
+        assert!(!dir.path().join("from").exists());
+        // A missing source is not in use, so it fails at once rather than after the retries.
+        assert!(rename_with_retries(&dir.path().join("from"), &dir.path().join("other")).is_err());
+    }
+
+    /// Windows refuses to rename a directory while a file in it is open without sharing deletes,
+    /// the situation antivirus creates; the rename goes through once the handle is released.
+    #[cfg(windows)]
+    #[test]
+    fn retries_a_rename_while_a_file_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        fs::create_dir_all(&from).unwrap();
+        fs::write(from.join("busy"), "x").unwrap();
+        let busy = fs::File::open(from.join("busy")).unwrap();
+        assert!(fs::rename(&from, dir.path().join("plain")).is_err(), "the open file should block a plain rename");
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(busy);
+        });
+        rename_with_retries(&from, &dir.path().join("to")).unwrap();
+        releaser.join().unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("to/busy")).unwrap(), "x");
     }
 }

@@ -35,8 +35,9 @@ impl ArchiveKind {
 /// Extracts `archive` and moves its top-level directory to `dest`.
 ///
 /// Extraction happens in a private staging directory next to `dest`, so a
-/// crash never leaves a half-installed toolchain, and concurrent installs of
-/// the same toolchain are safe: the first one to finish wins.
+/// crash never leaves a half-installed toolchain. Callers hold the toolchain's
+/// install lock (see `install_lock` in the crate root), so two processes never
+/// install the same toolchain at once.
 pub fn install(archive: &Path, kind: ArchiveKind, dest: &Path) -> Result<()> {
     let parent = dest.parent().context("install destination has no parent")?;
     fs::create_dir_all(parent)?;
@@ -55,7 +56,7 @@ pub fn install(archive: &Path, kind: ArchiveKind, dest: &Path) -> Result<()> {
             // Another process installed it meanwhile.
             return Ok(());
         }
-        fs::rename(&root, dest).with_context(|| format!("failed to install into {}", dest.display()))
+        kargo_util::fs::rename_with_retries(&root, dest).with_context(|| format!("failed to install into {}", dest.display()))
     })();
     let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
     result

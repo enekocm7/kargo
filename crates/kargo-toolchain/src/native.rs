@@ -16,9 +16,11 @@ use anyhow::{Context, Result, bail};
 
 use kargo_maven::{Artifact, MavenClient, ModuleId, Version};
 use kargo_util::config::Config;
+use kargo_util::flock::FileLock;
 use kargo_util::process::slash;
 
 use crate::archive::{self, ArchiveKind};
+use crate::install_lock;
 
 /// Environment variable that turns the precompiled standard library off (`false`, `0`, `no` or `off`).
 pub const CACHE_ENV: &str = "KARGO_NATIVE_CACHE";
@@ -140,8 +142,15 @@ impl NativeToolchain {
         Ok(toolchain.konanc().is_file().then_some(toolchain))
     }
 
+    /// Locks the installation of `version` against other Kargo processes, after checking the version.
+    fn lock(config: &Config, version: &str) -> Result<FileLock> {
+        Self::at(config, version)?;
+        install_lock(config, &format!("kotlin-native-{version}"))
+    }
+
     /// Ensures the distribution for `version` is installed, downloading it if needed.
     pub fn ensure(config: &Config, client: &MavenClient, version: &str) -> Result<Self> {
+        let _lock = Self::lock(config, version)?;
         if let Some(found) = Self::find(config, version)? {
             return Ok(found);
         }
@@ -186,6 +195,7 @@ impl NativeToolchain {
 
     /// Removes an installed distribution.
     pub fn remove(config: &Config, version: &str) -> Result<Self> {
+        let _lock = Self::lock(config, version)?;
         let Some(toolchain) = Self::find(config, version)? else {
             bail!("Kotlin/Native {version} is not installed; see `kargo toolchain list`");
         };
