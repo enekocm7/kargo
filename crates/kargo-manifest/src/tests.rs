@@ -710,7 +710,7 @@ core = { path = \"libs/core\" }
         root,
     )
     .unwrap();
-    assert_eq!(ws.members, [PathBuf::from("app"), PathBuf::from("libs/core")]);
+    assert_eq!(ws.members, ["app", "libs/core"]);
     assert_eq!(ws.kotlin_version.as_deref(), Some("2.3.0"));
     assert!(ws.has_dependency("core") && !ws.has_dependency("app"));
     assert!(is_workspace("[workspace]\nmembers = [\"a\"]\n").unwrap());
@@ -722,10 +722,21 @@ core = { path = \"libs/core\" }
     assert!(Manifest::parse("[workspace]\nmembers = [\"a\"]\n").unwrap_err().to_string().contains("workspace manifest"));
 
     let ws_err = |text: &str| format!("{:#}", WorkspaceManifest::parse(text, root).unwrap_err());
-    assert!(ws_err("[workspace]\nmembers = []\n").contains("`members` is empty"));
-    assert!(ws_err("[workspace]\nmembers = [\"libs/*\"]\n").contains("must be directories"));
+    // A new workspace has no members yet.
+    assert!(WorkspaceManifest::parse("[workspace]\nmembers = []\n", root).unwrap().member_dirs().unwrap().is_empty());
+    assert!(ws_err("[workspace]\nmembers = [\"libs/**\"]\n").contains("globs such as \"libs/*\""));
+    assert!(ws_err("[workspace]\nmembers = [\"/abs\"]\n").contains("relative to the workspace root"));
     assert!(ws_err("[workspace]\nmembers = [\"a\", \"a\"]\n").contains("more than once"));
-    assert!(ws_err("[workspace]\nmembers = [\"a\"]\nexclude = [\"b\"]\n").contains("exclude"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\nexclude = [\"b/*\"]\n").contains("`exclude` entries must be directories"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\ndefault-members = [\"*\"]\n").contains("`default-members` entries"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\nresolver = \"2\"\n").contains("resolver"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.package]\nname = \"x\"\n").contains("[workspace.package]"));
+    assert!(
+        ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.package]\nversion = { workspace = true }\n").contains("only valid in a member")
+    );
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.frameworks]\nspring = true\n").contains("[workspace.frameworks]"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.tasks]\nx = { depends-on = [\"y\"] }\n").contains("unknown task `y`"));
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.kotlin]\njvm-target = \"banana\"\n").contains("jvm-target"));
     assert!(
         ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.dependencies]\nx = { workspace = true }\n").contains("only valid in a member")
     );
@@ -745,6 +756,132 @@ core = { path = \"libs/core\" }
     let own = Manifest::parse_in(&format!("{MINIMAL}\n[kotlin]\nversion = \"2.4.0\"\n"), Some(&ws)).unwrap_err();
     assert!(format!("{own:#}").contains("differs from the workspace's"));
     assert!(!parse(MINIMAL).kotlin.version_set);
+    // `exported` and `test-fixtures` may be added to an inherited entry.
+    let m = member("core = { workspace = true, exported = true }").unwrap();
+    assert!(m.path_dependencies[0].exported);
+}
+
+#[test]
+fn workspace_members_globs_and_exclude() {
+    let dir = tempfile::tempdir().unwrap();
+    for member in ["apps/web", "apps/cli", "libs/core", "libs/old", "libs/.hidden", "libs/nomanifest"] {
+        std::fs::create_dir_all(dir.path().join(member)).unwrap();
+        if member != "libs/nomanifest" {
+            std::fs::write(dir.path().join(member).join(MANIFEST_NAME), "").unwrap();
+        }
+    }
+    let ws = WorkspaceManifest::parse(
+        "[workspace]\nmembers = [\"libs/*\", \"apps/*\", \"./libs/core\"]\nexclude = [\"libs/old\"]\ndefault-members = [\"apps/web\"]\n",
+        dir.path(),
+    )
+    .unwrap();
+    let dirs: Vec<String> = ws.member_dirs().unwrap().iter().map(|d| d.to_string_lossy().replace('\\', "/")).collect();
+    // Each glob's matches are sorted; `./libs/core` is already listed; hidden, excluded and
+    // manifest-less directories are left out.
+    assert_eq!(dirs, ["libs/core", "apps/cli", "apps/web"]);
+    assert_eq!(ws.default_members, [PathBuf::from("apps/web")]);
+    assert!(ws.lists_member(Path::new("apps/new")));
+    assert!(ws.lists_member(Path::new("libs/core")));
+    assert!(!ws.lists_member(Path::new("libs/old")));
+    assert!(!ws.lists_member(Path::new("libs/core/nested")));
+
+    let none = WorkspaceManifest::parse("[workspace]\nmembers = [\"nothing/*\"]\n", dir.path()).unwrap();
+    assert!(format!("{:#}", none.member_dirs().unwrap_err()).contains("matches no package"));
+}
+
+#[test]
+fn members_inherit_from_the_workspace() {
+    let ws = WorkspaceManifest::parse(
+        "[workspace]
+members = [\"app\"]
+
+[workspace.package]
+version = \"2.1.0\"
+group = \"com.example\"
+authors = [\"Ada\"]
+license = \"MIT\"
+
+[workspace.kotlin]
+opt-in = [\"kotlin.RequiresOptIn\"]
+compiler-args = [\"-Xcontext-parameters\"]
+warnings-as-errors = true
+jvm-target = \"17\"
+language-version = \"2.2\"
+
+[workspace.frameworks]
+serialization = { formats = [\"json\", \"cbor\"] }
+coroutines = \"1.10.2\"
+
+[workspace.plugins]
+notify = { command = \"tools/notify.sh\", hooks = [\"post-build\"] }
+
+[workspace.tasks]
+codegen = { run = \"gen\", depends-on = [\"prepare\"] }
+prepare = \"mkdir -p gen\"
+release = \"echo release\"
+",
+        Path::new("/ws"),
+    )
+    .unwrap();
+    assert_eq!(ws.tasks.keys().collect::<Vec<_>>(), ["codegen", "prepare", "release"]);
+    let member = |text: &str| Manifest::parse_in(text, Some(&ws));
+    let m = member(
+        "[package]
+name = \"app\"
+version.workspace = true
+group = { workspace = true }
+authors.workspace = true
+description = \"Own description\"
+
+[kotlin]
+opt-in = [\"kotlinx.coroutines.ExperimentalCoroutinesApi\", \"kotlin.RequiresOptIn\"]
+compiler-args = [\"-Xjsr305=strict\"]
+
+[frameworks]
+serialization.workspace = true
+coroutines = { workspace = true }
+
+[plugins]
+notify.workspace = true
+
+[tasks]
+codegen.workspace = true
+own = \"echo own\"
+",
+    )
+    .unwrap();
+    assert_eq!(m.package.version, "2.1.0");
+    assert_eq!(m.package.group.as_deref(), Some("com.example"));
+    assert_eq!(m.package.authors, ["Ada"]);
+    assert_eq!(m.package.license, None, "only the keys a member inherits");
+    assert_eq!(m.package.description.as_deref(), Some("Own description"));
+    assert_eq!(m.kotlin.opt_in, ["kotlin.RequiresOptIn", "kotlinx.coroutines.ExperimentalCoroutinesApi"]);
+    assert_eq!(m.kotlin.compiler_args, ["-Xcontext-parameters", "-Xjsr305=strict"]);
+    assert!(m.kotlin.warnings_as_errors);
+    assert_eq!(m.kotlin.language_version.as_deref(), Some("2.2"));
+    let jvm = m.targets.jvm.as_ref().unwrap();
+    assert_eq!(jvm.jvm_target, "17");
+    assert!(jvm.jvm_target_set);
+    assert_eq!(m.frameworks.serialization.as_ref().unwrap().formats.as_deref(), Some(&["json".to_owned(), "cbor".to_owned()][..]));
+    assert_eq!(m.frameworks.coroutines.as_ref().unwrap().version.as_deref(), Some("1.10.2"));
+    // A workspace plugin's command stays relative to the workspace.
+    assert_eq!(PathBuf::from(&m.process_plugins[0].command), Path::new("/ws").join("tools/notify.sh"));
+    // An inherited task brings the workspace tasks it depends on.
+    assert_eq!(m.tasks.keys().collect::<Vec<_>>(), ["codegen", "own", "prepare"]);
+
+    // A member's own `[target.jvm] jvm-target` wins.
+    let own = member("[package]\nname = \"app\"\nversion = \"1.0.0\"\n[target.jvm]\njvm-target = \"21\"\n").unwrap();
+    assert_eq!(own.targets.jvm.unwrap().jvm_target, "21");
+
+    let err = |text: &str| format!("{:#}", member(&format!("[package]\nname = \"app\"\nversion = \"1.0.0\"\n{text}")).unwrap_err());
+    assert!(err("[frameworks]\nktor.workspace = true\n").contains("[workspace.frameworks] has no `ktor`"));
+    assert!(err("[tasks]\nx = { workspace = true, run = \"y\" }\n").contains("and nothing else"));
+    let outside = Manifest::parse("[package]\nname = \"app\"\nversion.workspace = true\n").unwrap_err();
+    assert!(format!("{outside:#}").contains("needs a [workspace]"));
+    let licensed = member("[package]\nname = \"app\"\nversion = \"1.0.0\"\nlicense.workspace = true\n").unwrap();
+    assert_eq!(licensed.package.license.as_deref(), Some("MIT"));
+    let homepage = member("[package]\nname = \"app\"\nversion = \"1.0.0\"\nhomepage.workspace = true\n").unwrap_err();
+    assert!(format!("{homepage:#}").contains("[workspace.package] has no `homepage`"));
 }
 
 #[test]

@@ -88,6 +88,7 @@ pub fn metadata(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
         "root": path(project.root()),
         "workspace": project.is_workspace(),
         "members": project.members().iter().map(|&i| project.package(i).name()).collect::<Vec<_>>(),
+        "default-members": project.default_members().iter().map(|&i| project.package(i).name()).collect::<Vec<_>>(),
         "lockfile": path(&project.lockfile_path()),
         "target-dir": path(project.target_dir()),
         "profile": profile,
@@ -123,6 +124,8 @@ fn package(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
                 "scope": dep.scope.as_str(),
                 "dev": dep.dev,
                 "target": dep.target.map(TargetKind::as_str),
+                "exported": dep.exported,
+                "test-fixtures": dep.test_fixtures,
             })
         })
         .collect();
@@ -173,7 +176,9 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
     let mut out = json!({
         "kind": kind.as_str(),
         "source-roots": roots(&[ws.common_sources(), ws.target_sources(kind)]),
-        "test-roots": roots(&[ws.common_tests(), ws.target_tests(kind)]),
+        // Test fixtures compile like tests, so editors treat them as test sources too.
+        "test-roots": roots(&[ws.common_tests(), ws.target_tests(kind), ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
+        "test-fixture-roots": roots(&[ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
         "output-dir": path(&ws.output_dir(ctx.profile, kind)),
     });
     if kind == TargetKind::Android {

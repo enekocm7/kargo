@@ -56,13 +56,14 @@ Targets are `jvm`, `wasm`, `native` and `android`.
 
 ## Package selection
 
-In a [workspace](../../guides/workspaces/), commands apply to every member at the workspace root and to the current member inside a member's directory. These options pick packages explicitly:
+In a [workspace](../../guides/workspaces/), commands apply to the default members at the workspace root (every member, unless [`default-members`](../manifest/#workspace) says otherwise) and to the current member inside a member's directory. These options pick packages explicitly:
 
 | Option | Commands | Meaning |
 |---|---|---|
 | `-p, --package <name>` | `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `publish` | Only this package (repeatable) |
 | `--workspace` | the same | Every member of the workspace |
-| `-p, --package <name>` | `run`, `package`, `add`, `remove`, `outdated`, `upgrade` | The one package to work on; required at the root of a workspace with several members |
+| `--exclude <name>` | the same | Leave this member out (repeatable), with `--workspace` or at the workspace root |
+| `-p, --package <name>` | `run`, `package`, `add`, `remove`, `outdated`, `upgrade` | The one package to work on; required at the root of a workspace with several default members |
 
 `-p` takes any package of the project, including a path dependency that is not a member. Outside a workspace there is one package, so you never need these options.
 
@@ -97,12 +98,16 @@ kargo new <path> [options]
 | `--name <name>` | directory name | Package name |
 | `--kotlin <version>` | `2.4.21` | Kotlin version |
 | `--no-vcs` | | Don't create a git repository |
+| `--workspace` | | Create an empty [workspace](../../guides/workspaces/#creating-a-workspace) instead of a package |
 
 ```sh
 kargo new hello
 kargo new mylib --lib -t jvm,wasm,native
 kargo new api -w ktor,serialization --group io.acme
+kargo new shop --workspace
 ```
+
+Inside a workspace, `kargo new` (and `kargo init`) adds the new package to the workspace's `members`, unless a `members` glob already covers it, and the package shares the workspace's git repository. `--workspace` writes a `kargo.toml` with an empty `[workspace]` and a `[workspace.kotlin]` that pins the Kotlin version, and a `.gitignore`.
 
 The generated `kargo.toml` stays minimal: a `[package]` section, the `[target.*]` sections for any non-JVM targets (plus an empty `[target.jvm]` when JVM is one of several targets) and `[frameworks]` when you pass `--with`. It has no `[kotlin]` section unless `--kotlin` picks a non-default version, so the project uses Kargo's default Kotlin version and JVM target. Add `[dependencies]`, `[dev-dependencies]` and `[tasks]` when you need them; `kargo add` creates the dependency sections for you.
 
@@ -128,9 +133,10 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `--message-format <fmt>` | `human` (default) or `json`: print each compiler diagnostic as a JSON object on stdout. See [Machine-readable output](../machine-readable-output/#compiler-diagnostics) |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
-| `-p, --package <name>`, `--workspace` | Which packages to build ([package selection](#package-selection)) |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
+| `-j, --jobs <n>` | How many workspace members build at the same time (default: the number of CPUs) |
 
-[Path dependencies](../../guides/workspaces/) are built first, for the same targets.
+[Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts, and the error names the member and the target, such as ``could not build `core` (jvm)``.
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
@@ -162,7 +168,8 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | `--message-format <fmt>` | `human` (default) or `json`, as for `kargo build` |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
-| `-p, --package <name>`, `--workspace` | Which packages to check |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to check |
+| `-j, --jobs <n>` | How many workspace members are checked at the same time (default: the number of CPUs) |
 
 ```sh
 kargo check
@@ -232,7 +239,8 @@ kargo test [filter] [options]
 | `--message-format <fmt>` | `human` (default) or `json`: compiler diagnostics and each test's start and result as [JSON messages](../machine-readable-output/#test-results) on stdout; the test report moves to stderr |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
-| `-p, --package <name>`, `--workspace` | Which packages to test, one after another. The command fails if any test failed |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to test, in dependency order. The command fails if any test failed |
+| `-j, --jobs <n>` | How many packages are tested at the same time (default 1, so test output doesn't interleave) |
 
 By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
@@ -429,10 +437,10 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 | `-c, --configuration <c>` | `runtime` | `compile`, `runtime` or `test` |
 | `--depth <n>` | unlimited | Maximum depth |
 | `-d, --duplicates` | | Only modules requested in several versions |
-| `-p, --package <name>`, `--workspace` | current package | Which packages to show |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | current package | Which packages to show |
 | `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies; it can't be combined with `--depth` or `--duplicates`. When several packages are selected, the JSON output is an array with one document per package |
 
-Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`; their Maven dependencies appear in the graph next to yours.
+Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`, each with the path dependencies it uses in turn (the module graph); their Maven dependencies appear in the graph next to yours. With `-c compile`, only the path dependencies there are to compile against are listed: a path dependency's own path dependencies are only there at runtime unless they are `exported` ([what comes along](../../guides/workspaces/#what-comes-along)).
 
 ## `kargo classpath`
 
@@ -546,6 +554,8 @@ kargo task <name> [args]
 kargo <name> [args]      # shorthand
 ```
 
+In a workspace, a member's directory runs that member's tasks, and the root runs a `[workspace.tasks]` task; a name that only members define runs in every member that has it, in dependency order. See [Workspace tasks](../../guides/workspaces/#tasks-and-plugins).
+
 Inside a project, `kargo --help` also lists its tasks. A task named like a built-in command, such as `build` or `test`, can only run as `kargo task <name>`; the listing marks it and the commands that work on a package [warn about it](../warnings/#tasks-hidden-by-built-in-commands).
 
 ## `kargo plugins`
@@ -585,7 +595,7 @@ Show or stop the background compiler daemons that keep the Kotlin compiler warm 
 
 ## `kargo info`
 
-Print project information: package, targets, path dependencies and paths. At the root of a workspace, it prints the members, the Kotlin version, the lockfile and the target directory.
+Print project information: package, targets, path dependencies and paths. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -686,4 +696,4 @@ kargo completions bash
 
 ## `kargo <name>`
 
-If `<name>` is a task in `kargo.toml`, run it. Otherwise run the executable `kargo-<name>` from `~/.kargo/bin` or `PATH`.
+If `<name>` is a task in `kargo.toml` (or, in a workspace, in `[workspace.tasks]` or in the members' `[tasks]`, as for [`kargo task`](#kargo-task)), run it. Otherwise run the executable `kargo-<name>` from `~/.kargo/bin` or `PATH`.

@@ -72,6 +72,30 @@ gen = { run = ["mkdir -p build", "./gen.sh"], windows-run = ["if not exist build
 
 On Windows Kargo runs `windows-run` if it is set and `run` otherwise; on every other platform it always runs `run`. Commands that work in both shells, such as `protoc`, need only `run`.
 
+### In a workspace
+
+In a [workspace](../workspaces/#tasks-and-plugins), `[workspace.tasks]` in the workspace's `kargo.toml` are tasks that run at the workspace root. Members can inherit them, and `[workspace.plugins]` too:
+
+```toml title="kargo.toml (the workspace)"
+[workspace.tasks]
+release-notes = "./tools/notes.sh"
+codegen = { run = "./tools/codegen.sh", hooks = ["pre-build"] }
+
+[workspace.plugins.notify]
+command = "tools/notify.sh"
+hooks = ["post-build"]
+```
+
+```toml title="apps/server/kargo.toml"
+[tasks]
+codegen.workspace = true     # runs in apps/server before each of its builds
+
+[plugins]
+notify.workspace = true
+```
+
+At the workspace root, `kargo <name>` runs the workspace's task, or else the task of every member that defines one, in dependency order. Inside a member it runs the member's task, or else the workspace's. Tasks and hooks of a member also get `KARGO_WORKSPACE_DIR`, the workspace root.
+
 ## Hooks
 
 Hooks are lifecycle points: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run` and `post-package`. `kargo check` runs `pre-build` hooks too, so generated sources get checked, but not `post-build`. Attach tasks with `hooks = [...]` (see above), or attach any executable as a **hook plugin**:
@@ -112,6 +136,7 @@ Hooks receive these environment variables:
 |---|---|
 | `KARGO_HOOK` | always (e.g. `post-build`) |
 | `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PKG_GROUP` | always |
+| `KARGO_WORKSPACE_DIR` | in a workspace: the workspace root |
 | `KARGO_PROFILE`, `KARGO_TARGET_DIR`, `KARGO_KOTLIN_VERSION` | always |
 | `KARGO_CLASSPATH`, `KARGO_JVM_JAR` | after a JVM build |
 | `KARGO_PACKAGE` | after `kargo package`: the fat jar, or a library's jar |

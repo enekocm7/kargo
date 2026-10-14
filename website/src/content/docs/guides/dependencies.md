@@ -273,7 +273,7 @@ kargo add --path ../mathlib
 mathlib = { path = "../mathlib" }
 ```
 
-Its jar (or klib, for Wasm and Native) and its own Maven dependencies end up on your classpaths. To build several packages together with one `kargo.lock`, make them members of a workspace. See [Workspaces and path dependencies](../workspaces/).
+Its jar (or klib, for Wasm and Native) ends up on your classpaths, with its own Maven dependencies: the ones it marks `exported = true` to compile against, and the others at runtime only, like Gradle's `api` and `implementation`. To build several packages together with one `kargo.lock`, make them members of a workspace. See [Workspaces and path dependencies](../workspaces/).
 
 ## Repositories
 

@@ -398,6 +398,9 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
             implementation_version: Some(manifest.package.version.clone()),
         };
         write_jar(&jar, &classes, &jar_manifest, &[])?;
+        kargo_compiler::abi::update_stamp(&jar)?;
+    } else if !kargo_compiler::abi::stamp_path(&jar).is_file() {
+        kargo_compiler::abi::update_stamp(&jar)?;
     }
 
     Ok(JvmBuild { classes, jar, lib_dir, runtime_classpath, main_class, main_class_error, jvm_args: jvm.jvm_args.clone() })
@@ -415,7 +418,11 @@ fn sync_lib_dir(lib_dir: &Path, jars: &[PathBuf]) -> Result<Vec<String>> {
             name = format!("{}-{name}", group.map(|g| g.to_string_lossy().into_owned()).unwrap_or_default());
         }
         let dest = lib_dir.join(&name);
-        let up_to_date = std::fs::metadata(&dest).ok().zip(std::fs::metadata(jar).ok()).is_some_and(|(d, s)| d.len() == s.len());
+        // A path dependency's jar can be rewritten with the same size, so its time counts too.
+        let up_to_date = std::fs::metadata(&dest)
+            .ok()
+            .zip(std::fs::metadata(jar).ok())
+            .is_some_and(|(d, s)| d.len() == s.len() && d.modified().ok().zip(s.modified().ok()).is_some_and(|(d, s)| d >= s));
         if !up_to_date {
             std::fs::copy(jar, &dest).with_context(|| format!("failed to copy {} to {}", jar.display(), dest.display()))?;
         }

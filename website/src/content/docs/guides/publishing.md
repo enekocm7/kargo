@@ -87,7 +87,15 @@ com/example/mathlib/1.0.0/
 
 Every file comes with its `.md5`, `.sha1`, `.sha256` and `.sha512` checksums, and with an `.asc` signature when [signing](#signing) is on.
 
-The POM lists your dependencies (and those of your [frameworks](../frameworks/), such as `kotlin-stdlib`) at the versions `kargo.lock` resolved, BOMs as imports, and path dependencies under their own coordinates. `runtime` dependencies get Maven's `runtime` scope; `provided`, `processor` and `ksp` dependencies are left out. The POM also carries the project information from `[package]`:
+The POM lists your dependencies (and those of your [frameworks](../frameworks/), such as `kotlin-stdlib`) at the versions `kargo.lock` resolved, BOMs as imports, and path dependencies under their own coordinates. Like Gradle's `api` and `implementation`, a dependency gets Maven's `compile` scope only when it is part of the library's API: declared with `exported = true` (or a framework's library). Every other dependency, and every `runtime` one, gets the `runtime` scope, so it is there when consumers run the library but not when they compile against it. `provided`, `processor` and `ksp` dependencies are left out:
+
+```toml title="kargo.toml"
+[dependencies]
+"org.jetbrains.kotlinx:kotlinx-datetime" = { version = "0.7.1", exported = true }   # compile: in the public API
+"com.squareup.okio:okio" = "3.16.0"                                               # runtime: used internally
+```
+
+ The POM also carries the project information from `[package]`:
 
 ```toml title="kargo.toml"
 [package]
@@ -200,7 +208,7 @@ A release on Maven Central is permanent: it can't be changed or deleted. Try `ka
 
 ## Workspaces
 
-`kargo publish --workspace` (or `kargo publish` at the root of a workspace) publishes every member, path dependencies before the packages that use them. Members with `publish = false` in `[package]` are skipped, which is how you keep applications and internal tools out of the repository:
+`kargo publish --workspace` (or `kargo publish` at the root of a workspace) publishes every member (`--exclude <name>` leaves one out), path dependencies before the packages that use them. Members with `publish = false` in `[package]` are skipped, which is how you keep applications and internal tools out of the repository:
 
 ```toml title="app/kargo.toml"
 [package]
@@ -209,7 +217,7 @@ version = "0.1.0"
 publish = false
 ```
 
-A path dependency becomes an ordinary dependency on the other package's coordinates, so it has to be published too, with a `group` of its own.
+A path dependency becomes an ordinary dependency on the other package's coordinates, so it has to be published too, with a `group` of its own. Its POM scope is `compile` when the path dependency is `exported`, and `runtime` otherwise. Members can share `version`, `group`, `license` and the other `[package]` keys through [`[workspace.package]`](../workspaces/#shared-settings).
 
 ## Publishing from CI
 

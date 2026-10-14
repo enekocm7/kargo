@@ -111,6 +111,7 @@ $ kargo metadata
   "root": "/home/me/app",
   "workspace": false,
   "members": ["app"],
+  "default-members": ["app"],
   "lockfile": "/home/me/app/kargo.lock",
   "target-dir": "/home/me/app/target",
   "profile": "dev",
@@ -140,7 +141,8 @@ $ kargo metadata
         {
           "kind": "jvm",
           "source-roots": ["/home/me/app/src", "/home/me/app/src-jvm"],
-          "test-roots": ["/home/me/app/tests", "/home/me/app/tests-jvm"],
+          "test-roots": ["/home/me/app/tests", "/home/me/app/tests-jvm", "/home/me/app/test-fixtures", "/home/me/app/test-fixtures-jvm"],
+          "test-fixture-roots": ["/home/me/app/test-fixtures", "/home/me/app/test-fixtures-jvm"],
           "resource-roots": ["/home/me/app/resources"],
           "test-resource-roots": ["/home/me/app/test-resources"],
           "output-dir": "/home/me/app/target/debug/jvm",
@@ -192,6 +194,7 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `root` | The workspace root, or the package's directory |
 | `workspace` | Whether the project is a [workspace](../../guides/workspaces/) |
 | `members` | The names of the workspace members (the single package otherwise) |
+| `default-members` | The members commands work on at the workspace root: [`default-members`](../manifest/#workspace), else every member |
 | `lockfile`, `target-dir` | The project's `kargo.lock` and build directory |
 | `profile` | `dev`, or `release` with `--release`: the profile whose output directories and compiler arguments are shown |
 | `resolved` | `false` with `--no-deps`. Then every `dependencies` is `null`, `toolchain.jdk.home` is `null` and plugins have no `jar` |
@@ -209,7 +212,7 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `root`, `manifest` | The package's directory and `kargo.toml` |
 | `kotlin` | `[kotlin]` settings: `version`, `language-version`, `api-version`, `opt-in`, `warnings-as-errors` |
 | `frameworks` | The [built-in frameworks](../../guides/frameworks/) that are enabled |
-| `path-dependencies` | Each path dependency: the manifest key (`name`), the `package` it points to, `scope`, `dev` and the `target` it is limited to (or `null`) |
+| `path-dependencies` | Each path dependency: the manifest key (`name`), the `package` it points to, `scope`, `dev`, the `target` it is limited to (or `null`), and whether it is `exported` and brings its `test-fixtures`. Together they are the module graph |
 | `bins` | The [`[[bin]]`](../manifest/#bin) tables, with `path` made absolute |
 | `examples` | The `examples/<name>.kt` programs, with their `name` and `path` |
 | `tasks` | Each [task](../../guides/tasks-and-plugins/): `name`, `description`, the commands it runs on this platform (`run`) and `depends-on` |
@@ -220,7 +223,8 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | Field | Targets | Meaning |
 |---|---|---|
 | `kind` | all | `jvm`, `wasm`, `native` or `android` |
-| `source-roots`, `test-roots` | all | `src/` and `src-<target>/`, `tests/` and `tests-<target>/`, whether they exist or not |
+| `source-roots`, `test-roots` | all | `src/` and `src-<target>/`; `tests/`, `tests-<target>/` and the test fixtures `test-fixtures/` and `test-fixtures-<target>/`, whether they exist or not |
+| `test-fixture-roots` | all | `test-fixtures/` and `test-fixtures-<target>/` ([test fixtures](../../guides/workspaces/#test-fixtures)), which `test-roots` includes too |
 | `output-dir` | all | `target/<profile>/<target>` (with the member's name in a workspace) |
 | `compiler-args` | not Android | The Kotlin compiler arguments every compilation of the target gets: `[kotlin]` and profile settings plus the frameworks' flags |
 | `compiler-plugins` | not Android | Each compiler plugin (the frameworks' and [`[plugins]`](../manifest/#pluginsname)): `module`, `version`, `id`, its `-P` `options` and the downloaded `jar` |
@@ -277,6 +281,8 @@ $ kargo info --format json
   "targets": ["jvm"]
 }
 ```
+
+At the root of a [workspace](../../guides/workspaces/), it describes the workspace instead: `workspace` (its root), `members` (each with its `name`, `version`, `root` and the `dependencies` it builds on through path dependencies), `default-members`, `lockfile` and `target-dir`.
 
 `dependencies` and `dev-dependencies` are what `kargo.toml` declares: `name` is the key in `kargo.toml`, `version` is `null` when a BOM manages it. Target-specific dependencies are not listed; `kargo tree --format json` shows everything that was resolved.
 

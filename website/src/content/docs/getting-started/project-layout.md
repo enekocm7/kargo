@@ -16,6 +16,7 @@ my-app/
 ├── src-android/         Android-only sources
 ├── tests/               common tests (kotlin.test)
 ├── tests-jvm/           JVM-only tests (likewise tests-wasm/, tests-native/, tests-android/)
+├── test-fixtures/       test helpers shared with the tests of packages that depend on this one (JVM)
 ├── resources/           JVM resources, put on the classpath and in the jar; also the files of a Wasm browser app
 ├── test-resources/      resources for JVM tests
 ├── android/             AndroidManifest.xml, res/, assets/

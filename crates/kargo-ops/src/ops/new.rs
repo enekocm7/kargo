@@ -504,8 +504,78 @@ pub fn create(dir: &Path, opts: &NewOptions) -> Result<Vec<PathBuf>> {
         std::fs::write(&path, f.contents).with_context(|| format!("failed to write {}", path.display()))?;
         written.push(path);
     }
-    if opts.vcs
-        && !inside_git_repo(dir)
+    if opts.vcs {
+        git_init(dir);
+    }
+    Ok(written)
+}
+
+/// The `kargo.toml` of a new, empty workspace, pinning the Kotlin version every member will use.
+pub fn workspace_manifest(kotlin_version: &str) -> String {
+    format!(
+        "[workspace]
+# Member directories; globs such as \"libs/*\" work too. `kargo new <dir>` adds new members.
+members = []
+
+[workspace.kotlin]
+version = \"{kotlin_version}\"
+"
+    )
+}
+
+/// Creates an empty workspace in `dir` (`kargo new --workspace`): its `kargo.toml` and `.gitignore`.
+pub fn create_workspace(dir: &Path, kotlin_version: &str, vcs: bool) -> Result<Vec<PathBuf>> {
+    if dir.join(MANIFEST_NAME).exists() {
+        bail!("`{}` already contains a {MANIFEST_NAME}", dir.display());
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let mut written = Vec::new();
+    for (name, contents) in [(MANIFEST_NAME, workspace_manifest(kotlin_version)), (".gitignore", gitignore())] {
+        let path = dir.join(name);
+        if !path.exists() {
+            std::fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+            written.push(path);
+        }
+    }
+    if vcs {
+        git_init(dir);
+    }
+    Ok(written)
+}
+
+/// The workspace a new package in `dir` belongs to: the nearest `kargo.toml` above `dir`, if it
+/// is a workspace (a package there means `dir` is not a member of anything).
+pub fn enclosing_workspace(dir: &Path) -> Result<Option<PathBuf>> {
+    let dir = std::path::absolute(dir).with_context(|| format!("failed to resolve {}", dir.display()))?;
+    for ancestor in dir.ancestors().skip(1) {
+        let candidate = ancestor.join(MANIFEST_NAME);
+        if candidate.is_file() {
+            return Ok(kargo_manifest::is_workspace_manifest(&candidate)?.then(|| ancestor.to_path_buf()));
+        }
+    }
+    Ok(None)
+}
+
+/// Adds the package in `dir` to the `members` of the workspace at `root`, unless a `members`
+/// entry (or glob) already covers it. Returns the entry added, relative to `root`.
+pub fn add_to_workspace(root: &Path, dir: &Path) -> Result<Option<String>> {
+    let (root, dir) = (kargo_util::fs::dunce_canonicalize(root), kargo_util::fs::dunce_canonicalize(dir));
+    let relative =
+        dir.strip_prefix(&root).with_context(|| format!("{} is not inside the workspace at {}", dir.display(), root.display()))?;
+    let path = root.join(MANIFEST_NAME);
+    let workspace = kargo_manifest::WorkspaceManifest::load(&path)?;
+    if workspace.lists_member(relative) {
+        return Ok(None);
+    }
+    let member = relative.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
+    let mut editor = kargo_manifest::edit::ManifestEditor::load(&path)?;
+    editor.add_workspace_member(&member)?;
+    editor.save()?;
+    Ok(Some(member))
+}
+
+fn git_init(dir: &Path) {
+    if !inside_git_repo(dir)
         && let Some(git) = kargo_util::process::find_on_path("git")
     {
         let _ = std::process::Command::new(git)
@@ -516,7 +586,6 @@ pub fn create(dir: &Path, opts: &NewOptions) -> Result<Vec<PathBuf>> {
             .stderr(std::process::Stdio::null())
             .status();
     }
-    Ok(written)
 }
 
 /// Whether `dir` is inside an existing git work tree, so `kargo new` does not

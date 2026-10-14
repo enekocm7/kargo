@@ -26,6 +26,8 @@ repository = "https://github.com/me/my-app"
 publish = true
 ```
 
+In a workspace, a member can inherit `version`, `group`, `description`, `authors`, `license`, `homepage` and `repository` from [`[workspace.package]`](#workspace) with `version.workspace = true`.
+
 `version` names the jar and is the version in its Maven coordinates. Any string is accepted, but Kargo [warns](../warnings/#odd-package-versions) about one that doesn't start with a digit or that uses anything besides letters, digits and `.`, `-`, `_`, `+`.
 
 The other keys describe the package when it is [published](../../guides/publishing/) and fill in its POM:
@@ -62,6 +64,8 @@ warnings-as-errors = false
 | `opt-in` | `[]` | Annotations to opt in to everywhere |
 | `compiler-args` | `[]` | Extra arguments for every compilation |
 | `warnings-as-errors` | `false` | Fail on warnings. The compiler's `warnings found and -Werror specified` summary is printed [after the diagnostics](../warnings/#warnings-as-errors) |
+
+In a workspace, `[workspace.kotlin]` sets these for every member: a member's `opt-in` and `compiler-args` are added to the workspace's, and its other keys take precedence (see [`[workspace]`](#workspace)).
 
 ## `[toolchain]`
 
@@ -323,6 +327,10 @@ full = { version = "1.0", scope = "runtime", classifier = "x", extension = "jar"
 platform = { coords = "g:bom", version = "1.0", bom = true }
 mathlib = { path = "../mathlib" }                               # another Kargo package, built from source
 shared = { workspace = true }                                   # inherited from [workspace.dependencies]
+api = { version = "1.0", exported = true }                      # part of this package's API
+
+[dev-dependencies]
+mathlib = { path = "../mathlib", test-fixtures = true }         # also its test fixtures
 ```
 
 | Key | Default | Meaning |
@@ -337,8 +345,10 @@ shared = { workspace = true }                                   # inherited from
 | `force` | `false` | Use this version even if a newer one is requested |
 | `transitive` | `true` | Include this dependency's dependencies |
 | `bom` | `false` | Import as a BOM |
-| `path` | | Directory of another Kargo package to build from source. The key must be its package name, and only `scope` can be set with it |
-| `workspace` | | `true` to inherit the entry of the same name from `[workspace.dependencies]`; only `scope` can be set with it |
+| `path` | | Directory of another Kargo package to build from source. The key must be its package name, and only `scope`, `exported` and `test-fixtures` can be set with it |
+| `exported` | `false` | Part of this package's API, like Gradle's `api`: packages that depend on this one through `path` compile against it too, and its POM scope is `compile`. Otherwise they only get it at runtime, like Gradle's `implementation` ([what comes along](../../guides/workspaces/#what-comes-along)) |
+| `test-fixtures` | `false` | With `path`, in `[dev-dependencies]`: the tests also get the dependency's [test fixtures](../../guides/workspaces/#test-fixtures) |
+| `workspace` | | `true` to inherit the entry of the same name from `[workspace.dependencies]`; only `scope`, `exported` and `test-fixtures` can be set with it |
 
 A module can be declared several times with different `classifier` or `extension` values (the key must differ); declaring the same `group:artifact:classifier:extension` twice is an error. All of them share the module's version.
 
@@ -428,21 +438,63 @@ A workspace's `kargo.toml` has only a `[workspace]` table, no `[package]`. Its m
 
 ```toml
 [workspace]
-members = ["app", "libs/core"]       # required: member directories, relative to this file
+members = ["apps/*", "libs/core"]    # required: member directories or globs, relative to this file
+exclude = ["apps/attic"]             # directories the globs must not match
+default-members = ["apps/server"]    # what commands work on at the root (default: every member)
+
+[workspace.package]                  # [package] keys members inherit with `key.workspace = true`
+version = "1.2.0"
+group = "com.example"
 
 [workspace.kotlin]
 version = "2.4.21"                   # the Kotlin version of every member
+opt-in = ["kotlin.RequiresOptIn"]
+jvm-target = "17"
 
 [workspace.dependencies]
 "org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"
 core = { path = "libs/core" }        # paths are relative to the workspace root
+
+[workspace.frameworks]
+serialization = { formats = ["json"] }
+
+[workspace.plugins.notify]
+command = "tools/notify.sh"          # relative to the workspace root
+hooks = ["post-build"]
+
+[workspace.tasks]
+release-notes = "./tools/notes.sh"   # `kargo release-notes` at the root
 ```
 
 | Key | Meaning |
 |---|---|
-| `members` | Directories of the member packages. Globs are not supported |
-| `[workspace.kotlin] version` | Kotlin version for every member. A member's `[kotlin] version` must match it if set |
+| `members` | Member directories, or globs such as `libs/*` (`*` and `?` within one path segment). A glob matches the directories that have a `kargo.toml`, except hidden ones. Required; may be empty in a new workspace |
+| `exclude` | Directories that `members` globs must not match |
+| `default-members` | The members `build`, `check`, `test` and the other commands work on at the workspace root, and the one `run` picks when there is only one. Default: every member |
+| `[workspace.package]` | `version`, `group`, `description`, `authors`, `license`, `homepage` and `repository`, which members inherit with `key.workspace = true` |
+| `[workspace.kotlin]` | `version`, `language-version`, `api-version`, `ksp`, `opt-in`, `compiler-args`, `warnings-as-errors` and `jvm-target` (the default `[target.jvm] jvm-target`) for every member. A member's own `opt-in` and `compiler-args` are added to these; its other `[kotlin]` keys take precedence, except `version`, which must match |
 | `[workspace.dependencies]` | Dependency entries members inherit with `name = { workspace = true }` |
+| `[workspace.frameworks]` | `[frameworks]` entries members inherit with `name = { workspace = true }` |
+| `[workspace.plugins]` | `[plugins]` entries members inherit with `name = { workspace = true }`. A relative `command` stays relative to the workspace root |
+| `[workspace.tasks]` | Tasks that run at the workspace root. Members inherit them with `name = { workspace = true }`, which runs them in the member's directory |
+
+A member inherits a key with `{ workspace = true }` (or the dotted `key.workspace = true`), and nothing else in the same entry, except for `[dependencies]` entries, which may add `scope`, `exported` and `test-fixtures`:
+
+```toml title="apps/server/kargo.toml"
+[package]
+name = "server"
+version.workspace = true
+group.workspace = true
+
+[frameworks]
+serialization.workspace = true
+
+[plugins]
+notify.workspace = true
+
+[tasks]
+release-notes.workspace = true
+```
 
 See [Workspaces and path dependencies](../../guides/workspaces/).
 

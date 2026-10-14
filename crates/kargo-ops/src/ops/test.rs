@@ -19,17 +19,18 @@ use super::context::BuildContext;
 use crate::builtins::JUNIT_VERSION;
 use crate::warnings;
 use crate::web::{self, PageEvent, Site};
+use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::testreport::{self, TestEvent};
 use kargo_compiler::wasm::{WasmCompilation, npm_dependencies};
-use kargo_compiler::{Outcome, common_kotlin_args};
+use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
 use kargo_compiler::{diagnostics, junit};
 use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::Platform;
 use kargo_toolchain::browser::{self, Browser};
 use kargo_toolchain::native::Host;
-use kargo_util::fs::join_paths;
+use kargo_util::fs::{collect_files, join_paths};
 use kargo_util::process;
 
 #[derive(Debug, Clone, Default)]
@@ -228,6 +229,7 @@ fn no_tests(ctx: &BuildContext, target: TargetKind) -> TestRun {
 }
 
 fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
+    super::local::test_fixtures_unsupported(ctx, TargetKind::Android)?;
     if sources(ctx, TargetKind::Android, true, &["kt", "java"]).is_empty() {
         no_tests(ctx, TargetKind::Android);
         return Ok(true);
@@ -425,7 +427,9 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     // Make sure the main classpaths are locked too.
     let _ = jvm_classpaths(ctx, &setup)?;
     let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
-    let mut test_cp = super::local::artifacts(ctx, super::local::LocalTarget::Jvm, &all_scopes, true)?;
+    // The test fixtures of this package and of the `test-fixtures = true` dev-dependencies come first.
+    let mut test_cp = super::local::test_fixtures(ctx)?;
+    test_cp.extend(super::local::artifacts(ctx, super::local::LocalTarget::Jvm, &all_scopes, true)?);
     test_cp.extend(ctx.resolve("jvm/test", Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?.files());
     let jdk = ctx.jvm_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
@@ -467,6 +471,57 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, verb, TargetKind::Jvm, ", tests"))?;
     Ok(Some(JvmTestClasses { classes: test_classes, classpath }))
+}
+
+/// Compiles the JVM test fixtures (`test-fixtures/`, `test-fixtures-jvm/`) against the main jar,
+/// its dependencies and dev-dependencies, into `<name>-<version>-test-fixtures.jar`. Returns `None`
+/// without fixture sources.
+pub(crate) fn build_jvm_test_fixtures(ctx: &BuildContext) -> Result<Option<PathBuf>> {
+    let ws = ctx.ws;
+    let manifest = ws.manifest();
+    let fixtures = SourceSet::new(
+        collect_files(&ws.common_test_fixtures(), &["kt", "java"]),
+        collect_files(&ws.target_test_fixtures(TargetKind::Jvm), &["kt", "java"]),
+        TargetKind::Jvm.as_str(),
+    );
+    if fixtures.is_empty() {
+        return Ok(None);
+    }
+    let main = super::build::build_jvm(ctx)?;
+    let setup = ctx.setup(TargetKind::Jvm)?;
+    let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
+    let mut classpath = vec![main.jar.clone()];
+    classpath.extend(super::local::artifacts(ctx, super::local::LocalTarget::Jvm, &all_scopes, true)?);
+    classpath.extend(ctx.resolve("jvm/test", Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?.files());
+    let jdk = ctx.jvm_jdk()?;
+    let compiler = ctx.kotlin_compiler()?;
+    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    let kotlin_args = common_kotlin_args(manifest, ws.profile(ctx.profile), &setup.contributions.compiler_args);
+    let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
+    let out = ws.output_dir(ctx.profile, TargetKind::Jvm);
+    let name = format!("{}-test-fixtures", manifest.package.name);
+    let unit = JvmCompilation {
+        name: &name,
+        sources: fixtures,
+        classpath,
+        // Fixtures may use the package's `internal` declarations, like its tests.
+        friend_paths: vec![main.classes.clone()],
+        output: out.join("test-fixtures-classes"),
+        jvm_target: &jvm.target_for(jdk.version)?,
+        plugins: &plugins,
+        kotlin_args: &kotlin_args,
+        javac_args: &jvm_javac_args(&setup, jvm),
+        processor_path: &jvm_processor_path(ctx, &setup, true)?,
+        resources: Vec::new(),
+    };
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
+    let outcome = unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, "Compiling", TargetKind::Jvm, ", test fixtures"))?;
+    let jar = out.join(format!("{}-{}-test-fixtures.jar", manifest.package.name, manifest.package.version));
+    if outcome == Outcome::Compiled || !jar.is_file() {
+        write_jar(&jar, &unit.output, &JarManifest::default(), &[])?;
+        kargo_compiler::abi::update_stamp(&jar)?;
+    }
+    Ok(Some(jar))
 }
 
 /// Exit code of the JUnit console launcher when `--fail-if-no-tests` found nothing to run.
@@ -772,6 +827,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     if tests.kotlin_files().is_empty() {
         return Ok(no_tests(ctx, TargetKind::Wasm));
     }
+    super::local::test_fixtures_unsupported(ctx, TargetKind::Wasm)?;
     // Tests link against the main klib as a friend module, so the program's
     // `main` is not part of the test binary.
     let main = prepare_wasm(ctx)?;
@@ -842,6 +898,7 @@ fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation,
 }
 
 fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
+    super::local::test_fixtures_unsupported(ctx, TargetKind::Native)?;
     let Some(executable) = compile_native_tests(ctx)? else {
         return Ok(TestRun::Done(true));
     };

@@ -59,7 +59,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 - **Resolution.** When two dependencies need different versions, the highest one wins and only one copy is used. There's no equivalent of Cargo's multiple semver-incompatible copies.
 - **Targets are platforms.** `-t jvm` is closer to `--target x86_64-unknown-linux-gnu` than to Cargo's bin/lib targets.
 - **Packaging.** `kargo package` builds a fat jar you run with `java -jar`. For a native binary use the [Native target](../../guides/native/).
-- **Workspaces.** `[workspace]` with `members`, `[workspace.dependencies]`, `{ workspace = true }`, `{ path = "..." }` dependencies and `-p`/`--workspace` work as in Cargo. Members must be listed one by one (no globs), and a workspace root can't also be a package. See [Workspaces and path dependencies](../../guides/workspaces/).
+- **Workspaces.** `[workspace]` with `members` (globs included), `exclude`, `default-members`, `[workspace.package]` and `[workspace.dependencies]` with `key.workspace = true`, `{ path = "..." }` dependencies, `-p`/`--workspace`/`--exclude` and `-j` work as in Cargo, and `kargo new` inside a workspace adds the member. Kargo adds `[workspace.kotlin]`, `[workspace.frameworks]`, `[workspace.plugins]` and `[workspace.tasks]`, and `exported = true` for dependencies that are part of a package's API. A workspace root can't also be a package. See [Workspaces and path dependencies](../../guides/workspaces/).
 
 ## Kotlin for Rustaceans
 

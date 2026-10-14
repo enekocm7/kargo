@@ -56,6 +56,103 @@ pub fn parallel_targets<R: Send>(targets: &[TargetKind], f: impl Fn(TargetKind) 
     parallel_map(targets, |&target| kargo_compiler::diagnostics::with_target(Some(target.as_str()), || f(target)))
 }
 
+/// The default number of packages built at the same time: the number of CPUs.
+pub fn default_jobs() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
+/// Runs `f` for each package of `order` (which [`Project::dependency_order`] sorted), on up to
+/// `jobs` threads. A package starts once every package of `order` it reaches through path
+/// dependencies (with `dev`, also those of its tests) has finished; independent packages run at
+/// the same time. After a failure no new package starts, and the packages that depend on a failed
+/// one never run (their result is `None`). Results come back in the order of `order`.
+///
+/// [`Project::dependency_order`]: crate::workspace::Project::dependency_order
+pub fn build_graph<T: Send>(
+    project: &crate::workspace::Project,
+    order: &[usize],
+    dev: bool,
+    jobs: usize,
+    f: impl Fn(usize) -> Result<T> + Sync,
+) -> Vec<Option<Result<T>>> {
+    use std::sync::{Condvar, Mutex};
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Waiting,
+        Running,
+        Done,
+        Failed,
+    }
+    let deps: Vec<Vec<usize>> = order
+        .iter()
+        .map(|&i| {
+            let reached = project.reachable(i, dev);
+            (0..order.len()).filter(|&k| reached.contains(&order[k])).collect()
+        })
+        .collect();
+    let jobs = jobs.clamp(1, order.len().max(1));
+    if jobs == 1 {
+        let mut out: Vec<Option<Result<T>>> = Vec::new();
+        for &package in order {
+            let failed = out.iter().any(|r| matches!(r, Some(Err(_))));
+            out.push(if failed { None } else { Some(f(package)) });
+        }
+        return out;
+    }
+
+    let state = Mutex::new((vec![State::Waiting; order.len()], false));
+    let wake = Condvar::new();
+    let results: Mutex<Vec<Option<Result<T>>>> = Mutex::new((0..order.len()).map(|_| None).collect());
+    let f = &f;
+    let target = kargo_compiler::diagnostics::current_target();
+    std::thread::scope(|s| {
+        for _ in 0..jobs {
+            s.spawn(|| {
+                loop {
+                    let next = {
+                        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                        loop {
+                            let (states, stop) = &mut *guard;
+                            let ready = (0..order.len())
+                                .find(|&k| states[k] == State::Waiting && deps[k].iter().all(|&d| states[d] == State::Done));
+                            let waiting = states.contains(&State::Waiting);
+                            let running = states.contains(&State::Running);
+                            match ready {
+                                Some(k) if !*stop => {
+                                    states[k] = State::Running;
+                                    break Some(k);
+                                }
+                                // Nothing can start: done, stopped, or blocked by a failed dependency.
+                                _ if *stop || !waiting || !running => break None,
+                                _ => guard = wake.wait(guard).unwrap_or_else(|e| e.into_inner()),
+                            }
+                        }
+                    };
+                    let Some(k) = next else {
+                        wake.notify_all();
+                        return;
+                    };
+                    let run = || kargo_compiler::diagnostics::with_target(target.as_deref(), || f(order[k]));
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+                    let ok = matches!(result, Ok(Ok(_)));
+                    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.0[k] = if ok { State::Done } else { State::Failed };
+                    guard.1 |= !ok;
+                    drop(guard);
+                    wake.notify_all();
+                    match result {
+                        Ok(result) => results.lock().unwrap_or_else(|e| e.into_inner())[k] = Some(result),
+                        // The other workers stop; the scope re-raises the panic.
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    }
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Collects the per-target results of a multi-target operation.
 ///
 /// Without `keep_going` the first failure (in target order) is returned as is. With it,
@@ -68,7 +165,14 @@ pub(crate) fn collect_targets<R>(
     results: impl IntoIterator<Item = (TargetKind, Result<R>)>,
 ) -> Result<Vec<R>> {
     let (mut ok, mut succeeded, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+    // When several packages build together, a failure names the package and the target.
+    let several = ctx.project.packages().len() > 1;
+    let name = ctx.ws.name();
     for (target, result) in results {
+        let result = match result {
+            Err(e) if several => Err(e.context(format!("could not {action} `{name}` ({target})"))),
+            other => other,
+        };
         match result {
             Ok(r) => {
                 ok.push(r);
@@ -320,4 +424,70 @@ pub fn package(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathB
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
     build::finished(ctx, start);
     Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::workspace::Project;
+
+    /// `a` <- `b` <- `d`, and `c` on its own.
+    fn project() -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, deps: &str| {
+            std::fs::create_dir_all(dir.path().join(name)).unwrap();
+            let manifest = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n[dependencies]\n{deps}");
+            std::fs::write(dir.path().join(name).join("kargo.toml"), manifest).unwrap();
+        };
+        std::fs::write(dir.path().join("kargo.toml"), "[workspace]\nmembers = [\"*\"]\n").unwrap();
+        write("a", "");
+        write("b", "a = { path = \"../a\" }\n");
+        write("c", "");
+        write("d", "b = { path = \"../b\" }\n");
+        let project = Project::load(&dir.path().join("kargo.toml")).unwrap();
+        (dir, project)
+    }
+
+    #[test]
+    fn build_graph_runs_dependencies_first() {
+        let (_dir, project) = project();
+        let order = project.dependency_order(project.members(), false);
+        for jobs in [1, 4] {
+            let log = Mutex::new(Vec::new());
+            let results = build_graph(&project, &order, false, jobs, |i| {
+                let name = project.package(i).name().to_owned();
+                log.lock().unwrap().push(format!("start {name}"));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                log.lock().unwrap().push(format!("end {name}"));
+                Ok(name)
+            });
+            let names: Vec<String> = results.into_iter().map(|r| r.unwrap().unwrap()).collect();
+            assert_eq!(names, order.iter().map(|&i| project.package(i).name().to_owned()).collect::<Vec<_>>());
+            let log = log.into_inner().unwrap();
+            let at = |entry: &str| log.iter().position(|l| l == entry).unwrap();
+            assert!(at("end a") < at("start b") && at("end b") < at("start d"), "{log:?}");
+            if jobs > 1 {
+                // `c` does not wait for anything.
+                assert!(at("start c") < at("end a"), "{log:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn build_graph_stops_after_a_failure() {
+        let (_dir, project) = project();
+        let order = project.dependency_order(project.members(), false);
+        for jobs in [1, 3] {
+            let results = build_graph(&project, &order, false, jobs, |i| match project.package(i).name() {
+                "a" => anyhow::bail!("a broke"),
+                name => Ok(name.to_owned()),
+            });
+            let by_name = |name: &str| &results[order.iter().position(|&i| project.package(i).name() == name).unwrap()];
+            assert!(matches!(by_name("a"), Some(Err(_))));
+            // `b` and `d` depend on `a` and never run.
+            assert!(by_name("b").is_none() && by_name("d").is_none());
+        }
+    }
 }
