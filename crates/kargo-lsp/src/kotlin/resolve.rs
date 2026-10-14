@@ -1,0 +1,1787 @@
+//! Name resolution and type inference over the [`super::index`]es.
+//!
+//! Names resolve the way Kotlin scopes them: local declarations and parameters, `it`, the
+//! implicit receivers (lambdas with receivers, extension functions, enclosing classes with
+//! their supertypes and companions), the file, its explicit imports, its package, star imports
+//! and Kotlin's default imports. Types are inferred from declarations and from expressions as
+//! far as completion and navigation need: literals, calls with their generic return types
+//! (bound from receivers, explicit type arguments and value arguments), member chains,
+//! operators, `for` loop elements, destructuring and lambda parameters.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use super::index::{DEFAULT_IMPORTS, Index, Origin, SetKind, SymId, Unit, UnitId};
+use super::lexer::{HARD_KEYWORDS, Lexed, Tok};
+use super::syntax::{self, Decl, DeclId, File, InitKind, Kind, ScopeKind, TypeRef};
+
+/// A type, as far as Kargo knows it; unknown parts are `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ty {
+    /// An instance of a class, interface or object.
+    Class { sym: SymId, args: Vec<Option<Ty>>, nullable: bool },
+    /// A function type.
+    Func { receiver: Option<Box<Ty>>, params: Vec<Option<Ty>>, ret: Option<Box<Ty>> },
+    /// A class itself, as in `Foo.bar`: its companion, nested classes and enum entries.
+    Static(SymId),
+    /// A package in a qualified name: `kotlin.collections.`.
+    Package(String),
+}
+
+/// Type arguments by type parameter name.
+pub type Subst = HashMap<String, Ty>;
+
+/// A declaration found for a name, with the type arguments of the receiver it was found on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Member {
+    pub sym: SymId,
+    pub subst: Subst,
+}
+
+impl Member {
+    fn plain(sym: SymId) -> Self {
+        Member { sym, subst: Subst::new() }
+    }
+}
+
+/// What a name refers to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Found {
+    Sym(Member),
+    /// The implicit `it` of the lambda whose `{` is token `brace`.
+    It {
+        unit: UnitId,
+        brace: usize,
+    },
+}
+
+/// The types a lambda gets from the function it is passed to.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LambdaCtx {
+    pub receiver: Option<Ty>,
+    pub params: Vec<Option<Ty>>,
+    /// The function the lambda is passed to.
+    pub callee: Option<SymId>,
+}
+
+/// Where a type reference is resolved: a file, and the declaration it appears in (for type
+/// parameters and nested classes).
+#[derive(Debug, Clone, Copy)]
+pub struct Ctx {
+    pub unit: UnitId,
+    pub decl: Option<DeclId>,
+}
+
+/// One argument of a call, as tokens.
+#[derive(Debug, Clone)]
+pub struct Arg {
+    pub start: usize,
+    pub end: usize,
+    pub name: Option<String>,
+    /// A lambda literal; `start` is its `{`.
+    pub lambda: bool,
+    /// A lambda after the parentheses.
+    pub trailing: bool,
+}
+
+/// The project's packages: which packages each one sees (itself and its path dependencies).
+#[derive(Debug, Clone, Default)]
+pub struct Packages {
+    pub visible: Vec<Vec<usize>>,
+    /// Whether any package has a JVM target, so JVM-only library files apply.
+    pub jvm: bool,
+}
+
+pub struct Analyzer<'a> {
+    pub lib: &'a Index,
+    pub proj: &'a Index,
+    pub packages: &'a Packages,
+    depth: Cell<u32>,
+    lambdas: RefCell<HashMap<(UnitId, usize), Option<LambdaCtx>>>,
+    values: RefCell<HashMap<SymId, Option<Ty>>>,
+}
+
+const MAX_DEPTH: u32 = 24;
+
+impl<'a> Analyzer<'a> {
+    pub fn new(lib: &'a Index, proj: &'a Index, packages: &'a Packages) -> Self {
+        Self { lib, proj, packages, depth: Cell::new(0), lambdas: RefCell::default(), values: RefCell::default() }
+    }
+
+    pub fn index_of(&self, lib: bool) -> &'a Index {
+        if lib { self.lib } else { self.proj }
+    }
+
+    pub fn unit(&self, id: UnitId) -> &'a Unit {
+        &self.index_of(id.lib).units[id.unit as usize]
+    }
+
+    pub fn file(&self, id: UnitId) -> &'a File {
+        &self.unit(id).file
+    }
+
+    pub fn decl(&self, s: SymId) -> &'a Decl {
+        &self.file(s.unit_id()).decls[s.decl_id()]
+    }
+
+    fn enter(&self) -> bool {
+        let d = self.depth.get();
+        if d >= MAX_DEPTH {
+            return false;
+        }
+        self.depth.set(d + 1);
+        true
+    }
+
+    fn leave(&self) {
+        self.depth.set(self.depth.get().saturating_sub(1));
+    }
+
+    /// The fully qualified name of a declaration; local ones get a name unique to them.
+    pub fn fq(&self, s: SymId) -> String {
+        let d = self.decl(s);
+        if d.local || d.name.is_empty() || matches!(d.kind, Kind::Parameter | Kind::Variable) {
+            return format!("{}#{}:{}:{}", d.name, s.lib, s.unit, s.decl);
+        }
+        self.file(s.unit_id()).fq_name(s.decl_id())
+    }
+
+    /// The package a declaration is in.
+    pub fn package_of(&self, s: SymId) -> &'a str {
+        &self.file(s.unit_id()).package
+    }
+
+    pub fn by_fq(&self, fq: &str) -> Vec<SymId> {
+        let mut out: Vec<SymId> = self.proj.by_fq.get(fq).cloned().unwrap_or_default();
+        out.extend(self.lib.by_fq.get(fq).into_iter().flatten().copied());
+        out
+    }
+
+    fn by_name(&self, name: &str) -> impl Iterator<Item = SymId> + 'a {
+        self.proj.by_name.get(name).into_iter().flatten().chain(self.lib.by_name.get(name).into_iter().flatten()).copied()
+    }
+
+    pub fn has_package(&self, package: &str) -> bool {
+        self.proj.packages.contains(package) || self.lib.packages.contains(package)
+    }
+
+    // ----- visibility -----
+
+    /// Whether code in `from` can use `s`.
+    pub fn visible(&self, from: UnitId, s: SymId) -> bool {
+        let d = self.decl(s);
+        if d.hidden {
+            return false;
+        }
+        if d.is_private() {
+            return s.unit_id() == from;
+        }
+        let target = self.unit(s.unit_id());
+        let source = self.unit(from);
+        match (&source.origin, &target.origin) {
+            (_, Origin::Library { jvm, .. }) => !d.is_internal() && (!jvm || self.packages.jvm),
+            (_, Origin::Loose) => s.unit_id() == from,
+            (Origin::Library { .. }, _) => false,
+            (Origin::Loose, Origin::Source(t)) => t.kind == SetKind::Main,
+            (Origin::Source(f), Origin::Source(t)) => {
+                let kind_ok = t.kind == SetKind::Main || (t.kind == SetKind::Test && f.kind == SetKind::Test);
+                let target_ok = t.target.is_none() || t.target == f.target;
+                if f.package == t.package {
+                    kind_ok && target_ok
+                } else {
+                    t.kind == SetKind::Main && target_ok && self.packages.visible.get(f.package).is_some_and(|v| v.contains(&t.package))
+                }
+            }
+        }
+    }
+
+    /// Whether a top-level declaration is in scope in `from` without an import.
+    fn imported(&self, from: UnitId, s: SymId) -> bool {
+        let file = self.file(from);
+        let package = self.package_of(s);
+        if package == file.package || DEFAULT_IMPORTS.contains(&package) {
+            return true;
+        }
+        let name = &self.decl(s).name;
+        let fq = self.fq(s);
+        file.imports.iter().any(|i| if i.star { i.fq() == package } else { i.fq() == fq && i.path.last() == Some(name) })
+    }
+
+    // ----- types -----
+
+    /// The type a type reference denotes in `ctx`, with type parameters replaced from `subst`.
+    pub fn ty_of_ref(&self, tr: &TypeRef, ctx: Ctx, subst: &Subst) -> Option<Ty> {
+        if !self.enter() {
+            return None;
+        }
+        let out = self.ty_of_ref_inner(tr, ctx, subst);
+        self.leave();
+        out
+    }
+
+    fn ty_of_ref_inner(&self, tr: &TypeRef, ctx: Ctx, subst: &Subst) -> Option<Ty> {
+        if let Some(f) = &tr.func {
+            return Some(Ty::Func {
+                receiver: f.receiver.as_ref().and_then(|r| self.ty_of_ref(r, ctx, subst)).map(Box::new),
+                params: f.params.iter().map(|p| self.ty_of_ref(p, ctx, subst)).collect(),
+                ret: self.ty_of_ref(&f.ret, ctx, subst).map(Box::new),
+            });
+        }
+        if tr.name.is_empty() || tr.name == "*" {
+            return None;
+        }
+        if !tr.name.contains('.') {
+            if let Some(t) = subst.get(&tr.name) {
+                return Some(nullable(t.clone(), tr.nullable));
+            }
+            if self.is_type_param(ctx, &tr.name) {
+                return None;
+            }
+        }
+        let sym = self.resolve_type(ctx, &tr.name)?;
+        let d = self.decl(sym);
+        if d.kind == Kind::TypeAlias {
+            let alias_subst: Subst =
+                d.type_params.iter().zip(&tr.args).filter_map(|(p, a)| Some((p.name.clone(), self.ty_of_ref(a, ctx, subst)?))).collect();
+            let alias_ctx = Ctx { unit: sym.unit_id(), decl: Some(sym.decl_id()) };
+            if let Some(t) = d.ty.as_ref().and_then(|t| self.ty_of_ref(t, alias_ctx, &alias_subst)) {
+                return Some(nullable(t, tr.nullable));
+            }
+        }
+        let args = tr.args.iter().map(|a| self.ty_of_ref(a, ctx, subst)).collect();
+        Some(Ty::Class { sym, args, nullable: tr.nullable })
+    }
+
+    fn is_type_param(&self, ctx: Ctx, name: &str) -> bool {
+        let file = self.file(ctx.unit);
+        let mut d = ctx.decl;
+        while let Some(id) = d {
+            let decl = &file.decls[id];
+            if decl.type_params.iter().any(|t| t.name == name) {
+                return true;
+            }
+            d = decl.parent;
+        }
+        false
+    }
+
+    /// The class (or type alias) a type name denotes in `ctx`.
+    pub fn resolve_type(&self, ctx: Ctx, name: &str) -> Option<SymId> {
+        let file = self.file(ctx.unit);
+        if let Some((first, rest)) = name.split_once('.') {
+            if let Some(s) = self.best_type(self.by_fq(name).into_iter()) {
+                return Some(s);
+            }
+            let mut s = self.resolve_type(Ctx { decl: ctx.decl, ..ctx }, first)?;
+            for seg in rest.split('.') {
+                s = self.nested_class(s, seg)?;
+            }
+            return Some(s);
+        }
+        let mut d = ctx.decl;
+        while let Some(id) = d {
+            let decl = &file.decls[id];
+            if decl.kind.is_class() {
+                if decl.name == name {
+                    return Some(ctx.unit.sym(id));
+                }
+                if let Some(s) = self.nested_class(ctx.unit.sym(id), name) {
+                    return Some(s);
+                }
+            }
+            for &local in self.local_classes(ctx.unit, id) {
+                if file.decls[local].name == name {
+                    return Some(ctx.unit.sym(local));
+                }
+            }
+            d = decl.parent;
+        }
+        let local = file.top.iter().copied().find(|&t| file.decls[t].name == name && is_type_decl(&file.decls[t]));
+        if let Some(t) = local {
+            return Some(ctx.unit.sym(t));
+        }
+        self.global_type(ctx.unit, name)
+    }
+
+    /// Local classes declared in the body of `decl`.
+    fn local_classes(&self, unit: UnitId, decl: DeclId) -> &'a [DeclId] {
+        let file = self.file(unit);
+        match file.decls[decl].body {
+            Some(scope) if matches!(file.scopes[scope].kind, ScopeKind::Function(_)) => &file.scopes[scope].decls,
+            _ => &[],
+        }
+    }
+
+    fn global_type(&self, from: UnitId, name: &str) -> Option<SymId> {
+        let file = self.file(from);
+        for import in file.imports.iter().filter(|i| i.name() == Some(name)) {
+            if let Some(s) = self.best_type(self.import_targets(import.fq()).into_iter().filter(|&s| is_type_decl(self.decl(s)))) {
+                return Some(s);
+            }
+        }
+        let candidates: Vec<SymId> = self.by_name(name).filter(|&s| is_type_decl(self.decl(s)) && self.visible(from, s)).collect();
+        let in_package = |p: &str| self.best_type(candidates.iter().copied().filter(|&s| self.package_of(s) == p));
+        if let Some(s) = in_package(&file.package) {
+            return Some(s);
+        }
+        for import in file.imports.iter().filter(|i| i.star) {
+            if let Some(s) = in_package(&import.fq()) {
+                return Some(s);
+            }
+            if let Some(class) = self.best_type(self.by_fq(&import.fq()).into_iter())
+                && let Some(s) = self.nested_class(class, name)
+            {
+                return Some(s);
+            }
+        }
+        DEFAULT_IMPORTS.iter().find_map(|p| in_package(p))
+    }
+
+    /// What `import a.b.C` names: classes, functions and properties, or members of an object.
+    pub fn import_targets(&self, fq: String) -> Vec<SymId> {
+        let direct = self.by_fq(&fq);
+        if !direct.is_empty() {
+            return direct;
+        }
+        let Some((owner, name)) = fq.rsplit_once('.') else { return Vec::new() };
+        let mut out = Vec::new();
+        for class in self.by_fq(owner).into_iter().filter(|&s| self.decl(s).kind.is_class()) {
+            for &m in &self.decl(class).members {
+                if self.file(class.unit_id()).decls[m].name == name {
+                    out.push(class.unit_id().sym(m));
+                }
+            }
+        }
+        out
+    }
+
+    /// Among declarations of one type name, the best to show: a class over a type alias (an
+    /// `expect class` over its JVM `actual typealias`), then the one with documentation.
+    pub fn best_type(&self, candidates: impl Iterator<Item = SymId>) -> Option<SymId> {
+        candidates.min_by_key(|&s| {
+            let d = self.decl(s);
+            (!d.kind.is_class(), d.doc.is_none(), d.members.is_empty())
+        })
+    }
+
+    fn nested_class(&self, class: SymId, name: &str) -> Option<SymId> {
+        for c in self.class_decls(class) {
+            let file = self.file(c.unit_id());
+            for &m in &self.decl(c).members {
+                if file.decls[m].name == name && is_type_decl(&file.decls[m]) {
+                    return Some(c.unit_id().sym(m));
+                }
+            }
+        }
+        None
+    }
+
+    /// Every declaration of the class `s` (the `expect` and `actual` ones), `s` first.
+    pub fn class_decls(&self, s: SymId) -> Vec<SymId> {
+        let mut out = vec![s];
+        let d = self.decl(s);
+        if !d.local && !d.name.is_empty() {
+            for other in self.by_fq(&self.fq(s)) {
+                if other != s && self.decl(other).kind.is_class() {
+                    out.push(other);
+                }
+            }
+        }
+        out
+    }
+
+    /// The type of an instance of the class `s`, with unknown type arguments.
+    pub fn instance(&self, s: SymId) -> Ty {
+        Ty::Class { sym: s, args: vec![None; self.decl(s).type_params.len()], nullable: false }
+    }
+
+    fn std_class(&self, fq: &str) -> Option<SymId> {
+        self.best_type(self.by_fq(fq).into_iter())
+    }
+
+    fn std_ty(&self, fq: &str) -> Option<Ty> {
+        self.std_class(fq).map(|s| Ty::Class { sym: s, args: Vec::new(), nullable: false })
+    }
+
+    /// The class `s` and its supertypes, each with the type arguments it has there.
+    pub fn closure(&self, ty: &Ty) -> Vec<(SymId, Subst)> {
+        let (start, args) = match ty {
+            Ty::Class { sym, args, .. } => (*sym, args.clone()),
+            Ty::Func { .. } => match self.std_class("kotlin.Function") {
+                Some(s) => (s, Vec::new()),
+                None => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((start, self.class_subst(start, &args)));
+        while let Some((sym, subst)) = queue.pop_front() {
+            if !seen.insert(self.fq(sym)) || out.len() > 64 {
+                continue;
+            }
+            for c in self.class_decls(sym) {
+                let d = self.decl(c);
+                let ctx = Ctx { unit: c.unit_id(), decl: Some(c.decl_id()) };
+                for st in &d.supertypes {
+                    if let Some(Ty::Class { sym: s2, args: a2, .. }) = self.ty_of_ref(st, ctx, &subst) {
+                        queue.push_back((s2, self.class_subst(s2, &a2)));
+                    }
+                }
+                if d.kind == Kind::Enum
+                    && let Some(e) = self.std_class("kotlin.Enum")
+                {
+                    let mut s = Subst::new();
+                    s.insert("E".into(), self.instance(c));
+                    queue.push_back((e, s));
+                }
+                out.push((c, subst.clone()));
+            }
+        }
+        if let Some(any) = self.std_class("kotlin.Any")
+            && !seen.contains("kotlin.Any")
+        {
+            out.push((any, Subst::new()));
+        }
+        out
+    }
+
+    fn class_subst(&self, class: SymId, args: &[Option<Ty>]) -> Subst {
+        let d = self.decl(class);
+        d.type_params.iter().zip(args).filter_map(|(p, a)| Some((p.name.clone(), a.clone()?))).collect()
+    }
+
+    /// The members of a type (inherited ones too) and the extensions in scope in `from`; with
+    /// `all`, extensions that need an import as well.
+    pub fn members(&self, ty: &Ty, from: UnitId, all: bool) -> Vec<Member> {
+        let mut out = Vec::new();
+        let mut keys = HashSet::new();
+        let mut push = |this: &Self, m: Member, out: &mut Vec<Member>| {
+            if this.visible(from, m.sym) && keys.insert(this.member_key(m.sym)) {
+                out.push(m);
+            }
+        };
+        match ty {
+            Ty::Static(class) => {
+                for c in self.class_decls(*class) {
+                    let file = self.file(c.unit_id());
+                    let d = self.decl(c);
+                    for &m in &d.members {
+                        let md = &file.decls[m];
+                        if md.kind.is_class() && md.kind != Kind::Companion || md.kind == Kind::EnumEntry {
+                            push(self, Member::plain(c.unit_id().sym(m)), &mut out);
+                        }
+                    }
+                    if matches!(d.kind, Kind::Object | Kind::Companion) {
+                        for m in self.members(&self.instance(c), from, all) {
+                            push(self, m, &mut out);
+                        }
+                    } else if let Some(companion) = file.companion(c.decl_id()) {
+                        for m in self.members(&self.instance(c.unit_id().sym(companion)), from, all) {
+                            push(self, m, &mut out);
+                        }
+                    }
+                }
+            }
+            Ty::Class { .. } | Ty::Func { .. } => {
+                let closure = self.closure(ty);
+                for (c, subst) in &closure {
+                    let file = self.file(c.unit_id());
+                    for &m in &self.decl(*c).members {
+                        let md = &file.decls[m];
+                        if matches!(md.kind, Kind::Function | Kind::Property) {
+                            push(self, Member { sym: c.unit_id().sym(m), subst: subst.clone() }, &mut out);
+                        }
+                    }
+                }
+                for m in self.extensions(ty, &closure, from, all) {
+                    push(self, m, &mut out);
+                }
+            }
+            Ty::Package(_) => {}
+        }
+        out
+    }
+
+    /// A key that overrides, `expect`/`actual` pairs and duplicates share.
+    fn member_key(&self, s: SymId) -> String {
+        let d = self.decl(s);
+        let file = self.file(s.unit_id());
+        let text = &self.unit(s.unit_id()).text;
+        let params: Vec<String> =
+            d.params.iter().map(|&p| file.decls[p].ty.as_ref().map(|t| t.display(text)).unwrap_or_default()).collect();
+        let receiver = d.receiver.as_ref().map(|r| r.display(text)).unwrap_or_default();
+        format!("{:?}|{}|{}|{}", value_kind(d.kind), receiver, d.name, params.join(","))
+    }
+
+    fn extensions(&self, ty: &Ty, closure: &[(SymId, Subst)], from: UnitId, all: bool) -> Vec<Member> {
+        let mut out = Vec::new();
+        let mut names: Vec<(&str, Ty)> = Vec::new();
+        for (c, subst) in closure {
+            let d = self.decl(*c);
+            let args = d.type_params.iter().map(|p| subst.get(&p.name).cloned()).collect();
+            names.push((&d.name, Ty::Class { sym: *c, args, nullable: false }));
+        }
+        let simple_names: HashSet<&str> = names.iter().map(|(n, _)| *n).collect();
+        for index in [self.proj, self.lib] {
+            for (name, class_ty) in &names {
+                for &e in index.extensions.get(*name).into_iter().flatten() {
+                    if !all && !self.imported(from, e) {
+                        continue;
+                    }
+                    let d = self.decl(e);
+                    let Some(receiver) = &d.receiver else { continue };
+                    let mut subst = Subst::new();
+                    let tparams: Vec<String> = d.type_params.iter().map(|t| t.name.clone()).collect();
+                    self.unify(receiver, class_ty, &tparams, &mut subst);
+                    out.push(Member { sym: e, subst });
+                }
+            }
+            for &e in index.extensions.get("*").into_iter().flatten() {
+                if !all && !self.imported(from, e) {
+                    continue;
+                }
+                let d = self.decl(e);
+                let Some(receiver) = &d.receiver else { continue };
+                if receiver.func.is_some() != matches!(ty, Ty::Func { .. }) {
+                    continue;
+                }
+                let bound_ok = d.type_params.iter().find(|t| t.name == receiver.name).and_then(|t| t.bound.as_ref()).is_none_or(|b| {
+                    let simple = b.simple_name();
+                    simple == "Any" || simple_names.contains(simple)
+                });
+                if !bound_ok {
+                    continue;
+                }
+                let mut subst = Subst::new();
+                if receiver.func.is_none() {
+                    subst.insert(receiver.name.clone(), strip_nullable(ty.clone()));
+                }
+                out.push(Member { sym: e, subst });
+            }
+        }
+        out
+    }
+
+    /// Binds the type parameters `tparams` that `pattern` mentions from `actual`.
+    pub fn unify(&self, pattern: &TypeRef, actual: &Ty, tparams: &[String], subst: &mut Subst) {
+        if pattern.func.is_some() {
+            if let (Some(f), Ty::Func { params, ret, .. }) = (&pattern.func, actual) {
+                for (p, a) in f.params.iter().zip(params) {
+                    if let Some(a) = a {
+                        self.unify(p, a, tparams, subst);
+                    }
+                }
+                if let Some(r) = ret {
+                    self.unify(&f.ret, r, tparams, subst);
+                }
+            }
+            return;
+        }
+        if tparams.contains(&pattern.name) {
+            subst.entry(pattern.name.clone()).or_insert_with(|| strip_nullable(actual.clone()));
+            return;
+        }
+        if pattern.args.is_empty() || !matches!(actual, Ty::Class { .. }) {
+            return;
+        }
+        let simple = pattern.simple_name();
+        for (c, s) in self.closure(actual) {
+            let d = self.decl(c);
+            if d.name == simple {
+                for (pa, tp) in pattern.args.iter().zip(&d.type_params) {
+                    if let Some(a) = s.get(&tp.name) {
+                        self.unify(pa, a, tparams, subst);
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    /// The members named `name` of a type.
+    pub fn members_named(&self, ty: &Ty, name: &str, from: UnitId) -> Vec<Member> {
+        let mut found: Vec<Member> = self.members(ty, from, false).into_iter().filter(|m| self.decl(m.sym).name == name).collect();
+        if found.is_empty() {
+            // An extension that isn't imported: still worth navigating to.
+            found = self.members(ty, from, true).into_iter().filter(|m| self.decl(m.sym).name == name).collect();
+        }
+        found
+    }
+
+    // ----- values -----
+
+    /// The type of a value declaration, or what a function returns, with `subst` applied.
+    pub fn value_ty(&self, s: SymId, subst: &Subst) -> Option<Ty> {
+        let cacheable = subst.is_empty();
+        if cacheable && let Some(t) = self.values.borrow().get(&s) {
+            return t.clone();
+        }
+        if !self.enter() {
+            return None;
+        }
+        if cacheable {
+            self.values.borrow_mut().insert(s, None);
+        }
+        let out = self.value_ty_inner(s, subst);
+        self.leave();
+        if cacheable {
+            self.values.borrow_mut().insert(s, out.clone());
+        }
+        out
+    }
+
+    fn value_ty_inner(&self, s: SymId, subst: &Subst) -> Option<Ty> {
+        let d = self.decl(s);
+        let u = s.unit_id();
+        let ctx = Ctx { unit: u, decl: Some(s.decl_id()) };
+        let file = self.file(u);
+        match d.kind {
+            Kind::Object | Kind::Companion => Some(self.instance(s)),
+            k if k.is_class() => Some(Ty::Static(s)),
+            Kind::TypeAlias => self.ty_of_ref(d.ty.as_ref()?, ctx, subst).map(|t| match t {
+                Ty::Class { sym, .. } => Ty::Static(sym),
+                t => t,
+            }),
+            Kind::EnumEntry => file.owner_class(s.decl_id()).map(|c| self.instance(u.sym(c))),
+            Kind::Constructor => file.owner_class(s.decl_id()).map(|c| self.instance(u.sym(c))),
+            Kind::Function => self.return_ty(s, subst),
+            _ => {
+                if let Some(t) = &d.ty {
+                    let ty = self.ty_of_ref(t, ctx, subst)?;
+                    if d.vararg {
+                        let array = self.std_class("kotlin.Array")?;
+                        return Some(Ty::Class { sym: array, args: vec![Some(ty)], nullable: false });
+                    }
+                    return Some(ty);
+                }
+                let src = &self.unit(u).text;
+                let lx = &file.lexed;
+                match d.init_kind {
+                    InitKind::Value => {
+                        let start = d.init?;
+                        self.infer(u, start, syntax::expr_end(src, lx, start, lx.tokens.len()))
+                    }
+                    InitKind::Delegate => {
+                        let start = d.init?;
+                        // `by lazy { ... }`: what the lambda returns.
+                        if lx.is(src, start, "lazy") {
+                            let brace = (start + 1..start + 6).find(|&i| lx.kind(i) == Some(Tok::LBrace))?;
+                            return self.lambda_result(u, brace);
+                        }
+                        None
+                    }
+                    InitKind::Iterated => {
+                        let start = d.init?;
+                        let end = self.iterated_end(u, start);
+                        self.element_ty(&self.infer(u, start, end)?, u)
+                    }
+                    InitKind::IteratedComponent(n) => {
+                        let start = d.init?;
+                        let end = self.iterated_end(u, start);
+                        let element = self.element_ty(&self.infer(u, start, end)?, u)?;
+                        self.component_ty(&element, n, u)
+                    }
+                    InitKind::Component(n) => {
+                        let start = d.init?;
+                        let value = self.infer(u, start, syntax::expr_end(src, lx, start, lx.tokens.len()))?;
+                        self.component_ty(&value, n, u)
+                    }
+                    InitKind::LambdaParam(n) => self.lambda_ctx(u, d.init?)?.params.get(n).cloned().flatten(),
+                    InitKind::LambdaComponent(n, m) => {
+                        let param = self.lambda_ctx(u, d.init?)?.params.get(n).cloned().flatten()?;
+                        self.component_ty(&param, m, u)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The end of the iterated expression of a `for` loop starting at `start`: its `)`.
+    fn iterated_end(&self, u: UnitId, start: usize) -> usize {
+        let lx = &self.file(u).lexed;
+        let mut i = start;
+        while i < lx.tokens.len() {
+            match lx.tokens[i].kind {
+                Tok::RParen => return i,
+                Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen => i = lx.matching[i].map_or(lx.tokens.len(), |c| c + 1),
+                _ => i += 1,
+            }
+        }
+        i
+    }
+
+    /// What a function returns.
+    pub fn return_ty(&self, s: SymId, subst: &Subst) -> Option<Ty> {
+        let d = self.decl(s);
+        let u = s.unit_id();
+        if let Some(t) = &d.ty {
+            return self.ty_of_ref(t, Ctx { unit: u, decl: Some(s.decl_id()) }, subst);
+        }
+        if let Some(start) = d.init {
+            let file = self.file(u);
+            let end = syntax::expr_end(&self.unit(u).text, &file.lexed, start, file.lexed.tokens.len());
+            return self.infer(u, start, end);
+        }
+        self.std_ty("kotlin.Unit")
+    }
+
+    /// The type of the elements a `for` loop over `ty` gets: `iterator().next()`.
+    pub fn element_ty(&self, ty: &Ty, from: UnitId) -> Option<Ty> {
+        let iterator = self.call_member(ty, "iterator", from)?;
+        self.call_member(&iterator, "next", from)
+    }
+
+    fn call_member(&self, ty: &Ty, name: &str, from: UnitId) -> Option<Ty> {
+        let m = self.members_named(ty, name, from).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function)?;
+        self.value_ty(m.sym, &m.subst)
+    }
+
+    /// The type of component `n` of `ty`: its `componentN()`, or a data class's `n`th property.
+    pub fn component_ty(&self, ty: &Ty, n: usize, from: UnitId) -> Option<Ty> {
+        if let Some(t) = self.call_member(ty, &format!("component{n}"), from) {
+            return Some(t);
+        }
+        let Ty::Class { sym, args, .. } = ty else { return None };
+        let d = self.decl(*sym);
+        let file = self.file(sym.unit_id());
+        let prop = d.params.iter().filter(|&&p| file.decls[p].kind == Kind::Property).nth(n.checked_sub(1)?)?;
+        self.value_ty(sym.unit_id().sym(*prop), &self.class_subst(*sym, args))
+    }
+
+    // ----- names -----
+
+    /// What `name` refers to at `offset` in `u`, without a receiver: the declarations of the
+    /// innermost scope that has any.
+    pub fn resolve_name(&self, u: UnitId, offset: usize, name: &str) -> Vec<Found> {
+        let file = self.file(u);
+        let chain = file.scope_chain(offset);
+        for (ci, &sid) in chain.iter().enumerate() {
+            let scope = &file.scopes[sid];
+            if let ScopeKind::Lambda { it: true, brace } = scope.kind
+                && name == "it"
+            {
+                return vec![Found::It { unit: u, brace }];
+            }
+            let mut found: Vec<Found> = scope
+                .decls
+                .iter()
+                .copied()
+                .filter(|&d| {
+                    let decl = &file.decls[d];
+                    decl.name == name && (decl.kind == Kind::Parameter || decl.name_span.start < offset || decl.kind.is_class())
+                })
+                .map(|d| Found::Sym(Member::plain(u.sym(d))))
+                .collect();
+            if !found.is_empty() {
+                // The innermost declaration shadows the others.
+                if found.iter().all(|f| matches!(f, Found::Sym(m) if self.decl(m.sym).kind == Kind::Function)) {
+                    return found;
+                }
+                found.sort_by_key(|f| match f {
+                    Found::Sym(m) => std::cmp::Reverse(self.decl(m.sym).name_span.start),
+                    Found::It { .. } => std::cmp::Reverse(0),
+                });
+                found.truncate(1);
+                return found;
+            }
+            let receiver = match scope.kind {
+                ScopeKind::Function(fd) => {
+                    file.decls[fd].receiver.as_ref().and_then(|r| self.ty_of_ref(r, Ctx { unit: u, decl: Some(fd) }, &Subst::new()))
+                }
+                ScopeKind::Lambda { brace, .. } => self.lambda_ctx(u, brace).and_then(|c| c.receiver),
+                ScopeKind::Class(cd) => {
+                    let decl = &file.decls[cd];
+                    let in_function = chain[..ci].iter().any(|&s| matches!(file.scopes[s].kind, ScopeKind::Function(_)));
+                    if !in_function {
+                        let params: Vec<Found> = decl
+                            .params
+                            .iter()
+                            .copied()
+                            .filter(|&p| file.decls[p].kind == Kind::Parameter && file.decls[p].name == name)
+                            .map(|p| Found::Sym(Member::plain(u.sym(p))))
+                            .collect();
+                        if !params.is_empty() {
+                            return params;
+                        }
+                    }
+                    if decl.kind == Kind::EnumEntry {
+                        // An enum entry's body sees the enum's members.
+                        file.owner_class(cd).map(|c| self.instance(u.sym(c)))
+                    } else {
+                        Some(self.instance(u.sym(cd)))
+                    }
+                }
+                ScopeKind::File => {
+                    return self.global_names(u, name);
+                }
+                ScopeKind::Block => None,
+            };
+            if let Some(receiver) = receiver {
+                let mut found: Vec<Found> = self.members_named(&receiver, name, u).into_iter().map(Found::Sym).collect();
+                if let (ScopeKind::Class(cd), Ty::Class { sym, .. }) = (scope.kind, &receiver) {
+                    let class = if file.decls[cd].kind == Kind::EnumEntry { *sym } else { u.sym(cd) };
+                    found.extend(
+                        self.members(&Ty::Static(class), u, false).into_iter().filter(|m| self.decl(m.sym).name == name).map(Found::Sym),
+                    );
+                }
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Top-level declarations named `name` visible in `u`: in the file, imported, in the
+    /// package, star-imported, default-imported.
+    pub fn global_names(&self, u: UnitId, name: &str) -> Vec<Found> {
+        let file = self.file(u);
+        let wrap = |v: Vec<SymId>| -> Vec<Found> { v.into_iter().map(|s| Found::Sym(Member::plain(s))).collect() };
+        let local: Vec<SymId> = file
+            .top
+            .iter()
+            .copied()
+            .filter(|&t| file.decls[t].name == name && file.decls[t].receiver.is_none())
+            .map(|t| u.sym(t))
+            .collect();
+        if !local.is_empty() {
+            return wrap(local);
+        }
+        let mut imported = Vec::new();
+        for import in file.imports.iter().filter(|i| i.name() == Some(name)) {
+            imported.extend(self.import_targets(import.fq()).into_iter().filter(|&s| self.decl(s).receiver.is_none()));
+        }
+        if !imported.is_empty() {
+            return wrap(imported);
+        }
+        let candidates: Vec<SymId> = self.by_name(name).filter(|&s| self.visible(u, s)).collect();
+        let in_package = |p: &str| -> Vec<SymId> { candidates.iter().copied().filter(|&s| self.package_of(s) == p).collect() };
+        let same = in_package(&file.package);
+        if !same.is_empty() {
+            return wrap(same);
+        }
+        let mut star = Vec::new();
+        for import in file.imports.iter().filter(|i| i.star) {
+            star.extend(in_package(&import.fq()));
+            for class in self.by_fq(&import.fq()).into_iter().filter(|&s| self.decl(s).kind.is_class()) {
+                star.extend(
+                    self.members(&Ty::Static(class), u, false).into_iter().filter(|m| self.decl(m.sym).name == name).map(|m| m.sym),
+                );
+            }
+        }
+        if !star.is_empty() {
+            return wrap(star);
+        }
+        let mut defaults: Vec<SymId> = DEFAULT_IMPORTS.iter().flat_map(|p| in_package(p)).collect();
+        // Prefer the documented `expect` declaration of the standard library.
+        defaults.sort_by_key(|&s| self.decl(s).doc.is_none());
+        wrap(defaults)
+    }
+
+    /// The type of `this` at `offset`, optionally `this@label`.
+    pub fn this_ty(&self, u: UnitId, offset: usize, label: Option<&str>) -> Option<Ty> {
+        let file = self.file(u);
+        for sid in file.scope_chain(offset) {
+            match file.scopes[sid].kind {
+                ScopeKind::Lambda { brace, .. } => {
+                    let Some(ctx) = self.lambda_ctx(u, brace) else { continue };
+                    let Some(receiver) = ctx.receiver else { continue };
+                    let callee = ctx.callee.map(|c| self.decl(c).name.as_str());
+                    if label.is_none() || label == callee {
+                        return Some(receiver);
+                    }
+                }
+                ScopeKind::Function(fd) => {
+                    let d = &file.decls[fd];
+                    if let Some(r) = &d.receiver
+                        && (label.is_none() || label == Some(d.name.as_str()))
+                    {
+                        return self.ty_of_ref(r, Ctx { unit: u, decl: Some(fd) }, &Subst::new());
+                    }
+                }
+                ScopeKind::Class(cd) => {
+                    let d = &file.decls[cd];
+                    if d.name.is_empty() {
+                        // An anonymous object: its supertype.
+                        if let Some(st) = d.supertypes.first() {
+                            return self.ty_of_ref(st, Ctx { unit: u, decl: Some(cd) }, &Subst::new());
+                        }
+                        continue;
+                    }
+                    if label.is_none() || label == Some(d.name.as_str()) {
+                        return Some(self.instance(u.sym(cd)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The types a lambda gets from the call it is an argument of.
+    pub fn lambda_ctx(&self, u: UnitId, brace: usize) -> Option<LambdaCtx> {
+        if let Some(c) = self.lambdas.borrow().get(&(u, brace)) {
+            return c.clone();
+        }
+        if !self.enter() {
+            return None;
+        }
+        self.lambdas.borrow_mut().insert((u, brace), None);
+        let out = self.lambda_ctx_inner(u, brace);
+        self.leave();
+        self.lambdas.borrow_mut().insert((u, brace), out.clone());
+        out
+    }
+
+    fn lambda_ctx_inner(&self, u: UnitId, brace: usize) -> Option<LambdaCtx> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let mut p = brace;
+        if p > 0 && lx.kind(p - 1) == Some(Tok::Label) {
+            p -= 1;
+        }
+        // Where the call's callee ends, and which argument the lambda is.
+        enum Position {
+            Trailing,
+            Index(usize),
+            Named(String),
+        }
+        let (callee_end, position) = match p.checked_sub(1).and_then(|i| lx.kind(i)) {
+            Some(Tok::RParen) => (lx.matching[p - 1]?, Position::Trailing),
+            Some(Tok::Ident | Tok::Gt) if !HARD_KEYWORDS.contains(&lx.text(src, p - 1)) || lx.kind(p - 1) == Some(Tok::Gt) => {
+                (p, Position::Trailing)
+            }
+            _ => {
+                let open = enclosing_paren(lx, p)?;
+                if p >= 2 && lx.kind(p - 1) == Some(Tok::Eq) && lx.kind(p - 2) == Some(Tok::Ident) {
+                    (open, Position::Named(lx.text(src, p - 2).to_owned()))
+                } else {
+                    let commas = (open + 1..p).filter(|&i| lx.kind(i) == Some(Tok::Comma) && depth_between(lx, open + 1, i) == 0).count();
+                    (open, Position::Index(commas))
+                }
+            }
+        };
+        let (callee, members) = self.callee(u, callee_end)?;
+        let call_args = self.call_args(u, callee_end, lx.tokens.len()).0;
+        let lambda_params = file.scopes.iter().find(|s| matches!(s.kind, ScopeKind::Lambda { brace: b, .. } if b == brace));
+        let explicit =
+            lambda_params.map_or(0, |s| s.decls.iter().filter(|&&d| matches!(file.decls[d].init_kind, InitKind::LambdaParam(_))).count());
+        let has_it = lambda_params.is_some_and(|s| matches!(s.kind, ScopeKind::Lambda { it: true, .. }));
+        let mut best: Option<(Member, &TypeRef, i32)> = None;
+        for m in members {
+            let d = self.decl(m.sym);
+            if d.kind != Kind::Function {
+                continue;
+            }
+            let fparams = &self.file(m.sym.unit_id()).decls;
+            let param = match &position {
+                Position::Trailing => d.params.last(),
+                Position::Index(i) => d.params.get(*i).or_else(|| d.params.last().filter(|&&l| fparams[l].vararg)),
+                Position::Named(n) => d.params.iter().find(|&&q| fparams[q].name == *n),
+            };
+            let Some(&param) = param else { continue };
+            let Some(pty) = fparams[param].ty.as_ref() else { continue };
+            let Some(func) = &pty.func else { continue };
+            let arity = func.params.len();
+            let mut score = 0;
+            if has_it && (arity == 1 || (arity == 0 && func.receiver.is_some())) || !has_it && arity == explicit {
+                score += 2;
+            }
+            if callee.is_some_and(|c| c == m.sym) {
+                score += 1;
+            }
+            if best.as_ref().is_none_or(|(_, _, s)| score > *s) {
+                best = Some((m, pty, score));
+            }
+        }
+        let (m, pty, _) = best?;
+        let ctx = Ctx { unit: m.sym.unit_id(), decl: Some(m.sym.decl_id()) };
+        let mut subst = m.subst.clone();
+        self.bind_args(&m, &mut subst, u, &call_args, true);
+        let func = pty.func.as_ref()?;
+        Some(LambdaCtx {
+            receiver: func.receiver.as_ref().and_then(|r| self.ty_of_ref(r, ctx, &subst)),
+            params: func.params.iter().map(|t| self.ty_of_ref(t, ctx, &subst)).collect(),
+            callee: Some(m.sym),
+        })
+    }
+
+    /// The function candidates of the callee whose expression ends before token `end`.
+    fn callee(&self, u: UnitId, end: usize) -> Option<(Option<SymId>, Vec<Member>)> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let mut name_tok = end.checked_sub(1)?;
+        if lx.kind(name_tok) == Some(Tok::Gt) {
+            name_tok = matching_lt(lx, name_tok)?.checked_sub(1)?;
+        }
+        if lx.kind(name_tok) != Some(Tok::Ident) {
+            return None;
+        }
+        let name = lx.text(src, name_tok);
+        if name_tok > 0 && matches!(lx.kind(name_tok - 1), Some(Tok::Dot | Tok::SafeDot)) {
+            let start = chain_start(src, lx, name_tok - 1);
+            let receiver = self.infer(u, start, name_tok - 1)?;
+            let members = self.members_named(&receiver, name, u);
+            return Some((None, members));
+        }
+        let found = self.resolve_name(u, lx.tokens[name_tok].start, name);
+        let members: Vec<Member> = found
+            .into_iter()
+            .filter_map(|f| match f {
+                Found::Sym(m) => Some(m),
+                Found::It { .. } => None,
+            })
+            .collect();
+        Some((None, members))
+    }
+
+    /// The arguments of the call whose argument list or trailing lambda starts at token `at`
+    /// (just after the callee), and the token after them.
+    pub fn call_args(&self, u: UnitId, at: usize, limit: usize) -> (Vec<Arg>, usize) {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let mut args = Vec::new();
+        let mut i = at;
+        if lx.kind(i) == Some(Tok::Lt)
+            && let Some(gt) = matching_gt(lx, i)
+        {
+            i = gt + 1;
+        }
+        if lx.kind(i) == Some(Tok::LParen) {
+            let close = lx.matching[i].filter(|&c| c > i).unwrap_or(limit.min(lx.tokens.len()));
+            let mut start = i + 1;
+            let mut k = i + 1;
+            while k <= close && k < lx.tokens.len().max(close + 1) {
+                if k == close || lx.kind(k) == Some(Tok::Comma) {
+                    if k > start {
+                        let (name, s) = if lx.kind(start) == Some(Tok::Ident) && lx.kind(start + 1) == Some(Tok::Eq) {
+                            (Some(lx.text(src, start).to_owned()), start + 2)
+                        } else {
+                            (None, start)
+                        };
+                        let lambda = lx.kind(s) == Some(Tok::LBrace) && lx.matching[s].is_some_and(|c| c + 1 >= k);
+                        args.push(Arg { start: s, end: k, name, lambda, trailing: false });
+                    }
+                    start = k + 1;
+                    k += 1;
+                    continue;
+                }
+                k = match lx.kind(k) {
+                    Some(Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen | Tok::TemplateOpen) => {
+                        lx.matching[k].filter(|&c| c > k).map_or(close, |c| c + 1)
+                    }
+                    _ => k + 1,
+                };
+            }
+            i = close + 1;
+        }
+        loop {
+            let brace = if lx.kind(i) == Some(Tok::Label) { i + 1 } else { i };
+            if lx.kind(brace) == Some(Tok::LBrace) && !lx.tokens[brace].nl {
+                let close = lx.matching[brace].filter(|&c| c > brace).unwrap_or(limit.min(lx.tokens.len()).saturating_sub(1));
+                args.push(Arg { start: brace, end: close + 1, name: None, lambda: true, trailing: true });
+                i = close + 1;
+            } else {
+                break;
+            }
+        }
+        (args, i)
+    }
+
+    /// Binds the type parameters of the function `m` from the call's arguments.
+    pub fn bind_args(&self, m: &Member, subst: &mut Subst, u: UnitId, args: &[Arg], skip_lambdas: bool) {
+        let d = self.decl(m.sym);
+        let file = self.file(m.sym.unit_id());
+        let all: Vec<String> = match d.kind {
+            Kind::Constructor => {
+                file.owner_class(m.sym.decl_id()).map(|c| &file.decls[c]).unwrap_or(d).type_params.iter().map(|t| t.name.clone()).collect()
+            }
+            _ => d.type_params.iter().map(|t| t.name.clone()).collect(),
+        };
+        if all.is_empty() {
+            return;
+        }
+        let decls = &self.file(m.sym.unit_id()).decls;
+        let mut index = 0;
+        for arg in args {
+            let param = if let Some(n) = &arg.name {
+                d.params.iter().find(|&&p| decls[p].name == *n)
+            } else if arg.trailing {
+                d.params.last()
+            } else {
+                let p = d.params.get(index).or_else(|| d.params.last().filter(|&&l| decls[l].vararg));
+                index += 1;
+                p
+            };
+            let Some(&param) = param else { continue };
+            let Some(pty) = decls[param].ty.as_ref() else { continue };
+            if arg.lambda {
+                if skip_lambdas {
+                    continue;
+                }
+                // `map { ... }`: the lambda's result binds the function type's return type.
+                if let Some(func) = &pty.func
+                    && all.contains(&func.ret.name)
+                    && !subst.contains_key(&func.ret.name)
+                    && let Some(r) = self.lambda_result(u, arg.start)
+                {
+                    subst.insert(func.ret.name.clone(), r);
+                }
+                continue;
+            }
+            if let Some(actual) = self.infer(u, arg.start, arg.end) {
+                self.unify(pty, &actual, &all, subst);
+            }
+        }
+    }
+
+    /// The type of the last expression of the lambda whose `{` is `brace`.
+    pub fn lambda_result(&self, u: UnitId, brace: usize) -> Option<Ty> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let close = lx.matching[brace].filter(|&c| c > brace)?;
+        let scope = file.scopes.iter().find(|s| matches!(s.kind, ScopeKind::Lambda { brace: b, .. } if b == brace));
+        let mut start = brace + 1;
+        if let Some(s) = scope
+            && let Some(arrow) = (brace + 1..close).find(|&i| lx.kind(i) == Some(Tok::Arrow) && depth_between(lx, brace + 1, i) == 0)
+            && !matches!(s.kind, ScopeKind::Lambda { it: true, .. })
+        {
+            start = arrow + 1;
+        }
+        // The start of the last statement.
+        let mut last = start;
+        let mut i = start;
+        while i < close {
+            let e = syntax::expr_end(src, lx, i, close);
+            if e >= close {
+                break;
+            }
+            i = if lx.kind(e) == Some(Tok::Semi) { e + 1 } else { e.max(i + 1) };
+            if i < close {
+                last = i;
+            }
+        }
+        if last >= close || lx.is(src, last, "return") || lx.is(src, last, "val") || lx.is(src, last, "var") {
+            return None;
+        }
+        self.infer(u, last, close)
+    }
+
+    // ----- expressions -----
+
+    /// The type of the expression in tokens `a..b` of `u`.
+    pub fn infer(&self, u: UnitId, a: usize, b: usize) -> Option<Ty> {
+        if a >= b || !self.enter() {
+            return None;
+        }
+        let out = self.infer_inner(u, a, b);
+        self.leave();
+        out
+    }
+
+    fn infer_inner(&self, u: UnitId, a: usize, b: usize) -> Option<Ty> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let b = b.min(lx.tokens.len());
+        // Binary operators outside brackets, by precedence.
+        let mut ops: Vec<(usize, &str)> = Vec::new();
+        let mut k = a;
+        while k < b {
+            let t = lx.tokens[k];
+            match t.kind {
+                Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen | Tok::TemplateOpen => {
+                    k = lx.matching[k].filter(|&c| c > k).map_or(b, |c| c + 1);
+                    continue;
+                }
+                Tok::Lt if k > a => {
+                    if let Some(gt) = matching_gt(lx, k) {
+                        k = gt + 1;
+                        continue;
+                    }
+                    ops.push((k, "<"));
+                }
+                Tok::Gt if k > a => ops.push((k, ">")),
+                Tok::Op if k > a => ops.push((k, &src[t.span()])),
+                Tok::Ident if k > a && is_operand_end(src, lx, k - 1) && k + 1 < b => {
+                    let word = &src[t.span()];
+                    if matches!(word, "is" | "in" | "as") {
+                        ops.push((k, word));
+                    } else if !HARD_KEYWORDS.contains(&word) && lx.kind(k - 1) != Some(Tok::Dot) {
+                        ops.push((k, "infix"));
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        let find = |set: &[&str]| ops.iter().find(|(_, o)| set.contains(o)).map(|(i, o)| (*i, *o));
+        let boolean = || self.std_ty("kotlin.Boolean");
+        if find(&["||", "&&", "==", "!=", "===", "!==", "<", ">", "<=", ">=", "is", "in"]).is_some() {
+            return boolean();
+        }
+        if let Some((i, _)) = find(&["?:"]) {
+            return self.infer(u, a, i).map(strip_nullable).or_else(|| self.infer(u, i + 1, b));
+        }
+        if let Some(&(i, _)) = ops.iter().rev().find(|(_, o)| *o == "infix") {
+            let left = self.infer(u, a, i)?;
+            let name = lx.text(src, i);
+            let m = self.members_named(&left, name, u).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function)?;
+            let mut subst = m.subst.clone();
+            self.bind_args(&m, &mut subst, u, &[Arg { start: i + 1, end: b, name: None, lambda: false, trailing: false }], false);
+            return self.value_ty(m.sym, &subst);
+        }
+        if let Some((i, _)) = find(&["..", "..<"]) {
+            let left = self.infer(u, a, i)?;
+            let range = match self.class_fq(&left).as_deref() {
+                Some("kotlin.Long") => "kotlin.ranges.LongRange",
+                Some("kotlin.Char") => "kotlin.ranges.CharRange",
+                Some("kotlin.UInt") => "kotlin.ranges.UIntRange",
+                Some("kotlin.ULong") => "kotlin.ranges.ULongRange",
+                _ => "kotlin.ranges.IntRange",
+            };
+            return self.std_ty(range);
+        }
+        if let Some((i, _)) = find(&["+", "-", "*", "/", "%"]) {
+            let left = self.infer(u, a, i);
+            return left.or_else(|| self.infer(u, i + 1, b));
+        }
+        if let Some((i, _)) = find(&["as"]) {
+            let mut t = i + 1;
+            let safe = lx.kind(t) == Some(Tok::Question);
+            if safe {
+                t += 1;
+            }
+            let name: Vec<&str> =
+                (t..b).take_while(|&k| matches!(lx.kind(k), Some(Tok::Ident | Tok::Dot))).map(|k| lx.text(src, k)).collect();
+            let decl = self.decl_containing(u, lx.tokens[i].start);
+            let sym = self.resolve_type(Ctx { unit: u, decl }, &name.concat())?;
+            return Some(Ty::Class { sym, args: Vec::new(), nullable: safe });
+        }
+        // Prefix operators.
+        if lx.kind(a) == Some(Tok::Op) {
+            return match &src[lx.tokens[a].span()] {
+                "!" => boolean(),
+                _ => self.infer(u, a + 1, b),
+            };
+        }
+        self.chain(u, a, b)
+    }
+
+    /// The innermost non-local declaration around `offset`, for resolving type names.
+    pub fn decl_containing(&self, u: UnitId, offset: usize) -> Option<DeclId> {
+        let file = self.file(u);
+        for sid in file.scope_chain(offset) {
+            if let ScopeKind::Class(d) | ScopeKind::Function(d) = file.scopes[sid].kind {
+                return Some(d);
+            }
+        }
+        None
+    }
+
+    pub fn class_fq(&self, ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Class { sym, .. } => Some(self.fq(*sym)),
+            _ => None,
+        }
+    }
+
+    /// A postfix chain: a primary expression and `.member`, `?.member`, `!!`, calls and indexing.
+    fn chain(&self, u: UnitId, a: usize, b: usize) -> Option<Ty> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let (mut cur, mut i) = self.primary(u, a, b)?;
+        while i < b {
+            match lx.kind(i)? {
+                Tok::Dot | Tok::SafeDot => {
+                    if lx.kind(i + 1) != Some(Tok::Ident) || i + 1 >= b {
+                        return None;
+                    }
+                    let (ty, next) = self.member_access(u, &cur, i + 1, b)?;
+                    cur = ty;
+                    i = next;
+                }
+                Tok::BangBang => {
+                    cur = strip_nullable(cur);
+                    i += 1;
+                }
+                Tok::LParen => {
+                    let next = lx.matching[i].filter(|&c| c > i).map_or(b, |c| c + 1);
+                    cur = match cur {
+                        Ty::Func { ret, .. } => *ret?,
+                        other => self.call_member(&other, "invoke", u)?,
+                    };
+                    i = next;
+                }
+                Tok::LBracket => {
+                    let next = lx.matching[i].filter(|&c| c > i).map_or(b, |c| c + 1);
+                    let m = self.members_named(&cur, "get", u).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function)?;
+                    cur = self.value_ty(m.sym, &m.subst)?;
+                    i = next;
+                }
+                _ => return None,
+            }
+        }
+        Some(cur)
+    }
+
+    fn primary(&self, u: UnitId, i: usize, b: usize) -> Option<(Ty, usize)> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let t = lx.tokens.get(i)?;
+        let after = |k: usize| lx.matching[k].filter(|&c| c > k).map_or(b, |c| c + 1);
+        match t.kind {
+            Tok::StrOpen => Some((self.std_ty("kotlin.String")?, after(i))),
+            Tok::Int => {
+                let text = &src[t.span()];
+                let fq = if text.ends_with("uL") || text.ends_with("UL") {
+                    "kotlin.ULong"
+                } else if text.ends_with(['u', 'U']) {
+                    "kotlin.UInt"
+                } else if text.ends_with('L') {
+                    "kotlin.Long"
+                } else {
+                    "kotlin.Int"
+                };
+                Some((self.std_ty(fq)?, i + 1))
+            }
+            Tok::Float => {
+                let fq = if src[t.span()].ends_with(['f', 'F']) { "kotlin.Float" } else { "kotlin.Double" };
+                Some((self.std_ty(fq)?, i + 1))
+            }
+            Tok::Char => Some((self.std_ty("kotlin.Char")?, i + 1)),
+            Tok::LParen => {
+                let close = lx.matching[i].filter(|&c| c > i)?;
+                Some((self.infer(u, i + 1, close)?, close + 1))
+            }
+            Tok::Ident => {
+                let word = &src[t.span()];
+                match word {
+                    "true" | "false" => Some((self.std_ty("kotlin.Boolean")?, i + 1)),
+                    "null" => None,
+                    "this" => {
+                        let label = (lx.kind(i + 1) == Some(Tok::LabelRef)).then(|| lx.text(src, i + 1));
+                        let next = if label.is_some() { i + 2 } else { i + 1 };
+                        Some((self.this_ty(u, t.start, label)?, next))
+                    }
+                    "super" => {
+                        let decl = self.decl_containing(u, t.start)?;
+                        let class = self.enclosing_class(u, decl)?;
+                        let st = file.decls[class].supertypes.first()?;
+                        let ty = self.ty_of_ref(st, Ctx { unit: u, decl: Some(class) }, &Subst::new())?;
+                        Some((ty, if lx.kind(i + 1) == Some(Tok::LabelRef) { i + 2 } else { i + 1 }))
+                    }
+                    "if" => {
+                        let lp = i + 1;
+                        let close = lx.matching.get(lp).copied().flatten()?;
+                        let branch = close + 1;
+                        let ty = if lx.kind(branch) == Some(Tok::LBrace) {
+                            self.block_result(u, branch)
+                        } else {
+                            // The branch ends at its `else`.
+                            let end = syntax::expr_end(src, lx, branch, b);
+                            let mut k = branch;
+                            while k < end && !lx.is(src, k, "else") {
+                                k = match lx.kind(k) {
+                                    Some(Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen) => {
+                                        lx.matching[k].filter(|&c| c > k).map_or(end, |c| c + 1)
+                                    }
+                                    _ => k + 1,
+                                };
+                            }
+                            self.infer(u, branch, k.min(end))
+                        };
+                        Some((ty?, b))
+                    }
+                    "object" => {
+                        let d = file.decls.iter().position(|d| d.kind == Kind::Object && d.name.is_empty() && d.name_span == t.span())?;
+                        let st = file.decls[d].supertypes.first()?;
+                        let ty = self.ty_of_ref(st, Ctx { unit: u, decl: Some(d) }, &Subst::new())?;
+                        let next = file.decls[d].body.map(|s| file.scopes[s].range.end).map_or(b, |end| lx.at_or_after(end));
+                        Some((ty, next))
+                    }
+                    _ if HARD_KEYWORDS.contains(&word) => None,
+                    _ => self.name_ref(u, i, b),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn enclosing_class(&self, u: UnitId, mut decl: DeclId) -> Option<DeclId> {
+        let file = self.file(u);
+        loop {
+            if file.decls[decl].kind.is_class() {
+                return Some(decl);
+            }
+            decl = file.decls[decl].parent?;
+        }
+    }
+
+    /// The type of the last expression of the block whose `{` is `brace`.
+    fn block_result(&self, u: UnitId, brace: usize) -> Option<Ty> {
+        // Blocks and lambdas end alike.
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let close = lx.matching[brace].filter(|&c| c > brace)?;
+        let mut last = brace + 1;
+        let mut i = brace + 1;
+        while i < close {
+            let e = syntax::expr_end(src, lx, i, close);
+            if e >= close {
+                break;
+            }
+            i = if lx.kind(e) == Some(Tok::Semi) { e + 1 } else { e.max(i + 1) };
+            if i < close {
+                last = i;
+            }
+        }
+        self.infer(u, last, close)
+    }
+
+    /// A name used as an expression at token `i`: a value, a call, a class or a package.
+    fn name_ref(&self, u: UnitId, i: usize, b: usize) -> Option<(Ty, usize)> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let name = lx.text(src, i);
+        let found = self.resolve_name(u, lx.tokens[i].start, name);
+        let mut j = i + 1;
+        let targs = self.explicit_type_args(u, j);
+        if let Some((_, next)) = &targs {
+            j = *next;
+        }
+        let is_call = matches!(lx.kind(j), Some(Tok::LParen)) && !lx.tokens[j].nl
+            || matches!(lx.kind(j), Some(Tok::LBrace)) && !lx.tokens[j].nl
+            || lx.kind(j) == Some(Tok::Label) && lx.kind(j + 1) == Some(Tok::LBrace);
+        if found.is_empty() {
+            return self.has_package(name).then(|| (Ty::Package(name.to_owned()), j));
+        }
+        if is_call {
+            let (args, next) = self.call_args(u, j, b);
+            let ty = self.call_found(u, &found, &args, targs.map(|t| t.0).unwrap_or_default());
+            return Some((ty?, next));
+        }
+        let ty = found.iter().find_map(|f| match f {
+            Found::It { unit, brace } => self.lambda_ctx(*unit, *brace).and_then(|c| c.params.first().cloned().flatten()),
+            Found::Sym(m) => {
+                let d = self.decl(m.sym);
+                (d.kind != Kind::Function).then(|| self.value_ty(m.sym, &m.subst)).flatten()
+            }
+        })?;
+        Some((ty, j))
+    }
+
+    /// `<String, Int>` at `j` in an expression: the types and the token after them.
+    fn explicit_type_args(&self, u: UnitId, j: usize) -> Option<(Vec<Option<Ty>>, usize)> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        if lx.kind(j) != Some(Tok::Lt) {
+            return None;
+        }
+        let gt = matching_gt(lx, j)?;
+        let decl = self.decl_containing(u, lx.tokens[j].start);
+        let mut out = Vec::new();
+        let mut k = j + 1;
+        while k < gt {
+            let start = k;
+            let mut depth = 0;
+            while k < gt && !(depth == 0 && lx.kind(k) == Some(Tok::Comma)) {
+                match lx.kind(k) {
+                    Some(Tok::Lt) => depth += 1,
+                    Some(Tok::Gt) => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            let name: String =
+                (start..k).take_while(|&t| matches!(lx.kind(t), Some(Tok::Ident | Tok::Dot))).map(|t| lx.text(src, t)).collect();
+            let ty = self.resolve_type(Ctx { unit: u, decl }, &name).map(|s| self.instance(s));
+            out.push(ty);
+            k += 1;
+        }
+        Some((out, gt + 1))
+    }
+
+    /// What a call of one of `found` returns, choosing the overload by the number of arguments.
+    fn call_found(&self, u: UnitId, found: &[Found], args: &[Arg], targs: Vec<Option<Ty>>) -> Option<Ty> {
+        let members: Vec<&Member> = found.iter().filter_map(|f| if let Found::Sym(m) = f { Some(m) } else { None }).collect();
+        let m = self.pick_overload(&members, args.len())?;
+        self.call_ret(u, m, args, &targs)
+    }
+
+    /// Among candidates for a call with `argc` arguments, the best match.
+    pub fn pick_overload<'m>(&self, members: &[&'m Member], argc: usize) -> Option<&'m Member> {
+        let callable = |m: &Member| {
+            let d = self.decl(m.sym);
+            d.kind == Kind::Function || d.kind.is_class() || d.kind == Kind::Constructor || d.kind.is_value()
+        };
+        let fits = |m: &Member| {
+            let d = self.decl(m.sym);
+            let decls = &self.file(m.sym.unit_id()).decls;
+            let required = d.params.iter().filter(|&&p| !decls[p].has_default && !decls[p].vararg).count();
+            let vararg = d.params.iter().any(|&p| decls[p].vararg);
+            d.kind == Kind::Function && argc >= required && (vararg || argc <= d.params.len())
+        };
+        members.iter().copied().find(|m| fits(m)).or_else(|| members.iter().copied().find(|m| callable(m)))
+    }
+
+    /// What calling `m` with `args` returns: a function's return type, a class's instance.
+    pub fn call_ret(&self, u: UnitId, m: &Member, args: &[Arg], targs: &[Option<Ty>]) -> Option<Ty> {
+        let d = self.decl(m.sym);
+        let mut subst = m.subst.clone();
+        for (tp, ta) in d.type_params.iter().zip(targs) {
+            if let Some(t) = ta {
+                subst.insert(tp.name.clone(), t.clone());
+            }
+        }
+        match d.kind {
+            Kind::Function => {
+                self.bind_args(m, &mut subst, u, args, false);
+                self.value_ty(m.sym, &subst)
+            }
+            Kind::Object | Kind::Companion => self.call_member(&self.instance(m.sym), "invoke", u),
+            k if k.is_class() => {
+                // A constructor call: bind the class's type parameters from the primary
+                // constructor's arguments.
+                let ctor = Member { sym: m.sym, subst: subst.clone() };
+                self.bind_args(&ctor, &mut subst, u, args, false);
+                let args = d.type_params.iter().map(|p| subst.get(&p.name).cloned()).collect();
+                Some(Ty::Class { sym: m.sym, args, nullable: false })
+            }
+            Kind::TypeAlias => {
+                let target = self.value_ty(m.sym, &subst)?;
+                match target {
+                    Ty::Static(s) => Some(self.instance(s)),
+                    t => Some(t),
+                }
+            }
+            _ => match self.value_ty(m.sym, &subst)? {
+                Ty::Func { ret, .. } => ret.map(|r| *r),
+                other => self.call_member(&other, "invoke", u),
+            },
+        }
+    }
+
+    /// `.name` on `cur` at token `name_tok`: its type and the token after it (and after the call).
+    fn member_access(&self, u: UnitId, cur: &Ty, name_tok: usize, b: usize) -> Option<(Ty, usize)> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let name = lx.text(src, name_tok);
+        let mut j = name_tok + 1;
+        let targs = self.explicit_type_args(u, j);
+        if let Some((_, next)) = &targs {
+            j = *next;
+        }
+        let is_call = matches!(lx.kind(j), Some(Tok::LParen | Tok::LBrace)) && !lx.tokens[j].nl;
+        if let Ty::Package(p) = cur {
+            let fq = format!("{p}.{name}");
+            if let Some(class) = self.best_type(self.by_fq(&fq).into_iter().filter(|&s| is_type_decl(self.decl(s)))) {
+                if is_call {
+                    let (args, next) = self.call_args(u, j, b);
+                    return Some((self.call_ret(u, &Member::plain(class), &args, &[])?, next));
+                }
+                return Some((self.value_ty(class, &Subst::new())?, j));
+            }
+            if self.has_package(&fq) {
+                return Some((Ty::Package(fq), j));
+            }
+            let members: Vec<Member> = self.by_fq(&fq).into_iter().map(Member::plain).collect();
+            let found: Vec<Found> = members.into_iter().map(Found::Sym).collect();
+            if is_call {
+                let (args, next) = self.call_args(u, j, b);
+                return Some((self.call_found(u, &found, &args, Vec::new())?, next));
+            }
+            let Found::Sym(m) = found.first()? else { return None };
+            return Some((self.value_ty(m.sym, &m.subst)?, j));
+        }
+        let members = self.members_named(cur, name, u);
+        if is_call {
+            let (args, next) = self.call_args(u, j, b);
+            let refs: Vec<&Member> = members.iter().collect();
+            let m = self.pick_overload(&refs, args.len())?;
+            let ty = self.call_ret(u, m, &args, &targs.map(|t| t.0).unwrap_or_default())?;
+            return Some((ty, next));
+        }
+        let m = members.iter().find(|m| self.decl(m.sym).kind != Kind::Function)?;
+        Some((self.value_ty(m.sym, &m.subst)?, j))
+    }
+}
+
+fn is_type_decl(d: &Decl) -> bool {
+    d.kind.is_class() || d.kind == Kind::TypeAlias
+}
+
+/// Functions and values differ; property-like kinds share a key.
+fn value_kind(kind: Kind) -> u8 {
+    match kind {
+        Kind::Function | Kind::Constructor => 0,
+        k if k.is_value() => 1,
+        _ => 2,
+    }
+}
+
+pub fn nullable(ty: Ty, nullable: bool) -> Ty {
+    match ty {
+        Ty::Class { sym, args, nullable: n } => Ty::Class { sym, args, nullable: n || nullable },
+        t => t,
+    }
+}
+
+pub fn strip_nullable(ty: Ty) -> Ty {
+    match ty {
+        Ty::Class { sym, args, .. } => Ty::Class { sym, args, nullable: false },
+        t => t,
+    }
+}
+
+/// Whether token `k` can end an operand (for spotting infix calls and binary operators).
+fn is_operand_end(src: &str, lx: &Lexed, k: usize) -> bool {
+    match lx.tokens[k].kind {
+        Tok::Ident => {
+            !HARD_KEYWORDS.contains(&&src[lx.tokens[k].span()]) || matches!(&src[lx.tokens[k].span()], "this" | "true" | "false" | "null")
+        }
+        Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::StrClose | Tok::Int | Tok::Float | Tok::Char | Tok::BangBang | Tok::LabelRef => {
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The `<` that the `>` at `gt` closes, when it encloses only type syntax.
+pub fn matching_lt(lx: &Lexed, gt: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut k = gt;
+    loop {
+        match lx.kind(k)? {
+            Tok::Gt => depth += 1,
+            Tok::Lt => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            Tok::Ident | Tok::Dot | Tok::Comma | Tok::Question | Tok::LParen | Tok::RParen | Tok::Arrow | Tok::ColonColon => {}
+            Tok::Op if lx.tokens[k].end - lx.tokens[k].start == 1 => {}
+            _ => return None,
+        }
+        k = k.checked_sub(1)?;
+    }
+}
+
+/// The `>` closing type arguments at `lt`, when what follows makes them type arguments (a
+/// call, a callable reference, a member access or the end of a type).
+pub fn matching_gt(lx: &Lexed, lt: usize) -> Option<usize> {
+    let mut depth = 0;
+    for k in lt..lx.tokens.len().min(lt + 64) {
+        match lx.kind(k)? {
+            Tok::Lt => depth += 1,
+            Tok::Gt => {
+                depth -= 1;
+                if depth == 0 {
+                    return matches!(lx.kind(k + 1), Some(Tok::LParen | Tok::ColonColon | Tok::Dot | Tok::LBrace) | None)
+                        .then_some(k)
+                        .filter(|_| !lx.tokens.get(k + 1).is_some_and(|t| t.nl && t.kind == Tok::LBrace));
+                }
+            }
+            Tok::Ident | Tok::Dot | Tok::Comma | Tok::Question | Tok::Arrow | Tok::Colon => {}
+            Tok::LParen | Tok::RParen => {}
+            Tok::Op if lx.tokens[k].end - lx.tokens[k].start == 1 => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The `(` of the call whose arguments contain token `p`.
+fn enclosing_paren(lx: &Lexed, p: usize) -> Option<usize> {
+    let mut k = p;
+    while k > 0 {
+        k -= 1;
+        match lx.tokens[k].kind {
+            Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::StrClose => k = lx.matching[k].filter(|&o| o < k)?,
+            Tok::LParen => return Some(k),
+            Tok::LBrace | Tok::LBracket | Tok::Semi => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The bracket depth of token `i` relative to `from`.
+fn depth_between(lx: &Lexed, from: usize, i: usize) -> i32 {
+    let mut depth = 0;
+    for k in from..i {
+        match lx.tokens[k].kind {
+            Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen | Tok::TemplateOpen => depth += 1,
+            Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::StrClose => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// The first token of the receiver expression that ends before token `end`: `a.b(c)[0]!!`.
+pub fn chain_start(src: &str, lx: &Lexed, end: usize) -> usize {
+    let mut i = end;
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        let t = i - 1;
+        match lx.tokens[t].kind {
+            Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::StrClose => match lx.matching[t] {
+                Some(o) if o < t => {
+                    i = o;
+                    // A string, parenthesized expression or lambda may start the chain.
+                    if lx.tokens[t].kind == Tok::StrClose {
+                        if o > 0 && matches!(lx.kind(o - 1), Some(Tok::Dot | Tok::SafeDot)) {
+                            i = o - 1;
+                        } else {
+                            return o;
+                        }
+                    }
+                    continue;
+                }
+                _ => return i,
+            },
+            Tok::Gt => match matching_lt(lx, t) {
+                Some(lt) if lt > 0 && lx.kind(lt - 1) == Some(Tok::Ident) => i = lt,
+                _ => return i,
+            },
+            Tok::BangBang => i = t,
+            Tok::LabelRef => i = t,
+            Tok::Ident | Tok::Int | Tok::Float | Tok::Char => {
+                let word = &src[lx.tokens[t].span()];
+                if lx.tokens[t].kind == Tok::Ident
+                    && HARD_KEYWORDS.contains(&word)
+                    && !matches!(word, "this" | "super" | "null" | "true" | "false")
+                {
+                    return i;
+                }
+                i = t;
+                if t > 0 && matches!(lx.kind(t - 1), Some(Tok::Dot | Tok::SafeDot)) {
+                    i = t - 1;
+                    continue;
+                }
+                return i;
+            }
+            Tok::Dot | Tok::SafeDot => {
+                // Directly after a closing bracket: `foo().bar`.
+                i = t;
+                continue;
+            }
+            _ => return i,
+        }
+    }
+}

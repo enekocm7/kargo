@@ -626,21 +626,22 @@ The output has a `"version": 1` field and is described in [Machine-readable outp
 
 ## `kargo lsp`
 
-Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover, Maven coordinates and versions, hints at newer versions, code actions that make the edits of `kargo add`, `kargo target add` and `kargo upgrade`) and the `kargo/runnables` request itself, and passes Kotlin code to a Kotlin language server it downloads on first use and describes the project to.
+Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover, Maven coordinates and versions, hints at newer versions, code actions that make the edits of `kargo add`, `kargo target add` and `kargo upgrade`) and the `kargo/runnables` request itself. Kotlin code goes to [Kargo's own Kotlin server](../../guides/kotlin-server/), built into `kargo` (completion, hover, go to definition, references and rename), or to a Kotlin language server Kargo downloads on first use and describes the project to.
 
 ```sh
-kargo lsp                       # JetBrains' Kotlin LSP behind Kargo's server
+kargo lsp                       # Kargo's own Kotlin server
+kargo lsp --server kotlin-lsp   # JetBrains' Kotlin LSP behind Kargo's server
 kargo lsp --server kls          # fwcd's kotlin-language-server instead
 kargo lsp --server none         # kargo.toml support and runnables only
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--server <name>` | `kotlin-lsp` | The Kotlin language server: `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
-| `--server-path <path>` | | Run this server executable instead of the one Kargo downloads |
+| `--server <name>` | `kargo` | The Kotlin language server: `kargo` (built in), `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
+| `--server-path <path>` | | Run this server executable instead of the one Kargo downloads. It is a Kotlin LSP unless `--server kls` says otherwise |
 | `--klib-targets` | | Also describe Wasm and Native sources to the Kotlin LSP. The pinned Kotlin LSP can't read klibs yet, so their libraries don't resolve. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
 
-With `{ "checkOnSave": true }` in the editor's `initializationOptions`, saving a Kotlin or Java file runs `kargo check` in the background and adds its diagnostics for every target to the Kotlin server's; `checkTargets` limits the targets. See [Check on save](../../guides/editors/#check-on-save).
+With check on save, saving a Kotlin or Java file runs `kargo check` in the background and adds its diagnostics for every target to the Kotlin server's; `checkTargets` limits the targets. It is on with Kargo's own server and needs `{ "checkOnSave": true }` in the editor's `initializationOptions` with the others. See [Check on save](../../guides/editors/#check-on-save).
 
 Editors that pass `--stdio` may keep it; Kargo always uses stdio. The exit code is 0 after `shutdown` and `exit`, 1 if the editor exits without `shutdown`. See [Editor integration](../../guides/editors/#language-server) for editor setups, the files it writes, the [code actions](../../guides/editors/#code-actions-in-kargotoml) and the `kargo/runnables` request.
 

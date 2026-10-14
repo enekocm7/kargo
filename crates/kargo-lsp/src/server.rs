@@ -42,11 +42,33 @@ use kargo_util::config::Config;
 use crate::jsonrpc::{self, Kind};
 use crate::{actions, check, deps, manifest, project, text};
 
+/// The Kotlin language server behind `kargo lsp`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KotlinServer {
+    /// None: only `kargo.toml` support and runnables.
+    #[default]
+    None,
+    /// Kargo's own server, written in Rust and run in-process (see [`crate::kotlin`]).
+    Kargo,
+    /// A Kotlin language server Kargo downloads and runs.
+    External(ServerKind),
+}
+
+impl KotlinServer {
+    /// The server Kargo downloads and runs, if it is one.
+    pub fn external(self) -> Option<ServerKind> {
+        match self {
+            KotlinServer::External(kind) => Some(kind),
+            _ => None,
+        }
+    }
+}
+
 /// How `kargo lsp` runs.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// The Kotlin language server behind Kargo's; `None` serves only `kargo.toml` and runnables.
-    pub server: Option<ServerKind>,
+    /// The Kotlin language server behind Kargo's.
+    pub server: KotlinServer,
     /// Runs this executable as the server instead of the one Kargo manages.
     pub server_path: Option<PathBuf>,
     /// Which targets `workspace.json` describes to the Kotlin LSP.
@@ -651,7 +673,8 @@ impl Server {
         self.client_apply_edit = params["capabilities"]["workspace"]["applyEdit"] == true;
         self.client_refresh = params["capabilities"]["workspace"]["diagnostics"]["refreshSupport"] == true;
         self.client_label_details = params["capabilities"]["textDocument"]["completion"]["completionItem"]["labelDetailsSupport"] == true;
-        self.check = check::Settings::from_options(&params["initializationOptions"]);
+        // Kargo's own server reports no compiler errors, so `kargo check` does on save.
+        self.check = check::Settings::from_options(&params["initializationOptions"], self.opts.server == KotlinServer::Kargo);
         let dir = params["rootUri"]
             .as_str()
             .and_then(text::uri_to_path)
@@ -661,7 +684,7 @@ impl Server {
         self.root = dir.as_deref().and_then(project::project_root);
 
         // Import before the backend starts, so it finds the project description right away.
-        let kind = self.opts.server;
+        let kind = self.opts.server.external();
         let mut metadata: Option<Value> = None;
         let mut imported = false;
         if let Some(root) = self.root.clone() {
@@ -680,6 +703,10 @@ impl Server {
                 self.report_import(&outcome, true)?;
                 metadata = outcome.metadata;
             }
+        }
+        if self.backend.is_none() && self.opts.server == KotlinServer::Kargo {
+            let (reader, writer) = crate::kotlin::spawn(self.config.clone());
+            self.attach(reader, writer, None);
         }
         if self.backend.is_none()
             && let Some(kind) = kind
@@ -859,7 +886,7 @@ impl Server {
             self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })))?;
             self.progress = Some(Progress { token, create_id, begun: false });
         }
-        let (config, tx, kind, targets) = (self.config.clone(), self.tx.clone(), self.opts.server, self.opts.targets);
+        let (config, tx, kind, targets) = (self.config.clone(), self.tx.clone(), self.opts.server.external(), self.opts.targets);
         thread::spawn(move || {
             let outcome = project::import(&config, &root, kind, targets);
             // Keep the Zed tasks `kargo ide --zed` wrote current too.
@@ -1387,6 +1414,65 @@ mod tests {
     }
 
     #[test]
+    fn serves_kotlin_with_kargos_own_server() {
+        let dir = project(MANIFEST);
+        std::fs::create_dir_all(dir.path().join("src/model")).unwrap();
+        std::fs::write(dir.path().join("src/model/User.kt"), "package model\n\n/** A user. */\nclass User(val name: String)\n").unwrap();
+        let root = text::path_to_uri(dir.path());
+        let main = dir.path().join("src/Main.kt");
+        let uri = text::path_to_uri(&main);
+        let opts = Options { server: KotlinServer::Kargo, ..Options::default() };
+        let (mut editor, _home) = Editor::start(opts, None);
+        let (init, _) = editor.request(1, "initialize", json!({ "rootUri": root, "capabilities": {} }));
+        let caps = &init["result"]["capabilities"];
+        assert_eq!(caps["definitionProvider"], true);
+        assert_eq!(caps["renameProvider"]["prepareProvider"], true);
+        assert_eq!(caps["experimental"]["kargo"]["runnables"], true, "Kargo's own capabilities are merged in");
+        editor.send(jsonrpc::notification("initialized", json!({})));
+        let text = "import model.User\n\nfun main() {\n    val user = User(\"a\")\n    printl\n    user.\n}\n";
+        editor.send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }),
+        ));
+        let labels = |editor: &mut Editor, id: i64, line: u32, character: u32| -> Vec<String> {
+            let (reply, _) = editor.request(
+                id,
+                "textDocument/completion",
+                json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
+            );
+            reply["result"]["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_owned()).collect()
+        };
+        let members = labels(&mut editor, 2, 5, 9);
+        assert!(members.contains(&"name".to_owned()) && members.contains(&"toString".to_owned()), "{members:?}");
+        let names = labels(&mut editor, 3, 4, 10);
+        assert!(names.contains(&"println".to_owned()), "{names:?}");
+
+        let at =
+            |line: u32, character: u32| json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } });
+        let (hover, _) = editor.request(4, "textDocument/hover", at(3, 16));
+        let hover = hover["result"]["contents"]["value"].as_str().unwrap().to_owned();
+        assert!(hover.contains("class User(val name: String)") && hover.contains("A user."), "{hover}");
+        let (definition, _) = editor.request(5, "textDocument/definition", at(3, 16));
+        assert!(definition["result"][0]["uri"].as_str().unwrap().ends_with("src/model/User.kt"), "{definition}");
+        assert_eq!(definition["result"][0]["range"]["start"], json!({ "line": 3, "character": 6 }));
+
+        let (rename, _) = editor.request(
+            6,
+            "textDocument/rename",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": 3, "character": 16 }, "newName": "Person" }),
+        );
+        let changes = rename["result"]["changes"].as_object().unwrap();
+        assert_eq!(changes.len(), 2, "{changes:?}");
+        assert_eq!(changes[&uri].as_array().unwrap().len(), 2, "the import and the call");
+        let (library, _) = editor.request(7, "textDocument/prepareRename", at(3, 9));
+        assert_eq!(library["result"]["placeholder"], "user");
+
+        let (runnables, _) = editor.request(8, "kargo/runnables", json!({}));
+        assert!(runnables["result"].as_array().is_some_and(|r| !r.is_empty()));
+        assert!(editor.finish(), "shutdown, then exit");
+    }
+
+    #[test]
     fn completes_versions_and_hints_at_newer_ones() {
         let dir = tempfile::tempdir().unwrap();
         let meta = dir.path().join("repo/com/acme/widget");
@@ -1543,7 +1629,7 @@ local = \"{url}\"
         let shows_label_details = json!({ "textDocument": { "completion": { "completionItem": { "labelDetailsSupport": true } } } });
         for (capabilities, expected) in [(json!({}), Some("(message: Int) (kotlin.io)")), (shows_label_details, None)] {
             let (backend, _seen) = fake_backend();
-            let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+            let opts = Options { server: KotlinServer::External(ServerKind::KotlinLsp), ..Options::default() };
             let (mut editor, _home) = Editor::start(opts, Some(backend));
             editor.request(1, "initialize", json!({ "rootUri": root, "capabilities": capabilities }));
             let (reply, _) = editor.request(2, "textDocument/completion", completion.clone());
@@ -1561,7 +1647,7 @@ local = \"{url}\"
         let manifest_uri = text::path_to_uri(&dir.path().join("kargo.toml"));
         let kotlin_uri = text::path_to_uri(&dir.path().join("src/Main.kt"));
         let (backend, seen) = fake_backend();
-        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+        let opts = Options { server: KotlinServer::External(ServerKind::KotlinLsp), ..Options::default() };
         let (mut editor, _home) = Editor::start(opts, Some(backend));
 
         // Opened below the project root, as editors do for a workspace member.
@@ -1620,7 +1706,7 @@ local = \"{url}\"
             drop(to_kargo);
         });
         let backend: BackendIo = (Box::new(BufReader::new(from_backend)), Box::new(to_backend));
-        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+        let opts = Options { server: KotlinServer::External(ServerKind::KotlinLsp), ..Options::default() };
         let (mut editor, _home) = Editor::start(opts, Some(backend));
         let (init, _) = editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} }));
         assert_eq!(init["result"]["capabilities"], own_capabilities());
@@ -1762,7 +1848,7 @@ local = \"{url}\"
         let passing = vec![json!({ "reason": "build-finished", "success": true })];
         let stale = compiler_message(&common, 1, "wasm", "stale");
         let (runner, gate, runs) = gated_runner(vec![failing, passing], stale);
-        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+        let opts = Options { server: KotlinServer::External(ServerKind::KotlinLsp), ..Options::default() };
         let (mut editor, _home) = Editor::start_with(opts, Some(diagnosing_backend(false)), runner);
         let params = json!({
             "rootUri": text::path_to_uri(dir.path()),
@@ -1814,7 +1900,7 @@ local = \"{url}\"
             json!({ "reason": "build-finished", "success": false }),
         ];
         let (runner, gate, runs) = gated_runner(vec![failing], Value::Null);
-        let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+        let opts = Options { server: KotlinServer::External(ServerKind::KotlinLsp), ..Options::default() };
         let (mut editor, _home) = Editor::start_with(opts, Some(diagnosing_backend(true)), runner);
         let capabilities = json!({ "workspace": { "diagnostics": { "refreshSupport": true } } });
         let params = json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": capabilities, "initializationOptions": { "checkOnSave": true } });

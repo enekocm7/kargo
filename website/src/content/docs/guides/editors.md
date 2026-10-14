@@ -5,18 +5,18 @@ description: Pick an editor for Kargo projects. IntelliJ IDEA and Android Studio
 
 Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a language server, a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
 
-**Use IntelliJ IDEA or Android Studio with the Kargo plugin if you can.** It is the best supported way to work on a Kargo project. Kotlin is developed by JetBrains, and IntelliJ IDEA has the most complete support for the language: its own analysis, refactorings, debugger and test tree. The plugin imports your project into that support, so your dependencies resolve and Run, Test and Debug work from the IDE. Zed and the other editors run `kargo lsp` instead. The Kotlin language server it starts analyzes JVM code only for now, and those editors have no test tree.
+**Use IntelliJ IDEA or Android Studio with the Kargo plugin if you can.** It is the best supported way to work on a Kargo project. Kotlin is developed by JetBrains, and IntelliJ IDEA has the most complete support for the language: its own analysis, refactorings, debugger and test tree. The plugin imports your project into that support, so your dependencies resolve and Run, Test and Debug work from the IDE. Zed and the other editors run `kargo lsp` instead, with [Kargo's own Kotlin server](../kotlin-server/): completion, navigation and rename for every target, but not the compiler's full analysis, and those editors have no test tree.
 
 ## Which editor to use
 
 | Editor | Set up with | Kotlin code | Run, test and debug |
 |---|---|---|---|
 | IntelliJ IDEA, Android Studio | The [Kargo plugin](#intellij-idea-and-android-studio) | The IDE's own Kotlin support, with your dependencies imported. JVM, Kotlin/Native and Wasm modules | Run configurations, Run and Debug icons, a test tree and the JVM debugger |
-| Zed | The [Kargo extension](#zed) | `kargo lsp`, which analyzes JVM code only | Run buttons from `kargo ide --zed`, debugging through `kargo dap`, and test results in the terminal |
-| Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp`, which analyzes JVM code only | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
-| Emacs and other LSP clients | `kargo lsp` | `kargo lsp`, which analyzes JVM code only | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
+| Zed | The [Kargo extension](#zed) | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Run buttons from `kargo ide --zed`, debugging through `kargo dap`, and test results in the terminal |
+| Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
+| Emacs and other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
 
-Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). The language server that `kargo lsp` runs can't read Kotlin/Native and Wasm libraries yet, so code in `src-native/` and `src-wasm/` gets no code intelligence outside IntelliJ IDEA (see [Multiplatform projects](#multiplatform-projects)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
+Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with the standard library and the libraries whose sources jars you fetched; it doesn't know Java classes (see [its limits](../kotlin-server/#limits)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
 
 ## IntelliJ IDEA and Android Studio
 
@@ -213,11 +213,11 @@ If it can't find Kargo, the Kargo language server fails to start with a message 
 
 When you open a Kotlin file or `kargo.toml` in a folder with a `kargo.toml` at its root, Zed starts `kargo lsp` there. You get everything listed in [Editor integration](#language-server):
 
-- Completion, go to definition (into library sources once you run `kargo fetch --sources`), find references, hover, rename, quick fixes and formatting in Kotlin files, from JetBrains' Kotlin LSP. Kargo describes your project to it from `kargo.toml`, and again when `kargo.toml` or `kargo.lock` change.
+- Completion, hover, go to definition (into the standard library, and into library sources once you run `kargo fetch --sources`), find references and rename in Kotlin files, from [Kargo's Kotlin server](../kotlin-server/). It reads your project the way `kargo build` compiles it, and again when `kargo.toml` or `kargo.lock` change.
 - Completion, documentation, validation and quick fixes in `kargo.toml`, with Maven coordinate and version completion and hints at newer versions. The quick fixes add dependencies, frameworks and targets the way `kargo add` and `kargo target add` do.
 - [Check on save](#check-on-save): when you save a Kotlin file, the errors of `kargo check` for every target appear in the editor and in *diagnostics: deploy*. The extension turns it on.
 
-The first start downloads the Kotlin LSP and resolves your dependencies, so it takes a while.
+The first start downloads the standard library's sources, which takes a moment. To use JetBrains' Kotlin LSP instead, add `"--server", "kotlin-lsp"` to `binary.arguments` (see [Zed settings](#zed-settings)); its first start downloads the server and resolves your dependencies, so it takes a while.
 
 Zed's Kotlin extension brings its own Kotlin language servers, which don't know your dependencies. Use Kargo's instead:
 
@@ -241,7 +241,7 @@ Put this in the project's `.zed/settings.json` to change only Kargo projects.
 {
   "lsp": {
     "kargo": {
-      "binary": { "arguments": ["--server", "kls"] },
+      "binary": { "arguments": ["--server", "kotlin-lsp"] },
       "initialization_options": { "checkOnSave": true, "checkTargets": ["wasm", "native"] }
     }
   }
@@ -251,7 +251,7 @@ Put this in the project's `.zed/settings.json` to change only Kargo projects.
 | Setting | Default | Meaning |
 |---|---|---|
 | `binary.path` | the `kargo` on `PATH` | The `kargo` to run |
-| `binary.arguments` | none | Added after `kargo lsp`: [`--server kls`, `--server none`, `--klib-targets`](#choosing-the-kotlin-server) |
+| `binary.arguments` | none | Added after `kargo lsp`: [`--server kotlin-lsp`, `--server kls`, `--server none`, `--klib-targets`](#choosing-the-kotlin-server) |
 | `binary.env` | none | Environment variables for `kargo lsp` |
 | `initialization_options.checkOnSave` | `true` | Run `kargo check` when a Kotlin or Java file is saved |
 | `initialization_options.checkTargets` | every enabled target | The targets check on save compiles |
@@ -368,15 +368,15 @@ kargo lsp
 
 It speaks LSP over stdin and stdout and gives you:
 
-- **Kotlin code intelligence** (completion, go to definition, references, hover, rename, quick fixes, diagnostics) from [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp). Kargo downloads the server on first use, describes your project to it, and passes Kotlin traffic through unchanged, with one exception: an editor that doesn't show a completion item's `labelDetails` gets the signature as the item's `detail`, so each overload of `print` shows its own parameters instead of a bare `print` repeated.
+- **Kotlin code intelligence** (completion, hover, go to definition, references, rename, symbols) from [Kargo's Kotlin server](../kotlin-server/), built into `kargo`. Nothing is downloaded but the standard library's sources, and it needs no JDK. With [`--server kotlin-lsp`](#choosing-the-kotlin-server), JetBrains' Kotlin LSP gives it instead, with the compiler's own analysis: Kargo downloads that server on first use, describes your project to it, and passes Kotlin traffic through unchanged, with one exception: an editor that doesn't show a completion item's `labelDetails` gets the signature as the item's `detail`, so each overload of `print` shows its own parameters instead of a bare `print` repeated.
 - **`kargo.toml` support**: completion of keys, tables and values, documentation on hover, and errors as you type. Errors come from the [JSON Schema](#completion-and-validation-in-kargotoml) first (unknown keys with a "did you mean", wrong types, invalid values), then from Kargo's own validation and [warnings](../../reference/warnings/), the same messages `kargo build` prints.
 - **Dependencies in `kargo.toml`**: completion of `group:artifact` coordinates from Maven Central and of versions from your repositories, and a hint on every dependency with a newer version. See [Dependency completion and update hints](#dependency-completion-and-update-hints).
 - **Code actions in `kargo.toml`**: quick fixes for its errors, and the edits of `kargo add`, `kargo add --framework`, `kargo target add` and `kargo upgrade` from the editor. See [Code actions in `kargo.toml`](#code-actions-in-kargotoml).
-- **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
+- **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later (with Kargo's own server, once its sources jar is fetched).
 - **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
-- **Check on save** (opt-in): when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear next to the Kotlin server's. See [Check on save](#check-on-save).
+- **Check on save**: when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear in the editor. It is on with Kargo's own server, which reports no errors of its own, and opt-in with the others. See [Check on save](#check-on-save).
 
-The first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
+With `--server kotlin-lsp`, the first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
 
 
 :::note
@@ -387,19 +387,21 @@ Open the project root or any directory in it. Kargo finds the project from the f
 
 | Command | Kotlin server |
 |---|---|
-| `kargo lsp` | JetBrains' Kotlin LSP (the default) |
+| `kargo lsp` | [Kargo's Kotlin server](../kotlin-server/) (the default), built in |
+| `kargo lsp --server kargo` | The same, spelled out |
+| `kargo lsp --server kotlin-lsp` | JetBrains' [Kotlin LSP](https://github.com/Kotlin/kotlin-lsp): the Kotlin compiler's analysis, quick fixes and formatting, for JVM code |
 | `kargo lsp --server kls` | fwcd's [kotlin-language-server](https://github.com/fwcd/kotlin-language-server), for setups that still use it. It runs on the project's JDK, or on a Temurin 21 Kargo installs when that is newer than 21 |
 | `kargo lsp --server none` | No Kotlin server: only `kargo.toml` support and runnables |
-| `kargo lsp --server-path <path>` | The server executable at `<path>` instead of the one Kargo downloads |
+| `kargo lsp --server-path <path>` | The server executable at `<path>` instead of the one Kargo downloads: a Kotlin LSP, or a kotlin-language-server with `--server kls` |
 | `kargo lsp --klib-targets` | Also describe Wasm and Native code to the Kotlin LSP. See [Multiplatform projects](#multiplatform-projects) |
 
-kotlin-language-server is no longer maintained and its last release bundles Kotlin 2.1, so it understands code and libraries built with newer Kotlin versions only partly. Prefer the default server.
+Kargo's own server knows your sources and the libraries' sources but is not the Kotlin compiler; see [its limits](../kotlin-server/#limits). The Kotlin LSP analyzes like the compiler, but only JVM code, and it is a large download that runs a JVM. kotlin-language-server is no longer maintained and its last release bundles Kotlin 2.1, so it understands code and libraries built with newer Kotlin versions only partly; prefer the Kotlin LSP over it.
 
-Kargo pins the version of each server and installs it like any other [toolchain](../toolchains/#kotlin-language-servers). `kargo toolchain install kotlin-lsp` downloads it ahead of time; `kargo --offline lsp` uses what is installed and the dependencies already in the cache.
+Kargo pins the version of the Kotlin LSP and kotlin-language-server and installs them like any other [toolchain](../toolchains/#kotlin-language-servers). `kargo toolchain install kotlin-lsp` downloads it ahead of time; `kargo --offline lsp` uses what is installed and the dependencies already in the cache.
 
 ### Files it writes
 
-Kotlin language servers don't read `kargo.toml`, so Kargo writes the project description each one understands at the project root, from [`kargo metadata`](#importing-a-project):
+Kargo's own server reads the project itself and writes nothing. The Kotlin LSP and kotlin-language-server don't read `kargo.toml`, so for them Kargo writes the project description each one understands at the project root, from [`kargo metadata`](#importing-a-project):
 
 | Server | File | Contents |
 |---|---|---|
@@ -413,6 +415,8 @@ When a folder has both, the Kotlin LSP imports an IDE's `.idea/` (IntelliJ) inst
 If the dependencies can't be resolved (offline, a broken `kargo.toml`), Kargo describes the project without them and says why. It imports again once `kargo.toml` or `kargo.lock` change.
 
 ### Multiplatform projects
+
+Kargo's own server reads every target's sources and links `expect` and `actual` declarations, so this section is about the Kotlin LSP; see [How it reads your project](../kotlin-server/#how-it-reads-your-project) for Kargo's.
 
 In a package with several [targets](../multiplatform/), `workspace.json` has a module per source set, the way Gradle describes a Kotlin Multiplatform project to IntelliJ:
 
@@ -430,7 +434,7 @@ The Kotlin LSP analyzes JVM code only. Kargo therefore analyzes `src/` as JVM co
 `kargo lsp --klib-targets` also writes `<name>.wasm.main`, `<name>.native.main` and their test modules, with their klibs and, for Native, the Kotlin/Native distribution's standard and platform libraries. The Kotlin LSP Kargo pins doesn't support them yet: it can't read klibs, so library calls in `src-wasm/` show as unresolved, and it rejects Native modules. Use the option with a newer server (`--server-path`) that supports them. Without a JVM target, `src/` is then analyzed for all of the package's platforms, with no libraries.
 
 :::caution
-Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence from the Kotlin LSP yet. Use Android Studio for Android code. `kargo.toml` support, runnables and check on save work for every target.
+Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence from the Kotlin LSP yet; Kargo's own server, the default, reads it. Use Android Studio for Android code. `kargo.toml` support, runnables and check on save work for every target.
 :::
 
 ### Without `kargo lsp`
@@ -636,7 +640,7 @@ kargo fetch --sources
 
 ## Check on save
 
-The Kotlin server analyzes your code for the JVM, with the compiler plugins and flags it knows about. Errors only the real build finds don't show until you run `kargo build`: type errors in `src-wasm/` or `src-native/`, errors from compiler plugins, and [`warnings-as-errors`](../../reference/manifest/#kotlin) failures. With check on save, `kargo lsp` finds them for you. Turn it on in the editor's `initializationOptions`:
+[Kargo's own Kotlin server](../kotlin-server/) reports no errors, so with it check on save is on: the errors come from `kargo check`, which compiles your code for real. The Kotlin LSP and kotlin-language-server analyze your code for the JVM, with the compiler plugins and flags they know about, so errors only the real build finds don't show until you run `kargo build`: type errors in `src-wasm/` or `src-native/`, errors from compiler plugins, and [`warnings-as-errors`](../../reference/manifest/#kotlin) failures. With check on save, `kargo lsp` finds them for you. Turn it on (or off, with `false`) in the editor's `initializationOptions`:
 
 ```lua title="init.lua"
 vim.lsp.config('kargo', {
@@ -664,7 +668,7 @@ When you save a `.kt` or `.java` file, Kargo runs `kargo check --tests --keep-go
 
 | Option | Default | Meaning |
 |---|---|---|
-| `checkOnSave` | `false` | Run `kargo check` when a Kotlin or Java file is saved |
+| `checkOnSave` | `true` with Kargo's own server, else `false` | Run `kargo check` when a Kotlin or Java file is saved |
 | `checkTargets` | every enabled target | The targets to check, for example `["wasm", "native"]` to leave the JVM to the Kotlin server |
 
 Kargo merges its diagnostics into the Kotlin server's whether that server pushes them (`textDocument/publishDiagnostics`, kotlin-language-server) or the editor pulls them (`textDocument/diagnostic`, the Kotlin LSP). With pulled diagnostics, Kargo asks the editor to pull again with `workspace/diagnostic/refresh` after a check, and pushes the diagnostics of files that aren't open. Android sources are checked through Gradle, whose errors are not converted, so they show only in the log.

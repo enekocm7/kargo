@@ -15,7 +15,11 @@ Yes. Anything on Maven Central or in a repository you add in `[repositories]`, i
 
 ### Does my IDE understand Kargo projects?
 
-IntelliJ IDEA and Android Studio are the best supported editors for Kotlin. Their [Kargo plugin](../../guides/editors/#intellij-idea-and-android-studio) imports the project from `kargo metadata`, so completion and navigation know your dependencies. Zed has an [extension](../../guides/editors/#zed), and other editors can use [`kargo lsp`](../../guides/editors/). For Android, you can open the generated `target/android` project in Android Studio.
+IntelliJ IDEA and Android Studio are the best supported editors for Kotlin. Their [Kargo plugin](../../guides/editors/#intellij-idea-and-android-studio) imports the project from `kargo metadata`, so completion and navigation know your dependencies. Zed has an [extension](../../guides/editors/#zed), and other editors can use [`kargo lsp`](../../guides/editors/), which serves Kotlin with [Kargo's own Kotlin server](../../guides/kotlin-server/). For Android, you can open the generated `target/android` project in Android Studio.
+
+### Completion in my editor doesn't know a library's classes
+
+[Kargo's Kotlin server](../../guides/kotlin-server/#libraries), the default of `kargo lsp`, reads libraries from their sources jars. Run `kargo fetch --sources` and restart the editor's language server. Java classes, including the JDK's, and libraries that publish no sources jar stay unknown to it. For them, use `kargo lsp --server kotlin-lsp`, which reads compiled classes, or IntelliJ IDEA.
 
 ### Can I use Java?
 

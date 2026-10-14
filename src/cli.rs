@@ -292,10 +292,11 @@ enum FormatArg {
 }
 
 /// The Kotlin language server behind `kargo lsp`.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum LspServerArg {
+    /// Kargo's own Kotlin server, built into kargo: no download, no JDK
+    Kargo,
     /// JetBrains' Kotlin LSP
-    #[default]
     KotlinLsp,
     /// fwcd's kotlin-language-server
     Kls,
@@ -798,15 +799,20 @@ kargo.toml or kargo.lock changed. A file Kargo didn't write is never replaced.")
     #[command(long_about = "Run the language server for editors: LSP over stdin and stdout.
 
 Kargo answers for kargo.toml itself (diagnostics, completion and hover from its schema and
-Kargo's own validation) and the `kargo/runnables` request, and passes everything about Kotlin
-code to a Kotlin language server it downloads on first use. It describes the project to that
-server from `kargo metadata` (workspace.json for the Kotlin LSP, kls-classpath for
-kotlin-language-server) and again whenever kargo.toml or kargo.lock change.")]
+Kargo's own validation) and the `kargo/runnables` request. Kotlin code goes to Kargo's own
+Kotlin server by default: built into kargo, it reads your sources as Kargo lays them out and
+the standard library's sources, and gives completion, hover, go to definition, references and
+rename, with `kargo check` errors on save.
+
+With `--server kotlin-lsp` or `--server kls`, Kotlin code goes to that language server instead,
+downloaded on first use. Kargo describes the project to it from `kargo metadata`
+(workspace.json for the Kotlin LSP, kls-classpath for kotlin-language-server) and again
+whenever kargo.toml or kargo.lock change.")]
     Lsp {
-        /// The Kotlin language server: JetBrains' `kotlin-lsp`, fwcd's `kls`, or `none` for kargo.toml support only
-        #[arg(long, value_enum, default_value_t)]
-        server: LspServerArg,
-        /// Run this language server executable instead of the one Kargo downloads
+        /// The Kotlin language server: Kargo's own (`kargo`, the default), JetBrains' `kotlin-lsp`, fwcd's `kls`, or `none` for kargo.toml support only
+        #[arg(long, value_enum)]
+        server: Option<LspServerArg>,
+        /// Run this language server executable instead of the one Kargo downloads (`kotlin-lsp` unless `--server kls`)
         #[arg(long, value_name = "PATH")]
         server_path: Option<PathBuf>,
         /// Also describe Wasm and Native sources to the Kotlin LSP (it doesn't read klibs yet, so their libraries don't resolve)
@@ -1483,13 +1489,16 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             Ok(0)
         }
         Command::Lsp { server, server_path, klib_targets, stdio: _ } => {
+            // A server executable is JetBrains' Kotlin LSP unless `--server` says otherwise.
+            let server = server.unwrap_or(if server_path.is_some() { LspServerArg::KotlinLsp } else { LspServerArg::Kargo });
             let server = match server {
-                LspServerArg::KotlinLsp => Some(ServerKind::KotlinLsp),
-                LspServerArg::Kls => Some(ServerKind::Kls),
-                LspServerArg::None => None,
+                LspServerArg::Kargo => kargo_lsp::KotlinServer::Kargo,
+                LspServerArg::KotlinLsp => kargo_lsp::KotlinServer::External(ServerKind::KotlinLsp),
+                LspServerArg::Kls => kargo_lsp::KotlinServer::External(ServerKind::Kls),
+                LspServerArg::None => kargo_lsp::KotlinServer::None,
             };
-            if server.is_none() && server_path.is_some() {
-                bail!("`--server-path` needs a Kotlin language server; use `--server kotlin-lsp` or `--server kls`");
+            if server.external().is_none() && server_path.is_some() {
+                bail!("`--server-path` runs a Kotlin language server Kargo downloads; use `--server kotlin-lsp` or `--server kls` with it");
             }
             let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
             let opts = kargo_lsp::Options { server, server_path, targets, builtin_commands: builtin_commands(), search_url: None };

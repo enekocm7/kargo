@@ -523,11 +523,13 @@ dependencies = [
  "kargo-ops",
  "kargo-toolchain",
  "kargo-util",
+ "rayon",
  "serde_json",
  "tempfile",
  "toml",
  "toml_edit",
  "ureq",
+ "walkdir",
 ]
 
 [[package]]

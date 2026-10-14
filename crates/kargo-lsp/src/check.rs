@@ -35,10 +35,11 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Reads `checkOnSave` and `checkTargets` from the editor's `initializationOptions`.
-    pub fn from_options(options: &Value) -> Self {
+    /// Reads `checkOnSave` and `checkTargets` from the editor's `initializationOptions`;
+    /// `default` is whether to check on save when `checkOnSave` isn't set.
+    pub fn from_options(options: &Value, default: bool) -> Self {
         let targets = options["checkTargets"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-        Self { enabled: options["checkOnSave"] == true, targets }
+        Self { enabled: options["checkOnSave"].as_bool().unwrap_or(default), targets }
     }
 }
 
@@ -275,8 +276,10 @@ mod tests {
 
     #[test]
     fn reads_settings() {
-        assert_eq!(Settings::from_options(&Value::Null), Settings::default());
-        let settings = Settings::from_options(&json!({ "checkOnSave": true, "checkTargets": ["wasm", "native"] }));
+        assert_eq!(Settings::from_options(&Value::Null, false), Settings::default());
+        assert!(Settings::from_options(&Value::Null, true).enabled, "on by default for Kargo's own server");
+        assert!(!Settings::from_options(&json!({ "checkOnSave": false }), true).enabled);
+        let settings = Settings::from_options(&json!({ "checkOnSave": true, "checkTargets": ["wasm", "native"] }), false);
         assert!(settings.enabled);
         assert_eq!(settings.targets, ["wasm", "native"]);
         assert!(is_checked_source("file:///p/src/Main.kt") && is_checked_source("file:///p/src/A.java"));

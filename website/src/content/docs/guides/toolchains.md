@@ -58,7 +58,7 @@ $ kargo toolchain remove jdk 17      # every JDK 17 release
 $ kargo toolchain remove jdk 17.0.13+11
 $ kargo toolchain remove native 2.4.10
 $ kargo toolchain remove gradle 9.5.0
-$ kargo toolchain install kotlin-lsp # the Kotlin language server `kargo lsp` runs (or: kls)
+$ kargo toolchain install kotlin-lsp # the Kotlin language server `kargo lsp --server kotlin-lsp` runs (or: kls)
 ```
 
 `kargo toolchain ls` and `kargo toolchain rm` are aliases.
@@ -73,11 +73,11 @@ Android builds run the Android Gradle Plugin on Gradle. Kargo downloads the Grad
 
 ## Kotlin language servers
 
-[`kargo lsp`](../editors/#language-server) runs a Kotlin language server behind its own, downloaded on first use like the other toolchains:
+[`kargo lsp`](../editors/#language-server) uses [Kargo's own Kotlin server](../kotlin-server/) by default, which is built into `kargo` and needs no toolchain: it only downloads the standard library's sources jar into the Maven cache. With `--server`, it runs one of these Kotlin language servers behind its own instead, downloaded on first use like the other toolchains:
 
 | Server | `kargo lsp --server` | Version | Installed under |
 |---|---|---|---|
-| JetBrains' [Kotlin LSP](https://github.com/Kotlin/kotlin-lsp) (default) | `kotlin-lsp` | 263.6379.0 | `~/.kargo/toolchains/kotlin-lsp/<version>` |
+| JetBrains' [Kotlin LSP](https://github.com/Kotlin/kotlin-lsp) | `kotlin-lsp` | 263.6379.0 | `~/.kargo/toolchains/kotlin-lsp/<version>` |
 | fwcd's [kotlin-language-server](https://github.com/fwcd/kotlin-language-server) | `kls` | 1.3.13 | `~/.kargo/toolchains/kotlin-language-server/<version>` |
 
 Kargo pins one version of each and checks the download's SHA-256: the one JetBrains publishes next to the archive for the Kotlin LSP, and one built into Kargo for kotlin-language-server. The Kotlin LSP brings its own Java runtime. kotlin-language-server runs on the project's JDK, or, when that is newer than 21 (its Kotlin compiler doesn't support newer ones), on a Temurin 21 that Kargo [installs](#pinning-a-jdk) like any managed JDK. `kargo toolchain install kotlin-lsp` downloads it ahead of time, for example before going offline.
