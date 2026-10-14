@@ -149,7 +149,9 @@ enum ToolArg {
     Native,
     /// A Gradle distribution (runs Android builds)
     Gradle,
-    /// JetBrains' Kotlin language server, run by `kargo lsp`
+    /// kmp-lsp, the language server `kargo lsp` runs by default
+    KmpLsp,
+    /// JetBrains' Kotlin language server, run by `kargo lsp --server kotlin-lsp`
     KotlinLsp,
     /// fwcd's kotlin-language-server, run by `kargo lsp --server kls`
     Kls,
@@ -163,6 +165,7 @@ impl From<ToolArg> for ToolKind {
             ToolArg::Jdk => ToolKind::Jdk,
             ToolArg::Native => ToolKind::Native,
             ToolArg::Gradle => ToolKind::Gradle,
+            ToolArg::KmpLsp => ToolKind::Server(ServerKind::KmpLsp),
             ToolArg::KotlinLsp => ToolKind::Server(ServerKind::KotlinLsp),
             ToolArg::Kls => ToolKind::Server(ServerKind::Kls),
             ToolArg::KotlinDebugAdapter => ToolKind::Server(ServerKind::Kda),
@@ -188,7 +191,7 @@ enum ToolchainCommand {
         #[arg(value_enum)]
         kind: Option<ToolArg>,
         /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's);
-        /// kotlin-lsp, kls, kotlin-debug-adapter: a version (default: the one `kargo lsp` or `kargo dap` uses)
+        /// kmp-lsp, kotlin-lsp, kls, kotlin-debug-adapter: a version (default: the one `kargo lsp` or `kargo dap` uses)
         version: Option<String>,
     },
     /// Remove an installed toolchain
@@ -196,7 +199,7 @@ enum ToolchainCommand {
     Remove {
         #[arg(value_enum)]
         kind: ToolArg,
-        /// JDK: a major version (removes all its releases) or a release; Native, Gradle, kotlin-lsp, kls, kotlin-debug-adapter: a version
+        /// JDK: a major version (removes all its releases) or a release; Native, Gradle, kmp-lsp, kotlin-lsp, kls, kotlin-debug-adapter: a version
         #[arg(add = ArgValueCandidates::new(complete::installed_toolchains))]
         version: String,
     },
@@ -294,8 +297,10 @@ enum FormatArg {
 /// The Kotlin language server behind `kargo lsp`.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum LspServerArg {
-    /// JetBrains' Kotlin LSP
+    /// kmp-lsp: a native server that needs no JVM
     #[default]
+    KmpLsp,
+    /// JetBrains' Kotlin LSP
     KotlinLsp,
     /// fwcd's kotlin-language-server
     Kls,
@@ -777,7 +782,8 @@ classes are not part of it. Resolution respects kargo.lock, --locked and --offli
     #[command(long_about = "Write the project description a Kotlin language server reads, for editors that run
 the server themselves instead of `kargo lsp`.
 
-Writes workspace.json for JetBrains' Kotlin LSP, or with --kls a kls-classpath script for fwcd's
+Writes workspace.json for JetBrains' Kotlin LSP, with --kmp-lsp a workspace.json that also lists
+the libraries' jars for kmp-lsp, or with --kls a kls-classpath script for fwcd's
 kotlin-language-server, from `kargo metadata`. With --zed, writes .zed/tasks.json instead: tasks
 for the Zed editor that run, test and debug with Kargo from its run buttons. Kargo keeps the
 file up to date: `kargo build`,
@@ -785,13 +791,16 @@ file up to date: `kargo build`,
 kargo.toml or kargo.lock changed. A file Kargo didn't write is never replaced.")]
     Ide {
         /// Write kls-classpath for fwcd's kotlin-language-server instead of workspace.json
-        #[arg(long)]
+        #[arg(long, conflicts_with = "kmp_lsp")]
         kls: bool,
+        /// Write the workspace.json kmp-lsp reads, with the libraries' jars, instead of the Kotlin LSP's
+        #[arg(long, conflicts_with_all = ["kls", "klib_targets"])]
+        kmp_lsp: bool,
         /// Also describe Wasm and Native sources in workspace.json (the Kotlin LSP doesn't read klibs yet)
         #[arg(long, conflicts_with = "kls")]
         klib_targets: bool,
         /// Write .zed/tasks.json for the Zed editor instead: Kargo tasks for its run buttons
-        #[arg(long, conflicts_with_all = ["kls", "klib_targets"])]
+        #[arg(long, conflicts_with_all = ["kls", "kmp_lsp", "klib_targets"])]
         zed: bool,
     },
     /// Run the language server for editors (LSP over stdin and stdout)
@@ -800,10 +809,10 @@ kargo.toml or kargo.lock changed. A file Kargo didn't write is never replaced.")
 Kargo answers for kargo.toml itself (diagnostics, completion and hover from its schema and
 Kargo's own validation) and the `kargo/runnables` request, and passes everything about Kotlin
 code to a Kotlin language server it downloads on first use. It describes the project to that
-server from `kargo metadata` (workspace.json for the Kotlin LSP, kls-classpath for
+server from `kargo metadata` (workspace.json for kmp-lsp and the Kotlin LSP, kls-classpath for
 kotlin-language-server) and again whenever kargo.toml or kargo.lock change.")]
     Lsp {
-        /// The Kotlin language server: JetBrains' `kotlin-lsp`, fwcd's `kls`, or `none` for kargo.toml support only
+        /// The Kotlin language server: `kmp-lsp`, JetBrains' `kotlin-lsp`, fwcd's `kls`, or `none` for kargo.toml support only
         #[arg(long, value_enum, default_value_t)]
         server: LspServerArg,
         /// Run this language server executable instead of the one Kargo downloads
@@ -1467,9 +1476,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Ide { kls, klib_targets, zed: false } => {
+        Command::Ide { kls, kmp_lsp, klib_targets, zed: false } => {
             let project = load_project(global)?;
-            let kind = if kls { ServerKind::Kls } else { ServerKind::KotlinLsp };
+            let kind = match (kls, kmp_lsp) {
+                (true, _) => ServerKind::Kls,
+                (_, true) => ServerKind::KmpLsp,
+                _ => ServerKind::KotlinLsp,
+            };
             let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
             let outcome = kargo_lsp::project::import(config, project.root(), Some(kind), targets);
             report_editor_files(shell, project.root(), &outcome.written);
@@ -1484,12 +1497,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
         }
         Command::Lsp { server, server_path, klib_targets, stdio: _ } => {
             let server = match server {
+                LspServerArg::KmpLsp => Some(ServerKind::KmpLsp),
                 LspServerArg::KotlinLsp => Some(ServerKind::KotlinLsp),
                 LspServerArg::Kls => Some(ServerKind::Kls),
                 LspServerArg::None => None,
             };
             if server.is_none() && server_path.is_some() {
-                bail!("`--server-path` needs a Kotlin language server; use `--server kotlin-lsp` or `--server kls`");
+                bail!("`--server-path` needs a Kotlin language server; use `--server kmp-lsp`, `--server kotlin-lsp` or `--server kls`");
             }
             let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
             let opts = kargo_lsp::Options { server, server_path, targets, builtin_commands: builtin_commands(), search_url: None };

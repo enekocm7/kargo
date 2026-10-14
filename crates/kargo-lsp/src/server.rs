@@ -45,7 +45,8 @@ use crate::{actions, check, deps, manifest, project, text};
 /// How `kargo lsp` runs.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// The Kotlin language server behind Kargo's; `None` serves only `kargo.toml` and runnables.
+    /// The Kotlin language server behind Kargo's (kmp-lsp unless the user picks another); `None`
+    /// serves only `kargo.toml` and runnables.
     pub server: Option<ServerKind>,
     /// Runs this executable as the server instead of the one Kargo manages.
     pub server_path: Option<PathBuf>,
@@ -150,6 +151,9 @@ struct Server {
     docs: HashMap<String, String>,
     /// Requests sent to the backend that it hasn't answered yet.
     pending: HashSet<String>,
+    /// Requests Kargo itself sent to the backend and has not seen answered; the editor never
+    /// asked for them, so their answers are dropped.
+    own_requests: HashSet<String>,
     /// The id of the `initialize` request, while the backend answers it.
     initialize_id: Option<Value>,
     client_progress: bool,
@@ -368,6 +372,7 @@ impl Server {
             root: None,
             docs: HashMap::new(),
             pending: HashSet::new(),
+            own_requests: HashSet::new(),
             initialize_id: None,
             client_progress: false,
             client_watches: false,
@@ -574,6 +579,9 @@ impl Server {
     fn on_backend(&mut self, mut message: Value) -> Result<()> {
         match jsonrpc::kind(&message) {
             Kind::Response => {
+                if self.own_requests.remove(&id_key(&message["id"])) {
+                    return Ok(());
+                }
                 self.pending.remove(&id_key(&message["id"]));
                 if self.initialize_id.as_ref() == Some(&message["id"]) {
                     self.initialize_id = None;
@@ -666,7 +674,8 @@ impl Server {
         let mut imported = false;
         if let Some(root) = self.root.clone() {
             self.fingerprint = project::fingerprint(&root).ok();
-            let fresh = kind == Some(ServerKind::KotlinLsp) && project::is_fresh(&root, ServerKind::KotlinLsp, self.opts.targets);
+            let fresh = matches!(kind, Some(ServerKind::KmpLsp | ServerKind::KotlinLsp))
+                && kind.is_some_and(|kind| project::is_fresh(&root, kind, self.opts.targets));
             if kind.is_some() && !fresh {
                 imported = true;
                 let token = params.get("workDoneToken").filter(|t| !t.is_null()).cloned();
@@ -746,7 +755,7 @@ impl Server {
                         cmd.arg("-cp").arg(server.home.join("lib").join("*")).arg(KLS_MAIN_CLASS);
                         (java, cmd)
                     }
-                    ServerKind::KotlinLsp => {
+                    ServerKind::KmpLsp | ServerKind::KotlinLsp => {
                         let exe = server.executable().context("the language server has no launcher")?;
                         (exe.clone(), Command::new(exe))
                     }
@@ -762,6 +771,12 @@ impl Server {
             && let Some(home) = &java_home
         {
             cmd.env("JAVA_HOME", home);
+        }
+        // kmp-lsp would otherwise walk up from the root to the enclosing git repository.
+        if kind == ServerKind::KmpLsp
+            && let Some(root) = &self.root
+        {
+            cmd.env("KMP_LSP_WORKSPACE_ROOT", root);
         }
         self.config.shell().verbose("Running", kargo_util::process::describe(&cmd));
         let mut child = cmd.spawn().with_context(|| format!("failed to run {}", exe.display()))?;
@@ -879,7 +894,13 @@ impl Server {
         }
         self.report_import(&outcome, false)?;
         let changes: Vec<Value> = outcome.written.changed.iter().map(|path| json!({ "uri": text::path_to_uri(path), "type": 2 })).collect();
-        if !changes.is_empty() {
+        if !changes.is_empty() && self.opts.server == Some(ServerKind::KmpLsp) {
+            // kmp-lsp indexes watched files as source code; it reads workspace.json when it scans.
+            let id = self.next_id();
+            self.own_requests.insert(id_key(&json!(id)));
+            let command = json!({ "command": "kmp-lsp/reindex", "arguments": [] });
+            self.send_backend(&jsonrpc::request(&id, "workspace/executeCommand", command));
+        } else if !changes.is_empty() {
             self.send_backend(&jsonrpc::notification("workspace/didChangeWatchedFiles", json!({ "changes": changes })));
         }
         let open: Vec<String> = self.docs.keys().cloned().collect();
@@ -1502,7 +1523,7 @@ local = \"{url}\"
                         "isIncomplete": false,
                         "items": [{ "label": "print", "labelDetails": { "description": "Unit", "detail": "(message: Int) (kotlin.io)" } }],
                     })),
-                    "shutdown" => Some(Value::Null),
+                    "shutdown" | "workspace/executeCommand" => Some(Value::Null),
                     _ => None,
                 };
                 if let Some(result) = reply {
@@ -1606,6 +1627,46 @@ local = \"{url}\"
             ["initialize", "textDocument/didOpen", "textDocument/hover", "shutdown", "exit"],
             "kargo.toml stays with Kargo"
         );
+    }
+
+    #[test]
+    fn asks_kmp_lsp_to_reindex_when_the_project_changes() {
+        let dir = project(MANIFEST);
+        let root = text::path_to_uri(dir.path());
+        let manifest_uri = text::path_to_uri(&dir.path().join("kargo.toml"));
+        let kotlin_uri = text::path_to_uri(&dir.path().join("src/Main.kt"));
+        let (backend, seen) = fake_backend();
+        let opts = Options { server: Some(ServerKind::KmpLsp), ..Options::default() };
+        let (mut editor, _home) = Editor::start(opts, Some(backend));
+        editor.request(1, "initialize", json!({ "rootUri": root, "capabilities": {} }));
+        let first: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("workspace.json")).unwrap()).unwrap();
+        assert!(first["jarPaths"].is_array(), "kmp-lsp is told about the libraries");
+
+        std::fs::write(dir.path().join("kargo.toml"), MANIFEST.replace("\"app\"", "\"renamed\"")).unwrap();
+        editor.send(jsonrpc::notification("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": manifest_uri, "type": 2 }] })));
+        // The new description is not passed on as a changed source file: kmp-lsp rescans instead.
+        let mut received = Vec::new();
+        while received.last().is_none_or(|m: &Value| jsonrpc::method(m) != "workspace/executeCommand") {
+            received.push(seen.recv_timeout(Duration::from_secs(10)).unwrap());
+        }
+        let command = received.last().unwrap();
+        assert_eq!(command["params"]["command"], "kmp-lsp/reindex");
+        let methods: Vec<&str> = received.iter().map(jsonrpc::method).collect();
+        assert_eq!(methods, ["initialize", "workspace/didChangeWatchedFiles", "workspace/executeCommand"]);
+        let forwarded = &received[1]["params"]["changes"];
+        assert_eq!(forwarded[0]["uri"], manifest_uri, "the editor's own notification goes through");
+
+        // The editor never asked for the reindex, so it never sees the answer.
+        let (hover, before) = editor.request(
+            2,
+            "textDocument/hover",
+            json!({ "textDocument": { "uri": kotlin_uri }, "position": { "line": 0, "character": 0 } }),
+        );
+        assert_eq!(hover["result"]["contents"], "kotlin");
+        assert!(before.iter().all(|m| jsonrpc::kind(m) != Kind::Response), "{before:?}");
+        let second: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("workspace.json")).unwrap()).unwrap();
+        assert_eq!(second["modules"][0]["name"], "renamed");
+        assert!(editor.finish());
     }
 
     #[test]

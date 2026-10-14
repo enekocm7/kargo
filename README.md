@@ -46,9 +46,9 @@ $ kargo test
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors, `--tools` the Dokka, ktlint and detekt tools |
 | `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
-| `kargo ide [--kls\|--zed]` | Write `workspace.json` (Kotlin LSP) or `kls-classpath` (kotlin-language-server) for editors that run the server themselves, or `.zed/tasks.json` with Kargo tasks for Zed's run buttons; kept current by later commands |
+| `kargo ide [--kmp-lsp\|--kls\|--zed]` | Write `workspace.json` (Kotlin LSP, or with `--kmp-lsp` the one kmp-lsp reads) or `kls-classpath` (kotlin-language-server) for editors that run the server themselves, or `.zed/tasks.json` with Kargo tasks for Zed's run buttons; kept current by later commands |
 | `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
-| `kargo lsp [--server kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion, hover (including Maven coordinates, versions and newer-version hints) and code actions (quick fixes, add a dependency, framework or target, upgrade), `kargo/runnables`, Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into (multiplatform packages as source sets, so `expect`/`actual` link up; `--klib-targets` adds Wasm and Native), and opt-in `kargo check` on save (`checkOnSave`) with errors for every target |
+| `kargo lsp [--server kmp-lsp\|kotlin-lsp\|kls\|none]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion, hover (including Maven coordinates, versions and newer-version hints) and code actions (quick fixes, add a dependency, framework or target, upgrade), `kargo/runnables`, Kotlin code intelligence from a Kotlin language server Kargo downloads and keeps importing the project into (kmp-lsp by default, a native server that needs no JVM; `--server kotlin-lsp` for JetBrains' type-checking one, with multiplatform packages as source sets so `expect`/`actual` link up and `--klib-targets` adding Wasm and Native), and opt-in `kargo check` on save (`checkOnSave`) with errors for every target |
 | `kargo dap` | Debug adapter for editors over stdio: kotlin-debug-adapter on the project's JDK, launching `kargo run` or `kargo test` with `--debug` and mapping Kargo's source layout so breakpoints and stack frames find your files |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
@@ -250,7 +250,7 @@ Toolchains are locked while they install, so concurrent Kargo processes sharing 
 
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
-$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0, kotlin-lsp, kls, kotlin-debug-adapter
+$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0, kmp-lsp, kotlin-lsp, kls, kotlin-debug-adapter
 $ kargo toolchain install            # whatever the current project needs
 $ kargo toolchain list               # installed JDKs/Kotlin/Native/Gradle, disk usage, what the project uses
 $ kargo toolchain which              # toolchains resolved for this project

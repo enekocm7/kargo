@@ -583,8 +583,8 @@ Manage JDKs, Kotlin/Native and Gradle distributions, and the Kotlin language ser
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses |
-| `install [jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
-| `remove` (`rm`) `<jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs, a major version removes all its releases |
+| `install [jdk\|native\|gradle\|kmp-lsp\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kmp-lsp`, `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
+| `remove` (`rm`) `<jdk\|native\|gradle\|kmp-lsp\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 
@@ -629,16 +629,17 @@ The output has a `"version": 1` field and is described in [Machine-readable outp
 Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover, Maven coordinates and versions, hints at newer versions, code actions that make the edits of `kargo add`, `kargo target add` and `kargo upgrade`) and the `kargo/runnables` request itself, and passes Kotlin code to a Kotlin language server it downloads on first use and describes the project to.
 
 ```sh
-kargo lsp                       # JetBrains' Kotlin LSP behind Kargo's server
+kargo lsp                       # kmp-lsp behind Kargo's server
+kargo lsp --server kotlin-lsp   # JetBrains' Kotlin LSP instead
 kargo lsp --server kls          # fwcd's kotlin-language-server instead
 kargo lsp --server none         # kargo.toml support and runnables only
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--server <name>` | `kotlin-lsp` | The Kotlin language server: `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
+| `--server <name>` | `kmp-lsp` | The Kotlin language server: `kmp-lsp`, `kotlin-lsp` (JetBrains), `kls` (fwcd) or `none` |
 | `--server-path <path>` | | Run this server executable instead of the one Kargo downloads |
-| `--klib-targets` | | Also describe Wasm and Native sources to the Kotlin LSP. The pinned Kotlin LSP can't read klibs yet, so their libraries don't resolve. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
+| `--klib-targets` | | Also describe Wasm and Native sources to the Kotlin LSP (kmp-lsp ignores it). The pinned Kotlin LSP can't read klibs yet, so their libraries don't resolve. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
 
 With `{ "checkOnSave": true }` in the editor's `initializationOptions`, saving a Kotlin or Java file runs `kargo check` in the background and adds its diagnostics for every target to the Kotlin server's; `checkTargets` limits the targets. See [Check on save](../../guides/editors/#check-on-save).
 
@@ -646,16 +647,18 @@ Editors that pass `--stdio` may keep it; Kargo always uses stdio. The exit code 
 
 ## `kargo ide`
 
-Write the project description a Kotlin language server reads, for editors that run JetBrains' Kotlin LSP or fwcd's kotlin-language-server themselves instead of [`kargo lsp`](#kargo-lsp). The files are the ones `kargo lsp` writes.
+Write the project description a Kotlin language server reads, for editors that run kmp-lsp, JetBrains' Kotlin LSP or fwcd's kotlin-language-server themselves instead of [`kargo lsp`](#kargo-lsp). The files are the ones `kargo lsp` writes.
 
 ```sh
 kargo ide           # workspace.json, for the Kotlin LSP
+kargo ide --kmp-lsp # workspace.json with the libraries' jars, for kmp-lsp
 kargo ide --kls     # kls-classpath (kls-classpath.bat on Windows), for kotlin-language-server
 kargo ide --zed     # .zed/tasks.json, for Zed's run buttons
 ```
 
 | Option | Meaning |
 |---|---|
+| `--kmp-lsp` | Write the `workspace.json` kmp-lsp reads: the Kotlin LSP's description plus `jarPaths`, the jars of the test classpaths |
 | `--kls` | Write `kls-classpath` instead of `workspace.json` |
 | `--klib-targets` | Also describe Wasm and Native sources in `workspace.json`. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
 | `--zed` | Write `.zed/tasks.json` instead: tasks that run `kargo run` and `kargo test` from the run buttons of Zed's Kotlin extension, the project's programs, tests and tasks, and everyday commands. Needs no dependency resolution. See [Zed](../../guides/editors/#run-and-test-in-zed) |

@@ -1,6 +1,9 @@
 //! Importing a Kargo project for a Kotlin language server: `kargo metadata`, turned into the
 //! server's own project description.
 //!
+//! - kmp-lsp (the default) reads the same `workspace.json` for its source roots, and its top-level
+//!   `jarPaths` for the compiled libraries: Kargo adds the jars of the test classpaths there, since
+//!   kmp-lsp only finds jars in the Gradle cache on its own.
 //! - The JetBrains Kotlin LSP reads `workspace.json` at the project root (its format for build
 //!   systems it doesn't know) and reloads it when it changes. Kargo writes one module per
 //!   package for main and one for test code, with the target's classpath as libraries (with
@@ -85,7 +88,7 @@ pub fn import(config: &Config, root: &Path, kind: Option<ServerKind>, targets: T
 pub fn is_fresh(root: &Path, kind: ServerKind, targets: Targets) -> bool {
     let Ok(project) = Project::discover(root, None) else { return false };
     let generated = match kind {
-        ServerKind::KotlinLsp => project.root().join("workspace.json"),
+        ServerKind::KmpLsp | ServerKind::KotlinLsp => project.root().join("workspace.json"),
         ServerKind::Kls => project.root().join(if cfg!(windows) { "kls-classpath.bat" } else { "kls-classpath" }),
         ServerKind::Kda => return false,
     };
@@ -100,7 +103,12 @@ pub fn refresh(config: &Config, root: &Path) -> Option<Outcome> {
     let project = Project::discover(root, None).ok()?;
     let record = std::fs::read_to_string(project.target_dir().join("lsp").join("fingerprint")).ok()?;
     let (recorded, _) = record.trim().split_once(' ')?;
-    let combinations = [(ServerKind::KotlinLsp, Targets::Jvm), (ServerKind::KotlinLsp, Targets::All), (ServerKind::Kls, Targets::Jvm)];
+    let combinations = [
+        (ServerKind::KmpLsp, Targets::Jvm),
+        (ServerKind::KotlinLsp, Targets::Jvm),
+        (ServerKind::KotlinLsp, Targets::All),
+        (ServerKind::Kls, Targets::Jvm),
+    ];
     let &(kind, targets) = combinations.iter().find(|(k, t)| description(*k, *t) == recorded)?;
     if is_fresh(project.root(), kind, targets) {
         return None;
@@ -109,11 +117,11 @@ pub fn refresh(config: &Config, root: &Path) -> Option<Outcome> {
 }
 
 /// What an import wrote, as its fingerprint record names it: the server, and for the Kotlin LSP
-/// which targets `workspace.json` describes.
+/// which targets `workspace.json` describes (kmp-lsp always reads the JVM description).
 fn description(kind: ServerKind, targets: Targets) -> String {
     match kind {
         ServerKind::KotlinLsp => format!("{}{}", kind.as_str(), targets.record_suffix()),
-        ServerKind::Kls | ServerKind::Kda => kind.as_str().to_owned(),
+        ServerKind::KmpLsp | ServerKind::Kls | ServerKind::Kda => kind.as_str().to_owned(),
     }
 }
 
@@ -132,6 +140,12 @@ pub fn write(kind: ServerKind, metadata: &Value, targets: Targets) -> Result<Wri
     let state = state_dir(metadata);
     let mut written = Written::default();
     match kind {
+        ServerKind::KmpLsp => {
+            let mut workspace = workspace_json(metadata, Targets::Jvm);
+            workspace["jarPaths"] = json!(jar_paths(metadata));
+            let text = serde_json::to_string_pretty(&workspace)? + "\n";
+            generate(&root.join("workspace.json"), &text, &state, &mut written)?;
+        }
         ServerKind::KotlinLsp => {
             let text = serde_json::to_string_pretty(&workspace_json(metadata, targets))? + "\n";
             generate(&root.join("workspace.json"), &text, &state, &mut written)?;
@@ -232,6 +246,13 @@ fn test_classpath(metadata: &Value) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The jars and aars on the test classpaths of the project's JVM targets, for kmp-lsp's
+/// `jarPaths` in `workspace.json`.
+fn jar_paths(metadata: &Value) -> Vec<String> {
+    let is_library = |path: &PathBuf| path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jar") || e.eq_ignore_ascii_case("aar"));
+    test_classpath(metadata).iter().filter(|p| is_library(p)).map(|p| p.to_string_lossy().into_owned()).collect()
 }
 
 fn package_named<'a>(metadata: &'a Value, name: &str) -> Option<&'a Value> {
@@ -1113,6 +1134,28 @@ mod tests {
         assert_eq!(description(ServerKind::KotlinLsp, Targets::Jvm), "kotlin-lsp");
         assert_eq!(description(ServerKind::KotlinLsp, Targets::All), "kotlin-lsp+klib");
         assert_eq!(description(ServerKind::Kls, Targets::All), "kls");
+        assert_eq!(description(ServerKind::KmpLsp, Targets::All), "kmp-lsp");
+    }
+
+    #[test]
+    fn lists_the_jars_for_kmp_lsp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut metadata = sample();
+        metadata["root"] = json!(root.display().to_string());
+        metadata["target-dir"] = json!(root.join("target").display().to_string());
+
+        let written = write(ServerKind::KmpLsp, &metadata, Targets::All).unwrap();
+        assert_eq!(written.changed, [root.join("workspace.json")]);
+        let workspace: Value = serde_json::from_str(&std::fs::read_to_string(root.join("workspace.json")).unwrap()).unwrap();
+        assert_eq!(workspace["jarPaths"], json!(["/c/a-1.jar", "/c/t-3.jar"]));
+        let modules = workspace["modules"].as_array().unwrap();
+        assert!(modules.iter().all(|m| !m["name"].as_str().unwrap().contains("wasm")), "the JVM description, whatever the targets");
+
+        // Switching to the Kotlin LSP replaces the file Kargo wrote, without the jars.
+        let written = write(ServerKind::KotlinLsp, &metadata, Targets::Jvm).unwrap();
+        assert_eq!(written.changed, [root.join("workspace.json")]);
+        assert!(!std::fs::read_to_string(root.join("workspace.json")).unwrap().contains("jarPaths"));
     }
 
     #[test]

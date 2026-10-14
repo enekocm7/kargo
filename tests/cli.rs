@@ -2233,6 +2233,14 @@ fn ide_writes_workspace_json_and_keeps_it_current() {
     p.kargo().args(["add", "g:extra:1.0", "--dev"]).assert().success().stderr(predicates::str::contains("Wrote workspace.json"));
     assert!(libraries().contains(&"Kargo: g:extra:1.0".to_owned()), "{:?}", libraries());
 
+    // kmp-lsp gets the jars as `jarPaths` in the same file, and the Kotlin LSP's file has none.
+    p.kargo().args(["--offline", "ide", "--kmp-lsp"]).assert().success().stderr(predicates::str::contains("Wrote workspace.json"));
+    assert!(p.read("workspace.json").contains("\"jarPaths\""), "{}", p.read("workspace.json"));
+    p.kargo().args(["--offline", "ide", "--kmp-lsp"]).assert().success().stderr(predicates::str::contains("workspace.json is up to date"));
+    p.kargo().args(["--offline", "ide"]).assert().success().stderr(predicates::str::contains("Wrote workspace.json"));
+    assert!(!p.read("workspace.json").contains("jarPaths"));
+    p.kargo().args(["ide", "--kmp-lsp", "--kls"]).assert().failure();
+
     // fwcd's server gets a script printing the test classpath.
     p.kargo().args(["--offline", "ide", "--kls"]).assert().success();
     let script = if cfg!(windows) { "kls-classpath.bat" } else { "kls-classpath" };
@@ -2335,6 +2343,7 @@ fn lsp_describes_the_project_for_the_kotlin_lsp() {
         json!({ "jsonrpc": "2.0", "method": "exit" }),
     ]);
     p.kargo().args(["--offline", "lsp", "--server", "kls"]).write_stdin(input.clone()).assert().code(1);
+    p.kargo().args(["--offline", "lsp", "--server", "kotlin-lsp"]).write_stdin(input.clone()).assert().code(1);
     p.kargo().args(["--offline", "lsp"]).write_stdin(input).assert().code(1);
     assert_eq!(p.read("workspace.json"), "{}");
 }
@@ -2356,9 +2365,13 @@ fn lsp_describes_multiplatform_source_sets() {
         workspace["modules"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect()
     };
     // Offline, nothing resolves: the source sets are described without libraries.
-    assert_eq!(modules(&["--offline", "lsp"]), ["app", "app.common.main", "app.jvm.main", "app.common.test", "app.jvm.test"]);
+    let jvm = ["app", "app.common.main", "app.jvm.main", "app.common.test", "app.jvm.test"];
+    assert_eq!(modules(&["--offline", "lsp", "--server", "kotlin-lsp"]), jvm);
+    assert_eq!(modules(&["--offline", "lsp"]), jvm);
+    // kmp-lsp doesn't analyze types, so it has no use for the other targets' modules.
+    assert_eq!(modules(&["--offline", "lsp", "--klib-targets"]), jvm);
     assert_eq!(
-        modules(&["--offline", "lsp", "--klib-targets"]),
+        modules(&["--offline", "lsp", "--server", "kotlin-lsp", "--klib-targets"]),
         ["app", "app.common.main", "app.jvm.main", "app.wasm.main", "app.common.test", "app.jvm.test", "app.wasm.test"]
     );
 }
@@ -2371,12 +2384,14 @@ fn toolchain_lists_language_servers() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Kotlin language servers and debug adapter (").and(predicate::str::contains("(none installed)")));
+    p.kargo().args(["--offline", "toolchain", "install", "kmp-lsp"]).assert().failure().stderr(predicate::str::contains("offline"));
     p.kargo().args(["--offline", "toolchain", "install", "kotlin-lsp"]).assert().failure().stderr(predicate::str::contains("offline"));
     p.kargo()
         .args(["--offline", "toolchain", "install", "kotlin-debug-adapter"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("offline"));
+    p.kargo().args(["toolchain", "remove", "kmp-lsp", "0.27.0"]).assert().failure().stderr(predicate::str::contains("not installed"));
     p.kargo().args(["toolchain", "remove", "kls", "1.3.13"]).assert().failure().stderr(predicate::str::contains("not installed"));
 }
 
