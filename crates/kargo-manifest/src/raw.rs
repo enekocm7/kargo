@@ -224,6 +224,204 @@ pub struct AndroidConfig {
     pub agp_version: Option<String>,
     /// Gradle version that runs the Android build (default: the one `agp-version` requires).
     pub gradle_version: Option<String>,
+    /// Shrink, obfuscate and optimize release builds with R8.
+    #[serde(default)]
+    pub minify: bool,
+    /// Remove unused resources from release builds (default: `minify`, for applications).
+    pub shrink_resources: Option<bool>,
+    /// ProGuard/R8 rule files for release builds, relative to the project root.
+    #[serde(default)]
+    pub proguard_files: Vec<PathBuf>,
+    /// ProGuard/R8 rules a library ships to the apps that use it, relative to the project root.
+    #[serde(default)]
+    pub consumer_proguard_files: Vec<PathBuf>,
+    /// `BuildConfig` fields of every variant.
+    #[serde(default)]
+    pub build_config: BTreeMap<String, BuildConfigValue>,
+    /// Signing configurations by build type (`debug` or `release`).
+    #[serde(default)]
+    pub signing: BTreeMap<String, AndroidSigning>,
+    /// The order of the flavor dimensions; required with more than one dimension.
+    #[serde(default)]
+    pub flavor_dimensions: Vec<String>,
+    /// Product flavors by name.
+    #[serde(default)]
+    pub flavors: BTreeMap<String, AndroidFlavor>,
+}
+
+impl AndroidConfig {
+    /// The build types Kargo uses: `debug` (dev profile) and `release`.
+    pub const BUILD_TYPES: [&str; 2] = ["debug", "release"];
+
+    /// The flavor dimensions in priority order: `flavor-dimensions`, else the single one in use.
+    pub fn dimensions(&self) -> Vec<String> {
+        if !self.flavor_dimensions.is_empty() {
+            return self.flavor_dimensions.clone();
+        }
+        let mut dims: Vec<String> = self.flavors.values().map(|f| f.dimension.clone()).collect();
+        dims.dedup();
+        dims
+    }
+
+    /// The flavors of `dimension`, by name.
+    pub fn flavors_of<'a>(&'a self, dimension: &'a str) -> impl Iterator<Item = (&'a String, &'a AndroidFlavor)> + 'a {
+        self.flavors.iter().filter(move |(_, f)| f.dimension == dimension)
+    }
+}
+
+/// `[target.android.signing.<build-type>]`: the keystore that signs a build type.
+/// Passwords come from environment variables, never from `kargo.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AndroidSigning {
+    /// The keystore, relative to the project root.
+    pub store_file: PathBuf,
+    /// Environment variable holding the keystore password.
+    pub store_password_env: String,
+    pub key_alias: String,
+    /// Environment variable holding the key password (default: `store-password-env`).
+    pub key_password_env: Option<String>,
+    /// `jks` or `pkcs12` (default: detected by AGP).
+    pub store_type: Option<String>,
+}
+
+impl AndroidSigning {
+    pub fn key_password_env(&self) -> &str {
+        self.key_password_env.as_deref().unwrap_or(&self.store_password_env)
+    }
+}
+
+/// `[target.android.flavors.<name>]`: a product flavor.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AndroidFlavor {
+    pub dimension: String,
+    pub application_id_suffix: Option<String>,
+    pub version_name_suffix: Option<String>,
+    pub version_code: Option<u32>,
+    pub min_sdk: Option<u32>,
+    #[serde(default)]
+    pub build_config: BTreeMap<String, BuildConfigValue>,
+}
+
+/// The value of a `BuildConfig` field; its Java type follows from the TOML type.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum BuildConfigValue {
+    Bool(bool),
+    Int(i64),
+    String(String),
+}
+
+impl BuildConfigValue {
+    /// The Java type and the Java literal of the field.
+    pub fn java(&self) -> (&'static str, String) {
+        match self {
+            BuildConfigValue::Bool(b) => ("boolean", b.to_string()),
+            BuildConfigValue::Int(i) if i32::try_from(*i).is_ok() => ("int", i.to_string()),
+            BuildConfigValue::Int(i) => ("long", format!("{i}L")),
+            BuildConfigValue::String(s) => {
+                let mut lit = String::from("\"");
+                for c in s.chars() {
+                    match c {
+                        '"' => lit.push_str("\\\""),
+                        '\\' => lit.push_str("\\\\"),
+                        '\n' => lit.push_str("\\n"),
+                        '\r' => lit.push_str("\\r"),
+                        '\t' => lit.push_str("\\t"),
+                        c => lit.push(c),
+                    }
+                }
+                lit.push('"');
+                ("String", lit)
+            }
+        }
+    }
+}
+
+fn is_java_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+fn validate_build_config(fields: &BTreeMap<String, BuildConfigValue>, section: &str) -> Result<()> {
+    for name in fields.keys() {
+        if !is_java_identifier(name) {
+            bail!("[{section}.build-config] `{name}` is not a valid Java field name");
+        }
+    }
+    Ok(())
+}
+
+fn validate_android(config: &AndroidConfig) -> Result<()> {
+    if config.namespace.trim().is_empty() {
+        bail!("[target.android] `namespace` must not be empty");
+    }
+    if !matches!(config.kind.as_str(), "application" | "library") {
+        bail!("[target.android] `kind` must be `application` or `library`");
+    }
+    if config.min_sdk > config.target_sdk || config.target_sdk > config.compile_sdk {
+        bail!("[target.android] expected min-sdk <= target-sdk <= compile-sdk");
+    }
+    let is_app = config.kind == "application";
+    if config.shrink_resources == Some(true) && (!config.minify || !is_app) {
+        bail!("[target.android] `shrink-resources` needs `minify = true` and `kind = \"application\"`");
+    }
+    if !config.consumer_proguard_files.is_empty() && is_app {
+        bail!("[target.android] `consumer-proguard-files` only applies to libraries; use `proguard-files` for an application");
+    }
+    validate_build_config(&config.build_config, "target.android")?;
+    for (build_type, signing) in &config.signing {
+        if !AndroidConfig::BUILD_TYPES.contains(&build_type.as_str()) {
+            bail!("[target.android.signing.{build_type}] is not a build type; use `debug` or `release`");
+        }
+        if !is_app {
+            bail!("[target.android.signing.{build_type}] only applies to applications; a library is signed by the app that uses it");
+        }
+        if let Some(t) = &signing.store_type
+            && !matches!(t.as_str(), "jks" | "pkcs12")
+        {
+            bail!("[target.android.signing.{build_type}] `store-type` must be `jks` or `pkcs12`");
+        }
+        for var in [Some(signing.store_password_env.as_str()), signing.key_password_env.as_deref()].into_iter().flatten() {
+            if var.trim().is_empty() {
+                bail!("[target.android.signing.{build_type}] the `*-password-env` keys name environment variables and must not be empty");
+            }
+        }
+    }
+    for dim in &config.flavor_dimensions {
+        if !config.flavors.values().any(|f| &f.dimension == dim) {
+            bail!("[target.android] flavor dimension `{dim}` has no flavors");
+        }
+    }
+    let mut dims: Vec<&str> = config.flavors.values().map(|f| f.dimension.as_str()).collect();
+    dims.sort();
+    dims.dedup();
+    if dims.len() > 1 && config.flavor_dimensions.is_empty() {
+        bail!("[target.android] the flavors use several dimensions ({}); list their order in `flavor-dimensions`", dims.join(", "));
+    }
+    for (name, flavor) in &config.flavors {
+        if !is_java_identifier(name) || name.contains('$') {
+            bail!("invalid flavor name `{name}`: use letters, digits and `_`, starting with a letter");
+        }
+        if AndroidConfig::BUILD_TYPES.contains(&name.as_str()) || name == "test" || name == "main" || name == "androidTest" {
+            bail!("`{name}` cannot be a flavor name: it is a build type or source set");
+        }
+        if flavor.dimension.trim().is_empty() {
+            bail!("[target.android.flavors.{name}] `dimension` must not be empty");
+        }
+        if !config.flavor_dimensions.is_empty() && !config.flavor_dimensions.contains(&flavor.dimension) {
+            bail!("[target.android.flavors.{name}] dimension `{}` is not listed in `flavor-dimensions`", flavor.dimension);
+        }
+        if !is_app && (flavor.application_id_suffix.is_some() || flavor.version_name_suffix.is_some() || flavor.version_code.is_some()) {
+            bail!(
+                "[target.android.flavors.{name}] `application-id-suffix`, `version-name-suffix` and `version-code` only apply to applications"
+            );
+        }
+        validate_build_config(&flavor.build_config, &format!("target.android.flavors.{name}"))?;
+    }
+    Ok(())
 }
 
 fn default_min_sdk() -> u32 {
@@ -989,15 +1187,7 @@ impl RawManifest {
                                 Some(_) => bail!("[target.android.dependencies] must be a table"),
                             };
                             let config: AndroidConfig = Value::Table(table).try_into().context("invalid [target.android] section")?;
-                            if config.namespace.trim().is_empty() {
-                                bail!("[target.android] `namespace` must not be empty");
-                            }
-                            if !matches!(config.kind.as_str(), "application" | "library") {
-                                bail!("[target.android] `kind` must be `application` or `library`");
-                            }
-                            if config.min_sdk > config.target_sdk || config.target_sdk > config.compile_sdk {
-                                bail!("[target.android] expected min-sdk <= target-sdk <= compile-sdk");
-                            }
+                            validate_android(&config)?;
                             let dependencies =
                                 deps.parse(&dependencies, "target.android.dependencies", false, Some(TargetKind::Android))?;
                             Ok(AndroidTarget { config, dependencies })

@@ -337,9 +337,67 @@ fn target_errors() {
     assert!(parse_err(&with("[target.android]\nnamespace = \"a\"\nmin-sdk = 40")).contains("min-sdk"));
     assert!(parse_err(&with("[target.android]\nnamespace = \"a\"\nkind = \"game\"")).contains("kind"));
     assert!(parse_err(&with("[target.android]\nmin-sdk = 21")).contains("namespace"));
+    let android = |t: &str| parse_err(&with(&format!("[target.android]\nnamespace = \"a\"\n{t}")));
+    assert!(android("shrink-resources = true").contains("needs `minify = true`"));
+    assert!(android("consumer-proguard-files = [\"x.pro\"]").contains("only applies to libraries"));
+    assert!(android("build-config = { \"bad-name\" = 1 }").contains("not a valid Java field name"));
+    assert!(android("build-config = { RATIO = 1.5 }").contains("build-config"));
+    let signing = "store-file = \"k.jks\"\nstore-password-env = \"P\"\nkey-alias = \"a\"";
+    assert!(android(&format!("[target.android.signing.staging]\n{signing}")).contains("use `debug` or `release`"));
+    assert!(android(&format!("kind = \"library\"\n[target.android.signing.release]\n{signing}")).contains("only applies to applications"));
+    assert!(android(&format!("[target.android.signing.release]\n{signing}\nstore-type = \"zip\"")).contains("store-type"));
+    assert!(android("[target.android.signing.release]\nstore-file = \"k.jks\"\nkey-alias = \"a\"").contains("store-password-env"));
+    assert!(
+        android("[target.android.flavors.free]\ndimension = \"tier\"\n[target.android.flavors.dev]\ndimension = \"env\"")
+            .contains("list their order in `flavor-dimensions`")
+    );
+    assert!(android("flavor-dimensions = [\"env\"]\n[target.android.flavors.free]\ndimension = \"tier\"").contains("has no flavors"));
+    assert!(android("[target.android.flavors.release]\ndimension = \"tier\"").contains("cannot be a flavor name"));
+    assert!(android("[target.android.flavors.\"a-b\"]\ndimension = \"tier\"").contains("invalid flavor name"));
     let native = parse(&with("[target.native]"));
     assert_eq!(native.targets.native.unwrap().platforms, ["host"]);
     assert!(native.targets.jvm.is_none(), "explicit targets replace the JVM default");
+}
+
+#[test]
+fn android_release_settings() {
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[target.android]
+namespace = "com.example.app"
+minify = true
+proguard-files = ["android/proguard-rules.pro"]
+build-config = {{ API_URL = "https://example.com", LOGGING = false, RETRIES = 3, BIG = 10000000000 }}
+
+[target.android.signing.release]
+store-file = "release.jks"
+store-password-env = "KS_PASS"
+key-alias = "upload"
+
+[target.android.flavors.free]
+dimension = "tier"
+application-id-suffix = ".free"
+build-config = {{ ADS = true }}
+
+[target.android.flavors.paid]
+dimension = "tier"
+"#
+    ));
+    let cfg = &m.targets.android.as_ref().unwrap().config;
+    assert!(cfg.minify);
+    assert_eq!(cfg.shrink_resources, None);
+    assert_eq!(cfg.proguard_files, [Path::new("android/proguard-rules.pro")]);
+    assert_eq!(cfg.build_config["API_URL"].java(), ("String", "\"https://example.com\"".to_owned()));
+    assert_eq!(cfg.build_config["LOGGING"].java(), ("boolean", "false".to_owned()));
+    assert_eq!(cfg.build_config["RETRIES"].java(), ("int", "3".to_owned()));
+    assert_eq!(cfg.build_config["BIG"].java(), ("long", "10000000000L".to_owned()));
+    assert_eq!(BuildConfigValue::String("a\"b\\".into()).java().1, r#""a\"b\\""#);
+    let signing = &cfg.signing["release"];
+    assert_eq!(signing.key_alias, "upload");
+    assert_eq!(signing.key_password_env(), "KS_PASS", "the key password defaults to the store password");
+    assert_eq!(cfg.dimensions(), ["tier"]);
+    assert_eq!(cfg.flavors_of("tier").map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["free", "paid"]);
+    assert_eq!(cfg.flavors["free"].application_id_suffix.as_deref(), Some(".free"));
 }
 
 #[test]

@@ -149,6 +149,11 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `compilations["main"].cinterops { create("sqlite") { ... } }` | `[target.native.cinterop.sqlite]`, with the `.def` file in `interop/sqlite.def` |
 | `wasmWasi()` | `[target.wasm] environment = "wasi"` |
 | `com.android.application` + `android { ... }` | `[target.android]` |
+| `signingConfigs { create("release") { ... } }` | `[target.android.signing.release]`, with passwords in `store-password-env` / `key-password-env` |
+| `buildTypes { release { isMinifyEnabled = true; proguardFiles(...) } }` | `[target.android] minify = true`, `proguard-files = [...]` |
+| `buildConfigField("String", "API_URL", "\"...\"")` | `[target.android] build-config = { API_URL = "..." }` |
+| `flavorDimensions` + `productFlavors { create("free") { ... } }` | `flavor-dimensions` and `[target.android.flavors.free]` |
+| `./gradlew bundleRelease` | `kargo package -t android --release` |
 | `implementation(...)` | `[dependencies]` |
 | `api(...)` | `exported = true` in `[dependencies]` |
 | `include(":core")` in `settings.gradle.kts` | `[workspace] members = ["core"]` (or a glob such as `"libs/*"`) |

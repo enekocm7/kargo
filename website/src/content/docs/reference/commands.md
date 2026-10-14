@@ -202,6 +202,7 @@ Build and run the program. Arguments after `--` go to the program.
 | `--port <port>` | Wasm browser apps: the port to serve on (default `8080`; `0` picks a free one) |
 | `--open` | Wasm browser apps: open the served page in your browser |
 | `--debug[=<port>]` | JVM: start the program suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`; `0` lets the JVM pick and print one). See [Debugging](../../guides/editors/#debugging) |
+| `--flavor <name>` | Android: install this [product flavor](../../guides/android/#product-flavors) (repeatable, one per dimension; default: the first flavor of each dimension). Needs `-t android` |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 
 `--main`, `--bin` and `--example` exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
@@ -464,16 +465,19 @@ The entries are the ones the build compiles with, in the same order: path depend
 
 ## `kargo package`
 
-Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). JVM only. The path of the jar is printed on stdout.
+Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). The path of the jar is printed on stdout.
 
 A library (a project without a `main` function or `main-class`) gets what you would publish instead: `target/<profile>/package/<name>-<version>.jar` with only its own classes (no Kotlin standard library, no `Class-Path`) and `<name>-<version>-sources.jar` next to it. Pass `--fat` for the fat jar anyway. `kargo publish --dry-run` shows everything a [publication](../../guides/publishing/) holds, POM included.
+
+With `-t android` (the default when the JVM target is off and Android is on), it builds the Android App Bundle (`.aab`) and APK of an application, or the AAR of a library, for every [product flavor](../../guides/android/#product-flavors), and copies them to `target/<profile>/android/`. Their paths are printed on stdout, App Bundles first. They are signed when [`[target.android.signing]`](../manifest/#targetandroid) has an entry for the build type; an unsigned release build gets a warning. See [Release builds](../../guides/android/#release-builds).
 
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Use the release profile |
+| `-t, --target <target>` | `jvm` (the default when enabled) or `android` |
 | `-p, --package <name>` | The package to build the jar for; required at the root of a workspace with several members |
-| `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` |
-| `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library |
+| `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
+| `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library (JVM) |
 
 ## `kargo publish`
 

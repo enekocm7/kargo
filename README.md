@@ -29,7 +29,7 @@ $ kargo test
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo build [--release] [-t <target>] [--keep-going] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
-| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005) |
+| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--flavor <name>] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--flavor` picks the Android product flavor to install |
 | `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
@@ -42,7 +42,7 @@ $ kargo test
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
-| `kargo package [--release] [--bin <name>] [--fat]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar) |
+| `kargo package [--release] [-t jvm\|android] [--bin <name>] [--fat]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors, `--tools` the Dokka, ktlint and detekt tools |
 | `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
@@ -134,6 +134,17 @@ linker-options = ["-lsqlite3"]    # also: def, headers, compiler-options
 namespace = "com.example.app"
 min-sdk = 24                # target-sdk = 36, compile-sdk = 37, kind = "application" | "library"
 # agp-version = "9.4.1"     # gradle-version defaults to what AGP needs (9.6.0)
+# minify = true             # R8 for release builds; proguard-files = ["android/proguard-rules.pro"]
+# build-config = { API_URL = "https://api.example.com" }   # BuildConfig fields
+
+# [target.android.signing.release]  # passwords come from environment variables
+# store-file = "release.jks"
+# store-password-env = "KS_PASS"
+# key-alias = "upload"
+
+# [target.android.flavors.free]     # product flavors: kargo run -t android --flavor free
+# dimension = "tier"
+# application-id-suffix = ".free"
 
 [dependencies]
 "org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"

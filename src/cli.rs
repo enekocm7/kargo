@@ -469,6 +469,9 @@ enum Command {
         /// Start the JVM suspended, waiting for a debugger on this port (default 5005)
         #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
         debug: Option<u16>,
+        /// Install this Android product flavor (repeatable, one per dimension; default: the first of each)
+        #[arg(long = "flavor", value_name = "NAME")]
+        flavors: Vec<String>,
         #[command(flatten)]
         package: OnePackageArg,
         /// How to print compiler diagnostics
@@ -665,10 +668,13 @@ enum Command {
         #[arg(short, long)]
         release: bool,
     },
-    /// Build a self-contained executable jar, or a library's jar and sources jar (JVM)
+    /// Build a self-contained executable jar, or a library's jar and sources jar (JVM); APKs and App Bundles (Android)
     Package {
         #[arg(short, long)]
         release: bool,
+        /// Target to package: jvm (default when enabled) or android
+        #[arg(short, long, value_enum)]
+        target: Option<TargetArg>,
         /// Launch the [[bin]] with this name instead of the main class (writes <NAME>-<version>-all.jar)
         #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::bins))]
         bin: Option<String>,
@@ -1234,7 +1240,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, main, bin, example, port, open, debug, message_format, package, args } => {
+        Command::Run { release, target, main, bin, example, port, open, debug, flavors, message_format, package, args } => {
             set_message_format(message_format);
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
@@ -1246,7 +1252,8 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (_, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let code = ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug })?;
+            let code =
+                ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors })?;
             Ok(exit_code(code))
         }
         Command::Test { build, filter, no_run, no_fail_fast, report, debug, list, format } => {
@@ -1539,13 +1546,14 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, bin, fat, package } => {
+        Command::Package { release, target, bin, fat, package } => {
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
             let ctx = context(config, &project, index, global, profile(release))?;
-            let jar = ops::package(&ctx, bin.as_deref(), fat)?;
-            println!("{}", jar.display());
+            for file in ops::package(&ctx, target.map(Into::into), bin.as_deref(), fat)? {
+                println!("{}", file.display());
+            }
             Ok(0)
         }
         Command::Publish { repository, local, dry_run, packages } => {

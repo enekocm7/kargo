@@ -385,7 +385,40 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
 /// the project's main class or, with `bin`, that `[[bin]]` (`<bin>-<version>-all.jar`).
 /// A library (no main class) gets a jar of its own classes and a sources jar instead,
 /// unless `fat` asks for the self-contained jar.
-pub fn package(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathBuf> {
+pub fn package(ctx: &BuildContext, target: Option<TargetKind>, bin: Option<&str>, fat: bool) -> Result<Vec<PathBuf>> {
+    let targets = &ctx.ws.manifest().targets;
+    let target = match target {
+        Some(t) if !targets.is_enabled(t) => bail!("target `{t}` is not enabled in kargo.toml"),
+        Some(t) => t,
+        None if !targets.is_enabled(TargetKind::Jvm) && targets.is_enabled(TargetKind::Android) => TargetKind::Android,
+        None => TargetKind::Jvm,
+    };
+    match target {
+        TargetKind::Jvm => package_jvm(ctx, bin, fat).map(|jar| vec![jar]),
+        TargetKind::Android => {
+            if bin.is_some() || fat {
+                bail!("`--bin` and `--fat` build JVM jars and do not apply to `kargo package -t android`");
+            }
+            package_android(ctx)
+        }
+        other => bail!("`kargo package` packages the jvm and android targets, not {other}; use `kargo build` for {other}"),
+    }
+}
+
+/// `kargo package -t android`: signed (when configured) APKs and App Bundles, or AARs.
+fn package_android(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
+    let start = std::time::Instant::now();
+    let mut env = build::hook_env(ctx);
+    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    let files = crate::gradle::package(ctx)?;
+    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
+    env.push(("KARGO_PACKAGE".to_owned(), files[0].to_string_lossy().into_owned()));
+    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
+    build::finished(ctx, start);
+    Ok(files)
+}
+
+fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathBuf> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
         bail!("`kargo package` creates an executable jar and needs the JVM target; use `kargo build` for other targets");
     }
