@@ -2,8 +2,11 @@
 //!
 //! Kargo sits between the editor and a Kotlin language server (the backend). Everything about
 //! `kargo.toml` (diagnostics, completion, hover, code actions), Kargo's commands for
-//! `workspace/executeCommand` and the `kargo/runnables` request are answered here; every other message is passed through unchanged in both directions. The
-//! `initialize` response is the backend's with Kargo's capabilities merged in.
+//! `workspace/executeCommand` and the `kargo/runnables` request are answered here; every other
+//! message is passed through in both directions, except that completion items get their
+//! signature as `detail` when the editor doesn't show `labelDetails` (see
+//! [`label_details_as_detail`]). The `initialize` response is the backend's with Kargo's
+//! capabilities merged in.
 //!
 //! Before the backend starts, Kargo imports the project and writes the description the
 //! backend reads (see [`crate::project`]). When `kargo.toml` or `kargo.lock` change and the
@@ -180,6 +183,13 @@ struct Server {
     backend_pulled: HashMap<String, Vec<Value>>,
     /// `textDocument/diagnostic` requests the backend hasn't answered, with their URI.
     pulls: HashMap<String, String>,
+    /// Whether the editor shows a completion item's `labelDetails` (its
+    /// `completionItem.labelDetailsSupport`).
+    client_label_details: bool,
+    /// `textDocument/completion` requests the backend hasn't answered, whose items get their
+    /// `labelDetails` as `detail` (see [`label_details_as_detail`]). Only recorded for an editor
+    /// that doesn't show `labelDetails`.
+    completions: HashSet<String>,
     /// Whether the backend's diagnostics are pulled (`diagnosticProvider`) rather than pushed.
     backend_pull: bool,
     /// Whether the editor re-pulls on `workspace/diagnostic/refresh`.
@@ -322,6 +332,30 @@ pub(crate) fn merge_capabilities(backend: &Value) -> Value {
     caps
 }
 
+/// Gives the items of a completion result without a `detail` the `detail` (or else the
+/// `description`) of their `labelDetails`, for an editor that doesn't show `labelDetails`. The
+/// Kotlin LSP puts each overload's signature only there, so without this every overload of
+/// `print` shows as the same bare `print`.
+fn label_details_as_detail(result: &mut Value) {
+    let items = match result {
+        Value::Array(items) => items,
+        Value::Object(list) => match list.get_mut("items") {
+            Some(Value::Array(items)) => items,
+            _ => return,
+        },
+        _ => return,
+    };
+    for item in items {
+        let Some(item) = item.as_object_mut() else { continue };
+        if item.get("detail").is_none_or(Value::is_null) {
+            let signature = item.get("labelDetails").and_then(|d| d["detail"].as_str().or(d["description"].as_str()));
+            if let Some(signature) = signature.map(str::to_owned) {
+                item.insert("detail".into(), json!(signature));
+            }
+        }
+    }
+}
+
 impl Server {
     fn new(config: Config, opts: Options, out: Box<dyn Write + Send>, tx: Sender<Event>, runner: check::Runner) -> Self {
         let searcher = Arc::new(deps::Searcher::new(&config, opts.search_url.clone()));
@@ -356,6 +390,8 @@ impl Server {
             backend_pushed: HashMap::new(),
             backend_pulled: HashMap::new(),
             pulls: HashMap::new(),
+            client_label_details: false,
+            completions: HashSet::new(),
             backend_pull: false,
             client_refresh: false,
             open_sources: HashSet::new(),
@@ -521,6 +557,9 @@ impl Server {
             {
                 self.pulls.insert(id_key(&id), uri.to_owned());
             }
+            if jsonrpc::method(&message) == "textDocument/completion" && !self.client_label_details {
+                self.completions.insert(id_key(&id));
+            }
             self.send_backend(&message);
             return Ok(());
         }
@@ -545,6 +584,8 @@ impl Server {
                     }
                 } else if let Some(uri) = self.pulls.remove(&id_key(&message["id"])) {
                     self.merge_pulled(&uri, &mut message["result"]);
+                } else if self.completions.remove(&id_key(&message["id"])) {
+                    label_details_as_detail(&mut message["result"]);
                 }
             }
             Kind::Notification if jsonrpc::method(&message) == "textDocument/publishDiagnostics" => {
@@ -609,6 +650,7 @@ impl Server {
         self.client_watches = params["capabilities"]["workspace"]["didChangeWatchedFiles"]["dynamicRegistration"] == true;
         self.client_apply_edit = params["capabilities"]["workspace"]["applyEdit"] == true;
         self.client_refresh = params["capabilities"]["workspace"]["diagnostics"]["refreshSupport"] == true;
+        self.client_label_details = params["capabilities"]["textDocument"]["completion"]["completionItem"]["labelDetailsSupport"] == true;
         self.check = check::Settings::from_options(&params["initializationOptions"]);
         let dir = params["rootUri"]
             .as_str()
@@ -1210,6 +1252,30 @@ mod tests {
         assert_eq!(merge_capabilities(&Value::Null), own_capabilities());
     }
 
+    #[test]
+    fn gives_completion_items_without_a_detail_their_label_details() {
+        let mut list = json!({
+            "isIncomplete": false,
+            "items": [
+                { "label": "print", "labelDetails": { "description": "Unit", "detail": "(message: Int) (kotlin.io)" } },
+                { "label": "print", "detail": "kept", "labelDetails": { "detail": "(message: Any?)" } },
+                { "label": "println", "labelDetails": { "description": "kotlin.io" } },
+                { "label": "plain" },
+            ],
+        });
+        label_details_as_detail(&mut list);
+        let details: Vec<Option<&str>> = list["items"].as_array().unwrap().iter().map(|i| i["detail"].as_str()).collect();
+        assert_eq!(details, [Some("(message: Int) (kotlin.io)"), Some("kept"), Some("kotlin.io"), None]);
+        assert_eq!(list["items"][0]["labelDetails"]["description"], "Unit", "the item keeps what the editor may show");
+
+        let mut array = json!([{ "label": "print", "labelDetails": { "detail": "(message: Int)" } }]);
+        label_details_as_detail(&mut array);
+        assert_eq!(array[0]["detail"], "(message: Int)");
+        let mut none = Value::Null;
+        label_details_as_detail(&mut none);
+        assert!(none.is_null());
+    }
+
     /// An editor talking to `serve_with` over pipes.
     struct Editor {
         input: PipeWriter,
@@ -1418,8 +1484,9 @@ local = \"{url}\"
         assert!(editor.finish());
     }
 
-    /// A fake Kotlin server: answers `initialize`, `textDocument/hover` and `shutdown`, and
-    /// reports every method it receives.
+    /// A fake Kotlin server: answers `initialize`, `textDocument/hover`, `textDocument/completion`
+    /// (one overload, its signature only in `labelDetails`) and `shutdown`, and reports every
+    /// method it receives.
     fn fake_backend() -> (BackendIo, mpsc::Receiver<Value>) {
         let (from_kargo, to_backend) = io::pipe().unwrap();
         let (from_backend, to_kargo) = io::pipe().unwrap();
@@ -1431,6 +1498,10 @@ local = \"{url}\"
                 let reply = match jsonrpc::method(&message) {
                     "initialize" => Some(json!({ "capabilities": { "textDocumentSync": 2, "definitionProvider": true } })),
                     "textDocument/hover" => Some(json!({ "contents": "kotlin" })),
+                    "textDocument/completion" => Some(json!({
+                        "isIncomplete": false,
+                        "items": [{ "label": "print", "labelDetails": { "description": "Unit", "detail": "(message: Int) (kotlin.io)" } }],
+                    })),
                     "shutdown" => Some(Value::Null),
                     _ => None,
                 };
@@ -1461,6 +1532,26 @@ local = \"{url}\"
         let mut bare = json!({ "rootUri": "file:///p", "initializationOptions": null });
         prefer_workspace_json(bare.as_object_mut().unwrap());
         assert_eq!(bare["initializationOptions"], json!({ "buildTools": { "file:///p": "json" } }));
+    }
+
+    #[test]
+    fn shows_completion_signatures_to_editors_that_do_not_show_label_details() {
+        let dir = project(MANIFEST);
+        let root = text::path_to_uri(dir.path());
+        let uri = text::path_to_uri(&dir.path().join("src/Main.kt"));
+        let completion = json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 0 } });
+        let shows_label_details = json!({ "textDocument": { "completion": { "completionItem": { "labelDetailsSupport": true } } } });
+        for (capabilities, expected) in [(json!({}), Some("(message: Int) (kotlin.io)")), (shows_label_details, None)] {
+            let (backend, _seen) = fake_backend();
+            let opts = Options { server: Some(ServerKind::KotlinLsp), ..Options::default() };
+            let (mut editor, _home) = Editor::start(opts, Some(backend));
+            editor.request(1, "initialize", json!({ "rootUri": root, "capabilities": capabilities }));
+            let (reply, _) = editor.request(2, "textDocument/completion", completion.clone());
+            let item = &reply["result"]["items"][0];
+            assert_eq!(item["detail"].as_str(), expected, "{capabilities}");
+            assert_eq!(item["labelDetails"]["detail"], "(message: Int) (kotlin.io)", "the item is passed through");
+            assert!(editor.finish());
+        }
     }
 
     #[test]
