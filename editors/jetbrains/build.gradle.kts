@@ -23,6 +23,7 @@ dependencies {
     intellijPlatform {
         intellijIdeaCommunity(providers.gradleProperty("platformVersion"))
         bundledPlugin("com.intellij.java")
+        bundledPlugin("org.jetbrains.kotlin")
         plugin("com.redhat.devtools.lsp4ij", providers.gradleProperty("lsp4ijVersion").get())
         testFramework(TestFrameworkType.Platform)
     }
@@ -39,7 +40,9 @@ intellijPlatform {
     }
     pluginVerification {
         ides {
-            recommended()
+            // -PverifyIde=<dir> verifies against an installed IDE instead of the recommended releases.
+            val verifyIde = providers.gradleProperty("verifyIde")
+            if (verifyIde.isPresent) local(verifyIde.get()) else recommended()
         }
     }
 }

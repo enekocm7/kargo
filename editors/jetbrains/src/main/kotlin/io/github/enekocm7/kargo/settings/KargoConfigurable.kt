@@ -12,6 +12,7 @@ import com.intellij.ui.dsl.builder.COLUMNS_LARGE
 import com.intellij.ui.dsl.builder.panel
 import io.github.enekocm7.kargo.Kargo
 import io.github.enekocm7.kargo.lsp.KargoLsp
+import io.github.enekocm7.kargo.project.KargoProjectSync
 
 class KargoConfigurable : BoundConfigurable("Kargo") {
     private val options get() = KargoSettings.getInstance().state
@@ -23,6 +24,13 @@ class KargoConfigurable : BoundConfigurable("Kargo") {
                     .bindText({ options.kargoPath ?: "" }, { options.kargoPath = it.trim().ifEmpty { null } })
                     .columns(COLUMNS_LARGE)
                     .comment("Leave empty to use the kargo on PATH. Found: ${Kargo.executable()?.path ?: "none"}")
+            }
+        }
+        group("Project") {
+            row {
+                checkBox("Import the project model from Kargo")
+                    .bindSelected({ options.importProject }, { options.importProject = it })
+                    .comment("Modules, source roots and libraries from kargo.toml, so Kotlin code resolves them. Tools | Kargo | Reload Kargo Project imports again")
             }
         }
         group("Language Server (kargo lsp)") {
@@ -37,7 +45,9 @@ class KargoConfigurable : BoundConfigurable("Kargo") {
     override fun apply() {
         super.apply()
         for (project in ProjectManager.getInstance().openProjects) {
-            if (Kargo.isKargoProject(project)) KargoLsp.restart(project)
+            if (!Kargo.isKargoProject(project)) continue
+            KargoLsp.restart(project)
+            KargoProjectSync.getInstance(project).requestSync(force = true)
         }
     }
 }

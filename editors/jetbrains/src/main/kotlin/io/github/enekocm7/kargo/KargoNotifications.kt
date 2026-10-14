@@ -1,4 +1,4 @@
-// Balloons from the plugin, and the check for a missing `kargo` when a Kargo project opens.
+// Balloons from the plugin, and what happens when a Kargo project opens: a check for a missing `kargo`, and the import.
 
 package io.github.enekocm7.kargo
 
@@ -9,12 +9,15 @@ import com.intellij.notification.NotificationType
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
+import io.github.enekocm7.kargo.project.KargoProjectSync
 import io.github.enekocm7.kargo.settings.KargoConfigurable
 
 object KargoNotifications {
     private fun group() = NotificationGroupManager.getInstance().getNotificationGroup("Kargo")
 
     fun error(project: Project?, title: String, content: String) = group().createNotification(title, content, NotificationType.ERROR).notify(project)
+
+    fun warning(project: Project?, title: String, content: String) = group().createNotification(title, content, NotificationType.WARNING).notify(project)
 
     fun info(project: Project?, title: String, content: String) = group().createNotification(title, content, NotificationType.INFORMATION).notify(project)
 
@@ -30,9 +33,10 @@ object KargoNotifications {
     }
 }
 
-/** Says so when a Kargo project opens and `kargo` can't be found. */
+/** Imports a Kargo project when it opens, or says so when `kargo` can't be found. */
 class KargoStartupActivity : ProjectActivity {
     override suspend fun execute(project: Project) {
-        if (Kargo.isKargoProject(project) && Kargo.executable() == null) KargoNotifications.kargoNotFound(project)
+        if (!Kargo.isKargoProject(project)) return
+        if (Kargo.executable() == null) KargoNotifications.kargoNotFound(project) else KargoProjectSync.getInstance(project).requestSync(delayMs = 0)
     }
 }

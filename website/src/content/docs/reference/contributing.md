@@ -34,10 +34,11 @@ Format with `cargo fmt` before committing.
 
 ## The JetBrains plugin
 
-The plugin for IntelliJ IDEA and Android Studio ([IntelliJ IDEA and Android Studio](../../guides/jetbrains/)) is a Gradle project written in Kotlin, in `editors/jetbrains`. It runs `kargo lsp` through [LSP4IJ](https://github.com/redhat-developer/lsp4ij) and adds the IDE parts around it:
+The plugin for IntelliJ IDEA and Android Studio ([IntelliJ IDEA and Android Studio](../../guides/jetbrains/)) is a Gradle project written in Kotlin, in `editors/jetbrains`. It imports the project model from `kargo metadata`, runs `kargo lsp` through [LSP4IJ](https://github.com/redhat-developer/lsp4ij) and adds the IDE parts around it:
 
 | Package | Responsibility |
 |---|---|
+| `project` | The project import: `KargoMetadata` reads `kargo metadata`, `KargoImportPlanner` turns it into modules, roots and libraries (plain data, unit-tested), `KargoProjectImporter` applies the plan to the IDE, `KotlinSupport` is the only code that touches the Kotlin plugin's facets and library kinds, `KargoProjectSync` and `KargoFileListener` decide when to import |
 | `lsp` | Starting `kargo lsp` with the settings' options, the `kargo/runnables` request and the `kargo/addDependency` / `kargo/addTarget` commands |
 | `run` | The Kargo run configuration, gutter icons, the test tree (`--message-format json` to test events), debugging through `--debug` |
 | `wizard` | *File → New → Project → Kargo* (`kargo init`) |
@@ -48,9 +49,12 @@ cd editors/jetbrains
 ./gradlew buildPlugin test     # the plugin zip in build/distributions
 ./gradlew runIde               # an IDE with the plugin installed
 ./gradlew verifyPlugin         # check compatibility with recent IDEs
+./gradlew verifyPlugin -PverifyIde="<an installed IDE>"   # ... or with the IDE you have
 ```
 
 It needs JDK 21. The *JetBrains plugin* workflow builds and verifies it on every change to `editors/jetbrains`.
+
+The import tests (`KargoImportTest`) run the IDE's Kotlin analysis against imported modules. The Kotlin/Native and multiplatform ones need a Kotlin/Native distribution the IDE under test can read (a `kotlin-native-prebuilt-*` directory with Kotlin 2.3 in `~/.konan`, or in `KONAN_DATA_DIR`) and are skipped without one; `KargoSyncTest` needs `kargo` and skips without it. The plugin uses the Kotlin plugin's facets and library kinds, which are not a stable API, so `verifyPlugin` against the newest IDE is how you find out that a release changed them.
 
 ## The Zed extension
 

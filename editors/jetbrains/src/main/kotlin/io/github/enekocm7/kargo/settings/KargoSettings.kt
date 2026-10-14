@@ -1,4 +1,4 @@
-// The plugin's settings, shared by every project: where `kargo` is and whether `kargo lsp` runs.
+// The plugin's settings, shared by every project: where `kargo` is, whether `kargo lsp` runs and whether projects are imported.
 
 package io.github.enekocm7.kargo.settings
 
@@ -18,6 +18,9 @@ class KargoSettings : SimplePersistentStateComponent<KargoSettings.Options>(Opti
 
         /** Whether to run `kargo lsp` for `kargo.toml`. */
         var languageServer by property(true)
+
+        /** Whether to describe the project to the IDE (modules, source roots, libraries) from `kargo metadata`. */
+        var importProject by property(true)
     }
 
     companion object {

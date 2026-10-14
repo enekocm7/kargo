@@ -15,7 +15,7 @@ Yes. Anything on Maven Central or in a repository you add in `[repositories]`, i
 
 ### Does my IDE understand Kargo projects?
 
-There's no IDE plugin yet. IntelliJ IDEA and VS Code still highlight Kotlin files, but dependency-aware completion needs a build model the IDE understands. For Android, you can open the generated `target/android` project in Android Studio.
+IntelliJ IDEA and Android Studio have a [Kargo plugin](../../guides/jetbrains/) that imports the project from `kargo metadata`, so completion and navigation know your dependencies, and Zed has an [extension](../../guides/zed/). Other editors can use [`kargo lsp`](../../guides/editors/). For Android, you can open the generated `target/android` project in Android Studio.
 
 ### Can I use Java?
 

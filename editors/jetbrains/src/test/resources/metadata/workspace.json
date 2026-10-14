@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "root": "/w",
+  "workspace": true,
+  "resolved": true,
+  "watch": ["/w/kargo.toml", "/w/app/kargo.toml", "/w/lib/kargo.toml", "/w/kargo.lock"],
+  "toolchain": {"kotlin": "2.4.21", "jdk": {"home": "/jdk/21"}, "kotlin-native": {"version": "2.4.21", "home": "/konan/2.4.21"}},
+  "packages": [
+    {
+      "name": "app",
+      "member": true,
+      "root": "/w/app",
+      "manifest": "/w/app/kargo.toml",
+      "kotlin": {"opt-in": []},
+      "targets": [
+        {
+          "kind": "jvm",
+          "source-roots": ["/w/app/src", "/w/app/src-jvm"],
+          "test-roots": ["/w/app/tests", "/w/app/tests-jvm"],
+          "resource-roots": ["/w/app/resources"],
+          "test-resource-roots": ["/w/app/test-resources"],
+          "classes-dir": "/w/target/debug/jvm/classes",
+          "test-classes-dir": "/w/target/debug/jvm/test-classes",
+          "jvm-target": "21",
+          "compiler-args": [],
+          "compiler-plugins": [],
+          "dependencies": [
+            {"platform": "jvm",
+             "compile": [{"package": "lib", "scope": "compile"}, {"module": "org.jetbrains.kotlin:kotlin-stdlib", "version": "2.4.21", "path": "/cache/stdlib.jar", "sources": null}],
+             "runtime": [{"package": "lib", "scope": "compile"}, {"module": "org.jetbrains.kotlin:kotlin-stdlib", "version": "2.4.21", "path": "/cache/stdlib.jar", "sources": null}],
+             "test": [{"package": "lib", "scope": "compile"}, {"module": "org.jetbrains.kotlin:kotlin-stdlib", "version": "2.4.21", "path": "/cache/stdlib.jar", "sources": null}]}
+          ]
+        },
+        {
+          "kind": "native",
+          "platforms": ["linux_x64"],
+          "source-roots": ["/w/app/src", "/w/app/src-native"],
+          "test-roots": ["/w/app/tests", "/w/app/tests-native"],
+          "compiler-args": [],
+          "compiler-plugins": [],
+          "dependencies": [
+            {"platform": "native-linux_x64",
+             "compile": [{"package": "lib", "scope": "compile"}],
+             "runtime": [{"package": "lib", "scope": "compile"}],
+             "test": [{"package": "lib", "scope": "compile"}]}
+          ]
+        },
+        {
+          "kind": "android",
+          "source-roots": ["/w/app/src", "/w/app/src-android"],
+          "test-roots": [],
+          "dependencies": null
+        }
+      ]
+    },
+    {
+      "name": "lib",
+      "member": true,
+      "root": "/w/lib",
+      "manifest": "/w/lib/kargo.toml",
+      "kotlin": {"opt-in": []},
+      "targets": [
+        {
+          "kind": "jvm",
+          "source-roots": ["/w/lib/src"],
+          "test-roots": ["/w/lib/tests"],
+          "resource-roots": ["/w/lib/resources"],
+          "test-resource-roots": [],
+          "classes-dir": "/w/target/debug/deps/lib/jvm/classes",
+          "jvm-target": "21",
+          "compiler-args": [],
+          "compiler-plugins": [],
+          "dependencies": [{"platform": "jvm", "compile": [], "runtime": [], "test": []}]
+        },
+        {
+          "kind": "native",
+          "platforms": ["linux_x64"],
+          "source-roots": ["/w/lib/src"],
+          "test-roots": ["/w/lib/tests"],
+          "compiler-args": [],
+          "compiler-plugins": [],
+          "dependencies": [{"platform": "native-linux_x64", "compile": [], "runtime": [], "test": []}]
+        }
+      ]
+    }
+  ]
+}

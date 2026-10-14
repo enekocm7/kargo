@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "fingerprint": "def",
+  "watch": ["/p/tes/kargo.toml", "/p/tes/kargo.lock"],
+  "root": "/p/tes",
+  "resolved": true,
+  "toolchain": {
+    "kotlin": "2.4.21",
+    "jdk": {"request": "system", "home": "/jdk/25", "version": 25},
+    "kotlin-native": {"version": "2.4.21", "home": "/konan/2.4.21"}
+  },
+  "packages": [
+    {
+      "name": "tes",
+      "member": true,
+      "root": "/p/tes",
+      "manifest": "/p/tes/kargo.toml",
+      "kotlin": {"version": "2.4.21", "language-version": null, "api-version": null, "opt-in": []},
+      "targets": [
+        {
+          "kind": "native",
+          "native-kind": "executable",
+          "platforms": ["mingw_x64"],
+          "source-roots": ["/p/tes/src", "/p/tes/src-native"],
+          "test-roots": ["/p/tes/tests", "/p/tes/tests-native"],
+          "output-dir": "/p/tes/target/debug/native",
+          "compiler-args": [],
+          "compiler-plugins": [],
+          "dependencies": [
+            {
+              "platform": "native-mingw_x64",
+              "compile": [
+                {"module": "io.github.enekocm7:raylib-kt-mingwx64", "version": "0.3.0", "path": "/cache/raylib-kt-mingwx64-0.3.0.klib", "sources": null},
+                {"module": "io.github.enekocm7:raylib-kt-mingwx64", "version": "0.3.0", "path": "/cache/raylib-kt-mingwx64-0.3.0-cinterop-raylib.klib", "sources": null}
+              ],
+              "runtime": [
+                {"module": "io.github.enekocm7:raylib-kt-mingwx64", "version": "0.3.0", "path": "/cache/raylib-kt-mingwx64-0.3.0.klib", "sources": null},
+                {"module": "io.github.enekocm7:raylib-kt-mingwx64", "version": "0.3.0", "path": "/cache/raylib-kt-mingwx64-0.3.0-cinterop-raylib.klib", "sources": null}
+              ],
+              "test": [
+                {"module": "io.github.enekocm7:raylib-kt-mingwx64", "version": "0.3.0", "path": "/cache/raylib-kt-mingwx64-0.3.0.klib", "sources": null},
+                {"module": "io.github.enekocm7:raylib-kt-mingwx64", "version": "0.3.0", "path": "/cache/raylib-kt-mingwx64-0.3.0-cinterop-raylib.klib", "sources": null}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
