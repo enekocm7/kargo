@@ -15,7 +15,7 @@ Yes. Anything on Maven Central or in a repository you add in `[repositories]`, i
 
 ### Does my IDE understand Kargo projects?
 
-IntelliJ IDEA and Android Studio have a [Kargo plugin](../../guides/jetbrains/) that imports the project from `kargo metadata`, so completion and navigation know your dependencies, and Zed has an [extension](../../guides/zed/). Other editors can use [`kargo lsp`](../../guides/editors/). For Android, you can open the generated `target/android` project in Android Studio.
+IntelliJ IDEA and Android Studio are the best supported editors for Kotlin. Their [Kargo plugin](../../guides/editors/#intellij-idea-and-android-studio) imports the project from `kargo metadata`, so completion and navigation know your dependencies. Zed has an [extension](../../guides/editors/#zed), and other editors can use [`kargo lsp`](../../guides/editors/). For Android, you can open the generated `target/android` project in Android Studio.
 
 ### Can I use Java?
 

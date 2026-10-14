@@ -1,35 +1,324 @@
 ---
 title: Editor integration
-description: Run kargo lsp in your editor, get completion, validation and quick fixes in kargo.toml, import a project into a language server, browse library sources, drive a test explorer and debug with kargo dap.
+description: Pick an editor for Kargo projects. IntelliJ IDEA and Android Studio with the Kargo plugin are the best supported; Zed and other editors run kargo lsp, kargo dap and kargo ide.
 ---
 
 Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a language server, a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
 
-## Language server
+**Use IntelliJ IDEA or Android Studio with the Kargo plugin if you can.** It is the best supported way to work on a Kargo project. Kotlin is developed by JetBrains, and IntelliJ IDEA has the most complete support for the language: its own analysis, refactorings, debugger and test tree. The plugin imports your project into that support, so your dependencies resolve and Run, Test and Debug work from the IDE. Zed and the other editors run `kargo lsp` instead. The Kotlin language server it starts analyzes JVM code only for now, and those editors have no test tree.
 
-`kargo lsp` is one language server for a whole Kargo project. Point your editor at it for Kotlin files and `kargo.toml`:
+## Which editor to use
+
+| Editor | Set up with | Kotlin code | Run, test and debug |
+|---|---|---|---|
+| IntelliJ IDEA, Android Studio | The [Kargo plugin](#intellij-idea-and-android-studio) | The IDE's own Kotlin support, with your dependencies imported. JVM, Kotlin/Native and Wasm modules | Run configurations, Run and Debug icons, a test tree and the JVM debugger |
+| Zed | The [Kargo extension](#zed) | `kargo lsp`, which analyzes JVM code only | Run buttons from `kargo ide --zed`, debugging through `kargo dap`, and test results in the terminal |
+| Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp`, which analyzes JVM code only | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
+| Emacs and other LSP clients | `kargo lsp` | `kargo lsp`, which analyzes JVM code only | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
+
+Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). The language server that `kargo lsp` runs can't read Kotlin/Native and Wasm libraries yet, so code in `src-native/` and `src-wasm/` gets no code intelligence outside IntelliJ IDEA (see [Multiplatform projects](#multiplatform-projects)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
+
+## IntelliJ IDEA and Android Studio
+
+The Kargo plugin makes IntelliJ IDEA and Android Studio understand Kargo projects. It [imports the project](#project-import) (modules, source roots and the libraries of `kargo.toml`) so the IDE's own Kotlin support resolves your dependencies, runs [`kargo lsp`](#language-server) inside the IDE for `kargo.toml` support, and adds what an IDE needs on top: a New Project wizard, run configurations, Run and Debug icons, a test tree and a Kargo tool window.
+
+Open a folder that contains a `kargo.toml` and the plugin takes over. You don't need a `build.gradle.kts` or a `pom.xml`.
+
+### Install the plugin
+
+The plugin needs:
+
+- IntelliJ IDEA 2025.2 or newer, or Android Studio based on it (Otter or newer).
+- [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij), Red Hat's LSP client for JetBrains IDEs. Install it from *Settings → Plugins → Marketplace* first.
+- Kargo itself. See [Installation](../../getting-started/installation/).
+
+The plugin isn't on the JetBrains Marketplace yet. Build it from the repository and install the zip:
 
 ```sh
-kargo lsp
+cd editors/jetbrains
+./gradlew buildPlugin
 ```
 
-It speaks LSP over stdin and stdout and gives you:
+Then, in the IDE, open *Settings → Plugins → ⚙ → Install Plugin from Disk…* and pick `editors/jetbrains/build/distributions/kargo-jetbrains-<version>.zip`. Every build on `master` also attaches the zip as an artifact of the *JetBrains plugin* workflow on GitHub Actions.
 
-- **Kotlin code intelligence** (completion, go to definition, references, hover, rename, quick fixes, diagnostics) from [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp). Kargo downloads the server on first use, describes your project to it, and passes Kotlin traffic through unchanged.
-- **`kargo.toml` support**: completion of keys, tables and values, documentation on hover, and errors as you type. Errors come from the [JSON Schema](#completion-and-validation-in-kargotoml) first (unknown keys with a "did you mean", wrong types, invalid values), then from Kargo's own validation and [warnings](../../reference/warnings/), the same messages `kargo build` prints.
-- **Dependencies in `kargo.toml`**: completion of `group:artifact` coordinates from Maven Central and of versions from your repositories, and a hint on every dependency with a newer version. See [Dependency completion and update hints](#dependency-completion-and-update-hints).
-- **Code actions in `kargo.toml`**: quick fixes for its errors, and the edits of `kargo add`, `kargo add --framework`, `kargo target add` and `kargo upgrade` from the editor. See [Code actions in `kargo.toml`](#code-actions-in-kargotoml).
-- **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
-- **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
-- **Check on save** (opt-in): when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear next to the Kotlin server's. See [Check on save](#check-on-save).
+The plugin looks for `kargo` on your `PATH`, then in `~/.cargo/bin`. If Kargo is somewhere else, set *Kargo executable* in *Settings → Languages & Frameworks → Kargo*. If it can't find Kargo when a Kargo project opens, it says so and links to the installation guide.
 
-The first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
+### Create a project
 
-### Editor setup
+*File → New → Project → Kargo* runs [`kargo init`](../../reference/commands/) in the new project's directory with the options you pick:
 
-**IntelliJ IDEA** and **Android Studio**: install the Kargo plugin, which imports the project from `kargo metadata` (modules, source roots and libraries, JVM and Kotlin/Native) so the IDE's own Kotlin support resolves your dependencies, runs `kargo lsp` for `kargo.toml`, and adds a New Project wizard, run configurations, a test tree and debugging. See [IntelliJ IDEA and Android Studio](../jetbrains/).
+| Field | `kargo init` option |
+|---|---|
+| Name, Location | The directory, and the package name |
+| Library | `--lib` |
+| Targets | `--target jvm,wasm,native,android` |
+| Frameworks | `--with compose,ktor,...` (see [Built-in frameworks](../frameworks/)) |
+| Group | `--group` |
+| Kotlin version | `--kotlin` (empty: the version Kargo pins) |
+| Create Git repository | `--no-vcs` when unchecked |
 
-**Zed**: install the Kargo extension, which runs `kargo lsp` for Kotlin files and `kargo.toml` and debugs programs and tests through [`kargo dap`](#debug-adapter). See [Zed](../zed/).
+The project opens with `src/Main.kt`, and the plugin starts [importing it](#project-import).
+
+For a folder you already opened, *Tools → Kargo → Initialize Kargo Project* runs `kargo init` in its root.
+
+### Project import
+
+An IDE can only complete and resolve what it knows about. When a folder with a `kargo.toml` opens, the plugin runs [`kargo metadata`](../../reference/machine-readable-output/#kargo-metadata) in the background (the *Importing Kargo project* progress), which resolves the dependencies as `kargo build` would, and describes the result to the IDE:
+
+| From Kargo | In the IDE |
+|---|---|
+| A package | A module named after it |
+| `src/`, `src-<target>/` | Source roots |
+| `tests/`, `tests-<target>/` | Test source roots |
+| `resources/`, `test-resources/` | Resource roots |
+| `examples/` | A test source root, since examples are compiled against the package's sources |
+| `target/` | Excluded from the project |
+| A Maven dependency | A project library named `Kargo: <group>:<artifact>:<version>`, with its sources jar if `kargo fetch --sources` downloaded it |
+| `[dev-dependencies]` and runtime-only dependencies | The same libraries with *Test* and *Runtime* scope |
+| A path dependency or workspace member | A module dependency on that package's module |
+| `[package] kotlin`, `language-version`, `api-version`, `opt-in`, `compiler-args` and compiler plugins | The module's Kotlin facet |
+| `[toolchain] jdk` | The module's SDK, added to the IDE's JDK table |
+| The target | The module's Kotlin platform: JVM, Kotlin/Native or Wasm |
+
+Reopen a JVM project and its Maven libraries resolve: completion, go to definition (into the sources jar, once fetched), quick documentation and error highlighting all know the libraries of `kargo.toml`.
+
+**Kotlin/Native.** A Native module is analyzed as Kotlin/Native. Its libraries are the klibs of `[target.native.dependencies]`, plus the standard library and the platform libraries (`posix`, `windows`, ...) of the Kotlin/Native distribution Kargo downloaded. A library that is published only as Native klibs, such as a binding to a C library, resolves like any other. When the target builds for several Native platforms, the IDE analyzes the first.
+
+**Several targets.** A package with more than one target gets a module for `src/` and `tests/` (`<name>.common`) and one per target (`<name>.jvm`, `<name>.native`, `<name>.wasm`) for `src-<target>/`, which refines the common one, so `expect` and `actual` declarations find each other. Common code is analyzed like the package's first target (JVM, then Native, then Wasm), with that target's libraries; `kargo check` still compiles it for every target. Android code isn't imported: Gradle owns it, see [Android](#android).
+
+The import runs again, without any action, when a `kargo.toml` or `kargo.lock` changes (including when `kargo add`, `kargo update` or a build rewrites them) and when a `src*`, `tests*` or `resources` directory appears or goes away. *Tools → Kargo → Fetch Dependencies and Sources* imports once more to pick up the sources jars. To import by hand, use *Tools → Kargo → Reload Kargo Project*. If `kargo.toml` and `kargo.lock` are as they were at the last import, the check takes a moment and the IDE doesn't index anything.
+
+The modules are saved in the IDE's `.idea/` directory (which `kargo new` git-ignores), so a project opens with its last known model, even offline. The import only manages what it created: the modules it recorded in `.idea/kargo.xml` and the libraries whose name starts with `Kargo: `. A module of your own with the same name as a package is taken over when it only covers that package, and left alone otherwise.
+
+:::caution
+The IDE's Kotlin support reads libraries compiled by the Kotlin version it ships with, or one newer at most. A project on a newer Kotlin than the IDE understands shows its libraries, and even `String` and `println`, as unresolved. That is the case for Kargo's default Kotlin and IntelliJ IDEA 2025.2 (Kotlin 2.2): a Native project can't read the standard library, and a JVM project the libraries compiled with Kotlin 2.4. Use an IDE that bundles a Kotlin plugin at least as new as `[package] kotlin` (IntelliJ IDEA 2026.2 has Kotlin 2.4), or set an older `kotlin` in `kargo.toml`. *Settings → Plugins* shows the IDE's Kotlin version.
+:::
+
+If resolving the dependencies fails (offline with an empty cache, a library that doesn't exist), the plugin still imports the modules and source roots and shows a *Kargo dependencies are not resolved* balloon with Kargo's message. Fix the cause, then reload.
+
+### Code intelligence in the IDE
+
+When you open `kargo.toml`, the plugin starts `kargo lsp --server none` in the project root, which is `kargo lsp` without a Kotlin language server. It gives you the `kargo.toml` half of [Editor integration](#language-server): completion, documentation, validation and quick fixes, with Maven coordinate and version completion and hints at newer versions. It also answers [`kargo/runnables`](#runnables) for the tool window and the commands behind *Add Dependency* and *Add Target*.
+
+Kotlin files are not sent to `kargo lsp`: the IDE's own Kotlin support analyzes them against the [imported project](#project-import). Errors from `kargo check` are not shown in the editor either, which matters for what the IDE can't analyze, like code that fails on only one target; run *Tools → Kargo → Check*. LSP4IJ shows the server's log in *View → Tool Windows → Language Servers*.
+
+### Run, test and debug
+
+A green arrow in the gutter runs:
+
+| Next to | Runs |
+|---|---|
+| A top-level `fun main` | The program: `kargo run -t <target>`, `--bin <name>` for a [`[[bin]]`](../multiple-programs/), `--example <name>` in `examples/` |
+| A function annotated with `@Test` (or `@ParameterizedTest`, `@RepeatedTest`, `@TestFactory`) | That test: `kargo test <package.Class.method>` |
+| A test class | Its tests: `kargo test <package.Class>` |
+
+The target comes from the directory: `src-wasm/` and `tests-wasm/` run on Wasm, and so on. Tests in `tests/` run on every enabled target.
+
+Each click creates a temporary *Kargo* run configuration. You can also add one yourself in *Run → Edit Configurations → + → Kargo*:
+
+| Field | Meaning |
+|---|---|
+| Command | What follows `kargo`, such as `run -t jvm`, `test MathTest`, `build --release` or `task lint` |
+| Working directory | The package to run in; empty: the project root |
+| Environment variables | Added to the environment of `kargo` |
+
+Compiler errors and file locations in the output are links to the source.
+
+**Tests.** A configuration whose command is `kargo test` shows its results in the IDE's test tree: one node per test class and test, with its output, failure message, stack trace and duration. The plugin adds `--message-format json` for this; see [Test results](../../reference/machine-readable-output/#test-results).
+
+**Debugging.** *Debug* on a `run` or `test` configuration adds [`--debug=<port>`](#debugging) with a free port, and `-t jvm` unless the command names a target. The IDE's Java debugger attaches as soon as the JVM listens, so breakpoints, stepping and variables work as in any Java program. Debugging works for the JVM target only.
+
+### The Kargo tool window
+
+*View → Tool Windows → Kargo* lists what the project can run, from [`kargo/runnables`](#runnables): each target's program, `[[bin]]` and example, each target's tests, and the [tasks](../tasks-and-plugins/) in `kargo.toml`. Double-click an entry to run it, or select it and use *Debug* in the toolbar. *Refresh* lists them again after you change `kargo.toml`.
+
+### Kargo actions
+
+*Tools → Kargo* runs Kargo's commands for the package of the file you're in:
+
+| Action | Runs |
+|---|---|
+| Build, Check, Test, Clean | `kargo build`, `kargo check`, `kargo test`, `kargo clean` |
+| Run Command… | Any `kargo` command line you type |
+| Run Task… | `kargo task <name>`, picked from the tasks in `kargo.toml` |
+| Add Dependency… | `kargo add` for coordinates you type, into `[dependencies]` or `[dev-dependencies]` |
+| Remove Dependency… | `kargo remove <name>` |
+| Add Target… | `kargo target add <target>` |
+| Fetch Dependencies and Sources | `kargo fetch --sources`, for navigation into library sources; the [project import](#project-import) then picks them up |
+| Update Dependencies | `kargo update` |
+| Reload Kargo Project | [Imports the project](#project-import) again and restarts `kargo lsp` |
+| Initialize Kargo Project | `kargo init`, in a project without `kargo.toml` |
+
+*Add Dependency* and *Add Target* go through `kargo lsp`'s [commands](#commands-for-editor-plugins), so they edit `kargo.toml` the same way the quick fixes do. You can assign any of these actions a shortcut in *Settings → Keymap*.
+
+### Plugin settings
+
+*Settings → Languages & Frameworks → Kargo* applies to every project. Changing it restarts `kargo lsp` and imports the project again in open Kargo projects.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Kargo executable | empty | The `kargo` to run; empty: the one on `PATH`, then `~/.cargo/bin` |
+| Import the project model from Kargo | on | Describe the modules, source roots and libraries to the IDE ([Project import](#project-import)). Turn it off if you manage the project model yourself; modules already imported stay |
+| Run kargo lsp | on | Run the language server for `kargo.toml` |
+
+### Android
+
+Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, the project import, run configurations and the tool window work for every target but Android. Android sources (`src-android/`, `android/`) aren't imported, because Kargo hands Android to Gradle and the Android Gradle Plugin. Layout and Compose previews need Gradle's model. For those, open the Gradle project Kargo generates in `target/android` (see [Android](../android/)) in a second window.
+
+### Limitations of the plugin
+
+- *Build → Build Project* doesn't run `kargo build`; use *Tools → Kargo → Build*, or check on save for errors in the editor.
+- *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
+- The IDE analyzes each module for one platform. In a package with several targets, common code (`src/`) is analyzed like the first target, so completion there also offers that platform's APIs. *Tools → Kargo → Check* shows what fails on the other targets.
+- Wasm modules are analyzed against the Wasm klibs of `kargo.toml`, but browser APIs and npm packages are not described to the IDE.
+- Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are handed to the IDE but it may not apply them, so it can report errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
+- The IDE reads libraries compiled by its own Kotlin version or one newer at most, see the note under [Project import](#project-import).
+
+
+## Zed
+
+The Kargo extension makes [Zed](https://zed.dev) understand Kargo projects. It runs [`kargo lsp`](#language-server) for Kotlin files and `kargo.toml`, so completion, navigation and errors use your dependencies, and it debugs programs and tests through [`kargo dap`](#debug-adapter). With the tasks `kargo ide --zed` writes, the run buttons next to `fun main` and your tests run Kargo.
+
+Open a folder that contains a `kargo.toml` and the extension takes over. You don't need a `build.gradle.kts` or a `pom.xml`.
+
+### Install the extension
+
+The extension needs:
+
+- Kargo itself. See [Installation](../../getting-started/installation/).
+- Zed's **Kotlin** extension, for syntax highlighting and the run buttons. Install it from *zed: extensions*.
+- Rust, installed with [rustup](https://rustup.rs), while the extension isn't in Zed's registry yet: Zed compiles it when you install it.
+
+Install the extension from the repository:
+
+1. Clone Kargo: `git clone https://github.com/enekocm7/kargo`.
+2. In Zed, run *zed: install dev extension* from the command palette and pick the `editors/zed` directory.
+
+The extension runs the `kargo` on your `PATH`. If Kargo is somewhere else, set its path in Zed's settings:
+
+```json title="settings.json"
+{
+  "lsp": {
+    "kargo": {
+      "binary": { "path": "/home/me/.cargo/bin/kargo" }
+    }
+  }
+}
+```
+
+If it can't find Kargo, the Kargo language server fails to start with a message that says so; *zed: open log* shows it.
+
+### Code intelligence in Zed
+
+When you open a Kotlin file or `kargo.toml` in a folder with a `kargo.toml` at its root, Zed starts `kargo lsp` there. You get everything listed in [Editor integration](#language-server):
+
+- Completion, go to definition (into library sources once you run `kargo fetch --sources`), find references, hover, rename, quick fixes and formatting in Kotlin files, from JetBrains' Kotlin LSP. Kargo describes your project to it from `kargo.toml`, and again when `kargo.toml` or `kargo.lock` change.
+- Completion, documentation, validation and quick fixes in `kargo.toml`, with Maven coordinate and version completion and hints at newer versions. The quick fixes add dependencies, frameworks and targets the way `kargo add` and `kargo target add` do.
+- [Check on save](#check-on-save): when you save a Kotlin file, the errors of `kargo check` for every target appear in the editor and in *diagnostics: deploy*. The extension turns it on.
+
+The first start downloads the Kotlin LSP and resolves your dependencies, so it takes a while.
+
+Zed's Kotlin extension brings its own Kotlin language servers, which don't know your dependencies. Use Kargo's instead:
+
+```json title="settings.json"
+{
+  "languages": {
+    "Kotlin": {
+      "language_servers": ["kargo", "!kotlin-lsp", "!kotlin-language-server", "..."]
+    }
+  }
+}
+```
+
+Put this in the project's `.zed/settings.json` to change only Kargo projects.
+
+#### Zed settings
+
+`kargo lsp` reads its options from `lsp.kargo`:
+
+```json title="settings.json"
+{
+  "lsp": {
+    "kargo": {
+      "binary": { "arguments": ["--server", "kls"] },
+      "initialization_options": { "checkOnSave": true, "checkTargets": ["wasm", "native"] }
+    }
+  }
+}
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `binary.path` | the `kargo` on `PATH` | The `kargo` to run |
+| `binary.arguments` | none | Added after `kargo lsp`: [`--server kls`, `--server none`, `--klib-targets`](#choosing-the-kotlin-server) |
+| `binary.env` | none | Environment variables for `kargo lsp` |
+| `initialization_options.checkOnSave` | `true` | Run `kargo check` when a Kotlin or Java file is saved |
+| `initialization_options.checkTargets` | every enabled target | The targets check on save compiles |
+
+### Run and test in Zed
+
+Zed's Kotlin extension shows a run button next to `fun main`, each `@Test` function and each test class. What the button runs comes from your tasks. Write Kargo tasks for the project once:
+
+```sh
+kargo ide --zed
+```
+
+This writes `.zed/tasks.json`. Then the buttons run Kargo:
+
+| Next to | Runs |
+|---|---|
+| A `fun main` | A program of the package: `kargo run -t <target>`, `kargo run --bin <name>` for a [`[[bin]]`](../multiple-programs/), `kargo run --example <name>`; Zed lets you pick when there are several |
+| A test function | That test: `kargo test <package.Class.method>` |
+| A test class | Its tests: `kargo test <package.Class>` |
+
+Run tests from the directory of the file, so in a [workspace](../workspaces/) they run in the member that contains it.
+
+*task: spawn* lists the other tasks: each target's program and tests (`kargo run -t wasm`, `kargo test -t native`), each [task](../tasks-and-plugins/) in `kargo.toml` (`kargo task <name>`), and `kargo build`, `build --release`, `check --tests`, `test`, `clean`, `fetch --sources`, `update` and `outdated`. Select `group:artifact` coordinates in an editor and run `kargo add $ZED_SELECTED_TEXT` to add them as a dependency, or `kargo remove $ZED_SELECTED_TEXT` to remove one. Bind any task to a key with the `task::Spawn` action and its `task_name`.
+
+Kargo keeps the file current: after you change `kargo.toml`, `kargo lsp` and commands such as `kargo build` and `kargo add` write it again, so a new `[[bin]]`, target or task gets its task. Kargo never replaces a `.zed/tasks.json` it didn't write, so to keep your own tasks next to Kargo's, put yours in Zed's global tasks (*zed: open tasks*). If you edit the generated file, Kargo stops updating it; delete it and run `kargo ide --zed` to get it back.
+
+Compiler errors in a task's output name the file, line and column; Cmd-click (Ctrl-click on Linux and Windows) one in the terminal to open it.
+
+### Debug in Zed
+
+The extension debugs JVM programs and tests:
+
+- **From a run button**: its menu offers *Debug* for each `kargo run` and `kargo test` task. The program starts under `kargo dap` and stops at your breakpoints.
+- **From a task**: *debugger: start* lists the same tasks, converted by the extension's `kargo` locator.
+- **From `.zed/debug.json`**, for configurations you keep:
+
+  ```json title=".zed/debug.json"
+  [
+    { "label": "Debug the server", "adapter": "Kargo", "request": "launch", "args": ["run", "--bin", "server"] },
+    { "label": "Debug MathTest", "adapter": "Kargo", "request": "launch", "args": ["test", "com.example.app.MathTest"] },
+    { "label": "Attach to port 5005", "adapter": "Kargo", "request": "attach", "port": 5005 }
+  ]
+  ```
+
+`args` are the arguments of `kargo`; Kargo adds `--debug`, and `-t jvm` unless they name a target. Breakpoints, stepping, the call stack and variables work; the debug console shows what the program prints. The options are listed in [`kargo dap`](../../reference/commands/#kargo-dap), and what Kargo does behind them in [Debug adapter](#debug-adapter).
+
+`kargo dap` downloads kotlin-debug-adapter on first use and runs it on the project's JDK.
+
+### Assistant context
+
+Type `/kargo-metadata` in a text thread of the assistant panel to insert the project as Kargo sees it: each package's targets with their source and test directories, its programs, examples and tasks, and its `kargo.toml` with the dependencies and frameworks. The assistant then knows where code goes and which libraries it can use.
+
+### `kargo.toml` in Zed
+
+`kargo lsp` validates `kargo.toml` against Kargo's [JSON Schema](#completion-and-validation-in-kargotoml) and Kargo's own rules, so you don't need anything else. If you also use Zed's TOML language server (Taplo), add `#:schema https://enekocm7.github.io/kargo/schemas/kargo.json` as the first line of `kargo.toml` for Taplo's completion too, or limit `kargo.toml` to Kargo's server.
+
+### Limitations of Zed
+
+- Zed has no test explorer: run tests from their buttons or tasks, and read the results in the terminal. A failed test is re-run from its button.
+- The extension starts `kargo lsp` only when `kargo.toml` is at the root of the folder you open. Open the project root, not a directory above it.
+- Code in `src-wasm/`, `src-native/` and `android/` gets no Kotlin code intelligence from the Kotlin LSP yet. Check on save still reports its errors.
+- Debugging works for the JVM target only. kotlin-debug-adapter doesn't support conditional breakpoints or logpoints, and evaluates variable names only.
+- Slash commands work in text threads; the agent panel's threads don't run them.
+
+
+## Other editors
+
+Any editor with an LSP client can run `kargo lsp`. These are the setups we document:
 
 **Neovim** (0.11 or newer):
 
@@ -67,6 +356,27 @@ language-servers = ["kargo", "taplo"]
 ```
 
 Any other editor with a generic LSP client works the same way: run `kargo lsp` for Kotlin and TOML files. Kargo answers for every TOML file it is sent but only gives `kargo.toml` features, so other TOML files are unaffected.
+
+## Language server
+
+`kargo lsp` is one language server for a whole Kargo project. Point your editor at it for Kotlin files and `kargo.toml`:
+
+```sh
+kargo lsp
+```
+
+It speaks LSP over stdin and stdout and gives you:
+
+- **Kotlin code intelligence** (completion, go to definition, references, hover, rename, quick fixes, diagnostics) from [JetBrains' Kotlin LSP](https://github.com/Kotlin/kotlin-lsp). Kargo downloads the server on first use, describes your project to it, and passes Kotlin traffic through unchanged.
+- **`kargo.toml` support**: completion of keys, tables and values, documentation on hover, and errors as you type. Errors come from the [JSON Schema](#completion-and-validation-in-kargotoml) first (unknown keys with a "did you mean", wrong types, invalid values), then from Kargo's own validation and [warnings](../../reference/warnings/), the same messages `kargo build` prints.
+- **Dependencies in `kargo.toml`**: completion of `group:artifact` coordinates from Maven Central and of versions from your repositories, and a hint on every dependency with a newer version. See [Dependency completion and update hints](#dependency-completion-and-update-hints).
+- **Code actions in `kargo.toml`**: quick fixes for its errors, and the edits of `kargo add`, `kargo add --framework`, `kargo target add` and `kargo upgrade` from the editor. See [Code actions in `kargo.toml`](#code-actions-in-kargotoml).
+- **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
+- **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
+- **Check on save** (opt-in): when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear next to the Kotlin server's. See [Check on save](#check-on-save).
+
+The first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
+
 
 :::note
 Open the project root or any directory in it. Kargo finds the project from the folder the editor opens and points the Kotlin server at the project root, so opening a workspace member works too.
@@ -124,7 +434,7 @@ Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/`
 
 ### Without `kargo lsp`
 
-If your editor already runs JetBrains' Kotlin LSP or kotlin-language-server itself (the `kotlin_lsp` or `kotlin_language_server` configurations of nvim-lspconfig, the Kotlin extensions of VS Code and Zed without the [Kargo extension](../zed/)), give it the project description with `kargo ide` instead of switching to `kargo lsp`:
+If your editor already runs JetBrains' Kotlin LSP or kotlin-language-server itself (the `kotlin_lsp` or `kotlin_language_server` configurations of nvim-lspconfig, the Kotlin extensions of VS Code and Zed without the [Kargo extension](#zed)), give it the project description with `kargo ide` instead of switching to `kargo lsp`:
 
 ```sh
 kargo ide           # writes workspace.json, which the Kotlin LSP imports
@@ -230,7 +540,7 @@ To apply it to every `kargo.toml` without editing them:
   }
   ```
 
-- **IntelliJ IDEA** and Android Studio: the [Kargo plugin](../jetbrains/) gives you the `kargo.toml` support through `kargo lsp`. Without it, with the TOML plugin: in *Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings*, add a mapping with the schema URL and the file pattern `kargo.toml`.
+- **IntelliJ IDEA** and Android Studio: the [Kargo plugin](#intellij-idea-and-android-studio) gives you the `kargo.toml` support through `kargo lsp`. Without it, with the TOML plugin: in *Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings*, add a mapping with the schema URL and the file pattern `kargo.toml`.
 
 :::note
 The schema checks the shape of `kargo.toml`. Some rules need Kargo itself, such as a `path` dependency's directory existing or `min-sdk <= target-sdk`. `kargo check` still reports those.
@@ -402,7 +712,7 @@ Pick another port with `--debug=8000`, or let the JVM choose one with `--debug=0
 
 Attach with any JDWP debugger:
 
-- **IntelliJ IDEA**: with the [Kargo plugin](../jetbrains/#run-test-and-debug), *Debug* a Kargo run configuration and the debugger attaches by itself. Without it: *Run → Edit Configurations → + → Remote JVM Debug*, host `localhost`, port `5005`. Start `kargo run --debug`, then debug that configuration.
+- **IntelliJ IDEA**: with the [Kargo plugin](#run-test-and-debug), *Debug* a Kargo run configuration and the debugger attaches by itself. Without it: *Run → Edit Configurations → + → Remote JVM Debug*, host `localhost`, port `5005`. Start `kargo run --debug`, then debug that configuration.
 - **VS Code** with the Debugger for Java extension: add an attach configuration.
 
   ```json title=".vscode/launch.json"
@@ -415,7 +725,7 @@ Attach with any JDWP debugger:
   ```
 
 - **jdb**: `jdb -attach 127.0.0.1:5005`.
-- **Zed**: the [Kargo extension](../zed/#debug) debugs through `kargo dap`, below.
+- **Zed**: the [Kargo extension](#debug-in-zed) debugs through `kargo dap`, below.
 
 ### Debug adapter
 

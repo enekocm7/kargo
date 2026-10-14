@@ -16,7 +16,7 @@
       <li>A Kargo tool window listing the project's programs, tests and tasks, and Tools | Kargo actions for
           build, check, test, clean, fetch, update, add and remove dependencies, add targets and run tasks.</li>
     </ul>
-    Kargo must be installed; see the <a href="https://enekocm7.github.io/kargo/guides/jetbrains/">setup guide</a>.
+    Kargo must be installed; see the <a href="https://enekocm7.github.io/kargo/guides/editors/#intellij-idea-and-android-studio">setup guide</a>.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>

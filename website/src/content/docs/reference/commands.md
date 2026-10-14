@@ -612,7 +612,7 @@ kargo ide --zed     # .zed/tasks.json, for Zed's run buttons
 |---|---|
 | `--kls` | Write `kls-classpath` instead of `workspace.json` |
 | `--klib-targets` | Also describe Wasm and Native sources in `workspace.json`. See [Multiplatform projects](../../guides/editors/#multiplatform-projects) |
-| `--zed` | Write `.zed/tasks.json` instead: tasks that run `kargo run` and `kargo test` from the run buttons of Zed's Kotlin extension, the project's programs, tests and tasks, and everyday commands. Needs no dependency resolution. See [Zed](../../guides/zed/#run-and-test) |
+| `--zed` | Write `.zed/tasks.json` instead: tasks that run `kargo run` and `kargo test` from the run buttons of Zed's Kotlin extension, the project's programs, tests and tasks, and everyday commands. Needs no dependency resolution. See [Zed](../../guides/editors/#run-and-test-in-zed) |
 
 Kargo keeps the file current: after `kargo build`, `check`, `test`, `fetch`, `add`, `remove`, `update`, `upgrade` and `target`, it writes it again if `kargo.toml` or `kargo.lock` changed, and prints `Wrote workspace.json` (or `Wrote .zed/tasks.json`). A file Kargo didn't write is left alone, with a warning. If the dependencies can't be resolved, the project is described without them and the command fails with the reason. See [Without `kargo lsp`](../../guides/editors/#without-kargo-lsp).
 

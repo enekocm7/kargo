@@ -8,6 +8,11 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
 	site: process.env.SITE || undefined,
 	base: process.env.BASE_PATH || undefined,
+	// The IntelliJ IDEA and Zed pages were merged into the editor integration page.
+	redirects: {
+		'/guides/jetbrains': '/guides/editors/#intellij-idea-and-android-studio',
+		'/guides/zed': '/guides/editors/#zed',
+	},
 	integrations: [
 		starlight({
 			title: 'Kargo',
@@ -54,8 +59,6 @@ export default defineConfig({
 						{ label: 'Continuous integration', slug: 'guides/ci' },
 						{ label: 'Build performance', slug: 'guides/build-performance' },
 						{ label: 'Editor integration', slug: 'guides/editors' },
-						{ label: 'IntelliJ IDEA and Android Studio', slug: 'guides/jetbrains' },
-						{ label: 'Zed', slug: 'guides/zed' },
 					],
 				},
 				{

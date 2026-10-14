@@ -8,7 +8,7 @@ This tutorial is for people who have never written Kotlin before. By the end you
 You'll need Kargo and a JDK. See [Installation](../../getting-started/installation/) if you haven't set them up yet.
 
 :::tip[Editor]
-Any editor works. [IntelliJ IDEA](https://www.jetbrains.com/idea/) has the best Kotlin support. [VS Code](https://code.visualstudio.com) with a Kotlin extension is a lighter alternative.
+Any editor works. [IntelliJ IDEA](https://www.jetbrains.com/idea/) has the best Kotlin support. [VS Code](https://code.visualstudio.com) with a Kotlin extension is a lighter alternative. See [Editor integration](../editors/) for the Kargo plugin and the other editors.
 :::
 
 ## Step 1: Create the project

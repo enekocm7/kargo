@@ -34,7 +34,7 @@ Format with `cargo fmt` before committing.
 
 ## The JetBrains plugin
 
-The plugin for IntelliJ IDEA and Android Studio ([IntelliJ IDEA and Android Studio](../../guides/jetbrains/)) is a Gradle project written in Kotlin, in `editors/jetbrains`. It imports the project model from `kargo metadata`, runs `kargo lsp` through [LSP4IJ](https://github.com/redhat-developer/lsp4ij) and adds the IDE parts around it:
+The plugin for IntelliJ IDEA and Android Studio ([IntelliJ IDEA and Android Studio](../../guides/editors/#intellij-idea-and-android-studio)) is a Gradle project written in Kotlin, in `editors/jetbrains`. It imports the project model from `kargo metadata`, runs `kargo lsp` through [LSP4IJ](https://github.com/redhat-developer/lsp4ij) and adds the IDE parts around it:
 
 | Package | Responsibility |
 |---|---|
@@ -58,7 +58,7 @@ The import tests (`KargoImportTest`) run the IDE's Kotlin analysis against impor
 
 ## The Zed extension
 
-The [Zed](../../guides/zed/) extension in `editors/zed` is a Rust crate of its own (not a member of Kargo's workspace), compiled to WebAssembly against [`zed_extension_api`](https://crates.io/crates/zed_extension_api). `extension.toml` declares the language server for Kotlin and TOML, the `Kargo` debug adapter (its configuration schema is `debug_adapter_schemas/Kargo.json`), the `kargo` debug locator and the `/kargo-metadata` slash command; `src/lib.rs` implements them by running `kargo lsp`, `kargo dap` and `kargo metadata`.
+The [Zed](../../guides/editors/#zed) extension in `editors/zed` is a Rust crate of its own (not a member of Kargo's workspace), compiled to WebAssembly against [`zed_extension_api`](https://crates.io/crates/zed_extension_api). `extension.toml` declares the language server for Kotlin and TOML, the `Kargo` debug adapter (its configuration schema is `debug_adapter_schemas/Kargo.json`), the `kargo` debug locator and the `/kargo-metadata` slash command; `src/lib.rs` implements them by running `kargo lsp`, `kargo dap` and `kargo metadata`.
 
 ```sh
 cd editors/zed
