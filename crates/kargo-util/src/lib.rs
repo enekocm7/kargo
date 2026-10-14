@@ -6,4 +6,5 @@ pub mod flock;
 pub mod fs;
 pub mod hash;
 pub mod process;
+pub mod retry;
 pub mod shell;

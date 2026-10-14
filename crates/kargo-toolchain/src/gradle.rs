@@ -15,8 +15,10 @@ use anyhow::{Context, Result, bail};
 
 use kargo_maven::Version;
 use kargo_util::config::Config;
+use kargo_util::flock::FileLock;
 
 use crate::archive::{self, ArchiveKind};
+use crate::install_lock;
 
 /// Where Gradle distributions are published.
 pub const DISTRIBUTIONS_URL: &str = "https://services.gradle.org/distributions";
@@ -163,8 +165,15 @@ impl GradleDistribution {
         Ok(dist.executable().is_file().then_some(dist))
     }
 
+    /// Locks the installation of `version` against other Kargo processes, after checking the version.
+    fn lock(config: &Config, version: &str) -> Result<FileLock> {
+        Self::at(config, version)?;
+        install_lock(config, &format!("gradle-{version}"))
+    }
+
     /// Ensures the distribution for `version` is installed, downloading it if needed.
     pub fn ensure(config: &Config, version: &str) -> Result<Self> {
+        let _lock = Self::lock(config, version)?;
         if let Some(found) = Self::find(config, version)? {
             return Ok(found);
         }
@@ -209,6 +218,7 @@ impl GradleDistribution {
 
     /// Removes an installed distribution.
     pub fn remove(config: &Config, version: &str) -> Result<Self> {
+        let _lock = Self::lock(config, version)?;
         let Some(dist) = Self::find(config, version)? else {
             bail!("Gradle {version} is not installed; see `kargo toolchain list`");
         };
@@ -261,7 +271,7 @@ impl GradleDistribution {
                 std::fs::create_dir_all(to.parent().context("wrapper file has no parent")?)?;
                 std::fs::copy(scratch.join(file), &to)?;
             }
-            match std::fs::rename(&staging, &dir) {
+            match kargo_util::fs::rename_with_retries(&staging, &dir) {
                 Ok(()) => Ok(()),
                 // Another process generated it meanwhile.
                 Err(_) if wrapper_complete(&dir) => Ok(()),

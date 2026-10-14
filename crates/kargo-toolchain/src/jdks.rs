@@ -12,6 +12,7 @@ use kargo_util::config::Config;
 
 use crate::adoptium::{self, JdkPackage};
 use crate::archive;
+use crate::install_lock;
 use crate::jdk::Jdk;
 
 /// Written into each installation so it can be listed without probing `java`.
@@ -102,6 +103,7 @@ pub fn find_installed(config: &Config, request: &JdkRequest) -> Result<Option<Ma
 /// Downloads, verifies and installs `package` (no-op if already installed).
 pub fn install_package(config: &Config, package: &JdkPackage) -> Result<ManagedJdk> {
     let dir = install_dir(config, &package.release)?;
+    let _lock = install_lock(config, &package.release)?;
     if let Some(existing) = installed(config)?.into_iter().find(|j| j.release == package.release) {
         return Ok(existing);
     }
@@ -165,6 +167,7 @@ pub fn remove(config: &Config, selector: &str) -> Result<Vec<ManagedJdk>> {
         bail!("no installed JDK matches `{selector}`; see `kargo toolchain list`");
     }
     for jdk in &matching {
+        let _lock = install_lock(config, &jdk.release)?;
         kargo_util::fs::remove_dir_all_if_exists(&jdk.dir)?;
     }
     Ok(matching)
@@ -255,30 +258,35 @@ mod tests {
         assert_eq!(major_of("jdk-25.0.1+8"), Some(25));
     }
 
-    #[test]
-    fn installs_from_a_verified_archive() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = config(tmp.path()).with_offline(true);
-        // Pre-seed the download cache so no network is needed.
-        let archive_path = config.toolchains_dir().join("downloads").join("jdk-99.0.1_1.zip");
+    /// Pre-seeds the download cache with a JDK archive for `release`, so no network is needed.
+    fn seed_archive(config: &Config, release: &str, major: u32) -> JdkPackage {
+        let archive_path = config.toolchains_dir().join("downloads").join(format!("{}.zip", release.replace('+', "_")));
         std::fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
         {
             use std::io::Write;
             let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive_path).unwrap());
-            let java = if cfg!(windows) { "jdk-99.0.1+1/bin/java.exe" } else { "jdk-99.0.1+1/bin/java" };
+            let java = if cfg!(windows) { format!("{release}/bin/java.exe") } else { format!("{release}/bin/java") };
             zip.start_file(java, zip::write::SimpleFileOptions::default()).unwrap();
             zip.write_all(b"").unwrap();
             zip.finish().unwrap();
         }
         let sha256 = kargo_util::hash::sha256_file(&archive_path).unwrap();
-        let package = JdkPackage {
-            release: "jdk-99.0.1+1".into(),
-            major: 99,
+        JdkPackage {
+            release: release.into(),
+            major,
             url: "https://example.invalid/jdk.zip".into(),
             sha256,
             size: 0,
             archive: archive::ArchiveKind::Zip,
-        };
+        }
+    }
+
+    #[test]
+    fn installs_from_a_verified_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path()).with_offline(true);
+        let package = seed_archive(&config, "jdk-99.0.1+1", 99);
+        let archive_path = config.toolchains_dir().join("downloads").join("jdk-99.0.1_1.zip");
         let jdk = install_package(&config, &package).unwrap();
         assert_eq!(jdk.major, 99);
         assert!(jdk.home.join("bin").is_dir());
@@ -291,5 +299,25 @@ mod tests {
         let bad = JdkPackage { release: "jdk-98.0.1+1".into(), major: 98, sha256: "00".into(), ..package };
         std::fs::write(config.toolchains_dir().join("downloads").join("jdk-98.0.1_1.zip"), "junk").unwrap();
         assert!(install_package(&config, &bad).is_err());
+    }
+
+    /// Another Kargo process installing the same JDK holds its lock; this process must wait for
+    /// it rather than clear the directory the other one is writing.
+    #[test]
+    fn installs_wait_for_the_toolchain_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path()).with_offline(true);
+        let package = seed_archive(&config, "jdk-97.0.1+1", 97);
+        let other_process = install_lock(&config, &package.release).unwrap();
+        let worker = {
+            let (config, package) = (config.clone(), package.clone());
+            std::thread::spawn(move || install_package(&config, &package))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!worker.is_finished(), "the install ran while another process held the lock");
+        drop(other_process);
+        let jdk = worker.join().unwrap().unwrap();
+        assert!(jdk.home.join("bin").is_dir());
+        assert_eq!(installed(&config).unwrap().len(), 1);
     }
 }

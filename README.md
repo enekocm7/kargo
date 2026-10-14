@@ -221,6 +221,8 @@ Kotlin/Native distributions are tied to `[kotlin] version`. They are installed u
 
 Android builds run on a Gradle that Kargo downloads from `services.gradle.org` (checksum-verified, under `~/.kargo/toolchains/gradle/<version>`): the version the Android Gradle Plugin in use requires, or `[target.android] gradle-version`. A `gradlew` in the project root takes precedence, `--system-gradle` uses the `gradle` on `PATH`, and `target/android` gets a Gradle wrapper so it opens in Android Studio.
 
+Toolchains are locked while they install, so concurrent Kargo processes sharing `~/.kargo` install each one once, and downloads retry transient network failures. See [Parallel installs and retries](https://enekocm7.github.io/kargo/guides/toolchains/#parallel-installs-and-retries).
+
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
 $ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, native 2.4.21, gradle 9.6.0, kotlin-lsp, kls, kotlin-debug-adapter

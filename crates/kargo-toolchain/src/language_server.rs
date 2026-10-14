@@ -20,8 +20,10 @@ use anyhow::{Context, Result, bail};
 
 use kargo_maven::Version;
 use kargo_util::config::Config;
+use kargo_util::flock::FileLock;
 
 use crate::archive::{self, ArchiveKind};
+use crate::install_lock;
 
 /// The JetBrains Kotlin LSP version `kargo lsp` uses.
 pub const KOTLIN_LSP_VERSION: &str = "263.6379.0";
@@ -101,13 +103,18 @@ impl ServerKind {
         }
     }
 
-    /// Directory holding the installed versions.
-    pub fn dir(self, config: &Config) -> PathBuf {
-        config.toolchains_dir().join(match self {
+    /// Name of the directory holding the installed versions, under the toolchains directory.
+    fn dir_name(self) -> &'static str {
+        match self {
             ServerKind::KotlinLsp => "kotlin-lsp",
             ServerKind::Kls => "kotlin-language-server",
             ServerKind::Kda => "kotlin-debug-adapter",
-        })
+        }
+    }
+
+    /// Directory holding the installed versions.
+    pub fn dir(self, config: &Config) -> PathBuf {
+        config.toolchains_dir().join(self.dir_name())
     }
 
     /// The launcher, relative to the installation.
@@ -196,8 +203,15 @@ impl LanguageServer {
         Ok(server.executable().is_some().then_some(server))
     }
 
+    /// Locks the installation of `version` of `kind` against other Kargo processes, after checking the version.
+    fn lock(config: &Config, kind: ServerKind, version: &str) -> Result<FileLock> {
+        Self::at(config, kind, version)?;
+        install_lock(config, &format!("{}-{version}", kind.dir_name()))
+    }
+
     /// Ensures the server is installed, downloading it if needed.
     pub fn ensure(config: &Config, kind: ServerKind, version: &str) -> Result<Self> {
+        let _lock = Self::lock(config, kind, version)?;
         if let Some(found) = Self::find(config, kind, version)? {
             return Ok(found);
         }
@@ -265,6 +279,7 @@ impl LanguageServer {
 
     /// Removes an installed server.
     pub fn remove(config: &Config, kind: ServerKind, version: &str) -> Result<Self> {
+        let _lock = Self::lock(config, kind, version)?;
         let Some(server) = Self::find(config, kind, version)? else {
             bail!("{} {version} is not installed; see `kargo toolchain list`", kind.title());
         };

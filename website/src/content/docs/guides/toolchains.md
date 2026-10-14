@@ -88,6 +88,12 @@ Kargo pins one version of each and checks the download's SHA-256: the one JetBra
 
 You don't install the Kotlin compiler. Kargo downloads the version in `[kotlin] version` from Maven Central into its cache. To try a new Kotlin release, change the version and rebuild.
 
+## Parallel installs and retries
+
+Toolchains are shared by every project on the machine, so two Kargo processes can need the same one at once. Kargo locks a toolchain while it installs or removes it: the second process prints a `Blocking` status and waits, then uses what the first one installed. Nothing is downloaded or deleted twice.
+
+Downloads are retried when the connection drops or the server answers with HTTP 408, 429, 500, 502, 503 or 504, up to five times with a short backoff. Other failures, such as a 404 or a checksum mismatch, stop at once. On Windows, an install also retries for a moment when a file in it is briefly in use, which antivirus scanners often cause.
+
 ## Offline and Docker
 
 Pre-download everything a project needs, for example in a Docker build step, then build offline:

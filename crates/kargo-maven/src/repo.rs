@@ -13,6 +13,7 @@ use super::coord::{Artifact, ModuleId, is_snapshot};
 use super::snapshot::SnapshotMetadata;
 use super::version::{Version, select_latest};
 use kargo_util::config::Config;
+use kargo_util::retry;
 use kargo_util::shell::Shell;
 use kargo_util::{fs as kfs, hash};
 
@@ -36,9 +37,6 @@ pub fn maven_local_dir() -> Result<PathBuf> {
 
 /// How long `maven-metadata.xml` (the version list, or the builds of a SNAPSHOT) is trusted before re-checking.
 const METADATA_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// How many times a request that failed transiently (HTTP 429, 5xx, connection errors) is retried.
-const MAX_RETRIES: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credentials {
@@ -372,10 +370,10 @@ impl MavenClient {
             let result = request.call();
             // Rate limits, gateway hiccups and dropped connections are usually transient.
             let transient = match &result {
-                Ok(r) => matches!(r.status().as_u16(), 408 | 429 | 500 | 502 | 503 | 504),
+                Ok(r) => retry::is_transient_status(r.status().as_u16()),
                 Err(_) => true,
             };
-            if !transient || attempt >= MAX_RETRIES {
+            if !transient || attempt >= retry::MAX_RETRIES {
                 break result.with_context(|| format!("failed to connect to {url}"))?;
             }
             let delay = result
@@ -383,7 +381,7 @@ impl MavenClient {
                 .ok()
                 .and_then(|r| r.headers().get("retry-after")?.to_str().ok()?.trim().parse::<u64>().ok())
                 .map(|s| Duration::from_secs(s.min(30)))
-                .unwrap_or(Duration::from_millis(250 << attempt));
+                .unwrap_or(retry::backoff(attempt));
             attempt += 1;
             self.shell.verbose("Retrying", format!("{url} in {:.1}s", delay.as_secs_f64()));
             std::thread::sleep(delay);
@@ -434,12 +432,12 @@ impl MavenClient {
             }
             let result = request.send(data);
             let transient = match &result {
-                Ok(r) => matches!(r.status().as_u16(), 408 | 429 | 500 | 502 | 503 | 504),
+                Ok(r) => retry::is_transient_status(r.status().as_u16()),
                 Err(_) => true,
             };
-            if transient && attempt < MAX_RETRIES {
+            if transient && attempt < retry::MAX_RETRIES {
+                let delay = retry::backoff(attempt);
                 attempt += 1;
-                let delay = Duration::from_millis(250 << attempt);
                 self.shell.verbose("Retrying", format!("{url} in {:.1}s", delay.as_secs_f64()));
                 std::thread::sleep(delay);
                 continue;
