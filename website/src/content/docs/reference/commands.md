@@ -475,12 +475,13 @@ The package needs a `group` in `[package]`. Maven Central also needs `descriptio
 
 ## `kargo fetch`
 
-Download all dependencies and toolchains so later builds can run offline. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
+Download all dependencies and toolchains so later builds can run offline. For each enabled target this is the Kotlin compiler, its plugins and the dependencies. The JVM and Wasm targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs, and the Wasm target gets the [npm packages](../../guides/wasm/#npm-packages) of its Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
 
 | Option | Meaning |
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
 | `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. Libraries that publish none are skipped. Sources jars are not recorded in `kargo.lock` |
+| `--tools` | Also download the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint) and [`kargo lint`](../../guides/formatting-and-linting/) (detekt), so they work with `--offline` |
 | `-p, --package <name>`, `--workspace` | Which packages to fetch for |
 
 ```console

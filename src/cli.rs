@@ -633,6 +633,9 @@ enum Command {
         /// Also download the sources jars of the dependencies, for editors
         #[arg(long)]
         sources: bool,
+        /// Also download the tools of `kargo doc` (Dokka), `kargo fmt` (ktlint) and `kargo lint` (detekt)
+        #[arg(long)]
+        tools: bool,
         #[command(flatten)]
         packages: PackageArgs,
     },
@@ -1319,11 +1322,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             })?;
             Ok(0)
         }
-        Command::Fetch { targets, sources, packages } => {
+        Command::Fetch { targets, sources, tools, packages } => {
             let project = load_project(global)?;
             let targets: Vec<TargetKind> = targets.into_iter().map(Into::into).collect();
             let found = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
-                ops::fetch(ctx, &targets)?;
+                ops::fetch(ctx, &targets, tools)?;
                 if !sources {
                     return Ok(0);
                 }
@@ -1965,7 +1968,9 @@ mod tests {
         assert!(Cli::try_parse_from(["kargo", "metadata", "--format", "text"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "metadata", "--fingerprint", "--no-deps"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "fetch", "--sources"]).unwrap();
-        assert!(matches!(cli.command, Command::Fetch { sources: true, .. }));
+        assert!(matches!(cli.command, Command::Fetch { sources: true, tools: false, .. }));
+        let cli = Cli::try_parse_from(["kargo", "fetch", "--tools"]).unwrap();
+        assert!(matches!(cli.command, Command::Fetch { sources: false, tools: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "lint", "--create-baseline"]).unwrap();
         assert!(matches!(cli.command, Command::Lint { create_baseline: true, .. }));
     }

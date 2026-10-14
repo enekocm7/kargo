@@ -40,16 +40,36 @@ pub fn install(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<
     if deps.is_empty() {
         return Ok(None);
     }
-    let packages = deps.iter().map(|(name, version)| format!("{name}@{version}")).collect::<Vec<_>>().join(", ");
-    let preferred = ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.package_manager);
-    let (manager, exe) = find_package_manager(preferred, &packages)?;
-    let manifest = package_json(&deps);
+    let (manager, exe) = find_package_manager(ctx, &deps)?;
+    install_into(ctx, &deps, dir, manager, exe).map(Some)
+}
+
+/// `kargo fetch`: installs the packages [`install`] would, so an offline build finds them. Without
+/// npm, pnpm or bun the build could not install them either, so this warns instead of failing.
+pub fn fetch(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<()> {
+    let deps = dependencies(ctx, libraries)?;
+    if deps.is_empty() {
+        return Ok(());
+    }
+    match find_package_manager(ctx, &deps) {
+        Ok((manager, exe)) => install_into(ctx, &deps, dir, manager, exe).map(|_| ()),
+        Err(e) => {
+            ctx.shell().warn(format!("the npm packages were not fetched: {e:#}"));
+            Ok(())
+        }
+    }
+}
+
+/// Installs `deps` with `manager` into `dir/node_modules`, unless it already holds exactly these packages.
+fn install_into(ctx: &BuildContext, deps: &BTreeMap<String, String>, dir: &Path, manager: PackageManager, exe: PathBuf) -> Result<PathBuf> {
+    let packages = package_list(deps);
+    let manifest = package_json(deps);
     let installed = format!("{manager}\n{manifest}");
     // Written only after a successful install, so an interrupted one is retried.
     let node_modules = dir.join("node_modules");
     let marker = node_modules.join(".kargo-package.json");
     if std::fs::read_to_string(&marker).is_ok_and(|s| s == installed) {
-        return Ok(Some(node_modules));
+        return Ok(node_modules);
     }
     // Start clean: package managers don't share `node_modules` layouts or lockfiles.
     remove_dir_all_if_exists(&node_modules)?;
@@ -74,11 +94,12 @@ pub fn install(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<
         );
     }
     std::fs::write(marker, installed)?;
-    Ok(Some(node_modules))
+    Ok(node_modules)
 }
 
 /// The configured package manager, or else the first of npm, pnpm and bun on `PATH`.
-fn find_package_manager(preferred: Option<PackageManager>, packages: &str) -> Result<(PackageManager, PathBuf)> {
+fn find_package_manager(ctx: &BuildContext, deps: &BTreeMap<String, String>) -> Result<(PackageManager, PathBuf)> {
+    let preferred = ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.package_manager);
     if let Some(manager) = preferred {
         let exe = find_on_path(manager.as_str()).with_context(|| {
             format!("[target.wasm] package-manager is `{manager}`, but `{manager}` is not on PATH; install it or choose npm, pnpm or bun")
@@ -87,9 +108,15 @@ fn find_package_manager(preferred: Option<PackageManager>, packages: &str) -> Re
     }
     PackageManager::ALL.into_iter().find_map(|m| find_on_path(m.as_str()).map(|exe| (m, exe))).with_context(|| {
         format!(
-            "your Wasm dependencies need the npm packages {packages}; install Node.js (it includes npm), pnpm or bun and put it on PATH"
+            "your Wasm dependencies need the npm packages {}; install Node.js (it includes npm), pnpm or bun and put it on PATH",
+            package_list(deps)
         )
     })
+}
+
+/// The packages as `name@version`, for messages.
+fn package_list(deps: &BTreeMap<String, String>) -> String {
+    deps.iter().map(|(name, version)| format!("{name}@{version}")).collect::<Vec<_>>().join(", ")
 }
 
 /// The arguments that install `package.json` quietly, without touching any parent workspace.

@@ -927,6 +927,74 @@ fn wasm_installs_npm_packages_of_dependencies() {
 }
 
 #[test]
+fn fetch_prepares_an_offline_jvm_build() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    // A cache of its own, so the commands below only see what `kargo fetch` downloaded.
+    let home = tempfile::tempdir().unwrap();
+    let manifest = t.dir.path().join("app/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text}\n[toolchain]\njdk = \"21\"\n")).unwrap();
+
+    t.kargo("app").env("KARGO_HOME", home.path()).arg("fetch").assert().success();
+    t.kargo("app").env("KARGO_HOME", home.path()).args(["fetch", "--offline"]).assert().success();
+    // The pinned JDK was downloaded by `fetch`, and the test run needs no network: the JUnit launcher is cached too.
+    t.kargo("app")
+        .env("KARGO_HOME", home.path())
+        .args(["toolchain", "which", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("JDK 21"));
+    t.kargo("app").env("KARGO_HOME", home.path()).args(["test", "--offline"]).assert().success();
+}
+
+#[test]
+fn fetch_installs_wasm_npm_packages_for_offline_builds() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    let home = tempfile::tempdir().unwrap();
+    t.create(&["dt", "--target", "wasm"]);
+    t.kargo("dt").env("KARGO_HOME", home.path()).args(["add", "org.jetbrains.kotlinx:kotlinx-datetime:0.7.1"]).assert().success();
+    t.kargo("dt").env("KARGO_HOME", home.path()).args(["add", "org.jetbrains.kotlinx:kotlinx-serialization-core:1.9.0"]).assert().success();
+    t.write(
+        "dt/src/Main.kt",
+        "package com.example.dt\n\nimport kotlinx.datetime.*\n\nfun greeting(n: String) = \"Hello, $n!\"\n\n\
+         fun main() = println(LocalDate(2024, 1, 31).plus(1, DateTimeUnit.MONTH))\n",
+    );
+    t.kargo("dt")
+        .env("KARGO_HOME", home.path())
+        .arg("fetch")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installing npm packages @js-joda/core@"));
+    assert!(t.dir.path().join("dt/target/debug/node_modules/@js-joda/core").is_dir());
+    // The build finds the installed packages and runs without the network.
+    t.kargo("dt")
+        .env("KARGO_HOME", home.path())
+        .args(["run", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2024-02-29"));
+}
+
+#[test]
+fn fetch_tools_serves_fmt_lint_and_doc_offline() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["style"]);
+    let home = tempfile::tempdir().unwrap();
+    t.kargo("style").env("KARGO_HOME", home.path()).args(["fetch", "--tools"]).assert().success();
+    t.kargo("style").env("KARGO_HOME", home.path()).args(["fmt", "--check", "--offline"]).assert().success();
+    t.kargo("style").env("KARGO_HOME", home.path()).args(["lint", "--offline"]).assert().success();
+    t.kargo("style").env("KARGO_HOME", home.path()).args(["doc", "--offline"]).assert().success();
+}
+
+#[test]
 fn spring_boot_with_lombok() {
     require_e2e!();
     let t = E2e::new();
