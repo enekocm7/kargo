@@ -32,7 +32,31 @@ use crate::complete::{self, ShellArg};
 /// Exit code for build and test failures (matches Cargo).
 const FAILURE: u8 = 101;
 
-const AFTER_HELP: &str = "See `kargo help <command>` for more information on a specific command.";
+const AFTER_HELP: &str = "See all commands with `kargo --list`.\nSee `kargo help <command>` for more information on a specific command.";
+
+/// The commands `kargo --help` lists. The others are left out of the short help, but `kargo --list`, `kargo help <command>`
+/// and the shell completions still show them.
+const COMMON_COMMANDS: &[&str] = &[
+    "new",
+    "init",
+    "build",
+    "check",
+    "run",
+    "test",
+    "add",
+    "remove",
+    "update",
+    "fetch",
+    "tree",
+    "clean",
+    "package",
+    "publish",
+    "fmt",
+    "lint",
+    "doc",
+    "task",
+    "toolchain",
+];
 
 #[derive(Debug, Parser)]
 #[command(
@@ -841,17 +865,22 @@ fn run() -> ExitCode {
     }
 }
 
-/// Parses the command line. `kargo --help` also lists the current project's tasks.
+/// Parses the command line. `kargo --help` lists the common commands and the current project's tasks.
 fn parse() -> Cli {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if wants_builtin_list(&args) {
+        print_builtin_commands();
+        std::process::exit(0);
+    }
     let mut cmd = Cli::command();
-    if wants_top_level_help(&args)
-        && let Some(tasks) = tasks_help()
-    {
-        cmd = cmd.after_help(format!(
-            "{tasks}
+    if wants_top_level_help(&args) {
+        cmd = hide_uncommon_commands(cmd);
+        if let Some(tasks) = tasks_help() {
+            cmd = cmd.after_help(format!(
+                "{tasks}
 {AFTER_HELP}"
-        ));
+            ));
+        }
     }
     let matches = cmd.get_matches_from(args);
     Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
@@ -861,6 +890,35 @@ fn parse() -> Cli {
 fn wants_top_level_help(args: &[std::ffi::OsString]) -> bool {
     let mut words = args.iter().skip(1).filter_map(|a| a.to_str()).skip_while(|a| a.starts_with('-') && !matches!(*a, "-h" | "--help"));
     matches!(words.next(), Some("-h" | "--help" | "help")) && words.next().is_none()
+}
+
+/// `kargo --list`, possibly with other global flags. With a command or a value after it, clap reports `--list` as unexpected.
+fn wants_builtin_list(args: &[std::ffi::OsString]) -> bool {
+    let words: Vec<&str> = args.iter().skip(1).filter_map(|a| a.to_str()).collect();
+    words.contains(&"--list") && words.iter().all(|w| w.starts_with('-'))
+}
+
+/// `kargo --list`: every built-in command with its one-line description, laid out like `cargo --list`.
+fn print_builtin_commands() {
+    let cmd = Cli::command();
+    let commands: Vec<(&str, String)> =
+        cmd.get_subcommands().map(|c| (c.get_name(), c.get_about().map(ToString::to_string).unwrap_or_default())).collect();
+    let width = commands.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    println!("Built-in commands:");
+    for (name, about) in commands {
+        println!("    {name:width$}  {about}");
+    }
+}
+
+/// Hides the commands that `kargo --help` leaves out. Only the short help hides them: `Cli::command()` keeps
+/// them for `kargo --list`, `kargo help <command>`, the completions and the task-shadowing check.
+fn hide_uncommon_commands(mut cmd: clap::Command) -> clap::Command {
+    let uncommon: Vec<String> =
+        cmd.get_subcommands().map(|c| c.get_name().to_owned()).filter(|name| !COMMON_COMMANDS.contains(&name.as_str())).collect();
+    for name in uncommon {
+        cmd = cmd.mut_subcommand(name, |c| c.hide(true));
+    }
+    cmd
 }
 
 /// The "Tasks:" section of `kargo --help`, when run inside a project that defines tasks.
@@ -1770,6 +1828,32 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn short_help_hides_only_uncommon_commands() {
+        for name in COMMON_COMMANDS {
+            assert!(Cli::command().find_subcommand(name).is_some(), "`{name}` is in COMMON_COMMANDS but is not a command");
+        }
+        let short = hide_uncommon_commands(Cli::command());
+        let hidden = |name: &str| short.find_subcommand(name).is_some_and(|c| c.is_hide_set());
+        assert!(!hidden("build"));
+        assert!(!hidden("task"));
+        assert!(hidden("lsp"));
+        assert!(hidden("completions"));
+        // The command itself is unchanged, so completions and `kargo help lsp` still see it.
+        assert!(!Cli::command().find_subcommand("lsp").unwrap().is_hide_set());
+    }
+
+    #[test]
+    fn list_and_top_level_help_are_recognized_before_parsing() {
+        let args = |words: &[&str]| words.iter().map(|w| std::ffi::OsString::from(*w)).collect::<Vec<_>>();
+        assert!(wants_builtin_list(&args(&["kargo", "--list"])));
+        assert!(wants_builtin_list(&args(&["kargo", "-q", "--list"])));
+        assert!(!wants_builtin_list(&args(&["kargo", "--list", "build"])));
+        assert!(!wants_builtin_list(&args(&["kargo", "build"])));
+        assert!(wants_top_level_help(&args(&["kargo", "-q", "help"])));
+        assert!(!wants_top_level_help(&args(&["kargo", "help", "lsp"])));
     }
 
     #[test]

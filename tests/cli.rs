@@ -650,6 +650,114 @@ fn help_and_task_list_show_project_tasks() {
     p.kargo().args(["task", "--list"]).assert().success().stdout(predicate::str::contains("gen  generate sources"));
 }
 
+/// The command names on the rows of `output` that are indented by `indent` spaces. clap's help and `kargo --list` both put
+/// one command on each row, so a wrapped description line never starts with a name at that indent.
+fn listed_commands(output: &str, indent: usize) -> Vec<String> {
+    let pad = " ".repeat(indent);
+    output
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix(&pad)?;
+            if rest.starts_with(' ') {
+                return None;
+            }
+            rest.split_whitespace().next().map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn short_help_lists_common_commands_and_list_lists_all() {
+    const COMMON: &[&str] = &[
+        "new",
+        "init",
+        "build",
+        "check",
+        "run",
+        "test",
+        "add",
+        "remove",
+        "update",
+        "fetch",
+        "tree",
+        "clean",
+        "package",
+        "publish",
+        "fmt",
+        "lint",
+        "doc",
+        "task",
+        "toolchain",
+    ];
+    const UNCOMMON: &[&str] = &[
+        "outdated",
+        "upgrade",
+        "target",
+        "info",
+        "plugins",
+        "android",
+        "daemon",
+        "metadata",
+        "classpath",
+        "ide",
+        "lsp",
+        "dap",
+        "completions",
+    ];
+    let p = Project::new();
+    let stdout = |args: &[&str]| {
+        let out = p.kargo().args(args).assert().success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+
+    for args in [&["--help"][..], &["-h"], &["help"], &["-q", "--help"]] {
+        let help = stdout(args);
+        let shown = listed_commands(&help, 2);
+        for name in COMMON {
+            assert!(shown.iter().any(|s| s == name), "`{name}` missing from `kargo {args:?}`");
+        }
+        for name in UNCOMMON {
+            assert!(!shown.iter().any(|s| s == name), "`{name}` should be left out of `kargo {args:?}`");
+        }
+        assert!(help.contains("See all commands with `kargo --list`."), "{help}");
+        assert!(!help.contains("Tasks"), "no project, no tasks section");
+    }
+
+    let list = stdout(&["--list"]);
+    assert!(list.starts_with("Built-in commands:\n"), "{list}");
+    let mut listed = listed_commands(&list, 4);
+    let mut expected: Vec<String> = COMMON.iter().chain(UNCOMMON).map(|s| s.to_string()).collect();
+    listed.sort();
+    expected.sort();
+    assert_eq!(listed, expected);
+    assert!(list.contains("    completions  Print a shell completion script\n"), "{list}");
+    assert_eq!(stdout(&["-q", "--list"]), list);
+
+    // Commands left out of the short help still run their own help.
+    for name in UNCOMMON {
+        // The usage line names the binary: `kargo` or, on Windows, `kargo.exe`.
+        let usage = predicate::str::is_match(format!(r"Usage: kargo(\.exe)? {name}")).unwrap();
+        p.kargo().args(["help", name]).assert().success().stdout(usage);
+    }
+    p.kargo().args(["--list", "build"]).assert().failure().code(2);
+}
+
+#[test]
+fn short_help_marks_tasks_hidden_by_uncommon_commands() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("tasky", "[tasks]\nlsp = \"echo lsp\"\ngen = { run = \"echo gen\", description = \"generate sources\" }\n"),
+    );
+    p.kargo()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tasks (from kargo.toml"))
+        .stdout(predicate::str::contains("[hidden by `kargo lsp`; run it with `kargo task lsp`]"))
+        .stdout(predicate::str::contains("gen  generate sources"));
+}
+
 #[test]
 fn completions() {
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
@@ -665,8 +773,14 @@ fn completions() {
     };
     let values = |out: &str| out.lines().map(|l| l.split('\t').next().unwrap().to_string()).collect::<Vec<_>>();
 
-    // Outside a project: built-in commands only.
+    // Outside a project: built-in commands only, the ones the short help leaves out included.
     assert!(values(&complete(&["bu"])).contains(&"build".to_string()));
+    // Every built-in command from `kargo --list` completes under its own name, the ones the short help leaves out included.
+    // (An empty word lists some commands by their alias, such as `b` for `build`, so each name is completed by its prefix.)
+    let list = String::from_utf8(p.kargo().arg("--list").assert().success().get_output().stdout.clone()).unwrap();
+    for name in listed_commands(&list, 4) {
+        assert!(values(&complete(&[name.as_str()])).contains(&name), "`{name}` is not completed");
+    }
     assert!(!complete(&[""]).contains("generate sources"));
 
     p.file(
