@@ -59,6 +59,7 @@ export default defineConfig({
 						{ label: 'Continuous integration', slug: 'guides/ci' },
 						{ label: 'Build performance', slug: 'guides/build-performance' },
 						{ label: 'Editor integration', slug: 'guides/editors' },
+						{ label: "Kargo's Kotlin server", slug: 'guides/kotlin-server' },
 					],
 				},
 				{

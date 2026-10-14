@@ -2314,7 +2314,8 @@ fn lsp_describes_the_project_for_the_kotlin_lsp() {
         json!({ "jsonrpc": "2.0", "method": "exit" }),
     ]);
     // Offline, the Kotlin LSP can't be downloaded: Kargo says so and keeps serving kargo.toml.
-    let out = p.kargo().args(["--offline", "lsp"]).write_stdin(input).assert().success().get_output().stdout.clone();
+    let out =
+        p.kargo().args(["--offline", "lsp", "--server", "kotlin-lsp"]).write_stdin(input).assert().success().get_output().stdout.clone();
     let messages = lsp_output(&out);
     let shown = messages.iter().find(|m| m["method"] == "window/showMessage").unwrap_or_else(|| panic!("{messages:?}"));
     assert!(shown["params"]["message"].as_str().unwrap().contains("offline"), "{shown}");
@@ -2335,8 +2336,117 @@ fn lsp_describes_the_project_for_the_kotlin_lsp() {
         json!({ "jsonrpc": "2.0", "method": "exit" }),
     ]);
     p.kargo().args(["--offline", "lsp", "--server", "kls"]).write_stdin(input.clone()).assert().code(1);
-    p.kargo().args(["--offline", "lsp"]).write_stdin(input).assert().code(1);
+    p.kargo().args(["--offline", "lsp", "--server", "kotlin-lsp"]).write_stdin(input).assert().code(1);
     assert_eq!(p.read("workspace.json"), "{}");
+}
+
+/// `kargo lsp` running in the project, for a conversation: each request waits for its reply.
+struct LspSession {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl LspSession {
+    fn start(p: &Project, args: &[&str]) -> Self {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_kargo"))
+            .args(args)
+            .current_dir(p.path())
+            .env("KARGO_HOME", p.home.path())
+            .env_remove("KARGO_TARGET_DIR")
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        Self { child, stdin, stdout }
+    }
+
+    fn send(&mut self, message: serde_json::Value) {
+        use std::io::Write;
+        self.stdin.write_all(&lsp_input(&[message])).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    /// Sends a request and returns its reply, skipping notifications and requests from the server.
+    fn request(&mut self, id: i64, method: &str, params: serde_json::Value) -> serde_json::Value {
+        use std::io::{BufRead, Read};
+        self.send(serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        loop {
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(self.stdout.read_line(&mut line).unwrap() > 0, "kargo lsp stopped before replying to {method}");
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some(n) = line.strip_prefix("Content-Length: ") {
+                    length = n.parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            self.stdout.read_exact(&mut body).unwrap();
+            let message: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if message["id"] == id && message.get("method").is_none() {
+                return message;
+            }
+        }
+    }
+
+    fn finish(mut self) -> std::process::ExitStatus {
+        self.request(9999, "shutdown", serde_json::Value::Null);
+        self.send(serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
+        self.child.wait().unwrap()
+    }
+}
+
+#[test]
+fn lsp_serves_kotlin_with_its_own_server_by_default() {
+    use serde_json::json;
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.wasm]\n"))
+        .file("src/Platform.kt", "package app\n\nexpect fun platformName(): String\n")
+        .file("src-jvm/Platform.jvm.kt", "package app\n\nactual fun platformName(): String = \"JVM\"\n")
+        .file("src/Main.kt", "package app\n\nfun main() {\n    println(platformName())\n}\n");
+    let main = file_uri(&p.path().join("src/Main.kt"));
+    let at = |line: u32, character: u32| json!({ "textDocument": { "uri": main }, "position": { "line": line, "character": character } });
+    let mut lsp = LspSession::start(&p, &["--offline", "lsp"]);
+    let init = lsp.request(1, "initialize", json!({ "rootUri": file_uri(p.path()), "capabilities": {} }));
+    assert_eq!(init["result"]["capabilities"]["renameProvider"]["prepareProvider"], true);
+    lsp.send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let text = p.read("src/Main.kt");
+    lsp.send(json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": { "uri": main, "languageId": "kotlin", "version": 1, "text": text } } }));
+
+    let labels = |reply: serde_json::Value| -> Vec<String> {
+        reply["result"]["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_owned()).collect()
+    };
+    let names = labels(lsp.request(2, "textDocument/completion", at(3, 14)));
+    assert!(names.contains(&"platformName".to_owned()), "{names:?}");
+    let names = labels(lsp.request(7, "textDocument/completion", at(3, 8)));
+    assert!(names.contains(&"println".to_owned()) && names.contains(&"print".to_owned()), "the standard library: {names:?}");
+    let definition = lsp.request(3, "textDocument/definition", at(3, 14));
+    assert!(
+        definition["result"][0]["uri"].as_str().unwrap().ends_with("src/Platform.kt"),
+        "common code sees the expect declaration: {definition}"
+    );
+    let hover = lsp.request(4, "textDocument/hover", at(3, 6));
+    let hover = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(hover.contains("fun println("), "{hover}");
+    let rename = lsp.request(
+        5,
+        "textDocument/rename",
+        json!({ "textDocument": { "uri": main }, "position": { "line": 3, "character": 14 }, "newName": "hostName" }),
+    );
+    let changes = rename["result"]["changes"].as_object().unwrap();
+    assert_eq!(changes.len(), 3, "the call, the expect and the actual declaration: {changes:?}");
+    let library = lsp.request(6, "textDocument/prepareRename", at(3, 6));
+    assert!(library["error"]["message"].as_str().unwrap().contains("can't be renamed"), "{library}");
+    assert!(lsp.finish().success());
+    assert!(!p.path().join("workspace.json").exists(), "Kargo's own server needs no project description");
 }
 
 #[test]
@@ -2356,9 +2466,12 @@ fn lsp_describes_multiplatform_source_sets() {
         workspace["modules"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect()
     };
     // Offline, nothing resolves: the source sets are described without libraries.
-    assert_eq!(modules(&["--offline", "lsp"]), ["app", "app.common.main", "app.jvm.main", "app.common.test", "app.jvm.test"]);
     assert_eq!(
-        modules(&["--offline", "lsp", "--klib-targets"]),
+        modules(&["--offline", "lsp", "--server", "kotlin-lsp"]),
+        ["app", "app.common.main", "app.jvm.main", "app.common.test", "app.jvm.test"]
+    );
+    assert_eq!(
+        modules(&["--offline", "lsp", "--server", "kotlin-lsp", "--klib-targets"]),
         ["app", "app.common.main", "app.jvm.main", "app.wasm.main", "app.common.test", "app.jvm.test", "app.wasm.test"]
     );
 }
