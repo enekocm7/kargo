@@ -24,7 +24,6 @@ import org.jetbrains.kotlin.idea.base.platforms.KotlinNativeLibraryKind
 import org.jetbrains.kotlin.idea.facet.KotlinFacet
 import org.jetbrains.kotlin.platform.jvm.isJvm
 import org.jetbrains.kotlin.platform.konan.isNative
-import org.junit.Assume
 import java.io.File
 import java.nio.file.Files
 import java.util.zip.ZipEntry
@@ -137,6 +136,12 @@ class KargoImportTest : UsefulTestCase() {
         myFixture.configureFromExistingVirtualFile(virtualFile(file))
         return myFixture.doHighlighting().filter { it.severity == HighlightSeverity.ERROR }.map(HighlightInfo::getDescription)
     }
+
+    /**
+     * Says why a test did nothing. These tests extend JUnit 3's TestCase, whose runner reports a JUnit 4 assumption
+     * as a failure, so a test that can't run here returns early instead.
+     */
+    private fun skipped(reason: String) = println("$name skipped: $reason")
 
     /** A Kotlin/Native distribution on this machine whose klibs the IDE can read, or null. */
     private fun konan(): File? {
@@ -258,9 +263,7 @@ class KargoImportTest : UsefulTestCase() {
     // --- Kotlin/Native ----------------------------------------------------------------------------------------
 
     fun `test a Native package resolves klibs`() {
-        val konan = konan()
-        Assume.assumeNotNull(konan)
-        konan!!
+        val konan = konan() ?: return skipped("no Kotlin/Native distribution the IDE can read in ~/.konan or KONAN_DATA_DIR")
         // Real Kargo klibs are zip files; pack one to check that the archive form resolves, too.
         val klib = File(root, "libs/stdlib.klib")
         zip(File(konan, "klib/common/stdlib"), klib)
@@ -297,9 +300,7 @@ class KargoImportTest : UsefulTestCase() {
     // --- Multiplatform ----------------------------------------------------------------------------------------
 
     fun `test expect and actual declarations find each other across a common module`() {
-        val konan = konan()
-        Assume.assumeNotNull(konan)
-        konan!!
+        val konan = konan() ?: return skipped("no Kotlin/Native distribution the IDE can read in ~/.konan or KONAN_DATA_DIR")
         val common = write("hello/src/Platform.kt", "package hello\n\nexpect fun platformName(): String\n\nfun greeting(): String = \"Hello from \" + platformName()\n")
         val jvm = write("hello/src-jvm/Platform.kt", "package hello\n\nactual fun platformName(): String = \"the JVM\"\n")
         val native = write("hello/src-native/Platform.kt", "package hello\n\nactual fun platformName(): String = \"Native\"\n")
