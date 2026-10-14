@@ -20,6 +20,8 @@ serialization = true
 
 Because `serialization` is enabled too, Kargo also adds Ktor's JSON support and the content-negotiation plugin.
 
+The project also gets `resources/logback.xml`, which logs at `INFO`. Without a Logback configuration the server would print every `DEBUG` line from Netty at startup. Raise or lower the level there, for example `<root level="DEBUG">` while debugging.
+
 ## Write the API
 
 ```kotlin title="src/Main.kt"

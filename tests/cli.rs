@@ -821,6 +821,12 @@ fn external_subcommands_from_kargo_home() {
     p.kargo().args(["greet", "world"]).assert().code(3).stdout(predicate::str::contains("greet world ext"));
     p.kargo().arg("plugins").assert().success().stdout(predicate::str::contains("greet"));
     p.kargo().arg("definitely-not-a-command").assert().failure().stderr(predicate::str::contains("no such command"));
+    p.kargo()
+        .arg("biuld")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no such command: `biuld`").and(predicate::str::contains("Did you mean `build`?")));
+    p.kargo().arg("definitely-not-a-command").assert().failure().stderr(predicate::str::contains("Did you mean").not());
 }
 
 #[test]

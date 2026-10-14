@@ -32,6 +32,14 @@ impl Jdk {
         self.javac().is_file()
     }
 
+    /// Options `kargo run` and `kargo test` put before `[target.jvm] jvm-args`, so the program's output
+    /// stays free of JVM warnings: JDK 21 warns when a library (mockk, ByteBuddy) loads an agent
+    /// dynamically, and newer JDKs when native code is loaded without `--enable-native-access`
+    /// (Compose, Skiko). Users can still override them in `jvm-args`.
+    pub fn default_run_args(&self) -> Vec<&'static str> {
+        if self.version >= 21 { vec!["-XX:+EnableDynamicAgentLoading", "--enable-native-access=ALL-UNNAMED"] } else { Vec::new() }
+    }
+
     /// Finds a JDK via `JAVA_HOME`, falling back to `java` on `PATH`.
     pub fn detect() -> Result<Self> {
         if let Some(home) = std::env::var_os("JAVA_HOME").filter(|h| !h.is_empty()) {
@@ -110,6 +118,14 @@ fn parse_properties(text: &str) -> Option<(PathBuf, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_run_args_need_jdk_21() {
+        let jdk = |version| Jdk { home: PathBuf::from("/j"), version };
+        assert!(jdk(17).default_run_args().is_empty());
+        assert_eq!(jdk(21).default_run_args(), ["-XX:+EnableDynamicAgentLoading", "--enable-native-access=ALL-UNNAMED"]);
+        assert_eq!(jdk(25).default_run_args().len(), 2);
+    }
 
     #[test]
     fn parses_show_settings_output() {

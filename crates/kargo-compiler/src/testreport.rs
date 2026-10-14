@@ -149,6 +149,49 @@ pub fn event_json(event: TestEvent<'_>) -> serde_json::Value {
     }
 }
 
+/// What the failure list shows for a failed test: the message, then the stack trace without the
+/// frames of the Kotlin/Native runtime (unsymbolized `???` frames, the exception's constructors,
+/// `kotlin.native` internals and `kotlin.test`'s assertion helpers), which bury the test's own frames.
+fn failure_text(message: &str, details: &str) -> String {
+    let mut lines = details.lines().peekable();
+    // The runtime starts the trace with the exception and its message, which the message already shows.
+    if !message.is_empty() && lines.peek().is_some_and(|first| !is_frame(first) && first.contains(message)) {
+        lines.next();
+    }
+    let (mut kept, mut omitted) = (Vec::new(), 0);
+    for line in lines {
+        if is_frame(line) && is_runtime_frame(line) {
+            omitted += 1;
+        } else {
+            kept.push(line.to_owned());
+        }
+    }
+    if omitted > 0 {
+        kept.push(format!("        ... {omitted} runtime frame{} omitted", if omitted == 1 { "" } else { "s" }));
+    }
+    let trace = kept.join("\n");
+    if trace.trim().is_empty() { message.to_owned() } else { format!("{message}\n{trace}") }
+}
+
+fn is_frame(line: &str) -> bool {
+    line.trim_start().starts_with("at ")
+}
+
+fn is_runtime_frame(frame: &str) -> bool {
+    const RUNTIME: [&str; 9] = [
+        "???",
+        "kfun:kotlin.Throwable#",
+        "kfun:kotlin.Exception#",
+        "kfun:kotlin.RuntimeException#",
+        "kfun:kotlin.Error#",
+        "kfun:kotlin.AssertionError#",
+        "kfun:kotlin.native",
+        "kfun:kotlin.test#",
+        "kfun:kotlin.test.",
+    ];
+    RUNTIME.iter().any(|marker| frame.contains(marker))
+}
+
 /// Consumes test-runner output, printing `test Suite.name ... ok` lines and
 /// passing through anything that is not a service message.
 pub fn report(input: impl BufRead, out: impl Write) -> std::io::Result<TestSummary> {
@@ -193,8 +236,7 @@ pub fn report_with(input: impl BufRead, mut out: impl Write, mut on_event: impl 
             "testFailed" => {
                 let message = attr(&attrs, "message");
                 let details = attr(&attrs, "details");
-                let text = if details.is_empty() { message.to_owned() } else { format!("{message}\n{details}") };
-                summary.failures.push((full_name.clone(), text));
+                summary.failures.push((full_name.clone(), failure_text(message, details)));
                 current_failure = Some((message.to_owned(), details.to_owned()));
             }
             "testIgnored" => {
@@ -433,6 +475,25 @@ hello from test
         let mut total = TestSummary::default();
         total.merge(summary);
         assert_eq!(total.failed, 1);
+    }
+
+    #[test]
+    fn trims_native_runtime_frames() {
+        let details = "kotlin.AssertionError: Expected <4>, actual <3>.\n\
+            \tat 0   app.kexe  0x1 kfun:kotlin.Throwable#<init>(kotlin.String?){} + 93 (/rt/Throwable.kt:23:37)\n\
+            \tat 1   ???       0x2 0x3\n\
+            \tat 2   app.kexe  0x4 kfun:kotlin.test#assertEquals(kotlin.Int){} + 9\n\
+            \tat 3   app.kexe  0x5 kfun:com.example#MathTest.fails(){} + 12 (/src/MathTest.kt:9:9)\n\
+            \tat 4   ???       0x6 0x7";
+        let text = failure_text("Expected <4>, actual <3>.", details);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "Expected <4>, actual <3>.");
+        assert!(lines[1].contains("MathTest.fails"), "{text}");
+        assert_eq!(lines[2].trim(), "... 4 runtime frames omitted");
+        assert_eq!(lines.len(), 3, "{text}");
+        // A JVM-style trace is left alone.
+        assert_eq!(failure_text("boom", "java.lang.Error: boom\n\tat a.B.c(B.kt:1)"), "boom\n\tat a.B.c(B.kt:1)");
+        assert_eq!(failure_text("boom", ""), "boom");
     }
 
     #[test]

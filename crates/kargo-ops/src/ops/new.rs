@@ -227,6 +227,21 @@ fn framework_main(opts: &NewOptions) -> bool {
     opts.has("spring-boot") || opts.has("ktor") || (opts.has("compose") && opts.targets.contains(&TargetKind::Jvm))
 }
 
+/// The Ktor template's `resources/logback.xml`. Without a configuration Logback logs everything at
+/// DEBUG, which fills the console with Netty's internals.
+const LOGBACK_CONFIG: &str = r#"<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="STDOUT" />
+    </root>
+</configuration>
+"#;
+
 /// The `@Serializable` class of the serialization template, in its own file so
 /// the file name matches the class (as detekt and the Kotlin conventions expect).
 fn serializable_source(opts: &NewOptions) -> String {
@@ -452,6 +467,9 @@ pub fn template(opts: &NewOptions) -> Result<Vec<TemplateFile>> {
         files.push(file("src/Greeting.kt", serializable_source(opts)));
     }
     files.push(file("tests/GreetingTest.kt", test_source(opts)));
+    if opts.has("ktor") {
+        files.push(file("resources/logback.xml", LOGBACK_CONFIG));
+    }
     if opts.targets.contains(&TargetKind::Android) {
         files.extend(android_files(opts, true));
     }
@@ -572,6 +590,14 @@ mod tests {
         }
         let ktor = template(&NewOptions { frameworks: vec!["ktor".into(), "serialization".into()], ..opts("k") }).unwrap();
         assert!(!ktor.iter().any(|f| f.path == Path::new("src/Greeting.kt")));
+    }
+
+    #[test]
+    fn ktor_template_logs_at_info() {
+        let ktor = template(&NewOptions { frameworks: vec!["ktor".into()], ..opts("k") }).unwrap();
+        let logback = &ktor.iter().find(|f| f.path == Path::new("resources/logback.xml")).unwrap().contents;
+        assert!(logback.contains(r#"<root level="INFO">"#), "{logback}");
+        assert!(!template(&opts("plain")).unwrap().iter().any(|f| f.path == Path::new("resources/logback.xml")));
     }
 
     #[test]

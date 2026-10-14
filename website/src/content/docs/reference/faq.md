@@ -110,6 +110,10 @@ The `gradle-version` under `[target.android]` is older than the `agp-version` ne
 
 Kargo downloads Gradle for Android builds on first use. Run `kargo fetch` (or `kargo toolchain install gradle`) once while online.
 
+### `... is not in the local cache and Kargo is running in offline mode`
+
+`--offline` (or `KARGO_OFFLINE`) allows only what is already downloaded. Run `kargo fetch` once while online: it downloads the dependencies, compilers and test tools the project needs, so the offline build works. Add `--tools` for the doc, fmt and lint tools.
+
 ### `kargo.lock needs to be updated ... but --locked was passed`
 
 You changed `kargo.toml` without committing the updated lockfile. Run `kargo build` locally and commit `kargo.lock`.

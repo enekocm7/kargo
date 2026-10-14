@@ -62,7 +62,7 @@ const COMMON_COMMANDS: &[&str] = &[
 #[command(
     name = "kargo",
     version,
-    about = "Kotlin's package manager and build tool",
+    about = "Cargo for Kotlin: a build tool and package manager",
     long_about = "Kargo builds Kotlin projects for the JVM, WebAssembly, Kotlin/Native and Android,\nmanages Maven dependencies and runs tests, configured by a single kargo.toml.",
     after_help = AFTER_HELP,
     add = SubcommandCandidates::new(complete::external_subcommands)
@@ -1804,6 +1804,36 @@ fn info_json(ws: &Workspace) -> serde_json::Value {
     })
 }
 
+/// The candidate closest to `name` when it is near enough to be a typo (as Cargo suggests commands):
+/// at most a third of the name's length (at least one) away, counting a swap of neighbors as one edit.
+fn closest_match<'a>(name: &str, candidates: &'a [String]) -> Option<&'a str> {
+    let limit = name.chars().count().max(3) / 3;
+    candidates.iter().map(|c| (edit_distance(name, c), c)).filter(|(d, _)| *d <= limit).min_by_key(|(d, _)| *d).map(|(_, c)| c.as_str())
+}
+
+/// Optimal string alignment distance: insertions, deletions, substitutions and swaps of neighbors.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut rows = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in rows.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in rows[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (rows[i - 1][j] + 1).min(rows[i][j - 1] + 1).min(rows[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(rows[i - 2][j - 2] + 1);
+            }
+            rows[i][j] = best;
+        }
+    }
+    rows[a.len()][b.len()]
+}
+
 /// `kargo <name>`: a task from the manifest, else a `kargo-<name>` executable.
 fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u8> {
     let (name, args) = argv.split_first().context("missing subcommand")?;
@@ -1815,7 +1845,17 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u
         return Ok(0);
     }
     let Some(program) = kargo_ops::plugins::find_subcommand(config, name) else {
-        bail!("no such command: `{name}`\n\n\tView all installed commands with `kargo --help` and `kargo plugins`");
+        let mut known: Vec<String> = Cli::command()
+            .get_subcommands()
+            .flat_map(|c| std::iter::once(c.get_name()).chain(c.get_all_aliases()))
+            .map(str::to_owned)
+            .collect();
+        known.extend(kargo_ops::plugins::list_subcommands(config).into_keys());
+        if let Ok(ws) = load_workspace(global) {
+            known.extend(ws.manifest().tasks.keys().cloned());
+        }
+        let suggestion = closest_match(name, &known).map(|s| format!("\n\n\tDid you mean `{s}`?")).unwrap_or_default();
+        bail!("no such command: `{name}`{suggestion}\n\n\tView all installed commands with `kargo --help` and `kargo plugins`");
     };
     let cwd = std::env::current_dir()?;
     let code = kargo_ops::plugins::run_subcommand(config, name, &program, args, &cwd)?;
@@ -1831,6 +1871,17 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn suggests_the_closest_command() {
+        let known: Vec<String> = ["build", "bench", "run", "test", "tree", "check"].map(String::from).to_vec();
+        assert_eq!(closest_match("biuld", &known), Some("build"));
+        assert_eq!(closest_match("chek", &known), Some("check"));
+        assert_eq!(closest_match("tset", &known), Some("test"));
+        assert_eq!(closest_match("definitely-not-a-command", &known), None);
+        assert_eq!(closest_match("x", &known), None);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
     }
 
     #[test]

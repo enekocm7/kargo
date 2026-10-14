@@ -185,7 +185,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
                 cmd.arg(jdwp_option(port));
                 note_debugger(ctx.shell(), port, "the program");
             }
-            cmd.args(&jvm.jvm_args).arg("-cp").arg(join_paths(&classpath)).arg(&main);
+            cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).arg("-cp").arg(join_paths(&classpath)).arg(&main);
             label = format!("java {main}");
             cmd
         }
@@ -215,7 +215,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     cmd.args(&opts.args).current_dir(ctx.ws.root());
     for arg in &opts.args {
         label.push(' ');
-        label.push_str(arg);
+        label.push_str(&process::quote_for_display(arg));
     }
     ctx.unlock()?;
     ctx.shell().status("Running", format!("`{label}`"));

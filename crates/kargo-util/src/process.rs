@@ -1,5 +1,6 @@
 //! Helpers for spawning external tools.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
@@ -7,21 +8,34 @@ use anyhow::{Context, Result, bail};
 
 use crate::shell::Shell;
 
-/// Renders a command for `--verbose` output.
+/// Renders a command for `--verbose` output, quoting the arguments so it can be copied into a shell.
 pub fn describe(cmd: &Command) -> String {
     let mut out = cmd.get_program().to_string_lossy().into_owned();
     for arg in cmd.get_args() {
-        let arg = arg.to_string_lossy();
         out.push(' ');
-        if arg.contains(char::is_whitespace) || arg.is_empty() {
-            out.push('"');
-            out.push_str(&arg);
-            out.push('"');
-        } else {
-            out.push_str(&arg);
-        }
+        out.push_str(&quote_for_display(&arg.to_string_lossy()));
     }
     out
+}
+
+/// Quotes `arg` for a displayed command line when it is empty or has whitespace, quotes or shell
+/// metacharacters, so `buy milk` as one argument differs from two. Other arguments are left alone.
+pub fn quote_for_display(arg: &str) -> Cow<'_, str> {
+    let special = |c: char| c.is_whitespace() || "\"'$`&|;<>()*?!#".contains(c);
+    if !arg.is_empty() && !arg.contains(special) {
+        return Cow::Borrowed(arg);
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for c in arg.chars() {
+        // Backslashes are path separators on Windows, so only escape them elsewhere.
+        if c == '"' || (!cfg!(windows) && matches!(c, '\\' | '$' | '`')) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    Cow::Owned(out)
 }
 
 /// Runs `cmd` with inherited stdio and fails if it exits unsuccessfully.
@@ -224,6 +238,16 @@ mod tests {
         let mut cmd = Command::new("java");
         cmd.args(["-cp", "a b", ""]);
         assert_eq!(describe(&cmd), r#"java -cp "a b" """#);
+    }
+
+    #[test]
+    fn quotes_displayed_arguments() {
+        assert_eq!(quote_for_display("milk"), "milk");
+        assert_eq!(quote_for_display("--flag=1"), "--flag=1");
+        assert_eq!(quote_for_display("buy milk"), r#""buy milk""#);
+        assert_eq!(quote_for_display(""), r#""""#);
+        assert_eq!(quote_for_display(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(quote_for_display("a;b"), r#""a;b""#);
     }
 
     #[test]

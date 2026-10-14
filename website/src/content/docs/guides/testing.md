@@ -106,6 +106,8 @@ $ kargo test --report junit
 
 Each report has one `<testsuite>` per test class, with each test's time, failure message and stack trace, and what it printed. The directory is cleared at the start of every run, so it never holds results from an earlier one. See [CI](../ci/#test-results) for publishing the reports.
 
+When a Kotlin/Native test fails, the failure list shows the assertion message first, then the stack trace without the Kotlin/Native runtime's own frames (they end with `... N runtime frames omitted`), so the first frame is yours.
+
 ## Filtering tests
 
 The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on the JVM, Native and Android:
