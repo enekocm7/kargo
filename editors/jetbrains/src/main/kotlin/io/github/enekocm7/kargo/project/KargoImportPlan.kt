@@ -129,7 +129,8 @@ object KargoImportPlanner {
             val roots = target.sourceRoots.map { RootSpec(norm(it), RootKind.SOURCE) } +
                 target.testRoots.map { RootSpec(norm(it), RootKind.TEST) } +
                 target.resourceRoots.map { RootSpec(norm(it), RootKind.RESOURCE) } +
-                target.testResourceRoots.map { RootSpec(norm(it), RootKind.TEST_RESOURCE) }
+                target.testResourceRoots.map { RootSpec(norm(it), RootKind.TEST_RESOURCE) } +
+                examples()
             return module(pkg.name, listOf(ContentSpec(root, roots, excluded)), target, dependsOn = emptyList(), target = target.kind)
         }
 
@@ -137,7 +138,7 @@ object KargoImportPlanner {
         fun common(targets: List<KargoTarget>): ModuleSpec {
             val first = targets.first()
             val shared = sharedRoots(targets)
-            val roots = shared.sources.map { RootSpec(it, RootKind.SOURCE) } + shared.tests.map { RootSpec(it, RootKind.TEST) }
+            val roots = shared.sources.map { RootSpec(it, RootKind.SOURCE) } + shared.tests.map { RootSpec(it, RootKind.TEST) } + examples()
             return module("${pkg.name}.common", listOf(ContentSpec(root, roots, excluded)), first, dependsOn = emptyList(), target = null)
         }
 
@@ -155,6 +156,9 @@ object KargoImportPlanner {
             add(target.testResourceRoots, RootKind.TEST_RESOURCE, emptyList())
             return module(moduleName(pkg.name, target.kind, targetsOf.getValue(pkg.name)), contents, target, dependsOn = listOf("${pkg.name}.common"), target = target.kind)
         }
+
+        /** `examples/` is compiled against the package's sources, so the IDE sees it as test code. */
+        private fun examples() = listOf(RootSpec("$root/examples", RootKind.TEST))
 
         /** The source and test directories every target of the package compiles: `src/` and `tests/`. */
         fun sharedRoots(targets: List<KargoTarget>): Shared {

@@ -54,6 +54,7 @@ An IDE can only complete and resolve what it knows about. When a folder with a `
 | `src/`, `src-<target>/` | Source roots |
 | `tests/`, `tests-<target>/` | Test source roots |
 | `resources/`, `test-resources/` | Resource roots |
+| `examples/` | A test source root, since examples are compiled against the package's sources |
 | `target/` | Excluded from the project |
 | A Maven dependency | A project library named `Kargo: <group>:<artifact>:<version>`, with its sources jar if `kargo fetch --sources` downloaded it |
 | `[dev-dependencies]` and runtime-only dependencies | The same libraries with *Test* and *Runtime* scope |
@@ -153,4 +154,5 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, th
 - *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
 - The IDE analyzes each module for one platform. In a package with several targets, common code (`src/`) is analyzed like the first target, so completion there also offers that platform's APIs. *Tools → Kargo → Check* shows what fails on the other targets.
 - Wasm modules are analyzed against the Wasm klibs of `kargo.toml`, but browser APIs and npm packages are not described to the IDE.
+- Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are handed to the IDE but it may not apply them, so it can report errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
 - The IDE reads libraries compiled by its own Kotlin version or one newer at most, see the note under [Project import](#project-import).

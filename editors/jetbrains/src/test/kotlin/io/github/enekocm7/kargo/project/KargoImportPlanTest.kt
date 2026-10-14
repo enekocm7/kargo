@@ -47,7 +47,7 @@ class KargoImportPlanTest {
         assertEquals(
             listOf(
                 "SOURCE /p/app/src", "SOURCE /p/app/src-jvm", "TEST /p/app/tests", "TEST /p/app/tests-jvm",
-                "RESOURCE /p/app/resources", "TEST_RESOURCE /p/app/test-resources",
+                "RESOURCE /p/app/resources", "TEST_RESOURCE /p/app/test-resources", "TEST /p/app/examples",
             ),
             content.roots.map { it.toString() },
         )
@@ -115,7 +115,7 @@ class KargoImportPlanTest {
 
         val common = modules.getValue("app.common")
         assertEquals(PlatformKind.JVM, common.platform)
-        assertEquals(listOf("SOURCE /w/app/src", "TEST /w/app/tests"), common.contents.single().roots.map { it.toString() })
+        assertEquals(listOf("SOURCE /w/app/src", "TEST /w/app/tests", "TEST /w/app/examples"), common.contents.single().roots.map { it.toString() })
         assertTrue(common.dependsOn.isEmpty())
 
         val jvm = modules.getValue("app.jvm")
