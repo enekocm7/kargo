@@ -5,14 +5,16 @@
 //! output directories, compiler arguments and plugins, entry points and tasks, and, unless
 //! `--no-deps` is given, the resolved classpath (or klib path) of every target and scope.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::build::{ALL_SCOPES, native_entry_point, native_platforms, sources};
+use super::build::{ALL_SCOPES, native_entry_point, native_platforms, sources, wasm_resolution};
 use super::context::{BuildContext, TargetSetup};
 use crate::builtins;
+use crate::npm;
 use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::common_kotlin_args;
 use kargo_compiler::mainclass::find_jvm_main_class;
@@ -207,6 +209,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             out["environment"] = json!(wasm.environment.as_str());
             out["wasm-kind"] = json!(wasm.kind.as_str());
             out["module-name"] = json!(wasm.module_name(&m.package));
+            out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, &setup)?) };
         }
         TargetKind::Native => {
             let native = m.targets.native.as_ref().expect("the Native target is enabled");
@@ -302,6 +305,39 @@ fn dependencies(ctx: &BuildContext, kind: TargetKind, setup: &TargetSetup) -> Re
 /// A klib platform: the same libraries compile and link the program.
 fn klib_entry(platform: &str, main: Vec<Value>, test: Vec<Value>) -> Value {
     json!({ "platform": platform, "compile": main, "runtime": main, "test": test })
+}
+
+/// The npm packages of the Wasm target: the ones its klibs and `[target.wasm.npm-dependencies]` need, and
+/// where `kargo build` and `kargo test` install them. Path dependencies are not built to read their klibs
+/// here, so their packages are missing.
+fn npm_packages(ctx: &BuildContext, setup: &TargetSetup) -> Result<Vec<Value>> {
+    let main = npm::dependencies(ctx, &wasm_resolution(ctx, setup, false)?.files())?;
+    let test = npm::dependencies(ctx, &wasm_resolution(ctx, setup, true)?.files())?;
+    let main_dir = ctx.ws.profile_dir(ctx.profile).join("node_modules");
+    let test_dir = ctx.ws.output_dir(ctx.profile, TargetKind::Wasm).join("test").join("node_modules");
+    Ok(npm_listing(&main, &test, &main_dir, &test_dir))
+}
+
+/// The packages of the program, installed in `main_dir`, and of its tests. `kargo test` installs every
+/// test package into `test_dir` only when they differ from the program's, so then the ones the program
+/// already has at the same version are left out: they are listed once, from `main_dir`.
+fn npm_listing(main: &BTreeMap<String, String>, test: &BTreeMap<String, String>, main_dir: &Path, test_dir: &Path) -> Vec<Value> {
+    let mut out = npm_entries(main.iter(), main_dir, false);
+    if test != main {
+        let extra = test.iter().filter(|(name, version)| main.get(*name) != Some(*version));
+        out.extend(npm_entries(extra, test_dir, true));
+    }
+    out
+}
+
+fn npm_entries<'a>(packages: impl Iterator<Item = (&'a String, &'a String)>, dir: &Path, test: bool) -> Vec<Value> {
+    packages
+        .map(|(name, version)| {
+            // A scoped name such as `@js-joda/core` is a directory inside `node_modules`.
+            let directory = name.split('/').fold(dir.to_path_buf(), |p, part| p.join(part));
+            json!({ "name": name, "version": version, "directory": path(&directory), "test": test })
+        })
+        .collect()
 }
 
 /// One entry per downloaded artifact, in classpath order, with its sources jar if it is cached.
@@ -408,6 +444,37 @@ mod tests {
         let jvm = &doc["packages"][0]["targets"][0]["dependencies"][0];
         let lib = jvm["runtime"].as_array().unwrap().iter().find(|e| e["module"] == "g:lib").unwrap();
         assert!(lib["sources"].as_str().unwrap().ends_with("lib-1.0-sources.jar"), "{lib}");
+    }
+
+    fn packages(list: &[(&str, &str)]) -> BTreeMap<String, String> {
+        list.iter().map(|(name, version)| (name.to_string(), version.to_string())).collect()
+    }
+
+    #[test]
+    fn npm_packages_are_listed_in_the_directory_they_install_to() {
+        let main = packages(&[("date-fns", "4.1.0"), ("@js-joda/core", "3.2.0")]);
+        let out = npm_listing(&main, &main, Path::new("build/node_modules"), Path::new("build/test/node_modules"));
+        assert_eq!(out.len(), 2, "{out:?}");
+        let joda = out.iter().find(|e| e["name"] == "@js-joda/core").unwrap();
+        assert_eq!(joda["version"], "3.2.0");
+        assert_eq!(joda["test"], false);
+        let dir = joda["directory"].as_str().unwrap().replace('\\', "/");
+        assert!(dir.ends_with("build/node_modules/@js-joda/core"), "{dir}");
+    }
+
+    #[test]
+    fn test_packages_are_listed_only_when_they_are_installed_apart() {
+        let main = packages(&[("@js-joda/core", "3.2.0")]);
+        let same = npm_listing(&main, &main, Path::new("out/node_modules"), Path::new("out/test/node_modules"));
+        assert!(same.iter().all(|e| e["test"] == false), "{same:?}");
+
+        let test = packages(&[("@js-joda/core", "3.2.0"), ("mocha", "10.0.0")]);
+        let out = npm_listing(&main, &test, Path::new("out/node_modules"), Path::new("out/test/node_modules"));
+        let mocha = out.iter().find(|e| e["name"] == "mocha").unwrap();
+        assert_eq!(mocha["test"], true);
+        assert!(mocha["directory"].as_str().unwrap().replace('\\', "/").ends_with("out/test/node_modules/mocha"));
+        // The program's own package stays listed once, in the program's directory.
+        assert_eq!(out.iter().filter(|e| e["name"] == "@js-joda/core").count(), 1, "{out:?}");
     }
 
     #[test]

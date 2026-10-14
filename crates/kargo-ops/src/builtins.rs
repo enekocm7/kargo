@@ -6,10 +6,13 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use kargo_manifest::{Dependency, Manifest, Scope, TargetKind};
+use kargo_manifest::{Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::ModuleId;
 
 pub const COROUTINES_VERSION: &str = "1.11.0";
+/// The browser APIs of Kotlin/Wasm (`kotlinx.browser`, `org.w3c.dom`), which the standard library
+/// doesn't contain. Added for `environment = "browser"`.
+pub const KOTLINX_BROWSER_VERSION: &str = "0.5.0";
 pub const SERIALIZATION_VERSION: &str = "1.11.0";
 pub const COMPOSE_VERSION: &str = "1.12.1";
 pub const COMPOSE_MATERIAL3_VERSION: &str = "1.9.0";
@@ -107,6 +110,10 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
             let suffix = format!("wasm-{}", env.platform());
             c.dependencies.push(dep(&format!("org.jetbrains.kotlin:kotlin-stdlib-{suffix}"), Some(kotlin)));
             c.dev_dependencies.push(dep(&format!("org.jetbrains.kotlin:kotlin-test-{suffix}"), Some(kotlin)));
+            // A page's DOM and `window` are a separate library, so the build and the IDE both need it.
+            if env == WasmEnvironment::Browser {
+                c.dependencies.push(dep(&format!("org.jetbrains.kotlinx:kotlinx-browser-{suffix}"), Some(KOTLINX_BROWSER_VERSION)));
+            }
         }
         TargetKind::Native | TargetKind::Android => {}
     }
@@ -354,8 +361,18 @@ mod tests {
     fn browser_uses_the_wasm_js_libraries() {
         let m = manifest("[target.wasm]\nenvironment = \"browser\"\n");
         let c = contributions(&m, TargetKind::Wasm, Path::new(".")).unwrap();
-        assert_eq!(coords(&c.dependencies), ["org.jetbrains.kotlin:kotlin-stdlib-wasm-js"]);
+        assert_eq!(
+            coords(&c.dependencies),
+            ["org.jetbrains.kotlin:kotlin-stdlib-wasm-js", "org.jetbrains.kotlinx:kotlinx-browser-wasm-js"]
+        );
         assert_eq!(coords(&c.dev_dependencies), ["org.jetbrains.kotlin:kotlin-test-wasm-js"]);
+    }
+
+    #[test]
+    fn only_browsers_get_the_browser_apis() {
+        let js = manifest("[target.wasm]\nenvironment = \"js\"\n");
+        let c = contributions(&js, TargetKind::Wasm, Path::new(".")).unwrap();
+        assert_eq!(coords(&c.dependencies), ["org.jetbrains.kotlin:kotlin-stdlib-wasm-js"]);
     }
 
     #[test]

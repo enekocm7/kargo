@@ -74,6 +74,7 @@ An IDE can only complete and resolve what it knows about. When a folder with a `
 | `examples/` | A test source root, since examples are compiled against the package's sources |
 | `target/` | Excluded from the project |
 | A Maven dependency | A project library named `Kargo: <group>:<artifact>:<version>`, with its sources jar if `kargo fetch --sources` downloaded it |
+| An npm package of a Wasm target (from `[target.wasm.npm-dependencies]`, or one a Wasm library needs) | A project library named `Kargo: npm <name>@<version>`, with the package's directory in `target/<profile>/node_modules`. It is a runtime dependency of the Wasm module, or a test one for a package only the tests need. A package that isn't installed yet is left out until a build or `kargo fetch` installs it |
 | `[dev-dependencies]` and runtime-only dependencies | The same libraries with *Test* and *Runtime* scope |
 | A path dependency or workspace member | A module dependency on that package's module |
 | `[package] kotlin`, `language-version`, `api-version`, `opt-in`, `compiler-args` and compiler plugins | The module's Kotlin facet |
@@ -86,7 +87,7 @@ Reopen a JVM project and its Maven libraries resolve: completion, go to definiti
 
 **Several targets.** A package with more than one target gets a module for `src/` and `tests/` (`<name>.common`) and one per target (`<name>.jvm`, `<name>.native`, `<name>.wasm`) for `src-<target>/`, which refines the common one, so `expect` and `actual` declarations find each other. Common code is analyzed like the package's first target (JVM, then Native, then Wasm), with that target's libraries; `kargo check` still compiles it for every target. Android code isn't imported: Gradle owns it, see [Android](#android).
 
-The import runs again, without any action, when a `kargo.toml` or `kargo.lock` changes (including when `kargo add`, `kargo update` or a build rewrites them) and when a `src*`, `tests*` or `resources` directory appears or goes away. *Tools → Kargo → Fetch Dependencies and Sources* imports once more to pick up the sources jars. To import by hand, use *Tools → Kargo → Reload Kargo Project*. If `kargo.toml` and `kargo.lock` are as they were at the last import, the check takes a moment and the IDE doesn't index anything.
+The import runs again, without any action, when a `kargo.toml` or `kargo.lock` changes (including when `kargo add` or `kargo update` rewrites them), when a `src*`, `tests*` or `resources` directory appears or goes away, and after *Build*, *Run*, *Test* or a fetch, which can install npm packages without changing either file. *Tools → Kargo → Fetch Dependencies and Sources* imports once more to pick up the sources jars. To import by hand, use *Tools → Kargo → Reload Kargo Project*. If `kargo.toml` and `kargo.lock` are as they were at the last import, the check takes a moment and the IDE doesn't index anything.
 
 The modules are saved in the IDE's `.idea/` directory (which `kargo new` git-ignores), so a project opens with its last known model, even offline. The import only manages what it created: the modules it recorded in `.idea/kargo.xml` and the libraries whose name starts with `Kargo: `. A module of your own with the same name as a package is taken over when it only covers that package, and left alone otherwise.
 
@@ -170,7 +171,7 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, th
 - *Build → Build Project* doesn't run `kargo build`; use *Tools → Kargo → Build*, or check on save for errors in the editor.
 - *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
 - The IDE analyzes each module for one platform. In a package with several targets, common code (`src/`) is analyzed like the first target, so completion there also offers that platform's APIs. *Tools → Kargo → Check* shows what fails on the other targets.
-- Wasm modules are analyzed against the Wasm klibs of `kargo.toml`, but browser APIs and npm packages are not described to the IDE.
+- The npm packages of a [path dependency](../workspaces/#path-dependencies) are not described to the IDE: the import doesn't build a path dependency to read the npm packages in its klibs.
 - Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are handed to the IDE but it may not apply them, so it can report errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
 - The IDE reads libraries compiled by its own Kotlin version or one newer at most, see the note under [Project import](#project-import).
 

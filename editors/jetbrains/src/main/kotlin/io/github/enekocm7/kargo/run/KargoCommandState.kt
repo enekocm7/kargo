@@ -45,10 +45,11 @@ class KargoCommandState(environment: ExecutionEnvironment, private val configura
     override fun startProcess(): ProcessHandler {
         val handler = KillableColoredProcessHandler(commandLine())
         ProcessTerminatedListener.attach(handler)
-        // `kargo add`, `update` and builds change kargo.toml and kargo.lock, and `fetch --sources` the sources jars; the project model follows.
+        // `kargo add`, `update` and builds change kargo.toml and kargo.lock, and `fetch --sources` the sources jars; the project
+        // model follows. Builds, runs and tests also install npm packages, which change none of those, so they import anyway.
         handler.addProcessListener(object : ProcessListener {
             override fun processTerminated(event: ProcessEvent) {
-                KargoProjectSync.getInstance(environment.project).refreshAndSync(force = configuration.subcommand == "fetch")
+                KargoProjectSync.getInstance(environment.project).refreshAndSync(force = configuration.subcommand in IMPORT_AFTER)
             }
         })
         return handler
@@ -64,6 +65,9 @@ class KargoCommandState(environment: ExecutionEnvironment, private val configura
     }
 
     companion object {
+        /** The subcommands after which the project is imported even when kargo.toml and kargo.lock are unchanged. */
+        private val IMPORT_AFTER = setOf("fetch", "build", "run", "test")
+
         /**
          * `args` with what the IDE needs: `--message-format json` for the test tree, and
          * `--debug=<port>` (on the JVM target unless one is chosen) under the debugger.

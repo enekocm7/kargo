@@ -227,6 +227,7 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `resource-roots`, `test-resource-roots`, `classes-dir`, `test-classes-dir` | JVM | Resource directories and where classes are compiled to |
 | `jvm-target`, `main-class`, `jvm-args`, `javac-args` | JVM | The bytecode version the build uses, the main class (`[target.jvm] main-class`, or the single `main` in the sources, else `null`), and the extra JVM and javac options |
 | `environment`, `wasm-kind`, `module-name` | Wasm | `[target.wasm]` settings |
+| `npm` | Wasm | The npm packages the program needs, from the klibs of its dependencies and `[target.wasm.npm-dependencies]`: each with its `name`, `version` and `directory`, where `kargo build` installs it (`target/<profile>/node_modules/<name>`) whether or not it is installed yet. `test` is `true` for a package only the tests need: `kargo test` installs those into `target/<profile>/wasm/test/node_modules`, and only when they differ from the program's packages. The packages of a path dependency are missing, since their klibs aren't built to be read. `null` with `--no-deps` |
 | `native-kind`, `platforms`, `entry-point` | Native | `[target.native]` settings. `host` in `platforms` becomes the host's platform, and the entry point is detected as the build does |
 | `dependencies` | all | One entry per platform (`jvm`, `wasm-js`, `native-linux_x64`, ...). `null` with `--no-deps`, and for Android, whose dependencies Gradle resolves |
 

@@ -87,6 +87,8 @@ class KargoTarget(
     val platforms: List<String>,
     /** Resolved dependencies per platform; null when they weren't resolved (`--no-deps`, Android). */
     val dependencies: List<KargoPlatformDependencies>?,
+    /** The npm packages a Wasm target runs with, where they are installed; empty for other targets. */
+    val npm: List<KargoNpmPackage>,
 ) {
     companion object {
         fun parse(json: JsonObject) = KargoTarget(
@@ -103,6 +105,22 @@ class KargoTarget(
             compilerPlugins = json.objs("compiler-plugins").map(KargoCompilerPlugin::parse),
             platforms = json.strings("platforms"),
             dependencies = json.get("dependencies")?.takeIf { it.isJsonArray }?.asJsonArray?.map { KargoPlatformDependencies.parse(it.asJsonObject) },
+            npm = json.objs("npm").map(KargoNpmPackage::parse),
+        )
+    }
+}
+
+/**
+ * An npm package of a Wasm target, installed in `directory`. `test` is set when only the tests need it, and
+ * then it is installed apart from the program's packages.
+ */
+class KargoNpmPackage(val name: String, val version: String?, val directory: String?, val test: Boolean) {
+    companion object {
+        fun parse(json: JsonObject) = KargoNpmPackage(
+            name = json.string("name").orEmpty(),
+            version = json.string("version"),
+            directory = json.string("directory"),
+            test = json.bool("test") ?: false,
         )
     }
 }
