@@ -35,6 +35,13 @@ pub struct FmtOptions {
     pub check: bool,
 }
 
+/// `kargo fetch --tools`: downloads the ktlint jar that `kargo fmt` runs.
+pub fn fetch_tool(ctx: &BuildContext) -> Result<()> {
+    let version = ctx.ws.manifest().fmt.ktlint_version.as_deref().unwrap_or(KTLINT_VERSION);
+    ctx.tool_fat_jar(KTLINT_GROUP, "ktlint-cli", version).with_context(|| format!("failed to fetch ktlint {version}"))?;
+    Ok(())
+}
+
 /// Runs ktlint. Returns `false` if it found problems: any in `--check` mode,
 /// otherwise the ones it could not fix.
 pub fn fmt(ctx: &BuildContext, opts: &FmtOptions) -> Result<bool> {

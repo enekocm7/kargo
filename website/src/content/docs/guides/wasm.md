@@ -153,6 +153,7 @@ $ kargo run -t wasm
 - npm packages that only your `[dev-dependencies]` need are installed into `target/<profile>/wasm/test/` for `kargo test`.
 - This needs a package manager on your `PATH`, even for `kargo build`. Projects whose libraries need no npm packages never run one.
 - With `--offline`, Kargo passes `--offline` to the package manager, which then installs only from its own cache.
+- `kargo fetch` installs these packages ahead of time, when a package manager is on `PATH`. It works from the Maven dependencies, so the packages of a [path dependency](../workspaces/#path-dependencies) are installed by the first build.
 
 ### Your own npm packages
 

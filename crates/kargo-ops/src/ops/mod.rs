@@ -28,7 +28,7 @@ use self::build::{build_jvm, jvm_classpaths, native_platforms, native_resolution
 use self::context::BuildContext;
 use crate::workspace::Workspace;
 use kargo_compiler::jar::{JarManifest, write_jar};
-use kargo_manifest::{Hook, Scope, TargetKind};
+use kargo_manifest::{Hook, JdkRequest, Scope, TargetKind};
 use kargo_maven::{Platform, Resolution};
 use kargo_util::fs::remove_dir_all_if_exists;
 use kargo_util::shell::Shell;
@@ -175,15 +175,24 @@ pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Con
     }
 }
 
-/// `kargo fetch`: downloads every dependency (and the compiler) so later builds work offline.
-pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
+/// `kargo fetch`: downloads what later builds need so they can run offline: the compiler and
+/// dependencies, the JDK that `[toolchain] jdk` pins, the JUnit launcher (JVM), the npm packages
+/// (Wasm, when npm, pnpm or bun is on `PATH`) and, with `tools`, the Dokka, ktlint and detekt
+/// jars that `kargo doc`, `fmt` and `lint` run.
+pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<()> {
     let targets = select_targets(ctx, targets)?;
     let fetched = parallel_map(&targets, |&target| -> Result<()> {
         match target {
             TargetKind::Jvm => {
                 let setup = ctx.setup(target)?;
                 let (toolchain, (main, test)) = join(
-                    || ctx.kotlin_compiler().and_then(|_| ctx.plugin_jars(&setup.contributions.plugins)),
+                    || -> Result<()> {
+                        ctx.kotlin_compiler()?;
+                        ctx.plugin_jars(&setup.contributions.plugins)?;
+                        fetch_pinned_jdk(ctx)?;
+                        test::console_launcher(ctx)?;
+                        Ok(())
+                    },
                     || join(|| jvm_classpaths(ctx, &setup), || resolution_for(ctx, target, Configuration::Test)),
                 );
                 toolchain?;
@@ -198,12 +207,22 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
-                let (compiler, deps) = join(
-                    || ctx.kotlin_compiler().map(|_| ()),
-                    || wasm_resolution(ctx, &setup, false).and(wasm_resolution(ctx, &setup, true)),
+                let (compiler, (main, test)) = join(
+                    || -> Result<()> {
+                        ctx.kotlin_compiler()?;
+                        fetch_pinned_jdk(ctx)
+                    },
+                    || join(|| wasm_resolution(ctx, &setup, false), || wasm_resolution(ctx, &setup, true)),
                 );
                 compiler?;
-                deps?;
+                let (main, test) = (main?.files(), test?.files());
+                // Where `kargo build` and `kargo test` install them (see `npm::install`): the main packages
+                // next to the build, and the test ones in the test output when they differ.
+                crate::npm::fetch(ctx, &main, &ctx.ws.profile_dir(ctx.profile))?;
+                let test_dir = ctx.ws.output_dir(ctx.profile, TargetKind::Wasm).join("test");
+                if crate::npm::dependencies(ctx, &test)? != crate::npm::dependencies(ctx, &main)? {
+                    crate::npm::fetch(ctx, &test, &test_dir)?;
+                }
             }
             TargetKind::Native => {
                 let setup = ctx.setup(target)?;
@@ -217,7 +236,23 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
         }
         Ok(())
     });
-    fetched.into_iter().collect()
+    fetched.into_iter().collect::<Result<()>>()?;
+    if tools {
+        fetch_pinned_jdk(ctx)?;
+        let (dokka, (ktlint, detekt)) = join(|| doc::fetch_tool(ctx), || join(|| fmt::fetch_tool(ctx), || lint::fetch_tool(ctx)));
+        dokka?;
+        ktlint?;
+        detekt?;
+    }
+    Ok(())
+}
+
+/// Downloads the JDK that `[toolchain] jdk` pins. `system` is the JDK on the machine, which is left alone.
+fn fetch_pinned_jdk(ctx: &BuildContext) -> Result<()> {
+    if ctx.ws.manifest().toolchain.jdk != JdkRequest::System {
+        ctx.jdk()?;
+    }
+    Ok(())
 }
 
 /// `kargo update`: re-resolves every dependency, ignoring `kargo.lock`.

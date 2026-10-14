@@ -276,11 +276,16 @@ enum JunitMode {
     List,
 }
 
+/// The JUnit console launcher jar that runs the JVM tests (downloaded on first use, or by `kargo fetch`).
+pub fn console_launcher(ctx: &BuildContext) -> Result<PathBuf> {
+    ctx.tool_jar("org.junit.platform", "junit-platform-console-standalone", JUNIT_VERSION)
+}
+
 /// The JUnit console launcher command that runs (or lists) the compiled tests.
 fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses, mode: JunitMode) -> Result<Command> {
     let jdk = ctx.compiler_jdk()?;
     let jvm = ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")?;
-    let launcher = ctx.tool_jar("org.junit.platform", "junit-platform-console-standalone", JUNIT_VERSION)?;
+    let launcher = console_launcher(ctx)?;
     let mut run_cp = vec![tests.classes.clone()];
     run_cp.extend(tests.classpath.iter().cloned());
     if mode != JunitMode::Run {

@@ -98,3 +98,5 @@ RUN kargo toolchain install && kargo fetch
 COPY . .
 RUN kargo build --release --offline
 ```
+
+`kargo fetch` also downloads the JDK that `[toolchain] jdk` pins, the JUnit launcher for `kargo test`, and the npm packages of Wasm dependencies. Add `--tools` to fetch the documentation and formatting tools too (see [`kargo fetch`](../../reference/commands/#kargo-fetch)).

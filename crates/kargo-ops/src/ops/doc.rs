@@ -212,6 +212,13 @@ fn klibs(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// `kargo fetch --tools`: downloads the Dokka CLI and the plugins `kargo doc` runs with.
+pub fn fetch_tool(ctx: &BuildContext) -> Result<()> {
+    let version = ctx.ws.manifest().doc.dokka_version.as_deref().unwrap_or(DOKKA_VERSION);
+    dokka(ctx, version)?;
+    Ok(())
+}
+
 /// Fetches the Dokka CLI jar and the plugin classpath (`dokka-base` and the K2 analysis).
 fn dokka(ctx: &BuildContext, version: &str) -> Result<(PathBuf, Vec<PathBuf>)> {
     let cli = ctx.tool_jar(DOKKA_GROUP, "dokka-cli", version).with_context(|| format!("failed to fetch Dokka {version}"))?;

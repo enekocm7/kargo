@@ -47,6 +47,13 @@ pub struct LintOptions {
     pub create_baseline: bool,
 }
 
+/// `kargo fetch --tools`: downloads the detekt jar that `kargo lint` runs.
+pub fn fetch_tool(ctx: &BuildContext) -> Result<()> {
+    let version = ctx.ws.manifest().lint.detekt_version.as_deref().unwrap_or(DETEKT_VERSION);
+    ctx.tool_fat_jar(DETEKT_GROUP, "detekt-cli", version).with_context(|| format!("failed to fetch detekt {version}"))?;
+    Ok(())
+}
+
 /// Runs detekt. Returns `false` if it reported issues.
 pub fn lint(ctx: &BuildContext, opts: &LintOptions) -> Result<bool> {
     let start = Instant::now();

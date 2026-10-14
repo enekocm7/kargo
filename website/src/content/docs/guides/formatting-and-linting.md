@@ -141,7 +141,7 @@ See [Continuous integration](../ci/).
 
 ## How it works
 
-ktlint and detekt are downloaded on first use (the `ktlint-cli` and `detekt-cli` jars with the `all` classifier) and cached under `~/.kargo/cache`, like the Kotlin compiler. After that they work with `--offline`. They run on the JDK from [`[toolchain]`](../toolchains/), or `JAVA_HOME`.
+ktlint and detekt are downloaded on first use (the `ktlint-cli` and `detekt-cli` jars with the `all` classifier) and cached under `~/.kargo/cache`, like the Kotlin compiler. `kargo fetch --tools` downloads them ahead of time. After that they work with `--offline`. They run on the JDK from [`[toolchain]`](../toolchains/), or `JAVA_HOME`.
 
 Run `kargo fmt -v` or `kargo lint -v` to see the exact command line. Kargo's own detekt settings are written to `target/lint/kargo-detekt.yml`.
 
