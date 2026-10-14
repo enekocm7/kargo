@@ -265,6 +265,9 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     Ok(TestRun::Junit(junit_command(ctx, opts, &JvmTestClasses { classes: test_classes, classpath }, mode)?))
 }
 
+/// The launcher's (relocated) picocli setting for the terminal width; a number keeps it from running `stty`.
+const JUNIT_USAGE_WIDTH_PROPERTY: &str = "org.junit.platform.console.shadow.picocli.usage.width";
+
 /// What the JUnit console launcher is asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JunitMode {
@@ -302,7 +305,11 @@ fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses,
     if opts.debug.is_none() {
         cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)));
     }
-    cmd.args(&jvm.jvm_args);
+    cmd.args(jdk.default_run_args()).args(&jvm.jvm_args);
+    // Without a terminal the launcher's probe for the terminal width prints `stty: /dev/tty: No such device`.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        cmd.arg(format!("-D{JUNIT_USAGE_WIDTH_PROPERTY}=120"));
+    }
     if mode == JunitMode::List {
         cmd.arg(format!("-D{}=true", junit::LIST_PROPERTY));
     }

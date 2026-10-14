@@ -23,6 +23,17 @@ Built-in commands:
 
 The commands the short help leaves out (`outdated`, `upgrade`, `target`, `info`, `plugins`, `android`, `daemon`, `metadata`, `classpath`, `ide`, `lsp`, `dap` and `completions`) work as usual, and `kargo help <command>` shows each one's options. Shell completions offer them too.
 
+A command that doesn't exist suggests the closest built-in command, task or `kargo-*` plugin, as Cargo does:
+
+```console
+$ kargo biuld
+error: no such command: `biuld`
+
+	Did you mean `build`?
+
+	View all installed commands with `kargo --help` and `kargo plugins`
+```
+
 ## Global flags
 
 These work with every command.
@@ -187,6 +198,8 @@ Build and run the program. Arguments after `--` go to the program.
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 
 `--main`, `--bin` and `--example` exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
+
+The `Running` line quotes arguments that contain spaces or shell characters, so you can copy it: ``Running `java com.example.MainKt add "buy milk"` `` shows that `buy milk` is one argument.
 
 `--port` and `--open` only apply to a Wasm browser app; `kargo run` rejects them for any other target. A Wasm project with `kind = "library"` has no program, so `kargo run` rejects it too.
 

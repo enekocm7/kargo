@@ -25,7 +25,7 @@ fn agent() -> ureq::Agent {
 
 fn ensure_online(config: &Config, url: &str) -> Result<()> {
     if config.offline() {
-        bail!("cannot download {url}: Kargo is running in offline mode");
+        bail!("cannot download {url}: Kargo is running in offline mode; run `kargo fetch` while online first");
     }
     Ok(())
 }

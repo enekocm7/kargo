@@ -176,7 +176,7 @@ impl MavenClient {
             }
         }
         if self.offline && !self.repos.iter().all(Repository::is_local) {
-            bail!("`{rel}` is not in the local cache and Kargo is running in offline mode");
+            bail!("`{rel}` is not in the local cache and Kargo is running in offline mode; run `kargo fetch` while online first");
         }
         self.missing.lock().expect("lock poisoned").insert(rel.to_owned());
         Ok(None)

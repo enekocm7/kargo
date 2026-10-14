@@ -179,6 +179,8 @@ jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 javac-args = ["-Xlint:all"]             # extra javac options for Java sources
 ```
 
+On JDK 21 and newer, `kargo run` and `kargo test` put `-XX:+EnableDynamicAgentLoading` and `--enable-native-access=ALL-UNNAMED` before `jvm-args`, so libraries that load an agent (MockK) or native code (Compose) don't print JVM warnings into your output. Turn one off by adding the opposite option, for example `jvm-args = ["-XX:-EnableDynamicAgentLoading"]`.
+
 `javac-args` are appended to the `javac` command line for main and test Java sources, after the options Kargo sets (`-d`, `-encoding UTF-8`, `--release` from `jvm-target`, `-classpath`, and the [annotation processor](../../guides/dependencies/#annotation-processors) options). Use it for lint flags, `-parameters` or processor options such as `-Akey=value`. It has no effect on Kotlin sources; use `[kotlin] compiler-args` for those.
 
 `jvm-target` is a Java version: `8`, or `9` and up (`11`, `17`, `21`, ...). `1.8` is accepted as another spelling of `8`. Kargo checks the value when it loads `kargo.toml`, so a typo such as `"abc"` or `"1.9"` fails with the list of valid values before any compiler starts. It passes `1.8` to the Kotlin compiler (which doesn't accept `8`) and `--release 8` to `javac`.

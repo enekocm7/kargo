@@ -33,7 +33,7 @@ Run the same `cargo install` command again. Cargo replaces the old binary.
 $ kargo --version
 kargo 0.1.0
 $ kargo --help
-Kotlin's package manager and build tool
+Cargo for Kotlin: a build tool and package manager
 ...
 ```
 
