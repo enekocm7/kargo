@@ -32,7 +32,10 @@ use anyhow::{Context, Result, bail};
 use kargo_maven::repo::Credentials;
 use kargo_maven::{CoordSpec, ModuleId, Repository, VersionReq};
 
-pub use raw::{AndroidConfig, ComposeConfig, KtorConfig, LombokConfig, SerializationConfig, SpringBootConfig};
+pub use raw::{
+    AndroidConfig, AndroidFlavor, AndroidSigning, BuildConfigValue, ComposeConfig, KtorConfig, LombokConfig, SerializationConfig,
+    SpringBootConfig,
+};
 
 pub const MANIFEST_NAME: &str = "kargo.toml";
 pub const LOCKFILE_NAME: &str = "kargo.lock";

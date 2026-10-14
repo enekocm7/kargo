@@ -61,6 +61,8 @@ pub struct RunOptions {
     pub open: bool,
     /// Start the JVM suspended, waiting for a JDWP debugger on this port (`--debug`).
     pub debug: Option<u16>,
+    /// The Android flavors to install (`--flavor`), at most one per dimension.
+    pub flavors: Vec<String>,
 }
 
 /// The JVM option that waits for a debugger to attach over JDWP on `port` of the loopback
@@ -117,6 +119,12 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
     }
     if (opts.port.is_some() || opts.open) && !wasm.is_some_and(|w| w.environment == WasmEnvironment::Browser) {
         bail!("`--port` and `--open` serve a Wasm browser app; they need `-t wasm` with [target.wasm] environment = \"browser\"");
+    }
+    if !opts.flavors.is_empty() && target != TargetKind::Android {
+        bail!("`--flavor` picks an Android product flavor and needs `-t android`, not {target}");
+    }
+    if target == TargetKind::Android {
+        crate::gradle::validate_run(ctx, &opts.flavors)?;
     }
     if opts.debug.is_some() && target != TargetKind::Jvm {
         bail!("`--debug` starts the JVM under a debugger and only works for the jvm target, not {target}");
@@ -209,7 +217,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         }
         TargetKind::Android => {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
-            return crate::gradle::run(ctx);
+            return crate::gradle::run(ctx, &opts.flavors);
         }
     };
     cmd.args(&opts.args).current_dir(ctx.ws.root());

@@ -266,6 +266,19 @@ version-code = 1
 version-name = "0.1.0"
 agp-version = "..."              # Android Gradle Plugin version
 gradle-version = "..."           # Gradle version that runs the build
+minify = true                    # R8 for release builds
+proguard-files = ["android/proguard-rules.pro"]
+build-config = { API_URL = "https://api.example.com", LOGGING = false }
+
+[target.android.signing.release]
+store-file = "release.jks"
+store-password-env = "KS_PASS"
+key-alias = "upload"
+key-password-env = "KEY_PASS"
+
+[target.android.flavors.free]
+dimension = "tier"
+application-id-suffix = ".free"
 ```
 
 | Key | Default |
@@ -278,6 +291,35 @@ gradle-version = "..."           # Gradle version that runs the build
 | `version-code` | `1` |
 | `agp-version` | `9.4.1` |
 | `gradle-version` | The minimum Gradle version `agp-version` requires (`9.6.0` for AGP 9.4.1). Must not be older than that. A `gradlew` in the project root is used instead when present. See [Android](../../guides/android/#gradle) |
+| `minify` | `false`. Shrink, obfuscate and optimize release builds with R8 |
+| `shrink-resources` | `minify`, for applications. Remove unused resources from release builds; needs `minify = true` |
+| `proguard-files` | `[]`. R8 rule files for release builds, relative to the project root, after AGP's `proguard-android-optimize.txt` |
+| `consumer-proguard-files` | `[]`. Libraries only: R8 rules shipped in the AAR for the apps that use it |
+| `build-config` | `{}`. `BuildConfig` fields: a string becomes a `String`, a boolean a `boolean`, an integer an `int` (a `long` beyond 32 bits) |
+| `flavor-dimensions` | The dimensions of `flavors`. Required, in priority order, when the flavors use more than one |
+
+`[target.android.signing.<build-type>]` signs the `debug` or `release` build type (applications only). Passwords are never written to `kargo.toml` or the generated Gradle files: Gradle reads them from the environment variables you name when it runs.
+
+| Key | Meaning |
+|---|---|
+| `store-file` | Required. The keystore, relative to the project root |
+| `store-password-env` | Required. Environment variable holding the keystore password |
+| `key-alias` | Required. The key in the keystore |
+| `key-password-env` | Environment variable holding the key password. Default: `store-password-env` |
+| `store-type` | `jks` or `pkcs12`. Default: detected |
+
+`[target.android.flavors.<name>]` declares a product flavor. Flavor names use letters, digits and `_`.
+
+| Key | Meaning |
+|---|---|
+| `dimension` | Required. The flavor dimension it belongs to |
+| `application-id-suffix` | Appended to the application id (`.free`) |
+| `version-name-suffix` | Appended to the version name |
+| `version-code` | Overrides `version-code` |
+| `min-sdk` | Overrides `min-sdk` |
+| `build-config` | More `BuildConfig` fields for this flavor |
+
+See [Release builds](../../guides/android/#release-builds) and [Product flavors](../../guides/android/#product-flavors).
 
 ### Per-target dependencies
 
