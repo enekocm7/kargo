@@ -10,8 +10,11 @@ enum class RootKind { SOURCE, TEST, RESOURCE, TEST_RESOURCE }
 /** The Kotlin platform a module is analyzed for. */
 enum class PlatformKind { JVM, NATIVE, WASM_JS, WASM_WASI }
 
-/** What the IDE's Kotlin plugin should treat a library as. */
-enum class LibraryKind { JVM, NATIVE, WASM_JS, WASM_WASI }
+/**
+ * What the IDE's Kotlin plugin should treat a library as. NPM is the directory of an installed npm package (JavaScript
+ * and `.d.ts` files, no klibs): a plain library with no Kotlin library kind.
+ */
+enum class LibraryKind { JVM, NATIVE, WASM_JS, WASM_WASI, NPM }
 
 enum class DependencyScope { COMPILE, RUNTIME, TEST }
 
@@ -238,6 +241,16 @@ object KargoImportPlanner {
             }
             if (platform.first == PlatformKind.NATIVE) {
                 for (library in nativeDistribution(platform.second)) add(DependencySpec(library.name, null, DependencyScope.COMPILE))
+            }
+            if (target.kind == "wasm") {
+                for (npm in target.npm) {
+                    // Installed by `kargo build` (or `kargo fetch`); until then there is no directory to describe.
+                    val directory = npm.directory?.let(::norm)?.takeIf { files.exists(it) } ?: continue
+                    val label = npm.version?.let { "${npm.name}@$it" } ?: npm.name
+                    val spec = LibrarySpec("${ImportPlan.LIBRARY_PREFIX}npm $label", LibraryKind.NPM, listOf(directory), emptyList())
+                    val library = libraries.putIfAbsent(spec.name, spec) ?: spec
+                    add(DependencySpec(library.name, null, if (npm.test) DependencyScope.TEST else DependencyScope.RUNTIME))
+                }
             }
             return result.values.toList()
         }

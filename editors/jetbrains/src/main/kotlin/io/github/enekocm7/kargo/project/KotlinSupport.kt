@@ -21,9 +21,9 @@ import org.jetbrains.kotlin.platform.konan.NativePlatforms
 import org.jetbrains.kotlin.platform.wasm.WasmPlatforms
 
 object KotlinSupport {
-    /** The library kind the Kotlin plugin analyzes a library of `kind` with; JVM libraries need none. */
+    /** The library kind the Kotlin plugin analyzes a library of `kind` with; JVM and npm libraries need none. */
     fun libraryKind(kind: LibraryKind): PersistentLibraryKind<*>? = when (kind) {
-        LibraryKind.JVM -> null
+        LibraryKind.JVM, LibraryKind.NPM -> null
         LibraryKind.NATIVE -> KotlinNativeLibraryKind
         LibraryKind.WASM_JS -> KotlinWasmJsLibraryKind
         LibraryKind.WASM_WASI -> KotlinWasmWasiLibraryKind

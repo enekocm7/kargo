@@ -15,7 +15,7 @@ environment = "browser"   # "js" (default), "browser" or "wasi"
 | Environment | Use it for | Standard library |
 |---|---|---|
 | `js` (default) | Programs and libraries that run on Node.js. They can call JavaScript through `external` declarations and `js(...)`. | `kotlin-stdlib-wasm-js` |
-| `browser` | Web pages. Kargo adds an HTML page, serves it with `kargo run` and runs the tests in a headless browser. See [Browser apps](#browser-apps). | `kotlin-stdlib-wasm-js` |
+| `browser` | Web pages. Kargo adds an HTML page, serves it with `kargo run` and runs the tests in a headless browser. See [Browser apps](#browser-apps). | `kotlin-stdlib-wasm-js` and `kotlinx-browser-wasm-js` (the browser APIs) |
 | `wasi` | Standalone runtimes using the WebAssembly System Interface. | `kotlin-stdlib-wasm-wasi` |
 
 In an existing project, `kargo target add wasm` writes `[target.wasm]` with `environment = "js"` (and keeps an implicit JVM target enabled); change the environment afterwards if you need another. See [`kargo target`](../../reference/commands/#kargo-target).
@@ -104,7 +104,13 @@ Without any setup Kargo writes `index.html` next to the module: a short page tha
 </html>
 ```
 
-The module is named after the package (`hello.mjs` here), or after [`module-name`](#module-name-and-output-files). The Kotlin code reaches the page through the browser APIs, with `external` declarations or `js(...)`; the Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/wasm-js-interop.html) in depth.
+The module is named after the package (`hello.mjs` here), or after [`module-name`](#module-name-and-output-files). The Kotlin code reaches the page through the browser APIs: the `kotlinx.browser` package (`document`, `window`, and the DOM in `org.w3c.dom`) or `external` declarations and `js(...)`. The Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/wasm-js-interop.html) in depth.
+
+Kargo adds `kotlinx-browser-wasm-js` to every `browser` app and library, at the version it ships with, so `kotlinx.browser` builds without a dependency of your own and your IDE sees the same APIs:
+
+:::note
+The browser APIs are a dependency like any other, so they are recorded in `kargo.lock` and a published browser library passes them on to its users. To use another version, declare it in `[target.wasm.dependencies]`; the usual rules for conflicting versions apply, so the highest one wins unless you set `force = true`.
+:::
 
 :::note
 `resources/` is a JVM concept too (it ends up in the jar). In a project that targets both, the files in `resources/` go to the jar and to the browser app.

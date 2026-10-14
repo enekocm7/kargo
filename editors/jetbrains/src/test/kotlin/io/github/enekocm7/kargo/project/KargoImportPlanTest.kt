@@ -165,6 +165,40 @@ class KargoImportPlanTest {
     }
 
     @Test
+    fun `a Wasm browser app describes the browser APIs and its installed npm packages`() {
+        val installed = setOf("/out/node_modules/@js-joda/core", "/out/test/node_modules/mocha")
+        val onDisk = object : PlanFiles {
+            override fun exists(path: String) = path in installed
+
+            override fun subdirectories(path: String) = emptyList<String>()
+        }
+        val metadata = KargoMetadata.parse(
+            """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"wasm","source-roots":["/a/src"],"test-roots":["/a/tests"],
+            "dependencies":[{"platform":"wasm-js","compile":[
+              {"module":"org.jetbrains.kotlin:kotlin-stdlib-wasm-js","version":"2.4.21","path":"/cache/stdlib-wasm-js.klib"},
+              {"module":"org.jetbrains.kotlinx:kotlinx-browser-wasm-js","version":"0.5.0","path":"/cache/browser-wasm-js.klib"}],"runtime":[],"test":[]}],
+            "npm":[{"name":"@js-joda/core","version":"3.2.0","directory":"/out/node_modules/@js-joda/core","test":false},
+                   {"name":"date-fns","version":"4.1.0","directory":"/out/node_modules/date-fns","test":false},
+                   {"name":"mocha","version":"10.0.0","directory":"/out/test/node_modules/mocha","test":true}]}]}]}""",
+        )
+        val plan = KargoImportPlanner.plan(metadata, onDisk)
+        val module = plan.modules.single()
+        assertEquals(PlatformKind.WASM_JS, module.platform)
+
+        val browser = plan.libraries.single { it.name == "Kargo: org.jetbrains.kotlinx:kotlinx-browser-wasm-js:0.5.0" }
+        assertEquals(LibraryKind.WASM_JS, browser.kind)
+        assertTrue(module.dependencies.any { it.library == browser.name && it.scope == DependencyScope.COMPILE })
+
+        // Installed packages are described, at the scope they are needed for; a missing one isn't.
+        val joda = plan.libraries.single { it.name == "Kargo: npm @js-joda/core@3.2.0" }
+        assertEquals(LibraryKind.NPM, joda.kind)
+        assertEquals(listOf("/out/node_modules/@js-joda/core"), joda.classes)
+        assertEquals(DependencyScope.RUNTIME, module.dependencies.single { it.library == joda.name }.scope)
+        assertEquals(DependencyScope.TEST, module.dependencies.single { it.library == "Kargo: npm mocha@10.0.0" }.scope)
+        assertFalse(plan.libraries.any { it.name.contains("date-fns") })
+    }
+
+    @Test
     fun `android only packages have no module`() {
         val metadata = KargoMetadata.parse(
             """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"android","source-roots":["/a/src"],"test-roots":[],"dependencies":null}]}]}""",
