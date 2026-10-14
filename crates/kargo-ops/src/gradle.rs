@@ -16,6 +16,7 @@
 //! android/res/, android/assets/
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,7 +29,7 @@ use crate::ops::context::BuildContext;
 use crate::ops::test::{emit_report_event, emit_summary, human_out};
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::testreport::{self, TestSummary};
-use kargo_manifest::{AndroidConfig, AndroidTarget, Dependency, Manifest, Scope, TargetKind};
+use kargo_manifest::{AndroidConfig, AndroidTarget, BuildConfigValue, Dependency, Manifest, Scope, TargetKind};
 use kargo_toolchain::gradle::{self as toolchain_gradle, AgpGradle};
 use kargo_toolchain::{GradleDistribution, Jdk};
 use kargo_util::config::Config;
@@ -194,9 +195,22 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
         let _ = writeln!(s, "        versionName = {}", kts_string(cfg.version_name.as_deref().unwrap_or(&manifest.package.version)));
     }
     let _ = writeln!(s, "        minSdk = {}", cfg.min_sdk);
+    for file in &cfg.consumer_proguard_files {
+        let _ = writeln!(s, "        consumerProguardFiles({})", kts_path(&root.join(file)));
+    }
+    build_config_fields(&mut s, "        ", &cfg.build_config);
     let _ = writeln!(s, "    }}");
+    signing_and_build_types(&mut s, cfg, root, is_app);
+    product_flavors(&mut s, cfg);
+    let mut features = Vec::new();
     if fw.compose.is_some() {
-        let _ = writeln!(s, "\n    buildFeatures {{\n        compose = true\n    }}");
+        features.push("        compose = true");
+    }
+    if has_build_config(cfg) {
+        features.push("        buildConfig = true");
+    }
+    if !features.is_empty() {
+        let _ = writeln!(s, "\n    buildFeatures {{\n{}\n    }}", features.join("\n"));
     }
     let src_dirs = [root.join("src"), root.join(TargetKind::Android.source_dir_name())];
     let test_dirs = [root.join("tests"), root.join("tests-android")];
@@ -286,12 +300,165 @@ pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     push(&mut s, &Dependency::new("org.jetbrains.kotlin:kotlin-test-junit".parse()?, Some(kotlin.clone())), true);
     push(&mut s, &Dependency::new("junit:junit".parse()?, Some(JUNIT4_VERSION.to_owned())), true);
     let _ = writeln!(s, "}}");
-    s.push_str(DOC_CLASSPATH_TASK_KTS);
+    s.push_str(&doc_classpath_task_kts(&variant_name(&default_flavors(cfg, &[])?, "debug")));
     Ok(s)
+}
+
+fn has_build_config(cfg: &AndroidConfig) -> bool {
+    !cfg.build_config.is_empty() || cfg.flavors.values().any(|f| !f.build_config.is_empty())
+}
+
+fn build_config_fields(s: &mut String, indent: &str, fields: &BTreeMap<String, BuildConfigValue>) {
+    for (name, value) in fields {
+        let (ty, literal) = value.java();
+        let _ = writeln!(s, "{indent}buildConfigField({}, {}, {})", kts_string(ty), kts_string(name), kts_string(&literal));
+    }
+}
+
+/// Renders `signingConfigs` and `buildTypes`: signing, R8 and resource shrinking.
+/// Passwords are read from the environment when Gradle runs, so they never reach a file.
+fn signing_and_build_types(s: &mut String, cfg: &AndroidConfig, root: &Path, is_app: bool) {
+    if !cfg.signing.is_empty() {
+        let _ = writeln!(s, "\n    signingConfigs {{");
+        for (build_type, signing) in &cfg.signing {
+            // AGP always defines the `debug` signing config (the debug keystore).
+            let open = if build_type == "debug" { "getByName" } else { "create" };
+            let _ = writeln!(s, "        {open}({}) {{", kts_string(build_type));
+            let _ = writeln!(s, "            storeFile = file({})", kts_path(&root.join(&signing.store_file)));
+            let env = |var: &str| format!("providers.environmentVariable({}).orNull", kts_string(var));
+            let _ = writeln!(s, "            storePassword = {}", env(&signing.store_password_env));
+            let _ = writeln!(s, "            keyAlias = {}", kts_string(&signing.key_alias));
+            let _ = writeln!(s, "            keyPassword = {}", env(signing.key_password_env()));
+            if let Some(store_type) = &signing.store_type {
+                let _ = writeln!(s, "            storeType = {}", kts_string(store_type));
+            }
+            let _ = writeln!(s, "        }}");
+        }
+        let _ = writeln!(s, "    }}");
+    }
+    let mut types = String::new();
+    for build_type in AndroidConfig::BUILD_TYPES {
+        let mut body = Vec::new();
+        if build_type == "release" {
+            if cfg.minify {
+                body.push("isMinifyEnabled = true".to_owned());
+                if cfg.shrink_resources.unwrap_or(is_app) {
+                    body.push("isShrinkResources = true".to_owned());
+                }
+            }
+            if cfg.minify || !cfg.proguard_files.is_empty() {
+                let mut files = vec!["getDefaultProguardFile(\"proguard-android-optimize.txt\")".to_owned()];
+                files.extend(cfg.proguard_files.iter().map(|f| format!("file({})", kts_path(&root.join(f)))));
+                body.push(format!("proguardFiles({})", files.join(", ")));
+            }
+        }
+        if cfg.signing.contains_key(build_type) {
+            body.push(format!("signingConfig = signingConfigs.getByName({})", kts_string(build_type)));
+        }
+        if !body.is_empty() {
+            let _ = writeln!(types, "        getByName({}) {{", kts_string(build_type));
+            for line in body {
+                let _ = writeln!(types, "            {line}");
+            }
+            let _ = writeln!(types, "        }}");
+        }
+    }
+    if !types.is_empty() {
+        let _ = write!(s, "\n    buildTypes {{\n{types}    }}\n");
+    }
+}
+
+/// Renders `flavorDimensions` and `productFlavors`.
+fn product_flavors(s: &mut String, cfg: &AndroidConfig) {
+    if cfg.flavors.is_empty() {
+        return;
+    }
+    let dims: Vec<String> = cfg.dimensions().iter().map(|d| kts_string(d)).collect();
+    let _ = writeln!(s, "\n    flavorDimensions += listOf({})", dims.join(", "));
+    let _ = writeln!(s, "    productFlavors {{");
+    for (name, flavor) in &cfg.flavors {
+        let _ = writeln!(s, "        create({}) {{", kts_string(name));
+        let _ = writeln!(s, "            dimension = {}", kts_string(&flavor.dimension));
+        if let Some(suffix) = &flavor.application_id_suffix {
+            let _ = writeln!(s, "            applicationIdSuffix = {}", kts_string(suffix));
+        }
+        if let Some(suffix) = &flavor.version_name_suffix {
+            let _ = writeln!(s, "            versionNameSuffix = {}", kts_string(suffix));
+        }
+        if let Some(code) = flavor.version_code {
+            let _ = writeln!(s, "            versionCode = {code}");
+        }
+        if let Some(min) = flavor.min_sdk {
+            let _ = writeln!(s, "            minSdk = {min}");
+        }
+        build_config_fields(s, "            ", &flavor.build_config);
+        let _ = writeln!(s, "        }}");
+    }
+    let _ = writeln!(s, "    }}");
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The AGP variant name of `flavors` (in dimension order) and `build_type`, e.g. `freeRelease`.
+pub fn variant_name(flavors: &[String], build_type: &str) -> String {
+    let mut name = String::new();
+    for part in flavors.iter().map(String::as_str).chain([build_type]) {
+        let part = if name.is_empty() { part.to_owned() } else { capitalize(part) };
+        name.push_str(&part);
+    }
+    name
+}
+
+/// One flavor per dimension, in dimension order: the one named in `chosen`, else the first
+/// of the dimension (by name). Empty without flavors.
+pub fn default_flavors(cfg: &AndroidConfig, chosen: &[String]) -> Result<Vec<String>> {
+    for name in chosen {
+        if !cfg.flavors.contains_key(name) {
+            let known: Vec<&str> = cfg.flavors.keys().map(String::as_str).collect();
+            if known.is_empty() {
+                bail!("unknown flavor `{name}`: [target.android] defines no flavors");
+            }
+            bail!("unknown flavor `{name}` (expected one of: {})", known.join(", "));
+        }
+    }
+    let mut out = Vec::new();
+    for dim in cfg.dimensions() {
+        let picked: Vec<&String> = chosen.iter().filter(|c| cfg.flavors[c.as_str()].dimension == dim).collect();
+        match picked[..] {
+            [] => out.extend(cfg.flavors_of(&dim).next().map(|(n, _)| n.clone())),
+            [one] => out.push(one.clone()),
+            _ => {
+                let names: Vec<String> = picked.iter().map(|p| format!("`{p}`")).collect();
+                bail!("pick one flavor of dimension `{dim}`, not {}", names.join(" and "))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every combination of one flavor per dimension, in dimension order (a single empty one without flavors).
+pub fn flavor_combinations(cfg: &AndroidConfig) -> Vec<Vec<String>> {
+    let mut combos = vec![Vec::new()];
+    for dim in cfg.dimensions() {
+        let names: Vec<&String> = cfg.flavors_of(&dim).map(|(n, _)| n).collect();
+        combos = combos.into_iter().flat_map(|c| names.iter().map(move |n| [c.clone(), vec![(*n).clone()]].concat())).collect();
+    }
+    combos
 }
 
 /// Gradle task `kargo doc` runs to learn what the main sources compile against.
 const DOC_CLASSPATH_TASK: &str = "kargoDocClasspath";
+
+/// The task of [`DOC_CLASSPATH_TASK_KTS`] for `variant` (the default debug variant).
+fn doc_classpath_task_kts(variant: &str) -> String {
+    DOC_CLASSPATH_TASK_KTS.replace("debugCompileClasspath", &format!("{variant}CompileClasspath"))
+}
 
 /// Writes the boot classpath (`android.jar`) and the classes jars of the debug
 /// compile classpath, one per line. AGP unpacks AARs into `android-classes-jar` artifacts.
@@ -364,11 +531,54 @@ pub fn generate(ws: &Workspace) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn variant(profile: ProfileKind) -> &'static str {
+/// The AGP build type of `profile`.
+fn build_type(profile: ProfileKind) -> &'static str {
     match profile {
-        ProfileKind::Dev => "Debug",
-        ProfileKind::Release => "Release",
+        ProfileKind::Dev => "debug",
+        ProfileKind::Release => "release",
     }
+}
+
+fn android_config<'a>(ctx: &'a BuildContext) -> Result<&'a AndroidConfig> {
+    Ok(&ctx.ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?.config)
+}
+
+/// The variant `check`, `test` and `doc` use: the build type of the profile with the
+/// first flavor of each dimension, capitalized for task names (`FreeRelease`).
+fn default_variant(ctx: &BuildContext) -> Result<String> {
+    let cfg = android_config(ctx)?;
+    Ok(capitalize(&variant_name(&default_flavors(cfg, &[])?, build_type(ctx.profile))))
+}
+
+/// Checks, before Gradle runs, what signing the build type of `ctx` needs: the keystore
+/// exists and the environment variables with its passwords are set.
+fn check_signing(ctx: &BuildContext) -> Result<()> {
+    let cfg = android_config(ctx)?;
+    let build_type = build_type(ctx.profile);
+    let Some(signing) = cfg.signing.get(build_type) else {
+        return Ok(());
+    };
+    let section = format!("[target.android.signing.{build_type}]");
+    let store = ctx.ws.root().join(&signing.store_file);
+    if !store.is_file() {
+        bail!("{section}: keystore {} not found; create it with `keytool -genkeypair` or fix `store-file`", store.display());
+    }
+    for var in [signing.store_password_env.as_str(), signing.key_password_env()] {
+        if std::env::var_os(var).is_none_or(|v| v.is_empty()) {
+            bail!("{section} reads a password from the environment variable `{var}`, which is not set; set it before building");
+        }
+    }
+    Ok(())
+}
+
+/// Warns that the release build of an application is not signed.
+fn warn_unsigned(ctx: &BuildContext) -> Result<()> {
+    let cfg = android_config(ctx)?;
+    if ctx.profile == ProfileKind::Release && cfg.kind == "application" && !cfg.signing.contains_key("release") {
+        ctx.shell()
+            .warn("the release build is unsigned and cannot be installed or uploaded; add [target.android.signing.release] to kargo.toml");
+    }
+    Ok(())
 }
 
 /// The Android Gradle Plugin version of `cfg` (`agp-version`, or Kargo's default).
@@ -560,27 +770,99 @@ pub fn doc_classpath(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     Ok(text.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect())
 }
 
-/// `kargo build --target android`: assembles the APK/AAR.
+/// `kargo build --target android`: assembles the APK/AAR of every flavor.
 pub fn build(ctx: &BuildContext) -> Result<PathBuf> {
-    let android = ctx.ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?;
+    let cfg = android_config(ctx)?;
     compiling(ctx, TargetKind::Android, ", gradle");
-    let task = format!("assemble{}", variant(ctx.profile));
+    check_signing(ctx)?;
+    let build_type = build_type(ctx.profile);
+    let task = format!("assemble{}", capitalize(build_type));
     if !gradle(ctx, std::slice::from_ref(&task))? {
         bail!("Gradle `{task}` failed");
     }
+    warn_unsigned(ctx)?;
     let dir = ctx.ws.work_dir("android").join("build/outputs");
-    let lower = variant(ctx.profile).to_lowercase();
-    let out = if android.config.kind == "application" { dir.join("apk").join(&lower) } else { dir.join("aar") };
+    let out = match (cfg.kind == "application", cfg.flavors.is_empty()) {
+        (true, true) => dir.join("apk").join(build_type),
+        // Gradle writes apk/<flavor>/<build type>/ per flavor.
+        (true, false) => dir.join("apk"),
+        (false, _) => dir.join("aar"),
+    };
     Ok(out)
+}
+
+/// `kargo package --target android`: builds the APKs and Android App Bundles (AABs) of
+/// an application, or the AARs of a library, for every flavor, and copies them to
+/// `target/<profile>/android`. Returns the copied files, App Bundles first.
+pub fn package(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
+    let cfg = android_config(ctx)?;
+    let is_app = cfg.kind == "application";
+    compiling(ctx, TargetKind::Android, ", gradle");
+    check_signing(ctx)?;
+    let build_type = build_type(ctx.profile);
+    let mut tasks = Vec::new();
+    for flavors in flavor_combinations(cfg) {
+        let variant = capitalize(&variant_name(&flavors, build_type));
+        if is_app {
+            tasks.push(format!("bundle{variant}"));
+        }
+        tasks.push(format!("assemble{variant}"));
+    }
+    let outputs = ctx.ws.work_dir("android").join("build/outputs");
+    for kind in ["bundle", "apk", "aar"] {
+        let dir = outputs.join(kind);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).with_context(|| format!("failed to clear {}", dir.display()))?;
+        }
+    }
+    if !gradle(ctx, &tasks)? {
+        bail!("Gradle `{}` failed", tasks.join("`, `"));
+    }
+    warn_unsigned(ctx)?;
+    let mut found = Vec::new();
+    for (kind, ext) in [("bundle", "aab"), ("apk", "apk"), ("aar", "aar")] {
+        collect_files(&outputs.join(kind), ext, &mut found)?;
+    }
+    if found.is_empty() {
+        bail!("Gradle `{}` produced no APK, AAB or AAR under {}", tasks.join("`, `"), outputs.display());
+    }
+    let dest = ctx.ws.output_dir(ctx.profile, TargetKind::Android);
+    std::fs::create_dir_all(&dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    let mut copied = Vec::new();
+    for file in found {
+        let to = dest.join(file.file_name().context("an output without a file name")?);
+        std::fs::copy(&file, &to).with_context(|| format!("failed to copy {} to {}", file.display(), to.display()))?;
+        ctx.shell().status("Packaged", to.display());
+        copied.push(to);
+    }
+    Ok(copied)
+}
+
+/// The files with extension `ext` under `dir`, sorted, appended to `out`.
+fn collect_files(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect_files(&path, ext, out)?;
+        } else if path.extension().is_some_and(|e| e == ext) {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// `kargo check --target android`: compiles the Kotlin and Java sources (and,
 /// with `tests`, the unit tests) without dexing or packaging an APK/AAR.
 pub fn check(ctx: &BuildContext, tests: bool) -> Result<()> {
     announce(ctx, "Checking", TargetKind::Android, if tests { ", gradle, tests" } else { ", gradle" });
-    let mut tasks = vec![format!("compile{}Sources", variant(ctx.profile))];
+    let variant = default_variant(ctx)?;
+    let mut tasks = vec![format!("compile{variant}Sources")];
     if tests {
-        tasks.push(format!("compile{}UnitTestSources", variant(ctx.profile)));
+        tasks.push(format!("compile{variant}UnitTestSources"));
     }
     if !gradle(ctx, &tasks)? {
         bail!("Gradle `{}` failed", tasks.join("`, `"));
@@ -592,9 +874,10 @@ pub fn check(ctx: &BuildContext, tests: bool) -> Result<()> {
 /// results Gradle writes as JUnit XML, copying those files to `report_dir` if given.
 pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: Option<&Path>) -> Result<bool> {
     compiling(ctx, TargetKind::Android, ", gradle tests");
-    let task = format!("test{}UnitTest", variant(ctx.profile));
+    let variant = default_variant(ctx)?;
+    let task = format!("test{variant}UnitTest");
     if no_run {
-        return gradle(ctx, &[format!("compile{}UnitTestSources", variant(ctx.profile))]);
+        return gradle(ctx, &[format!("compile{variant}UnitTestSources")]);
     }
     let results = ctx.ws.work_dir("android").join("build/test-results").join(&task);
     if results.exists() {
@@ -646,13 +929,17 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
     Ok(gradle_ok && summary.success())
 }
 
-/// `kargo run --target android`: installs on a connected device and launches.
-pub fn run(ctx: &BuildContext) -> Result<i32> {
-    let android = ctx.ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?;
-    if android.config.kind != "application" {
-        bail!("an Android library cannot be run");
+/// `kargo run --target android`: installs on a connected device and launches. `flavors`
+/// (`--flavor`) picks the flavor of a dimension; the others use their first flavor.
+pub fn run(ctx: &BuildContext, flavors: &[String]) -> Result<i32> {
+    let cfg = android_config(ctx)?;
+    let flavors = validate_run(ctx, flavors)?;
+    let build_type = build_type(ctx.profile);
+    if !flavors.is_empty() {
+        ctx.shell().verbose("Using", format!("flavor {}", flavors.join(", ")));
     }
-    if !gradle(ctx, &[format!("install{}", variant(ctx.profile))])? {
+    let task = format!("install{}", capitalize(&variant_name(&flavors, build_type)));
+    if !gradle(ctx, std::slice::from_ref(&task))? {
         bail!("installing the app failed; is a device or emulator connected (`adb devices`)?");
     }
     let adb = android_sdk()
@@ -660,12 +947,41 @@ pub fn run(ctx: &BuildContext) -> Result<i32> {
         .filter(|p| p.is_file())
         .or_else(|| process::find_on_path("adb"))
         .context("`adb` not found; install the Android SDK platform-tools")?;
-    let app_id = android.config.application_id.clone().unwrap_or_else(|| android.config.namespace.clone());
+    let app_id = application_id(cfg, &flavors);
     let mut cmd = Command::new(adb);
     cmd.args(["shell", "monkey", "-p", &app_id, "-c", "android.intent.category.LAUNCHER", "1"]);
     ctx.shell().status("Launching", &app_id);
     let status = process::status(ctx.shell(), &mut cmd, "adb")?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Checks what `kargo run -t android` needs before anything builds: an application, known
+/// `--flavor`s and, for a release, a signing configuration. Returns the flavors to install.
+pub fn validate_run(ctx: &BuildContext, flavors: &[String]) -> Result<Vec<String>> {
+    let cfg = android_config(ctx)?;
+    if cfg.kind != "application" {
+        bail!("an Android library cannot be run");
+    }
+    let flavors = default_flavors(cfg, flavors)?;
+    if ctx.profile == ProfileKind::Release && !cfg.signing.contains_key("release") {
+        bail!("the release build is unsigned and cannot be installed; add [target.android.signing.release] to kargo.toml");
+    }
+    check_signing(ctx)?;
+    Ok(flavors)
+}
+
+/// The application id of the variant with `flavors`: `application-id` plus their suffixes.
+fn application_id(cfg: &AndroidConfig, flavors: &[String]) -> String {
+    let mut id = cfg.application_id.clone().unwrap_or_else(|| cfg.namespace.clone());
+    for flavor in flavors {
+        if let Some(suffix) = &cfg.flavors[flavor].application_id_suffix {
+            if !suffix.starts_with('.') {
+                id.push('.');
+            }
+            id.push_str(suffix);
+        }
+    }
+    id
 }
 
 #[cfg(test)]
@@ -735,6 +1051,107 @@ mod tests {
         let (_d, ws) = workspace("[dependencies]\n\"x:p\" = { version = \"1\", scope = \"ksp\" }\n[kotlin]\nksp = \"2.3.10\"\n");
         let android = ws.manifest().targets.android.clone().unwrap();
         assert!(build_gradle(&ws, &android).unwrap().contains("id(\"com.google.devtools.ksp\") version \"2.3.10\""));
+    }
+
+    #[test]
+    fn renders_release_signing_and_r8() {
+        let (_d, ws) = workspace(
+            "minify = true\nproguard-files = [\"android/proguard-rules.pro\"]\nbuild-config = { API_URL = \"https://x\", RETRIES = 3 }\n\
+             [target.android.signing.release]\nstore-file = \"release.jks\"\nstore-password-env = \"KS_PASS\"\nkey-alias = \"upload\"\nkey-password-env = \"KEY_PASS\"\n",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        let signing = text.split("signingConfigs {").nth(1).unwrap().split("buildTypes {").next().unwrap();
+        assert!(signing.contains("create(\"release\") {"), "{text}");
+        assert!(signing.contains(&format!("storeFile = file({})", kts_path(&ws.root().join("release.jks")))), "{text}");
+        assert!(signing.contains("storePassword = providers.environmentVariable(\"KS_PASS\").orNull"), "{text}");
+        assert!(signing.contains("keyAlias = \"upload\""));
+        assert!(signing.contains("keyPassword = providers.environmentVariable(\"KEY_PASS\").orNull"), "{text}");
+        let release = text.split("getByName(\"release\") {").nth(1).unwrap().split('}').next().unwrap();
+        assert!(release.contains("isMinifyEnabled = true"), "{text}");
+        assert!(release.contains("isShrinkResources = true"), "on by default with minify for apps");
+        let rules = kts_path(&ws.root().join("android/proguard-rules.pro"));
+        assert!(
+            release.contains(&format!("proguardFiles(getDefaultProguardFile(\"proguard-android-optimize.txt\"), file({rules}))")),
+            "{text}"
+        );
+        assert!(release.contains("signingConfig = signingConfigs.getByName(\"release\")"));
+        assert!(!text.contains("getByName(\"debug\") {"), "the debug build type keeps AGP's defaults");
+        assert!(text.contains("buildConfigField(\"String\", \"API_URL\", \"\\\"https://x\\\"\")"), "{text}");
+        assert!(text.contains("buildConfigField(\"int\", \"RETRIES\", \"3\")"), "{text}");
+        assert!(text.contains("buildConfig = true"));
+
+        // Without any of it, none of the blocks.
+        let (_d, ws) = workspace("");
+        let text = build_gradle(&ws, &ws.manifest().targets.android.clone().unwrap()).unwrap();
+        for absent in ["signingConfigs", "buildTypes", "productFlavors", "buildConfig", "buildFeatures"] {
+            assert!(!text.contains(absent), "{absent} in\n{text}");
+        }
+
+        // A debug keystore reuses AGP's `debug` signing config.
+        let (_d, ws) = workspace(
+            "shrink-resources = false\nminify = true\n[target.android.signing.debug]\nstore-file = \"debug.jks\"\nstore-password-env = \"P\"\nkey-alias = \"d\"\nstore-type = \"pkcs12\"\n",
+        );
+        let text = build_gradle(&ws, &ws.manifest().targets.android.clone().unwrap()).unwrap();
+        assert!(text.contains("getByName(\"debug\") {\n            storeFile"), "{text}");
+        assert!(text.contains("keyPassword = providers.environmentVariable(\"P\").orNull"), "defaults to the store password");
+        assert!(text.contains("storeType = \"pkcs12\""));
+        assert!(text.contains("getByName(\"debug\") {\n            signingConfig = signingConfigs.getByName(\"debug\")"), "{text}");
+        assert!(!text.contains("isShrinkResources"), "{text}");
+    }
+
+    #[test]
+    fn renders_library_consumer_rules() {
+        let (_d, ws) = workspace("kind = \"library\"\nconsumer-proguard-files = [\"consumer-rules.pro\"]\n");
+        let text = build_gradle(&ws, &ws.manifest().targets.android.clone().unwrap()).unwrap();
+        assert!(text.contains(&format!("consumerProguardFiles({})", kts_path(&ws.root().join("consumer-rules.pro")))), "{text}");
+    }
+
+    #[test]
+    fn renders_flavors_and_picks_variants() {
+        let (_d, ws) = workspace(
+            "flavor-dimensions = [\"tier\", \"env\"]\n\
+             [target.android.flavors.paid]\ndimension = \"tier\"\n\
+             [target.android.flavors.free]\ndimension = \"tier\"\napplication-id-suffix = \".free\"\nversion-name-suffix = \"-free\"\nbuild-config = { ADS = true }\n\
+             [target.android.flavors.staging]\ndimension = \"env\"\napplication-id-suffix = \"staging\"\nmin-sdk = 28\nversion-code = 7\n\
+             [target.android.flavors.prod]\ndimension = \"env\"\n",
+        );
+        let cfg = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &cfg).unwrap();
+        assert!(text.contains("flavorDimensions += listOf(\"tier\", \"env\")"), "{text}");
+        let free = text.split("create(\"free\") {").nth(1).unwrap().split('}').next().unwrap();
+        assert!(free.contains("dimension = \"tier\""));
+        assert!(free.contains("applicationIdSuffix = \".free\""));
+        assert!(free.contains("versionNameSuffix = \"-free\""));
+        assert!(free.contains("buildConfigField(\"boolean\", \"ADS\", \"true\")"), "{text}");
+        let staging = text.split("create(\"staging\") {").nth(1).unwrap().split('}').next().unwrap();
+        assert!(staging.contains("minSdk = 28") && staging.contains("versionCode = 7"), "{text}");
+        assert!(text.contains("buildConfig = true"));
+        // `kargo doc` reads the classpath of the default debug variant.
+        assert!(text.contains("configurations.getByName(\"freeProdDebugCompileClasspath\")"), "{text}");
+
+        let cfg = &cfg.config;
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(default_flavors(cfg, &[]).unwrap(), s(&["free", "prod"]));
+        assert_eq!(default_flavors(cfg, &s(&["staging"])).unwrap(), s(&["free", "staging"]));
+        assert_eq!(default_flavors(cfg, &s(&["staging", "paid"])).unwrap(), s(&["paid", "staging"]));
+        let err = default_flavors(cfg, &s(&["free", "paid"])).unwrap_err().to_string();
+        assert!(err.contains("pick one flavor of dimension `tier`"), "{err}");
+        let err = default_flavors(cfg, &s(&["gold"])).unwrap_err().to_string();
+        assert!(err.contains("unknown flavor `gold` (expected one of: free, paid, prod, staging)"), "{err}");
+        assert_eq!(variant_name(&s(&["free", "staging"]), "release"), "freeStagingRelease");
+        assert_eq!(variant_name(&[], "debug"), "debug");
+        assert_eq!(
+            flavor_combinations(cfg),
+            [s(&["free", "prod"]), s(&["free", "staging"]), s(&["paid", "prod"]), s(&["paid", "staging"])]
+        );
+        assert_eq!(application_id(cfg, &s(&["free", "staging"])), "com.example.droid.free.staging");
+        assert_eq!(application_id(cfg, &s(&["paid", "prod"])), "com.example.droid");
+
+        let (_d, ws) = workspace("");
+        let cfg = &ws.manifest().targets.android.as_ref().unwrap().config;
+        assert_eq!(flavor_combinations(cfg), [Vec::<String>::new()]);
+        assert!(default_flavors(cfg, &s(&["free"])).unwrap_err().to_string().contains("defines no flavors"));
     }
 
     #[test]

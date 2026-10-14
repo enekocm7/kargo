@@ -930,6 +930,72 @@ fn android_rejects_incompatible_gradle_before_running_it() {
 }
 
 #[test]
+fn android_checks_signing_before_running_gradle() {
+    let p = Project::new();
+    let signing = "[target.android.signing.release]\nstore-file = \"keys/release.jks\"\nstore-password-env = \"KARGO_TEST_KS_PASS\"\nkey-alias = \"upload\"\n";
+    p.file("kargo.toml", &manifest("droid", &format!("[target.android]\nnamespace = \"com.example.droid\"\n{signing}")));
+    p.file("android/AndroidManifest.xml", "<manifest/>");
+    for args in [&["build", "--release"][..], &["package", "--release"], &["run", "--release"]] {
+        p.kargo()
+            .args(args)
+            .args(["--target", "android", "--offline"])
+            .env_remove("KARGO_TEST_KS_PASS")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("[target.android.signing.release]: keystore"))
+            .stderr(predicate::str::contains("release.jks not found"));
+    }
+    p.file("keys/release.jks", "not really a keystore");
+    p.kargo()
+        .args(["package", "--release", "--target", "android", "--offline"])
+        .env_remove("KARGO_TEST_KS_PASS")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("environment variable `KARGO_TEST_KS_PASS`, which is not set"));
+    assert!(!p.path().join("target/android").exists(), "nothing is generated before signing is checked");
+}
+
+#[test]
+fn android_package_and_run_flags() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\n"));
+    p.file("android/AndroidManifest.xml", "<manifest/>");
+    p.kargo()
+        .args(["run", "--release", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("the release build is unsigned and cannot be installed; add [target.android.signing.release]"));
+    p.kargo()
+        .args(["run", "--flavor", "free", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown flavor `free`: [target.android] defines no flavors"));
+    p.kargo()
+        .args(["package", "--fat", "--target", "android"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("do not apply to `kargo package -t android`"));
+
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("twin", "[target.jvm]\n[target.wasm]\n"));
+    p.kargo()
+        .args(["package", "--target", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("packages the jvm and android targets"));
+    p.kargo()
+        .args(["package", "--target", "android"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target `android` is not enabled"));
+    p.kargo()
+        .args(["run", "--flavor", "free"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--flavor` picks an Android product flavor"));
+}
+
+#[test]
 fn toolchain_manages_gradle() {
     let p = Project::new();
     let gradle = p.home.path().join("toolchains/gradle/9.6.0/bin").join(if cfg!(windows) { "gradle.bat" } else { "gradle" });

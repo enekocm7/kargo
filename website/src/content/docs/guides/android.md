@@ -58,6 +58,7 @@ This writes `[target.android]` with the namespace `<group>.<name>`, `min-sdk = 2
 kargo check -t android --tests      # compile sources and unit tests without packaging an APK
 kargo build -t android              # debug APK in target/android/build/outputs/apk/debug/
 kargo build -t android --release    # release APK (or AAR for libraries)
+kargo package -t android --release  # release App Bundle and APK in target/release/android/
 kargo run -t android                # install on the connected device and launch
 kargo test -t android               # local unit tests (testDebugUnitTest)
 kargo doc -t android                # API documentation in target/debug/doc/
@@ -106,6 +107,88 @@ error: Gradle 9.1.0 is too old for Android Gradle Plugin 9.4.1, which needs Grad
 For `--offline` builds, download Gradle beforehand with `kargo fetch` or `kargo toolchain install gradle`. If Gradle isn't installed and Kargo is offline, it falls back to a `gradle` on `PATH` and warns.
 
 Gradle keeps its daemon and caches in `~/.gradle` (`GRADLE_USER_HOME`), shared with any other Gradle builds on the machine, so later builds start faster.
+
+## Release builds
+
+A release build that you can install or upload to Google Play needs a signing key. Create a keystore once and keep it out of version control:
+
+```sh
+keytool -genkeypair -v -keystore release.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Then point `kargo.toml` at it. The passwords stay in environment variables, like the credentials of [`[repositories]`](../../reference/manifest/#repositories):
+
+```toml title="kargo.toml"
+[target.android]
+namespace = "com.example.myapp"
+minify = true                                   # R8: shrink, obfuscate and optimize
+proguard-files = ["android/proguard-rules.pro"] # your keep rules
+
+[target.android.signing.release]
+store-file = "release.jks"
+store-password-env = "KS_PASS"
+key-alias = "upload"
+key-password-env = "KEY_PASS"                   # default: store-password-env
+```
+
+```console
+$ export KS_PASS=... KEY_PASS=...
+$ kargo package -t android --release
+   Compiling myapp v0.1.0 (android, gradle)
+    Packaged /home/me/myapp/target/release/android/myapp-release.aab
+    Packaged /home/me/myapp/target/release/android/myapp-release.apk
+```
+
+`kargo package -t android` runs `bundleRelease` and `assembleRelease` (`bundleDebug` and `assembleDebug` without `--release`) and copies the App Bundles and APKs to `target/<profile>/android/`, App Bundles first. A library gets its AAR. Upload the `.aab` to Google Play; install the `.apk` directly. `kargo build -t android --release` signs the APK in place, and `kargo run -t android --release` installs the signed app.
+
+Before Gradle runs, Kargo checks that the keystore exists and that the password variables are set, so a missing secret fails fast with the variable's name. A release build of an app without `[target.android.signing.release]` is unsigned: Kargo warns about it, and `kargo run --release` refuses to install it. `[target.android.signing.debug]` replaces the debug keystore AGP generates, for example to share one across a team.
+
+With `minify = true`, release builds are shrunk by R8 with AGP's `proguard-android-optimize.txt` rules and your `proguard-files`, and unused resources are removed (`shrink-resources = false` keeps them). A library can ship rules for the apps that use it with `consumer-proguard-files`.
+
+### Build config fields
+
+`build-config` adds constants to the generated `BuildConfig` class (`<namespace>.BuildConfig`). The TOML type picks the Java type:
+
+```toml title="kargo.toml"
+[target.android]
+namespace = "com.example.myapp"
+build-config = { API_URL = "https://api.example.com", LOGGING = false, RETRIES = 3 }
+```
+
+```kotlin title="src-android/Api.kt"
+val client = ApiClient(BuildConfig.API_URL, retries = BuildConfig.RETRIES)
+```
+
+## Product flavors
+
+Flavors build several versions of one app, such as a free and a paid one:
+
+```toml title="kargo.toml"
+[target.android.flavors.free]
+dimension = "tier"
+application-id-suffix = ".free"
+build-config = { ADS = true }
+
+[target.android.flavors.paid]
+dimension = "tier"
+build-config = { ADS = false }
+```
+
+`kargo build` and `kargo package` build every flavor. `kargo run` installs one: the first flavor of each dimension by name, or the one you pick with `--flavor`:
+
+```sh
+kargo run -t android --flavor paid
+```
+
+`kargo check`, `kargo test` and `kargo doc` use the first flavor of each dimension. With more than one dimension, list them in priority order in `flavor-dimensions`, and pass one `--flavor` per dimension you want to choose:
+
+```toml title="kargo.toml"
+[target.android]
+namespace = "com.example.myapp"
+flavor-dimensions = ["tier", "env"]
+```
+
+Sources and resources are shared by all flavors; to build something only in one flavor, read a `build-config` field. Any other Gradle task of a flavor runs through `kargo android`, for example `kargo android assembleFreeRelease`.
 
 ## Running any Gradle task
 

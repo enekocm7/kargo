@@ -114,7 +114,7 @@ Hooks receive these environment variables:
 | `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PKG_GROUP` | always |
 | `KARGO_PROFILE`, `KARGO_TARGET_DIR`, `KARGO_KOTLIN_VERSION` | always |
 | `KARGO_CLASSPATH`, `KARGO_JVM_JAR` | after a JVM build |
-| `KARGO_PACKAGE` | after `kargo package`: the fat jar, or a library's jar |
+| `KARGO_PACKAGE` | after `kargo package`: the fat jar, or a library's jar; with `-t android`, the first App Bundle (or AAR for a library) |
 | `KARGO_TEST_RESULT` | after tests |
 | `KARGO_BUILD_LOCK` | always; see below |
 
