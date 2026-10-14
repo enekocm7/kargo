@@ -5,6 +5,24 @@ description: Every kargo command and flag.
 
 Run `kargo help <command>` for the same information in your terminal.
 
+## Help
+
+`kargo --help` (also `-h` or `kargo help`) lists the common commands, then the tasks of the project you are in, and ends with a pointer to `kargo --list`. `kargo --list` prints every built-in command with its description, the way `cargo --list` does:
+
+```console
+$ kargo --list
+Built-in commands:
+    new          Create a new Kotlin project in a new directory
+    init         Create a new Kotlin project in an existing directory
+    ...
+    lsp          Run the language server for editors (LSP over stdin and stdout)
+    dap          Run the debug adapter for editors (DAP over stdin and stdout)
+    info         Print project information
+    completions  Print a shell completion script
+```
+
+The commands the short help leaves out (`outdated`, `upgrade`, `target`, `info`, `plugins`, `android`, `daemon`, `metadata`, `classpath`, `ide`, `lsp`, `dap` and `completions`) work as usual, and `kargo help <command>` shows each one's options. Shell completions offer them too.
+
 ## Global flags
 
 These work with every command.

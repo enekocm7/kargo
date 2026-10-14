@@ -61,6 +61,8 @@ $ kargo test
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
 
+`kargo --help` lists the common commands, then the project's tasks; `kargo --list` lists every built-in command with its description. Commands left out of `--help` still work, and `kargo help <command>` shows each one's options.
+
 In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree` and `fetch` take `-p <member>` (repeatable) or `--workspace`; `run`, `package`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`.
 
 ## Project layout
