@@ -378,8 +378,11 @@ fn published_dependencies(
 ) -> Result<Vec<PublishedDependency>> {
     let mut out = Vec::new();
     for dep in &setup.main {
+        // Like Gradle's `implementation`, a dependency that is not part of the API (`exported`) is
+        // only needed at runtime by consumers.
         let scope = match dep.scope {
-            Scope::Compile => DependencyScope::Compile,
+            Scope::Compile if dep.exported => DependencyScope::Compile,
+            Scope::Compile => DependencyScope::Runtime,
             Scope::Runtime => DependencyScope::Runtime,
             Scope::Provided | Scope::Processor | Scope::Ksp => continue,
         };
@@ -417,7 +420,8 @@ fn published_dependencies(
     let ws = ctx.ws;
     for (dep, index) in ws.path_dependencies().iter().filter(|(d, _)| d.applies_to(target, false)) {
         let scope = match dep.scope {
-            Scope::Compile => DependencyScope::Compile,
+            Scope::Compile if dep.exported => DependencyScope::Compile,
+            Scope::Compile => DependencyScope::Runtime,
             Scope::Runtime => DependencyScope::Runtime,
             _ => continue,
         };

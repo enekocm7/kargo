@@ -74,6 +74,8 @@ In a project with 300 source files, changing one file rebuilds in about 0.4 seco
 - **Java sources.** Kotlin compiles incrementally; `javac` still compiles all Java sources of a target whenever it rebuilds.
 - **Where the state lives.** The caches are in `target/<profile>/jvm/.fingerprint/<name>.ic/`, so `kargo clean` removes them.
 
+- **Path dependencies.** A [path dependency](../workspaces/)'s jar counts by its ABI: its public declarations, their signatures and constants, and the bodies of `inline` functions. A change to a private function, or to the body of a function that isn't `inline`, rebuilds the dependency but none of its JVM consumers, which run the new code from its new jar. See [Incremental builds across members](../workspaces/#incremental-builds-across-members).
+
 Incremental compilation needs the compiler daemon, and a Kotlin version that publishes `kotlin-build-tools-impl` (2.4 and newer). Multiplatform projects that share code between `src/` and `src-jvm/` with `expect`/`actual`, and the Wasm and Native targets, compile each target from scratch (in the daemon for Wasm).
 
 ### Turning it off
@@ -91,6 +93,7 @@ Kargo also falls back to a full rebuild by itself when the incremental compiler 
 Kargo runs independent work at the same time:
 
 - **Targets.** `kargo build`, `kargo check` and `kargo fetch` build the JVM, Wasm, Native and Android targets of a multiplatform project concurrently.
+- **Workspace members.** `kargo build` and `kargo check` build independent [workspace](../workspaces/#the-build-graph) members at the same time, each after the members it depends on; `-j <n>` limits how many (the default is the number of CPUs). `kargo test` tests one member at a time unless you pass `-j`.
 - **Native platforms.** Each entry in `[target.native] platforms` compiles in its own Kotlin/Native process at the same time.
 - **Tests.** `kargo test` compiles every target's tests concurrently, then runs them one target at a time so their output doesn't interleave.
 - **Downloads.** The compiler, the JDK and your dependencies download at the same time. Dependency resolution fetches POMs and Gradle module metadata of a whole level of the graph at once, and artifacts listed in `kargo.lock` download in parallel when the cache is empty (a fresh CI machine, for example). Requests that hit a rate limit (HTTP 429) or a temporary server error are retried with backoff.

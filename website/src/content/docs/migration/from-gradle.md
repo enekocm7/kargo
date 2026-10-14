@@ -155,7 +155,13 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `flavorDimensions` + `productFlavors { create("free") { ... } }` | `flavor-dimensions` and `[target.android.flavors.free]` |
 | `./gradlew bundleRelease` | `kargo package -t android --release` |
 | `implementation(...)` | `[dependencies]` |
-| `api(...)` | `[dependencies]` |
+| `api(...)` | `exported = true` in `[dependencies]` |
+| `include(":core")` in `settings.gradle.kts` | `[workspace] members = ["core"]` (or a glob such as `"libs/*"`) |
+| `implementation(project(":core"))` | `core = { path = "../core" }` |
+| `api(project(":core"))` | `core = { path = "../core", exported = true }` |
+| `java-test-fixtures` + `testImplementation(testFixtures(project(":core")))` | `test-fixtures/` and `core = { path = "../core", test-fixtures = true }` in `[dev-dependencies]` |
+| `subprojects { ... }` / convention plugins for shared settings | `[workspace.package]`, `[workspace.kotlin]`, `[workspace.dependencies]`, `[workspace.frameworks]` |
+| `./gradlew :server:run` | `kargo run -p server` |
 | `runtimeOnly(...)` | `scope = "runtime"` |
 | `compileOnly(...)` | `scope = "provided"` |
 | `annotationProcessor(...)` | `scope = "processor"` |
@@ -200,5 +206,5 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `--offline` | `--offline` |
 | `kotlin.incremental=true` (incremental compilation) | On by default for the JVM; `KARGO_INCREMENTAL=false` turns it off |
 | Gradle daemon / Kotlin daemon (`--no-daemon`, `kotlin.compiler.execution.strategy`) | The [compiler daemon](../../guides/build-performance/#the-compiler-daemon) (`KARGO_DAEMON=false`, `kargo daemon stop`) |
-| `org.gradle.parallel=true` | Always on: targets and Native platforms build in parallel |
+| `org.gradle.parallel=true` | Always on: targets, Native platforms and independent workspace members build in parallel (`-j` limits members) |
 | `gradle.lockfile` | `kargo.lock` (always on) |

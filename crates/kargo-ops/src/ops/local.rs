@@ -3,12 +3,13 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::build::{build_jvm, compile_wasm, native_klib};
 use super::context::BuildContext;
 use crate::workspace::Workspace;
 use kargo_manifest::{Scope, TargetKind};
+use kargo_util::fs::collect_files;
 
 /// What a path dependency is built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,13 +61,46 @@ pub fn artifacts(ctx: &BuildContext, target: LocalTarget, scopes: &[Scope], dev:
     Ok(out)
 }
 
-/// Fails if `ws` has path dependencies for `target`, which does not support them yet.
-pub fn unsupported(ws: &Workspace, target: TargetKind) -> Result<()> {
-    if let Some((dep, _)) = ws.path_dependencies().iter().find(|(d, _)| d.target.is_none_or(|t| t == target)) {
+/// The JVM test fixtures jars `ctx`'s tests use: its own, then those of the dev-dependencies
+/// declared with `test-fixtures = true`. Each is built once per invocation.
+pub fn test_fixtures(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
+    let mut packages = vec![ctx.package];
+    for (dep, index) in ctx.ws.path_dependencies() {
+        if dep.test_fixtures && dep.applies_to(TargetKind::Jvm, true) && !packages.contains(index) {
+            packages.push(*index);
+        }
+    }
+    let mut out = Vec::new();
+    for package in packages {
+        let name = ctx.project.package(package).name();
+        let jar = ctx.built_artifact(format!("{name}/jvm-test-fixtures"), || {
+            super::test::build_jvm_test_fixtures(&ctx.for_package(package))
+                .with_context(|| format!("could not build the test fixtures of `{name}`"))
+        })?;
+        out.extend(jar);
+    }
+    Ok(out)
+}
+
+/// Fails if `ctx`'s tests for `target` would need test fixtures, which only the JVM supports yet:
+/// its own or those of a `test-fixtures = true` dev-dependency, when they have sources for `target`.
+pub fn test_fixtures_unsupported(ctx: &BuildContext, target: TargetKind) -> Result<()> {
+    let has_fixtures =
+        |ws: &Workspace| [ws.common_test_fixtures(), ws.target_test_fixtures(target)].iter().any(|d| !collect_files(d, &["kt"]).is_empty());
+    let mut packages = vec![ctx.ws];
+    packages.extend(
+        ctx.ws
+            .path_dependencies()
+            .iter()
+            .filter(|(d, _)| d.test_fixtures && d.applies_to(target, true))
+            .map(|(_, i)| ctx.project.package(*i)),
+    );
+    if let Some(ws) = packages.into_iter().find(|ws| has_fixtures(ws)) {
         anyhow::bail!(
-            "`{}` has the path dependency `{}`, but path dependencies are not supported for the {target} target yet",
-            ws.name(),
-            dep.name
+            "the {target} tests of `{}` would use the test fixtures of `{}`, but test fixtures only work for the JVM target yet; \
+             keep JVM-only fixtures in `test-fixtures-jvm/`, or run `kargo test --target jvm`",
+            ctx.ws.name(),
+            ws.name()
         );
     }
     Ok(())

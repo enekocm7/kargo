@@ -11,7 +11,7 @@ use clap::{CommandFactory, ValueEnum};
 use clap_complete::env::{EnvCompleter, Shells};
 use clap_complete::{CompleteEnv, CompletionCandidate};
 
-use kargo_ops::workspace::Workspace;
+use kargo_ops::workspace::{Project, Workspace};
 use kargo_util::config::Config;
 use kargo_util::shell::{Shell, Verbosity};
 
@@ -62,12 +62,24 @@ fn config() -> Option<Config> {
     Config::from_env(Shell::new(Verbosity::Quiet)).ok()
 }
 
-/// The `[tasks]` of the project in the current directory.
+/// The `[tasks]` of the package in the current directory (of every member at the root of a
+/// workspace) and the `[workspace.tasks]`.
 pub fn tasks() -> Vec<CompletionCandidate> {
-    let Some(ws) = workspace() else { return Vec::new() };
-    ws.manifest()
-        .tasks
-        .values()
+    let Some(project) = std::env::current_dir().ok().and_then(|cwd| Project::discover(&cwd, None).ok()) else { return Vec::new() };
+    let packages: Vec<usize> = match project.current() {
+        Some(index) => vec![index],
+        None => project.members().to_vec(),
+    };
+    let mut tasks: Vec<&kargo_manifest::Task> = packages.iter().flat_map(|&i| project.package(i).manifest().tasks.values()).collect();
+    tasks.extend(project.workspace_manifest().into_iter().flat_map(|w| w.tasks.values()));
+    let mut seen: Vec<&str> = Vec::new();
+    tasks
+        .into_iter()
+        .filter(|t| {
+            let new = !seen.contains(&t.name.as_str());
+            seen.push(&t.name);
+            new
+        })
         .map(|t| {
             let help = t.description.clone().unwrap_or_else(|| t.platform_run().join(" && "));
             CompletionCandidate::new(&t.name).help(Some(help.into())).tag(Some("Tasks".into()))

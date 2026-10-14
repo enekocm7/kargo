@@ -66,9 +66,11 @@ pub struct Contributions {
     pub annotation_processors: Vec<Dependency>,
 }
 
+/// A framework library. It is part of the API of a package that uses the framework (`exported`),
+/// as the framework's annotations and types show up in its declarations.
 fn dep(coord: &str, version: Option<&str>) -> Dependency {
     let module: ModuleId = coord.parse().expect("built-in coordinates are valid");
-    Dependency::new(module, version.map(str::to_owned))
+    Dependency { exported: true, ..Dependency::new(module, version.map(str::to_owned)) }
 }
 
 fn dep_scoped(coord: &str, version: Option<&str>, scope: Scope) -> Dependency {

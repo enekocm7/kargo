@@ -570,6 +570,10 @@ struct DetailedDependency {
     transitive: Option<bool>,
     #[serde(default)]
     bom: bool,
+    #[serde(default)]
+    exported: bool,
+    #[serde(default)]
+    test_fixtures: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -632,6 +636,130 @@ fn parse_run(task: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<S
     })
 }
 
+/// Parses a `[tasks]` table (or `[workspace.tasks]`) and checks every `depends-on` names a task in it.
+fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
+    let mut tasks = BTreeMap::new();
+    for (name, value) in table {
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            bail!("invalid task name `{name}`");
+        }
+        let raw: RawTask = match value {
+            Value::String(cmd) => RawTask { run: Some(Value::String(cmd.clone())), ..Default::default() },
+            Value::Table(_) => value.clone().try_into().with_context(|| format!("invalid task `{name}`"))?,
+            _ => bail!("invalid task `{name}`: expected a command string or a table"),
+        };
+        let run = parse_run(name, "run", raw.run)?.unwrap_or_default();
+        let windows_run = parse_run(name, "windows-run", raw.windows_run)?;
+        if windows_run.is_some() && run.is_empty() {
+            bail!("task `{name}`: `windows-run` needs a `run` to use on other platforms");
+        }
+        let shell = match raw.shell.as_deref() {
+            None => None,
+            Some(s) => Some(TaskShell::parse(s).with_context(|| {
+                let known: Vec<_> = TaskShell::ALL.iter().map(|s| s.as_str()).collect();
+                format!("task `{name}`: unknown shell `{s}`; expected one of {}", known.join(", "))
+            })?),
+        };
+        if run.is_empty() && raw.depends_on.is_empty() {
+            bail!("task `{name}` has nothing to do: add `run` or `depends-on`");
+        }
+        tasks.insert(
+            name.clone(),
+            Task {
+                name: name.clone(),
+                description: raw.description,
+                run,
+                windows_run,
+                shell,
+                depends_on: raw.depends_on,
+                env: raw.env,
+                cwd: raw.cwd,
+                hooks: parse_hooks(&raw.hooks, &format!("task `{name}`"))?,
+            },
+        );
+    }
+    for task in tasks.values() {
+        for dep in &task.depends_on {
+            if !tasks.contains_key(dep) {
+                bail!("task `{}` depends on unknown task `{dep}`", task.name);
+            }
+        }
+    }
+    Ok(tasks)
+}
+
+/// Whether `value` is an inheritance marker: `{ workspace = true }`.
+fn is_inherited(value: &Value) -> bool {
+    value.as_table().is_some_and(|t| t.contains_key("workspace"))
+}
+
+/// Replaces the `{ workspace = true }` entries of `[package]`, `[frameworks]`, `[plugins]` and
+/// `[tasks]` in a member's manifest with the workspace's. Returns `None` when there is nothing to
+/// inherit, so the manifest is parsed from its text (with line numbers in errors).
+pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManifest>) -> Result<Option<toml::Table>> {
+    const SECTIONS: [&str; 4] = ["package", "frameworks", "plugins", "tasks"];
+    let marked = SECTIONS.iter().any(|s| table.get(*s).and_then(Value::as_table).is_some_and(|t| t.values().any(is_inherited)));
+    if !marked {
+        return Ok(None);
+    }
+    for section in SECTIONS {
+        let Some(Value::Table(entries)) = table.get_mut(section) else { continue };
+        let keys: Vec<String> = entries.iter().filter(|(_, v)| is_inherited(v)).map(|(k, _)| k.clone()).collect();
+        for key in keys {
+            let marker = entries[&key].as_table().expect("checked above");
+            if marker.get("workspace").and_then(Value::as_bool) != Some(true) || marker.len() > 1 {
+                bail!("[{section}] `{key}`: inherit it with `{key} = {{ workspace = true }}` and nothing else");
+            }
+            let Some(workspace) = workspace else {
+                bail!("[{section}] `{key}`: `workspace = true` needs a [workspace] that lists this package in `members`");
+            };
+            let (shared, from) = match section {
+                "package" => (&workspace.package, "workspace.package"),
+                "frameworks" => (&workspace.frameworks, "workspace.frameworks"),
+                "plugins" => (&workspace.plugins, "workspace.plugins"),
+                _ => (&workspace.raw_tasks, "workspace.tasks"),
+            };
+            let Some(value) = shared.get(&key) else {
+                bail!("[{section}] `{key}` inherits from the workspace, but [{from}] has no `{key}`");
+            };
+            let mut value = value.clone();
+            if section == "plugins" {
+                // A plugin command next to the workspace's kargo.toml stays there.
+                if let Some(Value::String(command)) = value.get("command")
+                    && (command.starts_with("./") || command.starts_with("../") || command.contains(['/', '\\']))
+                    && !Path::new(command).is_absolute()
+                {
+                    let absolute = workspace.root.join(command).to_string_lossy().into_owned();
+                    value.as_table_mut().expect("a plugin is a table").insert("command".to_owned(), Value::String(absolute));
+                }
+            }
+            entries.insert(key, value);
+        }
+        // A task inherited from the workspace brings the workspace tasks it depends on.
+        if section == "tasks"
+            && let Some(workspace) = workspace
+        {
+            loop {
+                let missing: Vec<String> = entries
+                    .values()
+                    .filter_map(|v| v.get("depends-on").and_then(Value::as_array))
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter(|dep| !entries.contains_key(*dep) && workspace.raw_tasks.contains_key(*dep))
+                    .map(str::to_owned)
+                    .collect();
+                if missing.is_empty() {
+                    break;
+                }
+                for dep in missing {
+                    entries.insert(dep.clone(), workspace.raw_tasks[&dep].clone());
+                }
+            }
+        }
+    }
+    Ok(Some(table))
+}
+
 /// A parsed `[dependencies]` entry: a Maven module or another Kargo package on disk.
 enum Entry {
     Maven(Dependency),
@@ -646,7 +774,7 @@ fn inherit_dependency(name: &str, value: &Value, section: &str, workspace: Optio
     if flag.as_bool() != Some(true) {
         bail!("{}: `workspace` can only be `true`", ctx());
     }
-    if let Some(other) = table.keys().find(|k| !matches!(k.as_str(), "workspace" | "scope")) {
+    if let Some(other) = table.keys().find(|k| !matches!(k.as_str(), "workspace" | "scope" | "exported" | "test-fixtures")) {
         bail!("{}: `{other}` cannot be combined with `workspace = true`; set it in [workspace.dependencies] instead", ctx());
     }
     let Some(workspace) = workspace else {
@@ -665,8 +793,10 @@ fn inherit_dependency(name: &str, value: &Value, section: &str, workspace: Optio
         let absolute = workspace.root.join(path);
         inherited.insert("path".to_owned(), Value::String(absolute.to_string_lossy().into_owned()));
     }
-    if let Some(scope) = table.get("scope") {
-        inherited.insert("scope".to_owned(), scope.clone());
+    for key in ["scope", "exported", "test-fixtures"] {
+        if let Some(value) = table.get(key) {
+            inherited.insert(key.to_owned(), value.clone());
+        }
     }
     Ok(Some(Value::Table(inherited)))
 }
@@ -683,6 +813,9 @@ fn parse_dependency(name: &str, value: &Value, section: &str, workspace: Option<
 
     if let Some(path) = detailed.path.clone() {
         return path_dependency(name, path, detailed, section).map(Entry::Path);
+    }
+    if detailed.test_fixtures {
+        bail!("{}: `test-fixtures` only applies to a `path` dependency on another Kargo package", ctx());
     }
     let module: ModuleId = if name.contains(':') {
         if detailed.coords.is_some() || detailed.group.is_some() || detailed.artifact.is_some() {
@@ -724,7 +857,10 @@ fn path_dependency(name: &str, path: PathBuf, detailed: DetailedDependency, sect
         ("bom", detailed.bom),
     ];
     if let Some((key, _)) = maven_only.iter().find(|(_, set)| *set) {
-        bail!("{}: `{key}` does not apply to a `path` dependency, which is built from source (only `scope` can be set)", ctx());
+        bail!(
+            "{}: `{key}` does not apply to a `path` dependency, which is built from source (only `scope`, `exported` and `test-fixtures` can be set)",
+            ctx()
+        );
     }
     validate_package_name(name).with_context(|| format!("{}: the key of a `path` dependency is the package name", ctx()))?;
     if path.as_os_str().is_empty() {
@@ -737,7 +873,15 @@ fn path_dependency(name: &str, path: PathBuf, detailed: DetailedDependency, sect
     if matches!(scope, Scope::Processor | Scope::Ksp) {
         bail!("{}: a `path` dependency can't be an annotation or KSP processor yet; depend on it as `compile` or `runtime`", ctx());
     }
-    Ok(PathDependency { name: name.to_owned(), path, scope, dev: false, target: None })
+    Ok(PathDependency {
+        name: name.to_owned(),
+        path,
+        scope,
+        dev: false,
+        target: None,
+        exported: detailed.exported,
+        test_fixtures: detailed.test_fixtures,
+    })
 }
 
 fn finish_dependency(
@@ -781,6 +925,7 @@ fn finish_dependency(
         force: detailed.force,
         transitive: detailed.transitive.unwrap_or(true),
         bom: detailed.bom,
+        exported: detailed.exported,
     })
 }
 
@@ -801,7 +946,12 @@ impl DependencyParser<'_> {
                     }
                     deps.push(dep);
                 }
-                Entry::Path(path) => self.paths.push(PathDependency { dev, target, ..path }),
+                Entry::Path(path) => {
+                    if path.test_fixtures && !dev {
+                        bail!("invalid dependency `{name}` in [{section}]: `test-fixtures` is for tests; declare it in [dev-dependencies]");
+                    }
+                    self.paths.push(PathDependency { dev, target, ..path })
+                }
             }
         }
         Ok(deps)
@@ -867,7 +1017,7 @@ impl RawManifest {
         }
 
         let workspace_kotlin = workspace.and_then(|w| w.kotlin_version.clone());
-        let (kotlin_version, kotlin_version_set) = match (self.kotlin.version, workspace_kotlin) {
+        let (kotlin_version, kotlin_version_set) = match (self.kotlin.version.clone(), workspace_kotlin) {
             (Some(own), Some(shared)) if own != shared => bail!(
                 "[kotlin] version {own} differs from the workspace's [workspace.kotlin] version {shared};                  remove it to use the workspace's, since every member builds with the same Kotlin"
             ),
@@ -875,7 +1025,23 @@ impl RawManifest {
             (None, None) => (DEFAULT_KOTLIN_VERSION.to_owned(), false),
         };
         validate_version_string("Kotlin version", &kotlin_version)?;
-        if let Some(ksp) = &self.kotlin.ksp {
+        // `[workspace.kotlin]` is where every member starts: its lists come first, and a member's
+        // own keys take precedence over the others.
+        let mut kotlin = self.kotlin;
+        if let Some(shared) = workspace.map(|w| &w.kotlin) {
+            kotlin.language_version = kotlin.language_version.or_else(|| shared.language_version.clone());
+            kotlin.api_version = kotlin.api_version.or_else(|| shared.api_version.clone());
+            kotlin.ksp = kotlin.ksp.or_else(|| shared.ksp_version.clone());
+            kotlin.warnings_as_errors |= shared.warnings_as_errors;
+            let mut opt_in = shared.opt_in.clone();
+            opt_in.extend(kotlin.opt_in.into_iter().filter(|o| !shared.opt_in.contains(o)));
+            kotlin.opt_in = opt_in;
+            let mut compiler_args = shared.compiler_args.clone();
+            compiler_args.extend(kotlin.compiler_args);
+            kotlin.compiler_args = compiler_args;
+        }
+        let shared_jvm_target = workspace.and_then(|w| w.kotlin.jvm_target.clone());
+        if let Some(ksp) = &kotlin.ksp {
             validate_version_string("KSP version", ksp)?;
         }
         let mut deps = DependencyParser { workspace, paths: Vec::new() };
@@ -884,8 +1050,8 @@ impl RawManifest {
             // No [target] section means a plain JVM project.
             None => Targets {
                 jvm: Some(JvmTarget {
-                    jvm_target: DEFAULT_JVM_TARGET.to_owned(),
-                    jvm_target_set: false,
+                    jvm_target: shared_jvm_target.clone().unwrap_or_else(|| DEFAULT_JVM_TARGET.to_owned()),
+                    jvm_target_set: shared_jvm_target.is_some(),
                     main_class: None,
                     jvm_args: Vec::new(),
                     javac_args: Vec::new(),
@@ -899,8 +1065,8 @@ impl RawManifest {
                         .jvm
                         .map(|j| -> Result<JvmTarget> {
                             Ok(JvmTarget {
-                                jvm_target_set: j.jvm_target.is_some(),
-                                jvm_target: match j.jvm_target {
+                                jvm_target_set: j.jvm_target.is_some() || shared_jvm_target.is_some(),
+                                jvm_target: match j.jvm_target.or_else(|| shared_jvm_target.clone()) {
                                     Some(target) => normalize_jvm_target(&target)?,
                                     None => DEFAULT_JVM_TARGET.to_owned(),
                                 },
@@ -1136,53 +1302,7 @@ impl RawManifest {
             }
         }
 
-        let mut tasks = BTreeMap::new();
-        for (name, value) in &self.tasks {
-            if name.is_empty() || name.contains(char::is_whitespace) {
-                bail!("invalid task name `{name}`");
-            }
-            let raw: RawTask = match value {
-                Value::String(cmd) => RawTask { run: Some(Value::String(cmd.clone())), ..Default::default() },
-                Value::Table(_) => value.clone().try_into().with_context(|| format!("invalid task `{name}`"))?,
-                _ => bail!("invalid task `{name}`: expected a command string or a table"),
-            };
-            let run = parse_run(name, "run", raw.run)?.unwrap_or_default();
-            let windows_run = parse_run(name, "windows-run", raw.windows_run)?;
-            if windows_run.is_some() && run.is_empty() {
-                bail!("task `{name}`: `windows-run` needs a `run` to use on other platforms");
-            }
-            let shell = match raw.shell.as_deref() {
-                None => None,
-                Some(s) => Some(TaskShell::parse(s).with_context(|| {
-                    let known: Vec<_> = TaskShell::ALL.iter().map(|s| s.as_str()).collect();
-                    format!("task `{name}`: unknown shell `{s}`; expected one of {}", known.join(", "))
-                })?),
-            };
-            if run.is_empty() && raw.depends_on.is_empty() {
-                bail!("task `{name}` has nothing to do: add `run` or `depends-on`");
-            }
-            tasks.insert(
-                name.clone(),
-                Task {
-                    name: name.clone(),
-                    description: raw.description,
-                    run,
-                    windows_run,
-                    shell,
-                    depends_on: raw.depends_on,
-                    env: raw.env,
-                    cwd: raw.cwd,
-                    hooks: parse_hooks(&raw.hooks, &format!("task `{name}`"))?,
-                },
-            );
-        }
-        for task in tasks.values() {
-            for dep in &task.depends_on {
-                if !tasks.contains_key(dep) {
-                    bail!("task `{}` depends on unknown task `{dep}`", task.name);
-                }
-            }
-        }
+        let tasks = parse_tasks(&self.tasks)?;
 
         let jdk = match self.toolchain.jdk {
             None => JdkRequest::System,
@@ -1241,12 +1361,12 @@ impl RawManifest {
             kotlin: KotlinSettings {
                 version: kotlin_version,
                 version_set: kotlin_version_set,
-                language_version: self.kotlin.language_version,
-                api_version: self.kotlin.api_version,
-                ksp_version: self.kotlin.ksp,
-                opt_in: self.kotlin.opt_in,
-                compiler_args: self.kotlin.compiler_args,
-                warnings_as_errors: self.kotlin.warnings_as_errors,
+                language_version: kotlin.language_version,
+                api_version: kotlin.api_version,
+                ksp_version: kotlin.ksp,
+                opt_in: kotlin.opt_in,
+                compiler_args: kotlin.compiler_args,
+                warnings_as_errors: kotlin.warnings_as_errors,
             },
             targets,
             bins,
@@ -1328,39 +1448,127 @@ struct RawWorkspace {
     #[serde(default)]
     members: Vec<String>,
     #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    default_members: Vec<String>,
+    #[serde(default)]
+    package: toml::Table,
+    #[serde(default)]
     dependencies: toml::Table,
     #[serde(default)]
     kotlin: RawWorkspaceKotlin,
+    #[serde(default)]
+    frameworks: toml::Table,
+    #[serde(default)]
+    plugins: toml::Table,
+    #[serde(default)]
+    tasks: toml::Table,
+}
+
+/// `[workspace.package]`: the `[package]` keys members can inherit. Deserialized to reject unknown
+/// keys; members validate the values they inherit.
+#[allow(dead_code)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawWorkspacePackage {
+    version: Option<String>,
+    group: Option<String>,
+    description: Option<String>,
+    authors: Option<Vec<String>>,
+    license: Option<String>,
+    homepage: Option<String>,
+    repository: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawWorkspaceKotlin {
     version: Option<String>,
+    language_version: Option<String>,
+    api_version: Option<String>,
+    ksp: Option<String>,
+    #[serde(default)]
+    opt_in: Vec<String>,
+    #[serde(default)]
+    compiler_args: Vec<String>,
+    #[serde(default)]
+    warnings_as_errors: bool,
+    jvm_target: Option<String>,
+}
+
+/// A `members`, `exclude` or `default-members` entry: a relative directory, or (in `members`) a glob.
+fn workspace_dir(key: &str, entry: &str, globs: bool) -> Result<()> {
+    let bad_glob = if globs { entry.contains(['[', ']', '{', '}']) || entry.contains("**") } else { entry.contains(['*', '?', '[']) };
+    if entry.trim().is_empty() || bad_glob || entry.starts_with(['/', '\\']) || Path::new(entry).is_absolute() {
+        let expected = if globs { "directories such as \"app\" or globs such as \"libs/*\"" } else { "directories such as \"app\"" };
+        bail!("[workspace] `{key}` entries must be {expected}, relative to the workspace root; got `{entry}`");
+    }
+    Ok(())
 }
 
 impl RawWorkspaceManifest {
     pub(super) fn validate(self, root: &Path) -> Result<WorkspaceManifest> {
         let raw = self.workspace;
-        if raw.members.is_empty() {
-            bail!("[workspace] `members` is empty; list the member directories, e.g. members = [\"app\", \"lib\"]");
-        }
-        let mut members: Vec<PathBuf> = Vec::new();
+        let mut members: Vec<String> = Vec::new();
         for member in &raw.members {
-            if member.is_empty() || member.contains(['*', '?', '[']) {
-                bail!("[workspace] `members` entries must be directories such as \"app\" or \"libs/core\", got `{member}`");
-            }
-            let path = PathBuf::from(member);
-            if members.contains(&path) {
+            workspace_dir("members", member, true)?;
+            if members.contains(member) {
                 bail!("[workspace] member `{member}` is listed more than once");
             }
-            members.push(path);
+            members.push(member.clone());
         }
-        if let Some(v) = &raw.kotlin.version {
-            validate_version_string("[workspace.kotlin] version", v)?;
+        for entry in raw.exclude.iter().chain(&raw.default_members) {
+            let key = if raw.exclude.contains(entry) { "exclude" } else { "default-members" };
+            workspace_dir(key, entry, false)?;
         }
-        let workspace =
-            WorkspaceManifest { root: root.to_path_buf(), members, kotlin_version: raw.kotlin.version, dependencies: raw.dependencies };
+        let kotlin = raw.kotlin;
+        for (key, value) in [("version", &kotlin.version), ("ksp", &kotlin.ksp)] {
+            if let Some(v) = value {
+                validate_version_string(&format!("[workspace.kotlin] {key}"), v)?;
+            }
+        }
+        let jvm_target =
+            kotlin.jvm_target.as_deref().map(normalize_jvm_target).transpose().context("invalid [workspace.kotlin] `jvm-target`")?;
+
+        for (section, table) in
+            [("package", &raw.package), ("frameworks", &raw.frameworks), ("plugins", &raw.plugins), ("tasks", &raw.tasks)]
+        {
+            if let Some(key) = table.iter().find(|(_, v)| is_inherited(v)).map(|(k, _)| k) {
+                bail!("[workspace.{section}] `{key}`: `workspace = true` is only valid in a member's kargo.toml");
+            }
+        }
+        let package: RawWorkspacePackage = Value::Table(raw.package.clone()).try_into().context("invalid [workspace.package]")?;
+        if let Some(v) = &package.version {
+            validate_version_string("[workspace.package] version", v)?;
+        }
+        let _: RawFrameworks = Value::Table(raw.frameworks.clone()).try_into().context("invalid [workspace.frameworks]")?;
+        for (name, value) in &raw.plugins {
+            let _: RawPlugin = value.clone().try_into().with_context(|| format!("invalid plugin `{name}` in [workspace.plugins]"))?;
+        }
+        let tasks = parse_tasks(&raw.tasks).context("invalid [workspace.tasks]")?;
+
+        let workspace = WorkspaceManifest {
+            root: root.to_path_buf(),
+            members,
+            exclude: raw.exclude.iter().map(PathBuf::from).collect(),
+            default_members: raw.default_members.iter().map(PathBuf::from).collect(),
+            kotlin_version: kotlin.version,
+            kotlin: WorkspaceKotlin {
+                language_version: kotlin.language_version,
+                api_version: kotlin.api_version,
+                ksp_version: kotlin.ksp,
+                opt_in: kotlin.opt_in,
+                compiler_args: kotlin.compiler_args,
+                warnings_as_errors: kotlin.warnings_as_errors,
+                jvm_target,
+            },
+            tasks,
+            dependencies: raw.dependencies,
+            package: raw.package,
+            frameworks: raw.frameworks,
+            plugins: raw.plugins,
+            raw_tasks: raw.tasks,
+        };
         // Validate the shared entries once, so a typo is reported even before a member uses it.
         for (name, value) in &workspace.dependencies {
             if value.get("workspace").is_some() {

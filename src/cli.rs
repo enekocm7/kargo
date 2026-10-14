@@ -258,11 +258,14 @@ struct PackageArgs {
     /// Every member of the workspace
     #[arg(long, conflicts_with = "packages")]
     workspace: bool,
+    /// Leave this member out (repeatable); with `--workspace` or at the workspace root
+    #[arg(long, value_name = "NAME", conflicts_with = "packages")]
+    exclude: Vec<String>,
 }
 
 impl PackageArgs {
     fn selection(&self) -> Selection {
-        Selection { packages: self.packages.clone(), workspace: self.workspace }
+        Selection { packages: self.packages.clone(), workspace: self.workspace, exclude: self.exclude.clone() }
     }
 }
 
@@ -276,7 +279,7 @@ struct OnePackageArg {
 
 impl OnePackageArg {
     fn selection(&self) -> Selection {
-        Selection { packages: self.package.iter().cloned().collect(), workspace: false }
+        Selection { packages: self.package.iter().cloned().collect(), ..Default::default() }
     }
 }
 
@@ -349,6 +352,9 @@ struct BuildArgs {
     targets: Vec<TargetArg>,
     #[command(flatten)]
     packages: PackageArgs,
+    /// How many workspace members to build at the same time (default: the number of CPUs; 1 for `kargo test`)
+    #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    jobs: Option<u32>,
     /// How to print compiler diagnostics
     #[arg(long, value_enum, default_value_t, value_name = "FMT")]
     message_format: MessageFormatArg,
@@ -395,6 +401,9 @@ struct NewArgs {
     /// Do not initialize a git repository
     #[arg(long)]
     no_vcs: bool,
+    /// Create an empty workspace (a kargo.toml with [workspace]) instead of a package
+    #[arg(long, conflicts_with_all = ["lib", "targets", "frameworks", "name"])]
+    workspace: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1063,11 +1072,47 @@ fn for_each_package<T>(
     let selected = project.select(selection)?;
     let ctx = context(config, project, selected[0], global, profile)?;
     let mut results = Vec::new();
-    for &index in &selected {
+    for &index in &project.dependency_order(&selected, false) {
         warn_manifest(config.shell(), project, project.package(index));
         results.push(op(&ctx.for_package(index))?);
     }
     Ok(results)
+}
+
+/// Runs `op` for every selected package, sharing one lockfile and the toolchains: in dependency
+/// order, with up to `jobs` independent packages at the same time. `dev` orders packages after the
+/// ones their tests use too. The first failure (in dependency order) is returned; the others are
+/// printed.
+fn build_packages<T: Send>(
+    config: &Config,
+    project: &Project,
+    selection: &Selection,
+    global: &GlobalArgs,
+    profile: ProfileKind,
+    (jobs, dev): (Option<u32>, bool),
+    op: impl Fn(&BuildContext) -> Result<T> + Sync,
+) -> Result<Vec<T>> {
+    let selected = project.select(selection)?;
+    let ctx = context(config, project, selected[0], global, profile)?;
+    let order = project.dependency_order(&selected, dev);
+    for &index in &order {
+        warn_manifest(config.shell(), project, project.package(index));
+    }
+    let jobs = jobs.map_or_else(kargo_ops::ops::default_jobs, |j| j as usize);
+    let results = kargo_ops::ops::build_graph(project, &order, dev, jobs, |index| op(&ctx.for_package(index)));
+    let mut out = Vec::new();
+    let mut first_error = None;
+    for result in results.into_iter().flatten() {
+        match result {
+            Ok(value) => out.push(value),
+            Err(e) if first_error.is_none() => first_error = Some(e),
+            Err(e) => report_error(config.shell(), &e),
+        }
+    }
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 fn profile(release: bool) -> ProfileKind {
@@ -1108,6 +1153,31 @@ fn new_options(dir: &Path, args: NewArgs) -> Result<NewOptions> {
     })
 }
 
+/// `kargo new` and `kargo init`: a package in `dir` (added to the members of the workspace it is
+/// in, if any), or with `--workspace` an empty workspace.
+fn create_package(shell: &Shell, dir: &Path, args: NewArgs) -> Result<u8> {
+    if args.workspace {
+        ops::new::create_workspace(dir, &args.kotlin, !args.no_vcs)?;
+        let name = kargo_ops::workspace::dunce_canonicalize(dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        shell.status("Created", format!("workspace `{name}`"));
+        return Ok(0);
+    }
+    // `create` validates the options before it creates the directory, so a bad name leaves nothing behind.
+    let opts = new_options(dir, args)?;
+    let workspace = ops::new::enclosing_workspace(dir)?;
+    // A member shares the workspace's repository.
+    let opts = if workspace.is_some() { NewOptions { vcs: false, ..opts } } else { opts };
+    let kind = if opts.lib { "library" } else { "application" };
+    ops::new::create(dir, &opts)?;
+    shell.status("Created", format!("{kind} `{}` package", opts.name));
+    if let Some(root) = workspace
+        && let Some(member) = ops::new::add_to_workspace(&root, dir)?
+    {
+        shell.status("Adding", format!("`{member}` to the members of the workspace at {}", root.display()));
+    }
+    Ok(0)
+}
+
 fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
     let global = cli.global;
     let config =
@@ -1139,30 +1209,23 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             if path.exists() && path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(true) {
                 bail!("destination `{}` already exists; use `kargo init` to initialize an existing directory", path.display());
             }
-            // `create` validates the options before it creates the directory, so a bad name leaves nothing behind.
-            let opts = new_options(&path, args)?;
-            let kind = if opts.lib { "library" } else { "application" };
-            ops::new::create(&path, &opts)?;
-            shell.status("Created", format!("{kind} `{}` package", opts.name));
-            Ok(0)
+            create_package(shell, &path, args)
         }
         Command::Init { path, args } => {
             let dir = match path {
                 Some(p) => p,
                 None => std::env::current_dir()?,
             };
-            let opts = new_options(&dir, args)?;
-            ops::new::create(&dir, &opts)?;
-            shell.status("Created", format!("{} `{}` package", if opts.lib { "library" } else { "application" }, opts.name));
-            Ok(0)
+            create_package(shell, &dir, args)
         }
         Command::Build { build, keep_going } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let opts = BuildOptions { keep_going, ..build.options() };
-            let results = for_each_package(config, &project, &build.packages.selection(), global, opts.profile(), |ctx| {
-                ops::build::build(ctx, &opts)
-            });
+            let results =
+                build_packages(config, &project, &build.packages.selection(), global, opts.profile(), (build.jobs, false), |ctx| {
+                    ops::build::build(ctx, &opts)
+                });
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
@@ -1170,9 +1233,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let opts = CheckOptions { build: BuildOptions { keep_going, ..build.options() }, tests };
-            let results = for_each_package(config, &project, &build.packages.selection(), global, opts.build.profile(), |ctx| {
-                ops::check::check(ctx, &opts)
-            });
+            let results =
+                build_packages(config, &project, &build.packages.selection(), global, opts.build.profile(), (build.jobs, tests), |ctx| {
+                    ops::check::check(ctx, &opts)
+                });
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
@@ -1198,9 +1262,15 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let junit_report = report == Some(ReportArg::Junit);
             let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
             let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug, list };
-            let passed = for_each_package(config, &project, &build.packages.selection(), global, opts.build.profile(), |ctx| {
-                ops::test::test(ctx, &opts)
-            })?;
+            let passed = build_packages(
+                config,
+                &project,
+                &build.packages.selection(),
+                global,
+                opts.build.profile(),
+                (build.jobs.or(Some(1)), true),
+                |ctx| ops::test::test(ctx, &opts),
+            )?;
             if passed.iter().all(|ok| *ok) {
                 Ok(0)
             } else {
@@ -1513,15 +1583,16 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             Ok(0)
         }
         Command::Task { name, list: _, args } => {
-            let ws = load_workspace(global)?;
+            let project = load_project(global)?;
             match name {
                 None => {
-                    list_tasks(&ws);
+                    list_tasks(&project);
                     Ok(0)
                 }
                 Some(name) => {
-                    let env = kargo_ops::plugins::base_env(&ws, "dev");
-                    kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, &name, &args, &env)?;
+                    if !run_task(shell, &project, &name, &args)? {
+                        bail!("no task named `{name}`; available tasks: {}", task_names(&project).join(", "));
+                    }
                     Ok(0)
                 }
             }
@@ -1539,15 +1610,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
         }
         Command::Info { format } => {
             let project = load_project(global)?;
-            match format {
-                FormatArg::Text => match project.select_one(&Selection::default(), "`kargo info`") {
-                    Ok(index) => print_info(&project, project.package(index)),
-                    Err(_) => print_workspace_info(&project),
-                },
-                FormatArg::Json => match project.select_one(&Selection::default(), "`kargo info`") {
-                    Ok(index) => println!("{}", serde_json::to_string_pretty(&info_json(project.package(index)))?),
-                    Err(_) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(&project))?),
-                },
+            // At the root of a workspace, the workspace; elsewhere, the package.
+            let package = task_package(&project);
+            match (format, package) {
+                (FormatArg::Text, Some(index)) => print_info(&project, project.package(index)),
+                (FormatArg::Text, None) => print_workspace_info(&project),
+                (FormatArg::Json, Some(index)) => println!("{}", serde_json::to_string_pretty(&info_json(project.package(index)))?),
+                (FormatArg::Json, None) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(&project))?),
             }
             Ok(0)
         }
@@ -1670,17 +1739,103 @@ fn target(shell: &Shell, global: &GlobalArgs, command: TargetCommand) -> Result<
     Ok(0)
 }
 
-fn list_tasks(ws: &Workspace) {
-    let tasks = &ws.manifest().tasks;
-    if tasks.is_empty() {
-        println!("No tasks defined. Add some under [tasks] in kargo.toml.");
-        return;
+/// The package whose `[tasks]` a task name refers to: the member the command runs in, or the
+/// package of a project that is not a workspace. `None` at the root of a workspace.
+fn task_package(project: &Project) -> Option<usize> {
+    project.current().or_else(|| (!project.is_workspace()).then(|| project.members()[0]))
+}
+
+/// Runs the task `name`: the current package's, else the workspace's (`[workspace.tasks]`, at the
+/// workspace root), else, at the root of a workspace, the task of every member that has one (in
+/// dependency order, each in its member's directory). Returns `false` when no task has that name.
+fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String]) -> Result<bool> {
+    let package = task_package(project);
+    if let Some(index) = package {
+        let ws = project.package(index);
+        if ws.manifest().tasks.contains_key(name) {
+            let env = kargo_ops::plugins::base_env(ws, "dev");
+            kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)?;
+            return Ok(true);
+        }
     }
-    println!("Available tasks:");
-    let width = tasks.keys().map(String::len).max().unwrap_or(0);
+    let Some(workspace) = project.workspace_manifest() else { return Ok(false) };
+    if workspace.tasks.contains_key(name) {
+        let env = kargo_ops::plugins::workspace_env(project);
+        kargo_ops::tasks::run(shell, project.root(), &workspace.tasks, name, args, &env)?;
+        return Ok(true);
+    }
+    if package.is_some() {
+        return Ok(false);
+    }
+    let members: Vec<usize> = project
+        .dependency_order(project.members(), false)
+        .into_iter()
+        .filter(|&i| project.package(i).manifest().tasks.contains_key(name))
+        .collect();
+    for &index in &members {
+        let ws = project.package(index);
+        let env = kargo_ops::plugins::base_env(ws, "dev");
+        kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)
+            .with_context(|| format!("task `{name}` of `{}` failed", ws.name()))?;
+    }
+    Ok(!members.is_empty())
+}
+
+/// Every task name `kargo <name>` may run here (for suggestions and completion).
+fn task_names(project: &Project) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let packages: Vec<usize> = match task_package(project) {
+        Some(index) => vec![index],
+        None => project.members().to_vec(),
+    };
+    for index in packages {
+        names.extend(project.package(index).manifest().tasks.keys().cloned());
+    }
+    if let Some(workspace) = project.workspace_manifest() {
+        names.extend(workspace.tasks.keys().cloned());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn list_tasks(project: &Project) {
     let builtins = builtin_commands();
-    for task in tasks.values() {
-        println!("    {:width$}  {}", task.name, task_description(task, &builtins));
+    let print = |title: &str, tasks: &std::collections::BTreeMap<String, kargo_manifest::Task>| {
+        println!("{title}");
+        let width = tasks.keys().map(String::len).max().unwrap_or(0);
+        for task in tasks.values() {
+            println!("    {:width$}  {}", task.name, task_description(task, &builtins));
+        }
+    };
+    let mut any = false;
+    match task_package(project) {
+        Some(index) => {
+            let tasks = &project.package(index).manifest().tasks;
+            if !tasks.is_empty() {
+                print("Available tasks:", tasks);
+                any = true;
+            }
+        }
+        // At the root of a workspace, each member's tasks run in every member that has them.
+        None => {
+            for &index in project.members() {
+                let ws = project.package(index);
+                if !ws.manifest().tasks.is_empty() {
+                    print(&format!("Tasks of `{}`:", ws.name()), &ws.manifest().tasks);
+                    any = true;
+                }
+            }
+        }
+    }
+    if let Some(workspace) = project.workspace_manifest()
+        && !workspace.tasks.is_empty()
+    {
+        print("Workspace tasks:", &workspace.tasks);
+        any = true;
+    }
+    if !any {
+        println!("No tasks defined. Add some under [tasks] in kargo.toml.");
     }
 }
 
@@ -1727,12 +1882,20 @@ fn workspace_info_json(project: &Project) -> serde_json::Value {
         .iter()
         .map(|&i| {
             let pkg = project.package(i);
-            serde_json::json!({ "name": pkg.name(), "version": pkg.manifest().package.version, "root": pkg.root().display().to_string() })
+            // The path dependencies it builds on: the module graph.
+            let dependencies: Vec<&str> = project.dependencies_of(i, false).into_iter().map(|d| project.package(d).name()).collect();
+            serde_json::json!({
+                "name": pkg.name(),
+                "version": pkg.manifest().package.version,
+                "root": pkg.root().display().to_string(),
+                "dependencies": dependencies,
+            })
         })
         .collect();
     serde_json::json!({
         "workspace": project.root().display().to_string(),
         "members": members,
+        "default-members": project.default_members().iter().map(|&i| project.package(i).name()).collect::<Vec<_>>(),
         "lockfile": project.lockfile_path().display().to_string(),
         "target-dir": project.target_dir().display().to_string(),
     })
@@ -1743,11 +1906,27 @@ fn print_workspace_info(project: &Project) {
         project.members().iter().map(|&i| project.package(i)).map(|p| format!("{} v{}", p.name(), p.manifest().package.version)).collect();
     println!("workspace:    {}", project.root().display());
     println!("members:      {}", members.join(", "));
+    if project.default_members() != project.members() {
+        let defaults: Vec<&str> = project.default_members().iter().map(|&i| project.package(i).name()).collect();
+        println!("default:      {}", defaults.join(", "));
+    }
     if let Some(&first) = project.members().first() {
         println!("kotlin:       {}", project.package(first).manifest().kotlin.version);
     }
     println!("lockfile:     {}", project.lockfile_path().display());
     println!("target dir:   {}", project.target_dir().display());
+    // The module graph, in build order.
+    let order = project.dependency_order(project.members(), false);
+    if order.iter().any(|&i| !project.dependencies_of(i, false).is_empty()) {
+        println!("graph:");
+        for i in order {
+            let deps: Vec<&str> = project.dependencies_of(i, false).into_iter().map(|d| project.package(d).name()).collect();
+            match deps.is_empty() {
+                true => println!("    {}", project.package(i).name()),
+                false => println!("    {} -> {}", project.package(i).name(), deps.join(", ")),
+            }
+        }
+    }
 }
 
 fn print_info(project: &Project, ws: &Workspace) {
@@ -1845,11 +2024,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// `kargo <name>`: a task from the manifest, else a `kargo-<name>` executable.
 fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u8> {
     let (name, args) = argv.split_first().context("missing subcommand")?;
-    if let Ok(ws) = load_workspace(global)
-        && ws.manifest().tasks.contains_key(name)
+    let project = load_project(global).ok();
+    if let Some(project) = &project
+        && run_task(config.shell(), project, name, args)?
     {
-        let env = kargo_ops::plugins::base_env(&ws, "dev");
-        kargo_ops::tasks::run(config.shell(), ws.root(), &ws.manifest().tasks, name, args, &env)?;
         return Ok(0);
     }
     let Some(program) = kargo_ops::plugins::find_subcommand(config, name) else {
@@ -1859,8 +2037,8 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u
             .map(str::to_owned)
             .collect();
         known.extend(kargo_ops::plugins::list_subcommands(config).into_keys());
-        if let Ok(ws) = load_workspace(global) {
-            known.extend(ws.manifest().tasks.keys().cloned());
+        if let Some(project) = &project {
+            known.extend(task_names(project));
         }
         let suggestion = closest_match(name, &known).map(|s| format!("\n\n\tDid you mean `{s}`?")).unwrap_or_default();
         bail!("no such command: `{name}`{suggestion}\n\n\tView all installed commands with `kargo --help` and `kargo plugins`");

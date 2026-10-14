@@ -221,6 +221,17 @@ Files in `test-resources/` are on the classpath of JVM tests:
 val text = javaClass.getResource("/fixtures/sample.json")!!.readText()
 ```
 
+## Test fixtures
+
+Test helpers that the tests of several packages share (fakes, builders, sample data) go in `test-fixtures/` (and JVM-only ones in `test-fixtures-jvm/`). They compile against the package and its dev-dependencies, and are on the classpath of the package's own JVM tests and of every package that depends on it with `test-fixtures = true`:
+
+```toml title="kargo.toml"
+[dev-dependencies]
+mathlib = { path = "../mathlib", test-fixtures = true }
+```
+
+See [Test fixtures](../workspaces/#test-fixtures).
+
 ## Hooks
 
 Run something before or after tests with a [task or hook plugin](../tasks-and-plugins/) attached to `pre-test` or `post-test`. After tests, hooks receive `KARGO_TEST_RESULT`.

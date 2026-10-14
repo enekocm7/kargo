@@ -98,6 +98,13 @@ impl Fingerprint {
         self
     }
 
+    /// Adds length-prefixed raw bytes.
+    pub fn bytes(&mut self, b: &[u8]) -> &mut Self {
+        self.hasher.update((b.len() as u64).to_le_bytes());
+        self.hasher.update(b);
+        self
+    }
+
     /// Adds a file's path, size and modification time (cheap, like Cargo's mtime checks).
     /// A directory (such as a classes directory on a classpath) adds every file in it, since
     /// its own modification time doesn't change when a file inside is rewritten.

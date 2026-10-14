@@ -1975,7 +1975,8 @@ fn metadata_describes_a_workspace_for_editors() {
             ),
         )
         .file("app/src/Main.kt", "package com.example\n\nfun main() {}\n")
-        .file("lib/kargo.toml", &manifest("lib", "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n"))
+        // `app` compiles against `g:util` because `lib` exports it.
+        .file("lib/kargo.toml", &manifest("lib", "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = { version = \"1.0\", exported = true }\n"))
         .file("lib/src/Lib.kt", "package com.example.lib\n\nfun answer() = 42\n");
 
     let metadata = |args: &[&str]| -> serde_json::Value {
@@ -1995,7 +1996,7 @@ fn metadata_describes_a_workspace_for_editors() {
     assert_eq!(app["member"], true);
     assert_eq!(
         app["path-dependencies"][0],
-        serde_json::json!({"name": "lib", "package": "lib", "scope": "compile", "dev": false, "target": null})
+        serde_json::json!({"name": "lib", "package": "lib", "scope": "compile", "dev": false, "target": null, "exported": false, "test-fixtures": false})
     );
     assert_eq!(app["tasks"][0]["name"], "gen");
     assert_eq!(app["tasks"][0]["description"], "Generate");
@@ -2377,4 +2378,161 @@ fn toolchain_lists_language_servers() {
         .failure()
         .stderr(predicate::str::contains("offline"));
     p.kargo().args(["toolchain", "remove", "kls", "1.3.13"]).assert().failure().stderr(predicate::str::contains("not installed"));
+}
+
+#[test]
+fn new_workspace_then_new_members_join_it() {
+    let p = Project::new();
+    p.kargo()
+        .args(["new", "shop", "--workspace", "--no-vcs"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Created workspace `shop`"));
+    let root = p.path().join("shop");
+    let text = p.read("shop/kargo.toml");
+    assert!(text.contains("[workspace]\n") && text.contains("members = []"), "{text}");
+    assert!(text.contains(&format!("[workspace.kotlin]\nversion = \"{}\"", kargo_manifest::DEFAULT_KOTLIN_VERSION)), "{text}");
+    p.kargo().arg("build").current_dir(&root).assert().failure().code(101).stderr(predicate::str::contains("has no members yet"));
+
+    // `kargo new` inside the workspace adds the member.
+    p.kargo()
+        .args(["new", "libs/core", "--lib"])
+        .current_dir(&root)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding `libs/core` to the members of the workspace"));
+    assert!(p.read("shop/kargo.toml").contains("members = [\"libs/core\"]"), "{}", p.read("shop/kargo.toml"));
+    assert!(!root.join("libs/core/.git").exists(), "a member shares the workspace's repository");
+    p.kargo().args(["new", "server"]).current_dir(&root).assert().success();
+    assert!(p.read("shop/kargo.toml").contains("members = [\"libs/core\", \"server\"]"));
+
+    // A member that a glob already covers is not listed again.
+    p.file("shop/kargo.toml", "[workspace]\nmembers = [\"libs/*\", \"server\"]\n");
+    p.kargo().args(["new", "libs/util", "--lib"]).current_dir(&root).assert().success().stderr(predicate::str::contains("Adding").not());
+    assert_eq!(p.read("shop/kargo.toml"), "[workspace]\nmembers = [\"libs/*\", \"server\"]\n");
+    p.kargo()
+        .arg("info")
+        .current_dir(&root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("members:      core v0.1.0, util v0.1.0, server v0.1.0"));
+
+    // Outside a workspace nothing is edited.
+    p.kargo().args(["new", "alone", "--no-vcs"]).assert().success().stderr(predicate::str::contains("Adding").not());
+}
+
+#[test]
+fn workspace_globs_default_members_exclude_and_inheritance() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        "[workspace]
+members = [\"libs/*\", \"apps/*\"]
+exclude = [\"libs/attic\"]
+default-members = [\"apps/server\"]
+
+[workspace.package]
+version = \"3.1.0\"
+group = \"com.shop\"
+
+[workspace.kotlin]
+opt-in = [\"kotlin.RequiresOptIn\"]
+",
+    )
+    .file("libs/core/kargo.toml", "[package]\nname = \"core\"\nversion.workspace = true\ngroup.workspace = true\n")
+    .file("libs/attic/kargo.toml", "this is not even TOML")
+    .file(
+        "apps/server/kargo.toml",
+        "[package]\nname = \"server\"\nversion.workspace = true\n[dependencies]\ncore = { path = \"../../libs/core\", exported = true }\n",
+    )
+    .file("apps/cli/kargo.toml", &manifest("cli", "[dependencies]\ncore = { path = \"../../libs/core\" }\n"));
+
+    let info = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let info: serde_json::Value = serde_json::from_slice(&info).unwrap();
+    let members: Vec<&str> = info["members"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(members, ["core", "cli", "server"]);
+    assert_eq!(info["default-members"], serde_json::json!(["server"]));
+    assert_eq!(info["members"][1]["dependencies"], serde_json::json!(["core"]));
+    p.kargo()
+        .arg("info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("default:      server"))
+        .stdout(predicate::str::contains("graph:\n    core\n    cli -> core\n    server -> core\n"));
+    p.kargo()
+        .arg("info")
+        .current_dir(p.path().join("libs/core"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("package:      core v3.1.0"));
+
+    let metadata = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+    assert_eq!(metadata["default-members"], serde_json::json!(["server"]));
+    let server = metadata["packages"].as_array().unwrap().iter().find(|p| p["name"] == "server").unwrap();
+    assert_eq!(server["version"], "3.1.0");
+    assert_eq!(server["path-dependencies"][0]["exported"], true);
+    assert_eq!(server["kotlin"]["opt-in"], serde_json::json!(["kotlin.RequiresOptIn"]));
+
+    // `--exclude` leaves members out; leaving none out is an error.
+    p.kargo()
+        .args(["build", "--workspace", "--exclude", "core", "--exclude", "cli", "--exclude", "server"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--exclude` leaves no package to work on"));
+    p.kargo()
+        .args(["build", "--exclude", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("package `nope` is not part of this project"));
+    p.kargo().args(["build", "-j", "0"]).assert().failure().stderr(predicate::str::contains("-j"));
+    p.kargo().args(["run"]).assert().failure().stderr(predicate::str::contains("pick one with `-p <name>`").not());
+}
+
+#[test]
+fn workspace_tasks_run_at_the_root_and_per_member() {
+    let p = Project::new();
+    // Every task appends a line to `log.txt` at the workspace root (TOML literal strings, so no escapes).
+    let log = |line: &str| {
+        if cfg!(windows) {
+            format!("echo {line}>> %KARGO_WORKSPACE_DIR%\\log.txt")
+        } else {
+            format!("echo {line} >> \"$KARGO_WORKSPACE_DIR/log.txt\"")
+        }
+    };
+    p.file(
+        "kargo.toml",
+        &format!(
+            "[workspace]\nmembers = [\"app\", \"core\"]\n[workspace.tasks]\nhello = {{ run = '{}', description = \"say hello\" }}\n",
+            log("hello")
+        ),
+    )
+    .file(
+        "app/kargo.toml",
+        &manifest(
+            "app",
+            &format!("[dependencies]\ncore = {{ path = \"../core\" }}\n[tasks]\ngen = '{}'\nhello.workspace = true\n", log("gen-app")),
+        ),
+    )
+    .file("core/kargo.toml", &manifest("core", &format!("[tasks]\ngen = '{}'\n", log("gen-core"))));
+
+    p.kargo().args(["task", "--list"]).assert().success().stdout(
+        predicate::str::contains("Tasks of `app`:")
+            .and(predicate::str::contains("Workspace tasks:"))
+            .and(predicate::str::contains("say hello")),
+    );
+    // At the root: the workspace's task, and each member's task in dependency order.
+    p.kargo().arg("hello").assert().success();
+    p.kargo().arg("gen").assert().success();
+    let lines = |p: &Project| p.read("log.txt").lines().map(|l| l.trim().to_owned()).collect::<Vec<_>>();
+    assert_eq!(lines(&p), ["hello", "gen-core", "gen-app"]);
+    // Inside a member: that member's tasks, including one it inherits.
+    p.kargo().arg("gen").current_dir(p.path().join("core")).assert().success();
+    p.kargo().args(["task", "hello"]).current_dir(p.path().join("app")).assert().success();
+    assert_eq!(lines(&p), ["hello", "gen-core", "gen-app", "gen-core", "hello"]);
+    p.kargo()
+        .args(["task", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no task named `nope`; available tasks: gen, hello"));
 }

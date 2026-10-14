@@ -25,9 +25,9 @@ $ kargo test
 
 | Command | Description |
 |---|---|
-| `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...]` | Create a project |
+| `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace |
 | `kargo init [dir]` | Create a project in an existing directory |
-| `kargo build [--release] [-t <target>] [--keep-going] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--message-format json` prints compiler diagnostics as JSON |
+| `kargo build [--release] [-t <target>] [--keep-going] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--flavor <name>] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--flavor` picks the Android product flavor to install |
 | `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
@@ -63,7 +63,7 @@ Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`
 
 `kargo --help` lists the common commands, then the project's tasks; `kargo --list` lists every built-in command with its description. Commands left out of `--help` still work, and `kargo help <command>` shows each one's options. A mistyped command suggests the closest one (`kargo biuld` → `Did you mean build?`).
 
-In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree` and `fetch` take `-p <member>` (repeatable) or `--workspace`; `run`, `package`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`.
+In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` and `publish` take `-p <member>` (repeatable), `--workspace` and `--exclude <member>`; `run`, `package`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`. Members build in dependency order, independent ones in parallel, and a JVM member recompiles only when the ABI of a member it uses changes.
 
 ## Project layout
 
@@ -74,6 +74,7 @@ src/                 common sources (.kt, and .java on the JVM)
 src-jvm/             target-specific sources: src-wasm/, src-native/, src-android/
 tests/               common tests (kotlin.test)
 tests-jvm/ ...       target-specific tests
+test-fixtures/       test helpers the tests of dependent packages can use (`test-fixtures = true`)
 resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm browser app
 android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
@@ -81,7 +82,7 @@ examples/            example programs: kargo run --example <name>
 target/              build output: target/<debug|release>/<target>/
 ```
 
-A workspace is a directory whose `kargo.toml` has a `[workspace]` with `members` (each a package like the one above). Members share the workspace's `kargo.lock` and `target/`, and build into `target/<profile>/<member>/<target>/`.
+A workspace is a directory whose `kargo.toml` has a `[workspace]` with `members` (each a package like the one above, or a glob such as `libs/*`). Members share the workspace's `kargo.lock` and `target/`, and build into `target/<profile>/<member>/<target>/`.
 
 `expect` declarations in `src/` can have `actual` implementations in `src-<target>/`. On the JVM, `.java` files next to your Kotlin files are compiled together with them (set `[target.jvm] main-class` if your `main` is in Java).
 
@@ -152,7 +153,7 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
 mathlib = { path = "../mathlib" }   # another Kargo package, built from source
 lwjgl-natives = { coords = "org.lwjgl:lwjgl:3.3.6", classifier = "natives-windows", scope = "runtime" }  # a classifier jar, next to the module's own
-# Other keys: classifier, extension, force, transitive, workspace = true
+# Other keys: classifier, extension, force, transitive, workspace = true, exported = true (part of the API of this package)
 "com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
 "com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }  # KSP processor (JVM, Android)
 # Scopes: compile (default), runtime, provided, processor, ksp. Other keys: classifier, extension, force, transitive
@@ -207,17 +208,30 @@ Zed gets an extension in [`editors/zed`](editors/zed) that runs `kargo lsp` for 
 ```toml
 # kargo.toml at the workspace root: no [package]
 [workspace]
-members = ["app", "mathlib"]          # directories; one kargo.lock and one target/ for all
+members = ["apps/*", "libs/*"]        # directories or globs; one kargo.lock and one target/ for all
+exclude = ["libs/attic"]
+default-members = ["apps/server"]     # what commands work on at the root (default: every member)
+
+[workspace.package]                   # members inherit these with `version.workspace = true`
+version = "1.2.0"
+group = "com.example"
 
 [workspace.kotlin]
 version = "2.4.21"                    # every member builds with this Kotlin version
+opt-in = ["kotlin.RequiresOptIn"]     # also language-version, compiler-args, jvm-target, ...
 
 [workspace.dependencies]              # members inherit these with `name = { workspace = true }`
 "org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"
-mathlib = { path = "mathlib" }
+mathlib = { path = "libs/mathlib" }
+
+[workspace.frameworks]                # and these with `serialization.workspace = true` in [frameworks]
+serialization = true
+
+[workspace.tasks]                     # `kargo <task>` at the root; [workspace.plugins] work like [plugins]
+release-notes = "./tools/notes.sh"
 ```
 
-A path dependency brings its own Maven dependencies along, and is built for the consumer's target: a jar for the JVM, a klib for Wasm and Native (Android is not supported yet). Packages built together use one Kotlin version and one JDK.
+A path dependency is built for the consumer's target: a jar for the JVM, a klib for Wasm and Native, and for Android a Gradle subproject (an Android library) or the JVM jar. It brings its own Maven dependencies: the `exported = true` ones (its API) to compile against, the others at runtime only. Test helpers in a package's `test-fixtures/` reach the tests of packages that depend on it with `test-fixtures = true`. `kargo new <dir>` inside a workspace adds the member, and `kargo new --workspace` creates one. Packages built together use one Kotlin version and one JDK.
 
 ### Toolchains
 
@@ -291,7 +305,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
   hooks = ["post-build"]
   ```
   `command` is run directly, not through a shell. On Windows a `.sh` script runs through `sh` (from Git for Windows); anything else must be a real executable (`.exe`, `.bat`, `.cmd`). `windows-command` and `windows-args` replace `command` and `args` on Windows; when they are not set, `command` and `args` are used everywhere.
-  Hooks receive `KARGO_HOOK`, `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PROFILE`, `KARGO_TARGET_DIR`, `KARGO_KOTLIN_VERSION` and `KARGO_BUILD_LOCK` (so a `kargo` call inside a hook doesn't wait on the build-directory lock its parent holds). After a JVM build they also get `KARGO_CLASSPATH` and `KARGO_JVM_JAR`, after `kargo package` they get `KARGO_PACKAGE`, and after tests they get `KARGO_TEST_RESULT`.
+  Hooks receive `KARGO_HOOK`, `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PROFILE`, `KARGO_TARGET_DIR`, `KARGO_KOTLIN_VERSION`, `KARGO_WORKSPACE_DIR` (in a workspace) and `KARGO_BUILD_LOCK` (so a `kargo` call inside a hook doesn't wait on the build-directory lock its parent holds). After a JVM build they also get `KARGO_CLASSPATH` and `KARGO_JVM_JAR`, after `kargo package` they get `KARGO_PACKAGE`, and after tests they get `KARGO_TEST_RESULT`.
 * **Subcommands**: an executable named `kargo-<name>` in `~/.kargo/bin` or on `PATH` becomes `kargo <name>`, just like Cargo.
 
 ## Environment
@@ -326,7 +340,7 @@ Kargo is a Cargo workspace:
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver, uploads and the Maven Central Portal |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
-| `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, jar packaging, entry points, test reports, compiler diagnostics |
+| `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, commands |
 | `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, project import for Kotlin language servers, runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |
 | `kargo` | The CLI binary |

@@ -13,7 +13,7 @@ use std::process::Command;
 use anyhow::{Result, bail};
 
 use crate::tasks;
-use crate::workspace::Workspace;
+use crate::workspace::{Project, Workspace};
 use kargo_manifest::{Hook, ProcessPlugin};
 use kargo_util::config::Config;
 use kargo_util::process;
@@ -23,7 +23,7 @@ use kargo_util::shell::Shell;
 pub fn base_env(ws: &Workspace, profile: &str) -> Vec<(String, String)> {
     let m = ws.manifest();
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "kargo".to_owned());
-    vec![
+    let mut env = vec![
         ("KARGO".to_owned(), exe),
         ("KARGO_MANIFEST_DIR".to_owned(), ws.root().to_string_lossy().into_owned()),
         ("KARGO_PKG_NAME".to_owned(), m.package.name.clone()),
@@ -32,7 +32,28 @@ pub fn base_env(ws: &Workspace, profile: &str) -> Vec<(String, String)> {
         ("KARGO_TARGET_DIR".to_owned(), ws.target_dir().to_string_lossy().into_owned()),
         ("KARGO_PROFILE".to_owned(), profile.to_owned()),
         ("KARGO_KOTLIN_VERSION".to_owned(), m.kotlin.version.clone()),
-    ]
+    ];
+    if let Some(workspace) = ws.workspace() {
+        env.push(("KARGO_WORKSPACE_DIR".to_owned(), workspace.root.to_string_lossy().into_owned()));
+    }
+    env
+}
+
+/// Environment of a `[workspace.tasks]` task, which runs at the workspace root.
+pub fn workspace_env(project: &Project) -> Vec<(String, String)> {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "kargo".to_owned());
+    let root = project.root().to_string_lossy().into_owned();
+    let mut env = vec![
+        ("KARGO".to_owned(), exe),
+        ("KARGO_MANIFEST_DIR".to_owned(), root.clone()),
+        ("KARGO_WORKSPACE_DIR".to_owned(), root),
+        ("KARGO_TARGET_DIR".to_owned(), project.target_dir().to_string_lossy().into_owned()),
+        ("KARGO_PROFILE".to_owned(), "dev".to_owned()),
+    ];
+    if let Some(&first) = project.members().first() {
+        env.push(("KARGO_KOTLIN_VERSION".to_owned(), project.package(first).manifest().kotlin.version.clone()));
+    }
+    env
 }
 
 /// Runs the tasks and hook plugins attached to `hook`.

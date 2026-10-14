@@ -13,13 +13,13 @@
       "required": ["name", "version"],
       "properties": {
         "name": { "description": "The package name.", "type": "string", "minLength": 1 },
-        "version": { "description": "The package version; names the jar and is the version in its Maven coordinates.", "type": "string", "minLength": 1, "examples": ["0.1.0"] },
-        "group": { "description": "Maven group, also the base Kotlin package in templates. Required to publish.", "type": "string", "examples": ["com.example"] },
-        "description": { "description": "One sentence about the package (POM <description>). Required by Maven Central.", "type": "string" },
-        "authors": { "description": "`Name <email>` entries (POM <developers>). Required by Maven Central.", "type": "array", "items": { "type": "string" } },
-        "license": { "description": "An SPDX expression such as `MIT` or `MIT OR Apache-2.0`. Required by Maven Central.", "type": "string" },
-        "homepage": { "description": "The project's web page, an http(s) URL. Defaults to `repository`.", "type": "string", "format": "uri" },
-        "repository": { "description": "The source repository, an http(s) URL. Required by Maven Central.", "type": "string", "format": "uri" },
+        "version": { "description": "The package version; names the jar and is the version in its Maven coordinates. `{ workspace = true }` inherits [workspace.package].", "anyOf": [{ "type": "string", "minLength": 1 }, { "$ref": "#/definitions/inherit" }], "examples": ["0.1.0"] },
+        "group": { "description": "Maven group, also the base Kotlin package in templates. Required to publish.", "anyOf": [{ "type": "string" }, { "$ref": "#/definitions/inherit" }], "examples": ["com.example"] },
+        "description": { "description": "One sentence about the package (POM <description>). Required by Maven Central.", "anyOf": [{ "type": "string" }, { "$ref": "#/definitions/inherit" }] },
+        "authors": { "description": "`Name <email>` entries (POM <developers>). Required by Maven Central.", "anyOf": [{ "type": "array", "items": { "type": "string" } }, { "$ref": "#/definitions/inherit" }] },
+        "license": { "description": "An SPDX expression such as `MIT` or `MIT OR Apache-2.0`. Required by Maven Central.", "anyOf": [{ "type": "string" }, { "$ref": "#/definitions/inherit" }] },
+        "homepage": { "description": "The project's web page, an http(s) URL. Defaults to `repository`.", "anyOf": [{ "type": "string", "format": "uri" }, { "$ref": "#/definitions/inherit" }] },
+        "repository": { "description": "The source repository, an http(s) URL. Required by Maven Central.", "anyOf": [{ "type": "string", "format": "uri" }, { "$ref": "#/definitions/inherit" }] },
         "publish": { "description": "`false` makes `kargo publish` refuse the package.", "type": "boolean", "default": true }
       }
     },
@@ -207,131 +207,9 @@
         ]
       }
     },
-    "frameworks": {
-      "description": "Built-in frameworks: each adds libraries, compiler plugins and flags.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "serialization": {
-          "description": "kotlinx.serialization.",
-          "anyOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "version": { "type": "string", "default": "1.11.0" },
-                "formats": { "type": "array", "items": { "enum": ["json", "cbor", "protobuf", "properties", "hocon", "core"] }, "default": ["json"] }
-              }
-            }
-          ]
-        },
-        "coroutines": { "description": "kotlinx.coroutines: true, false or a version string.", "type": ["boolean", "string"], "examples": [true, "1.11.0"] },
-        "compose": {
-          "description": "Compose Multiplatform.",
-          "anyOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "version": { "type": "string", "default": "1.12.1" },
-                "material3": { "description": "Add Material 3.", "type": "boolean", "default": true }
-              }
-            }
-          ]
-        },
-        "ktor": {
-          "description": "Ktor server and/or client.",
-          "anyOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "version": { "type": "string", "default": "3.6.0" },
-                "server": { "description": "Server engine.", "type": "string", "examples": ["netty", "cio", "jetty", "tomcat"] },
-                "client": { "description": "Client engine.", "type": "string", "examples": ["cio", "okhttp", "java", "apache5", "js", "curl", "winhttp", "darwin"] },
-                "server-plugins": { "type": "array", "items": { "type": "string" } },
-                "client-plugins": { "type": "array", "items": { "type": "string" } },
-                "json": { "description": "Add ktor-serialization-kotlinx-json (default: when serialization is enabled).", "type": "boolean" }
-              }
-            }
-          ]
-        },
-        "lombok": {
-          "description": "Lombok for Java sources.",
-          "anyOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "version": { "type": "string", "default": "1.18.48" },
-                "config": { "description": "Path to lombok.config, relative to the project root.", "type": "string" }
-              }
-            }
-          ]
-        },
-        "spring-boot": {
-          "description": "Spring Boot.",
-          "anyOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "version": { "type": "string", "default": "4.1.1" },
-                "starters": { "description": "Starters without the `spring-boot-starter-` prefix.", "type": "array", "items": { "type": "string" }, "default": ["web"] },
-                "jpa": { "description": "Apply the JPA no-arg preset (default: when `data-jpa` is a starter).", "type": "boolean" }
-              }
-            }
-          ]
-        }
-      }
-    },
-    "plugins": {
-      "description": "Compiler plugins (`maven`) and hook plugins (`command`).",
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "maven": { "description": "A compiler plugin's `group:artifact:version`.", "type": "string" },
-          "id": { "description": "The compiler plugin id, for its options.", "type": "string" },
-          "options": { "description": "Compiler plugin options.", "type": "object", "additionalProperties": { "type": "string" } },
-          "command": { "description": "A hook plugin's executable.", "type": "string" },
-          "windows-command": { "description": "Used instead of `command` on Windows.", "type": "string" },
-          "args": { "type": "array", "items": { "type": "string" } },
-          "windows-args": { "description": "Used instead of `args` on Windows.", "type": "array", "items": { "type": "string" } },
-          "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } },
-          "env": { "type": "object", "additionalProperties": { "type": "string" } }
-        }
-      }
-    },
-    "tasks": {
-      "description": "Commands run with `kargo <task>` or `kargo task <name>`.",
-      "type": "object",
-      "additionalProperties": {
-        "anyOf": [
-          { "type": "string" },
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "run": { "$ref": "#/definitions/commands" },
-              "windows-run": { "$ref": "#/definitions/commands", "description": "Replaces `run` on Windows." },
-              "description": { "type": "string" },
-              "shell": { "enum": ["sh", "bash", "cmd", "powershell", "pwsh"] },
-              "depends-on": { "type": "array", "items": { "type": "string" } },
-              "env": { "type": "object", "additionalProperties": { "type": "string" } },
-              "cwd": { "description": "Working directory, relative to the project root.", "type": "string" },
-              "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } }
-            }
-          }
-        ]
-      }
-    },
+    "frameworks": { "$ref": "#/definitions/frameworks" },
+    "plugins": { "$ref": "#/definitions/plugins" },
+    "tasks": { "$ref": "#/definitions/tasks" },
     "profile": {
       "description": "Build profiles.",
       "type": "object",
@@ -397,13 +275,42 @@
       "additionalProperties": false,
       "required": ["members"],
       "properties": {
-        "members": { "description": "Directories of the member packages, relative to this file. Globs are not supported.", "type": "array", "minItems": 1, "items": { "type": "string" } },
-        "kotlin": {
+        "members": { "description": "Directories of the member packages, relative to this file, or globs such as \"libs/*\". `kargo new <dir>` inside the workspace adds new members.", "type": "array", "items": { "type": "string" }, "examples": [["app", "libs/*"]] },
+        "exclude": { "description": "Directories that `members` globs must not match.", "type": "array", "items": { "type": "string" } },
+        "default-members": { "description": "The members that `kargo build` and the other commands work on at the workspace root (default: every member).", "type": "array", "items": { "type": "string" } },
+        "package": {
+          "description": "[package] keys members inherit with `key.workspace = true`.",
           "type": "object",
           "additionalProperties": false,
-          "properties": { "version": { "description": "The Kotlin version of every member.", "type": "string" } }
+          "properties": {
+            "version": { "type": "string", "examples": ["0.1.0"] },
+            "group": { "type": "string", "examples": ["com.example"] },
+            "description": { "type": "string" },
+            "authors": { "type": "array", "items": { "type": "string" } },
+            "license": { "type": "string" },
+            "homepage": { "type": "string", "format": "uri" },
+            "repository": { "type": "string", "format": "uri" }
+          }
         },
-        "dependencies": { "$ref": "#/definitions/dependencies", "description": "Entries members inherit with `name = { workspace = true }`." }
+        "kotlin": {
+          "description": "Kotlin settings of every member. A member's own `opt-in` and `compiler-args` add to these; its other [kotlin] keys take precedence.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": { "description": "The Kotlin version of every member.", "type": "string" },
+            "language-version": { "type": "string", "examples": ["2.4"] },
+            "api-version": { "type": "string", "examples": ["2.4"] },
+            "ksp": { "description": "KSP version for `scope = \"ksp\"` dependencies.", "type": "string" },
+            "opt-in": { "type": "array", "items": { "type": "string" } },
+            "compiler-args": { "type": "array", "items": { "type": "string" } },
+            "warnings-as-errors": { "type": "boolean", "default": false },
+            "jvm-target": { "description": "The default [target.jvm] jvm-target of members.", "type": "string", "examples": ["17"] }
+          }
+        },
+        "dependencies": { "$ref": "#/definitions/dependencies", "description": "Entries members inherit with `name = { workspace = true }`." },
+        "frameworks": { "$ref": "#/definitions/frameworks", "description": "Entries members inherit with `name = { workspace = true }` in [frameworks]." },
+        "plugins": { "$ref": "#/definitions/plugins", "description": "Entries members inherit with `name = { workspace = true }` in [plugins]." },
+        "tasks": { "$ref": "#/definitions/tasks", "description": "Tasks run at the workspace root with `kargo <task>`; members inherit them with `name = { workspace = true }` in [tasks]." }
       }
     }
   },
@@ -412,6 +319,149 @@
     { "required": ["workspace"], "maxProperties": 1 }
   ],
   "definitions": {
+    "inherit": {
+      "description": "Inherit this key from the workspace's kargo.toml.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace"],
+      "properties": { "workspace": { "const": true } }
+    },
+    "frameworks": {
+      "description": "Built-in frameworks: each adds libraries, compiler plugins and flags. In a member, `name = { workspace = true }` inherits the entry of [workspace.frameworks].",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serialization": {
+          "description": "kotlinx.serialization.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "1.11.0" },
+                "formats": { "type": "array", "items": { "enum": ["json", "cbor", "protobuf", "properties", "hocon", "core"] }, "default": ["json"] }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "coroutines": {
+          "description": "kotlinx.coroutines: true, false or a version string.",
+          "anyOf": [{ "type": ["boolean", "string"] }, { "$ref": "#/definitions/inherit" }],
+          "examples": [true, "1.11.0"]
+        },
+        "compose": {
+          "description": "Compose Multiplatform.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "1.12.1" },
+                "material3": { "description": "Add Material 3.", "type": "boolean", "default": true }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "ktor": {
+          "description": "Ktor server and/or client.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "3.6.0" },
+                "server": { "description": "Server engine.", "type": "string", "examples": ["netty", "cio", "jetty", "tomcat"] },
+                "client": { "description": "Client engine.", "type": "string", "examples": ["cio", "okhttp", "java", "apache5", "js", "curl", "winhttp", "darwin"] },
+                "server-plugins": { "type": "array", "items": { "type": "string" } },
+                "client-plugins": { "type": "array", "items": { "type": "string" } },
+                "json": { "description": "Add ktor-serialization-kotlinx-json (default: when serialization is enabled).", "type": "boolean" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "lombok": {
+          "description": "Lombok for Java sources.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "1.18.48" },
+                "config": { "description": "Path to lombok.config, relative to the project root.", "type": "string" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "spring-boot": {
+          "description": "Spring Boot.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "4.1.1" },
+                "starters": { "description": "Starters without the `spring-boot-starter-` prefix.", "type": "array", "items": { "type": "string" }, "default": ["web"] },
+                "jpa": { "description": "Apply the JPA no-arg preset (default: when `data-jpa` is a starter).", "type": "boolean" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        }
+      }
+    },
+    "plugins": {
+      "description": "Compiler plugins (`maven`) and hook plugins (`command`).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maven": { "description": "A compiler plugin's `group:artifact:version`.", "type": "string" },
+          "id": { "description": "The compiler plugin id, for its options.", "type": "string" },
+          "options": { "description": "Compiler plugin options.", "type": "object", "additionalProperties": { "type": "string" } },
+          "command": { "description": "A hook plugin's executable.", "type": "string" },
+          "windows-command": { "description": "Used instead of `command` on Windows.", "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "windows-args": { "description": "Used instead of `args` on Windows.", "type": "array", "items": { "type": "string" } },
+          "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } },
+          "env": { "type": "object", "additionalProperties": { "type": "string" } },
+          "workspace": { "description": "In a member: inherit the plugin of the same name from [workspace.plugins] (alone, without other keys).", "const": true }
+        }
+      }
+    },
+    "tasks": {
+      "description": "Commands run with `kargo <task>` or `kargo task <name>`.",
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "run": { "$ref": "#/definitions/commands" },
+              "windows-run": { "$ref": "#/definitions/commands", "description": "Replaces `run` on Windows." },
+              "description": { "type": "string" },
+              "shell": { "enum": ["sh", "bash", "cmd", "powershell", "pwsh"] },
+              "depends-on": { "type": "array", "items": { "type": "string" } },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } },
+              "cwd": { "description": "Working directory, relative to the project root.", "type": "string" },
+              "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } },
+              "workspace": { "description": "In a member: inherit the task of the same name from [workspace.tasks] (alone, without other keys).", "const": true }
+            }
+          }
+        ]
+      }
+    },
     "android-build-config": {
       "description": "`BuildConfig` fields: a string becomes a `String`, a boolean a `boolean`, an integer an `int` (or `long`).",
       "type": "object",
@@ -455,8 +505,10 @@
             "force": { "description": "Use this version even if a newer one is requested.", "type": "boolean", "default": false },
             "transitive": { "description": "Include this dependency's dependencies.", "type": "boolean", "default": true },
             "bom": { "description": "Import as a BOM.", "type": "boolean", "default": false },
-            "path": { "description": "Directory of another Kargo package to build from source; only `scope` can be set with it.", "type": "string" },
-            "workspace": { "description": "Inherit the entry of the same name from [workspace.dependencies].", "const": true }
+            "path": { "description": "Directory of another Kargo package to build from source; only `scope`, `exported` and `test-fixtures` can be set with it.", "type": "string" },
+            "exported": { "description": "Part of this package's API: packages that depend on it through `path` compile against it too, and its POM scope is `compile`. Otherwise they only get it at runtime.", "type": "boolean", "default": false },
+            "test-fixtures": { "description": "With `path`, in [dev-dependencies]: also use the dependency's test fixtures (`test-fixtures/`).", "type": "boolean", "default": false },
+            "workspace": { "description": "Inherit the entry of the same name from [workspace.dependencies]; only `scope`, `exported` and `test-fixtures` can be added.", "const": true }
           }
         }
       ]

@@ -1,6 +1,7 @@
 //! Drivers for the Kotlin compilers (JVM, Wasm, Native) plus helpers shared
 //! between them: source sets, compiler plugins and up-to-date checks.
 
+pub mod abi;
 pub mod daemon;
 pub mod diagnostics;
 pub mod incremental;
@@ -145,7 +146,8 @@ pub fn fingerprint(sources: &SourceSet, classpath: &[PathBuf], plugins: &[Resolv
     }
     fp.str("--classpath");
     for f in classpath {
-        fp.file_stamp(f);
+        // A path dependency's jar counts by its ABI, so a change to its bodies does not recompile this.
+        abi::stamp_classpath_entry(&mut fp, f);
     }
     fp.str("--plugins");
     for p in plugins {

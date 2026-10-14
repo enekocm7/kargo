@@ -1330,13 +1330,14 @@ fn path_dependencies() {
     assert!(lock.contains("[resolution.\"mathlib/jvm/compile\"]") && lock.contains("kotlinx-coroutines-core"), "{lock}");
     t.kargo("calc").args(["build", "-t", "jvm"]).assert().success().stderr(predicate::str::contains("Compiling").not());
 
-    // Changing the dependency rebuilds it and its consumer.
+    // Changing a body of the dependency rebuilds it, but not its consumer, whose classes don't change.
     t.write("mathlib/src/Lib.kt", &std::fs::read_to_string(t.dir.path().join("mathlib/src/Lib.kt")).unwrap().replace("a + b", "b + a"));
-    t.kargo("calc")
-        .args(["build", "-t", "jvm"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Compiling mathlib v0.1.0 (jvm)").and(predicate::str::contains("Compiling calc v0.1.0 (jvm)")));
+    t.kargo("calc").args(["build", "-t", "jvm"]).assert().success().stderr(
+        predicate::str::contains("Compiling mathlib v0.1.0 (jvm)").and(predicate::str::contains("Compiling calc v0.1.0 (jvm)").not()),
+    );
+    // A new declaration changes its ABI, which the consumer compiles against.
+    t.write("mathlib/src/More.kt", "package mathlib\n\nfun sub(a: Int, b: Int): Int = a - b\n");
+    t.kargo("calc").args(["build", "-t", "jvm"]).assert().success().stderr(predicate::str::contains("Compiling calc v0.1.0 (jvm)"));
 
     // Tests and the fat jar see it too.
     t.kargo("calc").args(["test", "-t", "jvm"]).assert().success();
@@ -1369,6 +1370,87 @@ fn workspaces() {
     assert!(std::fs::read_to_string(t.dir.path().join("kargo.lock")).unwrap().contains("[resolution.\"calc/jvm/runtime\"]"));
     t.kargo("").args(["run", "-p", "calc", "-t", "jvm"]).assert().success().stdout(predicate::str::contains("2 + 3 = 5"));
     t.kargo("").args(["test", "--workspace", "-t", "jvm"]).assert().success();
+}
+
+/// The layout of issue #45, without Android and Native: a multiplatform `core` (JVM and Wasm, with
+/// `expect`/`actual`) used by a JVM `server` and a Wasm `web` app, built from the workspace root.
+#[test]
+fn multiplatform_workspace_builds_in_dependency_order_and_recompiles_on_abi_changes() {
+    require_e2e!();
+    let t = E2e::new();
+    t.write(
+        "kargo.toml",
+        "[workspace]\nmembers = [\"libs/*\", \"apps/*\"]\n\n[workspace.package]\nversion = \"1.2.0\"\ngroup = \"com.shop\"\n",
+    );
+    let package =
+        |name: &str, targets: &str| format!("[package]\nname = \"{name}\"\nversion.workspace = true\ngroup.workspace = true\n\n{targets}");
+    t.write("libs/core/kargo.toml", &package("core", "[target.jvm]\n\n[target.wasm]\n"));
+    t.write("libs/core/src/Platform.kt", "package core\n\nexpect fun platform(): String\n");
+    t.write("libs/core/src-jvm/Platform.kt", "package core\n\nactual fun platform(): String = \"jvm\"\n");
+    t.write("libs/core/src-wasm/Platform.kt", "package core\n\nactual fun platform(): String = \"wasm\"\n");
+    let core = |suffix: &str, shout: &str| {
+        format!(
+            "package core\n\nfun greet(name: String): String = \"Hello, $name from ${{platform()}}\" + suffix()\n\n\
+             private fun suffix(): String = \"{suffix}\"\n\ninline fun shout(text: String): String = text.{shout}()\n"
+        )
+    };
+    t.write("libs/core/src/Core.kt", &core("!", "uppercase"));
+    t.write("libs/core/test-fixtures/Fixtures.kt", "package core\n\nobject Fixtures {\n    val visitor = \"tester\"\n}\n");
+
+    t.write(
+        "apps/server/kargo.toml",
+        &format!(
+            "{}[dependencies]\ncore = {{ path = \"../../libs/core\" }}\n\n[dev-dependencies]\ncore = {{ path = \"../../libs/core\", test-fixtures = true }}\n",
+            package("server", "[target.jvm]\n\n")
+        ),
+    );
+    t.write(
+        "apps/server/src/Main.kt",
+        "import core.greet\nimport core.shout\n\nfun main() {\n    println(greet(\"server\"))\n    println(shout(\"quiet\"))\n}\n",
+    );
+    t.write(
+        "apps/server/tests/ServerTest.kt",
+        "import kotlin.test.*\n\nclass ServerTest {\n    @Test fun greetsTheFixture() = assertTrue(core.greet(core.Fixtures.visitor).startsWith(\"Hello, tester\"))\n}\n",
+    );
+    t.write(
+        "apps/web/kargo.toml",
+        &format!("{}[dependencies]\ncore = {{ path = \"../../libs/core\" }}\n", package("web", "[target.wasm]\n\n")),
+    );
+    t.write("apps/web/src/Main.kt", "import core.greet\n\nfun main() {\n    println(greet(\"web\"))\n}\n");
+
+    // The root builds every member, `core` first; each app runs with `-p`.
+    t.kargo("").args(["build", "-j", "2"]).assert().success();
+    assert!(t.dir.path().join("target/debug/core/jvm/core-1.2.0.jar").is_file());
+    assert!(t.dir.path().join("target/debug/core/jvm/core-1.2.0.jar.abi").is_file());
+    t.kargo("")
+        .args(["run", "-p", "server"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello, server from jvm!").and(predicate::str::contains("QUIET")));
+    t.kargo("").args(["run", "-p", "web"]).assert().success().stdout(predicate::str::contains("Hello, web from wasm!"));
+    t.kargo("").args(["test", "-p", "server"]).assert().success();
+
+    // A private function body: `core` recompiles, `server` doesn't, and runs the new code.
+    t.write("libs/core/src/Core.kt", &core("!!", "uppercase"));
+    t.kargo("")
+        .args(["build", "-p", "server"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Compiling core v1.2.0 (jvm)").and(predicate::str::contains("Compiling server").not()));
+    t.kargo("").args(["run", "-p", "server"]).assert().success().stdout(predicate::str::contains("Hello, server from jvm!!"));
+    // The same for a public function that is not inline: only its signature is part of the ABI.
+    t.write("libs/core/src/Core.kt", &core("!!", "uppercase").replace("Hello, ", "Hi, "));
+    t.kargo("").args(["build", "-p", "server"]).assert().success().stderr(predicate::str::contains("Compiling server").not());
+    t.kargo("").args(["run", "-p", "server"]).assert().success().stdout(predicate::str::contains("Hi, server from jvm!!"));
+
+    // An inline function's body is compiled into its callers, so it is part of the ABI.
+    t.write("libs/core/src/Core.kt", &core("!!", "lowercase"));
+    t.kargo("").args(["build", "-p", "server"]).assert().success().stderr(predicate::str::contains("Compiling server v1.2.0 (jvm)"));
+    t.kargo("").args(["run", "-p", "server"]).assert().success().stdout(predicate::str::contains("quiet"));
+
+    // A failure names the member and the target.
+    t.write("libs/core/src/Broken.kt", "package core\n\nval broken: String = 1\n");
+    t.kargo("").arg("build").assert().failure().code(101).stderr(predicate::str::contains("could not build `core` (jvm)"));
 }
 
 /// A `mathlib` library and a `calc` application that uses it, both for the JVM and Wasm.

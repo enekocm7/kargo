@@ -63,6 +63,19 @@ impl ManifestEditor {
         self.doc.to_string()
     }
 
+    /// Adds `member` to `[workspace] members` unless it is listed already. Returns whether it was added.
+    pub fn add_workspace_member(&mut self, member: &str) -> Result<bool> {
+        let workspace = self.doc.entry("workspace").or_insert_with(|| Item::Table(Table::new()));
+        let workspace = workspace.as_table_like_mut().context("`workspace` in the manifest is not a table")?;
+        let members = workspace.entry("members").or_insert(Item::Value(Value::Array(toml_edit::Array::new())));
+        let members = members.as_array_mut().context("[workspace] `members` is not an array")?;
+        if members.iter().any(|m| m.as_str() == Some(member)) {
+            return Ok(false);
+        }
+        members.push(member);
+        Ok(true)
+    }
+
     fn table_mut(&mut self, section: DependencySection) -> Result<&mut Table> {
         let path = section.path();
         let mut current = self.doc.as_table_mut();
@@ -316,6 +329,45 @@ alias = { coords = "com.b:y", version = "2.0" }
 
     fn editor() -> ManifestEditor {
         ManifestEditor::from_str(Path::new("kargo.toml"), BASE).unwrap()
+    }
+
+    #[test]
+    fn adds_workspace_members_preserving_format() {
+        let text = "# My workspace
+[workspace]
+members = [\"app\"]  # apps
+
+[workspace.kotlin]
+version = \"2.3.0\"
+";
+        let mut e = ManifestEditor::from_str(Path::new("kargo.toml"), text).unwrap();
+        assert!(e.add_workspace_member("libs/core").unwrap());
+        assert!(!e.add_workspace_member("app").unwrap());
+        let out = e.contents();
+        assert!(
+            out.starts_with(
+                "# My workspace
+[workspace]
+members = [\"app\", \"libs/core\"]  # apps
+"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("[workspace.kotlin]"));
+
+        let mut e = ManifestEditor::from_str(
+            Path::new("kargo.toml"),
+            "[workspace]
+",
+        )
+        .unwrap();
+        e.add_workspace_member("app").unwrap();
+        assert_eq!(
+            e.contents(),
+            "[workspace]
+members = [\"app\"]
+"
+        );
     }
 
     #[test]

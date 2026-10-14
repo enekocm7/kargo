@@ -9,6 +9,7 @@
 //! src-<target>/        target-specific sources (src-jvm, src-wasm, src-native, src-android)
 //! tests/               common tests
 //! tests-<target>/      target-specific tests
+//! test-fixtures/       test code shared with dependent packages (`test-fixtures = true`)
 //! examples/            example programs (`kargo run --example <name>`)
 //! resources/           JVM resources
 //! test-resources/      JVM test resources
@@ -164,6 +165,11 @@ impl Workspace {
         &self.manifest.package.name
     }
 
+    /// The workspace this package is a member of (or a path dependency of a member of).
+    pub fn workspace(&self) -> Option<&WorkspaceManifest> {
+        self.workspace.as_deref()
+    }
+
     /// The `path` dependencies of this package, with the index of the package each points to.
     pub fn path_dependencies(&self) -> &[(PathDependency, usize)] {
         &self.path_deps
@@ -222,6 +228,16 @@ impl Workspace {
         self.root.join(format!("tests-{}", target.as_str()))
     }
 
+    /// Common test fixtures: code the tests of this package and of the packages that depend on it
+    /// with `test-fixtures = true` share.
+    pub fn common_test_fixtures(&self) -> PathBuf {
+        self.root.join("test-fixtures")
+    }
+
+    pub fn target_test_fixtures(&self, target: TargetKind) -> PathBuf {
+        self.root.join(format!("test-fixtures-{}", target.as_str()))
+    }
+
     /// Example programs: `examples/<name>.kt`, run with `kargo run --example <name>`.
     pub fn examples_dir(&self) -> PathBuf {
         self.root.join("examples")
@@ -241,14 +257,17 @@ impl Workspace {
         names
     }
 
-    /// Every existing source, test and example directory (`src/`, `src-<target>/`, `tests/`,
-    /// `tests-<target>/`, `examples/`) for any target, enabled or not, relative to the root.
+    /// Every existing source, test, test fixture and example directory (`src/`, `src-<target>/`,
+    /// `tests/`, `tests-<target>/`, `test-fixtures/`, `test-fixtures-<target>/`, `examples/`) for any
+    /// target, enabled or not, relative to the root.
     /// Used by `kargo fmt` and `kargo lint`, which never look inside `target/`.
     pub fn source_roots(&self) -> Vec<PathBuf> {
         let mut dirs = vec![PathBuf::from("src")];
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(t.source_dir_name())));
         dirs.push(PathBuf::from("tests"));
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("tests-{}", t.as_str()))));
+        dirs.push(PathBuf::from("test-fixtures"));
+        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("test-fixtures-{}", t.as_str()))));
         dirs.push(PathBuf::from("examples"));
         dirs.into_iter().filter(|d| self.root.join(d).is_dir()).collect()
     }
@@ -269,6 +288,8 @@ pub struct Selection {
     pub packages: Vec<String>,
     /// `--workspace`: every member.
     pub workspace: bool,
+    /// Package names given with `--exclude`, left out of the selection.
+    pub exclude: Vec<String>,
 }
 
 /// The packages one command works on: a single package or a workspace, plus their path dependencies.
@@ -280,6 +301,8 @@ pub struct Project {
     /// Members first (in `members` order; the single package otherwise), then path dependencies.
     packages: Vec<Workspace>,
     members: Vec<usize>,
+    /// The members commands work on at the workspace root (`default-members`, else every member).
+    default_members: Vec<usize>,
     /// The member whose directory the command runs in.
     current: Option<usize>,
 }
@@ -320,8 +343,16 @@ impl Project {
         let manifest = WorkspaceManifest::load(&root.join(MANIFEST_NAME))?;
         let mut loader = Loader::new(root, Some(Arc::new(manifest.clone())));
         let mut members = Vec::new();
-        for member in &manifest.members {
-            let dir = dunce_canonicalize(&root.join(member));
+        let mut dirs = Vec::new();
+        let member_dirs = manifest.member_dirs()?;
+        if member_dirs.is_empty() {
+            bail!(
+                "the workspace at {} has no members yet; create one with `kargo new <dir>` inside it, or list them in [workspace] `members`",
+                root.display()
+            );
+        }
+        for member in member_dirs {
+            let dir = dunce_canonicalize(&root.join(&member));
             let path = dir.join(MANIFEST_NAME);
             if !path.is_file() {
                 bail!("workspace member `{}` has no {MANIFEST_NAME} (looked for {})", member.display(), path.display());
@@ -331,9 +362,81 @@ impl Project {
             }
             let index = loader.package(&dir).with_context(|| format!("failed to load workspace member `{}`", member.display()))?;
             members.push(index);
+            dirs.push(dir);
+        }
+        let mut default_members = Vec::new();
+        for entry in &manifest.default_members {
+            let dir = dunce_canonicalize(&root.join(entry));
+            let Some(pos) = dirs.iter().position(|d| *d == dir) else {
+                bail!("[workspace] `default-members` lists `{}`, which is not a member; add it to `members`", entry.display());
+            };
+            if !default_members.contains(&members[pos]) {
+                default_members.push(members[pos]);
+            }
         }
         let current = current_dir.and_then(|d| members.iter().copied().find(|&i| loader.packages[i].root == d));
-        loader.finish(members, current)
+        let mut project = loader.finish(members, current)?;
+        if !default_members.is_empty() {
+            project.default_members = default_members;
+        }
+        Ok(project)
+    }
+
+    /// The workspace manifest, in a workspace.
+    pub fn workspace_manifest(&self) -> Option<&WorkspaceManifest> {
+        self.workspace.as_deref()
+    }
+
+    /// The members commands work on at the workspace root: `default-members`, else every member.
+    pub fn default_members(&self) -> &[usize] {
+        &self.default_members
+    }
+
+    /// The `path` dependencies of `package` that are built before it: the main ones and, with
+    /// `dev`, those of its tests.
+    pub fn dependencies_of(&self, package: usize, dev: bool) -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        for (dep, index) in self.packages[package].path_dependencies() {
+            if (dev || !dep.dev) && *index != package && !out.contains(index) {
+                out.push(*index);
+            }
+        }
+        out
+    }
+
+    /// Every package `package` reaches through main `path` dependencies (and, with `dev`, the
+    /// dev-dependencies of `package` itself), nearest first.
+    pub fn reachable(&self, package: usize, dev: bool) -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        let mut queue: std::collections::VecDeque<usize> = self.dependencies_of(package, dev).into();
+        while let Some(next) = queue.pop_front() {
+            if next == package || out.contains(&next) {
+                continue;
+            }
+            out.push(next);
+            queue.extend(self.dependencies_of(next, false));
+        }
+        out
+    }
+
+    /// `selected` sorted so that each package comes after the selected packages it reaches through
+    /// path dependencies (with `dev`, also through the dev-dependencies of the selected packages,
+    /// unless they would form a cycle). Ties keep the order of `selected`.
+    pub fn dependency_order(&self, selected: &[usize], dev: bool) -> Vec<usize> {
+        let order = |dev: bool| -> Option<Vec<usize>> {
+            let deps: Vec<Vec<usize>> =
+                selected.iter().map(|&i| self.reachable(i, dev).into_iter().filter(|d| selected.contains(d)).collect()).collect();
+            let mut done: Vec<usize> = Vec::new();
+            while done.len() < selected.len() {
+                let next = (0..selected.len()).find(|&k| !done.contains(&selected[k]) && deps[k].iter().all(|d| done.contains(d)))?;
+                done.push(selected[next]);
+            }
+            Some(done)
+        };
+        if dev && let Some(order) = order(true) {
+            return order;
+        }
+        order(false).unwrap_or_else(|| selected.to_vec())
     }
 
     /// The directory of the root manifest: the workspace root, or the single package's directory.
@@ -397,12 +500,12 @@ impl Project {
     }
 
     /// The packages a command applies to: the `-p` packages, every member with `--workspace`,
-    /// else the member the command runs in, or every member at the workspace root.
+    /// else the member the command runs in, or the default members at the workspace root;
+    /// minus the `--exclude` packages.
     pub fn select(&self, selection: &Selection) -> Result<Vec<usize>> {
-        if selection.workspace {
-            return Ok(self.members.clone());
-        }
-        if !selection.packages.is_empty() {
+        let mut selected = if selection.workspace {
+            self.members.clone()
+        } else if !selection.packages.is_empty() {
             let mut out = Vec::new();
             for name in &selection.packages {
                 let index = self.find(name)?;
@@ -410,12 +513,21 @@ impl Project {
                     out.push(index);
                 }
             }
-            return Ok(out);
+            out
+        } else {
+            match self.current {
+                Some(i) => vec![i],
+                None => self.default_members.clone(),
+            }
+        };
+        for name in &selection.exclude {
+            let index = self.find(name)?;
+            selected.retain(|&i| i != index);
         }
-        Ok(match self.current {
-            Some(i) => vec![i],
-            None => self.members.clone(),
-        })
+        if selected.is_empty() {
+            bail!("`--exclude` leaves no package to work on; its members are: {}", self.member_names());
+        }
+        Ok(selected)
     }
 
     /// The one package a command such as `kargo run` applies to.
@@ -443,8 +555,11 @@ fn enclosing_workspace(dir: &Path) -> Result<Option<PathBuf>> {
             continue;
         }
         let manifest = WorkspaceManifest::load(&candidate)?;
-        let listed = manifest.members.iter().any(|m| dunce_canonicalize(&ancestor.join(m)) == dir);
-        return Ok(listed.then(|| ancestor.to_path_buf()));
+        let ancestor = dunce_canonicalize(ancestor);
+        // `members` entries may also point outside the workspace directory (`../lib`).
+        let listed = dir.strip_prefix(&ancestor).is_ok_and(|rel| manifest.lists_member(rel))
+            || manifest.members.iter().any(|m| dunce_canonicalize(&ancestor.join(m)) == dir);
+        return Ok(listed.then_some(ancestor));
     }
     Ok(None)
 }
@@ -526,7 +641,15 @@ impl Loader {
         }
         check_cycles(&self.packages)?;
         unify_toolchains(&mut self.packages, self.workspace.is_some())?;
-        Ok(Project { root: self.root, workspace: self.workspace, target_dir: self.target_dir, packages: self.packages, members, current })
+        Ok(Project {
+            root: self.root,
+            workspace: self.workspace,
+            target_dir: self.target_dir,
+            packages: self.packages,
+            default_members: members.clone(),
+            members,
+            current,
+        })
     }
 }
 
@@ -692,11 +815,11 @@ core = { path = \"../libs/core\" }
         let all = Selection::default();
         assert_eq!(project.select(&all).unwrap(), [0, 1]);
         assert!(format!("{:#}", project.select_one(&all, "`kargo run`").unwrap_err()).contains("pick one with `-p <name>` (app, core)"));
-        let core_only = Selection { packages: vec!["core".into()], workspace: false };
+        let core_only = Selection { packages: vec!["core".into()], workspace: false, ..Default::default() };
         assert_eq!(project.select_one(&core_only, "`kargo run`").unwrap(), 1);
-        let unknown = Selection { packages: vec!["nope".into()], workspace: false };
+        let unknown = Selection { packages: vec!["nope".into()], workspace: false, ..Default::default() };
         assert!(format!("{:#}", project.select(&unknown).unwrap_err()).contains("members are: app, core"));
-        let whole = Selection { packages: vec![], workspace: true };
+        let whole = Selection { packages: vec![], workspace: true, ..Default::default() };
         assert!(project.select_one(&whole, "`kargo run`").is_err());
 
         let inside = Project::discover(&root.join("libs/core/src"), None).unwrap();
@@ -704,6 +827,76 @@ core = { path = \"../libs/core\" }
         assert_eq!(inside.select(&all).unwrap(), [1]);
         assert_eq!(Workspace::discover(&root.join("app"), None).unwrap().name(), "app");
         assert!(Workspace::discover(&root, None).is_err());
+    }
+
+    #[test]
+    fn member_globs_default_members_and_exclude() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce_canonicalize(dir.path());
+        write(
+            &root,
+            "kargo.toml",
+            "[workspace]
+members = [\"libs/*\", \"apps/*\"]
+exclude = [\"libs/legacy\"]
+default-members = [\"apps/server\"]
+",
+        );
+        write(&root, "libs/core/kargo.toml", &package("core", ""));
+        write(&root, "libs/util/kargo.toml", &package("util", ""));
+        write(&root, "libs/legacy/kargo.toml", &package("legacy", ""));
+        write(
+            &root,
+            "apps/server/kargo.toml",
+            &package(
+                "server",
+                "[dependencies]
+core = { path = \"../../libs/core\" }
+",
+            ),
+        );
+        write(
+            &root,
+            "apps/cli/kargo.toml",
+            &package(
+                "cli",
+                "[dependencies]
+core = { path = \"../../libs/core\" }
+util = { path = \"../../libs/util\" }
+[dev-dependencies]
+server = { path = \"../server\" }
+",
+            ),
+        );
+
+        let project = Project::discover(&root, None).unwrap();
+        let names = |indices: &[usize]| indices.iter().map(|&i| project.package(i).name().to_owned()).collect::<Vec<_>>();
+        assert_eq!(names(project.members()), ["core", "util", "cli", "server"]);
+        // At the root, the default members; `--workspace` is every member.
+        assert_eq!(names(&project.select(&Selection::default()).unwrap()), ["server"]);
+        let all = Selection { workspace: true, ..Default::default() };
+        assert_eq!(names(&project.select(&all).unwrap()), ["core", "util", "cli", "server"]);
+        let without = Selection { workspace: true, exclude: vec!["util".into(), "cli".into()], ..Default::default() };
+        assert_eq!(names(&project.select(&without).unwrap()), ["core", "server"]);
+        let nothing = Selection { exclude: vec!["server".into()], ..Default::default() };
+        assert!(format!("{:#}", project.select(&nothing).unwrap_err()).contains("leaves no package"));
+
+        // Dependencies come first; with `dev`, also the packages tests use.
+        let members = project.members().to_vec();
+        assert_eq!(names(&project.dependency_order(&members, false)), ["core", "util", "cli", "server"]);
+        assert_eq!(names(&project.dependency_order(&[members[3], members[2], members[0]], true)), ["core", "server", "cli"]);
+        assert_eq!(names(&project.reachable(members[2], false)), ["core", "util"]);
+        assert_eq!(names(&project.reachable(members[2], true)), ["core", "util", "server"]);
+
+        // A member found through a glob knows its workspace.
+        let inside = Project::discover(&root.join("libs/util"), None).unwrap();
+        assert!(inside.is_workspace());
+        assert_eq!(inside.current().map(|i| inside.package(i).name().to_owned()).as_deref(), Some("util"));
+        // An excluded directory is a project of its own.
+        assert!(!Project::discover(&root.join("libs/legacy"), None).unwrap().is_workspace());
+
+        write(&root, "kargo.toml", "[workspace]\nmembers = [\"libs/*\"]\ndefault-members = [\"apps/server\"]\n");
+        assert!(load_err(&root.join("kargo.toml")).contains("`default-members` lists `apps/server`, which is not a member"));
     }
 
     #[test]

@@ -215,6 +215,14 @@ AndroidX and other Android libraries come from Google's Maven repository, which 
 
 Android is just another target. Common code in `src/` is shared with JVM, Wasm and Native, and `src-android/` holds `actual` implementations. See [Multiplatform projects](../multiplatform/).
 
+Code can also live in other packages of a [workspace](../workspaces/#android-members): an Android app can depend on path members. An Android library among them (`kind = "library"`) becomes a Gradle subproject of the app's generated build, and a package without `[target.android]` comes in as the JVM jar Kargo builds for it:
+
+```toml title="apps/android-app/kargo.toml"
+[dependencies]
+core = { path = "../../libs/core" }       # a multiplatform library
+ui-kit = { path = "../../libs/ui-kit" }   # an Android library
+```
+
 ## Opening in Android Studio
 
 You can open `target/android` in Android Studio to use the layout editor or debugger. Don't edit the generated Gradle files there: Kargo rewrites them on every build. Change `kargo.toml` instead.

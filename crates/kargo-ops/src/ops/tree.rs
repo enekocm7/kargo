@@ -10,9 +10,18 @@ use super::context::BuildContext;
 use kargo_manifest::{Scope, TargetKind};
 use kargo_maven::{ModuleId, Resolution};
 
-/// The packages a configuration of `target` uses through path dependencies, as tree lines such
-/// as `mathlib v0.1.0 (/home/me/mathlib)`. Their own Maven dependencies are part of the resolution.
-pub fn path_dependencies(ctx: &BuildContext, target: TargetKind, configuration: Configuration) -> Result<Vec<String>> {
+/// A package reached through path dependencies, with the ones it reaches in turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalNode {
+    /// Such as `mathlib v0.1.0 (/home/me/mathlib)`.
+    pub label: String,
+    pub children: Vec<LocalNode>,
+}
+
+/// The packages a configuration of `target` uses through path dependencies, as a tree that
+/// follows the path dependencies of each one: the module graph. Their own Maven dependencies are
+/// part of the resolution.
+pub fn path_dependencies(ctx: &BuildContext, target: TargetKind, configuration: Configuration) -> Result<Vec<LocalNode>> {
     let scopes: &[Scope] = match configuration {
         Configuration::Compile => &[Scope::Compile, Scope::Provided],
         Configuration::Runtime => &[Scope::Compile, Scope::Runtime],
@@ -22,19 +31,46 @@ pub fn path_dependencies(ctx: &BuildContext, target: TargetKind, configuration: 
     if configuration == Configuration::Test {
         deps.extend(ctx.local_dependencies(target, true)?);
     }
-    Ok(deps
-        .iter()
-        .filter(|d| scopes.contains(&d.scope))
-        .map(|d| {
-            let pkg = ctx.project.package(d.package);
-            format!("{} v{} ({})", pkg.name(), pkg.manifest().package.version, pkg.root().display())
-        })
-        .collect())
+    let included: Vec<usize> = deps.iter().filter(|d| scopes.contains(&d.scope)).map(|d| d.package).collect();
+    let project = ctx.project;
+    fn node(
+        project: &crate::workspace::Project,
+        package: usize,
+        target: TargetKind,
+        included: &[usize],
+        seen: &mut Vec<usize>,
+    ) -> LocalNode {
+        let pkg = project.package(package);
+        let mut label = format!("{} v{} ({})", pkg.name(), pkg.manifest().package.version, pkg.root().display());
+        let children: Vec<usize> =
+            pkg.path_dependencies().iter().filter(|(d, i)| d.applies_to(target, false) && included.contains(i)).map(|(_, i)| *i).collect();
+        if seen.contains(&package) && !children.is_empty() {
+            label.push_str(" (*)");
+            return LocalNode { label, children: Vec::new() };
+        }
+        seen.push(package);
+        let children = children.into_iter().map(|c| node(project, c, target, included, seen)).collect();
+        LocalNode { label, children }
+    }
+    let (mut seen, mut top) = (Vec::new(), Vec::new());
+    let mut out = Vec::new();
+    for dev in [false, true] {
+        if dev && configuration != Configuration::Test {
+            break;
+        }
+        for (dep, index) in ctx.ws.path_dependencies() {
+            if dep.applies_to(target, dev) && included.contains(index) && *index != ctx.package && !top.contains(index) {
+                top.push(*index);
+                out.push(node(project, *index, target, &included, &mut seen));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Renders a resolution as a Cargo-style tree, after the `locals` (path dependency) lines.
 /// Modules already printed are marked `(*)`; version conflicts show `requested -> selected`.
-pub fn render(title: &str, locals: &[String], resolution: &Resolution, max_depth: Option<usize>) -> String {
+pub fn render(title: &str, locals: &[LocalNode], resolution: &Resolution, max_depth: Option<usize>) -> String {
     let versions: HashMap<&ModuleId, &str> = resolution.nodes.iter().map(|n| (&n.module, n.version.as_str())).collect();
     let deps: HashMap<&ModuleId, &Vec<(ModuleId, Option<String>)>> =
         resolution.nodes.iter().map(|n| (&n.module, &n.dependencies)).collect();
@@ -75,9 +111,15 @@ pub fn render(title: &str, locals: &[String], resolution: &Resolution, max_depth
         }
     }
 
+    fn walk_local(out: &mut String, node: &LocalNode, prefix: &str, last: bool) {
+        let _ = writeln!(out, "{prefix}{}{}", if last { "└── " } else { "├── " }, node.label);
+        let child_prefix = format!("{prefix}{}", if last { "    " } else { "│   " });
+        for (i, child) in node.children.iter().enumerate() {
+            walk_local(out, child, &child_prefix, i + 1 == node.children.len());
+        }
+    }
     for (i, local) in locals.iter().enumerate() {
-        let last = i + 1 == locals.len() && resolution.roots.is_empty();
-        let _ = writeln!(out, "{}{local}", if last { "└── " } else { "├── " });
+        walk_local(&mut out, local, "", i + 1 == locals.len() && resolution.roots.is_empty());
     }
     for (i, root) in resolution.roots.iter().enumerate() {
         walk(&mut out, root, None, "", i + 1 == resolution.roots.len(), 1, max_depth, &versions, &deps, &mut expanded);
@@ -184,6 +226,25 @@ demo (jvm)
 │   └── g:leaf:1
 └── g:other:1
     └── g:shared:2.0 (*)
+";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn renders_the_module_graph_first() {
+        let leaf = |label: &str| LocalNode { label: label.to_owned(), children: Vec::new() };
+        let locals = vec![
+            LocalNode { label: "core v0.1.0 (/ws/core)".to_owned(), children: vec![leaf("util v0.1.0 (/ws/util)")] },
+            leaf("util v0.1.0 (/ws/util)"),
+        ];
+        let text = render("server v0.1.0 (jvm)", &locals, &sample(), Some(0));
+        let expected = "\
+server v0.1.0 (jvm)
+├── core v0.1.0 (/ws/core)
+│   └── util v0.1.0 (/ws/util)
+├── util v0.1.0 (/ws/util)
+├── g:app:1
+└── g:other:1
 ";
         assert_eq!(text, expected);
     }

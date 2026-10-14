@@ -183,6 +183,10 @@ pub struct Dependency {
     pub transitive: bool,
     /// A BOM whose managed versions apply to the whole project.
     pub bom: bool,
+    /// Part of this package's API (`exported = true`): packages that depend on this one through a
+    /// `path` dependency compile against it too, and its POM scope is `compile`. Otherwise they
+    /// only get it at runtime.
+    pub exported: bool,
 }
 
 impl Dependency {
@@ -198,6 +202,7 @@ impl Dependency {
             force: false,
             transitive: true,
             bom: false,
+            exported: false,
         }
     }
 
@@ -221,6 +226,11 @@ pub struct PathDependency {
     pub dev: bool,
     /// Declared in `[target.<target>.dependencies]`.
     pub target: Option<TargetKind>,
+    /// Part of the declaring package's API (`exported = true`): its consumers compile against
+    /// this package too, instead of only getting it at runtime.
+    pub exported: bool,
+    /// Also brings the dependency's test fixtures (`test-fixtures = true`, only in `[dev-dependencies]`).
+    pub test_fixtures: bool,
 }
 
 impl PathDependency {
@@ -920,7 +930,10 @@ impl Manifest {
         if is_workspace(text)? {
             bail!("this is a workspace manifest ([workspace]), not a package; select a member with `-p <name>`");
         }
-        let raw: raw::RawManifest = toml::from_str(text)?;
+        let raw: raw::RawManifest = match raw::inherit(toml::from_str(text)?, workspace)? {
+            Some(table) => toml::Value::Table(table).try_into()?,
+            None => toml::from_str(text)?,
+        };
         raw.validate(workspace)
     }
 
@@ -935,18 +948,48 @@ impl Manifest {
     }
 }
 
-/// A workspace's `kargo.toml`: `[workspace]` with its `members`, shared
-/// `[workspace.dependencies]` and `[workspace.kotlin]`.
+/// A workspace's `kargo.toml`: `[workspace]` with its `members`, and what members share or
+/// inherit: `[workspace.package]`, `[workspace.kotlin]`, `[workspace.dependencies]`,
+/// `[workspace.frameworks]`, `[workspace.plugins]` and `[workspace.tasks]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceManifest {
     /// The directory holding the workspace's `kargo.toml`.
     pub root: PathBuf,
-    /// Member directories as written, relative to `root`.
-    pub members: Vec<PathBuf>,
+    /// Member directories or globs (`libs/*`) as written, relative to `root`.
+    pub members: Vec<String>,
+    /// Directories that `members` globs must not match, relative to `root`.
+    pub exclude: Vec<PathBuf>,
+    /// The members `kargo build` and the other commands work on at the workspace root
+    /// (`default-members`); empty means every member.
+    pub default_members: Vec<PathBuf>,
     /// The Kotlin version every member builds with.
     pub kotlin_version: Option<String>,
+    /// `[workspace.kotlin]`: compiler settings every member starts from.
+    pub kotlin: WorkspaceKotlin,
+    /// Tasks run at the workspace root (`[workspace.tasks]`); members may inherit them.
+    pub tasks: BTreeMap<String, Task>,
     /// Raw `[workspace.dependencies]` entries, inherited with `{ workspace = true }`.
     dependencies: toml::Table,
+    /// Raw `[workspace.package]`, `[workspace.frameworks]`, `[workspace.plugins]` and
+    /// `[workspace.tasks]` entries, inherited with `{ workspace = true }`.
+    package: toml::Table,
+    frameworks: toml::Table,
+    plugins: toml::Table,
+    raw_tasks: toml::Table,
+}
+
+/// `[workspace.kotlin]`: Kotlin settings that apply to every member. A member's own `opt-in` and
+/// `compiler-args` are added to these, and its other `[kotlin]` keys take precedence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceKotlin {
+    pub language_version: Option<String>,
+    pub api_version: Option<String>,
+    pub ksp_version: Option<String>,
+    pub opt_in: Vec<String>,
+    pub compiler_args: Vec<String>,
+    pub warnings_as_errors: bool,
+    /// The default `[target.jvm] jvm-target` of members.
+    pub jvm_target: Option<String>,
 }
 
 impl WorkspaceManifest {
@@ -966,6 +1009,103 @@ impl WorkspaceManifest {
     pub fn has_dependency(&self, name: &str) -> bool {
         self.dependencies.contains_key(name)
     }
+
+    /// The member directories, relative to `root`: each `members` entry, with globs expanded to
+    /// the matching directories that hold a `kargo.toml` (sorted), minus `exclude`.
+    pub fn member_dirs(&self) -> Result<Vec<PathBuf>> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for pattern in &self.members {
+            let found = if is_glob(pattern) {
+                let mut found = expand_glob(&self.root, pattern)?;
+                found.retain(|dir| self.root.join(dir).join(MANIFEST_NAME).is_file());
+                found.sort();
+                found
+            } else {
+                vec![PathBuf::from(pattern)]
+            };
+            for dir in found {
+                let excluded = self.exclude.iter().any(|e| normalize(e) == normalize(&dir));
+                if !excluded && !out.iter().any(|d| normalize(d) == normalize(&dir)) {
+                    out.push(dir);
+                }
+            }
+        }
+        if out.is_empty() && !self.members.is_empty() {
+            bail!("[workspace] `members` matches no package; check the globs and `exclude`");
+        }
+        Ok(out)
+    }
+
+    /// Whether `dir` (relative to `root`) is a member: listed in `members` or matched by one of
+    /// its globs, and not excluded. Unlike [`member_dirs`](Self::member_dirs), it doesn't read the disk.
+    pub fn lists_member(&self, dir: &Path) -> bool {
+        let dir = normalize(dir);
+        if self.exclude.iter().any(|e| normalize(e) == dir) {
+            return false;
+        }
+        self.members.iter().any(|pattern| {
+            if is_glob(pattern) { glob_matches(&normalize(Path::new(pattern)), &dir) } else { normalize(Path::new(pattern)) == dir }
+        })
+    }
+}
+
+/// Whether a `members` entry is a glob rather than a directory.
+fn is_glob(pattern: &str) -> bool {
+    pattern.contains(['*', '?'])
+}
+
+/// A relative path with `/` separators and without `.` components, for comparisons.
+fn normalize(path: &Path) -> String {
+    path.components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Matches one path segment against a glob segment with `*` (any run of characters) and `?`.
+fn segment_matches(pattern: &[char], name: &[char]) -> bool {
+    match (pattern.first(), name.first()) {
+        (None, None) => true,
+        (Some('*'), _) => segment_matches(&pattern[1..], name) || (!name.is_empty() && segment_matches(pattern, &name[1..])),
+        (Some('?'), Some(_)) => segment_matches(&pattern[1..], &name[1..]),
+        (Some(p), Some(n)) if p == n => segment_matches(&pattern[1..], &name[1..]),
+        _ => false,
+    }
+}
+
+/// Whether the `/`-separated `path` matches the `/`-separated glob `pattern`, segment by segment.
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    let (pattern, path): (Vec<&str>, Vec<&str>) = (pattern.split('/').collect(), path.split('/').collect());
+    pattern.len() == path.len()
+        && pattern.iter().zip(&path).all(|(p, n)| segment_matches(&p.chars().collect::<Vec<_>>(), &n.chars().collect::<Vec<_>>()))
+}
+
+/// The directories under `root` matching the glob `pattern`, relative to `root`.
+fn expand_glob(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+    let mut found = vec![PathBuf::new()];
+    for segment in normalize(Path::new(pattern)).split('/') {
+        let mut next = Vec::new();
+        for dir in found {
+            if !is_glob(segment) {
+                if root.join(&dir).join(segment).is_dir() {
+                    next.push(dir.join(segment));
+                }
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(root.join(&dir)) else { continue };
+            let pattern: Vec<char> = segment.chars().collect();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // Like a shell, `*` does not match hidden directories.
+                if entry.path().is_dir() && !name.starts_with('.') && segment_matches(&pattern, &name.chars().collect::<Vec<_>>()) {
+                    next.push(dir.join(name));
+                }
+            }
+        }
+        found = next;
+    }
+    Ok(found)
 }
 
 /// Whether `text` is a workspace manifest (a `[workspace]` table) rather than a package.

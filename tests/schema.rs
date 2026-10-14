@@ -176,7 +176,7 @@ fn schema_enums_match_kargo() {
     let names = |all: Vec<&'static str>| all;
     assert_eq!(enum_values(&root["definitions"]["hook"]), names(Hook::ALL.iter().map(|h| h.as_str()).collect()));
     assert_eq!(
-        enum_values(&props["tasks"]["additionalProperties"]["anyOf"][1]["properties"]["shell"]),
+        enum_values(&root["definitions"]["tasks"]["additionalProperties"]["anyOf"][1]["properties"]["shell"]),
         names(TaskShell::ALL.iter().map(|s| s.as_str()).collect())
     );
     assert_eq!(
@@ -188,7 +188,7 @@ fn schema_enums_match_kargo() {
     targets.sort();
     expected.sort();
     assert_eq!(targets, expected);
-    let mut frameworks = property_names(&props["frameworks"]);
+    let mut frameworks = property_names(&root["definitions"]["frameworks"]);
     let mut expected = kargo_ops::builtins::FRAMEWORK_NAMES.to_vec();
     frameworks.sort();
     expected.sort();
@@ -200,7 +200,7 @@ fn schema_defaults_match_kargo() {
     let root = schema();
     let props = &root["properties"];
     let default = |node: &Value| node["default"].as_str().map(str::to_owned);
-    let framework = |name: &str| default(&props["frameworks"]["properties"][name]["anyOf"][1]["properties"]["version"]);
+    let framework = |name: &str| default(&root["definitions"]["frameworks"]["properties"][name]["anyOf"][1]["properties"]["version"]);
     use kargo_ops::builtins::*;
     let cases = [
         (default(&props["kotlin"]["properties"]["version"]), kargo_manifest::DEFAULT_KOTLIN_VERSION),
@@ -218,7 +218,7 @@ fn schema_defaults_match_kargo() {
     for (schema_default, kargo) in cases {
         assert_eq!(schema_default.as_deref(), Some(kargo), "a default version in the schema is out of date");
     }
-    let coroutines = props["frameworks"]["properties"]["coroutines"]["examples"][1].as_str();
+    let coroutines = root["definitions"]["frameworks"]["properties"]["coroutines"]["examples"][1].as_str();
     assert_eq!(coroutines, Some(COROUTINES_VERSION));
     let jvm_target = props["target"]["properties"]["jvm"]["properties"]["jvm-target"]["description"].as_str().unwrap();
     assert!(jvm_target.contains(&format!("Defaults to {}", kargo_manifest::DEFAULT_JVM_TARGET)), "{jvm_target}");

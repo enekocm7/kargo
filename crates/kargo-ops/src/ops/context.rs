@@ -53,11 +53,15 @@ struct Shared {
     native: Lazy<NativeToolchain>,
     /// KSP tool classpaths by KSP version (members of a workspace may pick different ones).
     ksp: Mutex<HashMap<String, Vec<PathBuf>>>,
-    /// Artifacts of path dependencies already built in this invocation, by package, target and platform.
-    built: Mutex<HashMap<String, Option<PathBuf>>>,
+    /// Artifacts of path dependencies built in this invocation, by package, target and platform. Each
+    /// entry has its own lock, so packages building at the same time build a shared dependency once.
+    built: Mutex<HashMap<String, Arc<Mutex<Option<BuiltArtifact>>>>>,
     /// The build-directory lock, held until [`BuildContext::unlock`] or drop.
     build_lock: Mutex<Option<FileLock>>,
 }
+
+/// The outcome of building a path dependency: its artifact, or why it failed.
+type BuiltArtifact = std::result::Result<Option<PathBuf>, String>;
 
 /// A package reached through path dependencies, with the scope it has for the consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +80,19 @@ pub fn combine_scopes(outer: Scope, inner: Scope) -> Option<Scope> {
         (Scope::Processor | Scope::Ksp, _) => None,
         (Scope::Runtime, _) | (_, Scope::Runtime) => Some(Scope::Runtime),
         (Scope::Compile, Scope::Compile) => Some(Scope::Compile),
+    }
+}
+
+/// The scope a path dependency's own dependency (`inner`) gets for the consumer, which reaches the
+/// path dependency with scope `outer`. Like Gradle's `api` and `implementation`: an `exported`
+/// dependency is part of the path dependency's API and keeps Maven's scope ([`combine_scopes`]);
+/// any other one is only needed to run it, so the consumer gets it at runtime (and not at all
+/// through a `provided` dependency).
+pub fn inherited_scope(outer: Scope, inner: Scope, exported: bool) -> Option<Scope> {
+    match combine_scopes(outer, inner)? {
+        Scope::Compile if !exported => Some(Scope::Runtime),
+        Scope::Provided if !exported => None,
+        scope => Some(scope),
     }
 }
 
@@ -176,6 +193,19 @@ pub fn to_request(d: &Dependency) -> DependencyRequest {
     }
 }
 
+/// Adds the dependencies a path dependency brings to `deps`, whose first `own` entries the consumer
+/// declared itself (and which win). A module that two path dependencies bring with different scopes
+/// is needed both to compile and at runtime.
+fn merge_inherited(deps: &mut Vec<Dependency>, own: usize, inherited: Vec<Dependency>) {
+    for d in inherited {
+        match deps.iter().position(|u| u.same_artifact(&d)) {
+            None => deps.push(d),
+            Some(i) if i >= own && !d.bom && deps[i].scope != d.scope => deps[i].scope = Scope::Compile,
+            Some(_) => {}
+        }
+    }
+}
+
 /// Appends `extra` dependencies unless the user already declared that artifact of the module.
 fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
     let mut out: Vec<Dependency> = user.to_vec();
@@ -236,13 +266,16 @@ impl<'a> BuildContext<'a> {
     }
 
     /// The artifact of a path dependency built earlier in this invocation, or builds it with `build`.
+    /// While one thread builds it, the others asking for the same `key` wait for its result.
     pub fn built_artifact(&self, key: String, build: impl FnOnce() -> Result<Option<PathBuf>>) -> Result<Option<PathBuf>> {
-        if let Some(artifact) = self.shared.built.lock().expect("lock poisoned").get(&key) {
-            return Ok(artifact.clone());
+        let entry = self.shared.built.lock().expect("lock poisoned").entry(key).or_default().clone();
+        let mut slot = entry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(built) = &*slot {
+            return built.clone().map_err(|e| anyhow::anyhow!(e));
         }
-        let artifact = build()?;
-        self.shared.built.lock().expect("lock poisoned").insert(key, artifact.clone());
-        Ok(artifact)
+        let built = build();
+        *slot = Some(built.as_ref().map(Clone::clone).map_err(|e| format!("{e:#}")));
+        built
     }
 
     /// Every package this one reaches through path dependencies that apply to `target`, with its
@@ -279,7 +312,7 @@ impl<'a> BuildContext<'a> {
                 }
             };
             for (dep, child) in pkg.path_dependencies().iter().filter(|(dep, _)| dep.applies_to(target, false)) {
-                if let Some(s) = combine_scopes(scope, dep.scope) {
+                if let Some(s) = inherited_scope(scope, dep.scope, dep.exported) {
                     queue.push_back((package, *child, s));
                 }
             }
@@ -357,27 +390,35 @@ impl<'a> BuildContext<'a> {
         let user = manifest.dependencies_for(target);
         let mut all = merge_deps(&user, &contributions.dependencies);
         let mut dev_all = merge_deps(&manifest.dev_dependencies, &contributions.dev_dependencies);
-        // Path dependencies bring their Maven dependencies (declared and framework ones) along,
-        // following Maven's scope rules. What the consumer declares itself comes first and wins.
+        let (own, dev_own) = (all.len(), dev_all.len());
+        // Path dependencies bring their Maven dependencies (declared and framework ones) along:
+        // the `exported` ones (and the frameworks' libraries) with Maven's scope rules, the others
+        // at runtime. What the consumer declares itself comes first and wins.
         for dev in [false, true] {
             for local in self.local_dependencies(target, dev)? {
                 let pkg = self.project.package(local.package);
-                let theirs = builtins::contributions(pkg.manifest(), target, pkg.root())?;
-                let inherited: Vec<Dependency> = merge_deps(&pkg.manifest().dependencies_for(target), &theirs.dependencies)
+                let theirs = builtins::contributions(pkg.manifest(), target, pkg.root())?.dependencies;
+                let inherited: Vec<Dependency> = merge_deps(&pkg.manifest().dependencies_for(target), &theirs)
                     .into_iter()
                     .filter_map(|mut d| {
                         if !d.bom {
-                            d.scope = combine_scopes(local.scope, d.scope)?;
+                            d.scope = inherited_scope(local.scope, d.scope, d.exported)?;
                         }
                         Some(d)
                     })
                     .collect();
                 if dev {
-                    dev_all = merge_deps(&dev_all, &inherited);
+                    merge_inherited(&mut dev_all, dev_own, inherited);
                 } else {
-                    all = merge_deps(&all, &inherited);
+                    merge_inherited(&mut all, own, inherited);
                 }
             }
+        }
+        // Test fixtures compile against their package's dev-dependencies, which the tests using them need too.
+        for (_, index) in self.ws.path_dependencies().iter().filter(|(d, _)| d.test_fixtures && d.applies_to(target, true)) {
+            let pkg = self.project.package(*index);
+            let theirs = builtins::contributions(pkg.manifest(), target, pkg.root())?.dev_dependencies;
+            merge_inherited(&mut dev_all, dev_own, merge_deps(&pkg.manifest().dev_dependencies, &theirs));
         }
         let (boms, main): (Vec<_>, Vec<_>) = all.into_iter().partition(|d| d.bom);
         let (dev_boms, dev): (Vec<_>, Vec<_>) = dev_all.into_iter().partition(|d| d.bom);
@@ -524,6 +565,18 @@ mod tests {
     use crate::workspace::Project;
 
     #[test]
+    fn exported_dependencies_keep_their_scope() {
+        use Scope::*;
+        assert_eq!(inherited_scope(Compile, Compile, true), Some(Compile));
+        assert_eq!(inherited_scope(Compile, Compile, false), Some(Runtime));
+        assert_eq!(inherited_scope(Compile, Runtime, true), Some(Runtime));
+        assert_eq!(inherited_scope(Provided, Compile, true), Some(Provided));
+        assert_eq!(inherited_scope(Provided, Compile, false), None);
+        assert_eq!(inherited_scope(Runtime, Compile, false), Some(Runtime));
+        assert_eq!(inherited_scope(Compile, Provided, true), None);
+    }
+
+    #[test]
     fn scopes_combine_like_maven() {
         use Scope::*;
         assert_eq!(combine_scopes(Compile, Compile), Some(Compile));
@@ -573,7 +626,8 @@ fixtures = { path = \"../fixtures\" }
             "[dependencies]
 core = { path = \"../core\", scope = \"runtime\" }
 \"g:shared\" = \"1.0\"
-\"g:lib\" = \"1.0\"
+\"g:lib\" = { version = \"1.0\", exported = true }
+\"g:impl\" = \"1.0\"
              \"g:hidden\" = { version = \"1.0\", scope = \"provided\" }
 ",
         );
@@ -586,7 +640,8 @@ core = { path = \"../core\", scope = \"runtime\" }
         write(
             "tool/kargo.toml",
             "[dependencies]
-\"g:tool\" = \"1.0\"
+\"g:tool\" = { version = \"1.0\", exported = true }
+\"g:tool-impl\" = \"1.0\"
 ",
         );
         write(
@@ -611,9 +666,12 @@ lib = { path = \"../lib\" }
         let find = |deps: &[Dependency], artifact: &str| deps.iter().find(|d| d.module.artifact == artifact).cloned();
         // The consumer's own declaration wins over the dependency's.
         assert_eq!(find(&setup.main, "shared").unwrap().version.as_deref(), Some("2.0"));
+        // Only what `lib` exports is there to compile against; the rest comes at runtime.
         assert_eq!(find(&setup.main, "lib").unwrap().scope, Scope::Compile);
+        assert_eq!(find(&setup.main, "impl").unwrap().scope, Scope::Runtime);
         assert_eq!(find(&setup.main, "core").unwrap().scope, Scope::Runtime);
         assert_eq!(find(&setup.main, "tool").unwrap().scope, Scope::Provided);
+        assert!(find(&setup.main, "tool-impl").is_none(), "a provided dependency brings only its API");
         assert!(find(&setup.main, "hidden").is_none(), "provided dependencies are not passed on");
         assert!(find(&setup.dev, "fixture").is_some());
 
