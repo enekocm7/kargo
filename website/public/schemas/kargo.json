@@ -254,7 +254,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "fail-fast": { "description": "Stop at the first target whose tests fail.", "type": "boolean", "default": true }
+        "fail-fast": { "description": "Stop at the first target whose tests fail.", "type": "boolean", "default": true },
+        "timeout": { "description": "How long the whole test run may take, such as \"30s\", \"5m\" or \"1h\". The run is stopped when it passes.", "type": "string" },
+        "test-timeout": { "description": "How long one JVM test may take, such as \"30s\" or \"2m\" (JUnit Jupiter's default timeout).", "type": "string" },
+        "jvm-args": { "description": "JVM arguments for the test process, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } }
       }
     },
     "publish": {

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -86,6 +87,10 @@ struct RawFmt {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawTest {
     fail_fast: Option<bool>,
+    timeout: Option<String>,
+    test_timeout: Option<String>,
+    #[serde(default)]
+    jvm_args: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -637,6 +642,24 @@ fn parse_run(task: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<S
 }
 
 /// Parses a `[tasks]` table (or `[workspace.tasks]`) and checks every `depends-on` names a task in it.
+/// Parses a duration such as `500ms`, `30s`, `5m` or `1h` (a whole number and a unit, optionally separated by a space).
+fn parse_duration(key: &str, value: &str) -> Result<Duration> {
+    let text = value.trim();
+    let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (amount, unit) = text.split_at(digits);
+    let unit_millis = match unit.trim() {
+        "ms" => 1,
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => 0,
+    };
+    match amount.parse::<u64>() {
+        Ok(n) if n > 0 && unit_millis > 0 => Ok(Duration::from_millis(n.saturating_mul(unit_millis))),
+        _ => bail!("[test] `{key}` must be a positive duration such as \"30s\", \"5m\" or \"1h\", not \"{value}\""),
+    }
+}
+
 fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
     let mut tasks = BTreeMap::new();
     for (name, value) in table {
@@ -1346,7 +1369,12 @@ impl RawManifest {
             doc,
             fmt,
             lint,
-            test: TestSettings { fail_fast: self.test.fail_fast.unwrap_or(true) },
+            test: TestSettings {
+                fail_fast: self.test.fail_fast.unwrap_or(true),
+                timeout: self.test.timeout.as_deref().map(|v| parse_duration("timeout", v)).transpose()?,
+                test_timeout: self.test.test_timeout.as_deref().map(|v| parse_duration("test-timeout", v)).transpose()?,
+                jvm_args: self.test.jvm_args,
+            },
             package: Package {
                 name: self.package.name,
                 version: self.package.version,

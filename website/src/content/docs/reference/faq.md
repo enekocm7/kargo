@@ -130,6 +130,14 @@ You changed `kargo.toml` without committing the updated lockfile. Run `kargo bui
 
 Add `"host"` to `[target.native] platforms` to run locally.
 
+### `test JVM exited with code N before finishing`
+
+A test ended the test JVM early: a call to `System.exit(N)` is the usual cause, and an `OutOfMemoryError` the other. Look for the test that calls `exit`, or raise the heap with `[test] jvm-args = ["-Xmx1g"]`. See [When a test run stops early](../../guides/testing/#when-a-test-run-stops-early).
+
+### `JVM tests timed out after ...`
+
+The whole test run passed its `[test] timeout`, so Kargo stopped it. A test that waits on something that never comes is the usual cause. Limit one test with `[test] test-timeout` to find it, and see [Timeouts](../../guides/testing/#timeouts).
+
 ### `no JVM tests found` or `no JVM tests match ...`
 
 `kargo test` compiled your JVM tests but the JUnit Platform found nothing to run. Without a filter, check that test functions carry `@Test` (from `kotlin.test` or JUnit) and that the engine of any other framework (for example `io.kotest:kotest-runner-junit5`) is in `[dev-dependencies]`. With a filter, remember that it matches `package.Class.method` names; see [Filtering tests](../../guides/testing/#filtering-tests).

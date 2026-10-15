@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
@@ -864,11 +865,17 @@ pub struct LintSettings {
 pub struct TestSettings {
     /// Stop at the first target whose tests fail; `kargo test --no-fail-fast` overrides it.
     pub fail_fast: bool,
+    /// How long the whole test run may take, from the first test starting; `None` means no limit.
+    pub timeout: Option<Duration>,
+    /// How long one JVM test may take (`junit.jupiter.execution.timeout.default`); `None` means no limit.
+    pub test_timeout: Option<Duration>,
+    /// JVM arguments for the test process, after `[target.jvm] jvm-args`.
+    pub jvm_args: Vec<String>,
 }
 
 impl Default for TestSettings {
     fn default() -> Self {
-        Self { fail_fast: true }
+        Self { fail_fast: true, timeout: None, test_timeout: None, jvm_args: Vec::new() }
     }
 }
 
