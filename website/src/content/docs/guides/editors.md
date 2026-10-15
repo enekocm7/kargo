@@ -145,12 +145,15 @@ Compiler errors and file locations in the output are links to the source.
 | Add Dependency… | `kargo add` for coordinates you type, into `[dependencies]` or `[dev-dependencies]` |
 | Remove Dependency… | `kargo remove <name>` |
 | Add Target… | `kargo target add <target>` |
+| Remove Target… | `kargo target remove <target>`, for the targets `kargo target list` shows as enabled |
 | Fetch Dependencies and Sources | `kargo fetch --sources`, for navigation into library sources; the [project import](#project-import) then picks them up |
 | Update Dependencies | `kargo update` |
 | Reload Kargo Project | [Imports the project](#project-import) again and restarts `kargo lsp` |
 | Initialize Kargo Project | `kargo init`, in a project without `kargo.toml` |
 
 *Add Dependency* and *Add Target* go through `kargo lsp`'s [commands](#commands-for-editor-plugins), so they edit `kargo.toml` the same way the quick fixes do. You can assign any of these actions a shortcut in *Settings → Keymap*.
+
+*Build → Build Project* runs `kargo build` for the modules the plugin imported, instead of the IDE's compiler. Its compiler errors and warnings show in the Build tool window and the Problems view, each linked to its line in the source.
 
 ### Plugin settings
 
@@ -168,7 +171,6 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, th
 
 ### Limitations of the plugin
 
-- *Build → Build Project* doesn't run `kargo build`; use *Tools → Kargo → Build*, or check on save for errors in the editor.
 - *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
 - The IDE analyzes each module for one platform. In a package with several targets, common code (`src/`) is analyzed like the first target, so completion there also offers that platform's APIs. *Tools → Kargo → Check* shows what fails on the other targets.
 - The npm packages of a [path dependency](../workspaces/#path-dependencies) are not described to the IDE: the import doesn't build a path dependency to read the npm packages in its klibs.

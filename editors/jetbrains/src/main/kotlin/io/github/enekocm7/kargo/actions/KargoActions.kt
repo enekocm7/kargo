@@ -5,6 +5,7 @@ package io.github.enekocm7.kargo.actions
 
 import com.google.gson.JsonObject
 import com.intellij.execution.executors.DefaultRunExecutor
+import com.intellij.execution.process.CapturingProcessHandler
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -103,6 +104,39 @@ class KargoAddTargetAction : KargoProjectAction() {
             }
             .createPopup()
             .showCenteredInCurrentWindow(project)
+    }
+}
+
+/** `kargo target remove`, choosing among the targets `kargo target list` shows as enabled. */
+class KargoRemoveTargetAction : KargoProjectAction() {
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val dir = packageDir(e)?.path
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = enabledTargets(project, dir)
+            ApplicationManager.getApplication().invokeLater {
+                val targets = result.getOrElse { error ->
+                    KargoNotifications.error(project, "Couldn't list the targets", error.message ?: "kargo target list failed")
+                    return@invokeLater
+                }
+                if (targets.isEmpty()) {
+                    KargoNotifications.info(project, "No targets to remove", "This package has no enabled targets.")
+                    return@invokeLater
+                }
+                JBPopupFactory.getInstance().createPopupChooserBuilder(targets)
+                    .setTitle("Remove Target")
+                    .setItemChosenCallback { target -> runKargo(project, "kargo target remove $target", listOf("target", "remove", target), dir) }
+                    .createPopup()
+                    .showCenteredInCurrentWindow(project)
+            }
+        }
+    }
+
+    /** The enabled targets, from `kargo target list --format json`. Runs on a pooled thread. */
+    private fun enabledTargets(project: Project, dir: String?): Result<List<String>> = runCatching {
+        val output = CapturingProcessHandler(Kargo.commandLine(project, listOf("target", "list", "--format", "json"), dir)).runProcess(30_000)
+        check(output.exitCode == 0) { output.stderr.trim().ifEmpty { "kargo target list failed" } }
+        enabledTargetNames(output.stdout)
     }
 }
 
