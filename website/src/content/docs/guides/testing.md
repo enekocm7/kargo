@@ -167,18 +167,20 @@ Editors that use the [`kargo dap`](../editors/#debug-adapter) debug adapter do t
 
 | Target | Test runner | Default test libraries |
 |---|---|---|
-| JVM | JUnit Platform | `kotlin-test-junit5`, `junit-jupiter` |
+| JVM | JUnit 6 on the JUnit Platform | `kotlin-test-junit5`, `junit-jupiter` |
 | Wasm | Node.js, or a headless browser with `environment = "browser"` | `kotlin-test-wasm-js` / `kotlin-test-wasm-wasi` |
 | Native | the native test binary | built into Kotlin/Native |
 | Android | Gradle local unit tests (`testDebugUnitTest`) | `kotlin-test-junit`, `junit` |
 
 Test filters are not supported on Wasm; all tests run.
 
+JVM tests run on JUnit 6, which needs JDK 17 or newer, because `kargo test` starts its launcher on the project's JDK. If the JDK that builds your project is older, pin a newer one with [`[toolchain] jdk`](../toolchains/).
+
 With `environment = "browser"`, Kargo serves a test page, starts Chrome, Chromium, Edge, Brave or Firefox without a window to load it, and prints the results the page reports, so output, failures and `--report junit` look the same as on Node.js. See [Testing in a browser](../wasm/#testing-in-a-browser).
 
 ## JVM-only test libraries
 
-Because JVM tests run on the JUnit Platform, JUnit 5 annotations and libraries like [MockK](https://mockk.io), [AssertJ](https://assertj.github.io/doc/) or [Kotest assertions](https://kotest.io) work. Add them as dev-dependencies for the JVM:
+Because JVM tests run on JUnit 6, JUnit Jupiter annotations and libraries like [MockK](https://mockk.io), [AssertJ](https://assertj.github.io/doc/) or [Kotest assertions](https://kotest.io) work. Add them as dev-dependencies for the JVM:
 
 ```sh
 kargo add io.mockk:mockk --dev

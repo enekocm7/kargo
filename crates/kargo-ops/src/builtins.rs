@@ -21,6 +21,8 @@ pub const LOGBACK_VERSION: &str = "1.5.32";
 pub const LOMBOK_VERSION: &str = "1.18.48";
 pub const SPRING_BOOT_VERSION: &str = "4.1.1";
 pub const JUNIT_VERSION: &str = "6.1.3";
+/// The oldest JDK that runs JUnit 6 and its console launcher, which are compiled for Java 17.
+pub const JUNIT_MIN_JDK: u32 = 17;
 /// KSP2 (`com.google.devtools.ksp`), used for `scope = "ksp"` dependencies on the JVM and Android
 /// unless `[kotlin] ksp` overrides it.
 pub const KSP_VERSION: &str = "2.3.12";

@@ -16,7 +16,7 @@ use super::build::{
     native_cinterop, native_libraries, native_platforms, prepare_wasm, run_jvm_ksp, select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
-use crate::builtins::JUNIT_VERSION;
+use crate::builtins::{JUNIT_MIN_JDK, JUNIT_VERSION};
 use crate::warnings;
 use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -289,6 +289,7 @@ pub fn console_launcher(ctx: &BuildContext) -> Result<PathBuf> {
 /// The JUnit console launcher command that runs (or lists) the compiled tests.
 fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses, mode: JunitMode) -> Result<Command> {
     let jdk = ctx.compiler_jdk()?;
+    jdk.require_version(JUNIT_MIN_JDK).context("JVM tests run on JUnit 6; set `[toolchain] jdk` to a newer JDK")?;
     let jvm = ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")?;
     let launcher = console_launcher(ctx)?;
     let mut run_cp = vec![tests.classes.clone()];
