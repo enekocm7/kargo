@@ -25,6 +25,7 @@ use kargo_util::config::Config;
 
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, SetKind, SourceSet, Unit, UnitId};
+use super::jdk::Jdk;
 use super::library::{self, SourcesJar};
 use super::resolve::{Analyzer, Packages};
 use crate::jsonrpc::{self, Kind};
@@ -49,7 +50,7 @@ fn pipe() -> (io::PipeReader, io::PipeWriter) {
 enum Event {
     Client(Option<Value>),
     Project { generation: u64, model: Model, units: Vec<Arc<Unit>> },
-    Libraries { generation: u64, units: Vec<Arc<Unit>> },
+    Libraries { generation: u64, units: Vec<Arc<Unit>>, jdk: Option<Arc<Jdk>> },
 }
 
 /// What the server knows about the project's layout.
@@ -162,9 +163,25 @@ fn fallback_model(root: &Path) -> Model {
     model
 }
 
-/// Parses every Kotlin file of the project.
+/// The JDK the project builds with, for its sources: the installed JDK that its manifest asks
+/// for, else the one on `JAVA_HOME` or the path. A missing JDK isn't downloaded here; `kargo build` does that.
+fn project_jdk(config: &Config, root: &Path) -> Option<Arc<Jdk>> {
+    let installed = kargo_manifest::Manifest::load(&root.join(kargo_manifest::MANIFEST_NAME))
+        .ok()
+        .and_then(|manifest| kargo_toolchain::jdks::find_installed(config, &manifest.toolchain.jdk).ok().flatten());
+    let (home, version) = match installed {
+        Some(installed) => (installed.jdk().home, installed.major),
+        None => {
+            let jdk = kargo_toolchain::Jdk::detect().ok()?;
+            (jdk.home, jdk.version)
+        }
+    };
+    Jdk::open(&home, &config.home().join("cache"), &format!("JDK {version}")).map(Arc::new)
+}
+
+/// Parses every Kotlin and Java file of the project.
 fn scan(model: &Model) -> Vec<Arc<Unit>> {
-    let mut paths: Vec<PathBuf> = model.roots.iter().flat_map(|(root, _)| kargo_util::fs::collect_files(root, &["kt"])).collect();
+    let mut paths: Vec<PathBuf> = model.roots.iter().flat_map(|(root, _)| kargo_util::fs::collect_files(root, &["kt", "java"])).collect();
     paths.extend(model.files.iter().map(|(p, _)| p.clone()).filter(|p| p.is_file()));
     paths.sort();
     paths.dedup();
@@ -237,7 +254,8 @@ fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache
     if !jars.iter().any(|j| j.name.starts_with("kotlin-stdlib")) {
         units.extend(library::stub_units(&config));
     }
-    if tx.send(Event::Libraries { generation, units: units.clone() }).is_err() || !with_dependencies {
+    let jdk = project_jdk(&config, &root);
+    if tx.send(Event::Libraries { generation, units: units.clone(), jdk: jdk.clone() }).is_err() || !with_dependencies {
         return;
     }
     let Ok(meta) = crate::project::metadata(&config, &root, false) else { return };
@@ -246,7 +264,7 @@ fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache
         return;
     }
     units.extend(deps.iter().flat_map(|jar| jar_units_cached(&config, &cache, jar)));
-    let _ = tx.send(Event::Libraries { generation, units });
+    let _ = tx.send(Event::Libraries { generation, units, jdk });
 }
 
 /// The path of a `file:` URI, with the drive letter in upper case on Windows (editors send
@@ -410,9 +428,9 @@ impl State {
                 }
                 self.changed();
             }
-            Event::Libraries { generation, units } if generation == self.load_generation => {
+            Event::Libraries { generation, units, jdk } if generation == self.load_generation => {
                 self.libraries_loaded = true;
-                self.lib = Arc::new(Index::new(true, units));
+                self.lib = Arc::new(Index::new(true, units).with_jdk(jdk));
                 self.changed();
             }
             _ => {}
@@ -477,7 +495,7 @@ impl State {
                         let name = text::file_name(uri);
                         if name == kargo_manifest::MANIFEST_NAME || name == "kargo.lock" {
                             reload = true;
-                        } else if uri.ends_with(".kt") && !self.open.contains_key(uri) {
+                        } else if (uri.ends_with(".kt") || uri.ends_with(".java")) && !self.open.contains_key(uri) {
                             match std::fs::read_to_string(&path) {
                                 Ok(text) if change["type"] != 3 && self.model.origin(&path) != Origin::Loose => self.set_file(path, text),
                                 _ => {
@@ -518,7 +536,12 @@ impl State {
         }
         self.next_id += 1;
         let id = format!("kotlin/{}", self.next_id);
-        let watchers = json!([{ "globPattern": "**/*.kt" }, { "globPattern": "**/kargo.toml" }, { "globPattern": "**/kargo.lock" }]);
+        let watchers = json!([
+            { "globPattern": "**/*.kt" },
+            { "globPattern": "**/*.java" },
+            { "globPattern": "**/kargo.toml" },
+            { "globPattern": "**/kargo.lock" }
+        ]);
         let params = json!({ "registrations": [{ "id": "kargo-kotlin-watch", "method": "workspace/didChangeWatchedFiles", "registerOptions": { "watchers": watchers } }] });
         self.send(&jsonrpc::request(&id, "client/registerCapability", params))
     }
@@ -548,7 +571,11 @@ impl State {
         let an = Analyzer::new(&lib, &proj, &packages);
         let generation = self.generation;
         let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
-        let unit = file_path(uri).and_then(|p| ids.get(&p).copied()).map(|u| UnitId { lib: false, unit: u });
+        // A Java file is read for its declarations; this server answers requests for Kotlin files only.
+        let unit = file_path(uri)
+            .and_then(|p| ids.get(&p).copied())
+            .filter(|&u| !proj.units[u as usize].is_java())
+            .map(|u| UnitId { lib: false, unit: u });
         let at = |unit: UnitId| -> (usize, Option<usize>) {
             let u = an.unit(unit);
             let offset = text::offset(&u.text, &params["position"]);
@@ -707,7 +734,11 @@ fn group_at(an: &Analyzer, unit: UnitId, tok: usize) -> Option<Vec<super::index:
 fn rename_target(an: &Analyzer, unit: UnitId, tok: usize) -> Result<Vec<super::index::SymId>, Failure> {
     let targets = features::targets_at(an, unit, tok);
     match targets.first() {
-        Some(Target::Sym(m)) if !m.sym.lib => Ok(features::rename_group(an, m.sym)),
+        Some(Target::Sym(m)) if !m.sym.lib && !an.unit(m.sym.unit_id()).is_java() => Ok(features::rename_group(an, m.sym)),
+        Some(Target::Sym(m)) if !m.sym.lib => {
+            let name = &an.decl(m.sym).name;
+            Err(Failure::Invalid(format!("`{name}` is declared in a Java file, which this server doesn't edit, so it can't be renamed")))
+        }
         Some(Target::Sym(m)) => {
             let name = &an.decl(m.sym).name;
             let origin = match &an.unit(m.sym.unit_id()).origin {

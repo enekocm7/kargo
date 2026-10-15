@@ -17,7 +17,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 |---|---|
 | Completion | Members after `.`, `?.` and `::`, extension functions included; everything in scope otherwise; `import` paths. Declarations that need an import come with it |
 | Hover | The declaration's signature, its package or class, and its KDoc as Markdown. Inferred types of variables, such as `val names: List<String>` |
-| Go to definition | Into your project, a path dependency, or the sources of the standard library and of libraries. Go to declaration and go to type definition too |
+| Go to definition | Into your project, a path dependency, or the sources of the standard library, the JDK and libraries. Go to declaration and go to type definition too |
 | Find references, highlights | Every use in the project, with the declaration |
 | Rename | Every reference in the project, and the declarations that must change with it: `expect` and `actual` declarations, overrides, named arguments |
 | Outline | Document symbols for the file, workspace symbols for the project |
@@ -54,6 +54,8 @@ Declarations of the standard library and of other libraries can't be renamed; th
 
 The server reads your project the way `kargo build` compiles it, from [`kargo metadata`](../editors/#importing-a-project): every package of a [workspace](../workspaces/), with the source, test and test-fixture roots of each target and its examples. It writes no files: no `workspace.json`, no `kls-classpath`.
 
+Java files in those roots are read too, so Kotlin code sees the classes of your `.java` files. The server doesn't edit them: see [Limits](#limits).
+
 A file sees the declarations Kargo compiles it with:
 
 | Code in | Sees |
@@ -76,20 +78,25 @@ The **standard library** comes from its sources jar at the project's [`[kotlin] 
 
 Offline before that first download (`kargo --offline lsp`), a built-in outline of the most used parts of the standard library stands in, with its documentation. The whole library replaces it on the next start with network access.
 
+The **JDK** comes from the sources in its `lib/src.zip`. It is the JDK the project builds with: the installed one that `[toolchain] jdk` asks for, else the one on `JAVA_HOME` or the path. The server doesn't download a JDK; `kargo build` does. The JDK's classes are read when a name first needs them, so `java.io.File` and `System` complete, with their Javadoc, and go to definition opens the source file. A JDK without `lib/src.zip` leaves its classes unknown.
+
+Kotlin's view of Java types matches the compiler's: `java.lang.String` is `String`, `int` is `Int`, `java.util.List` is Kotlin's `MutableList`, and so on. `java.lang` is imported into every Kotlin file on the JVM, as it is by the compiler.
+
 **Dependencies** come from their sources jars, once they are in the cache. Download them with:
 
 ```sh
 kargo fetch --sources
 ```
 
-The server then resolves the project's dependencies in the background, as `kargo metadata` does, and reads the sources jars it finds. Restart the editor's language server after fetching new sources. Libraries without a sources jar, and Java code, stay unknown to it: their classes don't complete. The JDK's classes (`java.io.File`, `System`) are Java too.
+The server then resolves the project's dependencies in the background, as `kargo metadata` does, and reads the sources jars it finds, Java files included. Restart the editor's language server after fetching new sources. Libraries without a sources jar stay unknown to it: their classes don't complete.
 
 ## Limits
 
 The server reads declarations and infers types as far as completion and navigation need. It is not the Kotlin compiler:
 
 - It reports no errors of its own. They come from `kargo check` on save, which compiles the code for real. Turn it off with `{ "checkOnSave": false }` in the editor's `initializationOptions`; see [Check on save](../editors/#check-on-save).
-- It doesn't know Java classes, so members of a JDK or Java library type don't complete.
+- It reads Java but doesn't edit it. Java files get no completion, hover, rename or references of their own, and a Java declaration can't be renamed from Kotlin: the server refuses, because the Java code that uses it wouldn't change. References to a Kotlin declaration from Java code aren't searched.
+- Classes from binary-only libraries (jars without a sources jar) are unknown, so their members don't complete.
 - Smart casts (`if (x is Foo) x.`), the branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
 - It has no formatting, quick fixes, signature help, inlay hints or semantic highlighting. Use [`kargo fmt`](../formatting-and-linting/) to format code.
 

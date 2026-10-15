@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, SetKind, SourceSet, Unit, UnitId};
+use super::jdk::tests::fake_jdk;
 use super::library::stub_files;
 use super::resolve::{Analyzer, Packages};
 
@@ -16,10 +17,27 @@ struct Fixture {
     packages: Packages,
     /// The cursor (`$0`) of each file that has one: unit and offset.
     cursors: Vec<(UnitId, usize)>,
+    /// The fake JDK's home, kept while the test runs (the JDK writes its files there).
+    _jdk: Option<tempfile::TempDir>,
 }
 
 /// Project files by path; a path under `tests` is test code, `src-<target>` that target's.
 fn fixture(files: &[(&str, &str)]) -> Fixture {
+    fixture_with_jdk(files, &[])
+}
+
+/// [`fixture`] with the JDK's sources `jdk` (by path, as in `src.zip`) for the libraries.
+fn fixture_with_jdk(files: &[(&str, &str)], jdk: &[(&str, &str)]) -> Fixture {
+    if jdk.is_empty() {
+        return fixture_on(files, None, None);
+    }
+    let (dir, home) = fake_jdk(jdk);
+    let source = super::jdk::Jdk::open(&home, &dir.path().join("cache"), "JDK test").expect("a fake JDK");
+    fixture_on(files, Some(Arc::new(source)), Some(dir))
+}
+
+/// [`fixture`] with the JDK `jdk` (its cache in `jdk_dir`, which lives as long as the fixture).
+fn fixture_on(files: &[(&str, &str)], jdk: Option<Arc<super::jdk::Jdk>>, jdk_dir: Option<tempfile::TempDir>) -> Fixture {
     let lib_units: Vec<Arc<Unit>> = stub_files()
         .into_iter()
         .map(|(rel, text)| {
@@ -49,10 +67,11 @@ fn fixture(files: &[(&str, &str)]) -> Fixture {
         units.push(Arc::new(Unit::new(PathBuf::from("/project").join(path), text, origin)));
     }
     Fixture {
-        lib: Index::new(true, lib_units),
+        lib: Index::new(true, lib_units).with_jdk(jdk),
         proj: Index::new(false, units),
         packages: Packages { visible: vec![vec![0, 1], vec![1]], jvm: true },
         cursors,
+        _jdk: jdk_dir,
     }
 }
 
@@ -568,4 +587,81 @@ fn resolves_every_identifier_of_real_code() {
         }
     }
     eprintln!("{idents} identifiers, {resolved} resolved, in {:?}; slowest {:?} at {}", start.elapsed(), slowest.0, slowest.1);
+}
+
+/// The JDK's sources for the tests of Java: a few classes of `java.lang`, `java.io`.
+const JDK: &[(&str, &str)] = &[
+    ("java.base/module-info.java", "module java.base {\n    exports java.io;\n    exports java.lang;\n}\n"),
+    (
+        "java.base/java/io/File.java",
+        "package java.io;\n\npublic class File {\n    public static final String separator = \"/\";\n\n    public File(String path) {}\n\n    public boolean exists() {\n        return true;\n    }\n\n    public String getName() {\n        return \"\";\n    }\n}\n",
+    ),
+    ("java.base/java/io/PrintStream.java", "package java.io;\n\npublic class PrintStream {\n    public void println(String line) {}\n}\n"),
+    (
+        "java.base/java/lang/System.java",
+        "package java.lang;\n\npublic final class System {\n    public static final java.io.PrintStream out = null;\n\n    /** Gets a system property. */\n    public static String getProperty(String key) {\n        return null;\n    }\n}\n",
+    ),
+];
+
+#[test]
+fn completes_and_navigates_jdk_classes() {
+    // `File` is imported; its members, and those of the classes its members return, complete.
+    let f = fixture_with_jdk(&[("src/Main.kt", "import java.io.File\n\nfun main() {\n    File(\"x\").$0\n}\n")], JDK);
+    let labels = f.labels();
+    assert!(has(&labels, "exists") && has(&labels, "getName"), "{labels:?}");
+
+    // `System` is in `java.lang`, which Kotlin imports; its static members complete through the class.
+    let f = fixture_with_jdk(&[("src/Main.kt", "fun main() {\n    System.$0\n}\n")], JDK);
+    let labels = f.labels();
+    assert!(has(&labels, "out") && has(&labels, "getProperty"), "{labels:?}");
+
+    // Java's `String` is Kotlin's: the members of Kotlin's String complete on what Java returns.
+    let f = fixture_with_jdk(&[("src/Main.kt", "fun main() {\n    System.getProperty(\"a\").$0\n}\n")], JDK);
+    let labels = f.labels();
+    assert!(has(&labels, "uppercase") && has(&labels, "length"), "{labels:?}");
+
+    // Members of a field's type, through the class.
+    let f = fixture_with_jdk(&[("src/Main.kt", "fun main() {\n    System.out.$0\n}\n")], JDK);
+    assert!(has(&f.labels(), "println"), "{:?}", f.labels());
+
+    // Go to definition opens the JDK's source file, at the method.
+    let f = fixture_with_jdk(&[("src/Main.kt", "fun main() {\n    System.getPro$0perty(\"a\")\n}\n")], JDK);
+    assert_eq!(f.definition(), Some(("System.java".into(), "public static String getProperty(String key) {".into())));
+
+    // Hover shows the signature, with the Javadoc.
+    let f = fixture_with_jdk(&[("src/Main.kt", "fun main() {\n    System.getPro$0perty(\"a\")\n}\n")], JDK);
+    let hover = f.hover();
+    assert!(hover.contains("getProperty") && hover.contains("Gets a system property"), "{hover}");
+}
+
+#[test]
+fn knows_the_java_files_of_the_project() {
+    let f = fixture(&[
+        (
+            "src/app/Shape.java",
+            "package app;\n\nimport java.util.List;\n\n/** A shape. */\npublic class Shape {\n    public double area() {\n        return 0.0;\n    }\n\n    public List<String> labels() {\n        return null;\n    }\n}\n",
+        ),
+        ("src/app/Main.kt", "package app\n\nfun main() {\n    Shape().$0\n}\n"),
+    ]);
+    let labels = f.labels();
+    assert!(has(&labels, "area") && has(&labels, "labels"), "{labels:?}");
+}
+
+/// Completion and navigation into the JDK on this machine (`JAVA_HOME`), not a fake one. Run with
+/// `cargo test -p kargo-lsp -- --ignored completes_the_real_jdk --nocapture`.
+#[test]
+#[ignore]
+fn completes_the_real_jdk() {
+    let home = PathBuf::from(std::env::var("JAVA_HOME").expect("JAVA_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    let jdk = super::jdk::Jdk::open(&home, &dir.path().join("cache"), "JDK").expect("a JDK with sources");
+    let f = fixture_on(
+        &[("src/Main.kt", "import java.util.ArrayList\n\nfun main() {\n    ArrayList<String>().$0\n}\n")],
+        Some(Arc::new(jdk)),
+        Some(dir),
+    );
+    let labels = f.labels();
+    assert!(has(&labels, "add") && has(&labels, "size") && has(&labels, "isEmpty"), "{labels:?}");
+    let f = fixture_on(&[("src/Main.kt", "fun main() {\n    System.out.$0\n}\n")], None, None);
+    assert!(!has(&f.labels(), "println"), "without a JDK, nothing of System is known");
 }
