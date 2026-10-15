@@ -440,7 +440,9 @@ impl<'a> Analyzer<'a> {
             if !seen.insert(self.fq(sym)) || out.len() > 64 {
                 continue;
             }
-            for c in self.class_decls(sym) {
+            // A Java class is its own; looking up its name would give the Kotlin class it maps to.
+            let classes = if self.is_platform(sym) { vec![sym] } else { self.class_decls(sym) };
+            for c in classes {
                 let d = self.decl(c);
                 let ctx = Ctx { unit: c.unit_id(), decl: Some(c.decl_id()) };
                 for st in &d.supertypes {
@@ -457,6 +459,13 @@ impl<'a> Analyzer<'a> {
                 }
                 out.push((c, subst.clone()));
             }
+            // The members of the Java class that a Kotlin class also shows, with its type arguments.
+            if let Some(java) = java::java_counterpart(&self.fq(sym))
+                .and_then(|fq| self.lib.jdk_by_fq(fq).into_iter().find(|&s| is_type_decl(self.decl(s))))
+            {
+                let args: Vec<Option<Ty>> = self.decl(sym).type_params.iter().map(|p| subst.get(&p.name).cloned()).collect();
+                queue.push_back((java, self.class_subst(java, &args)));
+            }
         }
         if let Some(any) = self.std_class("kotlin.Any")
             && !seen.contains("kotlin.Any")
@@ -464,6 +473,11 @@ impl<'a> Analyzer<'a> {
             out.push((any, Subst::new()));
         }
         out
+    }
+
+    /// Whether `s` is a Java class that Kotlin maps to its own, or whose members a Kotlin class shows.
+    fn is_platform(&self, s: SymId) -> bool {
+        s.lib && java::is_platform_class(&self.fq(s))
     }
 
     fn class_subst(&self, class: SymId, args: &[Option<Ty>]) -> Subst {
@@ -509,13 +523,32 @@ impl<'a> Analyzer<'a> {
             }
             Ty::Class { .. } | Ty::Func { .. } => {
                 let closure = self.closure(ty);
+                // A Java member is shown only when Kotlin declares or offers no member of that name:
+                // Kotlin's `lines()` is an extension that wins over Java's.
+                let mut kotlin_names: HashSet<String> = HashSet::new();
+                if closure.iter().any(|(c, _)| self.is_platform(*c)) {
+                    for (c, _) in closure.iter().filter(|(c, _)| !self.is_platform(*c)) {
+                        let file = self.file(c.unit_id());
+                        for &m in &self.decl(*c).members {
+                            if matches!(file.decls[m].kind, Kind::Function | Kind::Property) {
+                                kotlin_names.insert(file.decls[m].name.clone());
+                            }
+                        }
+                    }
+                    kotlin_names.extend(self.extensions(ty, &closure, from, true).iter().map(|m| self.decl(m.sym).name.clone()));
+                }
                 for (c, subst) in &closure {
+                    let platform = self.is_platform(*c);
                     let file = self.file(c.unit_id());
                     for &m in &self.decl(*c).members {
                         let md = &file.decls[m];
-                        if matches!(md.kind, Kind::Function | Kind::Property) {
-                            push(self, Member { sym: c.unit_id().sym(m), subst: subst.clone() }, &mut out);
+                        if !matches!(md.kind, Kind::Function | Kind::Property) {
+                            continue;
                         }
+                        if platform && (md.has("static") || kotlin_names.contains(&md.name)) {
+                            continue;
+                        }
+                        push(self, Member { sym: c.unit_id().sym(m), subst: subst.clone() }, &mut out);
                     }
                 }
                 for m in self.extensions(ty, &closure, from, all) {

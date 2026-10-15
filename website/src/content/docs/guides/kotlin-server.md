@@ -82,6 +82,8 @@ The **JDK** comes from the sources in its `lib/src.zip`. It is the JDK the proje
 
 Kotlin's view of Java types matches the compiler's: `java.lang.String` is `String`, `int` is `Int`, `java.util.List` is Kotlin's `MutableList`, and so on. `java.lang` is imported into every Kotlin file on the JVM, as it is by the compiler.
 
+The Kotlin classes for `String`, `CharSequence`, the collections and the maps also show the Java methods of their counterpart, so `"abc".chars()`, `codePointAt(0)` and a list's `stream()` complete. A Java method is left out when Kotlin already declares or offers a member of that name: `lines()` is Kotlin's extension, not Java's `Stream`-returning method, and `length` is Kotlin's property. Static Java methods don't complete on an instance. The server extends only these classes this way: `Int`, `Any` and the other Kotlin classes don't show their Java counterparts' methods.
+
 **Dependencies** come from their sources jars, once they are in the cache. Download them with:
 
 ```sh
