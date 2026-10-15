@@ -1119,7 +1119,7 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
         return Ok(false);
     }
     emit_summary(ctx, TargetKind::Android, summary.passed, summary.failed, summary.ignored, gradle_ok && summary.success());
-    testreport::print_summary(&summary, human_out())?;
+    testreport::print_summary(&summary, None, human_out())?;
     if !gradle_ok && summary.success() {
         ctx.shell().error(format!("Gradle `{task}` failed"));
     }

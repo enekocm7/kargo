@@ -39,7 +39,7 @@ Cargo for Kotlin: a build tool and package manager
 
 ## 2. Get a JDK
 
-The Kotlin compiler runs on the JVM, so Kargo needs a **JDK 11 or newer** for every target. You have two options.
+The Kotlin compiler runs on the JVM, so Kargo needs a **JDK 11 or newer** for every target. JVM tests need **JDK 17 or newer**, because `kargo test` runs the JUnit 6 launcher on the project's JDK. You have two options.
 
 **Use the JDK you already have.** Kargo looks at `JAVA_HOME`, then at `java` on your `PATH`.
 

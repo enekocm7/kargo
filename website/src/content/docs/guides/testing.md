@@ -50,6 +50,8 @@ kargo test --release       # with the release profile
 
 `kargo test` exits with status `101` if a test fails, so it works in scripts and CI.
 
+Native and Wasm test lines show how long each test took, as in `test MathTest.adds ... ok (12ms)`, and their result line ends with the total time of the run (`finished in 1.50s`). The JVM report ends with the launcher's own total instead. With `--message-format json` each test's `duration-ms` is in its [result message](../../reference/machine-readable-output/#test-results), and `--report junit` writes the time of every test.
+
 With several targets enabled, the tests of every target compile at the same time; they then run one target after another, so each target's results stay together. See [Build performance](../build-performance/).
 
 On the JVM every class in `tests/` and `tests-jvm/` is scanned, whatever its name: a class called `T` or a Kotest spec called `UserSpec` runs just like `UserTest`. If test sources compiled but no test was found, or the filter matched nothing, `kargo test` reports an error and exits with `101` instead of silently passing.
@@ -121,6 +123,71 @@ The filter keeps the tests whose fully qualified `package.Class.method` name con
 
 On the JVM, a filter that matches a test class name selects whole classes, which works with every JUnit Platform engine. A filter that matches no class name is matched against method names, which only finds tests of method-based engines such as JUnit Jupiter (what `kotlin.test` uses), not Kotest specs.
 
+## Tags
+
+JUnit's `@Tag` separates slow or integration tests from the rest. `--include-tag` keeps only the tests with a tag, and `--exclude-tag` skips them. Both can be repeated, and both combine with a filter:
+
+```sh
+$ kargo test --exclude-tag slow          # everything but the slow tests
+$ kargo test --include-tag integration   # only the integration tests
+```
+
+```kotlin title="tests/CalculatorTest.kt"
+import kotlin.test.Test
+import org.junit.jupiter.api.Tag
+
+class CalculatorTest {
+    @Test
+    fun adds() { /* ... */ }
+
+    @Test
+    @Tag("slow")
+    fun loadsTheFullTable() { /* ... */ }
+}
+```
+
+Tags apply to JVM tests. Kargo says so when another target runs with them, and that target's tests run unfiltered. When no test matches, the run fails and says the filters matched nothing.
+
+## Timeouts
+
+Two limits in `kargo.toml` stop a test that hangs or runs too long:
+
+```toml title="kargo.toml"
+[test]
+timeout = "5m"         # the whole test run
+test-timeout = "30s"   # each JVM test
+```
+
+`timeout` limits the whole run. When it passes, Kargo kills the test process and fails with `JVM tests timed out after 5m; the whole test run is limited by [test] timeout`. The clock starts when the tests start running, so compiling them doesn't count. It applies to the JVM, Native and Wasm targets; Android tests run under Gradle, which Kargo doesn't limit.
+
+`test-timeout` limits each JVM test with JUnit Jupiter's `junit.jupiter.execution.timeout.default`. A test that runs longer fails, and the rest of the run goes on. It applies to tests run by JUnit Jupiter, which includes `kotlin.test` on the JVM. Other targets have no per-test limit, and Kargo says so when they run.
+
+Both take a whole number and a unit: `500ms`, `30s`, `5m` or `1h`.
+
+## Rerunning failures
+
+`kargo test --failed` runs only the JVM test classes that had a failing test in the last run, so a long suite can be fixed one class at a time:
+
+```sh
+$ kargo test          # some tests fail
+$ kargo test --failed # runs the classes that failed, and nothing else
+```
+
+Every JVM run records its failing classes in `target/<profile>/jvm/test-failures`, replacing the previous record. A run that passed records none, and `--failed` then says nothing failed and runs nothing. Without a record, `--failed` runs every test and says so. A run that didn't finish, such as one that was killed, records nothing for the same reason.
+
+The rerun works on whole test classes, not single methods, so a class with a failing test runs in full. `--failed` applies to the JVM target only; other targets run all their tests.
+
+## When a test run stops early
+
+A test that calls `System.exit`, or a JVM that runs out of memory, ends the test process before every test has run. Kargo reports that rather than leaving you to look for a failing assertion:
+
+```console
+$ kargo test
+error: test JVM exited with code 5 before finishing
+```
+
+In the terminal report, exit code 1 is the same as a failing test, so such a run is reported as failed tests. With `--message-format json`, Kargo's listener reports the end of the run, so a run that stops early with exit code 1 is reported as stopped early as well.
+
 ## Listing tests
 
 `--list` compiles the tests and prints them without running any:
@@ -167,18 +234,20 @@ Editors that use the [`kargo dap`](../editors/#debug-adapter) debug adapter do t
 
 | Target | Test runner | Default test libraries |
 |---|---|---|
-| JVM | JUnit Platform | `kotlin-test-junit5`, `junit-jupiter` |
+| JVM | JUnit 6 on the JUnit Platform | `kotlin-test-junit5`, `junit-jupiter` |
 | Wasm | Node.js, or a headless browser with `environment = "browser"` | `kotlin-test-wasm-js` / `kotlin-test-wasm-wasi` |
 | Native | the native test binary | built into Kotlin/Native |
 | Android | Gradle local unit tests (`testDebugUnitTest`) | `kotlin-test-junit`, `junit` |
 
 Test filters are not supported on Wasm; all tests run.
 
+JVM tests run on JUnit 6, which needs JDK 17 or newer, because `kargo test` starts its launcher on the project's JDK. If the JDK that builds your project is older, pin a newer one with [`[toolchain] jdk`](../toolchains/).
+
 With `environment = "browser"`, Kargo serves a test page, starts Chrome, Chromium, Edge, Brave or Firefox without a window to load it, and prints the results the page reports, so output, failures and `--report junit` look the same as on Node.js. See [Testing in a browser](../wasm/#testing-in-a-browser).
 
 ## JVM-only test libraries
 
-Because JVM tests run on the JUnit Platform, JUnit 5 annotations and libraries like [MockK](https://mockk.io), [AssertJ](https://assertj.github.io/doc/) or [Kotest assertions](https://kotest.io) work. Add them as dev-dependencies for the JVM:
+Because JVM tests run on JUnit 6, JUnit Jupiter annotations and libraries like [MockK](https://mockk.io), [AssertJ](https://assertj.github.io/doc/) or [Kotest assertions](https://kotest.io) work. Add them as dev-dependencies for the JVM:
 
 ```sh
 kargo add io.mockk:mockk --dev

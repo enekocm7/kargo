@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use zip::ZipArchive;
 
-use super::index::{JDK_UNITS, Origin, SymId, Unit};
+use super::index::{JDK_UNITS, Origin, Platforms, SymId, Unit};
 use super::java;
 use super::lexer::{self, Tok};
 
@@ -124,7 +124,7 @@ impl Jdk {
         if !path.is_file() {
             let _ = kargo_util::fs::write_string_atomic(&path, &text);
         }
-        Arc::new(Unit::new(path, text, Origin::Library { name: self.name.clone(), jvm: true }))
+        Arc::new(Unit::new(path, text, Origin::Library { name: self.name.clone(), main: Platforms::JVM, test: Platforms::NONE }))
     }
 
     fn read(&self, name: &str) -> Option<String> {

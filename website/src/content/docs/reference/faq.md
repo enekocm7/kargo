@@ -35,6 +35,10 @@ Yes. A package can depend on another package on disk with `{ path = "../lib" }`,
 
 Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one.
 
+### `JDK ... is too old; Kargo needs JDK 17 or newer` when running tests
+
+`kargo test` runs the JUnit 6 launcher on the project's JDK, and JUnit 6 needs JDK 17 or newer. Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one. See [Testing](../../guides/testing/#what-runs-where).
+
 ### `Kotlin ... cannot run on JDK ...`
 
 Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.10 or newer, or add `[toolchain] jdk = "21"` so Kargo builds with JDK 21. See [Older Kotlin versions on new JDKs](../../guides/toolchains/#older-kotlin-versions-on-new-jdks).
@@ -125,6 +129,14 @@ You changed `kargo.toml` without committing the updated lockfile. Run `kargo bui
 ### `the native target has no build for this host`
 
 Add `"host"` to `[target.native] platforms` to run locally.
+
+### `test JVM exited with code N before finishing`
+
+A test ended the test JVM early: a call to `System.exit(N)` is the usual cause, and an `OutOfMemoryError` the other. Look for the test that calls `exit`, or raise the heap with `[test] jvm-args = ["-Xmx1g"]`. See [When a test run stops early](../../guides/testing/#when-a-test-run-stops-early).
+
+### `JVM tests timed out after ...`
+
+The whole test run passed its `[test] timeout`, so Kargo stopped it. A test that waits on something that never comes is the usual cause. Limit one test with `[test] test-timeout` to find it, and see [Timeouts](../../guides/testing/#timeouts).
 
 ### `no JVM tests found` or `no JVM tests match ...`
 

@@ -74,7 +74,9 @@ The server notices new, changed and deleted `.kt` files, from the editor and on 
 
 ## Libraries
 
-The **standard library** comes from its sources jar at the project's [`[kotlin] version`](../../reference/manifest/#kotlin), and so does `kotlin-test`, for tests. Kargo downloads them on first use from the project's repositories into its Maven cache, like any other artifact, and extracts them under `~/.kargo/cache/lsp-sources`, so go to definition opens real files. The JVM-only parts of the standard library are offered when a package has a JVM or Android target.
+Libraries are seen per target, as the compiler sees them. Common code in `src/` compiles for every target of its package, so it sees only the libraries that every one of them has. `src-jvm/` sees the JVM's libraries, and `src-wasm/` the Wasm ones. Test code also sees the libraries that only the test classpath has, such as `[dev-dependencies]`, and main code doesn't. A Kotlin file outside the source roots sees the libraries of every platform.
+
+The **standard library** comes from its sources jar at the project's [`[kotlin] version`](../../reference/manifest/#kotlin), and so does `kotlin-test`, for tests. Kargo downloads them on first use from the project's repositories into its Maven cache, like any other artifact, and extracts them under `~/.kargo/cache/lsp-sources`, so go to definition opens real files. The server loads the standard library of each platform the project targets: the JVM's sources for `jvm` and `android`, and `kotlin-stdlib-wasm-js` (or `kotlin-stdlib-wasm-wasi` for `environment = "wasi"`) for `wasm`, each with its `kotlin-test` for tests. Native code takes the parts of the Wasm one that Native shares. The JVM-only parts are offered to JVM code alone.
 
 Offline before that first download (`kargo --offline lsp`), a built-in outline of the most used parts of the standard library stands in, with its documentation. The whole library replaces it on the next start with network access.
 
@@ -93,13 +95,14 @@ The Kotlin classes for `String`, `CharSequence`, the collections and the maps al
   ```
 
   Restart the editor's language server after fetching new sources.
-- A **jar without sources** is read from its class files. A class compiled from Kotlin keeps its Kotlin declarations in its metadata, so extension functions, nullability, `suspend`, default arguments, type aliases and companion objects come out as written. Any other class is read as Java: its public and protected fields, methods, constructors and nested classes, with generic types and, when the jar was compiled with `javac -parameters`, parameter names (otherwise `arg0`, `arg1`, ...).
-- A **klib** (the Wasm and Native variants of a dependency) is read from its Kotlin metadata the same way.
-- For a Native target, the **platform libraries** of the Kotlin/Native distribution that builds the project (`platform.posix`, `platform.zlib`, and on macOS and iOS the Apple frameworks) are read for the first platform of [`[target.native] platforms`](../../reference/manifest/#targetnative).
+- A dependency **without a sources jar** is read from its compiled form, for the targets whose classpath has it, as [above](#libraries) describes.
+  - A **jar** is read from its class files. A class compiled from Kotlin keeps its Kotlin declarations in its metadata, so extension functions, nullability, `suspend`, default arguments, type aliases and companion objects come out as written. Any other class is read as Java: its public and protected fields, methods, constructors and nested classes, with generic types and, when the jar was compiled with `javac -parameters`, parameter names (otherwise `arg0`, `arg1`, ...).
+  - A **klib** (the Wasm and Native variants of a dependency) is read from its Kotlin metadata the same way.
+- For Native code, the **platform libraries** of the Kotlin/Native distribution that builds the project (`platform.posix`, `platform.zlib`, and on macOS and iOS the Apple frameworks) are read for the first platform of [`[target.native] platforms`](../../reference/manifest/#targetnative).
 
 A library without sources is written out once as stub files under `~/.kargo/cache/lsp-sources`: one Kotlin file per package, and one Java file for its Java classes. Go to definition opens these files, which show each declaration's signature, `...` for default values, and no bodies or documentation (a klib compiled with its KDoc keeps it). They are generated, so edits to them change nothing. Private and internal declarations are left out, and so are those deprecated with `level = DeprecationLevel.HIDDEN`.
 
-The standard library and `kotlin-test` always come from their sources jars or the outline above, not from their compiled jars or klibs.
+The standard library and `kotlin-test` always come from their sources jars or the outline above, not from their compiled jars or klibs. Native code doesn't see the common Kotlin/Native libraries (`kotlinx.cinterop` and the like), only the platform ones.
 
 ## Limits
 
@@ -108,6 +111,7 @@ The server reads declarations and infers types as far as completion and navigati
 - It reports no errors of its own. They come from `kargo check` on save, which compiles the code for real. Turn it off with `{ "checkOnSave": false }` in the editor's `initializationOptions`; see [Check on save](../editors/#check-on-save).
 - It reads Java but doesn't edit it. Java files get no completion, hover, rename or references of their own, and a Java declaration can't be renamed from Kotlin: the server refuses, because the Java code that uses it wouldn't change. References to a Kotlin declaration from Java code aren't searched.
 - Libraries without sources have no documentation in hover, and a type parameter with several bounds keeps only the first.
+- Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native. Native-only declarations of the Kotlin/Native distribution itself, such as `kotlinx.cinterop`, don't complete.
 - Smart casts (`if (x is Foo) x.`), the branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
 - It has no formatting, quick fixes, signature help, inlay hints or semantic highlighting. Use [`kargo fmt`](../formatting-and-linting/) to format code.
 

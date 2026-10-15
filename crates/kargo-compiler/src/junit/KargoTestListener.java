@@ -61,6 +61,14 @@ public final class KargoTestListener implements TestExecutionListener {
     }
 
     @Override
+    public void testPlanExecutionFinished(TestPlan testPlan) {
+        // Printed last: a run that ends without it stopped early, such as when a test called `System.exit`.
+        if (!list) {
+            emit(new StringBuilder("{\"reason\":\"run-finished\""));
+        }
+    }
+
+    @Override
     public void executionStarted(TestIdentifier id) {
         if (list || !id.isTest()) {
             return;

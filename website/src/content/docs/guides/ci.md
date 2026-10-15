@@ -126,6 +126,8 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 | `kargo test --no-fail-fast` | Test every target and print a result per target instead of stopping at the first failure (or set [`[test] fail-fast = false`](../../reference/manifest/#test)) |
 | `kargo build --keep-going` | Build every target and report all failures, not just the first |
 | `kargo test --report junit` | Write JUnit XML reports for the CI's test summary |
+| `[test] timeout` | Stop a hung test run and fail it, rather than waiting for the CI's own job limit. See [Timeouts](../testing/#timeouts) |
+| `kargo test --failed` | Rerun only the JVM test classes that failed in the last run, on a retry job |
 | `--message-format json` | Compiler diagnostics as JSON, to annotate them on the changed lines. See [Machine-readable output](../../reference/machine-readable-output/) |
 | `-q`, `--quiet` | Less log noise |
 | `-v`, `--verbose` | Print the exact compiler commands when debugging |

@@ -90,7 +90,7 @@ main-class = "com.example.app.App"
 
 ### Java tests
 
-`.java` files in `tests/` and `tests-jvm/` are compiled and run on the JUnit Platform, so JUnit 5 tests work as they are:
+`.java` files in `tests/` and `tests-jvm/` are compiled and run on the JUnit Platform, so JUnit 6 tests work as they are:
 
 ```java title="tests/GreeterTest.java"
 import com.example.app.Greeter;

@@ -495,6 +495,15 @@ enum Command {
         /// Test every target even if one fails, then print a result per target
         #[arg(long)]
         no_fail_fast: bool,
+        /// Only run JVM tests with this JUnit `@Tag` (repeatable)
+        #[arg(long, value_name = "TAG")]
+        include_tag: Vec<String>,
+        /// Skip JVM tests with this JUnit `@Tag` (repeatable)
+        #[arg(long, value_name = "TAG")]
+        exclude_tag: Vec<String>,
+        /// Rerun only the JVM test classes that failed in the last run
+        #[arg(long, conflicts_with_all = ["list", "no_run"])]
+        failed: bool,
         /// Also write test reports: `junit` writes JUnit XML to target/<profile>/<target>/test-reports
         #[arg(long, value_enum, value_name = "FORMAT")]
         report: Option<ReportArg>,
@@ -1262,12 +1271,23 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors })?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run, no_fail_fast, report, debug, list, format } => {
+        Command::Test { build, filter, no_run, no_fail_fast, include_tag, exclude_tag, failed, report, debug, list, format } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let junit_report = report == Some(ReportArg::Junit);
             let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
-            let opts = TestOptions { build: build.options(), filter, no_run, no_fail_fast, junit_report, debug, list };
+            let opts = TestOptions {
+                build: build.options(),
+                filter,
+                no_run,
+                no_fail_fast,
+                junit_report,
+                debug,
+                list,
+                include_tags: include_tag,
+                exclude_tags: exclude_tag,
+                failed,
+            };
             let passed = build_packages(
                 config,
                 &project,
