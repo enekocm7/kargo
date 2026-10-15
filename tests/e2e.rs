@@ -146,6 +146,59 @@ fn jvm_test_failures_and_filters() {
     t.kargo("app").args(["test", "nothing_matches"]).assert().code(101).stderr(predicate::str::contains("no JVM tests match"));
 }
 
+#[test]
+fn jvm_test_limits_exit_codes_tags_and_reruns() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+
+    // `test-timeout` fails a test that runs too long, and the rest of the run goes on.
+    t.write("app/tests/Slow.kt", "import kotlin.test.*\nclass Slow {\n    @Test fun sleeps() = Thread.sleep(600_000)\n}\n");
+    t.write("app/kargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[test]\ntest-timeout = \"2s\"\n");
+    t.kargo("app").arg("test").assert().code(101).stdout(predicate::str::contains("sleeps()"));
+
+    // `timeout` stops the whole run, and says so.
+    t.write("app/kargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[test]\ntimeout = \"3s\"\n");
+    t.kargo("app").arg("test").assert().code(101).stderr(predicate::str::contains("JVM tests timed out after 3s"));
+    std::fs::remove_file(t.dir.path().join("app/tests/Slow.kt")).unwrap();
+    t.write("app/kargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+
+    // A test that exits the JVM is reported as such, in both output modes.
+    t.write("app/tests/Exit.kt", "import kotlin.test.*\nclass Exit {\n    @Test fun quits() { System.exit(5) }\n}\n");
+    let exited = "test JVM exited with code 5 before finishing";
+    t.kargo("app").arg("test").assert().code(101).stderr(predicate::str::contains(exited));
+    t.kargo("app").args(["test", "--message-format", "json"]).assert().code(101).stderr(predicate::str::contains(exited));
+    std::fs::remove_file(t.dir.path().join("app/tests/Exit.kt")).unwrap();
+
+    // Tags select tests on both sides of `--include-tag` and `--exclude-tag`.
+    t.create(&["tags"]);
+    t.write(
+        "tags/tests/Tagged.kt",
+        "import kotlin.test.*\nimport org.junit.jupiter.api.Tag\nclass Tagged {\n    @Test @Tag(\"fast\") fun quick() {}\n    @Test @Tag(\"slow\") fun lengthy() {}\n}\n",
+    );
+    let only = |flag: &str, tag: &str| t.kargo("tags").args(["test", flag, tag]).assert().success().get_output().stdout.clone();
+    let included = String::from_utf8(only("--include-tag", "fast")).unwrap();
+    assert!(included.contains("quick()") && !included.contains("lengthy()"), "{included}");
+    let excluded = String::from_utf8(only("--exclude-tag", "fast")).unwrap();
+    assert!(excluded.contains("lengthy()") && !excluded.contains("quick()"), "{excluded}");
+    t.kargo("tags")
+        .args(["test", "--include-tag", "nothing"])
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("no JVM tests match the --include-tag and --exclude-tag filters"));
+
+    // `--failed` reruns the classes that failed in the last run, and nothing else.
+    t.create(&["reruns"]);
+    t.write("reruns/tests/Passes.kt", "import kotlin.test.*\nclass Passes { @Test fun ok() {} }\n");
+    t.write("reruns/tests/Flaky.kt", "import kotlin.test.*\nclass Flaky { @Test fun bad() = assertEquals(1, 2) }\n");
+    t.kargo("reruns").args(["test", "--failed"]).assert().code(101).stderr(predicate::str::contains("no failed JVM tests are recorded"));
+    let rerun = String::from_utf8(t.kargo("reruns").args(["test", "--failed"]).assert().code(101).get_output().stdout.clone()).unwrap();
+    assert!(rerun.contains("bad()") && !rerun.contains("ok()"), "{rerun}");
+    t.write("reruns/tests/Flaky.kt", "import kotlin.test.*\nclass Flaky { @Test fun bad() {} }\n");
+    t.kargo("reruns").args(["test", "--failed"]).assert().success().stdout(predicate::str::contains("bad()"));
+    t.kargo("reruns").args(["test", "--failed"]).assert().success().stderr(predicate::str::contains("no JVM test failed in the last run"));
+}
+
 /// The JSON messages on a command's stdout, which must hold nothing else.
 fn json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
     let text = String::from_utf8_lossy(stdout);

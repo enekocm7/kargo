@@ -252,11 +252,11 @@ pub fn report_with(input: impl BufRead, mut out: impl Write, mut on_event: impl 
                 if let Some((message, details)) = current_failure.take() {
                     summary.failed += 1;
                     summary.cases.push(case(CaseOutcome::Failed { message, details }, time, output));
-                    writeln!(out, "test {full_name} ... {failed_style}FAILED{failed_style:#}")?;
+                    writeln!(out, "test {full_name} ... {failed_style}FAILED{failed_style:#} ({})", format_duration(time))?;
                 } else {
                     summary.passed += 1;
                     summary.cases.push(case(CaseOutcome::Passed, time, output));
-                    writeln!(out, "test {full_name} ... {ok}ok{ok:#}")?;
+                    writeln!(out, "test {full_name} ... {ok}ok{ok:#} ({})", format_duration(time))?;
                 }
                 on_event(TestEvent::Finished(summary.cases.last().expect("just pushed")));
             }
@@ -290,13 +290,16 @@ pub fn report_junit_xml_with(xml: &str, mut out: impl Write, mut on_event: impl 
         let name = case.attribute("name").unwrap_or_default();
         let full = if class.is_empty() { name.to_owned() } else { format!("{class}.{name}") };
         let failure = case.children().find(|c| c.has_tag_name("failure") || c.has_tag_name("error"));
+        let seconds = case.attribute("time").and_then(|t| t.parse::<f64>().ok()).filter(|t| t.is_finite() && *t >= 0.0);
+        let time = seconds.map(Duration::from_secs_f64).unwrap_or_default();
+        let timing = format_duration(time);
         let outcome = if let Some(failure) = failure {
             summary.failed += 1;
             let message = failure.attribute("message").unwrap_or_default();
             let details = failure.text().map(str::trim).unwrap_or_default();
             let text = if details.is_empty() { message } else { details };
             summary.failures.push((full.clone(), text.to_owned()));
-            writeln!(out, "test {full} ... {failed_style}FAILED{failed_style:#}")?;
+            writeln!(out, "test {full} ... {failed_style}FAILED{failed_style:#} ({timing})")?;
             CaseOutcome::Failed { message: message.to_owned(), details: details.to_owned() }
         } else if case.children().any(|c| c.has_tag_name("skipped")) {
             summary.ignored += 1;
@@ -304,25 +307,18 @@ pub fn report_junit_xml_with(xml: &str, mut out: impl Write, mut on_event: impl 
             CaseOutcome::Ignored
         } else {
             summary.passed += 1;
-            writeln!(out, "test {full} ... {ok}ok{ok:#}")?;
+            writeln!(out, "test {full} ... {ok}ok{ok:#} ({timing})")?;
             CaseOutcome::Passed
         };
-        let seconds = case.attribute("time").and_then(|t| t.parse::<f64>().ok()).filter(|t| t.is_finite() && *t >= 0.0);
         let output = case.children().find(|c| c.has_tag_name("system-out")).and_then(|c| c.text()).unwrap_or_default();
-        summary.cases.push(TestCase {
-            class: class.to_owned(),
-            name: name.to_owned(),
-            time: seconds.map(Duration::from_secs_f64).unwrap_or_default(),
-            outcome,
-            output: output.to_owned(),
-        });
+        summary.cases.push(TestCase { class: class.to_owned(), name: name.to_owned(), time, outcome, output: output.to_owned() });
         on_event(TestEvent::Finished(summary.cases.last().expect("just pushed")));
     }
     Ok(summary)
 }
 
-/// Prints failure details and the final `test result:` line.
-pub fn print_summary(summary: &TestSummary, mut out: impl Write) -> std::io::Result<()> {
+/// Prints failure details and the final `test result:` line, with how long the run took when `elapsed` is known.
+pub fn print_summary(summary: &TestSummary, elapsed: Option<Duration>, mut out: impl Write) -> std::io::Result<()> {
     if !summary.failures.is_empty() {
         writeln!(out, "\nfailures:\n")?;
         for (name, text) in &summary.failures {
@@ -330,11 +326,17 @@ pub fn print_summary(summary: &TestSummary, mut out: impl Write) -> std::io::Res
         }
     }
     let (style, verdict) = if summary.success() { (AnsiColor::Green.on_default(), "ok") } else { (AnsiColor::Red.on_default(), "FAILED") };
+    let took = elapsed.map(|t| format!("; finished in {}", format_duration(t))).unwrap_or_default();
     writeln!(
         out,
-        "\ntest result: {style}{verdict}{style:#}. {} passed; {} failed; {} ignored",
+        "\ntest result: {style}{verdict}{style:#}. {} passed; {} failed; {} ignored{took}",
         summary.passed, summary.failed, summary.ignored
     )
+}
+
+/// A duration as `12ms` below a second and `1.50s` from there on, for test timings.
+pub fn format_duration(time: Duration) -> String {
+    if time < Duration::from_secs(1) { format!("{}ms", time.as_millis()) } else { format!("{:.2}s", time.as_secs_f64()) }
 }
 
 /// Renders `cases` as a JUnit XML document with one `<testsuite>` per class,
@@ -429,6 +431,12 @@ mod tests {
     }
 
     #[test]
+    fn formats_durations() {
+        assert_eq!(format_duration(Duration::from_millis(12)), "12ms");
+        assert_eq!(format_duration(Duration::from_millis(1500)), "1.50s");
+    }
+
+    #[test]
     fn builds_report() {
         let input = "\
 ##teamcity[testSuiteStarted name='' flowId='1']
@@ -459,16 +467,17 @@ hello from test
         assert!(matches!(&summary.cases[1].outcome, CaseOutcome::Failed { message, .. } if message == "Expected <4>, actual <3>."));
         assert_eq!(summary.cases[2].outcome, CaseOutcome::Ignored);
 
+        assert!(text.contains("(12ms)"), "{text}");
         let mut out = Vec::new();
-        print_summary(&summary, &mut out).unwrap();
+        print_summary(&summary, Some(Duration::from_millis(1500)), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("---- MathTest.fails ----"));
-        assert!(text.contains("1 passed; 1 failed; 1 ignored"));
+        assert!(text.contains("1 passed; 1 failed; 1 ignored; finished in 1.50s"), "{text}");
 
         let crashed = TestSummary { passed: 2, crashed: true, ..TestSummary::default() };
         assert!(!crashed.success());
         let mut out = Vec::new();
-        print_summary(&crashed, &mut out).unwrap();
+        print_summary(&crashed, None, &mut out).unwrap();
         assert!(String::from_utf8(out).unwrap().contains("FAILED"));
         assert!(!TestSummary::default().ran_tests());
 

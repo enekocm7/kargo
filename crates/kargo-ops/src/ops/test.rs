@@ -4,7 +4,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
-use kargo_compiler::testreport::{self, TestEvent};
+use kargo_compiler::testreport::{self, CaseOutcome, TestEvent};
 use kargo_compiler::wasm::{WasmCompilation, npm_dependencies};
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
 use kargo_compiler::{diagnostics, junit};
@@ -49,6 +49,12 @@ pub struct TestOptions {
     pub debug: Option<u16>,
     /// Print the tests instead of running them (`--list`).
     pub list: Option<ListFormat>,
+    /// Only run JVM tests with one of these JUnit tags (`--include-tag`).
+    pub include_tags: Vec<String>,
+    /// Skip JVM tests with one of these JUnit tags (`--exclude-tag`).
+    pub exclude_tags: Vec<String>,
+    /// Only run the JVM test classes that failed in the last run (`--failed`).
+    pub failed: bool,
 }
 
 /// How `kargo test --list` prints the tests.
@@ -84,6 +90,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     if opts.debug.is_some() && targets != [TargetKind::Jvm] {
         anyhow::bail!("`--debug` runs the JVM tests under a debugger; select the JVM target with `-t jvm`");
     }
+    note_jvm_only_options(ctx, &targets, opts);
     let env = hook_env(ctx);
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
     // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
@@ -98,6 +105,8 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         TargetKind::Android => Ok(TestRun::Android),
     });
     let fail_fast = !opts.no_fail_fast && ctx.ws.manifest().test.fail_fast;
+    // The whole run's time limit counts from when the tests start running, not from compiling them.
+    let deadline = ctx.ws.manifest().test.timeout.map(|limit| Instant::now() + limit);
     let mut outcomes = Vec::new();
     // In fail-fast mode an error ends the run once the skipped targets are listed.
     let mut fatal = None;
@@ -108,9 +117,9 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         }
         let passed = run.and_then(|run| match run {
             TestRun::Done(passed) => Ok(passed),
-            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts),
-            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts),
-            TestRun::Browser(run) => run_in_browser(ctx, run, opts),
+            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts, deadline),
+            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts, deadline),
+            TestRun::Browser(run) => run_in_browser(ctx, run, opts, deadline),
             TestRun::Android => test_android(ctx, opts),
         });
         let outcome = match passed {
@@ -263,8 +272,116 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
+    let rerun = if opts.failed { failed_jvm_classes(ctx)? } else { None };
+    if opts.failed && rerun.is_none() {
+        ctx.shell().note("no failed JVM tests are recorded; running all of them");
+    }
+    if rerun.as_ref().is_some_and(Vec::is_empty) {
+        ctx.shell().note("no JVM test failed in the last run");
+        return Ok(TestRun::Done(true));
+    }
     let mode = if diagnostics::is_json() { JunitMode::Events } else { JunitMode::Run };
-    Ok(TestRun::Junit(junit_command(ctx, opts, &JvmTestClasses { classes: test_classes, classpath }, mode)?))
+    let tests = JvmTestClasses { classes: test_classes, classpath };
+    Ok(TestRun::Junit(junit_command(ctx, opts, &tests, mode, rerun.as_deref())?))
+}
+
+/// The test classes that failed in the last JVM run (`--failed`); `None` when no run has recorded any.
+fn failed_jvm_classes(ctx: &BuildContext) -> Result<Option<Vec<String>>> {
+    let path = failures_file(ctx);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+/// Records the JVM test classes that failed in the last run, for `--failed`. `None` forgets them,
+/// which is what an unfinished run leaves: its failures are unknown.
+fn record_jvm_failures(ctx: &BuildContext, failed: Option<&[String]>) -> Result<()> {
+    let path = failures_file(ctx);
+    match failed {
+        Some(classes) => {
+            let text: String = classes.iter().map(|class| format!("{class}\n")).collect();
+            std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("failed to remove {}", path.display())),
+        },
+    }
+}
+
+fn failures_file(ctx: &BuildContext) -> PathBuf {
+    ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-failures")
+}
+
+/// The test classes with a failed test in the JUnit XML reports of a run, in name order.
+fn failed_classes(reports: &Path) -> Result<Vec<String>> {
+    let mut classes = std::collections::BTreeSet::new();
+    for file in kargo_util::fs::collect_files(reports, &["xml"]) {
+        let xml = std::fs::read_to_string(&file).with_context(|| format!("failed to read {}", file.display()))?;
+        let summary = testreport::report_junit_xml(&xml, std::io::sink()).with_context(|| format!("failed to read {}", file.display()))?;
+        for case in summary.cases.iter().filter(|case| matches!(case.outcome, CaseOutcome::Failed { .. })) {
+            if !case.class.is_empty() {
+                classes.insert(case.class.clone());
+            }
+        }
+    }
+    Ok(classes.into_iter().collect())
+}
+
+/// Notes the options that only apply to JVM tests, for the targets that will not use them.
+fn note_jvm_only_options(ctx: &BuildContext, targets: &[TargetKind], opts: &TestOptions) {
+    let others: Vec<&str> = targets.iter().filter(|target| **target != TargetKind::Jvm).map(|target| target.as_str()).collect();
+    if others.is_empty() {
+        return;
+    }
+    let others = others.join(", ");
+    if !opts.include_tags.is_empty() || !opts.exclude_tags.is_empty() {
+        ctx.shell().warn(format!("tag filters only apply to JVM tests; the {others} tests run unfiltered"));
+    }
+    if ctx.ws.manifest().test.test_timeout.is_some() {
+        ctx.shell().warn(format!("`[test] test-timeout` only applies to JVM tests; the {others} tests have no per-test limit"));
+    }
+    if opts.failed {
+        ctx.shell().warn(format!("`--failed` only reruns JVM tests; running all of the {others} tests"));
+    }
+}
+
+/// A duration from `kargo.toml` as it reads in messages: `5m`, `30s`, `1h` or `500ms`.
+fn describe_limit(limit: Duration) -> String {
+    let ms = limit.as_millis();
+    if ms > 0 && ms.is_multiple_of(3_600_000) {
+        format!("{}h", ms / 3_600_000)
+    } else if ms > 0 && ms.is_multiple_of(60_000) {
+        format!("{}m", ms / 60_000)
+    } else if ms > 0 && ms.is_multiple_of(1_000) {
+        format!("{}s", ms / 1_000)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Why a run stopped at the `[test] timeout`, for the error that says so.
+fn timed_out_message(ctx: &BuildContext) -> String {
+    let limit = ctx.ws.manifest().test.timeout.map(describe_limit).unwrap_or_default();
+    format!("timed out after {limit}; the whole test run is limited by `[test] timeout`")
+}
+
+/// Waits for a test process to exit. When `deadline` passes first, the process is killed.
+/// Returns its status and whether it was killed for that reason.
+fn wait_until(child: &mut Child, deadline: Option<Instant>) -> std::io::Result<(ExitStatus, bool)> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((status, false));
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let _ = child.kill();
+            return Ok((child.wait()?, true));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The launcher's (relocated) picocli setting for the terminal width; a number keeps it from running `stty`.
@@ -287,7 +404,14 @@ pub fn console_launcher(ctx: &BuildContext) -> Result<PathBuf> {
 }
 
 /// The JUnit console launcher command that runs (or lists) the compiled tests.
-fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses, mode: JunitMode) -> Result<Command> {
+/// `rerun` names the test classes to run in place of scanning every test (`--failed`).
+fn junit_command(
+    ctx: &BuildContext,
+    opts: &TestOptions,
+    tests: &JvmTestClasses,
+    mode: JunitMode,
+    rerun: Option<&[String]>,
+) -> Result<Command> {
     let jdk = ctx.compiler_jdk()?;
     jdk.require_version(JUNIT_MIN_JDK).context("JVM tests run on JUnit 6; set `[toolchain] jdk` to a newer JDK")?;
     let jvm = ctx.ws.manifest().targets.jvm.as_ref().context("the JVM target is not enabled")?;
@@ -308,7 +432,7 @@ fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses,
     if opts.debug.is_none() {
         cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)));
     }
-    cmd.args(jdk.default_run_args()).args(&jvm.jvm_args);
+    cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).args(&ctx.ws.manifest().test.jvm_args);
     // Without a terminal the launcher's probe for the terminal width prints `stty: /dev/tty: No such device`.
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         cmd.arg(format!("-D{JUNIT_USAGE_WIDTH_PROPERTY}=120"));
@@ -317,18 +441,29 @@ fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses,
         cmd.arg(format!("-D{}=true", junit::LIST_PROPERTY));
     }
     let colors = mode == JunitMode::Run && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    // JUnit's own limit for each test, which a test that sleeps too long fails with.
+    let test_timeout = ctx.ws.manifest().test.test_timeout;
     cmd.arg("-jar")
         .arg(&launcher)
         .arg("execute")
         .arg("--disable-banner")
         .arg(if mode == JunitMode::List { "--details=none" } else { "--details=tree" })
         .args((!colors).then_some("--disable-ansi-colors"))
+        .args(opts.include_tags.iter().map(|tag| format!("--include-tag={tag}")))
+        .args(opts.exclude_tags.iter().map(|tag| format!("--exclude-tag={tag}")))
+        .args(test_timeout.map(|limit| format!("--config=junit.jupiter.execution.timeout.default={} ms", limit.as_millis())))
         .arg("--class-path")
-        .arg(join_paths(&run_cp))
-        .arg("--scan-class-path")
-        .arg(&tests.classes)
-        .args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes)))
-        .current_dir(ctx.ws.root());
+        .arg(join_paths(&run_cp));
+    match rerun {
+        // Only the classes that failed last time: scanning the whole output would run every test again.
+        Some(classes) => {
+            cmd.args(classes.iter().map(|class| format!("--select-class={class}")));
+        }
+        None => {
+            cmd.arg("--scan-class-path").arg(&tests.classes);
+        }
+    }
+    cmd.args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes))).current_dir(ctx.ws.root());
     match mode {
         JunitMode::Run => {
             cmd.arg("--fail-if-no-tests");
@@ -346,67 +481,129 @@ fn junit_command(ctx: &BuildContext, opts: &TestOptions, tests: &JvmTestClasses,
     Ok(cmd)
 }
 
-fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions) -> Result<bool> {
-    let reports = opts.junit_report.then(|| reports_dir(ctx, TargetKind::Jvm)).transpose()?;
-    if let Some(dir) = &reports {
-        // The launcher writes `TEST-junit-jupiter.xml` (one file per test engine).
-        cmd.arg("--reports-dir").arg(dir);
-    }
+fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
+    // The launcher writes `TEST-junit-jupiter.xml` (one file per test engine); `--failed` reads the failures from it.
+    let reports = reports_dir(ctx, TargetKind::Jvm)?;
+    cmd.arg("--reports-dir").arg(&reports);
     ctx.shell().status("Running", "JVM tests (JUnit Platform)");
     if let Some(port) = opts.debug {
         super::run::note_debugger(ctx.shell(), port, "the test JVM");
     }
-    let status = if diagnostics::is_json() {
-        run_junit_events(ctx, cmd)?
-    } else {
-        process::status(ctx.shell(), &mut cmd, "the JUnit console launcher")?
-    };
-    if let Some(dir) = &reports {
-        wrote_reports(ctx, dir);
+    let end = if diagnostics::is_json() { run_junit_events(ctx, cmd, deadline)? } else { run_junit_terminal(ctx, cmd, deadline)? };
+    if opts.junit_report {
+        wrote_reports(ctx, &reports);
     }
+    if let Some(tally) = &end.events {
+        emit_summary(ctx, TargetKind::Jvm, tally.passed, tally.failed, tally.ignored, end.status.success());
+    }
+    if end.timed_out {
+        ctx.shell().error(format!("JVM tests {}", timed_out_message(ctx)));
+        record_jvm_failures(ctx, None)?;
+        return Ok(false);
+    }
+    if let Some(reason) = end.abnormal() {
+        ctx.shell().error(format!("test JVM {reason} before finishing"));
+        record_jvm_failures(ctx, None)?;
+        return Ok(false);
+    }
+    record_jvm_failures(ctx, Some(&failed_classes(&reports)?))?;
     let filter = opts.filter.as_deref();
-    if status.code() == Some(JUNIT_NO_TESTS) {
+    let tagged = !opts.include_tags.is_empty() || !opts.exclude_tags.is_empty();
+    if end.status.code() == Some(JUNIT_NO_TESTS) {
         match filter {
             Some(filter) => ctx.shell().error(format!("no JVM tests match `{filter}`; the filter matches `package.Class.method` names")),
+            None if tagged => ctx.shell().error("no JVM tests match the --include-tag and --exclude-tag filters"),
+            None if opts.failed => ctx.shell().error("none of the test classes that failed in the last run has tests any more"),
             None => ctx.shell().error(
                 "no JVM tests found; mark test functions with `@Test` (kotlin.test or JUnit) or add your test framework's \
                  JUnit Platform engine to [dev-dependencies]",
             ),
         }
     }
-    Ok(status.success())
+    Ok(end.status.success())
+}
+
+/// How the JUnit console launcher ended.
+struct JvmEnd {
+    status: ExitStatus,
+    /// Killed because the whole test run passed its `[test] timeout`.
+    timed_out: bool,
+    /// What the listener reported (`--message-format json`); `None` when the launcher printed to the terminal.
+    events: Option<Tally>,
+}
+
+/// How many tests the listener saw finish, and whether it saw the test plan end.
+#[derive(Debug, Default)]
+struct Tally {
+    passed: usize,
+    failed: usize,
+    ignored: usize,
+    /// The listener reported the end of the test plan. A run that never reports it was cut short.
+    finished: bool,
+}
+
+impl JvmEnd {
+    /// Why the launcher stopped before the tests ran to the end, if it did: a test called `System.exit`,
+    /// the JVM ran out of memory, and so on. A failed test also ends the launcher with exit code 1, so
+    /// that counts as an early stop only when the listener did not see the test plan end.
+    fn abnormal(&self) -> Option<String> {
+        match self.status.code() {
+            Some(0) | Some(JUNIT_NO_TESTS) => None,
+            Some(1) if self.events.as_ref().is_none_or(|tally| tally.finished) => None,
+            Some(code) => Some(format!("exited with code {code}")),
+            None => Some("was terminated by a signal".to_owned()),
+        }
+    }
+}
+
+/// Runs the launcher with its output going straight to the terminal, until it exits or `deadline` passes.
+fn run_junit_terminal(ctx: &BuildContext, mut cmd: Command, deadline: Option<Instant>) -> Result<JvmEnd> {
+    ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
+    let mut child = cmd.spawn().context("failed to start the JUnit console launcher")?;
+    let (status, timed_out) = wait_until(&mut child, deadline)?;
+    Ok(JvmEnd { status, timed_out, events: None })
 }
 
 /// Runs the launcher with Kargo's listener, passing each test message on with the package
-/// and target added, and the launcher's own output to stderr.
-fn run_junit_events(ctx: &BuildContext, mut cmd: Command) -> Result<std::process::ExitStatus> {
+/// and target added, and the launcher's own output to stderr. The output is read on its own
+/// thread, so `deadline` still ends a run whose tests hang.
+fn run_junit_events(ctx: &BuildContext, mut cmd: Command, deadline: Option<Instant>) -> Result<JvmEnd> {
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.stdout(Stdio::piped()).spawn().context("failed to start the JUnit console launcher")?;
     let stdout = child.stdout.take().context("missing test stdout")?;
-    let package = &ctx.ws.manifest().package.name;
-    let (mut passed, mut failed, mut ignored) = (0, 0, 0);
-    let mut err = anstream::stderr();
-    for line in BufReader::new(stdout).lines() {
-        let line = line?;
-        match junit::parse_event(&line) {
-            Some(message) => {
-                if message.get("reason").and_then(|r| r.as_str()) == Some("test-finished") {
-                    match message.get("outcome").and_then(|o| o.as_str()) {
-                        Some("passed") => passed += 1,
-                        Some("ignored") => ignored += 1,
-                        _ => failed += 1,
+    let package = ctx.ws.manifest().package.name.clone();
+    let reader = std::thread::spawn(move || -> std::io::Result<Tally> {
+        let mut tally = Tally::default();
+        let mut err = anstream::stderr();
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            match junit::parse_event(&line) {
+                Some(message) => {
+                    match message.get("reason").and_then(|r| r.as_str()) {
+                        Some("test-finished") => match message.get("outcome").and_then(|o| o.as_str()) {
+                            Some("passed") => tally.passed += 1,
+                            Some("ignored") => tally.ignored += 1,
+                            _ => tally.failed += 1,
+                        },
+                        // Kargo's own marker of the end of the test plan, not a message for the JSON stream.
+                        Some("run-finished") => {
+                            tally.finished = true;
+                            continue;
+                        }
+                        _ => {}
                     }
+                    emit_event(&package, TargetKind::Jvm, message);
                 }
-                emit_event(package, TargetKind::Jvm, message);
+                // The listener starts each message on a new line, which leaves blank lines behind.
+                None if line.trim().is_empty() => {}
+                None => writeln!(err, "{line}")?,
             }
-            // The listener starts each message on a new line, which leaves blank lines behind.
-            None if line.trim().is_empty() => {}
-            None => writeln!(err, "{line}")?,
         }
-    }
-    let status = child.wait()?;
-    emit_summary(ctx, TargetKind::Jvm, passed, failed, ignored, status.success());
-    Ok(status)
+        Ok(tally)
+    });
+    let (status, timed_out) = wait_until(&mut child, deadline)?;
+    let tally = reader.join().map_err(|_| anyhow::anyhow!("the test output reader panicked"))??;
+    Ok(JvmEnd { status, timed_out, events: Some(tally) })
 }
 
 /// Compiled JVM test classes and the classpath they were compiled against.
@@ -573,38 +770,66 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// Runs a test executable whose stdout carries TeamCity messages.
-fn run_reported(ctx: &BuildContext, mut cmd: Command, label: &str, target: TargetKind, opts: &TestOptions) -> Result<bool> {
+fn run_reported(
+    ctx: &BuildContext,
+    mut cmd: Command,
+    label: &str,
+    target: TargetKind,
+    opts: &TestOptions,
+    deadline: Option<Instant>,
+) -> Result<bool> {
     ctx.shell().status("Running", label);
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
+    let started = Instant::now();
     let mut child = cmd.stdout(Stdio::piped()).spawn().with_context(|| format!("failed to start {label}"))?;
     let stdout = child.stdout.take().context("missing test stdout")?;
     let package = ctx.ws.manifest().package.name.clone();
     let json = diagnostics::is_json();
-    let summary = testreport::report_with(BufReader::new(stdout), human_out(), |event| {
-        if json {
-            emit_report_event(&package, target, event);
-        }
-    })?;
-    let status = child.wait()?;
-    // Runners exit non-zero when a test failed; without a failed test that means a crash.
-    let abnormal = (!status.success()).then(|| {
-        let how = format!("exited with {}", process::describe_status(status));
-        if summary.ran_tests() { how } else { format!("{how} before running any tests") }
+    // The report is read on its own thread, so a test that hangs still reaches the deadline.
+    let reader = std::thread::spawn(move || {
+        testreport::report_with(BufReader::new(stdout), human_out(), |event| {
+            if json {
+                emit_report_event(&package, target, event);
+            }
+        })
     });
-    finish_reported(ctx, summary, label, target, opts, abnormal)
+    let (status, timed_out) = wait_until(&mut child, deadline)?;
+    let summary = reader.join().map_err(|_| anyhow::anyhow!("the test reporter panicked"))??;
+    // Runners exit non-zero when a test failed; without a failed test that means a crash.
+    let abnormal = if timed_out {
+        Some(timed_out_message(ctx))
+    } else {
+        (!status.success()).then(|| {
+            let how = format!("exited with {}", process::describe_status(status));
+            if summary.ran_tests() { how } else { format!("{how} before running any tests") }
+        })
+    };
+    let ending = Ending { abnormal, timed_out, elapsed: started.elapsed() };
+    finish_reported(ctx, summary, label, target, opts, ending)
 }
 
-/// Writes the reports and prints the summary of a test run. `abnormal` says how the runner
+/// How a test process that reports TeamCity messages ended.
+struct Ending {
+    /// What went wrong, when the process did not finish normally.
+    abnormal: Option<String>,
+    /// Killed at the `[test] timeout`, which is certain to have ended the run early.
+    timed_out: bool,
+    /// How long the process ran.
+    elapsed: Duration,
+}
+
+/// Writes the reports and prints the summary of a test run. `ending.abnormal` says how the runner
 /// ended when it did not finish normally (`exited with exit code 1`); that only counts as a crash
-/// when no test failed, since runners also end that way when a test failed.
+/// when no test failed, since runners also end that way when a test failed. A timeout always does.
 fn finish_reported(
     ctx: &BuildContext,
     mut summary: testreport::TestSummary,
     label: &str,
     target: TargetKind,
     opts: &TestOptions,
-    abnormal: Option<String>,
+    ending: Ending,
 ) -> Result<bool> {
+    let Ending { abnormal, timed_out, elapsed } = ending;
     if opts.junit_report {
         let dir = reports_dir(ctx, target)?;
         let file = dir.join(format!("TEST-{target}.xml"));
@@ -613,13 +838,13 @@ fn finish_reported(
             .with_context(|| format!("failed to write {}", file.display()))?;
         wrote_reports(ctx, &dir);
     }
-    summary.crashed = abnormal.is_some() && summary.failed == 0;
+    summary.crashed = abnormal.is_some() && (timed_out || summary.failed == 0);
     emit_summary(ctx, target, summary.passed, summary.failed, summary.ignored, summary.success());
     if summary.crashed && !summary.ran_tests() {
         ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
         return Ok(false);
     }
-    testreport::print_summary(&summary, human_out())?;
+    testreport::print_summary(&summary, Some(elapsed), human_out())?;
     if summary.crashed {
         ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
     }
@@ -638,7 +863,8 @@ const SETTLE: Duration = Duration::from_millis(400);
 
 /// Runs the tests in a headless browser: serves the test page, starts the browser on it and
 /// turns the console output the page reports into the usual test report.
-fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions) -> Result<bool> {
+fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
+    let started = Instant::now();
     let (events_tx, events) = mpsc::channel();
     let server = web::Server::start(web::bind(0)?, run.site, Some(events_tx))?;
     let label = "Wasm tests (headless browser)";
@@ -659,7 +885,7 @@ fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions) -> Re
             }
         })
     });
-    let outcome = wait_for_page(&mut child, &events, &lines_tx, browser_timeout());
+    let outcome = wait_for_page(&mut child, &events, &lines_tx, browser_timeout(), deadline);
     drop(lines_tx);
     let summary = reporter.join().map_err(|_| anyhow::anyhow!("the test reporter panicked"))??;
 
@@ -683,7 +909,9 @@ fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions) -> Re
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    finish_reported(ctx, summary, label, TargetKind::Wasm, opts, outcome.err())
+    let timed_out = outcome.is_err() && deadline.is_some_and(|deadline| Instant::now() >= deadline);
+    let abnormal = if timed_out { Some(timed_out_message(ctx)) } else { outcome.err() };
+    finish_reported(ctx, summary, label, TargetKind::Wasm, opts, Ending { abnormal, timed_out, elapsed: started.elapsed() })
 }
 
 /// What a test page has reported so far.
@@ -733,6 +961,7 @@ fn wait_for_page(
     events: &Receiver<PageEvent>,
     lines: &mpsc::Sender<String>,
     timeout: Duration,
+    deadline: Option<Instant>,
 ) -> Result<(), String> {
     let mut progress = PageProgress::new();
     // Set once the browser process has ended without failing.
@@ -764,6 +993,9 @@ fn wait_for_page(
                     // A browser that ends successfully has handed over to another process (Firefox
                     // starts again after applying an update), which still runs the page.
                     handed_over = true;
+                }
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    return Err("the test run passed its time limit".to_owned());
                 }
                 if progress.last_event.elapsed() > timeout {
                     return Err(format!(
@@ -1042,7 +1274,7 @@ fn list_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<ListedTest>> {
         no_tests(ctx, TargetKind::Jvm);
         return Ok(Vec::new());
     };
-    let mut cmd = junit_command(ctx, opts, &tests, JunitMode::List)?;
+    let mut cmd = junit_command(ctx, opts, &tests, JunitMode::List, None)?;
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let output = cmd.stdin(Stdio::null()).output().context("failed to start the JUnit console launcher")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1256,6 +1488,70 @@ mod tests {
         // A test without a function of its name points at its class.
         assert_eq!(found[4], (kt, Some(3)));
         assert_eq!(found[5], (None, None));
+    }
+
+    #[test]
+    fn describes_limits_as_written_in_kargo_toml() {
+        let limit = |ms| describe_limit(Duration::from_millis(ms));
+        assert_eq!((limit(300_000), limit(30_000), limit(3_600_000)), ("5m".to_owned(), "30s".to_owned(), "1h".to_owned()));
+        assert_eq!((limit(500), limit(90_000), limit(1_500)), ("500ms".to_owned(), "90s".to_owned(), "1500ms".to_owned()));
+    }
+
+    #[test]
+    fn finds_failed_classes_in_junit_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("TEST-junit-jupiter.xml"),
+            r#"<testsuites><testsuite name="a">
+                <testcase classname="app.MathTest" name="adds()" time="0.01"/>
+                <testcase classname="app.MathTest" name="fails()" time="0.02"><failure message="no"/></testcase>
+                <testcase classname="app.Outer$Inner" name="deep()"><error message="boom"/></testcase>
+                <testcase classname="app.Passes" name="ok()"/>
+            </testsuite></testsuites>"#,
+        )
+        .unwrap();
+        assert_eq!(failed_classes(dir.path()).unwrap(), ["app.MathTest", "app.Outer$Inner"]);
+        assert!(failed_classes(&dir.path().join("missing")).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> ExitStatus {
+        std::os::unix::process::ExitStatusExt::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn exit_status(code: i32) -> ExitStatus {
+        std::os::windows::process::ExitStatusExt::from_raw(code as u32)
+    }
+
+    #[test]
+    fn explains_how_the_launcher_ended() {
+        let end = |code, events: Option<bool>| JvmEnd {
+            status: exit_status(code),
+            timed_out: false,
+            events: events.map(|finished| Tally { finished, ..Tally::default() }),
+        };
+        assert_eq!(end(0, Some(true)).abnormal(), None);
+        assert_eq!(end(JUNIT_NO_TESTS, None).abnormal(), None);
+        // A failed test ends the launcher with 1, which is not an early stop...
+        assert_eq!(end(1, None).abnormal(), None);
+        assert_eq!(end(1, Some(true)).abnormal(), None);
+        // ...unless the listener never saw the test plan end, as when the JVM ran out of memory.
+        assert_eq!(end(1, Some(false)).abnormal().as_deref(), Some("exited with code 1"));
+        // A test that called `System.exit(5)`.
+        assert_eq!(end(5, None).abnormal().as_deref(), Some("exited with code 5"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kills_a_process_that_passes_its_deadline() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let (status, timed_out) = wait_until(&mut child, Some(Instant::now() + Duration::from_millis(100))).unwrap();
+        assert!(timed_out);
+        assert!(!status.success());
+        let mut quick = Command::new("true").spawn().unwrap();
+        let (status, timed_out) = wait_until(&mut quick, Some(Instant::now() + Duration::from_secs(30))).unwrap();
+        assert_eq!((status.success(), timed_out), (true, false));
     }
 
     #[test]

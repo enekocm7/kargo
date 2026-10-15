@@ -195,6 +195,9 @@ baseline = "detekt-baseline.xml"
 
 [test]                      # kargo test
 fail-fast = false           # test every target even if one fails (default: true)
+timeout = "10m"             # stop the whole test run after this long (optional)
+test-timeout = "30s"        # fail a JVM test that runs longer than this (optional)
+jvm-args = ["-Xmx1g"]       # extra JVM arguments for the test process
 ```
 
 Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekocm7.github.io/kargo/schemas/kargo.json`: put `#:schema <url>` on the first line for Taplo-based editors (Even Better TOML, Zed, Helix), or map the URL to `kargo.toml` in your editor. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/).

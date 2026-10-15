@@ -138,13 +138,19 @@ Options for `kargo test`. Every key is optional.
 ```toml
 [test]
 fail-fast = false
+timeout = "10m"
+test-timeout = "30s"
+jvm-args = ["-Xmx1g"]
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
 | `fail-fast` | `true` | Stop at the first target whose tests fail or don't compile. `false` tests every target and prints a result per target, like `kargo test --no-fail-fast` |
+| `timeout` | none | How long the whole test run may take, such as `"30s"`, `"5m"` or `"1h"`, counted from when the tests start running. The run is stopped and fails when it passes. Applies to the JVM, Native and Wasm targets, not Android |
+| `test-timeout` | none | How long one JVM test may take, such as `"30s"`. A test that runs longer fails, and the run goes on. Applies to tests run by JUnit Jupiter |
+| `jvm-args` | `[]` | JVM arguments for the test process, after `[target.jvm] jvm-args` |
 
-See [Testing every target](../../guides/testing/#testing-every-target).
+See [Testing every target](../../guides/testing/#testing-every-target) and [Timeouts](../../guides/testing/#timeouts).
 
 ## `[publish]`
 

@@ -233,6 +233,9 @@ kargo test [filter] [options]
 | `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
 | `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
+| `--include-tag <tag>` | Only run JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
+| `--exclude-tag <tag>` | Skip JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
+| `--failed` | Rerun only the JVM test classes that failed in the last run. Conflicts with `--list` and `--no-run`. See [Rerunning failures](../../guides/testing/#rerunning-failures) |
 | `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
 | `--debug[=<port>]` | Start the JVM tests suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`). Needs `-t jvm` in a project with several targets. See [Debugging tests](../../guides/testing/#debugging-tests) |
 | `--list` | Compile the tests and print them (`<target>: <Class>.<name>`) instead of running them. JVM and Native only. See [Listing tests](../../guides/testing/#listing-tests) |

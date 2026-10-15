@@ -948,6 +948,18 @@ fn test_section() {
     assert!(!parse(&format!("{MINIMAL}\n[test]\nfail-fast = false\n")).test.fail_fast);
     assert!(parse_err(&format!("{MINIMAL}\n[test]\nfail-fast = \"no\"\n")).contains("fail-fast"));
     assert!(parse_err(&format!("{MINIMAL}\n[test]\nthreads = 2\n")).contains("threads"));
+    let limits = parse(&format!("{MINIMAL}\n[test]\ntimeout = \"5m\"\ntest-timeout = \"30 s\"\njvm-args = [\"-Xmx512m\"]\n")).test;
+    assert_eq!(limits.timeout, Some(Duration::from_secs(300)));
+    assert_eq!(limits.test_timeout, Some(Duration::from_secs(30)));
+    assert_eq!(limits.jvm_args, ["-Xmx512m"]);
+    assert_eq!(parse(MINIMAL).test, TestSettings::default(), "no limits are set by default");
+    assert_eq!(parse(&format!("{MINIMAL}\n[test]\ntimeout = \"500ms\"\n")).test.timeout, Some(Duration::from_millis(500)));
+    assert_eq!(parse(&format!("{MINIMAL}\n[test]\ntimeout = \"1h\"\n")).test.timeout, Some(Duration::from_secs(3600)));
+    for bad in ["0s", "5", "1.5s", "10 parsecs", "", "-1m"] {
+        let err = parse_err(&format!("{MINIMAL}\n[test]\ntimeout = \"{bad}\"\n"));
+        assert!(err.contains("[test] `timeout` must be a positive duration"), "{bad}: {err}");
+    }
+    assert!(parse_err(&format!("{MINIMAL}\n[test]\ntest-timeout = \"soon\"\n")).contains("`test-timeout`"));
 }
 
 #[test]
