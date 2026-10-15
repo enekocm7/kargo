@@ -14,7 +14,8 @@
       <li>Kargo run configurations, Run and Debug icons on <code>main</code> and tests, a test tree with per-test results,
           and JVM debugging through <code>--debug</code>.</li>
       <li>A Kargo tool window listing the project's programs, tests and tasks, and Tools | Kargo actions for
-          build, check, test, clean, fetch, update, add and remove dependencies, add targets and run tasks.</li>
+          build, check, test, clean, fetch, update, add and remove dependencies, add and remove targets and run tasks.</li>
+      <li>Build | Build Project runs <code>kargo build</code>, and its errors and warnings go to the Build tool window and the Problems view.</li>
     </ul>
     Kargo must be installed; see the <a href="https://enekocm7.github.io/kargo/guides/editors/#intellij-idea-and-android-studio">setup guide</a>.
     ]]></description>
@@ -45,6 +46,8 @@
         <runLineMarkerContributor language="kotlin" implementationClass="io.github.enekocm7.kargo.run.KargoRunLineMarkerContributor"/>
 
         <newProjectWizard.generator implementation="io.github.enekocm7.kargo.wizard.KargoNewProjectWizard"/>
+
+        <projectTaskRunner implementation="io.github.enekocm7.kargo.projecttask.KargoProjectTaskRunner" order="first"/>
 
         <toolWindow id="Kargo" anchor="right" icon="/icons/kargo.svg"
                     factoryClass="io.github.enekocm7.kargo.toolwindow.KargoToolWindowFactory"/>
@@ -77,6 +80,8 @@
                     text="Remove Dependency…" description="kargo remove"/>
             <action id="Kargo.AddTarget" class="io.github.enekocm7.kargo.actions.KargoAddTargetAction" text="Add Target…"
                     description="kargo target add"/>
+            <action id="Kargo.RemoveTarget" class="io.github.enekocm7.kargo.actions.KargoRemoveTargetAction" text="Remove Target…"
+                    description="kargo target remove"/>
             <action id="Kargo.Fetch" class="io.github.enekocm7.kargo.actions.KargoFetchAction" text="Fetch Dependencies and Sources"
                     description="kargo fetch --sources"/>
             <action id="Kargo.Update" class="io.github.enekocm7.kargo.actions.KargoUpdateAction" text="Update Dependencies"
