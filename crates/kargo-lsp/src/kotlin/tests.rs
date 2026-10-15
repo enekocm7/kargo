@@ -566,6 +566,12 @@ fn platforms_against_the_real_standard_library() {
         (Some("jvm"), both, "fun main() {\n    thr$0\n}\n", "thread", true),
         (Some("wasm"), both, "fun main() {\n    thr$0\n}\n", "thread", false),
         (Some("wasm"), both, "fun main() {\n    \"A\".lower$0\n}\n", "lowercase", true),
+        // Native takes the common code and the parts of the Wasm standard library it shares with Wasm.
+        (Some("native"), Platforms::NATIVE, "fun main() {\n    listOf(1).$0\n}\n", "map", true),
+        (Some("native"), Platforms::NATIVE, "fun main() {\n    \"A\".lower$0\n}\n", "lowercase", true),
+        (Some("native"), Platforms::NATIVE, "fun main() {\n    thr$0\n}\n", "thread", false),
+        (Some("native"), Platforms::NATIVE, "fun main() {\n    Obsolete$0\n}\n", "ObsoleteWorkersApi", true),
+        (Some("jvm"), both, "fun main() {\n    Obsolete$0\n}\n", "ObsoleteWorkersApi", false),
     ];
     for (target, platforms, src, label, expected) in cases {
         let at = src.find("$0").unwrap();
