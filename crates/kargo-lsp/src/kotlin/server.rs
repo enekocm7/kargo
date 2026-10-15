@@ -48,10 +48,24 @@ fn pipe() -> (io::PipeReader, io::PipeWriter) {
     io::pipe().expect("failed to create a pipe")
 }
 
+/// What the server's loop handles: an editor message, or what a load of the project sent.
+/// `Fetching` and `Fetched` begin and end downloading the sources jars of `modules` dependencies,
+/// of which `found` had one.
 enum Event {
     Client(Option<Value>),
     Project { generation: u64, model: Model, units: Vec<Arc<Unit>> },
     Libraries { generation: u64, units: Vec<Arc<Unit>>, jdk: Option<Arc<Jdk>> },
+    Fetching { generation: u64, modules: usize },
+    Fetched { generation: u64, found: usize },
+}
+
+/// The `$/progress` of downloading sources jars, once the editor accepted its token.
+struct Progress {
+    generation: u64,
+    token: String,
+    create_id: String,
+    modules: usize,
+    begun: bool,
 }
 
 /// What the server knows about the project's layout.
@@ -372,8 +386,48 @@ fn native_stdlib(meta: &Value, stdlib: &[Arc<Unit>]) -> Option<CompiledLibrary> 
     })
 }
 
-/// Loads the project at `root` and its libraries, sending each as it is ready.
-fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache: UnitCache, with_dependencies: bool) {
+/// The dependencies in `meta` without a sources jar in the cache, as `group:artifact` and version:
+/// the ones [`dependency_compiled`] reads from their compiled jars and klibs.
+fn missing_sources(meta: &Value) -> Vec<(String, String)> {
+    let mut out: BTreeSet<(String, String)> = BTreeSet::new();
+    for package in meta["packages"].as_array().into_iter().flatten() {
+        for target in package["targets"].as_array().into_iter().flatten() {
+            for classpaths in target["dependencies"].as_array().into_iter().flatten() {
+                for entry in ["compile", "test"].iter().flat_map(|scope| classpaths[*scope].as_array().into_iter().flatten()) {
+                    let (Some(path), Some(module), Some(version)) =
+                        (entry["path"].as_str(), entry["module"].as_str(), entry["version"].as_str())
+                    else {
+                        continue;
+                    };
+                    if entry["sources"].is_null()
+                        && !is_stdlib_module(module)
+                        && Path::new(path).extension().is_some_and(|e| e == "jar" || e == "klib")
+                    {
+                        out.insert((module.to_owned(), version.to_owned()));
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// What a load of the project does besides reading it.
+#[derive(Clone)]
+struct LoadOptions {
+    /// Whether the dependencies are loaded, not only the standard library.
+    dependencies: bool,
+    /// Whether missing sources jars of dependencies are downloaded.
+    fetch_sources: bool,
+    /// The modules whose sources jars were looked for already, found or not, so a reload
+    /// doesn't ask the repositories again.
+    tried: Arc<std::sync::Mutex<BTreeSet<(String, String)>>>,
+}
+
+/// Loads the project at `root` and its libraries, sending each as it is ready. Dependencies
+/// without a sources jar in the cache are read from their compiled jars first; then their
+/// sources jars are downloaded (as `kargo fetch --sources` does) and the libraries load again.
+fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache: UnitCache, options: LoadOptions) {
     let model = match crate::project::metadata(&config, &root, true) {
         Ok(meta) => model_from_metadata(&meta),
         Err(_) => fallback_model(&root),
@@ -390,34 +444,65 @@ fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache
         return;
     }
     let platforms = model.packages.platforms.iter().fold(Platforms::NONE, |all, p| all.union(*p));
-    let mut jars = library::stdlib_jars(&config, &model.kotlin, model.repositories.clone(), platforms, model.wasm_platform.as_deref());
+    let stdlib = library::stdlib_jars(&config, &model.kotlin, model.repositories.clone(), platforms, model.wasm_platform.as_deref());
     // Without the standard library's sources, the built-in outline stands in for it.
-    let outline = !jars.iter().any(|j| j.name.starts_with("kotlin-stdlib"));
-    let mut units = library::units(&config, &cache, &jars);
-    if outline {
-        units.extend(library::stub_units(&config));
-    }
+    let outline = !stdlib.iter().any(|j| j.name.starts_with("kotlin-stdlib"));
+    let libraries = |meta: Option<&Value>| {
+        // Parsed together with the standard library, so a file both carry is one unit.
+        let mut jars = stdlib.clone();
+        jars.extend(meta.map(dependency_jars).unwrap_or_default());
+        let mut units = library::units(&config, &cache, &jars);
+        let mut outline_units = if outline { library::stub_units(&config) } else { Vec::new() };
+        if let Some(meta) = meta {
+            let mut compiled = dependency_compiled(meta);
+            if platforms.contains(Platforms::NATIVE) {
+                // Only the standard library's own files say what the Native one adds.
+                let mut known = library::units(&config, &cache, &stdlib);
+                known.extend(outline_units.iter().cloned());
+                compiled.extend(native_stdlib(meta, &known));
+            }
+            units.extend(library::compiled_units(&config, &cache, &compiled));
+        }
+        units.append(&mut outline_units);
+        units
+    };
     let jdk = project_jdk(&config, &root);
-    if tx.send(Event::Libraries { generation, units: units.clone(), jdk: jdk.clone() }).is_err() || !with_dependencies {
+    let send = |units| tx.send(Event::Libraries { generation, units, jdk: jdk.clone() }).is_ok();
+    if !send(libraries(None)) || !options.dependencies {
         return;
     }
     let Ok(meta) = crate::project::metadata(&config, &root, false) else { return };
-    let deps = dependency_jars(&meta);
-    let mut compiled = dependency_compiled(&meta);
-    if platforms.contains(Platforms::NATIVE) {
-        compiled.extend(native_stdlib(&meta, &units));
-    }
-    if deps.is_empty() && compiled.is_empty() {
+    if (!dependency_jars(&meta).is_empty() || !dependency_compiled(&meta).is_empty()) && !send(libraries(Some(&meta))) {
         return;
     }
-    // Parsed together with the standard library, so a file both carry is one unit.
-    jars.extend(deps);
-    let mut units = library::units(&config, &cache, &jars);
-    units.extend(library::compiled_units(&config, &cache, &compiled));
-    if outline {
-        units.extend(library::stub_units(&config));
+    if !options.fetch_sources {
+        return;
     }
-    let _ = tx.send(Event::Libraries { generation, units, jdk });
+    let missing: Vec<(String, String)> = {
+        let tried = options.tried.lock().expect("lock poisoned");
+        missing_sources(&meta).into_iter().filter(|m| !tried.contains(m)).collect()
+    };
+    if missing.is_empty() || tx.send(Event::Fetching { generation, modules: missing.len() }).is_err() {
+        return;
+    }
+    let results = crate::project::fetch_sources(&config, &root, &missing).unwrap_or_default();
+    let mut found = 0;
+    {
+        let mut tried = options.tried.lock().expect("lock poisoned");
+        for (module, result) in missing.into_iter().zip(results) {
+            // A failed download is tried again on the next load.
+            if let Ok(fetched) = result {
+                found += usize::from(fetched);
+                tried.insert(module);
+            }
+        }
+    }
+    if tx.send(Event::Fetched { generation, found }).is_err() || found == 0 {
+        return;
+    }
+    if let Ok(meta) = crate::project::metadata(&config, &root, false) {
+        send(libraries(Some(&meta)));
+    }
 }
 
 /// The path of a `file:` URI, with the drive letter in upper case on Windows (editors send
@@ -498,7 +583,10 @@ struct State {
     generation: u64,
     snippets: bool,
     watch: bool,
-    dependencies: bool,
+    /// Whether the editor shows `$/progress`.
+    work_done_progress: bool,
+    load_options: LoadOptions,
+    progress: Option<Progress>,
     cache: UnitCache,
     next_id: u64,
     /// Whether the current load delivered the project's files, and the libraries.
@@ -524,7 +612,9 @@ impl State {
             generation: 0,
             snippets: false,
             watch: false,
-            dependencies,
+            work_done_progress: false,
+            load_options: LoadOptions { dependencies, fetch_sources: true, tried: Arc::default() },
+            progress: None,
             cache: UnitCache::default(),
             next_id: 0,
             project_loaded: false,
@@ -586,8 +676,56 @@ impl State {
                 self.lib = Arc::new(Index::new(true, units).with_jdk(jdk));
                 self.changed();
             }
+            Event::Fetching { generation, modules } => {
+                self.end_progress(None);
+                if self.work_done_progress {
+                    self.next_id += 1;
+                    let create_id = format!("kotlin/{}", self.next_id);
+                    let token = format!("{create_id}/sources");
+                    let _ = self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })));
+                    self.progress = Some(Progress { generation, token, create_id, modules, begun: false });
+                }
+            }
+            Event::Fetched { generation, found } if self.progress.as_ref().is_some_and(|p| p.generation == generation) => {
+                self.end_progress(Some(format!("{found} sources jar{}", if found == 1 { "" } else { "s" })));
+            }
             _ => {}
         }
+    }
+
+    /// Ends the `$/progress` of downloading sources jars, if the editor showed it.
+    fn end_progress(&mut self, message: Option<String>) {
+        if let Some(progress) = self.progress.take()
+            && progress.begun
+        {
+            let mut value = json!({ "kind": "end" });
+            if let Some(message) = message {
+                value["message"] = json!(message);
+            }
+            let _ = self.send(&jsonrpc::notification("$/progress", json!({ "token": progress.token, "value": value })));
+        }
+    }
+
+    /// The editor answered one of the server's requests: begins the progress whose token it accepted.
+    fn response(&mut self, message: &Value) -> anyhow::Result<()> {
+        let Some(progress) = &mut self.progress else { return Ok(()) };
+        if message["id"].as_str() != Some(progress.create_id.as_str()) || progress.begun {
+            return Ok(());
+        }
+        if !message["error"].is_null() {
+            self.progress = None;
+            return Ok(());
+        }
+        progress.begun = true;
+        let n = progress.modules;
+        let value = json!({
+            "kind": "begin",
+            "title": "Fetching dependency sources",
+            "message": format!("{n} librar{}", if n == 1 { "y" } else { "ies" }),
+            "cancellable": false,
+        });
+        let params = json!({ "token": progress.token, "value": value });
+        self.send(&jsonrpc::notification("$/progress", params))
     }
 
     fn changed(&mut self) {
@@ -598,16 +736,16 @@ impl State {
     fn reload(&mut self) {
         let Some(root) = self.root.clone() else { return };
         self.load_generation += 1;
-        let (config, tx, cache, generation, deps) =
-            (self.config.clone(), self.tx.clone(), Arc::clone(&self.cache), self.load_generation, self.dependencies);
-        thread::spawn(move || load(config, root, generation, tx, cache, deps));
+        let (config, tx, cache, generation, options) =
+            (self.config.clone(), self.tx.clone(), Arc::clone(&self.cache), self.load_generation, self.load_options.clone());
+        thread::spawn(move || load(config, root, generation, tx, cache, options));
     }
 
     fn message(&mut self, message: Value) -> anyhow::Result<bool> {
         let method = jsonrpc::method(&message).to_owned();
         let params = &message["params"];
         match jsonrpc::kind(&message) {
-            Kind::Response => {}
+            Kind::Response => self.response(&message)?,
             Kind::Notification => match method.as_str() {
                 "exit" => return Ok(false),
                 "initialized" => self.register_watchers()?,
@@ -828,6 +966,8 @@ impl State {
         let completion = &params["capabilities"]["textDocument"]["completion"];
         self.snippets = completion["completionItem"]["snippetSupport"] == true;
         self.watch = params["capabilities"]["workspace"]["didChangeWatchedFiles"]["dynamicRegistration"] == true;
+        self.work_done_progress = params["capabilities"]["window"]["workDoneProgress"] == true;
+        self.load_options.fetch_sources = params["initializationOptions"]["fetchSources"] != false;
         self.root = params["rootUri"]
             .as_str()
             .and_then(file_path)
@@ -1048,6 +1188,164 @@ package=c
         assert_eq!(library.main, Platforms::NATIVE);
         let known: Vec<&str> = library.known.as_deref().unwrap().iter().map(String::as_str).collect();
         assert_eq!(known, ["kotlin.io.println"], "only public declarations the sources give Native code");
+    }
+
+    #[test]
+    fn lists_the_dependencies_missing_sources_jars() {
+        let entry = |module: &str, path: &str, sources: Option<&str>| json!({ "module": module, "version": "1.0", "path": path, "sources": sources });
+        let meta = json!({ "packages": [{ "name": "app", "targets": [{ "kind": "jvm", "dependencies": [{
+            "compile": [
+                entry("org.jetbrains.kotlin:kotlin-stdlib", "/m/kotlin-stdlib.jar", None),
+                entry("com.example:with-sources", "/m/a.jar", Some("/m/a-sources.jar")),
+                entry("com.example:without", "/m/b.jar", None),
+                entry("com.example:pom-only", "/m/c.pom", None),
+            ],
+            "test": [entry("com.example:without", "/m/b.jar", None), entry("com.example:tested", "/m/d.jar", None)],
+        }] }] }] });
+        let missing = missing_sources(&meta);
+        assert_eq!(missing, [("com.example:tested".to_owned(), "1.0".to_owned()), ("com.example:without".to_owned(), "1.0".to_owned())]);
+    }
+
+    /// Writes `files` to a zip at `path`.
+    fn zip(path: &Path, files: &[(&str, &str)]) {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, text) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Publishes `group:artifact:version` with a POM and a jar (and a sources jar with `sources`) to a Maven repository.
+    fn publish(repo: &Path, group: &str, artifact: &str, version: &str, sources: &[(&str, &str)]) {
+        let dir = repo.join(group.replace('.', "/")).join(artifact).join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pom = format!("<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version></project>");
+        std::fs::write(dir.join(format!("{artifact}-{version}.pom")), pom).unwrap();
+        zip(
+            &dir.join(format!("{artifact}-{version}.jar")),
+            &[(
+                "META-INF/MANIFEST.MF",
+                "Manifest-Version: 1.0
+",
+            )],
+        );
+        if !sources.is_empty() {
+            zip(&dir.join(format!("{artifact}-{version}-sources.jar")), sources);
+        }
+    }
+
+    #[test]
+    fn downloads_missing_sources_jars_and_completes_from_them() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        publish(
+            repo.path(),
+            "g",
+            "lib",
+            "1.0",
+            &[(
+                "g/Greeter.kt",
+                "package g
+
+class Greeter {
+    fun greet(): String = \"hi\"
+}
+",
+            )],
+        );
+        for artifact in ["kotlin-stdlib", "kotlin-test-junit5"] {
+            publish(repo.path(), "org.jetbrains.kotlin", artifact, kargo_manifest::DEFAULT_KOTLIN_VERSION, &[]);
+        }
+        publish(repo.path(), "org.junit.jupiter", "junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+        let url = format!("file:///{}", repo.path().display().to_string().replace('\\', "/").trim_start_matches('/'));
+        let manifest = format!(
+            "[package]
+name = \"app\"
+version = \"0.1.0\"
+[dependencies]
+\"g:lib\" = \"1.0\"
+[repositories]
+local = \"{url}\"
+"
+        );
+        std::fs::write(dir.path().join("kargo.toml"), manifest).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let main = "fun main() {
+    g.Greeter().
+}
+";
+        std::fs::write(dir.path().join("src/Main.kt"), main).unwrap();
+
+        let config =
+            Config::new(home.path().to_path_buf(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet)).with_offline(true);
+        let (server_in, mut input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let mut output = BufReader::new(output);
+        let server = thread::spawn(move || serve(config, BufReader::new(server_in), server_out));
+        let mut send = |message: Value| jsonrpc::write(&mut input, &message).unwrap();
+        let capabilities = json!({ "window": { "workDoneProgress": true } });
+        send(jsonrpc::request("1", "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": capabilities })));
+        send(jsonrpc::notification("initialized", json!({})));
+        let uri = text::path_to_uri(&dir.path().join("src/Main.kt"));
+        send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": main } }),
+        ));
+
+        // The download is reported with `$/progress` once the editor accepts the token.
+        let mut progress = Vec::new();
+        loop {
+            let message = jsonrpc::read(&mut output).unwrap().expect("a message");
+            if message["method"] == "window/workDoneProgress/create" {
+                send(jsonrpc::response(&message["id"], Value::Null));
+            } else if message["method"] == "$/progress" {
+                progress.push(message["params"]["value"].clone());
+                if message["params"]["value"]["kind"] == "end" {
+                    break;
+                }
+            }
+        }
+        assert_eq!(progress[0]["title"], "Fetching dependency sources", "{progress:?}");
+        // g:lib, kotlin-test-junit5 and junit-jupiter lack one; only g:lib publishes one.
+        assert_eq!(progress[0]["message"], "3 libraries", "{progress:?}");
+        assert_eq!(progress.last().unwrap()["message"], "1 sources jar", "{progress:?}");
+
+        // The library loads again, now from its sources, without a restart.
+        let position = json!({ "line": 1, "character": 16 });
+        let mut id = 2;
+        let labels = loop {
+            send(jsonrpc::request(
+                &id.to_string(),
+                "textDocument/completion",
+                json!({ "textDocument": { "uri": uri }, "position": position }),
+            ));
+            let reply = loop {
+                let message = jsonrpc::read(&mut output).unwrap().expect("a message");
+                if message["id"].as_str() == Some(id.to_string().as_str()) && message.get("method").is_none() {
+                    break message;
+                }
+            };
+            let labels: Vec<String> =
+                reply["result"]["items"].as_array().into_iter().flatten().filter_map(|i| i["label"].as_str().map(str::to_owned)).collect();
+            if labels.iter().any(|l| l.starts_with("greet")) || id > 100 {
+                break labels;
+            }
+            id += 1;
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert!(labels.iter().any(|l| l.starts_with("greet")), "{labels:?}");
+        let fetched = home.path();
+        assert!(
+            walkdir::WalkDir::new(fetched).into_iter().flatten().any(|e| e.file_name() == "lib-1.0-sources.jar"),
+            "cached in {}",
+            fetched.display()
+        );
+
+        send(jsonrpc::request("999", "shutdown", Value::Null));
+        send(jsonrpc::notification("exit", Value::Null));
+        server.join().unwrap().unwrap();
     }
 
     #[test]
