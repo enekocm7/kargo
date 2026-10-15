@@ -5,12 +5,16 @@
 //! library from its sources jar ([`library`]), and offers completion, hover, go to definition,
 //! references and rename ([`features`]) on top of a declaration parser ([`syntax`]) and a
 //! resolver with enough type inference for member access ([`resolve`]). Java declarations come
-//! from the JDK's sources ([`jdk`]) and from `.java` files ([`java`]).
+//! from the JDK's sources ([`jdk`]) and from `.java` files ([`java`]). Libraries without a
+//! sources jar are read from their class files and klibs ([`compiled`]).
 
+pub mod classfile;
+pub mod compiled;
 pub mod features;
 pub mod index;
 pub mod java;
 pub mod jdk;
+pub mod kmetadata;
 pub mod lexer;
 pub mod library;
 pub mod resolve;

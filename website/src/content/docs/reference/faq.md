@@ -19,7 +19,7 @@ IntelliJ IDEA and Android Studio are the best supported editors for Kotlin. Thei
 
 ### Completion in my editor doesn't know a library's classes
 
-[Kargo's Kotlin server](../../guides/kotlin-server/#libraries), the default of `kargo lsp`, reads libraries from their sources jars. Run `kargo fetch --sources` and restart the editor's language server. Java classes, including the JDK's, and libraries that publish no sources jar stay unknown to it. For them, use `kargo lsp --server kotlin-lsp`, which reads compiled classes, or IntelliJ IDEA.
+[Kargo's Kotlin server](../../guides/kotlin-server/#libraries), the default of `kargo lsp`, reads a library from its sources jar when it is in the cache, else from its compiled jar or klib. It resolves the dependencies in the background, so a library completes a moment after the project opens (offline, only once it is in Kargo's cache). Run `kargo fetch --sources` for documentation in hover and real sources in go to definition, and restart the editor's language server. The JDK's classes come from its `lib/src.zip`; a JDK without it leaves them unknown. For the Kotlin compiler's own analysis, use `kargo lsp --server kotlin-lsp` or IntelliJ IDEA.
 
 ### Can I use Java?
 

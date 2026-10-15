@@ -29,21 +29,28 @@ fn fixture(files: &[(&str, &str)]) -> Fixture {
 /// [`fixture`] with the JDK's sources `jdk` (by path, as in `src.zip`) for the libraries.
 fn fixture_with_jdk(files: &[(&str, &str)], jdk: &[(&str, &str)]) -> Fixture {
     if jdk.is_empty() {
-        return fixture_on(files, None, None);
+        return fixture_on(files, None, None, Vec::new());
     }
     let (dir, home) = fake_jdk(jdk);
     let source = super::jdk::Jdk::open(&home, &dir.path().join("cache"), "JDK test").expect("a fake JDK");
-    fixture_on(files, Some(Arc::new(source)), Some(dir))
+    fixture_on(files, Some(Arc::new(source)), Some(dir), Vec::new())
 }
 
-/// [`fixture`] with the JDK `jdk` (its cache in `jdk_dir`, which lives as long as the fixture).
-fn fixture_on(files: &[(&str, &str)], jdk: Option<Arc<super::jdk::Jdk>>, jdk_dir: Option<tempfile::TempDir>) -> Fixture {
-    let lib_units: Vec<Arc<Unit>> = stub_files()
+/// [`fixture`] with the JDK `jdk` (its cache in `jdk_dir`, which lives as long as the fixture),
+/// and more library units `libs`.
+fn fixture_on(
+    files: &[(&str, &str)],
+    jdk: Option<Arc<super::jdk::Jdk>>,
+    jdk_dir: Option<tempfile::TempDir>,
+    libs: Vec<Arc<Unit>>,
+) -> Fixture {
+    let mut lib_units: Vec<Arc<Unit>> = stub_files()
         .into_iter()
         .map(|(rel, text)| {
             Arc::new(Unit::new(PathBuf::from("/stdlib").join(rel), text, Origin::Library { name: "stdlib".into(), jvm: false }))
         })
         .collect();
+    lib_units.extend(libs);
     let mut cursors = Vec::new();
     let mut units = Vec::new();
     for (i, (path, text)) in files.iter().enumerate() {
@@ -667,16 +674,17 @@ fn completes_the_real_jdk() {
         &[("src/Main.kt", "import java.util.ArrayList\n\nfun main() {\n    ArrayList<String>().$0\n}\n")],
         Some(Arc::new(jdk)),
         Some(dir),
+        Vec::new(),
     );
     let labels = f.labels();
     assert!(has(&labels, "add") && has(&labels, "size") && has(&labels, "isEmpty"), "{labels:?}");
-    let f = fixture_on(&[("src/Main.kt", "fun main() {\n    System.out.$0\n}\n")], None, None);
+    let f = fixture_on(&[("src/Main.kt", "fun main() {\n    System.out.$0\n}\n")], None, None, Vec::new());
     assert!(!has(&f.labels(), "println"), "without a JDK, nothing of System is known");
 
     // The methods Java adds to Kotlin's String: `chars()` comes from CharSequence's default method.
     let dir = tempfile::tempdir().unwrap();
     let jdk = super::jdk::Jdk::open(&home, &dir.path().join("cache"), "JDK").expect("a JDK with sources");
-    let f = fixture_on(&[("src/Main.kt", "fun main() {\n    \"abc\".$0\n}\n")], Some(Arc::new(jdk)), Some(dir));
+    let f = fixture_on(&[("src/Main.kt", "fun main() {\n    \"abc\".$0\n}\n")], Some(Arc::new(jdk)), Some(dir), Vec::new());
     let labels = f.labels();
     assert!(has(&labels, "chars") && has(&labels, "codePointAt") && has(&labels, "lines"), "{labels:?}");
 }
@@ -690,4 +698,46 @@ fn completes_the_java_members_of_kotlin_classes() {
     assert!(has(&labels, "codePointAt") && has(&labels, "chars"), "{labels:?}");
     assert!(!has(&labels, "valueOf"), "{labels:?}");
     assert_eq!(labels.iter().filter(|l| *l == "length").count(), 1, "{labels:?}");
+}
+
+/// The stubs of the hand-made compiled library in [`super::compiled::testing`], as library units.
+fn compiled_library() -> Vec<Arc<Unit>> {
+    super::compiled::render_classes(super::compiled::testing::sample_classes(), "generated")
+        .into_iter()
+        .map(|(rel, text)| {
+            Arc::new(Unit::new(PathBuf::from("/stubs").join(rel), text, Origin::Library { name: "sample".into(), jvm: true }))
+        })
+        .collect()
+}
+
+#[test]
+fn completes_libraries_without_sources() {
+    let complete = |main: &str| fixture_on(&[("src/Main.kt", main)], None, None, compiled_library()).labels();
+
+    // A Kotlin class read from its metadata, and what its members return.
+    let labels = complete("import p.Greeter\n\nfun main() {\n    Greeter(\"a\").$0\n}\n");
+    assert!(has(&labels, "greet") && has(&labels, "name") && has(&labels, "pause"), "{labels:?}");
+    let labels = complete("import p.Greeter\n\nfun main() {\n    Greeter(\"a\").greet().$0\n}\n");
+    assert!(has(&labels, "uppercase"), "{labels:?}");
+
+    // A top-level extension function, but not a hidden one.
+    let labels = complete("import p.shout\n\nfun main() {\n    \"a\".$0\n}\n");
+    assert!(has(&labels, "shout"), "{labels:?}");
+    let labels = complete("package p\n\nfun main() {\n    ol$0\n}\n");
+    assert!(!has(&labels, "old"), "{labels:?}");
+
+    // A Java class read from its class file: static members through the class, nested classes.
+    let labels = complete("import p.JavaThing\n\nfun main() {\n    JavaThing.$0\n}\n");
+    assert!(has(&labels, "of") && has(&labels, "Builder"), "{labels:?}");
+    let labels = complete("import p.JavaThing\n\nfun main() {\n    JavaThing.of(1).$0\n}\n");
+    assert!(has(&labels, "wrap") && !has(&labels, "secret"), "{labels:?}");
+
+    // Go to definition opens the generated file.
+    let f = fixture_on(
+        &[("src/Main.kt", "import p.Greeter\n\nfun main() {\n    Greeter(\"a\").gre$0et()\n}\n")],
+        None,
+        None,
+        compiled_library(),
+    );
+    assert_eq!(f.definition(), Some(("p.kt".into(), "public fun greet(times: Int = ...): String".into())));
 }

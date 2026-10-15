@@ -1,9 +1,11 @@
 //! The libraries Kargo's Kotlin server knows: the Kotlin standard library and `kotlin-test` at
 //! the project's Kotlin version, from their sources jars (downloaded like any artifact and
-//! cached), and the sources jars of dependencies that are already in the cache (`kargo fetch
-//! --sources`). Each jar is extracted once under `~/.kargo/cache/lsp-sources`, so go to definition
-//! opens real files. Without the standard library's sources (offline, before the first
-//! download), a small built-in outline of it stands in.
+//! cached), the sources jars of dependencies that are already in the cache (`kargo fetch
+//! --sources`), and the compiled jars and klibs of the dependencies without one (see
+//! [`super::compiled`]). Each jar is extracted (or its stubs generated) once under
+//! `~/.kargo/cache/lsp-sources`, so go to definition opens real files. Without the standard
+//! library's sources (offline, before the first download), a small built-in outline of it
+//! stands in.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use rayon::prelude::*;
 use kargo_maven::{MavenClient, ModuleId, Repository};
 use kargo_util::config::Config;
 
+use super::compiled;
 use super::index::{Origin, Unit};
 
 /// The built-in outline of the standard library, split into files at `// file:` lines.
@@ -25,6 +28,22 @@ pub struct SourcesJar {
     pub name: String,
     pub jar: PathBuf,
 }
+
+/// A library without sources: a jar of classes, or a klib (a file or an unpacked directory).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledLibrary {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl CompiledLibrary {
+    fn is_klib(&self) -> bool {
+        self.path.is_dir() || self.path.extension().is_some_and(|e| e == "klib")
+    }
+}
+
+/// Bumped when the generated stubs change, so that cached ones are generated again.
+const STUBS_FORMAT: &str = "1";
 
 /// The sources jars of the standard library and `kotlin-test` at `version`, downloading them
 /// unless offline.
@@ -42,7 +61,7 @@ pub fn stdlib_jars(config: &Config, version: &str, repositories: Vec<Repository>
 
 /// The parsed Kotlin files of a sources jar.
 pub fn jar_units(config: &Config, jar: &SourcesJar) -> Result<Vec<Arc<Unit>>> {
-    let dir = extract(config, &jar.jar)?;
+    let dir = cached_dir(config, &jar.jar, "", |staging| kargo_toolchain::archive::extract_zip(&jar.jar, staging))?;
     let files = kargo_util::fs::collect_files(&dir, &["kt"]);
     Ok(files
         .par_iter()
@@ -56,13 +75,43 @@ pub fn jar_units(config: &Config, jar: &SourcesJar) -> Result<Vec<Arc<Unit>>> {
         .collect())
 }
 
-/// Where the sources of `jar` are extracted, extracting them the first time.
-fn extract(config: &Config, jar: &Path) -> Result<PathBuf> {
-    let stem = jar.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "sources".into());
+/// The parsed stubs of a compiled library, generated the first time. A jar's classes exist only
+/// on the JVM; a klib's declarations are for Wasm or Native.
+pub fn compiled_units(config: &Config, library: &CompiledLibrary) -> Result<Vec<Arc<Unit>>> {
+    let klib = library.is_klib();
+    let suffix = format!("-stubs{STUBS_FORMAT}-{}", env!("CARGO_PKG_VERSION"));
+    let dir = cached_dir(config, &library.path, &suffix, |staging| {
+        let stubs = if klib { compiled::klib_stubs(&library.path)? } else { compiled::jar_stubs(&library.path)? };
+        for (rel, text) in stubs {
+            let path = staging.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        Ok(())
+    })?;
+    let files = kargo_util::fs::collect_files(&dir, &["kt", "java"]);
+    Ok(files
+        .par_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(path).ok()?;
+            Some(Arc::new(Unit::new(path.clone(), text, Origin::Library { name: library.name.clone(), jvm: !klib })))
+        })
+        .collect())
+}
+
+/// A directory under `~/.kargo/cache/lsp-sources` for what is made from `source` (a jar, a
+/// klib or an unpacked klib), filled by `fill` the first time.
+fn cached_dir(config: &Config, source: &Path, suffix: &str, fill: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
+    let stem = if source.is_dir() { source.file_name() } else { source.file_stem() };
+    let stem = stem.map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "sources".into());
     let mut fp = kargo_util::hash::Fingerprint::new();
-    fp.file_stamp(jar);
+    // An unpacked klib changes with its metadata; its IR is large and irrelevant here.
+    let linkdata = source.join("default").join("linkdata");
+    fp.file_stamp(if linkdata.is_dir() { &linkdata } else { source });
     let hash = fp.finish();
-    let dir = config.home().join("cache").join("lsp-sources").join(format!("{stem}-{}", &hash[..12]));
+    let dir = config.home().join("cache").join("lsp-sources").join(format!("{stem}-{}{suffix}", &hash[..12]));
     let marker = dir.join(".kargo-complete");
     if marker.is_file() {
         return Ok(dir);
@@ -70,13 +119,16 @@ fn extract(config: &Config, jar: &Path) -> Result<PathBuf> {
     let staging = dir.with_extension(format!("tmp-{}", std::process::id()));
     let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
     std::fs::create_dir_all(&staging).with_context(|| format!("failed to create {}", staging.display()))?;
-    kargo_toolchain::archive::extract_zip(jar, &staging)?;
+    if let Err(e) = fill(&staging) {
+        let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
+        return Err(e);
+    }
     std::fs::write(staging.join(".kargo-complete"), "")?;
     if kargo_util::fs::rename_with_retries(&staging, &dir).is_err() {
         // Another `kargo lsp` extracted it first.
         let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
         if !marker.is_file() {
-            anyhow::bail!("failed to extract {}", jar.display());
+            anyhow::bail!("failed to prepare {}", source.display());
         }
     }
     Ok(dir)

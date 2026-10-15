@@ -26,7 +26,7 @@ use kargo_util::config::Config;
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
-use super::library::{self, SourcesJar};
+use super::library::{self, CompiledLibrary, SourcesJar};
 use super::resolve::{Analyzer, Packages};
 use crate::jsonrpc::{self, Kind};
 use crate::text;
@@ -194,33 +194,75 @@ fn scan(model: &Model) -> Vec<Arc<Unit>> {
         .collect()
 }
 
-/// The sources jars of the dependencies in `meta` (with dependencies) that are in the cache.
-fn dependency_sources(meta: &Value, skip: &[SourcesJar]) -> Vec<SourcesJar> {
-    let mut out: Vec<SourcesJar> = Vec::new();
+/// The libraries of the dependencies in `meta` (with dependencies): their sources jars that are
+/// in the cache, and the compiled jars and klibs of the others. The standard library and
+/// `kotlin-test` come from [`library::stdlib_jars`] instead.
+fn dependency_libraries(meta: &Value, skip: &[SourcesJar]) -> (Vec<SourcesJar>, Vec<CompiledLibrary>) {
+    let mut sources: Vec<SourcesJar> = Vec::new();
+    let mut compiled: Vec<CompiledLibrary> = Vec::new();
     for package in meta["packages"].as_array().into_iter().flatten() {
         for target in package["targets"].as_array().into_iter().flatten() {
             for platform in target["dependencies"].as_array().into_iter().flatten() {
                 for scope in ["compile", "test"] {
                     for entry in platform[scope].as_array().into_iter().flatten() {
-                        let (Some(sources), Some(module)) = (entry["sources"].as_str(), entry["module"].as_str()) else { continue };
-                        let jar = PathBuf::from(sources);
-                        if skip.iter().any(|s| s.jar == jar) || out.iter().any(|s| s.jar == jar) {
-                            continue;
-                        }
-                        if module == "org.jetbrains.kotlin:kotlin-stdlib" || module == "org.jetbrains.kotlin:kotlin-test" {
-                            continue;
-                        }
+                        let Some(module) = entry["module"].as_str() else { continue };
                         let version = entry["version"].as_str().unwrap_or_default();
-                        out.push(SourcesJar { name: format!("{} {version}", module.split(':').nth(1).unwrap_or(module)), jar });
+                        let name = format!("{} {version}", module.split(':').nth(1).unwrap_or(module));
+                        if let Some(jar) = entry["sources"].as_str().map(PathBuf::from) {
+                            if skip.iter().any(|s| s.jar == jar) || sources.iter().any(|s| s.jar == jar) {
+                                continue;
+                            }
+                            if module == "org.jetbrains.kotlin:kotlin-stdlib" || module == "org.jetbrains.kotlin:kotlin-test" {
+                                continue;
+                            }
+                            sources.push(SourcesJar { name, jar });
+                        } else if let Some(path) = entry["path"].as_str().map(PathBuf::from) {
+                            let artifact = module.strip_prefix("org.jetbrains.kotlin:").unwrap_or_default();
+                            if artifact.starts_with("kotlin-stdlib") || artifact.starts_with("kotlin-test") {
+                                continue;
+                            }
+                            let readable = path.extension().is_some_and(|e| e == "jar" || e == "klib");
+                            if readable && !compiled.iter().any(|c| c.path == path) {
+                                compiled.push(CompiledLibrary { name, path });
+                            }
+                        }
                     }
                 }
             }
         }
     }
+    compiled.extend(platform_libraries(meta));
+    (sources, compiled)
+}
+
+/// The Kotlin/Native platform libraries (`posix`, `zlib`, ...) of the first Native platform in
+/// `meta`, from the distribution that builds the project.
+fn platform_libraries(meta: &Value) -> Vec<CompiledLibrary> {
+    let Some(home) = meta["toolchain"]["kotlin-native"]["home"].as_str() else { return Vec::new() };
+    let platform = meta["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["targets"].as_array().into_iter().flatten())
+        .filter(|t| t["kind"] == "native")
+        .find_map(|t| t["platforms"].as_array().and_then(|p| p.first()).and_then(Value::as_str));
+    let Some(platform) = platform else { return Vec::new() };
+    let dir = Path::new(home).join("klib").join("platform").join(platform);
+    let mut out: Vec<CompiledLibrary> = std::fs::read_dir(&dir)
+        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| {
+            let lib = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let short = lib.rsplit('.').next().unwrap_or(&lib).to_owned();
+            CompiledLibrary { name: format!("Kotlin/Native {short} ({platform})"), path }
+        })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     out
 }
 
-/// Parsed sources jars, kept across reloads of the project.
+/// Parsed sources jars and compiled libraries, kept across reloads of the project.
 type JarCache = Arc<Mutex<HashMap<PathBuf, Vec<Arc<Unit>>>>>;
 
 fn jar_units_cached(config: &Config, cache: &JarCache, jar: &SourcesJar) -> Vec<Arc<Unit>> {
@@ -229,6 +271,15 @@ fn jar_units_cached(config: &Config, cache: &JarCache, jar: &SourcesJar) -> Vec<
     }
     let units = library::jar_units(config, jar).unwrap_or_default();
     cache.lock().expect("lock poisoned").insert(jar.jar.clone(), units.clone());
+    units
+}
+
+fn compiled_units_cached(config: &Config, cache: &JarCache, lib: &CompiledLibrary) -> Vec<Arc<Unit>> {
+    if let Some(units) = cache.lock().expect("lock poisoned").get(&lib.path) {
+        return units.clone();
+    }
+    let units = library::compiled_units(config, lib).unwrap_or_default();
+    cache.lock().expect("lock poisoned").insert(lib.path.clone(), units.clone());
     units
 }
 
@@ -259,11 +310,12 @@ fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache
         return;
     }
     let Ok(meta) = crate::project::metadata(&config, &root, false) else { return };
-    let deps = dependency_sources(&meta, &jars);
-    if deps.is_empty() {
+    let (deps, compiled) = dependency_libraries(&meta, &jars);
+    if deps.is_empty() && compiled.is_empty() {
         return;
     }
     units.extend(deps.iter().flat_map(|jar| jar_units_cached(&config, &cache, jar)));
+    units.extend(compiled.iter().flat_map(|lib| compiled_units_cached(&config, &cache, lib)));
     let _ = tx.send(Event::Libraries { generation, units, jdk });
 }
 
@@ -790,6 +842,38 @@ mod tests {
         assert_eq!(set("/p/examples/demo.kt"), (0, SetKind::Example, None));
         assert_eq!(set("/p/lib/src-native/N.kt"), (1, SetKind::Main, Some("native".into())));
         assert_eq!(model.origin(Path::new("/elsewhere/X.kt")), Origin::Loose);
+    }
+
+    #[test]
+    fn reads_compiled_libraries_without_sources_jars() {
+        let home = tempfile::tempdir().unwrap();
+        let platform = home.path().join("klib").join("platform").join("linux_x64");
+        for lib in ["org.jetbrains.kotlin.native.platform.posix", "org.jetbrains.kotlin.native.platform.zlib"] {
+            std::fs::create_dir_all(platform.join(lib)).unwrap();
+        }
+        let entry = |module: &str, path: &str, sources: Option<&str>| json!({ "module": module, "version": "1.0", "path": path, "sources": sources });
+        let meta = json!({
+            "toolchain": { "kotlin-native": { "home": home.path().display().to_string() } },
+            "packages": [{
+                "name": "app",
+                "targets": [
+                    { "kind": "jvm", "dependencies": [{ "platform": "jvm", "compile": [
+                        entry("org.jetbrains.kotlin:kotlin-stdlib", "/m/kotlin-stdlib.jar", None),
+                        entry("com.example:with-sources", "/m/a.jar", Some("/m/a-sources.jar")),
+                        entry("com.example:without", "/m/b.jar", None),
+                        entry("com.example:without", "/m/b.jar", None),
+                    ], "test": [entry("com.example:tested", "/m/c.pom", None)] }] },
+                    { "kind": "native", "platforms": ["linux_x64"], "dependencies": [{ "platform": "native-linux_x64", "compile": [
+                        entry("org.jetbrains.kotlin:kotlin-stdlib-native", "/m/stdlib.klib", None),
+                        entry("com.example:native", "/m/d.klib", None),
+                    ] }] },
+                ],
+            }],
+        });
+        let (sources, compiled) = dependency_libraries(&meta, &[]);
+        assert_eq!(sources, [SourcesJar { name: "with-sources 1.0".into(), jar: PathBuf::from("/m/a-sources.jar") }]);
+        let names: Vec<&str> = compiled.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["without 1.0", "native 1.0", "Kotlin/Native posix (linux_x64)", "Kotlin/Native zlib (linux_x64)"]);
     }
 
     #[test]
