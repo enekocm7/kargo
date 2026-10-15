@@ -1,15 +1,21 @@
 //! Parsed files and the maps that find their declarations: by package, by fully qualified name,
 //! and extensions by receiver.
 //!
-//! There are two indexes: the libraries' (the standard library and the sources jars of
-//! dependencies), built once in the background, and the project's, rebuilt when a file changes.
-//! A [`SymId`] names a declaration in either.
+//! There are two indexes: the libraries' (the standard library, the sources jars of dependencies
+//! and the JDK's sources, see [`super::jdk`]), built once in the background, and the project's,
+//! rebuilt when a file changes. A [`SymId`] names a declaration in either.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::java;
+use super::jdk::Jdk;
 use super::syntax::{self, Decl, DeclId, File, Kind};
+
+/// The units of the JDK's sources are numbered from here, so that they never clash with the
+/// eager units of an index: the unit `JDK_UNITS + n` is the `n`th class of the JDK.
+pub const JDK_UNITS: u32 = 1 << 30;
 
 /// Where a file comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +25,7 @@ pub enum Origin {
     /// A file outside every source root, open in the editor: it sees the main sources of
     /// every package.
     Loose,
-    /// A sources jar; `jvm` for files that only exist on the JVM.
+    /// A sources jar, or the JDK's sources; `jvm` for files that only exist on the JVM.
     Library { name: String, jvm: bool },
 }
 
@@ -49,13 +55,28 @@ pub struct Unit {
 }
 
 impl Unit {
+    /// A file, parsed as Java when its path ends in `.java`, else as Kotlin. A library's Java
+    /// file keeps only what is public.
     pub fn new(path: PathBuf, text: String, origin: Origin) -> Self {
-        let file = syntax::parse(&text);
+        let file = if path.extension().is_some_and(|e| e == "java") {
+            let mut file = java::parse(&text);
+            if matches!(origin, Origin::Library { .. }) {
+                java::hide_non_public(&mut file);
+            }
+            file
+        } else {
+            syntax::parse(&text)
+        };
         Self { path, text, file, origin }
     }
 
     pub fn is_library(&self) -> bool {
         matches!(self.origin, Origin::Library { .. })
+    }
+
+    /// Whether this is a Java file, which is looked up but never edited.
+    pub fn is_java(&self) -> bool {
+        self.path.extension().is_some_and(|e| e == "java")
     }
 
     pub fn decl(&self, id: DeclId) -> &Decl {
@@ -99,6 +120,8 @@ impl UnitId {
 pub struct Index {
     pub lib: bool,
     pub units: Vec<Arc<Unit>>,
+    /// The JDK's sources, parsed as they are looked up.
+    pub jdk: Option<Arc<Jdk>>,
     /// Top-level declarations that aren't extensions, by package.
     pub by_package: HashMap<String, Vec<SymId>>,
     /// Classes, objects, type aliases, and top-level functions and properties, by fully
@@ -134,6 +157,16 @@ impl Index {
             }
         }
         index
+    }
+
+    /// Adds the JDK's sources to this library index: its packages, and its classes, which are
+    /// parsed when a lookup asks for them.
+    pub fn with_jdk(mut self, jdk: Option<Arc<Jdk>>) -> Self {
+        if let Some(jdk) = &jdk {
+            self.packages.extend(jdk.packages.iter().cloned());
+        }
+        self.jdk = jdk;
+        self
     }
 
     fn add_top(&mut self, file: &File, unit: UnitId, d: DeclId) {
@@ -176,8 +209,32 @@ impl Index {
         }
     }
 
+    /// The file `id` names, from this index or, for a JDK class, from the JDK (parsing it if needed).
     pub fn unit(&self, id: UnitId) -> Option<&Arc<Unit>> {
-        self.units.get(id.unit as usize)
+        match id.unit.checked_sub(JDK_UNITS) {
+            Some(i) => self.jdk.as_ref()?.unit(i as usize),
+            None => self.units.get(id.unit as usize),
+        }
+    }
+
+    /// The JDK's classes with the fully qualified name `fq`.
+    pub fn jdk_by_fq(&self, fq: &str) -> Vec<SymId> {
+        self.jdk.as_ref().map(|jdk| jdk.by_fq(fq)).unwrap_or_default()
+    }
+
+    /// The JDK's classes with the simple name `name`.
+    pub fn jdk_named(&self, name: &str) -> Vec<SymId> {
+        self.jdk.as_ref().map(|jdk| jdk.named(name)).unwrap_or_default()
+    }
+
+    /// The JDK's classes in `package`.
+    pub fn jdk_in_package(&self, package: &str) -> Vec<SymId> {
+        self.jdk.as_ref().map(|jdk| jdk.in_package(package)).unwrap_or_default()
+    }
+
+    /// Every simple name of a JDK class, sorted.
+    pub fn jdk_simple_names(&self) -> Vec<&str> {
+        self.jdk.as_ref().map(|jdk| jdk.simple_names().collect()).unwrap_or_default()
     }
 }
 
@@ -192,7 +249,13 @@ pub const DEFAULT_IMPORTS: &[&str] = &[
     "kotlin.sequences",
     "kotlin.text",
     "kotlin.jvm",
+    "java.lang",
 ];
+
+/// The packages a file sees without importing them: Kotlin's default imports, or Java's `java.lang`.
+pub fn default_imports(unit: &Unit) -> &'static [&'static str] {
+    if unit.is_java() { java::JAVA_DEFAULT_IMPORTS } else { DEFAULT_IMPORTS }
+}
 
 /// Whether a library package is an implementation detail, left out of completion.
 pub fn is_internal_package(package: &str) -> bool {

@@ -530,6 +530,7 @@ dependencies = [
  "toml_edit",
  "ureq",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

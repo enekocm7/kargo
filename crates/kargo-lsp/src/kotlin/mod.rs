@@ -4,10 +4,13 @@
 //! reads the project's sources as Kargo lays them out (see [`server::Model`]) and the standard
 //! library from its sources jar ([`library`]), and offers completion, hover, go to definition,
 //! references and rename ([`features`]) on top of a declaration parser ([`syntax`]) and a
-//! resolver with enough type inference for member access ([`resolve`]).
+//! resolver with enough type inference for member access ([`resolve`]). Java declarations come
+//! from the JDK's sources ([`jdk`]) and from `.java` files ([`java`]).
 
 pub mod features;
 pub mod index;
+pub mod java;
+pub mod jdk;
 pub mod lexer;
 pub mod library;
 pub mod resolve;

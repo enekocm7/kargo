@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::index::{DEFAULT_IMPORTS, SymId, UnitId, is_internal_package};
+use super::java::javadoc_markdown;
 use super::lexer::{self, HARD_KEYWORDS, Tok};
 use super::resolve::{Analyzer, Arg, Found, Member, Subst, Ty, chain_start};
-use super::syntax::{Decl, Kind, ScopeKind, normalize};
+use super::syntax::{Decl, File, Kind, ScopeKind, normalize};
 use crate::text;
 
 /// What an identifier refers to.
@@ -297,7 +298,9 @@ pub fn documentation(an: &Analyzer, s: SymId) -> Option<String> {
             return documentation(an, other);
         }
     };
-    Some(kdoc_to_markdown(doc))
+    let markdown = kdoc_to_markdown(doc);
+    // Javadoc has inline tags and HTML that KDoc doesn't.
+    if an.unit(s.unit_id()).is_java() { Some(javadoc_markdown(&markdown)) } else { Some(markdown) }
 }
 
 /// Turns a `/** ... */` comment into Markdown: block tags become lists, `[links]` code.
@@ -706,8 +709,14 @@ struct Collector<'a, 'b> {
     paren_follows: bool,
     /// Only types (after `:` or `as`), so no calls get parentheses.
     types_only: bool,
+    /// Whether some classes were left out, so the list is asked for again as more is typed.
+    incomplete: bool,
     generation: u64,
 }
+
+/// The most JDK classes one completion offers: each one parses its file, and the rest of the
+/// names come with the next keystrokes.
+const JDK_OFFERS: usize = 150;
 
 /// Whether `name` matches what was typed: the first letter, then the rest in order.
 pub fn matches_prefix(name: &str, prefix: &str) -> bool {
@@ -913,6 +922,7 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
         range,
         paren_follows,
         types_only,
+        incomplete: false,
         generation,
     };
     // `package a.b` gets nothing; `import a.b.` gets packages and declarations.
@@ -972,12 +982,12 @@ fn is_type_position(an: &Analyzer, u: UnitId, i: usize) -> bool {
 fn finish(c: Collector) -> Value {
     const LIMIT: usize = 1500;
     let mut items = c.items;
-    let incomplete = items.len() > LIMIT;
-    if incomplete {
+    let truncated = items.len() > LIMIT;
+    if truncated {
         items.sort_by(|a, b| a["sortText"].as_str().cmp(&b["sortText"].as_str()));
         items.truncate(LIMIT);
     }
-    json!({ "isIncomplete": incomplete || c.prefix.is_empty(), "items": items })
+    json!({ "isIncomplete": truncated || c.incomplete || c.prefix.is_empty(), "items": items })
 }
 
 fn member_completion(c: &mut Collector, receiver: &Ty) {
@@ -1020,13 +1030,19 @@ fn package_contents(c: &mut Collector, package: &str) {
                 .push(json!({ "label": seg, "kind": 9, "sortText": format!("1{seg}"), "textEdit": { "range": c.range, "newText": seg } }));
         }
     }
-    for index in [an.proj, an.lib] {
-        for &s in index.by_package.get(package).into_iter().flatten() {
-            if an.visible(c.u, s) {
-                c.add(&Member { sym: s, subst: Subst::new() }, Group::Member, None);
-            }
+    for s in package_syms(an, package) {
+        if an.visible(c.u, s) {
+            c.add(&Member { sym: s, subst: Subst::new() }, Group::Member, None);
         }
     }
+}
+
+/// The top-level declarations of `package` in the project and the libraries, JDK classes included.
+fn package_syms(an: &Analyzer, package: &str) -> Vec<SymId> {
+    let mut out: Vec<SymId> =
+        [an.proj, an.lib].into_iter().flat_map(|index| index.by_package.get(package).into_iter().flatten().copied()).collect();
+    out.extend(an.lib.jdk_in_package(package));
+    out
 }
 
 fn import_completion(c: &mut Collector, path: &str) {
@@ -1132,12 +1148,10 @@ fn scope_completion(c: &mut Collector, offset: usize) {
     }
     let mut in_scope: HashSet<SymId> = HashSet::new();
     for (package, group) in &packages {
-        for index in [an.proj, an.lib] {
-            for &s in index.by_package.get(*package).into_iter().flatten() {
-                in_scope.insert(s);
-                if an.visible(u, s) {
-                    c.add(&Member { sym: s, subst: Subst::new() }, *group, None);
-                }
+        for s in package_syms(an, package) {
+            in_scope.insert(s);
+            if an.visible(u, s) {
+                c.add(&Member { sym: s, subst: Subst::new() }, *group, None);
             }
         }
     }
@@ -1149,27 +1163,53 @@ fn scope_completion(c: &mut Collector, offset: usize) {
         let mut offered: HashMap<String, usize> = HashMap::new();
         for index in [an.proj, an.lib] {
             for (name, syms) in &index.by_name {
-                if !matches_prefix(name, &c.prefix) {
-                    continue;
-                }
-                for &s in syms {
-                    let package = an.package_of(s);
-                    if in_scope.contains(&s) || package.is_empty() || (s.lib && is_internal_package(package)) || !an.visible(u, s) {
-                        continue;
-                    }
-                    let count = offered.entry(name.clone()).or_default();
-                    if *count >= 8 {
-                        continue;
-                    }
-                    *count += 1;
-                    let fq = an.fq(s);
-                    if file.imports.iter().any(|i| i.fq() == fq) {
-                        continue;
-                    }
-                    c.add(&Member { sym: s, subst: Subst::new() }, Group::NotImported, Some(fq));
+                if matches_prefix(name, &c.prefix) {
+                    offer_by_import(c, file, name, syms, &in_scope, &mut offered);
                 }
             }
         }
+        // The JDK's classes are parsed as they are offered, so only a bounded number of them.
+        let mut jdk_offered = 0;
+        for name in an.lib.jdk_simple_names() {
+            if !matches_prefix(name, &c.prefix) {
+                continue;
+            }
+            if jdk_offered >= JDK_OFFERS {
+                c.incomplete = true;
+                break;
+            }
+            let before = c.items.len();
+            offer_by_import(c, file, name, &an.lib.jdk_named(name), &in_scope, &mut offered);
+            jdk_offered += c.items.len() - before;
+        }
+    }
+}
+
+/// Offers the declarations `syms`, named `name`, that need an import to be used, at most eight per name.
+fn offer_by_import(
+    c: &mut Collector,
+    file: &File,
+    name: &str,
+    syms: &[SymId],
+    in_scope: &HashSet<SymId>,
+    offered: &mut HashMap<String, usize>,
+) {
+    let an = c.an;
+    for &s in syms {
+        let package = an.package_of(s);
+        if in_scope.contains(&s) || package.is_empty() || (s.lib && is_internal_package(package)) || !an.visible(c.u, s) {
+            continue;
+        }
+        let count = offered.entry(name.to_owned()).or_default();
+        if *count >= 8 {
+            continue;
+        }
+        *count += 1;
+        let fq = an.fq(s);
+        if file.imports.iter().any(|i| i.fq() == fq) {
+            continue;
+        }
+        c.add(&Member { sym: s, subst: Subst::new() }, Group::NotImported, Some(fq));
     }
 }
 
@@ -1178,7 +1218,7 @@ pub fn resolve_item(an: &Analyzer, mut item: Value) -> Value {
     let data = &item["data"];
     let (Some(lib), Some(unit), Some(decl)) = (data["lib"].as_bool(), data["unit"].as_u64(), data["decl"].as_u64()) else { return item };
     let index = an.index_of(lib);
-    let Some(u) = index.units.get(unit as usize) else { return item };
+    let Some(u) = index.unit(UnitId { lib, unit: unit as u32 }) else { return item };
     if decl as usize >= u.file.decls.len() {
         return item;
     }
@@ -1255,7 +1295,8 @@ pub fn references(an: &Analyzer, group: &[SymId], include_declaration: bool) -> 
     let local = d.local || d.kind == Kind::Variable || d.is_private();
     for (ui, unit) in an.proj.units.iter().enumerate() {
         let uid = UnitId { lib: false, unit: ui as u32 };
-        if local && !first.lib && uid != first.unit_id() {
+        // Java files are read for their declarations only: their uses aren't resolved.
+        if unit.is_java() || (local && !first.lib && uid != first.unit_id()) {
             continue;
         }
         let lx = &unit.file.lexed;

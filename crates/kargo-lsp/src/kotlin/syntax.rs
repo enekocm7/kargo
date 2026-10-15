@@ -178,7 +178,8 @@ pub enum InitKind {
 }
 
 impl Decl {
-    fn new(kind: Kind, name: String, name_span: Range<usize>, start: usize) -> Self {
+    /// A declaration with no modifiers, type or members yet; `start` is where it begins.
+    pub fn new(kind: Kind, name: String, name_span: Range<usize>, start: usize) -> Self {
         Self {
             kind,
             name,

@@ -11,7 +11,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::index::{DEFAULT_IMPORTS, Index, Origin, SetKind, SymId, Unit, UnitId};
+use super::index::{Index, Origin, SetKind, SymId, Unit, UnitId, default_imports};
+use super::java;
 use super::lexer::{HARD_KEYWORDS, Lexed, Tok};
 use super::syntax::{self, Decl, DeclId, File, InitKind, Kind, ScopeKind, TypeRef};
 
@@ -113,7 +114,7 @@ impl<'a> Analyzer<'a> {
     }
 
     pub fn unit(&self, id: UnitId) -> &'a Unit {
-        &self.index_of(id.lib).units[id.unit as usize]
+        self.index_of(id.lib).unit(id).expect("a unit an index holds")
     }
 
     pub fn file(&self, id: UnitId) -> &'a File {
@@ -151,14 +152,27 @@ impl<'a> Analyzer<'a> {
         &self.file(s.unit_id()).package
     }
 
+    /// The classes and declarations with the fully qualified name `fq`. A Java platform class
+    /// is found as the Kotlin class it maps to (`java.lang.String` is `kotlin.String`).
     pub fn by_fq(&self, fq: &str) -> Vec<SymId> {
+        if let Some(kotlin) = java::kotlin_name(fq) {
+            let mapped = self.by_fq(kotlin);
+            if !mapped.is_empty() {
+                return mapped;
+            }
+        }
         let mut out: Vec<SymId> = self.proj.by_fq.get(fq).cloned().unwrap_or_default();
         out.extend(self.lib.by_fq.get(fq).into_iter().flatten().copied());
+        out.extend(self.lib.jdk_by_fq(fq));
         out
     }
 
-    fn by_name(&self, name: &str) -> impl Iterator<Item = SymId> + 'a {
-        self.proj.by_name.get(name).into_iter().flatten().chain(self.lib.by_name.get(name).into_iter().flatten()).copied()
+    /// The declarations with the simple name `name` in the project and the libraries.
+    fn by_name(&self, name: &str) -> Vec<SymId> {
+        let mut out: Vec<SymId> =
+            self.proj.by_name.get(name).into_iter().flatten().chain(self.lib.by_name.get(name).into_iter().flatten()).copied().collect();
+        out.extend(self.lib.jdk_named(name));
+        out
     }
 
     pub fn has_package(&self, package: &str) -> bool {
@@ -199,7 +213,7 @@ impl<'a> Analyzer<'a> {
     fn imported(&self, from: UnitId, s: SymId) -> bool {
         let file = self.file(from);
         let package = self.package_of(s);
-        if package == file.package || DEFAULT_IMPORTS.contains(&package) {
+        if package == file.package || default_imports(self.unit(from)).contains(&package) {
             return true;
         }
         let name = &self.decl(s).name;
@@ -319,13 +333,18 @@ impl<'a> Analyzer<'a> {
                 return Some(s);
             }
         }
-        let candidates: Vec<SymId> = self.by_name(name).filter(|&s| is_type_decl(self.decl(s)) && self.visible(from, s)).collect();
+        let candidates: Vec<SymId> =
+            self.by_name(name).into_iter().filter(|&s| is_type_decl(self.decl(s)) && self.visible(from, s)).collect();
         let in_package = |p: &str| self.best_type(candidates.iter().copied().filter(|&s| self.package_of(s) == p));
+        // A class named `p.name`, which may be a Java platform class that Kotlin names elsewhere.
+        let named_in = |p: &str| {
+            self.best_type(self.by_fq(&format!("{p}.{name}")).into_iter().filter(|&s| self.visible(from, s) && is_type_decl(self.decl(s))))
+        };
         if let Some(s) = in_package(&file.package) {
             return Some(s);
         }
         for import in file.imports.iter().filter(|i| i.star) {
-            if let Some(s) = in_package(&import.fq()) {
+            if let Some(s) = in_package(&import.fq()).or_else(|| named_in(&import.fq())) {
                 return Some(s);
             }
             if let Some(class) = self.best_type(self.by_fq(&import.fq()).into_iter())
@@ -334,7 +353,7 @@ impl<'a> Analyzer<'a> {
                 return Some(s);
             }
         }
-        DEFAULT_IMPORTS.iter().find_map(|p| in_package(p))
+        default_imports(self.unit(from)).iter().find_map(|p| in_package(p).or_else(|| named_in(p)))
     }
 
     /// What `import a.b.C` names: classes, functions and properties, or members of an object.
@@ -469,8 +488,12 @@ impl<'a> Analyzer<'a> {
                     let d = self.decl(c);
                     for &m in &d.members {
                         let md = &file.decls[m];
+                        // Nested classes, enum entries, and the static members of a Java class.
+                        let static_member = md.has("static") && matches!(md.kind, Kind::Function | Kind::Property);
                         if md.kind.is_class() && md.kind != Kind::Companion || md.kind == Kind::EnumEntry {
                             push(self, Member::plain(c.unit_id().sym(m)), &mut out);
+                        } else if static_member {
+                            push(self, Member { sym: c.unit_id().sym(m), subst: Subst::new() }, &mut out);
                         }
                     }
                     if matches!(d.kind, Kind::Object | Kind::Companion) {
@@ -856,8 +879,10 @@ impl<'a> Analyzer<'a> {
         if !imported.is_empty() {
             return wrap(imported);
         }
-        let candidates: Vec<SymId> = self.by_name(name).filter(|&s| self.visible(u, s)).collect();
+        let candidates: Vec<SymId> = self.by_name(name).into_iter().filter(|&s| self.visible(u, s)).collect();
         let in_package = |p: &str| -> Vec<SymId> { candidates.iter().copied().filter(|&s| self.package_of(s) == p).collect() };
+        // The declarations named `p.name`, which may be a Java platform class that Kotlin names elsewhere.
+        let named_in = |p: &str| -> Vec<SymId> { self.by_fq(&format!("{p}.{name}")).into_iter().filter(|&s| self.visible(u, s)).collect() };
         let same = in_package(&file.package);
         if !same.is_empty() {
             return wrap(same);
@@ -865,6 +890,11 @@ impl<'a> Analyzer<'a> {
         let mut star = Vec::new();
         for import in file.imports.iter().filter(|i| i.star) {
             star.extend(in_package(&import.fq()));
+            for s in named_in(&import.fq()) {
+                if !star.contains(&s) {
+                    star.push(s);
+                }
+            }
             for class in self.by_fq(&import.fq()).into_iter().filter(|&s| self.decl(s).kind.is_class()) {
                 star.extend(
                     self.members(&Ty::Static(class), u, false).into_iter().filter(|m| self.decl(m.sym).name == name).map(|m| m.sym),
@@ -874,7 +904,9 @@ impl<'a> Analyzer<'a> {
         if !star.is_empty() {
             return wrap(star);
         }
-        let mut defaults: Vec<SymId> = DEFAULT_IMPORTS.iter().flat_map(|p| in_package(p)).collect();
+        let mut defaults: Vec<SymId> =
+            default_imports(self.unit(u)).iter().flat_map(|p| in_package(p).into_iter().chain(named_in(p))).collect();
+        defaults.dedup();
         // Prefer the documented `expect` declaration of the standard library.
         defaults.sort_by_key(|&s| self.decl(s).doc.is_none());
         wrap(defaults)

@@ -16,7 +16,7 @@ Kargo gives editors what they need to understand a project without reading `karg
 | Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
 | Emacs and other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
 
-Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with the standard library and the libraries whose sources jars you fetched; it doesn't know Java classes (see [its limits](../kotlin-server/#limits)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
+Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with the standard library, the JDK's sources, your `.java` files and the libraries whose sources jars you fetched; it doesn't know classes of libraries without sources (see [its limits](../kotlin-server/#limits)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
 
 ## IntelliJ IDEA and Android Studio
 
@@ -213,7 +213,7 @@ If it can't find Kargo, the Kargo language server fails to start with a message 
 
 When you open a Kotlin file or `kargo.toml` in a folder with a `kargo.toml` at its root, Zed starts `kargo lsp` there. You get everything listed in [Editor integration](#language-server):
 
-- Completion, hover, go to definition (into the standard library, and into library sources once you run `kargo fetch --sources`), find references and rename in Kotlin files, from [Kargo's Kotlin server](../kotlin-server/). It reads your project the way `kargo build` compiles it, and again when `kargo.toml` or `kargo.lock` change.
+- Completion, hover, go to definition (into the standard library and the JDK, and into library sources once you run `kargo fetch --sources`), find references and rename in Kotlin files, from [Kargo's Kotlin server](../kotlin-server/). It reads your project the way `kargo build` compiles it, and again when `kargo.toml` or `kargo.lock` change.
 - Completion, documentation, validation and quick fixes in `kargo.toml`, with Maven coordinate and version completion and hints at newer versions. The quick fixes add dependencies, frameworks and targets the way `kargo add` and `kargo target add` do.
 - [Check on save](#check-on-save): when you save a Kotlin file, the errors of `kargo check` for every target appear in the editor and in *diagnostics: deploy*. The extension turns it on.
 
