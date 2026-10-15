@@ -88,13 +88,7 @@ The Kotlin classes for `String`, `CharSequence`, the collections and the maps al
 
 **Dependencies** are resolved in the background, as `kargo metadata` does, and read whether or not they publish sources:
 
-- A dependency whose **sources jar** is in the cache is read from it, Java files included, so hover shows its KDoc and Javadoc. Download the sources jars with:
-
-  ```sh
-  kargo fetch --sources
-  ```
-
-  Restart the editor's language server after fetching new sources.
+- A dependency whose **sources jar** is in the cache is read from it, Java files included, so hover shows its KDoc and Javadoc. The server downloads the missing sources jars itself, as `kargo fetch --sources` does: once the dependencies are resolved, it fetches the sources jar of every library that lacks one, in parallel and reported with `$/progress` ("Fetching dependency sources"), and then reads those libraries again from their sources. Until then, and for libraries that publish no sources, the compiled form below stands in.
 - A dependency **without a sources jar** is read from its compiled form, for the targets whose classpath has it, as [above](#libraries) describes.
   - A **jar** is read from its class files. A class compiled from Kotlin keeps its Kotlin declarations in its metadata, so extension functions, nullability, `suspend`, default arguments, type aliases and companion objects come out as written. Any other class is read as Java: its public and protected fields, methods, constructors and nested classes, with generic types and, when the jar was compiled with `javac -parameters`, parameter names (otherwise `arg0`, `arg1`, ...).
   - A **klib** (the Wasm and Native variants of a dependency) is read from its Kotlin metadata the same way.
@@ -103,6 +97,21 @@ The Kotlin classes for `String`, `CharSequence`, the collections and the maps al
 A library without sources is written out once as stub files under `~/.kargo/cache/lsp-sources`: one Kotlin file per package, and one Java file for its Java classes. Go to definition opens these files, which show each declaration's signature, `...` for default values, and no bodies or documentation (a klib compiled with its KDoc keeps it). They are generated, so edits to them change nothing. Private and internal declarations are left out, and so are those deprecated with `level = DeprecationLevel.HIDDEN`.
 
 The standard library and `kotlin-test` always come from their sources jars or the outline above, not from their compiled jars or klibs. Native code doesn't see the common Kotlin/Native libraries (`kotlinx.cinterop` and the like), only the platform ones.
+
+When `kargo.toml` or `kargo.lock` change, after `kargo add` for example, the server resolves the dependencies again, fetches the new ones' sources jars and loads the libraries again, without a restart. Files of libraries that didn't change are not parsed again. A library whose repositories publish no sources jar is not asked for one again until the language server restarts; a download that failed is retried on the next change.
+
+Offline (`kargo --offline lsp`), only sources jars already in Kargo's cache or in a repository on disk are read. To keep the server from downloading sources jars, on a metered network for example, set `fetchSources` to `false` in the editor's `initializationOptions`:
+
+```lua title="init.lua"
+vim.lsp.config('kargo', {
+  cmd = { 'kargo', 'lsp' },
+  filetypes = { 'kotlin', 'toml' },
+  root_markers = { 'kargo.lock', 'kargo.toml' },
+  init_options = { fetchSources = false },
+})
+```
+
+Then run `kargo fetch --sources` yourself when you want them; the server reads them on the next change to `kargo.toml` or `kargo.lock`, or the next start.
 
 ## Limits
 
