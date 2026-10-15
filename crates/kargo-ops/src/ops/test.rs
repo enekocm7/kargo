@@ -1070,7 +1070,8 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
-    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    super::build::npm_opt_in(ctx, &mut kotlin_args);
     let name = format!("{}-test", wasm.module_name(&manifest.package));
     let main_node_modules = main.as_ref().and_then(|m| m.node_modules.clone());
     let unit = WasmCompilation {

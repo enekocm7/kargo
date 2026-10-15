@@ -2,7 +2,8 @@
 //! packages (`@js-joda/core`) at runtime. Kargo reads them from the klibs, adds
 //! the project's own `[target.wasm.npm-dependencies]` and installs them with
 //! npm, pnpm or bun into a `node_modules` that Node.js finds from the compiled
-//! `.mjs` files (a browser gets an import map, see `wasm_output`).
+//! `.mjs` files (a browser gets an import map, see `wasm_output`). The project's own
+//! packages also get Kotlin declarations generated from their TypeScript ones ([`declarations`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -10,10 +11,13 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::dts;
 use crate::ops::context::BuildContext;
+use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::wasm::npm_dependencies;
-use kargo_manifest::PackageManager;
-use kargo_util::fs::remove_dir_all_if_exists;
+use kargo_manifest::{Manifest, PackageManager};
+use kargo_maven::Version;
+use kargo_util::fs::{collect_files, remove_dir_all_if_exists};
 use kargo_util::process::{self, find_on_path};
 
 /// Lockfiles the package managers leave next to `package.json`.
@@ -57,6 +61,87 @@ pub fn fetch(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<()
             ctx.shell().warn(format!("the npm packages were not fetched: {e:#}"));
             Ok(())
         }
+    }
+}
+
+/// Where [`declarations`] writes the Kotlin declarations of the npm packages.
+pub fn declarations_dir(ws: &Workspace, profile: ProfileKind) -> PathBuf {
+    ws.profile_dir(profile).join("generated").join("npm")
+}
+
+/// The opt-in Kotlin/Wasm interop needs since Kotlin 2.2 (`JsAny` and friends are
+/// `@ExperimentalWasmJsInterop`), so the generated declarations and the code calling them compile
+/// without a warning at every use. `None` when the project opts in itself or its Kotlin predates it.
+pub fn interop_opt_in(manifest: &Manifest) -> Option<String> {
+    const MARKER: &str = "kotlin.js.ExperimentalWasmJsInterop";
+    let since = Version::parse(&manifest.kotlin.version) >= Version::parse("2.2.0");
+    (since && !manifest.kotlin.opt_in.iter().any(|o| o == MARKER)).then(|| format!("-opt-in={MARKER}"))
+}
+
+/// Kotlin declarations for the project's own npm packages (`[target.wasm.npm-dependencies]`),
+/// generated from their TypeScript declarations (see [`crate::dts`]) into [`declarations_dir`].
+/// Installs the packages first (as the build would after compiling), and `@types/<name>` for each
+/// package without declarations of its own. Returns the Kotlin files: none without npm dependencies.
+///
+/// The files are written again only when the installed packages change.
+pub fn declarations(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let out = declarations_dir(ctx.ws, ctx.profile);
+    let packages: Vec<String> =
+        ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.npm_dependencies.keys().cloned().collect()).unwrap_or_default();
+    if packages.is_empty() {
+        remove_dir_all_if_exists(&out)?;
+        return Ok(Vec::new());
+    }
+    let profile_dir = ctx.ws.profile_dir(ctx.profile);
+    let Some(node_modules) = install(ctx, libraries, &profile_dir)? else { return Ok(Vec::new()) };
+    let types: BTreeMap<String, String> = packages
+        .iter()
+        .filter(|p| !p.starts_with("@types/") && !dts::has_declarations(&node_modules, p))
+        .map(|p| (format!("@types/{}", dts::types_name(p)), types_range(&node_modules, p)))
+        .collect();
+
+    let installed = std::fs::read_to_string(node_modules.join(".kargo-package.json")).unwrap_or_default();
+    let stamp = format!("{}+{}\n{}\n{installed}\n{}", env!("CARGO_PKG_VERSION"), dts::FORMAT, packages.join(","), package_list(&types));
+    let stamp_path = out.join(".kargo-stamp");
+    if std::fs::read_to_string(&stamp_path).is_ok_and(|s| s == stamp) {
+        return Ok(collect_files(&out, &["kt"]));
+    }
+
+    let mut roots = vec![node_modules];
+    if !types.is_empty() {
+        // Apart from the packages the program runs with: a missing `@types` package only costs its declarations.
+        let fetched = find_package_manager(ctx, &types)
+            .and_then(|(manager, exe)| install_into(ctx, &types, &profile_dir.join("npm-types"), manager, exe));
+        match fetched {
+            Ok(dir) => roots.push(dir),
+            Err(e) => ctx.shell().warn(format!(
+                "no TypeScript declarations for {}, so Kotlin gets none: {e:#}",
+                types.keys().map(|t| t.trim_start_matches("@types/")).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+    ctx.shell().status("Generating", format!("Kotlin declarations for npm packages {}", packages.join(", ")));
+    let generated = dts::generate(&packages, &roots, &out)?;
+    for package in &generated.untyped {
+        ctx.shell().warn(format!(
+            "the npm package `{package}` has no TypeScript declarations, so Kotlin gets none; declare what you use with `@JsModule(\"{package}\")` external declarations"
+        ));
+    }
+    std::fs::create_dir_all(&out)?;
+    std::fs::write(&stamp_path, stamp)?;
+    Ok(generated.files)
+}
+
+/// The `@types` version for the installed `package`: the same major version (`^5`).
+fn types_range(node_modules: &Path, package: &str) -> String {
+    let manifest = package.split('/').fold(node_modules.to_path_buf(), |p, part| p.join(part)).join("package.json");
+    let version = std::fs::read_to_string(manifest)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["version"].as_str().map(str::to_owned));
+    match version.as_deref().and_then(|v| v.split('.').next()).filter(|m| m.chars().all(|c| c.is_ascii_digit()) && !m.is_empty()) {
+        Some(major) => format!("^{major}"),
+        None => "*".to_owned(),
     }
 }
 

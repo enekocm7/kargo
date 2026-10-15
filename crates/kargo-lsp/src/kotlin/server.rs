@@ -79,6 +79,9 @@ pub struct Model {
     pub kotlin: String,
     /// The platform of the Wasm target, `js` or `wasi`, whose standard library is loaded.
     pub wasm_platform: Option<String>,
+    /// The directories of Kotlin declarations generated for the Wasm target's npm packages,
+    /// which load as a library of Wasm code.
+    pub npm_declarations: Vec<PathBuf>,
     pub repositories: Vec<Repository>,
 }
 
@@ -117,6 +120,9 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             if kind == "wasm" {
                 // `browser` is the `js` platform too.
                 model.wasm_platform = Some(if target["environment"] == "wasi" { "wasi" } else { "js" }.to_owned());
+                if let Some(dir) = target["npm-declarations"].as_str() {
+                    model.npm_declarations.push(PathBuf::from(dir));
+                }
             }
             let mut add = |key: &str, set: SetKind| {
                 for (i, root) in target[key].as_array().into_iter().flatten().filter_map(Value::as_str).enumerate() {
@@ -464,11 +470,18 @@ fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache
             units.extend(library::compiled_units(&config, &cache, &compiled));
         }
         units.append(&mut outline_units);
+        for dir in &model.npm_declarations {
+            units.extend(library::directory_units("npm", dir, Platforms::WASM, Platforms::NONE));
+        }
         units
     };
     let jdk = project_jdk(&config, &root);
     let send = |units| tx.send(Event::Libraries { generation, units, jdk: jdk.clone() }).is_ok();
     if !send(libraries(None)) || !options.dependencies {
+        return;
+    }
+    // Like the build, installs the npm packages and writes their declarations if they changed.
+    if !model.npm_declarations.is_empty() && crate::project::npm_declarations(&config, &root).is_ok() && !send(libraries(None)) {
         return;
     }
     let Ok(meta) = crate::project::metadata(&config, &root, false) else { return };
@@ -1060,7 +1073,12 @@ mod tests {
                     "path-dependencies": [{ "package": "lib" }],
                     "targets": [
                         { "kind": "jvm", "source-roots": ["/p/src", "/p/src-jvm"], "test-roots": ["/p/tests", "/p/tests-jvm", "/p/test-fixtures", "/p/test-fixtures-jvm"] },
-                        { "kind": "wasm", "source-roots": ["/p/src", "/p/src-wasm"], "test-roots": ["/p/tests", "/p/tests-wasm"] },
+                        {
+                            "kind": "wasm",
+                            "source-roots": ["/p/src", "/p/src-wasm"],
+                            "test-roots": ["/p/tests", "/p/tests-wasm"],
+                            "npm-declarations": "/p/target/debug/generated/npm",
+                        },
                     ],
                     "examples": [{ "name": "demo", "path": "/p/examples/demo.kt" }],
                 },
@@ -1071,6 +1089,9 @@ mod tests {
         let model = model_from_metadata(&meta);
         assert_eq!(model.kotlin, "2.4.21");
         assert_eq!(model.wasm_platform.as_deref(), Some("js"));
+        // Loaded as a library, not as sources of the project.
+        assert_eq!(model.npm_declarations, [PathBuf::from("/p/target/debug/generated/npm")]);
+        assert_eq!(model.origin(Path::new("/p/target/debug/generated/npm/express/Default.kt")), Origin::Loose);
         assert_eq!(model.packages.platforms, [Platforms::JVM.union(Platforms::WASM), Platforms::NATIVE, Platforms::NONE]);
         assert_eq!(model.packages.visible, [vec![0, 1, 2], vec![1, 2], vec![2]]);
         let set = |path: &str| match model.origin(Path::new(path)) {

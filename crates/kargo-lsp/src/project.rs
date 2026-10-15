@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use kargo_manifest::TargetKind;
+use kargo_ops::ops::build::wasm_resolution;
 use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::metadata::{self, MetadataOptions};
 use kargo_ops::workspace::{ProfileKind, Project};
@@ -40,6 +42,25 @@ pub fn fetch_sources(config: &Config, root: &Path, modules: &[(String, String)])
         let module: kargo_maven::ModuleId = module.parse()?;
         Ok(ctx.client.fetch_sources(&module, version)?.is_some())
     }))
+}
+
+/// Generates the Kotlin declarations of the npm packages of each package with a Wasm target, as
+/// `kargo build` does (`kargo_ops::npm::declarations`): installs the packages if needed and writes
+/// the declarations where `kargo metadata` says (`npm-declarations`).
+pub fn npm_declarations(config: &Config, root: &Path) -> Result<()> {
+    let project = Project::discover(root, None)?;
+    let first = BuildContext::new(config, &project, project.members()[0], ProfileKind::Dev)?;
+    for i in 0..project.packages().len() {
+        let ctx = first.for_package(i);
+        if ctx.ws.manifest().targets.wasm.as_ref().is_none_or(|w| w.npm_dependencies.is_empty()) {
+            continue;
+        }
+        let setup = ctx.setup(TargetKind::Wasm)?;
+        // The npm packages Maven klibs ask for; path dependencies aren't built for theirs.
+        let libraries = wasm_resolution(&ctx, &setup, false)?.files();
+        kargo_ops::npm::declarations(&ctx, &libraries)?;
+    }
+    Ok(())
 }
 
 /// The project's fingerprint (see `kargo metadata --fingerprint`).
@@ -364,6 +385,10 @@ fn roots(target: &Value, test: bool, part: Roots) -> Vec<(String, &'static str)>
         }
     }
     if part != Roots::Common {
+        // The declarations of the Wasm target's npm packages are generated main code.
+        if !test && let Some(dir) = target["npm-declarations"].as_str() {
+            out.push((dir.to_owned(), source_type));
+        }
         out.extend(dirs(resources).into_iter().map(|dir| (dir, resource_type)));
     }
     out
@@ -1109,10 +1134,13 @@ mod tests {
         let targets = metadata["packages"][0]["targets"].as_array_mut().unwrap();
         targets.retain(|t| t["kind"] == "wasm");
         targets[0]["environment"] = json!("wasi");
+        targets[0]["npm-declarations"] = json!("/p/target/debug/generated/npm");
         metadata["packages"].as_array_mut().unwrap().truncate(1);
         let ws = workspace_json(&metadata, Targets::All);
         assert_eq!(names(&ws["modules"], "name"), ["app", "app.main", "app.test"]);
-        assert_eq!(names(&module(&ws, "app.main")["contentRoots"], "path"), ["/p/src", "/p/src-wasm"]);
+        // The declarations generated for npm packages are main code.
+        assert_eq!(names(&module(&ws, "app.main")["contentRoots"], "path"), ["/p/src", "/p/src-wasm", "/p/target/debug/generated/npm"]);
+        assert_eq!(names(&module(&ws, "app.test")["contentRoots"], "path"), ["/p/tests", "/p/tests-wasm"]);
         let main = settings(&ws, "app.main");
         assert_eq!(main["targetPlatform"], "Wasm [WASI]");
         assert_eq!(main["kind"], "default");

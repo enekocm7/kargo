@@ -485,11 +485,13 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
     let (jdk, compiler, plugins) = toolchain?;
     let libraries = libraries?;
     let profile = ctx.ws.profile(ctx.profile);
-    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut srcs = sources(ctx, TargetKind::Wasm, false, &["kt"]);
+    add_npm_declarations(ctx, &libraries, &mut srcs, &mut kotlin_args)?;
     let unit = WasmCompilation {
         name: wasm.module_name(&manifest.package),
         environment: wasm.environment,
-        sources: sources(ctx, TargetKind::Wasm, false, &["kt"]),
+        sources: srcs,
         libraries,
         friends: Vec::new(),
         plugins: &plugins,
@@ -514,6 +516,36 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
         libraries: unit.libraries,
         node_modules: None,
     }))
+}
+
+/// Adds the Kotlin declarations generated for the project's npm packages (see
+/// [`crate::npm::declarations`]) to the Wasm main `sources`, and the opt-in they need to `kotlin_args`.
+pub(crate) fn add_npm_declarations(
+    ctx: &BuildContext,
+    libraries: &[PathBuf],
+    sources: &mut SourceSet,
+    kotlin_args: &mut Vec<String>,
+) -> Result<()> {
+    let generated = crate::npm::declarations(ctx, libraries)?;
+    if generated.is_empty() {
+        return Ok(());
+    }
+    // As with KSP: the platform fragment, unless only `src/` has Kotlin, which then stays one fragment.
+    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
+        sources.platform.extend(generated);
+    } else {
+        sources.common.extend(generated);
+    }
+    npm_opt_in(ctx, kotlin_args);
+    Ok(())
+}
+
+/// Adds the opt-in that calls into the npm declarations need, when the project has npm dependencies.
+pub(crate) fn npm_opt_in(ctx: &BuildContext, kotlin_args: &mut Vec<String>) {
+    let manifest = ctx.ws.manifest();
+    if manifest.targets.wasm.as_ref().is_some_and(|w| !w.npm_dependencies.is_empty()) {
+        kotlin_args.extend(crate::npm::interop_opt_in(manifest));
+    }
 }
 
 pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {

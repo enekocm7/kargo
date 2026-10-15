@@ -2036,6 +2036,24 @@ fn metadata_describes_a_workspace_for_editors() {
 }
 
 #[test]
+fn metadata_points_editors_at_the_declarations_of_npm_packages() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"js\"\n\n[target.wasm.npm-dependencies]\nexpress = \"5.1.0\"\n"))
+        .file("src/Main.kt", "fun main() {}\n");
+    let metadata = || -> serde_json::Value {
+        let out = p.kargo().args(["--offline", "metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let wasm = metadata()["packages"][0]["targets"][0].clone();
+    assert_eq!(wasm["kind"], "wasm");
+    let dir = std::path::PathBuf::from(wasm["npm-declarations"].as_str().unwrap());
+    assert!(dir.ends_with(std::path::Path::new("target").join("debug").join("generated").join("npm")), "{wasm}");
+
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"js\"\n"));
+    assert_eq!(metadata()["packages"][0]["targets"][0]["npm-declarations"], serde_json::Value::Null);
+}
+
+#[test]
 fn debug_needs_the_jvm_target() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("dbg", "[target.jvm]\n[target.wasm]\n")).file("src/Main.kt", "fun main() {}\n");
