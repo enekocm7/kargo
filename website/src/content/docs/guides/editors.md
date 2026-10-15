@@ -16,7 +16,7 @@ Kargo gives editors what they need to understand a project without reading `karg
 | Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
 | Emacs and other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
 
-Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with the standard library, the JDK's sources, your `.java` files and the libraries whose sources jars you fetched; it doesn't know classes of libraries without sources (see [its limits](../kotlin-server/#limits)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
+Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with each target's standard library and libraries, the JDK's sources, your `.java` files and the libraries whose sources jars you fetched; it doesn't know classes of libraries without sources (see [its limits](../kotlin-server/#limits)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
 
 ## IntelliJ IDEA and Android Studio
 

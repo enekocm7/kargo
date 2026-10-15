@@ -6,9 +6,9 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::features::{self, CompletionOptions, Target};
-use super::index::{Index, Origin, SetKind, SourceSet, Unit, UnitId};
+use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::tests::fake_jdk;
-use super::library::stub_files;
+use super::library::{self, SourcesJar, UnitCache, folder_platforms, stub_files};
 use super::resolve::{Analyzer, Packages};
 
 struct Fixture {
@@ -41,9 +41,23 @@ fn fixture_on(files: &[(&str, &str)], jdk: Option<Arc<super::jdk::Jdk>>, jdk_dir
     let lib_units: Vec<Arc<Unit>> = stub_files()
         .into_iter()
         .map(|(rel, text)| {
-            Arc::new(Unit::new(PathBuf::from("/stdlib").join(rel), text, Origin::Library { name: "stdlib".into(), jvm: false }))
+            Arc::new(Unit::new(
+                PathBuf::from("/stdlib").join(rel),
+                text,
+                Origin::Library { name: "stdlib".into(), main: Platforms::ALL, test: Platforms::NONE },
+            ))
         })
         .collect();
+    fixture_with(files, lib_units, jdk, jdk_dir)
+}
+
+/// [`fixture_on`] with the library files `lib_units` in place of the outline.
+fn fixture_with(
+    files: &[(&str, &str)],
+    lib_units: Vec<Arc<Unit>>,
+    jdk: Option<Arc<super::jdk::Jdk>>,
+    jdk_dir: Option<tempfile::TempDir>,
+) -> Fixture {
     let mut cursors = Vec::new();
     let mut units = Vec::new();
     for (i, (path, text)) in files.iter().enumerate() {
@@ -69,7 +83,7 @@ fn fixture_on(files: &[(&str, &str)], jdk: Option<Arc<super::jdk::Jdk>>, jdk_dir
     Fixture {
         lib: Index::new(true, lib_units).with_jdk(jdk),
         proj: Index::new(false, units),
-        packages: Packages { visible: vec![vec![0, 1], vec![1]], jvm: true },
+        packages: Packages { visible: vec![vec![0, 1], vec![1]], platforms: vec![Platforms::JVM, Platforms::JVM] },
         cursors,
         _jdk: jdk_dir,
     }
@@ -439,6 +453,133 @@ fn nothing_in_comments_and_strings() {
     assert!(has(&f.labels(), "print"));
 }
 
+/// [`fixture`] with the library files `libs`, each with the platforms it is on for main code and for
+/// test code only, and the platforms of the packages.
+fn platform_fixture(files: &[(&str, &str)], libs: &[(&str, &str, Platforms, Platforms)], platforms: Vec<Platforms>) -> Fixture {
+    let lib_units: Vec<Arc<Unit>> = libs
+        .iter()
+        .map(|&(path, text, main, test)| {
+            Arc::new(Unit::new(PathBuf::from("/lib").join(path), text.to_owned(), Origin::Library { name: "lib".into(), main, test }))
+        })
+        .collect();
+    let mut f = fixture_with(files, lib_units, None, None);
+    f.packages.platforms = platforms;
+    f
+}
+
+/// A library with a declaration on each platform, and one for test code only.
+fn demo_libs() -> Vec<(&'static str, &'static str, Platforms, Platforms)> {
+    vec![
+        ("kotlin/Common.kt", "package kotlin.demo\n\nfun shared() = 1\n", Platforms::ALL, Platforms::NONE),
+        ("jvmMain/kotlin/demo/Jvm.kt", "package kotlin.demo\n\nfun jvmOnly() = 1\n", Platforms::JVM, Platforms::NONE),
+        ("wasmJsMain/kotlin/demo/Wasm.kt", "package kotlin.demo\n\nfun wasmOnly() = 1\n", Platforms::WASM, Platforms::NONE),
+        ("kotlin/test/Assert.kt", "package kotlin.demo\n\nfun testOnly() = 1\n", Platforms::NONE, Platforms::ALL),
+    ]
+}
+
+/// Whether code of the project file at position `from` sees a top-level declaration named `fq`.
+fn sees(f: &Fixture, from: usize, fq: &str) -> bool {
+    let an = f.an();
+    let syms = an.by_fq(fq);
+    assert!(!syms.is_empty(), "{fq} is indexed");
+    let from = UnitId { lib: false, unit: from as u32 };
+    syms.iter().any(|&s| an.visible(from, s))
+}
+
+#[test]
+fn a_multi_target_package_sees_only_what_every_target_has_in_common_code() {
+    let f = platform_fixture(
+        &[
+            ("src/Common.kt", "package app\n"),
+            ("src-jvm/Jvm.kt", "package app\n"),
+            ("src-wasm/Wasm.kt", "package app\n"),
+            ("tests/Test.kt", "package app\n"),
+        ],
+        &demo_libs(),
+        vec![Platforms::JVM.union(Platforms::WASM), Platforms::NONE],
+    );
+    // Common code compiles for JVM and Wasm alike, so it sees the libraries of both, and not the
+    // test-only ones.
+    assert!(sees(&f, 0, "kotlin.demo.shared"));
+    assert!(!sees(&f, 0, "kotlin.demo.jvmOnly"));
+    assert!(!sees(&f, 0, "kotlin.demo.wasmOnly"));
+    assert!(!sees(&f, 0, "kotlin.demo.testOnly"));
+    // Each target sees its own platform's libraries, and the common ones.
+    assert!(sees(&f, 1, "kotlin.demo.shared") && sees(&f, 1, "kotlin.demo.jvmOnly"));
+    assert!(!sees(&f, 1, "kotlin.demo.wasmOnly"));
+    assert!(sees(&f, 2, "kotlin.demo.shared") && sees(&f, 2, "kotlin.demo.wasmOnly"));
+    assert!(!sees(&f, 2, "kotlin.demo.jvmOnly"));
+    // Test code sees the test-only libraries, and still only what every target has.
+    assert!(sees(&f, 3, "kotlin.demo.shared") && sees(&f, 3, "kotlin.demo.testOnly"));
+    assert!(!sees(&f, 3, "kotlin.demo.jvmOnly"));
+}
+
+#[test]
+fn a_jvm_only_package_sees_jvm_libraries_in_common_code() {
+    // A file outside the source roots, open in the editor, sees every platform's libraries.
+    let f =
+        platform_fixture(&[("src/Common.kt", "package app\n"), ("loose/Scratch.kt", "package app\n")], &demo_libs(), vec![Platforms::JVM]);
+    assert!(sees(&f, 0, "kotlin.demo.jvmOnly") && sees(&f, 0, "kotlin.demo.shared"));
+    assert!(!sees(&f, 0, "kotlin.demo.wasmOnly"));
+    assert!(sees(&f, 1, "kotlin.demo.wasmOnly") && sees(&f, 1, "kotlin.demo.jvmOnly"));
+}
+
+#[test]
+fn jdk_classes_stay_out_of_wasm_code() {
+    // Common code of a Wasm-only package compiles for Wasm, which has no JDK.
+    let mut f = fixture_with_jdk(&[("src/Common.kt", "package app\n")], JDK);
+    f.packages.platforms = vec![Platforms::WASM, Platforms::NONE];
+    assert!(!sees(&f, 0, "java.io.File"));
+    f.packages.platforms = vec![Platforms::JVM, Platforms::NONE];
+    assert!(sees(&f, 0, "java.io.File"));
+}
+
+/// Completes against the real standard library's sources jars, loaded as the server loads them
+/// (`KOTLIN_JVM_SOURCES`: `kotlin-stdlib`, `KOTLIN_WASM_SOURCES`: `kotlin-stdlib-wasm-js`). The
+/// JVM's `kotlin.concurrent.thread` is offered to JVM code only, and `String.lowercase` to all.
+#[test]
+#[ignore]
+fn platforms_against_the_real_standard_library() {
+    use kargo_util::shell::{Shell, Verbosity};
+    let home = tempfile::tempdir().unwrap();
+    let config = kargo_util::config::Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_offline(true);
+    let jars = [
+        SourcesJar {
+            name: "kotlin-stdlib".into(),
+            jar: PathBuf::from(std::env::var("KOTLIN_JVM_SOURCES").expect("KOTLIN_JVM_SOURCES")),
+            main: Platforms::ALL,
+            test: Platforms::NONE,
+        },
+        SourcesJar {
+            name: "kotlin-stdlib-wasm-js".into(),
+            jar: PathBuf::from(std::env::var("KOTLIN_WASM_SOURCES").expect("KOTLIN_WASM_SOURCES")),
+            main: Platforms::ALL,
+            test: Platforms::NONE,
+        },
+    ];
+    let lib = Index::new(true, library::units(&config, &UnitCache::default(), &jars));
+    // A package of a JVM and a Wasm target: its common code, the JVM's file and the Wasm one.
+    let both = Platforms::JVM.union(Platforms::WASM);
+    let cases = [
+        (None, both, "fun main() {\n    thr$0\n}\n", "thread", false),
+        (None, both, "fun main() {\n    \"A\".lower$0\n}\n", "lowercase", true),
+        (Some("jvm"), both, "fun main() {\n    thr$0\n}\n", "thread", true),
+        (Some("wasm"), both, "fun main() {\n    thr$0\n}\n", "thread", false),
+        (Some("wasm"), both, "fun main() {\n    \"A\".lower$0\n}\n", "lowercase", true),
+    ];
+    for (target, platforms, src, label, expected) in cases {
+        let at = src.find("$0").unwrap();
+        let text = src.replacen("$0", "", 1);
+        let origin = Origin::Source(SourceSet { package: 0, kind: SetKind::Main, target: target.map(str::to_owned) });
+        let proj = Index::new(false, vec![Arc::new(Unit::new(PathBuf::from("/p/src/Main.kt"), text, origin))]);
+        let packages = Packages { visible: vec![vec![0]], platforms: vec![platforms] };
+        let an = Analyzer::new(&lib, &proj, &packages);
+        let list = features::completion(&an, UnitId { lib: false, unit: 0 }, at, CompletionOptions { snippets: true }, 0);
+        let labels: Vec<&str> = list["items"].as_array().unwrap().iter().filter_map(|i| i["label"].as_str()).collect();
+        assert_eq!(labels.contains(&label), expected, "{label} in {target:?} code: {src:?}");
+    }
+}
+
 #[test]
 fn outlines_files() {
     let f = fixture(&[("src/Main.kt", "class A {\n    fun b() {}\n    val c = 1\n}\nfun main() {}\n")]);
@@ -465,8 +606,9 @@ fn against_the_real_standard_library() {
         .iter()
         .map(|p| {
             let rel = p.strip_prefix(&dir).unwrap();
-            let jvm = rel.to_string_lossy().starts_with("jvm") || rel.to_string_lossy().starts_with("jdk");
-            Arc::new(Unit::new(p.clone(), std::fs::read_to_string(p).unwrap(), Origin::Library { name: "kotlin-stdlib".into(), jvm }))
+            let folder = rel.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+            let origin = Origin::Library { name: "kotlin-stdlib".into(), main: folder_platforms(&folder), test: Platforms::NONE };
+            Arc::new(Unit::new(p.clone(), std::fs::read_to_string(p).unwrap(), origin))
         })
         .collect();
     let lib = Index::new(true, lib_units);
@@ -495,7 +637,7 @@ fn against_the_real_standard_library() {
         ("fun main() {\n    'c'.$0\n}\n", &["isDigit", "code", "uppercaseChar"]),
         ("fun main() {\n    3.14.$0\n}\n", &["toInt", "roundToInt"]),
     ];
-    let packages = Packages { visible: vec![vec![0]], jvm: true };
+    let packages = Packages { visible: vec![vec![0]], platforms: vec![Platforms::JVM] };
     for (src, expected) in cases {
         let at = src.find("$0").unwrap();
         let text = src.replacen("$0", "", 1);
@@ -546,7 +688,13 @@ fn resolves_every_identifier_of_real_code() {
     let files = kargo_util::fs::collect_files(&dir, &["kt"]);
     let lib_units: Vec<Arc<Unit>> = files
         .iter()
-        .map(|p| Arc::new(Unit::new(p.clone(), std::fs::read_to_string(p).unwrap(), Origin::Library { name: "lib".into(), jvm: false })))
+        .map(|p| {
+            Arc::new(Unit::new(
+                p.clone(),
+                std::fs::read_to_string(p).unwrap(),
+                Origin::Library { name: "lib".into(), main: Platforms::ALL, test: Platforms::NONE },
+            ))
+        })
         .collect();
     let lib = Index::new(true, lib_units);
     let origin = Origin::Source(SourceSet { package: 0, kind: SetKind::Main, target: None });
@@ -559,7 +707,7 @@ fn resolves_every_identifier_of_real_code() {
         .map(|p| Arc::new(Unit::new(p.clone(), std::fs::read_to_string(p).unwrap(), origin.clone())))
         .collect();
     let proj = Index::new(false, proj_units);
-    let packages = Packages { visible: vec![vec![0]], jvm: true };
+    let packages = Packages { visible: vec![vec![0]], platforms: vec![Platforms::JVM] };
     let start = std::time::Instant::now();
     let (mut idents, mut resolved, mut slowest) = (0, 0, (std::time::Duration::ZERO, String::new()));
     for (ui, unit) in proj.units.iter().enumerate() {

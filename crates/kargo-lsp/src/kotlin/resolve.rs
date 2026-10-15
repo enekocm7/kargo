@@ -11,7 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::index::{Index, Origin, SetKind, SymId, Unit, UnitId, default_imports};
+use super::index::{Index, Origin, Platforms, SetKind, SourceSet, SymId, Unit, UnitId, default_imports};
 use super::java;
 use super::lexer::{HARD_KEYWORDS, Lexed, Tok};
 use super::syntax::{self, Decl, DeclId, File, InitKind, Kind, ScopeKind, TypeRef};
@@ -85,12 +85,14 @@ pub struct Arg {
     pub trailing: bool,
 }
 
-/// The project's packages: which packages each one sees (itself and its path dependencies).
+/// The project's packages: which packages each one sees (itself and its path dependencies), and
+/// the platforms of its targets.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
     pub visible: Vec<Vec<usize>>,
-    /// Whether any package has a JVM target, so JVM-only library files apply.
-    pub jvm: bool,
+    /// Per package, the platforms of its enabled targets. Common code (in `src/`) compiles for
+    /// all of them, so it sees only the libraries on all of them.
+    pub platforms: Vec<Platforms>,
 }
 
 pub struct Analyzer<'a> {
@@ -193,7 +195,7 @@ impl<'a> Analyzer<'a> {
         let target = self.unit(s.unit_id());
         let source = self.unit(from);
         match (&source.origin, &target.origin) {
-            (_, Origin::Library { jvm, .. }) => !d.is_internal() && (!jvm || self.packages.jvm),
+            (_, Origin::Library { main, test, .. }) => !d.is_internal() && self.library_in_scope(&source.origin, *main, *test),
             (_, Origin::Loose) => s.unit_id() == from,
             (Origin::Library { .. }, _) => false,
             (Origin::Loose, Origin::Source(t)) => t.kind == SetKind::Main,
@@ -206,6 +208,33 @@ impl<'a> Analyzer<'a> {
                     t.kind == SetKind::Main && target_ok && self.packages.visible.get(f.package).is_some_and(|v| v.contains(&t.package))
                 }
             }
+        }
+    }
+
+    /// Whether code of origin `from` sees a library file on the platforms `main` (main code) and
+    /// `test` (test code only). A source set sees it when it compiles for all of its platforms,
+    /// and test code sees the test-only libraries too. A library file sees the libraries it
+    /// shares a platform with.
+    fn library_in_scope(&self, from: &Origin, main: Platforms, test: Platforms) -> bool {
+        match from {
+            Origin::Source(set) => {
+                let scope = if set.kind == SetKind::Test { main.union(test) } else { main };
+                scope.contains(self.platforms_of(set))
+            }
+            Origin::Library { main: from_main, test: from_test, .. } => from_main.union(*from_test).intersects(main.union(test)),
+            Origin::Loose => true,
+        }
+    }
+
+    /// The platforms the code of `set` compiles for: its target's, or every target's for common
+    /// code, which compiles for each of them.
+    fn platforms_of(&self, set: &SourceSet) -> Platforms {
+        match &set.target {
+            Some(target) => Platforms::of_target(target),
+            None => match self.packages.platforms.get(set.package) {
+                Some(platforms) if !platforms.is_empty() => *platforms,
+                _ => Platforms::ALL,
+            },
         }
     }
 

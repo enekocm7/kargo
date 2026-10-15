@@ -25,8 +25,56 @@ pub enum Origin {
     /// A file outside every source root, open in the editor: it sees the main sources of
     /// every package.
     Loose,
-    /// A sources jar, or the JDK's sources; `jvm` for files that only exist on the JVM.
-    Library { name: String, jvm: bool },
+    /// A sources jar, or the JDK's sources: the platforms it is on for main code, and those
+    /// for test code only (a test-only dependency).
+    Library { name: String, main: Platforms, test: Platforms },
+}
+
+/// A set of Kargo's platforms: JVM (the `jvm` and `android` targets), Wasm and Kotlin/Native.
+/// A library file applies to the platforms of its set, and a source set sees it when it compiles
+/// for all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Platforms(u8);
+
+impl Platforms {
+    pub const NONE: Self = Self(0);
+    pub const JVM: Self = Self(1);
+    pub const WASM: Self = Self(2);
+    pub const NATIVE: Self = Self(4);
+    pub const ALL: Self = Self(7);
+
+    /// The platforms of a target kind as `kargo metadata` names it. An unknown kind stands for
+    /// every platform, so nothing is hidden from it.
+    pub fn of_target(kind: &str) -> Self {
+        match kind {
+            "jvm" | "android" => Self::JVM,
+            "wasm" => Self::WASM,
+            "native" => Self::NATIVE,
+            _ => Self::ALL,
+        }
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// Whether the two sets share a platform.
+    pub fn intersects(self, other: Self) -> bool {
+        !self.intersect(other).is_empty()
+    }
+
+    /// Whether every platform of `other` is in this set.
+    pub fn contains(self, other: Self) -> bool {
+        self.intersect(other) == other
+    }
+
+    pub fn is_empty(self) -> bool {
+        self == Self::NONE
+    }
 }
 
 /// A source set of a Kargo package: which package, main, test or example code, and which

@@ -74,7 +74,9 @@ The server notices new, changed and deleted `.kt` files, from the editor and on 
 
 ## Libraries
 
-The **standard library** comes from its sources jar at the project's [`[kotlin] version`](../../reference/manifest/#kotlin), and so does `kotlin-test`, for tests. Kargo downloads them on first use from the project's repositories into its Maven cache, like any other artifact, and extracts them under `~/.kargo/cache/lsp-sources`, so go to definition opens real files. The JVM-only parts of the standard library are offered when a package has a JVM or Android target.
+Libraries are seen per target, as the compiler sees them. Common code in `src/` compiles for every target of its package, so it sees only the libraries that every one of them has. `src-jvm/` sees the JVM's libraries, and `src-wasm/` the Wasm ones. Test code also sees the libraries that only the test classpath has, such as `[dev-dependencies]`, and main code doesn't. A Kotlin file outside the source roots sees the libraries of every platform.
+
+The **standard library** comes from its sources jar at the project's [`[kotlin] version`](../../reference/manifest/#kotlin), and so does `kotlin-test`, for tests. Kargo downloads them on first use from the project's repositories into its Maven cache, like any other artifact, and extracts them under `~/.kargo/cache/lsp-sources`, so go to definition opens real files. The server loads the standard library of each platform the project targets: the JVM's sources for `jvm` and `android`, and `kotlin-stdlib-wasm-js` (or `kotlin-stdlib-wasm-wasi` for `environment = "wasi"`) for `wasm`, each with its `kotlin-test` for tests. Native code takes the parts of the Wasm one that Native shares. The JVM-only parts are offered to JVM code alone.
 
 Offline before that first download (`kargo --offline lsp`), a built-in outline of the most used parts of the standard library stands in, with its documentation. The whole library replaces it on the next start with network access.
 
@@ -90,7 +92,7 @@ The Kotlin classes for `String`, `CharSequence`, the collections and the maps al
 kargo fetch --sources
 ```
 
-The server then resolves the project's dependencies in the background, as `kargo metadata` does, and reads the sources jars it finds, Java files included. Restart the editor's language server after fetching new sources. Libraries without a sources jar stay unknown to it: their classes don't complete.
+The server then resolves the project's dependencies in the background, as `kargo metadata` does, and reads the sources jars it finds, Java files included. A sources jar applies to the targets whose classpath has it, as [above](#libraries) describes. Restart the editor's language server after fetching new sources. Libraries without a sources jar stay unknown to it: their classes don't complete.
 
 ## Limits
 
@@ -99,6 +101,7 @@ The server reads declarations and infers types as far as completion and navigati
 - It reports no errors of its own. They come from `kargo check` on save, which compiles the code for real. Turn it off with `{ "checkOnSave": false }` in the editor's `initializationOptions`; see [Check on save](../editors/#check-on-save).
 - It reads Java but doesn't edit it. Java files get no completion, hover, rename or references of their own, and a Java declaration can't be renamed from Kotlin: the server refuses, because the Java code that uses it wouldn't change. References to a Kotlin declaration from Java code aren't searched.
 - Classes from binary-only libraries (jars without a sources jar) are unknown, so their members don't complete.
+- Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native. Native-only declarations, such as `kotlinx.cinterop` and the platform libraries (`platform.posix` and the like), don't complete.
 - Smart casts (`if (x is Foo) x.`), the branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
 - It has no formatting, quick fixes, signature help, inlay hints or semantic highlighting. Use [`kargo fmt`](../formatting-and-linting/) to format code.
 
