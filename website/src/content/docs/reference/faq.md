@@ -82,6 +82,10 @@ The KSP processor didn't run. Declare it with `scope = "ksp"`, not `processor` (
 
 Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Building Wasm doesn't need it; running and testing do.
 
+### `the npm package ... has no TypeScript declarations, so Kotlin gets none`
+
+Kargo generates Kotlin declarations for the packages of `[target.wasm.npm-dependencies]` from their TypeScript declarations: the package's own `.d.ts` files, or `@types/<name>`. This package has neither, or `@types/<name>` couldn't be installed (the message says why). Write `@JsModule("<name>")` external declarations for what you use yourself, as [the Kotlin docs](https://kotlinlang.org/docs/wasm-js-interop.html) describe, or add a `@types/` package to `npm-dependencies` if one exists under another version. See [Kotlin declarations for npm packages](../../guides/wasm/#kotlin-declarations-for-npm-packages).
+
 ### `your Wasm dependencies need the npm packages ...`
 
 A Wasm dependency, such as `kotlinx-datetime`, imports npm packages at runtime, and Kargo installs them with npm, pnpm or bun. Install [Node.js](https://nodejs.org), which includes npm, or install [pnpm](https://pnpm.io) or [bun](https://bun.sh), and make sure it is on your `PATH`. If you set `package-manager` in `[target.wasm]`, that tool must be on your `PATH`. See [npm packages](../../guides/wasm/#npm-packages).

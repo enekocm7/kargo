@@ -899,3 +899,24 @@ fn completes_libraries_without_sources() {
     );
     assert_eq!(f.definition(), Some(("p.kt".into(), "public fun greet(times: Int = ...): String".into())));
 }
+
+#[test]
+fn generated_npm_declarations_serve_wasm_code() {
+    // What `kargo build` generates for an npm package (see `kargo_ops::dts`), loaded as a Wasm library.
+    let express = "package express\n\nimport kotlin.js.*\n\n/**\n * Creates an Express application.\n */\n@JsModule(\"express\")\nexternal fun express(): express.Express\n";
+    let types = "package express\n\nimport kotlin.js.*\n\nexternal interface Express : JsAny {\n    fun get(path: String, handlers: (express.Request, express.Response, (JsAny?) -> Unit) -> Unit): express.Express\n}\n\nexternal interface Request : JsAny {\n    val path: String\n}\n\nexternal interface Response : JsAny {\n    fun send(body: String): express.Response\n}\n";
+    let libs =
+        [("express/Default.kt", express, Platforms::WASM, Platforms::NONE), ("express/Types.kt", types, Platforms::WASM, Platforms::NONE)];
+    let main = "import express.express\n\nfun main() {\n    express().get(\"/\") { req, res, _ -> req.pa$0 }\n}\n";
+    let f = platform_fixture(&[("src/Main.kt", main)], &libs, vec![Platforms::WASM, Platforms::WASM]);
+    assert!(has(&f.labels(), "path"), "{:?}", f.labels());
+    let f = platform_fixture(
+        &[("src/Main.kt", "import express.express\n\nval app = expr$0ess()\n")],
+        &libs,
+        vec![Platforms::WASM, Platforms::WASM],
+    );
+    assert!(f.hover().contains("Creates an Express application."), "{}", f.hover());
+    // Not in JVM code.
+    let f = platform_fixture(&[("src/Main.kt", "package app\n")], &libs, vec![Platforms::JVM.union(Platforms::WASM), Platforms::JVM]);
+    assert!(!sees(&f, 0, "express.express"));
+}

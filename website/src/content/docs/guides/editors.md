@@ -16,7 +16,7 @@ Kargo gives editors what they need to understand a project without reading `karg
 | Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
 | Emacs and other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
 
-Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with each target's standard library, the JDK's sources, your `.java` files and your dependencies: from their sources jars once you fetch them, else from their compiled classes and klibs (see [Libraries](../kotlin-server/#libraries)). Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
+Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with each target's standard library, the JDK's sources, your `.java` files and your dependencies: from their sources jars once you fetch them, else from their compiled classes and klibs (see [Libraries](../kotlin-server/#libraries)). The npm packages of a Wasm target come from the [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) Kargo generates for them. Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
 
 ## IntelliJ IDEA and Android Studio
 
@@ -174,6 +174,7 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, th
 - *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
 - The IDE analyzes each module for one platform. In a package with several targets, common code (`src/`) is analyzed like the first target, so completion there also offers that platform's APIs. *Tools → Kargo → Check* shows what fails on the other targets.
 - The npm packages of a [path dependency](../workspaces/#path-dependencies) are not described to the IDE: the import doesn't build a path dependency to read the npm packages in its klibs.
+- The [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) generated for `[target.wasm.npm-dependencies]` are not yet a source root of the Wasm module, so calls into npm packages show as unresolved in the IDE; they compile and run. `kargo lsp` with Kargo's own Kotlin server, in other editors, reads them.
 - Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are handed to the IDE but it may not apply them, so it can report errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
 - The IDE reads libraries compiled by its own Kotlin version or one newer at most, see the note under [Project import](#project-import).
 

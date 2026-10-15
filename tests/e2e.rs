@@ -980,6 +980,39 @@ fn wasm_installs_npm_packages_of_dependencies() {
 }
 
 #[test]
+fn wasm_calls_npm_packages_through_generated_declarations() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["web", "--target", "wasm"]);
+    let manifest = t.dir.path().join("web/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    // express ships no TypeScript declarations, so Kargo installs `@types/express` for them.
+    std::fs::write(&manifest, format!("{text}\n[target.wasm.npm-dependencies]\nexpress = \"5.1.0\"\n")).unwrap();
+    t.write(
+        "web/src/Main.kt",
+        "import express.Router\nimport express.express\n\nfun main() {\n    val app = express()\n    app.get(\"/\") { _, res, _ -> res.status(200).send(\"hi\") }\n    \
+         app.use(\"/api\", Router())\n    println(\"env: \" + app.get(\"env\"))\n}\n",
+    );
+    t.kargo("web")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installing npm packages @types/express@^5"))
+        .stderr(predicate::str::contains("Generating Kotlin declarations for npm packages express"))
+        .stderr(predicate::str::contains("warning").not())
+        .stdout(predicate::str::contains("env: development"));
+    let generated = t.dir.path().join("web/target/debug/generated/npm");
+    assert!(generated.join("express/Default.kt").is_file());
+    assert!(generated.join("express_serve_static_core/Types.kt").is_file());
+    // Nothing changed: no second install or generation.
+    t.kargo("web").arg("build").assert().success().stderr(predicate::str::contains("Generating").not());
+}
+
+#[test]
 fn fetch_prepares_an_offline_jvm_build() {
     require_e2e!();
     let t = E2e::new();

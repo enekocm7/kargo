@@ -126,6 +126,8 @@ target/
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/                     the module (.mjs, .wasm); for a browser app also index.html and resources/, for a library package.json and .d.mts
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
+│   ├── npm-types/                @types packages for npm dependencies without TypeScript declarations
+│   ├── generated/npm/            Kotlin declarations generated for [target.wasm.npm-dependencies]
 │   ├── native/                   one directory per platform; cinterop/ holds C bindings, bin/ the [[bin]] executables
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release

@@ -16,8 +16,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, announce, compile_jvm, finished, hook_env, native_cinterop, native_cinterop_defs, native_libraries, native_platforms,
-    native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
+    BuildOptions, add_npm_declarations, announce, compile_jvm, finished, hook_env, native_cinterop, native_cinterop_defs, native_libraries,
+    native_platforms, native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
@@ -74,15 +74,18 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
-    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let out = check_dir(ctx, TargetKind::Wasm);
     let fp_dir = out.join(".fingerprint");
 
+    let libraries = wasm_libraries(ctx, &setup, false)?;
+    let mut main_sources = sources(ctx, TargetKind::Wasm, false, &["kt"]);
+    add_npm_declarations(ctx, &libraries, &mut main_sources, &mut kotlin_args)?;
     let main = WasmCompilation {
         name: wasm.module_name(&manifest.package),
         environment: wasm.environment,
-        sources: sources(ctx, TargetKind::Wasm, false, &["kt"]),
-        libraries: wasm_libraries(ctx, &setup, false)?,
+        sources: main_sources,
+        libraries,
         friends: Vec::new(),
         plugins: &plugins,
         kotlin_args: &kotlin_args,

@@ -163,12 +163,62 @@ $ kargo run -t wasm
 
 ### Your own npm packages
 
-To use an npm package from your own code, for example through `@JsModule("left-pad")`, list it in `[target.wasm.npm-dependencies]`. Kargo installs it with the others, and your entry wins when a library asks for another version of the same package:
+To use an npm package from your own code, list it in `[target.wasm.npm-dependencies]`. Kargo installs it with the others, and your entry wins when a library asks for another version of the same package:
 
 ```toml title="kargo.toml"
 [target.wasm.npm-dependencies]
-"left-pad" = "1.3.0"
+express = "5.1.0"
 ```
+
+Kargo then generates Kotlin declarations for the package from its TypeScript declarations, so you call it like a Kotlin library, and your editor completes and navigates it:
+
+```kotlin title="src/Main.kt"
+import express.express
+
+fun main() {
+    val app = express()
+    app.get("/") { req, res, _ -> res.status(200).send("Hello from Kotlin at ${req.path}") }
+    app.listen(3000) { println("Listening on http://localhost:3000") }
+}
+```
+
+```console
+$ kargo run
+  Installing npm packages express@5.1.0 (npm)
+  Installing npm packages @types/express@^5 (npm)
+  Generating Kotlin declarations for npm packages express
+   Compiling web v0.1.0 (wasm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.12s
+     Running `node target/debug/wasm/web.mjs`
+Listening on http://localhost:3000
+```
+
+### Kotlin declarations for npm packages
+
+For each package in `[target.wasm.npm-dependencies]`, Kargo reads the package's own `.d.ts` files, or those of `@types/<name>` when it ships none (express, for example), and writes Kotlin/Wasm `external` declarations into `target/<profile>/generated/npm/`. They compile with your code, and `kargo lsp` reads them for completion, hover (with the package's documentation) and go to definition.
+
+- **Packages.** Each npm package gets a Kotlin package named after it: `express` is `express`, `@acme/my-lib` is `acme.my_lib`. The package's default export is a function named after the package (`express()`, `leftPad()` for `left-pad`), and its named exports keep their names (`import express.Router`). The types a package uses from other packages, such as `express-serve-static-core`, get Kotlin packages of their own.
+- **`@types`.** For a package without declarations of its own, Kargo installs `@types/<name>` at the package's major version (`@types/express@^5`) into `target/<profile>/npm-types/`, apart from the packages your program runs with. If there is no such package, the build warns and goes on without declarations for it. You can also list a `@types/` package in `npm-dependencies` yourself to pick its version.
+- **When.** `kargo build`, `run`, `test` and `check` install the packages before compiling and generate the declarations again only when the installed packages change. `kargo lsp` does the same when it opens the project, so the editor has them before your first build.
+- **Opt-in.** Kotlin/Wasm interop types (`JsAny` and friends) need the opt-in `kotlin.js.ExperimentalWasmJsInterop` since Kotlin 2.2. When a project has npm dependencies, Kargo passes it to the Wasm compiler, so neither the declarations nor your calls to them warn.
+
+Kotlin/Wasm can only pass `String`, `Int`, `Double`, `Boolean`, function types and JS objects (`JsAny`) to JavaScript, so the TypeScript types are simplified:
+
+| TypeScript | Kotlin |
+| --- | --- |
+| An interface or class | An `external interface` (`external class` for the package's own classes) with the members of all its supertypes; generic types take their default type arguments |
+| A property whose type is callable, such as `get: IRouterMatcher<this>` | Methods, one per call signature, so `app.get("/") { ... }` works |
+| An interface that is only callable, such as `RequestHandler` | A Kotlin function type, so you pass a lambda |
+| `number` parameter | Overloads for `Int` and `Double` |
+| `any` parameter | Overloads for `JsAny?` and `String` |
+| A union parameter (`string \| RegExp`) | One overload per member; `JsAny` stands for the object types |
+| A rest parameter `...handlers` | A `vararg`, and a single parameter so a trailing lambda works |
+| An optional parameter | A default of `definedExternally`, or, with several types, an overload without it and one per type |
+| Other unions, `object`, `Date`, conditional and mapped types | `JsAny` (or `JsAny?` for `any` and `unknown`) |
+| `string[]`, `Promise<T>` | `JsArray<JsString>`, `Promise<...>` |
+| A string index signature `[key: string]: T` | An `operator fun get(key: String)` extension in the package's Kotlin package, so `req.params["id"]` works with `import express.get` (or `import express.*`) |
+
+A package without TypeScript declarations gets none, with a warning; declare what you use yourself with `@JsModule("<name>")` [external declarations](https://kotlinlang.org/docs/wasm-js-interop.html). The generated files are rewritten by the next build, so edit your own declarations instead of them.
 
 ### In the browser
 

@@ -215,6 +215,9 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             out["wasm-kind"] = json!(wasm.kind.as_str());
             out["module-name"] = json!(wasm.module_name(&m.package));
             out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, &setup)?) };
+            // The Kotlin declarations generated for `[target.wasm.npm-dependencies]`, once a build wrote them.
+            out["npm-declarations"] =
+                if wasm.npm_dependencies.is_empty() { Value::Null } else { json!(path(&npm::declarations_dir(ws, ctx.profile))) };
         }
         TargetKind::Native => {
             let native = m.targets.native.as_ref().expect("the Native target is enabled");

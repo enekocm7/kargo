@@ -128,6 +128,19 @@ pub fn units(config: &Config, cache: &UnitCache, jars: &[SourcesJar]) -> Vec<Arc
         .collect()
 }
 
+/// The Kotlin files under `dir` as a library called `name` on the platforms `main` and `test`
+/// (as for a [`SourcesJar`]). For generated declarations, which change, so they are parsed each time.
+pub fn directory_units(name: &str, dir: &Path, main: Platforms, test: Platforms) -> Vec<Arc<Unit>> {
+    kargo_util::fs::collect_files(dir, &["kt"])
+        .par_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(path).ok()?;
+            let origin = Origin::Library { name: name.to_owned(), main, test };
+            Some(Arc::new(Unit::new(path.clone(), text, origin)))
+        })
+        .collect()
+}
+
 /// A library file to parse: the path of its first copy, what its jar calls it, and the platforms
 /// it applies to.
 #[derive(Debug, Clone, PartialEq, Eq)]
