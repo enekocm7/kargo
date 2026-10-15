@@ -593,6 +593,14 @@ fn resolves_every_identifier_of_real_code() {
 const JDK: &[(&str, &str)] = &[
     ("java.base/module-info.java", "module java.base {\n    exports java.io;\n    exports java.lang;\n}\n"),
     (
+        "java.base/java/lang/CharSequence.java",
+        "package java.lang;\n\npublic interface CharSequence {\n    int length();\n\n    char charAt(int index);\n\n    default java.util.stream.IntStream chars() {\n        return null;\n    }\n}\n",
+    ),
+    (
+        "java.base/java/lang/String.java",
+        "package java.lang;\n\npublic final class String implements CharSequence {\n    public int codePointAt(int index) {\n        return 0;\n    }\n\n    public static String valueOf(int i) {\n        return null;\n    }\n}\n",
+    ),
+    (
         "java.base/java/io/File.java",
         "package java.io;\n\npublic class File {\n    public static final String separator = \"/\";\n\n    public File(String path) {}\n\n    public boolean exists() {\n        return true;\n    }\n\n    public String getName() {\n        return \"\";\n    }\n}\n",
     ),
@@ -664,4 +672,22 @@ fn completes_the_real_jdk() {
     assert!(has(&labels, "add") && has(&labels, "size") && has(&labels, "isEmpty"), "{labels:?}");
     let f = fixture_on(&[("src/Main.kt", "fun main() {\n    System.out.$0\n}\n")], None, None);
     assert!(!has(&f.labels(), "println"), "without a JDK, nothing of System is known");
+
+    // The methods Java adds to Kotlin's String: `chars()` comes from CharSequence's default method.
+    let dir = tempfile::tempdir().unwrap();
+    let jdk = super::jdk::Jdk::open(&home, &dir.path().join("cache"), "JDK").expect("a JDK with sources");
+    let f = fixture_on(&[("src/Main.kt", "fun main() {\n    \"abc\".$0\n}\n")], Some(Arc::new(jdk)), Some(dir));
+    let labels = f.labels();
+    assert!(has(&labels, "chars") && has(&labels, "codePointAt") && has(&labels, "lines"), "{labels:?}");
+}
+
+#[test]
+fn completes_the_java_members_of_kotlin_classes() {
+    // `String` is Kotlin's class, but the methods Java adds to it complete too, including `chars()`
+    // that `CharSequence` declares by default. Static methods don't; a name Kotlin declares is listed once.
+    let f = fixture_with_jdk(&[("src/Main.kt", "fun main() {\n    \"abc\".$0\n}\n")], JDK);
+    let labels = f.labels();
+    assert!(has(&labels, "codePointAt") && has(&labels, "chars"), "{labels:?}");
+    assert!(!has(&labels, "valueOf"), "{labels:?}");
+    assert_eq!(labels.iter().filter(|l| *l == "length").count(), 1, "{labels:?}");
 }

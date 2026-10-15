@@ -51,6 +51,33 @@ const PLATFORM: &[(&str, &str)] = &[
     ("java.util.Map.Entry", "kotlin.collections.MutableMap.MutableEntry"),
 ];
 
+/// Kotlin classes that also show the members their Java counterpart declares: `String.chars()`
+/// and `List.stream()`. Kotlin shows some Java members of its classes and not others, so this
+/// is a list: `Int` doesn't show `Integer`'s methods, and `Any` doesn't show `Object`'s.
+const SHOWS_JAVA_MEMBERS: &[(&str, &str)] = &[
+    ("kotlin.String", "java.lang.String"),
+    ("kotlin.CharSequence", "java.lang.CharSequence"),
+    ("kotlin.collections.Iterable", "java.lang.Iterable"),
+    ("kotlin.collections.Collection", "java.util.Collection"),
+    ("kotlin.collections.MutableCollection", "java.util.Collection"),
+    ("kotlin.collections.List", "java.util.List"),
+    ("kotlin.collections.MutableList", "java.util.List"),
+    ("kotlin.collections.Set", "java.util.Set"),
+    ("kotlin.collections.MutableSet", "java.util.Set"),
+    ("kotlin.collections.Map", "java.util.Map"),
+    ("kotlin.collections.MutableMap", "java.util.Map"),
+];
+
+/// The Java class whose members the Kotlin class `kotlin_fq` also shows, if any.
+pub fn java_counterpart(kotlin_fq: &str) -> Option<&'static str> {
+    SHOWS_JAVA_MEMBERS.iter().find(|(kotlin, _)| *kotlin == kotlin_fq).map(|(_, java)| *java)
+}
+
+/// Whether `java_fq` is a Java class Kotlin maps to its own, or one whose members a Kotlin class shows.
+pub fn is_platform_class(java_fq: &str) -> bool {
+    PLATFORM.iter().any(|(java, _)| *java == java_fq) || SHOWS_JAVA_MEMBERS.iter().any(|(_, java)| *java == java_fq)
+}
+
 /// The packages a Java file sees without importing them.
 pub const JAVA_DEFAULT_IMPORTS: &[&str] = &["java.lang"];
 
