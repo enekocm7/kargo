@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use kargo_maven::Repository;
 use kargo_util::config::Config;
 
+use super::compiled;
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
@@ -267,17 +268,28 @@ fn dependency_compiled(meta: &Value) -> Vec<CompiledLibrary> {
                     let main = scope == "compile";
                     for entry in classpaths[scope].as_array().into_iter().flatten() {
                         let (Some(path), Some(module)) = (entry["path"].as_str(), entry["module"].as_str()) else { continue };
-                        if !entry["sources"].is_null() || is_stdlib_module(module) || (!main && compile.contains(module)) {
+                        if is_stdlib_module(module) || (!main && compile.contains(module)) {
                             continue;
                         }
                         let path = PathBuf::from(path);
                         if !path.extension().is_some_and(|e| e == "jar" || e == "klib") {
                             continue;
                         }
+                        // The cinterop klib of a module comes with the module's sources jar, which
+                        // never has the declarations cinterop generated.
+                        let has_sources = !entry["sources"].is_null();
+                        if has_sources
+                            && !libraries.contains_key(&path)
+                            && !(path.extension().is_some_and(|e| e == "klib") && compiled::is_interop_klib(&path))
+                        {
+                            continue;
+                        }
                         let library = libraries.entry(path.clone()).or_insert_with(|| {
                             let artifact = module.split_once(':').map_or(module, |(_, artifact)| artifact);
                             let version = entry["version"].as_str().unwrap_or_default();
-                            CompiledLibrary { name: format!("{artifact} {version}"), path, main: Platforms::NONE, test: Platforms::NONE }
+                            let name =
+                                if has_sources { format!("{artifact} {version} (cinterop)") } else { format!("{artifact} {version}") };
+                            CompiledLibrary { name, path, main: Platforms::NONE, test: Platforms::NONE, known: None }
                         });
                         if main {
                             library.main = library.main.union(platforms);
@@ -314,11 +326,50 @@ fn platform_libraries(meta: &Value) -> Vec<CompiledLibrary> {
         .map(|path| {
             let lib = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let short = lib.rsplit('.').next().unwrap_or(&lib).to_owned();
-            CompiledLibrary { name: format!("Kotlin/Native {short} ({platform})"), path, main: Platforms::NATIVE, test: Platforms::NONE }
+            CompiledLibrary {
+                name: format!("Kotlin/Native {short} ({platform})"),
+                path,
+                main: Platforms::NATIVE,
+                test: Platforms::NONE,
+                known: None,
+            }
         })
         .collect();
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// The Kotlin/Native standard library's klib in the distribution that builds the project, for
+/// what its sources jar doesn't give Native code (`kotlinx.cinterop`, `kotlin.native`, ...):
+/// `stdlib` are the standard library files already loaded, whose top-level declarations on
+/// Native are left out of it.
+fn native_stdlib(meta: &Value, stdlib: &[Arc<Unit>]) -> Option<CompiledLibrary> {
+    let home = meta["toolchain"]["kotlin-native"]["home"].as_str()?;
+    let path = Path::new(home).join("klib").join("common").join("stdlib");
+    if !path.is_dir() {
+        return None;
+    }
+    let mut known = BTreeSet::new();
+    for unit in stdlib {
+        let Origin::Library { main, .. } = &unit.origin else { continue };
+        if !main.contains(Platforms::NATIVE) {
+            continue;
+        }
+        let file = &unit.file;
+        for &id in &file.top {
+            let decl = &file.decls[id];
+            if !decl.is_private() && !decl.is_internal() {
+                known.insert(if file.package.is_empty() { decl.name.clone() } else { format!("{}.{}", file.package, decl.name) });
+            }
+        }
+    }
+    Some(CompiledLibrary {
+        name: "Kotlin/Native stdlib".into(),
+        path,
+        main: Platforms::NATIVE,
+        test: Platforms::NONE,
+        known: Some(Arc::new(known)),
+    })
 }
 
 /// Loads the project at `root` and its libraries, sending each as it is ready.
@@ -352,7 +403,10 @@ fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache
     }
     let Ok(meta) = crate::project::metadata(&config, &root, false) else { return };
     let deps = dependency_jars(&meta);
-    let compiled = dependency_compiled(&meta);
+    let mut compiled = dependency_compiled(&meta);
+    if platforms.contains(Platforms::NATIVE) {
+        compiled.extend(native_stdlib(&meta, &units));
+    }
     if deps.is_empty() && compiled.is_empty() {
         return;
     }
@@ -899,6 +953,27 @@ mod tests {
         for lib in ["org.jetbrains.kotlin.native.platform.posix", "org.jetbrains.kotlin.native.platform.zlib"] {
             std::fs::create_dir_all(platform.join(lib)).unwrap();
         }
+        // A cinterop klib comes with its module's sources jar, like the module's own klib.
+        let deps = tempfile::tempdir().unwrap();
+        let interop = deps.path().join("e-cinterop-c.klib");
+        let own = deps.path().join("e.klib");
+        for (klib, manifest) in [
+            (
+                &interop,
+                "interop=true
+package=c
+",
+            ),
+            (
+                &own,
+                "unique_name=e
+",
+            ),
+        ] {
+            std::fs::create_dir_all(klib.join("default")).unwrap();
+            std::fs::write(klib.join("default").join("manifest"), manifest).unwrap();
+        }
+        let (interop, own) = (interop.display().to_string(), own.display().to_string());
         let entry = |module: &str, path: &str, sources: Option<&str>| json!({ "module": module, "version": "1.0", "path": path, "sources": sources });
         let meta = json!({
             "toolchain": { "kotlin-native": { "home": home.path().display().to_string() } },
@@ -914,25 +989,65 @@ mod tests {
                     { "kind": "native", "platforms": ["linux_x64"], "dependencies": [{ "platform": "native-linux_x64", "compile": [
                         entry("org.jetbrains.kotlin:kotlin-stdlib-native", "/m/stdlib.klib", None),
                         entry("com.example:native", "/m/d.klib", None),
+                        entry("com.example:e", &own, Some("/m/e-sources.jar")),
+                        entry("com.example:e", &interop, Some("/m/e-sources.jar")),
                     ] }] },
                 ],
             }],
         });
-        assert!(dependency_jars(&meta).iter().all(|j| j.jar == Path::new("/m/a-sources.jar")), "only a sources jar is listed");
+        assert!(
+            dependency_jars(&meta).iter().all(|j| j.jar == Path::new("/m/a-sources.jar") || j.jar == Path::new("/m/e-sources.jar")),
+            "only sources jars are listed"
+        );
         let libs: Vec<(String, Platforms, Platforms)> = dependency_compiled(&meta).into_iter().map(|c| (c.name, c.main, c.test)).collect();
         let expected = [
             ("native 1.0", Platforms::NATIVE, Platforms::NONE),
             ("tested 1.0", Platforms::NONE, Platforms::JVM),
             ("without 1.0", Platforms::JVM, Platforms::NONE),
+            ("e 1.0 (cinterop)", Platforms::NATIVE, Platforms::NONE),
             ("Kotlin/Native posix (linux_x64)", Platforms::NATIVE, Platforms::NONE),
             ("Kotlin/Native zlib (linux_x64)", Platforms::NATIVE, Platforms::NONE),
         ];
-        let names: Vec<&str> = libs.iter().map(|(n, ..)| n.as_str()).collect();
-        // Dependencies come in path order (`/m/b.jar`, `/m/c.jar`, `/m/d.klib`), then the platform libraries.
-        assert_eq!(names, ["without 1.0", "tested 1.0", "native 1.0", "Kotlin/Native posix (linux_x64)", "Kotlin/Native zlib (linux_x64)"]);
+        let mut names: Vec<&str> = libs.iter().map(|(n, ..)| n.as_str()).collect();
+        // Dependencies come in path order, then the platform libraries.
+        names[..4].sort();
+        assert_eq!(
+            names,
+            [
+                "e 1.0 (cinterop)",
+                "native 1.0",
+                "tested 1.0",
+                "without 1.0",
+                "Kotlin/Native posix (linux_x64)",
+                "Kotlin/Native zlib (linux_x64)"
+            ]
+        );
         for (name, main, test) in expected {
             assert_eq!(libs.iter().find(|(n, ..)| n == name).map(|(_, m, t)| (*m, *t)), Some((main, test)), "{name}");
         }
+    }
+
+    #[test]
+    fn reads_the_native_stdlib_for_what_its_sources_lack() {
+        let home = tempfile::tempdir().unwrap();
+        let meta = json!({ "toolchain": { "kotlin-native": { "home": home.path().display().to_string() } } });
+        assert!(native_stdlib(&meta, &[]).is_none(), "no distribution, no library");
+        std::fs::create_dir_all(home.path().join("klib").join("common").join("stdlib")).unwrap();
+        let unit = |path: &str, text: &str, main: Platforms| {
+            Arc::new(Unit::new(PathBuf::from(path), text.into(), Origin::Library { name: "stdlib".into(), main, test: Platforms::NONE }))
+        };
+        let stdlib = [
+            unit(
+                "/s/a.kt",
+                "package kotlin.io\nfun println(message: Any?) {}\nprivate fun hidden() {}",
+                Platforms::WASM.union(Platforms::NATIVE),
+            ),
+            unit("/s/b.kt", "package kotlin.js\nclass JsAny", Platforms::WASM),
+        ];
+        let library = native_stdlib(&meta, &stdlib).unwrap();
+        assert_eq!(library.main, Platforms::NATIVE);
+        let known: Vec<&str> = library.known.as_deref().unwrap().iter().map(String::as_str).collect();
+        assert_eq!(known, ["kotlin.io.println"], "only public declarations the sources give Native code");
     }
 
     #[test]

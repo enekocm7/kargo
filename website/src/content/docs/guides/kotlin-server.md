@@ -98,11 +98,13 @@ The Kotlin classes for `String`, `CharSequence`, the collections and the maps al
 - A dependency **without a sources jar** is read from its compiled form, for the targets whose classpath has it, as [above](#libraries) describes.
   - A **jar** is read from its class files. A class compiled from Kotlin keeps its Kotlin declarations in its metadata, so extension functions, nullability, `suspend`, default arguments, type aliases and companion objects come out as written. Any other class is read as Java: its public and protected fields, methods, constructors and nested classes, with generic types and, when the jar was compiled with `javac -parameters`, parameter names (otherwise `arg0`, `arg1`, ...).
   - A **klib** (the Wasm and Native variants of a dependency) is read from its Kotlin metadata the same way.
+- A **cinterop klib** (the C bindings a Native library publishes next to its own klib, such as `mylib-mingwx64-1.0-cinterop-mylib.klib`) is always read from its metadata, even when the library has a sources jar: cinterop generates those declarations from C headers, so no sources jar contains them. Hover names it `<artifact> <version> (cinterop)`.
+- For Native code, the **Kotlin/Native standard library** of the distribution that builds the project is read from its klib for what the standard library's sources don't give Native code: `kotlinx.cinterop` (`CValue`, `memScoped`, `cValue`, `ExperimentalForeignApi`, ...), `kotlin.native`, `kotlin.concurrent.AtomicInt` and the like. Its internal packages and every declaration the sources already have are left out, so `println` still shows its documentation. Hover names it `Kotlin/Native stdlib`.
 - For Native code, the **platform libraries** of the Kotlin/Native distribution that builds the project (`platform.posix`, `platform.zlib`, and on macOS and iOS the Apple frameworks) are read for the first platform of [`[target.native] platforms`](../../reference/manifest/#targetnative).
 
 A library without sources is written out once as stub files under `~/.kargo/cache/lsp-sources`: one Kotlin file per package, and one Java file for its Java classes. Go to definition opens these files, which show each declaration's signature, `...` for default values, and no bodies or documentation (a klib compiled with its KDoc keeps it). They are generated, so edits to them change nothing. Private and internal declarations are left out, and so are those deprecated with `level = DeprecationLevel.HIDDEN`.
 
-The standard library and `kotlin-test` always come from their sources jars or the outline above, not from their compiled jars or klibs. Native code doesn't see the common Kotlin/Native libraries (`kotlinx.cinterop` and the like), only the platform ones.
+The standard library and `kotlin-test` come from their sources jars or the outline above, not from their compiled jars or klibs; only the Native-only parts of the Kotlin/Native standard library come from its klib, as described above.
 
 ## Limits
 
@@ -111,7 +113,7 @@ The server reads declarations and infers types as far as completion and navigati
 - It reports no errors of its own. They come from `kargo check` on save, which compiles the code for real. Turn it off with `{ "checkOnSave": false }` in the editor's `initializationOptions`; see [Check on save](../editors/#check-on-save).
 - It reads Java but doesn't edit it. Java files get no completion, hover, rename or references of their own, and a Java declaration can't be renamed from Kotlin: the server refuses, because the Java code that uses it wouldn't change. References to a Kotlin declaration from Java code aren't searched.
 - Libraries without sources have no documentation in hover, and a type parameter with several bounds keeps only the first.
-- Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native. Native-only declarations of the Kotlin/Native distribution itself, such as `kotlinx.cinterop`, don't complete.
+- Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native, plus the Native-only declarations from the distribution's klib, which have no documentation in hover.
 - Smart casts (`if (x is Foo) x.`), the branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
 - It has no formatting, quick fixes, signature help, inlay hints or semantic highlighting. Use [`kargo fmt`](../formatting-and-linting/) to format code.
 

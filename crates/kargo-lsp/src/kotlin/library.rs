@@ -12,7 +12,7 @@
 //! applies. A file that several jars carry, such as the common code each platform's standard
 //! library has, is one unit on the platforms of all of them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -46,6 +46,10 @@ pub struct CompiledLibrary {
     pub path: PathBuf,
     pub main: Platforms,
     pub test: Platforms,
+    /// For the Kotlin/Native standard library: the top-level declarations (`package.Name`) that
+    /// its sources already give Native code, left out of its stubs (see
+    /// [`compiled::native_stdlib_stubs`]).
+    pub known: Option<Arc<BTreeSet<String>>>,
 }
 
 impl CompiledLibrary {
@@ -193,9 +197,20 @@ pub fn compiled_units(config: &Config, cache: &UnitCache, libraries: &[CompiledL
 
 fn library_units(config: &Config, cache: &UnitCache, library: &CompiledLibrary) -> Result<Vec<Arc<Unit>>> {
     let klib = library.is_klib();
-    let suffix = format!("-stubs{STUBS_FORMAT}-{}", env!("CARGO_PKG_VERSION"));
+    let mut suffix = format!("-stubs{STUBS_FORMAT}-{}", env!("CARGO_PKG_VERSION"));
+    if let Some(known) = &library.known {
+        let mut fp = kargo_util::hash::Fingerprint::new();
+        for name in known.iter() {
+            fp.str(name);
+        }
+        suffix = format!("{suffix}-{}", &fp.finish()[..12]);
+    }
     let dir = cached_dir(config, &library.path, &suffix, |staging| {
-        let stubs = if klib { compiled::klib_stubs(&library.path)? } else { compiled::jar_stubs(&library.path)? };
+        let stubs = match &library.known {
+            Some(known) => compiled::native_stdlib_stubs(&library.path, known)?,
+            None if klib => compiled::klib_stubs(&library.path)?,
+            None => compiled::jar_stubs(&library.path)?,
+        };
         for (rel, text) in stubs {
             let path = staging.join(rel);
             if let Some(parent) = path.parent() {
