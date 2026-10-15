@@ -215,7 +215,7 @@ If it can't find Kargo, the Kargo language server fails to start with a message 
 
 When you open a Kotlin file or `kargo.toml` in a folder with a `kargo.toml` at its root, Zed starts `kargo lsp` there. You get everything listed in [Editor integration](#language-server):
 
-- Completion, hover, go to definition (into the standard library, the JDK, and library sources once you run `kargo fetch --sources`, or stubs generated from the compiled library until then), find references and rename in Kotlin files, from [Kargo's Kotlin server](../kotlin-server/). It reads your project the way `kargo build` compiles it, and again when `kargo.toml` or `kargo.lock` change.
+- Completion, hover, go to definition (into the standard library, the JDK, and library sources, which the server downloads in the background, or stubs generated from the compiled library until then and for libraries without sources), find references and rename in Kotlin files, from [Kargo's Kotlin server](../kotlin-server/). It reads your project the way `kargo build` compiles it, and again when `kargo.toml` or `kargo.lock` change.
 - Completion, documentation, validation and quick fixes in `kargo.toml`, with Maven coordinate and version completion and hints at newer versions. The quick fixes add dependencies, frameworks and targets the way `kargo add` and `kargo target add` do.
 - [Check on save](#check-on-save): when you save a Kotlin file, the errors of `kargo check` for every target appear in the editor and in *diagnostics: deploy*. The extension turns it on.
 
@@ -257,6 +257,7 @@ Put this in the project's `.zed/settings.json` to change only Kargo projects.
 | `binary.env` | none | Environment variables for `kargo lsp` |
 | `initialization_options.checkOnSave` | `true` | Run `kargo check` when a Kotlin or Java file is saved |
 | `initialization_options.checkTargets` | every enabled target | The targets check on save compiles |
+| `initialization_options.fetchSources` | `true` | Let [Kargo's Kotlin server](../kotlin-server/#libraries) download the sources jars of dependencies |
 
 ### Run and test in Zed
 
@@ -638,7 +639,7 @@ Navigating into a library or stepping into it in a debugger needs its sources. D
 kargo fetch --sources
 ```
 
-`kargo metadata` then lists each library's sources jar next to its jar, in the `sources` field. Libraries that don't publish sources are skipped.
+`kargo metadata` then lists each library's sources jar next to its jar, in the `sources` field. Libraries that don't publish sources are skipped. [Kargo's own Kotlin server](../kotlin-server/#libraries) downloads them itself unless `fetchSources` is `false` in the editor's `initializationOptions`.
 
 ## Check on save
 
