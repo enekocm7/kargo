@@ -1,9 +1,11 @@
 //! The libraries Kargo's Kotlin server knows: the Kotlin standard library and `kotlin-test` at
 //! the project's Kotlin version, from their sources jars (downloaded like any artifact and
-//! cached), and the sources jars of dependencies that are already in the cache (`kargo fetch
-//! --sources`). Each jar is extracted once under `~/.kargo/cache/lsp-sources`, so go to definition
-//! opens real files. Without the standard library's sources (offline, before the first
-//! download), a small built-in outline of it stands in.
+//! cached), the sources jars of dependencies that are already in the cache (`kargo fetch
+//! --sources`), and the compiled jars and klibs of the dependencies without one (see
+//! [`super::compiled`]). Each jar is extracted (or its stubs generated) once under
+//! `~/.kargo/cache/lsp-sources`, so go to definition opens real files. Without the standard
+//! library's sources (offline, before the first download), a small built-in outline of it
+//! stands in.
 //!
 //! A library file applies to the platforms it is on. The standard library's sources have a folder
 //! per source set (`commonMain`, `jvmMain`, `wasmJsMain`, ...), and a file's folder says where it
@@ -20,6 +22,7 @@ use rayon::prelude::*;
 use kargo_maven::{MavenClient, ModuleId, Repository};
 use kargo_util::config::Config;
 
+use super::compiled;
 use super::index::{Origin, Platforms, Unit};
 
 /// The built-in outline of the standard library, split into files at `// file:` lines.
@@ -34,6 +37,25 @@ pub struct SourcesJar {
     pub main: Platforms,
     pub test: Platforms,
 }
+
+/// A library without sources: a jar of classes, or a klib (a file or an unpacked directory), and
+/// the platforms it is for, as for a [`SourcesJar`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledLibrary {
+    pub name: String,
+    pub path: PathBuf,
+    pub main: Platforms,
+    pub test: Platforms,
+}
+
+impl CompiledLibrary {
+    fn is_klib(&self) -> bool {
+        self.path.is_dir() || self.path.extension().is_some_and(|e| e == "klib")
+    }
+}
+
+/// Bumped when the generated stubs change, so that cached ones are generated again.
+const STUBS_FORMAT: &str = "1";
 
 /// The parsed library files, by the path of their first copy and what they apply to. Kept across
 /// reloads of the project.
@@ -163,13 +185,59 @@ pub fn folder_platforms(folder: &str) -> Platforms {
     if platforms.is_empty() { Platforms::ALL } else { platforms }
 }
 
+/// The parsed stubs of the compiled `libraries`, generated the first time. Files parsed before
+/// are taken from `cache`.
+pub fn compiled_units(config: &Config, cache: &UnitCache, libraries: &[CompiledLibrary]) -> Vec<Arc<Unit>> {
+    libraries.iter().flat_map(|library| library_units(config, cache, library).unwrap_or_default()).collect()
+}
+
+fn library_units(config: &Config, cache: &UnitCache, library: &CompiledLibrary) -> Result<Vec<Arc<Unit>>> {
+    let klib = library.is_klib();
+    let suffix = format!("-stubs{STUBS_FORMAT}-{}", env!("CARGO_PKG_VERSION"));
+    let dir = cached_dir(config, &library.path, &suffix, |staging| {
+        let stubs = if klib { compiled::klib_stubs(&library.path)? } else { compiled::jar_stubs(&library.path)? };
+        for (rel, text) in stubs {
+            let path = staging.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        Ok(())
+    })?;
+    let files = kargo_util::fs::collect_files(&dir, &["kt", "java"]);
+    Ok(files
+        .par_iter()
+        .filter_map(|path| {
+            let key = (path.clone(), library.main, library.test);
+            if let Some(unit) = cache.lock().expect("lock poisoned").get(&key) {
+                return Some(Arc::clone(unit));
+            }
+            let text = std::fs::read_to_string(path).ok()?;
+            let origin = Origin::Library { name: library.name.clone(), main: library.main, test: library.test };
+            let unit = Arc::new(Unit::new(path.clone(), text, origin));
+            cache.lock().expect("lock poisoned").insert(key, Arc::clone(&unit));
+            Some(unit)
+        })
+        .collect())
+}
+
 /// Where the sources of `jar` are extracted, extracting them the first time.
 fn extract(config: &Config, jar: &Path) -> Result<PathBuf> {
-    let stem = jar.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "sources".into());
+    cached_dir(config, jar, "", |staging| kargo_toolchain::archive::extract_zip(jar, staging))
+}
+
+/// A directory under `~/.kargo/cache/lsp-sources` for what is made from `source` (a jar, a
+/// klib or an unpacked klib), filled by `fill` the first time.
+fn cached_dir(config: &Config, source: &Path, suffix: &str, fill: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
+    let stem = if source.is_dir() { source.file_name() } else { source.file_stem() };
+    let stem = stem.map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "sources".into());
     let mut fp = kargo_util::hash::Fingerprint::new();
-    fp.file_stamp(jar);
+    // An unpacked klib changes with its metadata; its IR is large and irrelevant here.
+    let linkdata = source.join("default").join("linkdata");
+    fp.file_stamp(if linkdata.is_dir() { &linkdata } else { source });
     let hash = fp.finish();
-    let dir = config.home().join("cache").join("lsp-sources").join(format!("{stem}-{}", &hash[..12]));
+    let dir = config.home().join("cache").join("lsp-sources").join(format!("{stem}-{}{suffix}", &hash[..12]));
     let marker = dir.join(".kargo-complete");
     if marker.is_file() {
         return Ok(dir);
@@ -177,13 +245,16 @@ fn extract(config: &Config, jar: &Path) -> Result<PathBuf> {
     let staging = dir.with_extension(format!("tmp-{}", std::process::id()));
     let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
     std::fs::create_dir_all(&staging).with_context(|| format!("failed to create {}", staging.display()))?;
-    kargo_toolchain::archive::extract_zip(jar, &staging)?;
+    if let Err(e) = fill(&staging) {
+        let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
+        return Err(e);
+    }
     std::fs::write(staging.join(".kargo-complete"), "")?;
     if kargo_util::fs::rename_with_retries(&staging, &dir).is_err() {
         // Another `kargo lsp` extracted it first.
         let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
         if !marker.is_file() {
-            anyhow::bail!("failed to extract {}", jar.display());
+            anyhow::bail!("failed to prepare {}", source.display());
         }
     }
     Ok(dir)
