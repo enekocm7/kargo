@@ -35,6 +35,10 @@ Yes. A package can depend on another package on disk with `{ path = "../lib" }`,
 
 Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one.
 
+### `JDK ... is too old; Kargo needs JDK 17 or newer` when running tests
+
+`kargo test` runs the JUnit 6 launcher on the project's JDK, and JUnit 6 needs JDK 17 or newer. Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one. See [Testing](../../guides/testing/#what-runs-where).
+
 ### `Kotlin ... cannot run on JDK ...`
 
 Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.10 or newer, or add `[toolchain] jdk = "21"` so Kargo builds with JDK 21. See [Older Kotlin versions on new JDKs](../../guides/toolchains/#older-kotlin-versions-on-new-jdks).

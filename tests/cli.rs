@@ -1960,7 +1960,7 @@ fn metadata_describes_a_workspace_for_editors() {
     repo.publish("g:util", "1.0", &[])
         .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
         .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
-        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
     let p = Project::new();
     p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n")
         .file(
@@ -2166,7 +2166,7 @@ fn classpath_prints_the_resolved_jars_of_each_scope() {
         .publish("g:check", "1.0", &[])
         .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
         .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
-        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
     let p = Project::new();
     let extra = format!(
         "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n\"g:rt\" = {{ version = \"1.0\", scope = \"runtime\" }}\n\
@@ -2188,7 +2188,10 @@ fn classpath_prints_the_resolved_jars_of_each_scope() {
     let runtime = lines(&["--scope", "runtime"]);
     assert!(runtime.contains(&"rt-1.0.jar".to_owned()) && !runtime.contains(&"check-1.0.jar".to_owned()), "{runtime:?}");
     let test = lines(&["-s", "test", "-t", "jvm"]);
-    assert!(test.contains(&"check-1.0.jar".to_owned()) && test.contains(&"junit-jupiter-6.1.3.jar".to_owned()), "{test:?}");
+    assert!(
+        test.contains(&"check-1.0.jar".to_owned()) && test.contains(&format!("junit-jupiter-{}.jar", kargo_ops::builtins::JUNIT_VERSION)),
+        "{test:?}"
+    );
     assert!(p.path().join("kargo.lock").is_file(), "the resolution is locked");
 
     // The default format is one line joined with the platform's path separator.
@@ -2215,7 +2218,7 @@ fn ide_writes_workspace_json_and_keeps_it_current() {
         .publish("g:extra", "1.0", &[])
         .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
         .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
-        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
     let p = Project::new();
     let extra =
         format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url());
@@ -2303,7 +2306,7 @@ fn lsp_describes_the_project_for_the_kotlin_lsp() {
     repo.publish("g:util", "1.0", &[])
         .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
         .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
-        .publish("org.junit.jupiter:junit-jupiter", "6.1.3", &[]);
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
     let p = Project::new();
     let extra =
         format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:util\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url());
