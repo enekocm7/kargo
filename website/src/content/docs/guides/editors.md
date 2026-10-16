@@ -192,7 +192,7 @@ The extension needs:
 
 - Kargo itself. See [Installation](../../getting-started/installation/).
 - VS Code 1.100 or newer.
-- A Kotlin syntax extension for highlighting, since VS Code has no Kotlin support built in. An extension that runs its own Kotlin language server competes with `kargo lsp`, so turn that server off for Kargo projects.
+The extension highlights Kotlin itself. Another Kotlin extension that runs its own Kotlin language server competes with `kargo lsp`, so turn that server off for Kargo projects.
 
 The extension isn't on the Marketplace yet. Build it from the repository, which needs Node.js 22 or newer:
 
@@ -299,7 +299,7 @@ Add Dependency searches the same index as the completion of coordinates in `karg
 ### Limitations of VS Code
 
 - The extension isn't on the Marketplace yet, so it is installed from a `.vsix` package.
-- Kotlin highlighting comes from another extension.
+- Kotlin highlighting is syntactic: names are coloured by how they're written (a capitalized name as a type, a name before `(` as a function), not by what they resolve to. Kargo's language server doesn't send semantic tokens yet.
 - The test explorer lists JVM and Native tests. Wasm and Android tests can't be listed yet (see [Test discovery](../../reference/machine-readable-output/#test-discovery)). Debugging works for the JVM target only, and from the Debug button above a test rather than from the explorer.
 - Run and Debug buttons are found from the source text, so a `fun main` or a test function the scan doesn't recognize gets no button. Tasks, the test explorer and the commands still work.
 - Compiler errors come from the human-readable output of `kargo build`. Android builds run through Gradle, whose errors stay in the terminal.

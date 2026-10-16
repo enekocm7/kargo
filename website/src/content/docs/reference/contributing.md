@@ -72,7 +72,7 @@ To try it, run *zed: install dev extension* in Zed and pick `editors/zed`. The *
 
 The [Visual Studio Code](../../guides/editors/#visual-studio-code) extension in `editors/vscode` is a TypeScript project built with `tsc` against `@types/vscode`, using `vscode-languageclient` for `kargo lsp`. `src/extension.ts` activates in a folder with a `kargo.toml`, and each module does one part: `servers.ts` (the language server), `tasks.ts` (the `kargo` tasks and their terminal, which reads the compiler messages), `testing.ts` (the test explorer), `codeLens.ts` and `kotlinScan.ts` (the Run and Debug buttons), `debug.ts` (`kargo dap`), `actions.ts` and `selection.ts` (the commands and the status bar), `project.ts` and `metadata.ts` (`kargo metadata --no-deps`), and `maven.ts` (the dependency search).
 
-The modules that don't import `vscode` (`commands.ts`, `diagnostics.ts`, `executable.ts`, `kotlinScan.ts`, `maven.ts`, `messages.ts`, `metadata.ts`, `process.ts`) carry the logic and are unit tested with `node:test`. Changing a command line goes through `commands.ts`; changing a JSON message goes through `messages.ts`.
+The modules that don't import `vscode` (`commands.ts`, `diagnostics.ts`, `executable.ts`, `kotlinScan.ts`, `maven.ts`, `messages.ts`, `metadata.ts`, `process.ts`) carry the logic and are unit tested with `node:test`. Changing a command line goes through `commands.ts`; changing a JSON message goes through `messages.ts`. Kotlin's colours come from the TextMate grammar in `syntaxes/kotlin.tmLanguage.json`, which `kotlinGrammar.test.ts` checks by tokenizing sample code with the same engine VS Code uses.
 
 ```sh
 cd editors/vscode
