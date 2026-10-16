@@ -1,0 +1,342 @@
+{
+  "name": "kargo",
+  "displayName": "Kargo",
+  "description": "Kargo projects in VS Code: kargo lsp for Kotlin and kargo.toml, build tasks with problems in the Problems view, a test explorer, Run and Debug buttons, and a status bar for the target and profile.",
+  "version": "0.1.0",
+  "publisher": "enekocm7",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enekocm7/kargo",
+    "directory": "editors/vscode"
+  },
+  "homepage": "https://enekocm7.github.io/kargo/guides/editors/#visual-studio-code",
+  "bugs": {
+    "url": "https://github.com/enekocm7/kargo/issues"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Testing",
+    "Debuggers",
+    "Other"
+  ],
+  "keywords": [
+    "kotlin",
+    "kargo",
+    "build",
+    "test",
+    "debug",
+    "lsp"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:kargo.toml",
+    "onDebugResolve:kargo",
+    "onDebugDynamicConfigurations:kargo"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "aliases": [
+          "Kotlin",
+          "kotlin"
+        ],
+        "extensions": [
+          ".kt",
+          ".kts"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "kargo.menu",
+        "title": "Show Menu",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.build",
+        "title": "Build",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.check",
+        "title": "Check",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.test",
+        "title": "Test",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.clean",
+        "title": "Clean",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.run",
+        "title": "Run Program…",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.runTask",
+        "title": "Run Task…",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.addDependency",
+        "title": "Add Dependency…",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.removeDependency",
+        "title": "Remove Dependency…",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.fetch",
+        "title": "Fetch Dependencies and Sources",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.update",
+        "title": "Update Dependencies",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.selectTarget",
+        "title": "Select Target…",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.selectProfile",
+        "title": "Select Profile…",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.openManifest",
+        "title": "Open kargo.toml",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.restart",
+        "title": "Restart Kargo Language Server",
+        "category": "Kargo"
+      },
+      {
+        "command": "kargo.showOutput",
+        "title": "Show Output",
+        "category": "Kargo"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "kargo",
+        "required": [
+          "args"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The arguments of kargo, such as [\"build\", \"--release\"] or [\"test\", \"com.example.MathTest\"]."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "The directory to run kargo in, relative to the workspace folder; default: the folder."
+          }
+        }
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "kargo",
+        "label": "Kargo",
+        "languages": [
+          "kotlin"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "args"
+            ],
+            "properties": {
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "run"
+                ],
+                "description": "The arguments of kargo, starting with run or test, such as [\"run\", \"--bin\", \"server\"] or [\"test\", \"com.example.MathTest\"]. Kargo adds --debug and, unless they name a target, -t jvm."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "The directory to run kargo in, relative to the project root; default: the project root."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Environment variables for kargo and the program."
+              },
+              "timeout": {
+                "type": "integer",
+                "default": 10000,
+                "description": "How long to try to connect to the JVM, in milliseconds."
+              },
+              "logLevel": {
+                "type": "string",
+                "enum": [
+                  "NONE",
+                  "ERROR",
+                  "WARN",
+                  "INFO",
+                  "DEBUG",
+                  "TRACE"
+                ],
+                "description": "How much kotlin-debug-adapter logs to the debug console."
+              }
+            }
+          },
+          "attach": {
+            "required": [
+              "port"
+            ],
+            "properties": {
+              "port": {
+                "type": "integer",
+                "default": 5005,
+                "description": "The port the JVM started by kargo run --debug or kargo test --debug listens on."
+              },
+              "hostName": {
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "The host the JVM listens on."
+              },
+              "timeout": {
+                "type": "integer",
+                "default": 10000,
+                "description": "How long to try to connect to the JVM, in milliseconds."
+              },
+              "logLevel": {
+                "type": "string",
+                "enum": [
+                  "NONE",
+                  "ERROR",
+                  "WARN",
+                  "INFO",
+                  "DEBUG",
+                  "TRACE"
+                ],
+                "description": "How much kotlin-debug-adapter logs to the debug console."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "kargo",
+            "request": "launch",
+            "name": "Kargo: run the program",
+            "args": [
+              "run"
+            ]
+          },
+          {
+            "type": "kargo",
+            "request": "launch",
+            "name": "Kargo: run the tests",
+            "args": [
+              "test"
+            ]
+          },
+          {
+            "type": "kargo",
+            "request": "attach",
+            "name": "Kargo: attach to port 5005",
+            "port": 5005
+          }
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Kargo",
+      "properties": {
+        "kargo.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The `kargo` executable to run. Empty: the `kargo` on `PATH`, then `~/.cargo/bin`."
+        },
+        "kargo.lsp.server": {
+          "type": "string",
+          "enum": [
+            "kargo",
+            "kotlin-lsp",
+            "kls",
+            "none"
+          ],
+          "enumDescriptions": [
+            "Kargo's own Kotlin server, built into kargo (the default).",
+            "JetBrains' Kotlin LSP, behind kargo lsp (`kargo lsp --server kotlin-lsp`).",
+            "fwcd's kotlin-language-server (`kargo lsp --server kls`).",
+            "No Kotlin server: kargo.toml support and runnables only (`kargo lsp --server none`)."
+          ],
+          "default": "kargo",
+          "markdownDescription": "The Kotlin language server `kargo lsp` runs. See [Choosing the Kotlin server](https://enekocm7.github.io/kargo/guides/editors/#choosing-the-kotlin-server)."
+        },
+        "kargo.lsp.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run `kargo check` when a Kotlin or Java file is saved, and show its errors for every target in the editor."
+        },
+        "kargo.lsp.checkTargets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "jvm",
+              "wasm",
+              "native",
+              "android"
+            ]
+          },
+          "uniqueItems": true,
+          "default": [],
+          "markdownDescription": "The targets that check on save compiles. Empty: every enabled target."
+        },
+        "kargo.lsp.fetchSources": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Let Kargo's Kotlin server download the sources jars of dependencies in the background, for navigation into library sources."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "test": "tsc -p . && node --test \"out/test/**/*.test.js\"",
+    "test:integration": "tsc -p . && node out/integration/runTests.js",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --out kargo-vscode.vsix"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "~22.20.5",
+    "@types/vscode": "~1.100.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^4.0.0",
+    "typescript": "~5.9.3"
+  }
+}

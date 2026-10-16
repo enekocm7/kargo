@@ -204,7 +204,7 @@ Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekoc
 
 IntelliJ IDEA and Android Studio are the best supported editors, since Kotlin is JetBrains' own language. Their plugin in [`editors/jetbrains`](editors/jetbrains) that imports the project from `kargo metadata` (modules, source roots and the libraries of `kargo.toml`, including Kotlin/Native and Wasm klibs and the npm packages of Wasm targets) so the IDE resolves your dependencies, runs `kargo lsp` for `kargo.toml` and adds a New Project wizard, run configurations, Run/Debug gutter icons, a test tree, JVM debugging and a Kargo tool window. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#intellij-idea-and-android-studio).
 
-Zed gets an extension in [`editors/zed`](editors/zed) that runs `kargo lsp` for Kotlin and `kargo.toml`, debugs programs and tests through `kargo dap`, and adds a `/kargo-metadata` slash command; `kargo ide --zed` writes the tasks behind its run buttons. Other editors run `kargo lsp` for Kotlin and `kargo.toml`; see [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#other-editors). Outside IntelliJ IDEA, Kotlin code is served by [Kargo's own Kotlin server](https://enekocm7.github.io/kargo/guides/kotlin-server/), written in Rust and built into `kargo`: completion, hover, go to definition, references and rename against your sources (every target's source sets), each target's standard library, the JDK's sources and your dependencies (from their sources jars, which it downloads in the background, or from their compiled classes and klibs until then and when they have none), with `kargo check` errors on save. `kargo lsp --server kotlin-lsp` runs JetBrains' Kotlin LSP instead.
+VS Code gets an extension in [`editors/vscode`](editors/vscode) that runs `kargo lsp` for Kotlin and `kargo.toml`, runs the `kargo` commands as tasks with their compiler errors in the Problems view, shows the tests in a test explorer, puts Run and Debug buttons above `fun main` and the tests, and debugs through `kargo dap`; see [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#visual-studio-code). Zed gets an extension in [`editors/zed`](editors/zed) that runs `kargo lsp` for Kotlin and `kargo.toml`, debugs programs and tests through `kargo dap`, and adds a `/kargo-metadata` slash command; `kargo ide --zed` writes the tasks behind its run buttons. Other editors run `kargo lsp` for Kotlin and `kargo.toml`; see [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#other-editors). Outside IntelliJ IDEA, Kotlin code is served by [Kargo's own Kotlin server](https://enekocm7.github.io/kargo/guides/kotlin-server/), written in Rust and built into `kargo`: completion, hover, go to definition, references and rename against your sources (every target's source sets), each target's standard library, the JDK's sources and your dependencies (from their sources jars, which it downloads in the background, or from their compiled classes and klibs until then and when they have none), with `kargo check` errors on save. `kargo lsp --server kotlin-lsp` runs JetBrains' Kotlin LSP instead.
 
 ### Workspaces
 
@@ -368,4 +368,14 @@ The Zed extension in `editors/zed` is a Rust crate of its own, compiled to WebAs
 cd editors/zed
 cargo test                                   # unit tests, on the host
 cargo build --release --target wasm32-wasip2 # what Zed builds; install it with zed: install dev extension
+```
+
+The VS Code extension in `editors/vscode` is TypeScript, built with Node.js 22 or newer:
+
+```bash
+cd editors/vscode
+npm ci
+npm test                                     # unit tests
+npm run test:integration                     # VS Code with the extension and a new project; needs kargo on PATH
+npm run package                              # kargo-vscode.vsix, to install from VS Code
 ```
