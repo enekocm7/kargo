@@ -7,7 +7,7 @@ Run `kargo help <command>` for the same information in your terminal.
 
 ## Help
 
-`kargo --help` (also `-h` or `kargo help`) lists the common commands, then the tasks of the project you are in, and ends with a pointer to `kargo --list`. `kargo --list` prints every built-in command with its description, the way `cargo --list` does:
+`kargo --help` (also `-h` or `kargo help`) lists the common commands, then the tasks of the project you are in, and ends with a pointer to `kargo --list`. `kargo` with no arguments prints the same help and exits with 0. `kargo --list` prints every built-in command with its description, the way `cargo --list` does:
 
 ```console
 $ kargo --list
