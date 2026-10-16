@@ -2,6 +2,7 @@
 //! folder. One server per folder, so a workspace with several projects analyzes each with its own
 //! dependencies.
 
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, ServerOptions, State } from 'vscode-languageclient/node';
 import { Projects, kargoBinary } from './project';
@@ -36,6 +37,11 @@ export function initializationOptions(settings: ServerSettings): Record<string, 
 /** The arguments of `kargo lsp` for `settings`. */
 export function serverArguments(settings: ServerSettings): string[] {
     return settings.server === 'kargo' ? ['lsp'] : ['lsp', '--server', settings.server];
+}
+
+/** Whether `uri` is a `kargo.toml`, the one file name Kargo's server treats as a manifest. */
+function isManifest(uri: vscode.Uri): boolean {
+    return path.basename(uri.fsPath) === 'kargo.toml';
 }
 
 export class KargoServers implements vscode.Disposable {
@@ -83,6 +89,12 @@ export class KargoServers implements vscode.Disposable {
             workspaceFolder: folder,
             outputChannel: this.log,
             diagnosticCollectionName: 'kargo-lsp',
+            middleware: {
+                // Kargo's Kotlin server has no code actions: it answers `textDocument/codeAction` for Kotlin and
+                // Java files with "not supported", which VS Code shows as an error. Only `kargo.toml` has them.
+                provideCodeActions: (document, range, context, token, next) =>
+                    isManifest(document.uri) ? next(document, range, context, token) : undefined,
+            },
         };
         const client = new LanguageClient('kargo', `Kargo (${folder.name})`, serverOptions, clientOptions);
         this.clients.set(key, client);
