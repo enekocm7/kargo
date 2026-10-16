@@ -61,7 +61,7 @@ $ kargo test
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
 
-`kargo --help` lists the common commands, then the project's tasks; `kargo --list` lists every built-in command with its description. Commands left out of `--help` still work, and `kargo help <command>` shows each one's options. A mistyped command suggests the closest one (`kargo biuld` → `Did you mean build?`).
+`kargo --help` lists the common commands, then the project's tasks, and `kargo` alone prints the same help; `kargo --list` lists every built-in command with its description. Commands left out of `--help` still work, and `kargo help <command>` shows each one's options. A mistyped command suggests the closest one (`kargo biuld` → `Did you mean build?`).
 
 In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` and `publish` take `-p <member>` (repeatable), `--workspace` and `--exclude <member>`; `run`, `package`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`. Members build in dependency order, independent ones in parallel, and a JVM member recompiles only when the ABI of a member it uses changes.
 

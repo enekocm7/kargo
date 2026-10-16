@@ -14,6 +14,15 @@ fn help_and_version() {
 }
 
 #[test]
+fn bare_kargo_shows_the_help() {
+    let p = Project::new();
+    let help = p.kargo().arg("--help").assert().success().get_output().stdout.clone();
+    p.kargo().assert().success().stdout(help.clone()).stderr(predicate::str::is_empty());
+    p.kargo().arg("-q").assert().success().stdout(help);
+    p.kargo().arg("--version").assert().success().stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn new_creates_a_project() {
     let p = Project::new();
     p.kargo()

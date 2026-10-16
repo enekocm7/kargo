@@ -898,12 +898,17 @@ fn run() -> ExitCode {
     }
 }
 
-/// Parses the command line. `kargo --help` lists the common commands and the current project's tasks.
+/// Parses the command line. `kargo --help` lists the common commands and the current project's tasks, and `kargo` alone
+/// shows that same help.
 fn parse() -> Cli {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if wants_builtin_list(&args) {
         print_builtin_commands();
         std::process::exit(0);
+    }
+    if !has_command(&args) {
+        // Without a command clap would report a missing subcommand. Asking for help instead prints exactly what `--help` does.
+        args.push("--help".into());
     }
     let mut cmd = Cli::command();
     if wants_top_level_help(&args) {
@@ -923,6 +928,12 @@ fn parse() -> Cli {
 fn wants_top_level_help(args: &[std::ffi::OsString]) -> bool {
     let mut words = args.iter().skip(1).filter_map(|a| a.to_str()).skip_while(|a| a.starts_with('-') && !matches!(*a, "-h" | "--help"));
     matches!(words.next(), Some("-h" | "--help" | "help")) && words.next().is_none()
+}
+
+/// Whether the arguments name a command, a task or a plugin, or ask for help with `-h` or `--help`. Global flags such as
+/// `-q` don't count.
+fn has_command(args: &[std::ffi::OsString]) -> bool {
+    args.iter().skip(1).filter_map(|a| a.to_str()).any(|a| !a.starts_with('-') || matches!(a, "-h" | "--help"))
 }
 
 /// `kargo --list`, possibly with other global flags. With a command or a value after it, clap reports `--list` as unexpected.
@@ -2123,6 +2134,12 @@ mod tests {
         assert!(!wants_builtin_list(&args(&["kargo", "build"])));
         assert!(wants_top_level_help(&args(&["kargo", "-q", "help"])));
         assert!(!wants_top_level_help(&args(&["kargo", "help", "lsp"])));
+        assert!(!has_command(&args(&["kargo"])));
+        assert!(!has_command(&args(&["kargo", "-q", "-v"])));
+        assert!(has_command(&args(&["kargo", "-q", "--help"])));
+        assert!(has_command(&args(&["kargo", "-h"])));
+        assert!(has_command(&args(&["kargo", "build"])));
+        assert!(has_command(&args(&["kargo", "-q", "my-plugin"])));
     }
 
     #[test]
