@@ -1,17 +1,18 @@
 ---
 title: Editor integration
-description: Pick an editor for Kargo projects. IntelliJ IDEA and Android Studio with the Kargo plugin are the best supported; Zed and other editors run kargo lsp, kargo dap and kargo ide.
+description: Pick an editor for Kargo projects. IntelliJ IDEA and Android Studio with the Kargo plugin are the best supported; VS Code and Zed have Kargo extensions, and other editors run kargo lsp, kargo dap and kargo ide.
 ---
 
 Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a language server, a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
 
-**Use IntelliJ IDEA or Android Studio with the Kargo plugin if you can.** It is the best supported way to work on a Kargo project. Kotlin is developed by JetBrains, and IntelliJ IDEA has the most complete support for the language: its own analysis, refactorings, debugger and test tree. The plugin imports your project into that support, so your dependencies resolve and Run, Test and Debug work from the IDE. Zed and the other editors run `kargo lsp` instead, with [Kargo's own Kotlin server](../kotlin-server/): completion, navigation and rename for every target, but not the compiler's full analysis, and those editors have no test tree.
+**Use IntelliJ IDEA or Android Studio with the Kargo plugin if you can.** It is the best supported way to work on a Kargo project. Kotlin is developed by JetBrains, and IntelliJ IDEA has the most complete support for the language: its own analysis, refactorings, debugger and test tree. The plugin imports your project into that support, so your dependencies resolve and Run, Test and Debug work from the IDE. Zed and the other editors run `kargo lsp` instead, with [Kargo's own Kotlin server](../kotlin-server/): completion, navigation and rename for every target, but not the compiler's full analysis. The Kargo extension for VS Code adds tasks, a test explorer and Run and Debug buttons, and the other editors have no test tree.
 
 ## Which editor to use
 
 | Editor | Set up with | Kotlin code | Run, test and debug |
 |---|---|---|---|
 | IntelliJ IDEA, Android Studio | The [Kargo plugin](#intellij-idea-and-android-studio) | The IDE's own Kotlin support, with your dependencies imported. JVM, Kotlin/Native and Wasm modules | Run configurations, Run and Debug icons, a test tree and the JVM debugger |
+| VS Code | The [Kargo extension](#visual-studio-code) | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Tasks with compiler errors in the Problems view, a test explorer, Run and Debug buttons, and debugging through `kargo dap` |
 | Zed | The [Kargo extension](#zed) | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Run buttons from `kargo ide --zed`, debugging through `kargo dap`, and test results in the terminal |
 | Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
 | Emacs and other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
@@ -178,6 +179,132 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, th
 - Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are handed to the IDE but it may not apply them, so it can report errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
 - The IDE reads libraries compiled by its own Kotlin version or one newer at most, see the note under [Project import](#project-import).
 
+
+## Visual Studio Code
+
+The Kargo extension makes [Visual Studio Code](https://code.visualstudio.com) understand Kargo projects. It runs [`kargo lsp`](#language-server) for Kotlin files and `kargo.toml`, runs the commands of Kargo as tasks whose compiler errors appear in the Problems view, shows the tests in a test explorer, puts Run and Debug buttons above `fun main` and the tests, and debugs JVM programs and tests through [`kargo dap`](#debug-adapter).
+
+Open a folder that contains a `kargo.toml` at its root and the extension takes over. You don't need a `build.gradle.kts` or a `pom.xml`.
+
+### Install the extension
+
+The extension needs:
+
+- Kargo itself. See [Installation](../../getting-started/installation/).
+- VS Code 1.100 or newer.
+- A Kotlin syntax extension for highlighting, since VS Code has no Kotlin support built in. An extension that runs its own Kotlin language server competes with `kargo lsp`, so turn that server off for Kargo projects.
+
+The extension isn't on the Marketplace yet. Build it from the repository, which needs Node.js 22 or newer:
+
+```sh
+cd editors/vscode
+npm ci
+npm run package
+```
+
+`npm run package` writes `kargo-vscode.vsix`. Install it with *Extensions → ⋯ → Install from VSIX…*. Every build on `master` also attaches the package as an artifact of the *VS Code extension* workflow on GitHub Actions.
+
+The extension looks for `kargo` in the `kargo.path` setting, then on `PATH`, then in `~/.cargo/bin`. If Kargo is somewhere else, set its path:
+
+```json title="settings.json"
+{
+  "kargo.path": "/home/me/.cargo/bin/kargo"
+}
+```
+
+If it can't find Kargo, it says so and links to the installation guide.
+
+### Code intelligence in VS Code
+
+For each folder with a `kargo.toml` at its root, the extension starts `kargo lsp`. It serves the Kotlin and `kargo.toml` files of that folder, so completion, navigation and errors use the project's dependencies, with the features listed in [Language server](#language-server):
+
+- Completion, hover, go to definition, find references and rename in Kotlin files, from [Kargo's Kotlin server](../kotlin-server/).
+- Completion, documentation, validation and quick fixes in `kargo.toml`, with Maven coordinate and version completion and hints at newer versions. These come from `kargo lsp` itself, so the extension doesn't need a JSON Schema association. A TOML extension that also validates `kargo.toml` adds its own messages.
+- [Check on save](#check-on-save): saving a Kotlin or Java file shows the errors of `kargo check` for every target.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `kargo.path` | empty | The `kargo` to run. Empty: the one on `PATH`, then `~/.cargo/bin` |
+| `kargo.lsp.server` | `kargo` | The Kotlin server `kargo lsp` runs: `kargo` (Kargo's own), `kotlin-lsp` (JetBrains'), `kls` (fwcd's) or `none`. See [Choosing the Kotlin server](#choosing-the-kotlin-server) |
+| `kargo.lsp.checkOnSave` | `true` | Run `kargo check` when a Kotlin or Java file is saved |
+| `kargo.lsp.checkTargets` | empty | The targets that check on save compiles. Empty: every enabled target |
+| `kargo.lsp.fetchSources` | `true` | Let Kargo's Kotlin server download the sources jars of dependencies |
+
+Changing a setting restarts the language server.
+
+### Tasks and problems
+
+*Tasks: Run Task* lists the `kargo` tasks of the project: `build`, `build --release`, `check --tests`, `test`, `clean`, `fetch --sources` and `update`, then each target's run and test, each [`[[bin]]`](../multiple-programs/), example and task of `kargo.toml`. A task runs in the terminal. Compiler errors and warnings from Kotlin and javac appear in the Problems view under *kargo*, at their line and column.
+
+*Run Build Task* (Ctrl+Shift+B) lists the build tasks. An extension can't choose the default build task, so pick the one you use with *Tasks: Configure Default Build Task*. A task in `tasks.json` with `"type": "kargo"` and an `args` list runs `kargo` with those arguments:
+
+```json title=".vscode/tasks.json"
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "Release build", "type": "kargo", "args": ["build", "--release"], "group": "build" }
+  ]
+}
+```
+
+### Run, debug and test
+
+Above each `fun main`, and above each `@Test` function and test class, two buttons run it:
+
+| Button | Runs |
+|---|---|
+| *Run* | A task in the terminal: `kargo run -t <target>`, `kargo run --bin <name>` for a [`[[bin]]`](../multiple-programs/), or `kargo run --example <name>` in `examples/`. For a test, `kargo test <package.Class.method>`, or the tests of a class |
+| *Debug* | The same command under the debugger, through [`kargo dap`](#debug-adapter). Offered for the JVM target |
+
+The target of a file is the one of its directory (`src-wasm/` is Wasm), else the target selected in the [status bar](#status-bar-and-commands).
+
+The test explorer lists the tests of each target, grouped by class. Each test shows its result after a run: passed, failed (with the assertion message, the stack trace and what the test printed) or skipped, and how long it took. Run all the tests, a class, or a selection from the explorer, and *Rerun Failed Tests* runs the failures again. Discovery runs `kargo test --list`, which compiles the tests, when the project opens, when you refresh the explorer, and after you save a test file.
+
+The *Add Configuration…* list of *Run and Debug* offers Kargo's debug configurations: run the program, run the tests, and attach to port 5005. To keep your own, add them to `launch.json`:
+
+```json title=".vscode/launch.json"
+{
+  "version": "0.2.0",
+  "configurations": [
+    { "type": "kargo", "request": "launch", "name": "Debug the server", "args": ["run", "--bin", "server"] },
+    { "type": "kargo", "request": "launch", "name": "Debug MathTest", "args": ["test", "com.example.app.MathTest"] },
+    { "type": "kargo", "request": "attach", "name": "Attach to port 5005", "port": 5005 }
+  ]
+}
+```
+
+`args` are the arguments of `kargo`: Kargo adds `--debug`, and `-t jvm` unless they name a target. The options are listed in [`kargo dap`](../../reference/commands/#kargo-dap), and [Debug adapter](#debug-adapter) describes what Kargo does behind them.
+
+### Status bar and commands
+
+The status bar shows the target and profile that build, run and test use, such as `Kargo: all targets · dev`. Click it, or run *Kargo: Show Menu* from the Command Palette, for Kargo's commands:
+
+| Command | Does |
+|---|---|
+| Build, Check, Test, Clean | `kargo build`, `kargo check --tests`, `kargo test` and `kargo clean`, in the terminal |
+| Run Program… | Runs a program, `[[bin]]` or example of the project, picked from a list |
+| Run Task… | Runs a task of `kargo.toml`: `kargo task <name>` |
+| Add Dependency… | Searches Maven Central as you type, then runs `kargo add` for the artifact you pick, in `[dependencies]` or `[dev-dependencies]` |
+| Remove Dependency… | Runs `kargo remove` for a dependency of `kargo.toml` |
+| Fetch Dependencies and Sources | `kargo fetch --sources`, for navigation into library sources |
+| Update Dependencies | `kargo update` |
+| Select Target… | The target for build, run and test: all enabled targets, or one of `jvm`, `wasm`, `native` and `android` |
+| Select Profile… | `dev`, or `release` for `--release` |
+| Open kargo.toml | The project's manifest |
+| Restart the Kargo Language Server | Restarts `kargo lsp` and discovers the tests again |
+| Show Kargo Output | The extension's output |
+
+Add Dependency searches the same index as the completion of coordinates in `kargo.toml`. Set `KARGO_MAVEN_SEARCH_URL` to search a mirror of it (see [Environment](../../reference/environment/)).
+
+### Limitations of VS Code
+
+- The extension isn't on the Marketplace yet, so it is installed from a `.vsix` package.
+- Kotlin highlighting comes from another extension.
+- The test explorer lists JVM and Native tests. Wasm and Android tests can't be listed yet (see [Test discovery](../../reference/machine-readable-output/#test-discovery)). Debugging works for the JVM target only, and from the Debug button above a test rather than from the explorer.
+- Run and Debug buttons are found from the source text, so a `fun main` or a test function the scan doesn't recognize gets no button. Tasks, the test explorer and the commands still work.
+- Compiler errors come from the human-readable output of `kargo build`. Android builds run through Gradle, whose errors stay in the terminal.
+- An error can appear in the Problems view twice: once from the language server's check on save, under *kargo-lsp*, and once from a build, under *kargo*.
+- Debugging uses kotlin-debug-adapter, which doesn't support conditional breakpoints or logpoints, as in [Zed](#debug-in-zed).
 
 ## Zed
 
@@ -702,7 +829,7 @@ kargo test --message-format json      # run them, reporting each one as it start
 
 `--list` prints a `test-discovered` message per test with an `id`, its class (`suite`), `name`, `display-name`, and the `file` and `line` that declare it, for gutter icons and "go to test". A run prints `test-started` and `test-finished` messages with the same ids, then a `test-summary` per target. `test-finished` carries the outcome, the duration, the failure message and stack trace, and what the test printed. To run one test, pass its `Class.name` as the filter: `kargo test --message-format json com.example.app.MathTest.adds`.
 
-JVM and Native tests can be listed; Wasm and Android tests report results but can't be listed yet. The fields are described in [Test discovery](../../reference/machine-readable-output/#test-discovery) and [Test results](../../reference/machine-readable-output/#test-results).
+JVM and Native tests can be listed; Wasm and Android tests report results but can't be listed yet. The fields are described in [Test discovery](../../reference/machine-readable-output/#test-discovery) and [Test results](../../reference/machine-readable-output/#test-results). The [Kargo extension for VS Code](#visual-studio-code) and the [JetBrains plugin](#intellij-idea-and-android-studio) build their test explorers on these messages.
 
 ## Debugging
 
@@ -722,7 +849,7 @@ Pick another port with `--debug=8000`, or let the JVM choose one with `--debug=0
 Attach with any JDWP debugger:
 
 - **IntelliJ IDEA**: with the [Kargo plugin](#run-test-and-debug), *Debug* a Kargo run configuration and the debugger attaches by itself. Without it: *Run → Edit Configurations → + → Remote JVM Debug*, host `localhost`, port `5005`. Start `kargo run --debug`, then debug that configuration.
-- **VS Code** with the Debugger for Java extension: add an attach configuration.
+- **VS Code**: the [Kargo extension](#visual-studio-code) debugs through `kargo dap`, with a Debug button above each `fun main` and test. Without it, with the Debugger for Java extension, add an attach configuration:
 
   ```json title=".vscode/launch.json"
   {

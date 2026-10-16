@@ -68,6 +68,22 @@ cargo build --release --target wasm32-wasip2   # the extension Zed builds
 
 To try it, run *zed: install dev extension* in Zed and pick `editors/zed`. The *Zed extension* workflow formats, tests, builds and lints it on every change to `editors/zed`.
 
+## The VS Code extension
+
+The [Visual Studio Code](../../guides/editors/#visual-studio-code) extension in `editors/vscode` is a TypeScript project built with `tsc` against `@types/vscode`, using `vscode-languageclient` for `kargo lsp`. `src/extension.ts` activates in a folder with a `kargo.toml`, and each module does one part: `servers.ts` (the language server), `tasks.ts` (the `kargo` tasks and their terminal, which reads the compiler messages), `testing.ts` (the test explorer), `codeLens.ts` and `kotlinScan.ts` (the Run and Debug buttons), `debug.ts` (`kargo dap`), `actions.ts` and `selection.ts` (the commands and the status bar), `project.ts` and `metadata.ts` (`kargo metadata --no-deps`), and `maven.ts` (the dependency search).
+
+The modules that don't import `vscode` (`commands.ts`, `diagnostics.ts`, `executable.ts`, `kotlinScan.ts`, `maven.ts`, `messages.ts`, `metadata.ts`, `process.ts`) carry the logic and are unit tested with `node:test`. Changing a command line goes through `commands.ts`; changing a JSON message goes through `messages.ts`.
+
+```sh
+cd editors/vscode
+npm ci
+npm test                    # unit tests
+npm run test:integration    # VS Code 1.100 with the extension and a new project: needs kargo on PATH and network
+npm run package             # kargo-vscode.vsix
+```
+
+`npm run test:integration` downloads VS Code the first time, creates a project with `kargo new`, and checks in the extension host that the commands are registered, the tasks are offered, `kargo lsp` runs, the tests are discovered and run with their results, a build succeeds, a compiler error reaches the Problems view, and the Run and Debug buttons appear. Run it after a change to how the extension starts `kargo` or reads its output. The *VS Code extension* workflow runs the unit tests and builds the package on every change to `editors/vscode`.
+
 ## This website
 
 The docs are an [Astro](https://astro.build) + [Starlight](https://starlight.astro.build) site in `website/`:
