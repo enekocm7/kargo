@@ -219,7 +219,8 @@ pub fn manifest(opts: &NewOptions) -> String {
 
 fn gitignore() -> String {
     // `kargo lsp` writes the last three for Kotlin language servers; they hold local paths.
-    "/target\n/.kotlin\n/.gradle\n*.iml\n.idea/\n/workspace.json\n/kls-classpath\n/kls-classpath.bat\n".to_owned()
+    // The `.env.local` files hold values for one machine, often secrets, so they stay out of git.
+    "/target\n/.kotlin\n/.gradle\n*.iml\n.idea/\n/workspace.json\n/kls-classpath\n/kls-classpath.bat\n.env.local\n.env.*.local\n".to_owned()
 }
 
 /// Whether `src/Main.kt` comes from a framework's own template rather than the plain one.

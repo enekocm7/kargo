@@ -202,6 +202,8 @@ Build and run the program. Arguments after `--` go to the program.
 | `--port <port>` | Wasm browser apps: the port to serve on (default `8080`; `0` picks a free one) |
 | `--open` | Wasm browser apps: open the served page in your browser |
 | `--debug[=<port>]` | JVM: start the program suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`; `0` lets the JVM pick and print one). See [Debugging](../../guides/editors/#debugging) |
+| `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
+| `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `--flavor <name>` | Android: install this [product flavor](../../guides/android/#product-flavors) (repeatable, one per dimension; default: the first flavor of each dimension). Needs `-t android` |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 
@@ -243,6 +245,8 @@ kargo test [filter] [options]
 | `--message-format <fmt>` | `human` (default) or `json`: compiler diagnostics and each test's start and result as [JSON messages](../machine-readable-output/#test-results) on stdout; the test report moves to stderr |
 | `-r, --release` | Use the release profile |
 | `-t, --target <target>` | Only this target (repeatable) |
+| `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
+| `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to test, in dependency order. The command fails if any test failed |
 | `-j, --jobs <n>` | How many packages are tested at the same time (default 1, so test output doesn't interleave) |
 
@@ -549,6 +553,23 @@ Delete everything in `target/` except the build-directory lock, `target/.kargo-l
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Only delete the release profile's output |
+
+## `kargo env`
+
+Show the environment `kargo run` and `kargo test` start programs with: each variable, the source that set it (`shell`, `[env]`, `[profile.<name>.env]` or a `.env` file with its line number) and its value.
+
+```sh
+kargo env [--release] [--show-values] [--env-file <path>] [--no-env-file] [-p <name>]
+```
+
+| Option | Meaning |
+|---|---|
+| `-r, --release` | Show the release profile's variables |
+| `--show-values` | Print the values. Without it they show as `********`, because they often hold secrets |
+| `--env-file <path>`, `--no-env-file` | As for `kargo run` |
+| `-p, --package <name>` | The package, at the root of a workspace with several members |
+
+A required variable that nothing sets is listed as `missing (required)`, and the command fails with exit code 101. See [Environment variables](../../guides/environment/#check-the-result-with-kargo-env).
 
 ## `kargo task`
 

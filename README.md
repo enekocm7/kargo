@@ -29,8 +29,8 @@ $ kargo test
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo build [--release] [-t <target>] [--keep-going] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
-| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--flavor <name>] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--flavor` picks the Android product flavor to install |
-| `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
+| `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--flavor <name>] [--env-file <path>] [--no-env-file] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--flavor` picks the Android product flavor to install |
+| `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [--env-file <path>] [--no-env-file] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
 | `kargo lint [--create-baseline]` | Analyze Kotlin sources with detekt |
@@ -52,6 +52,7 @@ $ kargo test
 | `kargo dap` | Debug adapter for editors over stdio: kotlin-debug-adapter on the project's JDK, launching `kargo run` or `kargo test` with `--debug` and mapping Kargo's source layout so breakpoints and stack frames find your files |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks |
+| `kargo env [--release] [--show-values]` | Show the environment `kargo run` and `kargo test` use: each variable, where it comes from, and its value (hidden unless `--show-values`) |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, Kotlin/Native and Gradle distributions, the Kotlin language servers behind `kargo lsp` and the debug adapter behind `kargo dap` |
@@ -177,6 +178,10 @@ repository = "maven-central"  # default destination: maven-central, maven-local 
 # sources = true
 # javadoc = "dokka"         # or "empty" (a manifest only) or false
 # central-publishing = "manual"   # or "automatic": release as soon as Maven Central validates the upload
+
+[env]                       # variables for kargo run/test, tasks and hooks; .env files and the shell override them
+APP_NAME = "demo"
+DATABASE_URL = { required = true }   # fails early unless the shell or a .env file sets it
 
 [profile.release]
 compiler-args = []          # also: debug, optimize

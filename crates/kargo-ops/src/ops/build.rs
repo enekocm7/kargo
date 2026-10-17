@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::context::{BuildContext, TargetSetup};
 use super::local::{self, LocalTarget};
+use crate::env::EnvOptions;
 use crate::warnings;
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -115,7 +116,7 @@ pub fn warn_about_sources(ctx: &BuildContext, targets: &[TargetKind]) {
 pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.targets)?;
-    let env = hook_env(ctx);
+    let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     warn_about_sources(ctx, &targets);
 
@@ -150,17 +151,16 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     Ok(results)
 }
 
-pub fn hook_env(ctx: &BuildContext) -> Vec<(String, String)> {
-    let profile = match ctx.profile {
-        ProfileKind::Dev => "dev",
-        ProfileKind::Release => "release",
-    };
-    let mut env = crate::plugins::base_env(ctx.ws, profile);
+/// The environment of build hooks and plugins: the project's variables, then Kargo's own.
+/// `opts` picks the `.env` files, as `--env-file` and `--no-env-file` do for `kargo run`.
+pub fn hook_env(ctx: &BuildContext, opts: &EnvOptions) -> Result<Vec<(String, String)>> {
+    let mut env = ctx.project_env(opts)?.for_child();
+    env.extend(crate::plugins::base_env(ctx.ws, ctx.profile.name()));
     // Hooks run while this process holds the build lock; a `kargo` they call must not wait on it.
     if let Some(lock) = ctx.build_lock_path() {
         env.push((kargo_util::flock::HELD_LOCK_ENV.to_owned(), lock.to_string_lossy().into_owned()));
     }
-    env
+    Ok(env)
 }
 
 pub fn finished(ctx: &BuildContext, start: Instant) {

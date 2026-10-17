@@ -67,6 +67,14 @@ pub enum ProfileKind {
 }
 
 impl ProfileKind {
+    /// The profile's name in kargo.toml and in `.env.<name>` files: `dev` or `release`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ProfileKind::Dev => "dev",
+            ProfileKind::Release => "release",
+        }
+    }
+
     pub fn dir_name(self) -> &'static str {
         match self {
             ProfileKind::Dev => "debug",

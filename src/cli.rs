@@ -9,6 +9,7 @@ use clap_complete::engine::{ArgValueCandidates, SubcommandCandidates};
 
 use kargo_manifest::edit::DependencySection;
 use kargo_manifest::{Scope, TargetKind};
+use kargo_ops::env::EnvOptions;
 use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::check::CheckOptions;
 use kargo_ops::ops::classpath::ClasspathScope;
@@ -343,6 +344,23 @@ enum ReportArg {
     Junit,
 }
 
+/// Which `.env` files a program's environment is read from.
+#[derive(Debug, Args)]
+struct EnvArgs {
+    /// Read this `.env` file after the standard ones, so it wins over them (repeatable)
+    #[arg(long = "env-file", value_name = "PATH", conflicts_with = "no_env_file")]
+    env_file: Vec<PathBuf>,
+    /// Do not read the `.env` files; the variables in kargo.toml still apply
+    #[arg(long)]
+    no_env_file: bool,
+}
+
+impl EnvArgs {
+    fn options(&self) -> EnvOptions {
+        EnvOptions { files: self.env_file.clone(), no_files: self.no_env_file }
+    }
+}
+
 #[derive(Debug, Args)]
 struct BuildArgs {
     /// Build with the release profile
@@ -478,6 +496,8 @@ enum Command {
         /// How to print compiler diagnostics
         #[arg(long, value_enum, default_value_t, value_name = "FMT")]
         message_format: MessageFormatArg,
+        #[command(flatten)]
+        env: EnvArgs,
         /// Arguments for the program
         #[arg(last = true)]
         args: Vec<String>,
@@ -516,6 +536,21 @@ enum Command {
         /// Output format of `--list`; `json` prints one JSON object per test
         #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
         format: FormatArg,
+        #[command(flatten)]
+        env: EnvArgs,
+    },
+    /// Show the environment `kargo run` and `kargo test` use, and where each variable comes from
+    Env {
+        /// Print the values instead of hiding them
+        #[arg(long)]
+        show_values: bool,
+        /// Show the release profile's variables
+        #[arg(short, long)]
+        release: bool,
+        #[command(flatten)]
+        env: EnvArgs,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Generate API documentation from KDoc with Dokka
     #[command(visible_alias = "d")]
@@ -1141,6 +1176,13 @@ fn build_packages<T: Send>(
     }
 }
 
+/// The environment of a package's tasks: its variables from `[env]` and the `.env` files, then Kargo's own.
+fn task_env(ws: &Workspace) -> Result<Vec<(String, String)>> {
+    let mut env = kargo_ops::env::resolve(ws, "dev", &EnvOptions::default())?.ensure_set()?.for_child();
+    env.extend(kargo_ops::plugins::base_env(ws, "dev"));
+    Ok(env)
+}
+
 fn profile(release: bool) -> ProfileKind {
     if release { ProfileKind::Release } else { ProfileKind::Dev }
 }
@@ -1266,7 +1308,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, main, bin, example, port, open, debug, flavors, message_format, package, args } => {
+        Command::Run { release, target, main, bin, example, port, open, debug, flavors, message_format, package, env, args } => {
             set_message_format(message_format);
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
@@ -1278,11 +1320,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (_, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let code =
-                ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors })?;
+            let code = ops::run::run(
+                &ctx,
+                &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors, env: env.options() },
+            )?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run, no_fail_fast, include_tag, exclude_tag, failed, report, debug, list, format } => {
+        Command::Test { build, filter, no_run, no_fail_fast, include_tag, exclude_tag, failed, report, debug, list, format, env } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let junit_report = report == Some(ReportArg::Junit);
@@ -1298,6 +1342,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 include_tags: include_tag,
                 exclude_tags: exclude_tag,
                 failed,
+                env: env.options(),
             };
             let passed = build_packages(
                 config,
@@ -1314,6 +1359,12 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 shell.error("test failed");
                 Ok(FAILURE)
             }
+        }
+        Command::Env { show_values, release, env, package } => {
+            let project = load_project(global)?;
+            let index = project.select_one(&package.selection(), "`kargo env`")?;
+            ops::env::show(shell, project.package(index), profile(release), &env.options(), show_values)?;
+            Ok(0)
         }
         Command::Doc { targets, open, packages } => {
             let project = load_project(global)?;
@@ -1793,7 +1844,7 @@ fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String]) -> Re
     if let Some(index) = package {
         let ws = project.package(index);
         if ws.manifest().tasks.contains_key(name) {
-            let env = kargo_ops::plugins::base_env(ws, "dev");
+            let env = task_env(ws)?;
             kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)?;
             return Ok(true);
         }
@@ -1814,7 +1865,7 @@ fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String]) -> Re
         .collect();
     for &index in &members {
         let ws = project.package(index);
-        let env = kargo_ops::plugins::base_env(ws, "dev");
+        let env = task_env(ws)?;
         kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)
             .with_context(|| format!("task `{name}` of `{}` failed", ws.name()))?;
     }

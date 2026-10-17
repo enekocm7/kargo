@@ -1017,3 +1017,34 @@ fn a_module_can_be_declared_once_per_classifier_and_extension() {
     ));
     assert!(twice.contains("declared more than once"), "{twice}");
 }
+
+#[test]
+fn env_table_accepts_strings_and_detailed_variables() {
+    let m = parse(&format!(
+        "{MINIMAL}\n[env]\nAPP_NAME = \"demo\"\nPORT = 8080\nDEBUG = true\n\
+         LOG_LEVEL = {{ value = \"debug\", force = true }}\nCONFIG_DIR = {{ value = \"config\", relative = true }}\n\
+         DATABASE_URL = {{ required = true }}\n\n[profile.release.env]\nLOG_LEVEL = \"info\"\n"
+    ));
+    let var = |value: &str| EnvVar { value: Some(value.to_owned()), ..Default::default() };
+    assert_eq!(m.env["APP_NAME"], var("demo"));
+    assert_eq!(m.env["PORT"], var("8080"));
+    assert_eq!(m.env["DEBUG"], var("true"));
+    assert_eq!(m.env["LOG_LEVEL"], EnvVar { force: true, ..var("debug") });
+    assert_eq!(m.env["CONFIG_DIR"], EnvVar { relative: true, ..var("config") });
+    assert_eq!(m.env["DATABASE_URL"], EnvVar { required: true, ..Default::default() });
+    assert_eq!(m.release_profile.env["LOG_LEVEL"], var("info"));
+    assert!(m.dev_profile.env.is_empty());
+}
+
+#[test]
+fn env_rejects_invalid_variables() {
+    let base = |env: &str| format!("{MINIMAL}\n[env]\n{env}\n");
+    assert!(parse_err(&base("\"bad-name\" = \"x\"")).contains("invalid variable name `bad-name`"));
+    assert!(parse_err(&base("A = []")).contains("`A` must be a string or a table"));
+    assert!(parse_err(&base("A = {}")).contains("`A` needs a `value`, or `required = true`"));
+    assert!(parse_err(&base("A = { value = \"x\", required = true }")).contains("both `value` and `required`"));
+    assert!(parse_err(&base("A = { required = true, relative = true }")).contains("`relative` without a `value`"));
+    assert!(parse_err(&base("A = { value = \"x\", typo = 1 }")).contains("unknown field"));
+    let profile = format!("{MINIMAL}\n[profile.dev.env]\nB = {{}}\n");
+    assert!(parse_err(&profile).contains("[profile.dev.env]: `B` needs a `value`"));
+}

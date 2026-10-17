@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{Context, Result, bail};
 
 use crate::builtins::{self, Contributions, PluginSpec};
+use crate::env::{EnvOptions, ProjectEnv};
 use crate::lockfile::Lockfile;
 use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
@@ -328,6 +329,12 @@ impl<'a> BuildContext<'a> {
 
     pub fn shell(&self) -> &Shell {
         self.config.shell()
+    }
+
+    /// The environment of the package for this profile: `[env]`, the `.env` files and the shell.
+    /// Fails when a required variable is not set.
+    pub fn project_env(&self, opts: &EnvOptions) -> Result<ProjectEnv> {
+        crate::env::resolve(self.ws, self.profile.name(), opts)?.ensure_set()
     }
 
     pub fn jdk(&self) -> Result<&Jdk> {

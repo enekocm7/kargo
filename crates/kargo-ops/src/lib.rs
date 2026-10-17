@@ -4,6 +4,7 @@
 
 pub mod builtins;
 pub mod dts;
+pub mod env;
 pub mod gradle;
 pub mod lockfile;
 pub mod npm;

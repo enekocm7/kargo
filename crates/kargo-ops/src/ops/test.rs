@@ -17,6 +17,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use crate::builtins::{JUNIT_MIN_JDK, JUNIT_VERSION};
+use crate::env::EnvOptions;
 use crate::warnings;
 use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -36,6 +37,8 @@ use kargo_util::process;
 #[derive(Debug, Clone, Default)]
 pub struct TestOptions {
     pub build: BuildOptions,
+    /// The `.env` files the tests' environment is read from (`--env-file`, `--no-env-file`).
+    pub env: EnvOptions,
     /// Only run tests whose name contains this string.
     pub filter: Option<String>,
     /// Compile tests without running them.
@@ -91,7 +94,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         anyhow::bail!("`--debug` runs the JVM tests under a debugger; select the JVM target with `-t jvm`");
     }
     note_jvm_only_options(ctx, &targets, opts);
-    let env = hook_env(ctx);
+    let env = hook_env(ctx, &opts.env)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
     // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, warnings::ignored_files(ctx.ws));
@@ -463,7 +466,9 @@ fn junit_command(
             cmd.arg("--scan-class-path").arg(&tests.classes);
         }
     }
-    cmd.args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes))).current_dir(ctx.ws.root());
+    cmd.args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes)))
+        .current_dir(ctx.ws.root())
+        .envs(ctx.project_env(&opts.env)?.for_child());
     match mode {
         JunitMode::Run => {
             cmd.arg("--fail-if-no-tests");
@@ -1107,7 +1112,10 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         ctx.shell().warn("test filters are not supported for the wasm target; running all tests");
     }
     let mut cmd = Command::new(kargo_toolchain::node()?);
-    cmd.arg("-e").arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path()))).current_dir(ctx.ws.root());
+    cmd.arg("-e")
+        .arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path())))
+        .current_dir(ctx.ws.root())
+        .envs(ctx.project_env(&opts.env)?.for_child());
     Ok(TestRun::Reported(cmd, "Wasm tests (Node.js)"))
 }
 
@@ -1140,7 +1148,7 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         return Ok(TestRun::Done(true));
     }
     let mut cmd = Command::new(executable);
-    cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root());
+    cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child());
     if let Some(filter) = &opts.filter {
         cmd.arg(format!("--ktest_filter=*{filter}*"));
     }
@@ -1311,7 +1319,7 @@ fn list_native(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<ListedTest>
         return Ok(Vec::new());
     };
     let mut cmd = Command::new(&executable);
-    cmd.arg("--ktest_list_tests").current_dir(ctx.ws.root()).stdin(Stdio::null());
+    cmd.arg("--ktest_list_tests").current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child()).stdin(Stdio::null());
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let output = cmd.output().with_context(|| format!("failed to start {}", executable.display()))?;
     if !output.status.success() {

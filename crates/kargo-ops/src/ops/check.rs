@@ -21,6 +21,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
+use crate::env::EnvOptions;
 use kargo_compiler::common_kotlin_args;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::wasm::WasmCompilation;
@@ -44,7 +45,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.build.targets)?;
     // Pre-build hooks may generate sources, so they run before checking.
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx))?;
+    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx, &EnvOptions::default())?)?;
     warn_about_sources(ctx, &targets);
 
     let checked = super::parallel_targets(&targets, |target| match target {

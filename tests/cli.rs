@@ -37,6 +37,7 @@ fn new_creates_a_project() {
     assert!(root.join("src/Main.kt").is_file());
     assert!(root.join("tests/GreetingTest.kt").is_file());
     assert!(std::fs::read_to_string(root.join(".gitignore")).unwrap().contains("/workspace.json\n"), "kargo lsp's generated files");
+    assert!(std::fs::read_to_string(root.join(".gitignore")).unwrap().contains(".env.*.local\n"), "machine-specific .env files");
     assert!(!root.join(".git").exists(), "--no-vcs");
 
     p.kargo().args(["new", "my-app"]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));
@@ -706,6 +707,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "plugins",
         "android",
         "daemon",
+        "env",
         "metadata",
         "classpath",
         "ide",
@@ -2678,4 +2680,82 @@ fn workspace_tasks_run_at_the_root_and_per_member() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no task named `nope`; available tasks: gen, hello"));
+}
+
+#[test]
+fn env_command_lists_sources_and_hides_values() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("envy", "[env]\nAPP_NAME = \"demo\"\nLOG_LEVEL = \"debug\"\n\n[profile.release.env]\nLOG_LEVEL = \"info\"\n"),
+    );
+    p.file(".env", "# shared\nSECRET_TOKEN=\"t0ken\"\nAPP_NAME=from-file\n");
+    p.file(".env.release", "EXTRA=1\n");
+
+    let out = p.kargo().args(["env"]).env("LOG_LEVEL", "trace").assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("APP_NAME") && stdout.contains(".env:3"), "{stdout}");
+    assert!(stdout.contains("LOG_LEVEL") && stdout.contains("shell"), "{stdout}");
+    assert!(stdout.contains("SECRET_TOKEN") && stdout.contains("********"), "{stdout}");
+    assert!(!stdout.contains("t0ken") && !stdout.contains("from-file") && !stdout.contains("trace"), "{stdout}");
+    assert!(!stdout.contains("EXTRA"), "the release file is read only for --release:\n{stdout}");
+
+    let shown = p.kargo().args(["env", "--show-values", "--release"]).assert().success();
+    let shown = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
+    assert!(shown.contains("t0ken") && shown.contains("info") && shown.contains("EXTRA"), "{shown}");
+    assert!(shown.contains("[profile.release.env]"), "{shown}");
+}
+
+#[test]
+fn env_file_options_choose_the_files() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("envy", "[env]\nNAME = \"manifest\"\n"));
+    p.file(".env", "NAME=standard\n");
+    p.file("extra.env", "NAME=extra\n");
+
+    p.kargo().args(["env", "--show-values"]).assert().success().stdout(predicates::str::contains("standard"));
+    p.kargo()
+        .args(["env", "--show-values", "--env-file", "extra.env"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("extra").and(predicates::str::contains("extra.env:1")));
+    p.kargo().args(["env", "--show-values", "--no-env-file"]).assert().success().stdout(predicates::str::contains("manifest"));
+    p.kargo().args(["env", "--no-env-file", "--env-file", "extra.env"]).assert().failure().code(2);
+    p.kargo().args(["env", "--env-file", "missing.env"]).assert().failure().stderr(predicates::str::contains("missing.env"));
+}
+
+#[test]
+fn missing_required_variable_fails_before_the_build() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("needy", "[env]\nDATABASE_URL = { required = true }\n"));
+
+    p.kargo()
+        .args(["run"])
+        .env_remove("DATABASE_URL")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicates::str::contains("`DATABASE_URL` (declared in [env])"))
+        .stderr(predicates::str::contains("Compiling").not());
+    p.kargo().args(["env"]).env_remove("DATABASE_URL").assert().failure().stdout(predicates::str::contains("missing (required)"));
+
+    p.kargo().args(["env"]).env("DATABASE_URL", "postgres://local").assert().success();
+    p.file(".env.local", "DATABASE_URL=postgres://file\n");
+    p.kargo().args(["env"]).env_remove("DATABASE_URL").assert().success();
+}
+
+#[cfg(unix)]
+#[test]
+fn tasks_run_with_the_project_environment() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tasky",
+            "[env]\nGREETING = \"hello\"\nLOG = { value = \"debug\", force = true }\n\n[tasks]\nshow = \"echo $GREETING $LOG > out.txt\"\n",
+        ),
+    );
+    p.file(".env", "GREETING=\"from file\"\n");
+    p.kargo().args(["task", "show"]).env("LOG", "trace").assert().success();
+    assert_eq!(p.read("out.txt"), "from file debug\n");
 }

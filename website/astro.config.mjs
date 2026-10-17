@@ -55,6 +55,7 @@ export default defineConfig({
 						{ label: 'Spring Boot', slug: 'guides/spring-boot' },
 						{ label: 'Compose Desktop', slug: 'guides/compose' },
 						{ label: 'Tasks and plugins', slug: 'guides/tasks-and-plugins' },
+						{ label: 'Environment variables', slug: 'guides/environment' },
 						{ label: 'Managing JDKs', slug: 'guides/toolchains' },
 						{ label: 'Continuous integration', slug: 'guides/ci' },
 						{ label: 'Build performance', slug: 'guides/build-performance' },

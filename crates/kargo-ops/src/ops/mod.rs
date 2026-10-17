@@ -6,6 +6,7 @@ pub mod check;
 pub mod classpath;
 pub mod context;
 pub mod doc;
+pub mod env;
 pub mod fmt;
 pub mod lint;
 pub mod local;
@@ -26,6 +27,7 @@ use anyhow::{Context, Result, bail};
 
 use self::build::{build_jvm, jvm_classpaths, native_platforms, native_resolution, select_targets, wasm_resolution};
 use self::context::BuildContext;
+use crate::env::EnvOptions;
 use crate::workspace::Workspace;
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_manifest::{Hook, JdkRequest, Scope, TargetKind};
@@ -408,7 +410,7 @@ pub fn package(ctx: &BuildContext, target: Option<TargetKind>, bin: Option<&str>
 /// `kargo package -t android`: signed (when configured) APKs and App Bundles, or AARs.
 fn package_android(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     let start = std::time::Instant::now();
-    let mut env = build::hook_env(ctx);
+    let mut env = build::hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     let files = crate::gradle::package(ctx)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
@@ -427,7 +429,7 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathB
         None => None,
     };
     let start = std::time::Instant::now();
-    let env = build::hook_env(ctx);
+    let env = build::hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     build::warn_about_sources(ctx, &[TargetKind::Jvm]);
     let jvm = build_jvm(ctx)?;

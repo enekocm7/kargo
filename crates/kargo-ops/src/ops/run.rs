@@ -13,6 +13,7 @@ use super::build::{
     sources,
 };
 use super::context::BuildContext;
+use crate::env::EnvOptions;
 use crate::web;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::mainclass::find_entry_point_in;
@@ -63,6 +64,8 @@ pub struct RunOptions {
     pub debug: Option<u16>,
     /// The Android flavors to install (`--flavor`), at most one per dimension.
     pub flavors: Vec<String>,
+    /// The `.env` files the program's environment is read from (`--env-file`, `--no-env-file`).
+    pub env: EnvOptions,
 }
 
 /// The JVM option that waits for a debugger to attach over JDWP on `port` of the loopback
@@ -171,6 +174,8 @@ fn bin_hint(ctx: &BuildContext) -> String {
 pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
     validate(ctx, target, opts)?;
+    // Fails before anything builds when a required variable is not set.
+    let project_env = ctx.project_env(&opts.env)?;
     // `--main` and `--example` on Kotlin/Native link their own executable instead of the project's.
     let separate_native = target == TargetKind::Native && matches!(opts.program, Program::Main(_) | Program::Example(_));
     let results = if separate_native {
@@ -186,7 +191,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         TargetKind::Jvm => {
             let jvm = results.jvm.context("JVM build produced no output")?;
             let (main, classpath) = jvm_program(ctx, &jvm, &opts.program)?;
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
+            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let jdk = ctx.jdk()?;
             let mut cmd = Command::new(jdk.java());
             if let Some(port) = opts.debug {
@@ -198,7 +203,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
             cmd
         }
         TargetKind::Wasm => {
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
+            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
             if wasm.environment == WasmEnvironment::Browser {
                 return serve_wasm_app(ctx, &wasm, opts);
@@ -211,16 +216,16 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         TargetKind::Native => {
             let artifact =
                 if separate_native { build_native_program(ctx, &opts.program)? } else { native_artifact(ctx, &results, &opts.program)? };
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
+            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             label = rel(&artifact);
             Command::new(&artifact)
         }
         TargetKind::Android => {
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx))?;
+            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             return crate::gradle::run(ctx, &opts.flavors);
         }
     };
-    cmd.args(&opts.args).current_dir(ctx.ws.root());
+    cmd.args(&opts.args).current_dir(ctx.ws.root()).envs(project_env.for_child());
     for arg in &opts.args {
         label.push(' ');
         label.push_str(&process::quote_for_display(arg));
@@ -346,7 +351,7 @@ fn native_artifact(ctx: &BuildContext, results: &BuildResults, program: &Program
 /// function (`--main`), or an example linked against the main sources as a library (`--example`).
 fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf> {
     let start = Instant::now();
-    let env = hook_env(ctx);
+    let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
