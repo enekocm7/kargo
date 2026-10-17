@@ -629,7 +629,7 @@ The output has a `"version": 1` field and is described in [Machine-readable outp
 
 ## `kargo lsp`
 
-Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover, Maven coordinates and versions, hints at newer versions, code actions that make the edits of `kargo add`, `kargo target add` and `kargo upgrade`) and the `kargo/runnables` request itself. Kotlin code goes to [Kargo's own Kotlin server](../../guides/kotlin-server/), built into `kargo` (completion, hover, go to definition, references and rename), or to a Kotlin language server Kargo downloads on first use and describes the project to.
+Run the language server for editors, speaking LSP over stdin and stdout. Kargo answers everything about `kargo.toml` (diagnostics, completion, hover, Maven coordinates and versions, hints at newer versions, code actions that make the edits of `kargo add`, `kargo target add` and `kargo upgrade`) and the `kargo/runnables` request itself. Kotlin code goes to [Kargo's own Kotlin server](../../guides/kotlin-server/), built into `kargo` (completion, hover, go to definition, references, rename and code actions), or to a Kotlin language server Kargo downloads on first use and describes the project to.
 
 ```sh
 kargo lsp                       # Kargo's own Kotlin server

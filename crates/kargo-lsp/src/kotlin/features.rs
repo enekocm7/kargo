@@ -859,7 +859,8 @@ impl Collector<'_, '_> {
     }
 }
 
-fn escape_name(name: &str) -> String {
+/// A name as Kotlin source: backquoted when it is a keyword or not a plain identifier.
+pub fn escape_name(name: &str) -> String {
     let plain = name.chars().next().is_some_and(lexer::is_ident_start) && name.chars().all(lexer::is_ident_char);
     if plain && !HARD_KEYWORDS.contains(&name) { name.to_owned() } else { format!("`{name}`") }
 }

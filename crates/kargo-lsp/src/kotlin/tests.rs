@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use super::actions;
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::tests::fake_jdk;
@@ -919,4 +920,248 @@ fn generated_npm_declarations_serve_wasm_code() {
     // Not in JVM code.
     let f = platform_fixture(&[("src/Main.kt", "package app\n")], &libs, vec![Platforms::JVM.union(Platforms::WASM), Platforms::JVM]);
     assert!(!sees(&f, 0, "express.express"));
+}
+
+// ----- code actions -----
+
+/// The source roots of a package with common sources and `jvm` and `native` ones.
+fn multiplatform_roots() -> Vec<(PathBuf, SourceSet)> {
+    [None, Some("jvm"), Some("native")]
+        .into_iter()
+        .map(|target| {
+            let dir = target.map_or_else(|| "src".to_owned(), |t| format!("src-{t}"));
+            (PathBuf::from("/project").join(dir), SourceSet { package: 0, kind: SetKind::Main, target: target.map(str::to_owned) })
+        })
+        .collect()
+}
+
+impl Fixture {
+    /// The code actions at the cursor, with the diagnostics `diagnostics` there.
+    fn actions(&self, diagnostics: Vec<Value>, roots: &[(PathBuf, SourceSet)]) -> Vec<Value> {
+        let (unit, offset) = self.cursor();
+        let manifests = vec![PathBuf::from("/project/kargo.toml")];
+        let request = actions::Request {
+            unit,
+            range: offset..offset,
+            only: Vec::new(),
+            diagnostics,
+            roots,
+            manifests: &manifests,
+            document_changes: true,
+            create_files: true,
+        };
+        actions::code_actions(&self.an(), &request)
+    }
+
+    fn titles(&self, diagnostics: Vec<Value>) -> Vec<String> {
+        self.actions(diagnostics, &[]).iter().map(|a| a["title"].as_str().unwrap().to_owned()).collect()
+    }
+
+    /// The cursor's file after the edits of the action titled `title`.
+    fn applied(&self, diagnostics: Vec<Value>, title: &str) -> String {
+        let actions = self.actions(diagnostics, &[]);
+        let action = actions.iter().find(|a| a["title"] == title).unwrap_or_else(|| panic!("no `{title}` in {actions:#?}"));
+        let unit = &self.proj.units[self.cursor().0.unit as usize];
+        let uri = crate::text::path_to_uri(&unit.path);
+        apply_edits(&unit.text, action["edit"]["changes"][&uri].as_array().unwrap())
+    }
+
+    /// A diagnostic with `message` on the identifier at the cursor.
+    fn diagnostic(&self, message: &str) -> Value {
+        let (u, tok) = self.token();
+        let unit = &self.proj.units[u.unit as usize];
+        let span = unit.file.lexed.tokens[tok].span();
+        serde_json::json!({ "range": crate::text::range(&unit.text, span), "severity": 1, "source": "kargo", "message": message })
+    }
+}
+
+fn apply_edits(text: &str, edits: &[Value]) -> String {
+    let mut spans: Vec<(usize, usize, &str)> = edits
+        .iter()
+        .map(|e| {
+            let start = crate::text::offset(text, &e["range"]["start"]);
+            let end = crate::text::offset(text, &e["range"]["end"]);
+            (start, end, e["newText"].as_str().unwrap())
+        })
+        .collect();
+    spans.sort_by_key(|(start, end, _)| std::cmp::Reverse((*start, *end)));
+    let mut out = text.to_owned();
+    for (start, end, new) in spans {
+        out.replace_range(start..end, new);
+    }
+    out
+}
+
+#[test]
+fn imports_unresolved_names() {
+    let lib = ("src/lib/Thing.kt", "package lib\n\nclass Thing\n\nval answer = 42\n");
+    let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nfun main() {\n    val t = Thi$0ng()\n}\n")]);
+    assert_eq!(f.titles(Vec::new()), ["Import `lib.Thing`"]);
+    assert_eq!(f.applied(Vec::new(), "Import `lib.Thing`"), "package app\n\nimport lib.Thing\n\nfun main() {\n    val t = Thing()\n}\n");
+
+    // In sorted place among the imports.
+    let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nimport a.A\nimport z.Z\n\nfun main() = Thi$0ng()\n")]);
+    assert_eq!(
+        f.applied(Vec::new(), "Import `lib.Thing`"),
+        "package app\n\nimport a.A\nimport lib.Thing\nimport z.Z\n\nfun main() = Thing()\n"
+    );
+
+    // A name that isn't a call or a type only from a diagnostic.
+    let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nfun main() = println(ans$0wer)\n")]);
+    assert!(f.titles(Vec::new()).is_empty());
+    let diagnostic = f.diagnostic("Unresolved reference 'answer'.");
+    let found = f.actions(vec![diagnostic.clone()], &[]);
+    assert_eq!(found[0]["title"], "Import `lib.answer`");
+    assert_eq!(found[0]["diagnostics"][0], diagnostic);
+
+    // Resolved names get nothing.
+    let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nimport lib.Thing\n\nfun main() = Thi$0ng()\n")]);
+    assert!(f.titles(Vec::new()).is_empty());
+}
+
+#[test]
+fn organizes_imports() {
+    let lib = ("src/lib/Things.kt", "package lib\n\nclass A\nclass B\nclass C\n");
+    let main = "package app\n\nimport lib.C\nimport kotlin.math.max\nimport java.io.File\nimport lib.A\nimport lib.A\nimport app.Local\nimport lib.B as Bee\nimport lib.*\n\n/** See [File]. */\nfun main() {$0\n    println(A())\n    println(max(1, 2))\n    println(Bee())\n}\n";
+    let f = fixture(&[lib, ("src/app/Main.kt", main)]);
+    let organized = f.applied(Vec::new(), "Organize imports");
+    assert_eq!(
+        organized,
+        "package app\n\nimport lib.*\nimport lib.A\nimport java.io.File\nimport kotlin.math.max\nimport lib.B as Bee\n\n/** See [File]. */\nfun main() {\n    println(A())\n    println(max(1, 2))\n    println(Bee())\n}\n"
+    );
+    // Nothing to do: no action.
+    let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nimport lib.A\n\nfun main() = A()$0\n")]);
+    assert!(!f.titles(Vec::new()).iter().any(|t| t == "Organize imports"));
+    // Every import unused.
+    let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nimport lib.A\nimport lib.B\n\nfun main() {}$0\n")]);
+    assert_eq!(f.applied(Vec::new(), "Organize imports"), "package app\n\nfun main() {}\n");
+}
+
+#[test]
+fn adds_the_dependency_of_an_unresolved_import() {
+    let main = "package app\n\nimport kotlinx.coroutines.launch$0\nimport kotlinx.coroutines.runBlocking\n\nfun main() = runBlocking { launch {} }\n";
+    let f = fixture(&[("src/app/Main.kt", main)]);
+    let found = f.actions(Vec::new(), &[]);
+    let action = found.iter().find(|a| a["command"].is_object()).expect("an add-dependency action");
+    assert_eq!(action["title"], "Add `org.jetbrains.kotlinx:kotlinx-coroutines-core` to kargo.toml");
+    assert_eq!(action["command"]["command"], crate::actions::ADD_DEPENDENCY);
+    let args = &action["command"]["arguments"][0];
+    assert_eq!(args["coords"], "org.jetbrains.kotlinx:kotlinx-coroutines-core");
+    assert_eq!(args["section"], "dependencies");
+    assert_eq!(args["uri"], crate::text::path_to_uri(std::path::Path::new("/project/kargo.toml")));
+
+    // Test code adds to `dev-dependencies`, the longest known prefix wins.
+    let f = fixture(&[("tests/AppTest.kt", "import kotlinx.coroutines.test.runTest$0\n")]);
+    let found = f.actions(Vec::new(), &[]);
+    let args = &found.iter().find(|a| a["command"].is_object()).unwrap()["command"]["arguments"][0];
+    assert_eq!(
+        (args["coords"].as_str(), args["section"].as_str()),
+        (Some("org.jetbrains.kotlinx:kotlinx-coroutines-test"), Some("dev-dependencies"))
+    );
+
+    // Not for a package that resolves, or that Kargo doesn't know.
+    let f = fixture(&[("src/app/Main.kt", "import kotlin.collections.List$0\nimport com.example.unknown.Thing\n")]);
+    assert!(f.actions(Vec::new(), &[]).iter().all(|a| a["command"].is_null()));
+    assert_eq!(super::actions::known_module("io.ktor.server.netty.EngineMain"), Some("io.ktor:ktor-server-netty"));
+    assert_eq!(super::actions::known_module("io.ktor.server.routing.get"), Some("io.ktor:ktor-server-core"));
+    assert_eq!(super::actions::known_module("io.ktorx.Thing"), None);
+}
+
+#[test]
+fn implements_abstract_members() {
+    let repo = "package data\n\nclass User\n\ninterface Repo<T> {\n    fun find(id: Int): T\n    val size: Int\n    var name: String\n    fun describe() = \"repo\"\n    suspend fun save(item: T)\n}\n\nabstract class Base : Repo<User> {\n    override fun find(id: Int): User = User()\n    abstract fun close()\n}\n";
+    let f = fixture(&[
+        ("src/data/Repo.kt", repo),
+        ("src/app/Users.kt", "package app\n\nimport data.Repo\n\nclass Use$0rs : Repo<data.User> {\n}\n"),
+    ]);
+    let users = f.applied(Vec::new(), "Implement 4 members");
+    assert_eq!(
+        users,
+        "package app\n\nimport data.Repo\nimport data.User\n\nclass Users : Repo<data.User> {\n    override fun find(id: Int): User {\n        TODO(\"Not yet implemented\")\n    }\n\n    override val size: Int\n        get() = TODO(\"Not yet implemented\")\n\n    override var name: String\n        get() = TODO(\"Not yet implemented\")\n        set(value) {}\n\n    override suspend fun save(item: User) {\n        TODO(\"Not yet implemented\")\n    }\n}\n"
+    );
+
+    // Through an abstract class that implements some of them; without a body.
+    let f = fixture(&[("src/data/Repo.kt", repo), ("src/data/Impl.kt", "package data\n\nclass Im$0pl : Base()\n")]);
+    let message = "Class 'Impl' is not abstract and does not implement abstract member 'close'.";
+    let diagnostic = f.diagnostic(message);
+    let found = f.actions(vec![diagnostic.clone()], &[]);
+    let action = found.iter().find(|a| a["title"] == "Implement 4 members").expect("an implement action");
+    assert_eq!(action["diagnostics"][0], diagnostic);
+    let impl_kt = f.applied(Vec::new(), "Implement 4 members");
+    // The closest supertype's members first.
+    assert!(impl_kt.starts_with("package data\n\nclass Impl : Base() {\n    override fun close() {\n"), "{impl_kt}");
+    assert!(impl_kt.contains("    override val size: Int\n") && !impl_kt.contains("fun find"), "{impl_kt}");
+
+    // Nothing for a class that implements everything, or an abstract one.
+    let f = fixture(&[("src/data/Repo.kt", repo), ("src/data/Done.kt", "package data\n\nabstract class Do$0ne : Base()\n")]);
+    assert!(f.titles(Vec::new()).is_empty());
+}
+
+#[test]
+fn adds_missing_actual_declarations() {
+    let common = "package app\n\nimport kotlin.time.Duration\n\nexpect fun plat$0form(timeout: Duration = Duration.ZERO): String\n\nexpect class Clock {\n    fun now(): Long\n    val zone: String\n}\n";
+    let jvm = "package app\n\nactual fun platform(timeout: Duration): String = \"jvm\"\n";
+    let f = fixture(&[("src/app/Platform.kt", common), ("src-jvm/app/Platform.jvm.kt", jvm)]);
+    let roots = multiplatform_roots();
+    let found = f.actions(Vec::new(), &roots);
+    let titles: Vec<&str> = found.iter().map(|a| a["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, ["Add `actual` for `platform` to the native target"]);
+    let changes = found[0]["edit"]["documentChanges"].as_array().unwrap();
+    let uri = crate::text::path_to_uri(std::path::Path::new("/project/src-native/app/Platform.native.kt"));
+    assert_eq!(changes[0], serde_json::json!({ "kind": "create", "uri": uri, "options": { "ignoreIfExists": true } }));
+    assert_eq!(
+        changes[1]["edits"][0]["newText"],
+        "package app\n\nimport kotlin.time.Duration\n\nactual fun platform(timeout: Duration): String {\n    TODO(\"Not yet implemented\")\n}\n"
+    );
+
+    // A class: appended to the target's file there is, and created in the other.
+    let f = fixture(&[
+        ("src/app/Platform.kt", &common.replace("$0", "").replace("class Clock", "class Cl$0ock")),
+        ("src-jvm/app/Platform.jvm.kt", jvm),
+    ]);
+    let found = f.actions(Vec::new(), &roots);
+    let titles: Vec<&str> = found.iter().map(|a| a["title"].as_str().unwrap()).collect();
+    assert_eq!(
+        titles,
+        [
+            "Add `actual` for `Clock` to the jvm target",
+            "Add `actual` for `Clock` to the native target",
+            "Add `actual` for `Clock` to every target"
+        ]
+    );
+    let edit = &found[0]["edit"]["documentChanges"][0];
+    assert_eq!(edit["textDocument"]["uri"], crate::text::path_to_uri(std::path::Path::new("/project/src-jvm/app/Platform.jvm.kt")));
+    let appended = apply_edits(jvm, edit["edits"].as_array().unwrap());
+    assert_eq!(
+        appended,
+        format!(
+            "{jvm}\nactual class Clock {{\n    actual fun now(): Long {{\n        TODO(\"Not yet implemented\")\n    }}\n\n    actual val zone: String\n        get() = TODO(\"Not yet implemented\")\n}}\n"
+        )
+    );
+    assert_eq!(found[2]["edit"]["documentChanges"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn fixes_compiler_messages() {
+    let base =
+        "package app\n\nopen class Base {\n    open fun greet() = \"hi\"\n}\n\nclass Child : Base() {\n    fun gr$0eet() = \"hello\"\n}\n";
+    let f = fixture(&[("src/app/Child.kt", base)]);
+    let diagnostic = f.diagnostic("'fun greet(): String' hides member of supertype 'Base' and needs an 'override' modifier.");
+    let fixed = f.applied(vec![diagnostic], "Add `override` to `greet`");
+    assert!(fixed.contains("    override fun greet() = \"hello\""), "{fixed}");
+
+    let main = "fun main() {\n    val un$0used = compute()\n    val other = 1\n    println(\"x\")\n}\nfun compute() = 1\n";
+    let f = fixture(&[("src/Main.kt", main)]);
+    let diagnostic = f.diagnostic("Variable 'unused' is never used.");
+    let fixed = f.applied(vec![diagnostic], "Remove variable `unused`");
+    assert_eq!(fixed, "fun main() {\n    compute()\n    val other = 1\n    println(\"x\")\n}\nfun compute() = 1\n");
+    let f = fixture(&[("src/Main.kt", &main.replace("$0", "").replace("val other", "val ot$0her"))]);
+    let diagnostic = f.diagnostic("Unused variable 'other'.");
+    let fixed = f.applied(vec![diagnostic], "Remove variable `other`");
+    assert_eq!(fixed, "fun main() {\n    val unused = compute()\n    println(\"x\")\n}\nfun compute() = 1\n");
+
+    // A destructured component is renamed to `_`.
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    val (a, b$0) = Pair(1, 2)\n    println(a)\n}\n")]);
+    let diagnostic = f.diagnostic("Variable 'b' is never used.");
+    assert_eq!(f.applied(vec![diagnostic], "Rename to `_`"), "fun main() {\n    val (a, _) = Pair(1, 2)\n    println(a)\n}\n");
 }
