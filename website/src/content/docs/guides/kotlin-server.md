@@ -15,8 +15,8 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 
 | Feature | What you get |
 |---|---|
-| Completion | Members after `.`, `?.` and `::`, extension functions included; everything in scope otherwise; `import` paths. Declarations that need an import come with it |
-| Hover | The declaration's signature, its package or class, and its KDoc as Markdown. Inferred types of variables, such as `val names: List<String>` |
+| Completion | Members after `.`, `?.` and `::`, extension functions included; everything in scope otherwise; `import` paths. Declarations that need an import come with it. Annotation classes after `@`, and the arguments of an annotation inside its parentheses |
+| Hover | The declaration's signature, its package or class, and its KDoc as Markdown. Inferred types of variables, such as `val names: List<String>`. The same for annotations and their arguments |
 | Go to definition | Into your project, a path dependency, the sources of the standard library, the JDK and libraries, or stubs of libraries without sources. Go to declaration and go to type definition too |
 | Find references, highlights | Every use in the project, with the declaration |
 | Rename | Every reference in the project, and the declarations that must change with it: `expect` and `actual` declarations, overrides, named arguments |
@@ -42,6 +42,8 @@ After a `.` you get the members of the receiver's type and its supertypes, and t
 - keywords.
 
 Once you have typed a letter, classes and functions from other packages are offered too, with an edit that adds their `import`. Choosing a function inserts its parentheses and, in an editor that supports snippets, puts the cursor between them, or in the braces of a function that takes one lambda.
+
+Annotations complete on their own. After `@` you get annotation classes only: those in scope, and once you have typed a letter, the others with an `import` added. `@Rest` offers Spring Web's `RestController`, for example. Inside the parentheses of an annotation you get the arguments it takes that you haven't given yet, as `defaultValue = `. The arguments of a Java annotation are the elements of its `@interface`, and those of an annotation written in Kotlin are its constructor parameters. Hover and go to definition work on annotations on classes, functions, parameters and properties, and on their arguments.
 
 To know the receiver's type, the server infers the types completion needs: literals, calls of generic functions (`listOf("a")` is a `List<String>`), lambda parameters from the function the lambda is passed to (`it` in `forEach`, `map` or `let`), lambda results (`map { it.length }` is a `List<Int>`), `for` loop variables, destructuring (`for ((key, value) in map)`), `by lazy { }`, `if` expressions and the operators.
 

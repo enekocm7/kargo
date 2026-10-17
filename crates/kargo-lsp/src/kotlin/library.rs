@@ -29,13 +29,15 @@ use super::index::{Origin, Platforms, Unit};
 const STUBS: &str = include_str!("stubs.kt");
 
 /// A sources jar, what to call it, and the platforms it is for: `main` for main code and `test`
-/// for test code only.
+/// for test code only. `java` reads its Java files too, as a dependency's are: the standard
+/// library's are its JVM internals, which the JDK's classes already cover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcesJar {
     pub name: String,
     pub jar: PathBuf,
     pub main: Platforms,
     pub test: Platforms,
+    pub java: bool,
 }
 
 /// A library without sources: a jar of classes, or a klib (a file or an unpacked directory), and
@@ -93,7 +95,7 @@ pub fn stdlib_jars(
         .filter_map(|(artifact, main, test)| {
             let module = ModuleId::new("org.jetbrains.kotlin", &artifact);
             match client.fetch_sources(&module, version) {
-                Ok(Some(jar)) => Some(SourcesJar { name: format!("{artifact} {version}"), jar, main, test }),
+                Ok(Some(jar)) => Some(SourcesJar { name: format!("{artifact} {version}"), jar, main, test, java: false }),
                 _ => None,
             }
         })
@@ -107,7 +109,8 @@ pub fn units(config: &Config, cache: &UnitCache, jars: &[SourcesJar]) -> Vec<Arc
         .iter()
         .filter_map(|jar| {
             let dir = extract(config, &jar.jar).ok()?;
-            let files = kargo_util::fs::collect_files(&dir, &["kt"]);
+            let extensions: &[&str] = if jar.java { &["kt", "java"] } else { &["kt"] };
+            let files = kargo_util::fs::collect_files(&dir, extensions);
             Some((jar, dir, files))
         })
         .collect();
@@ -324,7 +327,7 @@ mod tests {
     use super::*;
 
     fn jar(name: &str, main: Platforms, test: Platforms) -> SourcesJar {
-        SourcesJar { name: name.into(), jar: PathBuf::from(name), main, test }
+        SourcesJar { name: name.into(), jar: PathBuf::from(name), main, test, java: false }
     }
 
     #[test]
@@ -397,5 +400,34 @@ mod tests {
         // A folder that isn't a source set leaves the jar's platforms as they are.
         assert_eq!(merged.iter().find(|f| f.path.ends_with("lib/Api.kt")).unwrap().main, Platforms::JVM);
         assert_eq!(merged.iter().find(|f| f.path.ends_with("jvmMain/lib/Jvm.kt")).unwrap().main, Platforms::JVM);
+    }
+
+    #[test]
+    fn reads_the_java_files_of_dependencies_but_not_of_the_standard_library() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("lib-1.0-sources.jar");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        for (name, text) in [
+            ("p/Api.kt", "package p\n\nclass Api\n"),
+            ("p/Marker.java", "package p;\n\npublic @interface Marker {\n    String value() default \"\";\n}\n"),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let config = Config::new(dir.path().join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let read = |java: bool| {
+            let jars = [SourcesJar { name: "lib 1.0".into(), jar: jar.clone(), main: Platforms::JVM, test: Platforms::NONE, java }];
+            let mut names: Vec<String> = units(&config, &UnitCache::default(), &jars)
+                .iter()
+                .map(|u| u.path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(read(false), ["Api.kt"]);
+        assert_eq!(read(true), ["Api.kt", "Marker.java"]);
     }
 }

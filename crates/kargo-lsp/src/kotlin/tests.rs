@@ -557,12 +557,14 @@ fn platforms_against_the_real_standard_library() {
             jar: PathBuf::from(std::env::var("KOTLIN_JVM_SOURCES").expect("KOTLIN_JVM_SOURCES")),
             main: Platforms::ALL,
             test: Platforms::NONE,
+            java: false,
         },
         SourcesJar {
             name: "kotlin-stdlib-wasm-js".into(),
             jar: PathBuf::from(std::env::var("KOTLIN_WASM_SOURCES").expect("KOTLIN_WASM_SOURCES")),
             main: Platforms::ALL,
             test: Platforms::NONE,
+            java: false,
         },
     ];
     let lib = Index::new(true, library::units(&config, &UnitCache::default(), &jars));
@@ -1164,4 +1166,165 @@ fn fixes_compiler_messages() {
     let f = fixture(&[("src/Main.kt", "fun main() {\n    val (a, b$0) = Pair(1, 2)\n    println(a)\n}\n")]);
     let diagnostic = f.diagnostic("Variable 'b' is never used.");
     assert_eq!(f.applied(vec![diagnostic], "Rename to `_`"), "fun main() {\n    val (a, _) = Pair(1, 2)\n    println(a)\n}\n");
+}
+
+// ----- annotations -----
+
+/// Spring's annotations, as the Java sources a library's sources jar provides.
+fn spring_libs() -> Vec<Arc<Unit>> {
+    let files = [
+        (
+            "org/springframework/web/bind/annotation/GetMapping.java",
+            "package org.springframework.web.bind.annotation;\n\n@Target(ElementType.METHOD)\n@Retention(RetentionPolicy.RUNTIME)\npublic @interface GetMapping {\n    String[] value() default {};\n}\n",
+        ),
+        (
+            "org/springframework/web/bind/annotation/RequestParam.java",
+            "package org.springframework.web.bind.annotation;\n\npublic @interface RequestParam {\n    String name() default \"\";\n    String value() default \"\";\n    boolean required() default true;\n    String defaultValue() default \"\";\n}\n",
+        ),
+        (
+            "org/springframework/web/bind/annotation/RestController.java",
+            "package org.springframework.web.bind.annotation;\n\npublic @interface RestController {\n}\n",
+        ),
+    ];
+    files
+        .into_iter()
+        .map(|(path, text)| {
+            Arc::new(Unit::new(
+                PathBuf::from("/spring").join(path),
+                text.to_owned(),
+                Origin::Library { name: "spring-web".into(), main: Platforms::JVM, test: Platforms::NONE },
+            ))
+        })
+        .collect()
+}
+
+const SPRING_IMPORTS: &str =
+    "import org.springframework.web.bind.annotation.GetMapping\nimport org.springframework.web.bind.annotation.RequestParam\n";
+
+#[test]
+fn completes_annotation_classes_after_at() {
+    let main = "package app\n\nfun restart() = 1\n\n@Rest$0\nclass G\n";
+    let f = fixture_on(&[("src/Main.kt", main)], None, None, spring_libs());
+    let items = f.items();
+    let labels: Vec<String> = items.iter().map(|i| i["label"].as_str().unwrap().to_owned()).collect();
+    assert!(has(&labels, "RestController"), "{labels:?}");
+    // Only annotation classes: the function `restart` matches too, but is not offered.
+    assert!(!has(&labels, "restart"), "{labels:?}");
+    let controller = items.iter().find(|i| i["label"] == "RestController").unwrap();
+    assert_eq!(
+        controller["additionalTextEdits"][0]["newText"], "\n\nimport org.springframework.web.bind.annotation.RestController",
+        "{controller}"
+    );
+
+    // A qualified name takes annotations only, too.
+    let f = fixture_on(
+        &[("src/Main.kt", "package app\n\n@org.springframework.web.bind.annotation.Rest$0\nclass G\n")],
+        None,
+        None,
+        spring_libs(),
+    );
+    assert!(has(&f.labels(), "RestController"), "{:?}", f.labels());
+}
+
+#[test]
+fn completes_and_navigates_annotation_arguments() {
+    // Completion offers the arguments of the annotation whose `(` comes before the cursor.
+    let f = fixture_on(
+        &[("src/Main.kt", &format!("package app\n\n{SPRING_IMPORTS}\n@RequestParam(def$0)\nfun greet(name: String) = name\n"))],
+        None,
+        None,
+        spring_libs(),
+    );
+    let items = f.items();
+    let default = items.iter().find(|i| i["label"] == "defaultValue").expect("the defaultValue argument");
+    assert_eq!(default["textEdit"]["newText"], "defaultValue = ", "{default}");
+    assert!(!has(&f.labels(), "greet"), "{:?}", f.labels());
+
+    // Arguments already given are not offered again.
+    let f = fixture_on(
+        &[("src/Main.kt", &format!("package app\n\n{SPRING_IMPORTS}\n@RequestParam(name = \"a\", $0)\nfun greet(name: String) = name\n"))],
+        None,
+        None,
+        spring_libs(),
+    );
+    let labels = f.labels();
+    assert!(has(&labels, "value") && has(&labels, "defaultValue"), "{labels:?}");
+    assert!(!has(&labels, "name"), "{labels:?}");
+
+    // Hover and go to definition on an argument of a Java annotation: its element.
+    let f = fixture_on(
+        &[(
+            "src/Main.kt",
+            &format!(
+                "package app\n\n{SPRING_IMPORTS}\n@GetMapping(\"/\")\nfun greet(@RequestParam(defaultV$0alue = \"World\") name: String) = name\n"
+            ),
+        )],
+        None,
+        None,
+        spring_libs(),
+    );
+    assert!(f.hover().contains("defaultValue"), "{}", f.hover());
+    assert_eq!(f.definition(), Some(("RequestParam.java".into(), "String defaultValue() default \"\";".into())));
+
+    // Arguments of a Kotlin annotation class are its constructor parameters.
+    let f = fixture_on(
+        &[
+            ("src/Tag.kt", "package app\n\nannotation class Tag(val label: String)\n"),
+            ("src/Main.kt", "package app\n\n@Tag(la$0bel = \"x\")\nfun main() {}\n"),
+        ],
+        None,
+        None,
+        Vec::new(),
+    );
+    assert_eq!(f.definition(), Some(("Tag.kt".into(), "annotation class Tag(val label: String)".into())));
+}
+
+#[test]
+fn hovers_and_navigates_annotations_wherever_they_are() {
+    // On a class, a function, a parameter and a property.
+    let cases = [
+        format!("package app\n\n{SPRING_IMPORTS}\n@Req$0uestParam(\"a\") class G\n"),
+        format!("package app\n\n{SPRING_IMPORTS}\n@GetMapping(\"/\")\nfun greet(@Req$0uestParam(\"a\") name: String) = name\n"),
+        format!("package app\n\n{SPRING_IMPORTS}\nclass G {{\n    @Req$0uestParam(\"a\") val name = 1\n}}\n"),
+        format!("package app\n\n{SPRING_IMPORTS}\nfun main() {{\n    @Req$0uestParam(\"a\") val name = 1\n}}\n"),
+    ];
+    for case in cases {
+        let f = fixture_on(&[("src/Main.kt", case.as_str())], None, None, spring_libs());
+        assert_eq!(f.definition(), Some(("RequestParam.java".into(), "public @interface RequestParam {".into())), "{case}");
+        assert!(f.hover().contains("RequestParam"), "{case}: {}", f.hover());
+    }
+}
+
+/// The annotations of the real Spring Web sources (`SPRING_WEB_SOURCES`: the `spring-web` sources
+/// jar), loaded as a dependency's sources jar is: they complete after `@`, show their Javadoc, and
+/// their arguments complete and navigate.
+#[test]
+#[ignore]
+fn annotations_against_the_real_spring_web_sources() {
+    use kargo_util::shell::{Shell, Verbosity};
+    let home = tempfile::tempdir().unwrap();
+    let config = kargo_util::config::Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_offline(true);
+    let jars = [SourcesJar {
+        name: "spring-web".into(),
+        jar: PathBuf::from(std::env::var("SPRING_WEB_SOURCES").expect("SPRING_WEB_SOURCES")),
+        main: Platforms::JVM,
+        test: Platforms::NONE,
+        java: true,
+    }];
+    let libs = library::units(&config, &UnitCache::default(), &jars);
+    let imports =
+        "import org.springframework.web.bind.annotation.GetMapping\nimport org.springframework.web.bind.annotation.RequestParam\n";
+
+    let f = fixture_with(&[("src/Main.kt", "package app\n\n@Rest$0\nclass G\n")], libs.clone(), None, None);
+    assert!(has(&f.labels(), "RestController"), "{:?}", f.labels());
+
+    let main =
+        format!("package app\n\n{imports}\n@GetMapping(\"/\")\nfun greet(@RequestParam(defaultV$0alue = \"World\") name: String) = name\n");
+    let f = fixture_with(&[("src/Main.kt", &main)], libs.clone(), None, None);
+    assert!(f.hover().contains("The default value to use as a fallback"), "{}", f.hover());
+    assert_eq!(f.definition().map(|(file, _)| file), Some("RequestParam.java".to_owned()));
+
+    let main = format!("package app\n\n{imports}\n@RequestParam(def$0)\nfun greet(name: String) = name\n");
+    let f = fixture_with(&[("src/Main.kt", &main)], libs, None, None);
+    assert!(has(&f.labels(), "defaultValue"), "{:?}", f.labels());
 }
