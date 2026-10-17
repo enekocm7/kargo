@@ -253,6 +253,7 @@ fn dependency_jars(meta: &Value) -> Vec<SourcesJar> {
                                 jar: PathBuf::from(sources),
                                 main: Platforms::NONE,
                                 test: Platforms::NONE,
+                                java: true,
                             }
                         });
                         if main {

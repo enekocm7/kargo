@@ -9,7 +9,7 @@ use super::index::{DEFAULT_IMPORTS, SymId, UnitId, is_internal_package};
 use super::java::javadoc_markdown;
 use super::lexer::{self, HARD_KEYWORDS, Tok};
 use super::resolve::{Analyzer, Arg, Found, Member, Subst, Ty, chain_start};
-use super::syntax::{Decl, File, Kind, ScopeKind, normalize};
+use super::syntax::{Decl, DeclId, File, Kind, ScopeKind, normalize};
 use crate::text;
 
 /// What an identifier refers to.
@@ -139,7 +139,8 @@ pub fn targets_at(an: &Analyzer, u: UnitId, tok: usize) -> Vec<Target> {
     out
 }
 
-/// The parameters named `name` of the function called with the parentheses at `open`.
+/// The parameters named `name` of the function called with the parentheses at `open`, or the
+/// arguments of the annotation there.
 fn named_argument(an: &Analyzer, u: UnitId, open: usize, name: &str) -> Option<Vec<Target>> {
     let file = an.file(u);
     let lx = &file.lexed;
@@ -155,12 +156,92 @@ fn named_argument(an: &Analyzer, u: UnitId, open: usize, name: &str) -> Option<V
     for c in candidates {
         let Target::Sym(m) = c else { continue };
         let d = an.decl(m.sym);
-        let decls = &an.file(m.sym.unit_id()).decls;
-        if let Some(&p) = d.params.iter().find(|&&p| decls[p].name == name) {
+        let file = an.file(m.sym.unit_id());
+        let args = if d.kind == Kind::Annotation { annotation_arguments(file, m.sym.decl_id()) } else { d.params.clone() };
+        if let Some(&p) = args.iter().find(|&&p| file.decls[p].name == name) {
             out.push(Target::Sym(Member { sym: m.sym.unit_id().sym(p), subst: Subst::new() }));
         }
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// The arguments an annotation class takes, in order: its constructor parameters (Kotlin), and
+/// the elements of a Java `@interface`, which are its methods.
+fn annotation_arguments(file: &File, class: DeclId) -> Vec<DeclId> {
+    let d = &file.decls[class];
+    let elements = d.members.iter().copied().filter(|&m| file.decls[m].kind == Kind::Function);
+    d.params.iter().copied().chain(elements).collect()
+}
+
+/// The name token of the annotation whose arguments open at the parenthesis `open`: `@Name(`,
+/// `@pkg.Name(` or `@get:Name(`.
+fn annotation_name(lx: &lexer::Lexed, open: usize) -> Option<usize> {
+    let name = open.checked_sub(1)?;
+    if lx.kind(name) != Some(Tok::Ident) {
+        return None;
+    }
+    let mut start = name;
+    while start >= 2 && lx.kind(start - 1) == Some(Tok::Dot) && lx.kind(start - 2) == Some(Tok::Ident) {
+        start -= 2;
+    }
+    let mut at = start.checked_sub(1)?;
+    if lx.kind(at) == Some(Tok::Colon) {
+        at = at.checked_sub(2)?;
+    }
+    (lx.kind(at) == Some(Tok::At)).then_some(name)
+}
+
+/// The names of the arguments given in the parentheses at `open`, before the token `end`.
+fn given_arguments(lx: &lexer::Lexed, src: &str, open: usize, end: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = open + 1;
+    while i < end {
+        match lx.kind(i) {
+            // Nested brackets are skipped: their arguments are not this call's.
+            Some(Tok::LParen | Tok::LBracket | Tok::LBrace) => {
+                i = lx.matching.get(i).copied().flatten().filter(|&c| c > i).map_or(end, |c| c + 1);
+                continue;
+            }
+            Some(Tok::Ident) if lx.kind(i + 1) == Some(Tok::Eq) && matches!(lx.kind(i - 1), Some(Tok::LParen | Tok::Comma)) => {
+                out.push(lx.text(src, i).to_owned());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Offers the arguments of the annotation whose parentheses open at `open` and that are not
+/// given yet; `end` is the token the completion is at.
+fn annotation_argument_completion(c: &mut Collector, open: usize, end: usize) {
+    let an = c.an;
+    let u = c.u;
+    let lx = &an.file(u).lexed;
+    let Some(name) = annotation_name(lx, open) else { return };
+    let Some(class) = targets_at(an, u, name).iter().find_map(|t| t.sym()) else { return };
+    if an.decl(class).kind != Kind::Annotation {
+        return;
+    }
+    let file = an.file(class.unit_id());
+    let src = &an.unit(class.unit_id()).text;
+    let given = given_arguments(lx, &an.unit(u).text, open, end);
+    for arg in annotation_arguments(file, class.decl_id()) {
+        let d = &file.decls[arg];
+        if !matches_prefix(&d.name, &c.prefix) || given.contains(&d.name) || !c.seen.insert(format!("{}|argument", d.name)) {
+            continue;
+        }
+        let ty = d.ty.as_ref().map(|t| t.display(src)).unwrap_or_default();
+        c.items.push(json!({
+            "label": d.name,
+            "kind": 10,
+            "detail": ty,
+            "sortText": format!("{}{}", Group::Local as u8, d.name),
+            "filterText": d.name,
+            "textEdit": { "range": c.range, "newText": format!("{} = ", escape_name(&d.name)) },
+            "insertTextFormat": 1,
+        }));
+    }
 }
 
 fn enclosing_open_paren(lx: &lexer::Lexed, tok: usize) -> Option<usize> {
@@ -709,6 +790,8 @@ struct Collector<'a, 'b> {
     paren_follows: bool,
     /// Only types (after `:` or `as`), so no calls get parentheses.
     types_only: bool,
+    /// Only annotation classes (after `@`).
+    annotations_only: bool,
     /// Whether some classes were left out, so the list is asked for again as more is typed.
     incomplete: bool,
     generation: u64,
@@ -743,6 +826,9 @@ impl Collector<'_, '_> {
             return;
         }
         if self.types_only && !(d.kind.is_class() || d.kind == Kind::TypeAlias) {
+            return;
+        }
+        if self.annotations_only && d.kind != Kind::Annotation {
             return;
         }
         let sig = signature(self.an, m);
@@ -834,7 +920,7 @@ impl Collector<'_, '_> {
     }
 
     fn keyword(&mut self, word: &str) {
-        if !matches_prefix(word, &self.prefix) || !self.seen.insert(format!("keyword|{word}")) {
+        if self.annotations_only || !matches_prefix(word, &self.prefix) || !self.seen.insert(format!("keyword|{word}")) {
             return;
         }
         self.items.push(json!({
@@ -846,7 +932,7 @@ impl Collector<'_, '_> {
     }
 
     fn local(&mut self, name: &str, detail: String) {
-        if !matches_prefix(name, &self.prefix) || !self.seen.insert(format!("{name}|local")) {
+        if self.annotations_only || !matches_prefix(name, &self.prefix) || !self.seen.insert(format!("{name}|local")) {
             return;
         }
         self.items.push(json!({
@@ -923,6 +1009,7 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
         range,
         paren_follows,
         types_only,
+        annotations_only: prev_kind == Some(Tok::At),
         incomplete: false,
         generation,
     };
@@ -936,11 +1023,20 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
         import_completion(&mut c, path.trim());
         return finish(c);
     }
+    // The arguments of an annotation: `@Name(arg = ...)`.
+    if let Some(prev) = prev.filter(|_| matches!(prev_kind, Some(Tok::LParen | Tok::Comma))) {
+        let open = if prev_kind == Some(Tok::LParen) { Some(prev) } else { enclosing_open_paren(lx, prev) };
+        if let Some(open) = open {
+            annotation_argument_completion(&mut c, open, prev + 1);
+        }
+    }
     match prev_kind {
         Some(Tok::Dot | Tok::SafeDot) => {
             let dot = prev.unwrap_or_default();
             let start = chain_start(src, lx, dot);
             if start < dot {
+                // A qualified annotation name, `@pkg.Name`, takes annotations only.
+                c.annotations_only = start > 0 && lx.kind(start - 1) == Some(Tok::At);
                 if let Some(receiver) = an.infer(u, start, dot) {
                     member_completion(&mut c, &receiver);
                 }
