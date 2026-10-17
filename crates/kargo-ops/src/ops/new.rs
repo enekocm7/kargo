@@ -80,7 +80,7 @@ impl NewOptions {
 
 /// Kotlin hard keywords plus Java keywords and literals: none of them can be a
 /// package segment in the generated Kotlin (or, with Lombok and Android, Java) code.
-const RESERVED_WORDS: &[&str] = &[
+pub(crate) const RESERVED_WORDS: &[&str] = &[
     "abstract",
     "as",
     "assert",
@@ -147,7 +147,7 @@ const RESERVED_WORDS: &[&str] = &[
 ];
 
 /// Escapes a package segment that is a reserved word by appending `_`.
-fn package_segment(segment: &str) -> String {
+pub(crate) fn package_segment(segment: &str) -> String {
     if RESERVED_WORDS.contains(&segment) { format!("{segment}_") } else { segment.to_owned() }
 }
 

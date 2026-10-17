@@ -14,6 +14,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use crate::env::EnvOptions;
+use crate::warnings;
 use crate::web;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::mainclass::find_entry_point_in;
@@ -174,8 +175,15 @@ fn bin_hint(ctx: &BuildContext) -> String {
 pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
     validate(ctx, target, opts)?;
-    // Fails before anything builds when a required variable is not set.
-    let project_env = ctx.project_env(&opts.env)?;
+    // Fails before anything builds when a required variable is not set. Android and Wasm browser
+    // apps get no environment, so they neither need nor read it.
+    let project_env = if ctx.program_env_applies(target) {
+        let env = ctx.project_env(&opts.env)?;
+        warnings::emit(ctx.shell(), ctx.project, ctx.ws, env.tracked_secret_warnings(ctx.ws.root()));
+        env.for_child()
+    } else {
+        Vec::new()
+    };
     // `--main` and `--example` on Kotlin/Native link their own executable instead of the project's.
     let separate_native = target == TargetKind::Native && matches!(opts.program, Program::Main(_) | Program::Example(_));
     let results = if separate_native {
@@ -225,7 +233,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
             return crate::gradle::run(ctx, &opts.flavors);
         }
     };
-    cmd.args(&opts.args).current_dir(ctx.ws.root()).envs(project_env.for_child());
+    cmd.args(&opts.args).current_dir(ctx.ws.root()).envs(project_env);
     for arg in &opts.args {
         label.push(' ');
         label.push_str(&process::quote_for_display(arg));
@@ -343,7 +351,7 @@ fn native_artifact(ctx: &BuildContext, results: &BuildResults, program: &Program
     }
     // The project's own executable is skipped when its `main` is ambiguous; say why.
     let native = ctx.ws.manifest().targets.native.as_ref().context("the Native target is not enabled")?;
-    let reason = native_entry_point(native, &sources(ctx, TargetKind::Native, false, &["kt"])).err().map(|e| e.to_string());
+    let reason = native_entry_point(native, &sources(ctx, TargetKind::Native, false, &["kt"])?).err().map(|e| e.to_string());
     bail!("could not determine the entry point: {}{}", reason.unwrap_or_else(|| "no executable was built".to_owned()), bin_hint(ctx))
 }
 
@@ -357,7 +365,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let host = Host::current()?.konan_target.to_owned();
     let setup = ctx.setup(TargetKind::Native)?;
-    let main_sources = sources(ctx, TargetKind::Native, false, &["kt"]);
+    let main_sources = sources(ctx, TargetKind::Native, false, &["kt"])?;
     let example = match program {
         Program::Example(name) => {
             let file = example_file(ctx, name)?;

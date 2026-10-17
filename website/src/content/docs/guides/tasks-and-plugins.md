@@ -14,7 +14,7 @@ Kargo has four extension points:
 
 ## Tasks
 
-A package's tasks start with its [environment variables](../environment/): the ones from `[env]` and the `.env` files, then the task's own `env`, which wins over them.
+A package's tasks start with its [environment variables](../environment/): the ones from `[env]` and the `.env` files, then the task's own `env`, which wins over them. `--env-file` picks other `.env` files for a task, as in `kargo task --env-file .env.staging deploy`.
 
 ```toml title="kargo.toml"
 [tasks]

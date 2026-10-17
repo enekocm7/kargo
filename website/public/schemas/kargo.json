@@ -526,9 +526,36 @@
     },
     "hook": { "enum": ["pre-build", "post-build", "pre-test", "post-test", "pre-run", "post-package"] },
     "env": {
-      "description": "Variables for the program: a string, or a table with `value`, `force`, `relative` or `required`.",
+      "description": "Variables for the program: a string, or a table with `value`, `force`, `relative` or `required`. Also `env-files` and `expose`.",
       "type": "object",
-      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "propertyNames": { "pattern": "^(env-files|expose|[A-Za-z_][A-Za-z0-9_]*)$" },
+      "properties": {
+        "env-files": {
+          "description": "More `.env` files, relative to the package root, read after the standard ones. `--no-env-file` skips them.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expose": {
+          "description": "Variables compiled into a generated `BuildConfig` object, for the JVM, Native and Wasm (Node.js) targets.",
+          "anyOf": [
+            { "$ref": "#/definitions/env-var" },
+            { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" } }
+          ]
+        }
+      },
+      "additionalProperties": { "$ref": "#/definitions/env-var" }
+    },
+    "profile-env": {
+      "description": "Variables that replace `[env]` for this profile, variable by variable. Also `env-files`.",
+      "type": "object",
+      "propertyNames": { "pattern": "^(env-files|[A-Za-z_][A-Za-z0-9_]*)$" },
+      "properties": {
+        "env-files": {
+          "description": "More `.env` files for this profile, relative to the package root.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
       "additionalProperties": { "$ref": "#/definitions/env-var" }
     },
     "env-var": {
@@ -555,7 +582,7 @@
         "debug": { "description": "Include debug information.", "type": "boolean" },
         "optimize": { "description": "Optimize (mainly Native and Wasm).", "type": "boolean" },
         "compiler-args": { "description": "Extra compiler arguments for this profile.", "type": "array", "items": { "type": "string" } },
-        "env": { "$ref": "#/definitions/env", "description": "Variables that replace `[env]` for this profile, variable by variable." }
+        "env": { "$ref": "#/definitions/profile-env" }
       }
     }
   }

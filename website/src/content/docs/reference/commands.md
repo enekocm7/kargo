@@ -559,17 +559,18 @@ Delete everything in `target/` except the build-directory lock, `target/.kargo-l
 Show the environment `kargo run` and `kargo test` start programs with: each variable, the source that set it (`shell`, `[env]`, `[profile.<name>.env]` or a `.env` file with its line number) and its value.
 
 ```sh
-kargo env [--release] [--show-values] [--env-file <path>] [--no-env-file] [-p <name>]
+kargo env [--release] [--show-values] [--check] [--env-file <path>] [--no-env-file] [-p <name>]
 ```
 
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Show the release profile's variables |
 | `--show-values` | Print the values. Without it they show as `********`, because they often hold secrets |
+| `--check` | Fail (exit code 101) listing each required variable that is not set, and each key of `.env.example` that neither the shell nor a source sets. For CI |
 | `--env-file <path>`, `--no-env-file` | As for `kargo run` |
 | `-p, --package <name>` | The package, at the root of a workspace with several members |
 
-A required variable that nothing sets is listed as `missing (required)`, and the command fails with exit code 101. See [Environment variables](../../guides/environment/#check-the-result-with-kargo-env).
+A required variable that nothing sets is listed as `missing (required)`; the listing itself succeeds, and `--check` makes it a failure. See [Environment variables](../../guides/environment/#check-the-result-with-kargo-env).
 
 ## `kargo task`
 
@@ -578,9 +579,11 @@ List tasks, or run one. Extra arguments are appended to the task's last command.
 ```sh
 kargo task               # list
 kargo task --list        # the same
-kargo task <name> [args]
+kargo task [--env-file <path>] [--no-env-file] <name> [args]
 kargo <name> [args]      # shorthand
 ```
+
+A package task starts with the [project environment](../../guides/environment/): `--env-file <path>` (repeatable) and `--no-env-file` choose its `.env` files, as they do for `kargo run`. They can come before the name or right after it, where they are taken from the front of the arguments: `kargo deploy --env-file .env.staging --dry-run` passes only `--dry-run` to the task. Workspace tasks run at the root and get no project environment.
 
 In a workspace, a member's directory runs that member's tasks, and the root runs a `[workspace.tasks]` task; a name that only members define runs in every member that has it, in dependency order. See [Workspace tasks](../../guides/workspaces/#tasks-and-plugins).
 

@@ -544,6 +544,9 @@ enum Command {
         /// Print the values instead of hiding them
         #[arg(long)]
         show_values: bool,
+        /// Fail when a required variable is unset or a key of .env.example is not set (for CI)
+        #[arg(long)]
+        check: bool,
         /// Show the release profile's variables
         #[arg(short, long)]
         release: bool,
@@ -751,6 +754,8 @@ sources and javadoc jars, checksums and, when signing is on, GnuPG signatures. T
     },
     /// Run a task from [tasks], or list tasks
     Task {
+        #[command(flatten)]
+        env: EnvArgs,
         /// Task name (omit to list tasks)
         #[arg(add = ArgValueCandidates::new(complete::tasks))]
         name: Option<String>,
@@ -1177,10 +1182,38 @@ fn build_packages<T: Send>(
 }
 
 /// The environment of a package's tasks: its variables from `[env]` and the `.env` files, then Kargo's own.
-fn task_env(ws: &Workspace) -> Result<Vec<(String, String)>> {
-    let mut env = kargo_ops::env::resolve(ws, "dev", &EnvOptions::default())?.ensure_set()?.for_child();
+fn task_env(shell: &Shell, project: &Project, ws: &Workspace, opts: &EnvOptions) -> Result<Vec<(String, String)>> {
+    let resolved = kargo_ops::env::resolve(ws, "dev", opts)?;
+    warnings::emit(shell, project, ws, resolved.tracked_secret_warnings(ws.root()));
+    let mut env = resolved.ensure_set()?.for_child();
     env.extend(kargo_ops::plugins::base_env(ws, "dev"));
     Ok(env)
+}
+
+/// Takes `--env-file <path>`, `--env-file=<path>` and `--no-env-file` from the front of a task's
+/// arguments, so `kargo deploy --env-file .env.staging` works like `kargo task --env-file
+/// .env.staging deploy`. The first other argument, and everything after it, belongs to the task.
+fn split_task_args(mut env: EnvOptions, args: &[String]) -> Result<(EnvOptions, &[String])> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        match arg.as_str() {
+            "--no-env-file" => env.no_files = true,
+            "--env-file" => {
+                let Some(path) = args.get(at + 1) else { bail!("`--env-file` needs a path") };
+                env.files.push(PathBuf::from(path));
+                at += 1;
+            }
+            _ => match arg.strip_prefix("--env-file=") {
+                Some(path) => env.files.push(PathBuf::from(path)),
+                None => break,
+            },
+        }
+        at += 1;
+    }
+    if env.no_files && !env.files.is_empty() {
+        bail!("`--env-file` and `--no-env-file` cannot be used together");
+    }
+    Ok((env, &args[at..]))
 }
 
 fn profile(release: bool) -> ProfileKind {
@@ -1360,10 +1393,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 Ok(FAILURE)
             }
         }
-        Command::Env { show_values, release, env, package } => {
+        Command::Env { show_values, check, release, env, package } => {
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo env`")?;
-            ops::env::show(shell, project.package(index), profile(release), &env.options(), show_values)?;
+            ops::env::show(shell, &project, index, profile(release), &env.options(), show_values, check)?;
             Ok(0)
         }
         Command::Doc { targets, open, packages } => {
@@ -1673,7 +1706,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Task { name, list: _, args } => {
+        Command::Task { env, name, list: _, args } => {
             let project = load_project(global)?;
             match name {
                 None => {
@@ -1681,7 +1714,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     Ok(0)
                 }
                 Some(name) => {
-                    if !run_task(shell, &project, &name, &args)? {
+                    if !run_task(shell, &project, &name, &args, &env.options())? {
                         bail!("no task named `{name}`; available tasks: {}", task_names(&project).join(", "));
                     }
                     Ok(0)
@@ -1839,13 +1872,14 @@ fn task_package(project: &Project) -> Option<usize> {
 /// Runs the task `name`: the current package's, else the workspace's (`[workspace.tasks]`, at the
 /// workspace root), else, at the root of a workspace, the task of every member that has one (in
 /// dependency order, each in its member's directory). Returns `false` when no task has that name.
-fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String]) -> Result<bool> {
+fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String], env: &EnvOptions) -> Result<bool> {
+    let (env, args) = split_task_args(env.clone(), args)?;
     let package = task_package(project);
     if let Some(index) = package {
         let ws = project.package(index);
         if ws.manifest().tasks.contains_key(name) {
-            let env = task_env(ws)?;
-            kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)?;
+            let vars = task_env(shell, project, ws, &env)?;
+            kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &vars)?;
             return Ok(true);
         }
     }
@@ -1865,8 +1899,8 @@ fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String]) -> Re
         .collect();
     for &index in &members {
         let ws = project.package(index);
-        let env = task_env(ws)?;
-        kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)
+        let vars = task_env(shell, project, ws, &env)?;
+        kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &vars)
             .with_context(|| format!("task `{name}` of `{}` failed", ws.name()))?;
     }
     Ok(!members.is_empty())
@@ -2117,7 +2151,7 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u
     let (name, args) = argv.split_first().context("missing subcommand")?;
     let project = load_project(global).ok();
     if let Some(project) = &project
-        && run_task(config.shell(), project, name, args)?
+        && run_task(config.shell(), project, name, args, &EnvOptions::default())?
     {
         return Ok(0);
     }

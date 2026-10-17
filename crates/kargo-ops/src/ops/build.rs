@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::context::{BuildContext, TargetSetup};
 use super::local::{self, LocalTarget};
-use crate::env::EnvOptions;
+use crate::env::{EnvOptions, build_config_package, build_config_source};
 use crate::warnings;
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -98,11 +98,43 @@ pub fn select_targets(ctx: &BuildContext, requested: &[TargetKind]) -> Result<Ve
     Ok(requested.to_vec())
 }
 
-pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: &[&str]) -> SourceSet {
+pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: &[&str]) -> Result<SourceSet> {
     let ws = ctx.ws;
     let (common, platform) =
         if tests { (ws.common_tests(), ws.target_tests(target)) } else { (ws.common_sources(), ws.target_sources(target)) };
-    SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str())
+    let mut set = SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str());
+    if !tests {
+        add_build_config(ctx, target, &mut set)?;
+    }
+    Ok(set)
+}
+
+/// Writes the `BuildConfig` object of `[env] expose` into the build directory and adds it to the
+/// main sources of `target`, where the program gets the environment (see `program_env_applies`).
+/// The file is rewritten only when its contents change, so unchanged builds stay incremental.
+fn add_build_config(ctx: &BuildContext, target: TargetKind, sources: &mut SourceSet) -> Result<()> {
+    let manifest = ctx.ws.manifest();
+    if manifest.env.expose.is_empty() || !ctx.program_env_applies(target) {
+        return Ok(());
+    }
+    let env = ctx.resolve_env(&EnvOptions::default())?;
+    let package = build_config_package(manifest.package.group.as_deref(), &manifest.package.name);
+    let contents = build_config_source(&package, &manifest.env.expose, &env);
+    let path = ctx.ws.output_dir(ctx.profile, target).join("generated").join("env").join("BuildConfig.kt");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(contents.as_str()) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+        std::fs::write(&path, &contents).with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    // As with KSP and npm declarations: the platform fragment, unless that would make a `src/`-only
+    // compilation multiplatform.
+    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
+        sources.platform.push(path);
+    } else {
+        sources.common.push(path);
+    }
+    Ok(())
 }
 
 /// Warns about sources that are missing for `targets` or that Kargo ignores. Call it after the
@@ -154,7 +186,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
 /// The environment of build hooks and plugins: the project's variables, then Kargo's own.
 /// `opts` picks the `.env` files, as `--env-file` and `--no-env-file` do for `kargo run`.
 pub fn hook_env(ctx: &BuildContext, opts: &EnvOptions) -> Result<Vec<(String, String)>> {
-    let mut env = ctx.project_env(opts)?.for_child();
+    let mut env = ctx.resolve_env(opts)?.for_child();
     env.extend(crate::plugins::base_env(ctx.ws, ctx.profile.name()));
     // Hooks run while this process holds the build lock; a `kargo` they call must not wait on it.
     if let Some(lock) = ctx.build_lock_path() {
@@ -340,7 +372,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     let classes = out.join("classes");
     let jvm_target = jvm.target_for(jdk.version)?;
-    let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"]);
+    let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"])?;
     let mut resources = vec![ctx.ws.resources()];
     let ksp = JvmKspUnit {
         name: &manifest.package.name,
@@ -486,7 +518,7 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
     let libraries = libraries?;
     let profile = ctx.ws.profile(ctx.profile);
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
-    let mut srcs = sources(ctx, TargetKind::Wasm, false, &["kt"]);
+    let mut srcs = sources(ctx, TargetKind::Wasm, false, &["kt"])?;
     add_npm_declarations(ctx, &libraries, &mut srcs, &mut kotlin_args)?;
     let unit = WasmCompilation {
         name: wasm.module_name(&manifest.package),
@@ -579,7 +611,7 @@ pub fn native_libraries(ctx: &BuildContext, setup: &TargetSetup, konan_target: &
 pub fn native_klib(ctx: &BuildContext, konan_target: &str) -> Result<Option<PathBuf>> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
-    let srcs = sources(ctx, TargetKind::Native, false, &["kt"]);
+    let srcs = sources(ctx, TargetKind::Native, false, &["kt"])?;
     if srcs.kotlin_files().is_empty() {
         return Ok(None);
     }
@@ -740,7 +772,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let setup = ctx.setup(TargetKind::Native)?;
-    let srcs = sources(ctx, TargetKind::Native, false, &["kt"]);
+    let srcs = sources(ctx, TargetKind::Native, false, &["kt"])?;
     if srcs.kotlin_files().is_empty() {
         return Ok(Vec::new());
     }

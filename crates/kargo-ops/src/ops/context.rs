@@ -12,7 +12,7 @@ use crate::env::{EnvOptions, ProjectEnv};
 use crate::lockfile::Lockfile;
 use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
-use kargo_manifest::{Dependency, Scope, TargetKind};
+use kargo_manifest::{Dependency, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::{DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
@@ -331,10 +331,26 @@ impl<'a> BuildContext<'a> {
         self.config.shell()
     }
 
-    /// The environment of the package for this profile: `[env]`, the `.env` files and the shell.
-    /// Fails when a required variable is not set.
+    /// The environment of the package for this profile, for a command that starts programs or
+    /// tasks: `[env]`, the `.env` files and the shell. Fails when a required variable is not set.
     pub fn project_env(&self, opts: &EnvOptions) -> Result<ProjectEnv> {
-        crate::env::resolve(self.ws, self.profile.name(), opts)?.ensure_set()
+        self.resolve_env(opts)?.ensure_set()
+    }
+
+    /// The environment of the package for this profile, with unset required variables left in
+    /// [`ProjectEnv::missing`] for the caller to judge. Builds and their hooks use this.
+    pub fn resolve_env(&self, opts: &EnvOptions) -> Result<ProjectEnv> {
+        crate::env::resolve(self.ws, self.profile.name(), opts)
+    }
+
+    /// Whether the programs of `target` start with the project environment. Android installs an
+    /// app that gets no environment, and a Wasm browser app runs in a browser, which can't read it.
+    pub fn program_env_applies(&self, target: TargetKind) -> bool {
+        match target {
+            TargetKind::Jvm | TargetKind::Native => true,
+            TargetKind::Wasm => self.ws.manifest().targets.wasm.as_ref().is_none_or(|w| w.environment != WasmEnvironment::Browser),
+            TargetKind::Android => false,
+        }
     }
 
     pub fn jdk(&self) -> Result<&Jdk> {

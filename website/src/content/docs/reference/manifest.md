@@ -497,9 +497,16 @@ The variables the program gets with `kargo run`, `kargo test`, tasks and hooks. 
 | `value` | none | The value. Required unless `required = true`, and not allowed with it |
 | `force` | `false` | Use `value` even when the shell or a `.env` file sets the variable |
 | `relative` | `false` | Resolve `value` against the package's directory. Needs a `value` |
-| `required` | `false` | Fail before anything builds unless the shell or a `.env` file sets the variable |
+| `required` | `false` | Fail `kargo run`, `kargo test` and `kargo task` before anything runs unless the shell or a `.env` file sets it. Builds don't check it |
 
-Names are letters, digits and `_`, and don't start with a digit. `.env` files and the precedence between sources are described in [Environment variables](../../guides/environment/).
+Names are letters, digits and `_`, and don't start with a digit. Two keys are not variables; they hold arrays:
+
+| Key | Meaning |
+|---|---|
+| `env-files` | More `.env` files, relative to the package root, read after the standard `.env` files and before `--env-file`. A missing one is an error |
+| `expose` | Variables compiled into a generated `BuildConfig` object in the package, one `const val` for each one that is set. Only in `[env]`. Unset ones become a nullable `null` property. Applies to the JVM, Native and Wasm (Node.js) targets, not Android or Wasm browser apps |
+
+`.env` files and the precedence between sources are described in [Environment variables](../../guides/environment/).
 
 ## `[workspace]`
 
@@ -581,4 +588,4 @@ compiler-args = ["-Xno-call-assertions"]
 | `debug` | `true` | `false` | Include debug information |
 | `optimize` | `false` | `true` | Optimize (mainly affects Native and Wasm; for Wasm it removes dead code, see [Release builds](../../guides/wasm/#release-builds)) |
 | `compiler-args` | `[]` | `[]` | Extra compiler arguments for this profile |
-| `env` | `{}` | `{}` | `[profile.<name>.env]`: variables that replace `[env]` for this profile, one by one. Same format as `[env]` |
+| `env` | `{}` | `{}` | `[profile.<name>.env]`: variables that replace `[env]` for this profile, one by one, and an `env-files` list of its own. Same format as `[env]`, but without `expose` |

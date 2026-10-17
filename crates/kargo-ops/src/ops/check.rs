@@ -80,7 +80,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
     let fp_dir = out.join(".fingerprint");
 
     let libraries = wasm_libraries(ctx, &setup, false)?;
-    let mut main_sources = sources(ctx, TargetKind::Wasm, false, &["kt"]);
+    let mut main_sources = sources(ctx, TargetKind::Wasm, false, &["kt"])?;
     add_npm_declarations(ctx, &libraries, &mut main_sources, &mut kotlin_args)?;
     let main = WasmCompilation {
         name: wasm.module_name(&manifest.package),
@@ -98,7 +98,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
     };
     main.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ""))?;
 
-    let test_sources = sources(ctx, TargetKind::Wasm, true, &["kt"]);
+    let test_sources = sources(ctx, TargetKind::Wasm, true, &["kt"])?;
     if !tests || test_sources.kotlin_files().is_empty() {
         return Ok(());
     }
@@ -125,8 +125,8 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
 fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
-    let main_sources = sources(ctx, TargetKind::Native, false, &["kt"]);
-    let test_sources = sources(ctx, TargetKind::Native, true, &["kt"]);
+    let main_sources = sources(ctx, TargetKind::Native, false, &["kt"])?;
+    let test_sources = sources(ctx, TargetKind::Native, true, &["kt"])?;
     if main_sources.kotlin_files().is_empty() && (!tests || test_sources.kotlin_files().is_empty()) {
         return Ok(());
     }
