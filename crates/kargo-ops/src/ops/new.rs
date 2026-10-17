@@ -80,7 +80,7 @@ impl NewOptions {
 
 /// Kotlin hard keywords plus Java keywords and literals: none of them can be a
 /// package segment in the generated Kotlin (or, with Lombok and Android, Java) code.
-const RESERVED_WORDS: &[&str] = &[
+pub(crate) const RESERVED_WORDS: &[&str] = &[
     "abstract",
     "as",
     "assert",
@@ -147,7 +147,7 @@ const RESERVED_WORDS: &[&str] = &[
 ];
 
 /// Escapes a package segment that is a reserved word by appending `_`.
-fn package_segment(segment: &str) -> String {
+pub(crate) fn package_segment(segment: &str) -> String {
     if RESERVED_WORDS.contains(&segment) { format!("{segment}_") } else { segment.to_owned() }
 }
 
@@ -219,7 +219,8 @@ pub fn manifest(opts: &NewOptions) -> String {
 
 fn gitignore() -> String {
     // `kargo lsp` writes the last three for Kotlin language servers; they hold local paths.
-    "/target\n/.kotlin\n/.gradle\n*.iml\n.idea/\n/workspace.json\n/kls-classpath\n/kls-classpath.bat\n".to_owned()
+    // The `.env.local` files hold values for one machine, often secrets, so they stay out of git.
+    "/target\n/.kotlin\n/.gradle\n*.iml\n.idea/\n/workspace.json\n/kls-classpath\n/kls-classpath.bat\n.env.local\n.env.*.local\n".to_owned()
 }
 
 /// Whether `src/Main.kt` comes from a framework's own template rather than the plain one.

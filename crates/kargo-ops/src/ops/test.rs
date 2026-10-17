@@ -17,6 +17,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use crate::builtins::{JUNIT_MIN_JDK, JUNIT_VERSION};
+use crate::env::EnvOptions;
 use crate::warnings;
 use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -36,6 +37,8 @@ use kargo_util::process;
 #[derive(Debug, Clone, Default)]
 pub struct TestOptions {
     pub build: BuildOptions,
+    /// The `.env` files the tests' environment is read from (`--env-file`, `--no-env-file`).
+    pub env: EnvOptions,
     /// Only run tests whose name contains this string.
     pub filter: Option<String>,
     /// Compile tests without running them.
@@ -91,7 +94,13 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         anyhow::bail!("`--debug` runs the JVM tests under a debugger; select the JVM target with `-t jvm`");
     }
     note_jvm_only_options(ctx, &targets, opts);
-    let env = hook_env(ctx);
+    // Fails before anything compiles when a required variable is not set, unless only Android or
+    // Wasm browser tests run, which get no environment.
+    if targets.iter().any(|&target| ctx.program_env_applies(target)) {
+        let env = ctx.project_env(&opts.env)?;
+        warnings::emit(ctx.shell(), ctx.project, ctx.ws, env.tracked_secret_warnings(ctx.ws.root()));
+    }
+    let env = hook_env(ctx, &opts.env)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
     // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, warnings::ignored_files(ctx.ws));
@@ -239,7 +248,7 @@ fn no_tests(ctx: &BuildContext, target: TargetKind) -> TestRun {
 
 fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     super::local::test_fixtures_unsupported(ctx, TargetKind::Android)?;
-    if sources(ctx, TargetKind::Android, true, &["kt", "java"]).is_empty() {
+    if sources(ctx, TargetKind::Android, true, &["kt", "java"])?.is_empty() {
         no_tests(ctx, TargetKind::Android);
         return Ok(true);
     }
@@ -463,7 +472,9 @@ fn junit_command(
             cmd.arg("--scan-class-path").arg(&tests.classes);
         }
     }
-    cmd.args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes))).current_dir(ctx.ws.root());
+    cmd.args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes)))
+        .current_dir(ctx.ws.root())
+        .envs(ctx.project_env(&opts.env)?.for_child());
     match mode {
         JunitMode::Run => {
             cmd.arg("--fail-if-no-tests");
@@ -617,7 +628,7 @@ pub(crate) struct JvmTestClasses {
 /// Returns `None` when there are no test sources.
 pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &str) -> Result<Option<JvmTestClasses>> {
     let manifest = ctx.ws.manifest();
-    let test_sources = sources(ctx, TargetKind::Jvm, true, &["kt", "java"]);
+    let test_sources = sources(ctx, TargetKind::Jvm, true, &["kt", "java"])?;
     if test_sources.is_empty() {
         return Ok(None);
     }
@@ -1056,7 +1067,7 @@ fn file_url(path: &Path) -> String {
 fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
-    let tests = sources(ctx, TargetKind::Wasm, true, &["kt"]);
+    let tests = sources(ctx, TargetKind::Wasm, true, &["kt"])?;
     if tests.kotlin_files().is_empty() {
         return Ok(no_tests(ctx, TargetKind::Wasm));
     }
@@ -1107,7 +1118,10 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         ctx.shell().warn("test filters are not supported for the wasm target; running all tests");
     }
     let mut cmd = Command::new(kargo_toolchain::node()?);
-    cmd.arg("-e").arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path()))).current_dir(ctx.ws.root());
+    cmd.arg("-e")
+        .arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path())))
+        .current_dir(ctx.ws.root())
+        .envs(ctx.project_env(&opts.env)?.for_child());
     Ok(TestRun::Reported(cmd, "Wasm tests (Node.js)"))
 }
 
@@ -1140,7 +1154,7 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         return Ok(TestRun::Done(true));
     }
     let mut cmd = Command::new(executable);
-    cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root());
+    cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child());
     if let Some(filter) = &opts.filter {
         cmd.arg(format!("--ktest_filter=*{filter}*"));
     }
@@ -1151,7 +1165,7 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
 /// (after saying why) when there is nothing to run.
 fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     let manifest = ctx.ws.manifest();
-    let tests = sources(ctx, TargetKind::Native, true, &["kt"]);
+    let tests = sources(ctx, TargetKind::Native, true, &["kt"])?;
     if tests.kotlin_files().is_empty() {
         no_tests(ctx, TargetKind::Native);
         return Ok(None);
@@ -1170,7 +1184,7 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(ctx.profile);
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
-    let mut all = sources(ctx, TargetKind::Native, false, &["kt"]);
+    let mut all = sources(ctx, TargetKind::Native, false, &["kt"])?;
     all.extend(&tests);
     let name = format!("{}-test", manifest.package.name);
     let unit = NativeCompilation {
@@ -1242,7 +1256,7 @@ fn list(ctx: &BuildContext, opts: &TestOptions, format: ListFormat) -> Result<()
     let mut out = anstream::stdout();
     for (&target, tests) in targets.iter().zip(listed) {
         let mut tests = tests?;
-        let test_sources = sources(ctx, target, true, &["kt", "java"]);
+        let test_sources = sources(ctx, target, true, &["kt", "java"])?;
         locate_tests(&mut tests, &test_sources.all().cloned().collect::<Vec<_>>());
         for test in &tests {
             match format {
@@ -1311,7 +1325,7 @@ fn list_native(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<ListedTest>
         return Ok(Vec::new());
     };
     let mut cmd = Command::new(&executable);
-    cmd.arg("--ktest_list_tests").current_dir(ctx.ws.root()).stdin(Stdio::null());
+    cmd.arg("--ktest_list_tests").current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child()).stdin(Stdio::null());
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let output = cmd.output().with_context(|| format!("failed to start {}", executable.display()))?;
     if !output.status.success() {

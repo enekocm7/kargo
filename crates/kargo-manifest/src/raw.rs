@@ -34,6 +34,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     tasks: toml::Table,
     #[serde(default)]
+    env: toml::Table,
+    #[serde(default)]
     profile: RawProfiles,
     #[serde(default)]
     toolchain: RawToolchain,
@@ -541,10 +543,13 @@ struct RawProfile {
     optimize: Option<bool>,
     #[serde(default)]
     compiler_args: Vec<String>,
+    #[serde(default)]
+    env: toml::Table,
 }
 
 impl RawProfile {
-    fn apply(self, mut base: Profile) -> Profile {
+    /// `name` is the profile's name in the manifest, for error messages.
+    fn apply(self, mut base: Profile, name: &str) -> Result<Profile> {
         if let Some(d) = self.debug {
             base.debug = d;
         }
@@ -552,8 +557,93 @@ impl RawProfile {
             base.optimize = o;
         }
         base.compiler_args = self.compiler_args;
-        base
+        base.env = parse_env(&self.env, &format!("[profile.{name}.env]"), false)?;
+        Ok(base)
     }
+}
+
+/// The fields of a table-form variable in `[env]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawEnvVar {
+    value: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    relative: bool,
+    #[serde(default)]
+    required: bool,
+}
+
+/// Parses `[env]` (`base` is true) or `[profile.<name>.env]`. A variable is a string, number or
+/// boolean, or a table with `value`, `force`, `relative` and `required`. `env-files` and, in
+/// `[env]`, `expose` are arrays of strings; a string named `expose` is still a variable.
+fn parse_env(table: &toml::Table, section: &str, base: bool) -> Result<EnvTable> {
+    let mut env = EnvTable::default();
+    for (name, value) in table {
+        match (name.as_str(), value) {
+            ("env-files", value) => env.files = parse_string_list(value, &format!("{section}: `env-files`"))?,
+            ("expose", Value::Array(_)) if base => {
+                let names = parse_string_list(value, &format!("{section}: `expose`"))?;
+                for (at, name) in names.iter().enumerate() {
+                    if !is_env_name(name) {
+                        bail!("{section}: `expose` lists `{name}`, which is not a valid variable name");
+                    }
+                    if names[..at].contains(name) {
+                        bail!("{section}: `expose` lists `{name}` more than once");
+                    }
+                }
+                env.expose = names;
+            }
+            ("expose", Value::Array(_)) => bail!("{section}: `expose` belongs in [env]; it is the only table that generates BuildConfig"),
+            _ => {
+                let var = parse_env_var(name, value, section)?;
+                env.vars.insert(name.clone(), var);
+            }
+        }
+    }
+    Ok(env)
+}
+
+/// An array of non-empty strings, such as `env-files`.
+fn parse_string_list(value: &Value, what: &str) -> Result<Vec<String>> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(s) if !s.is_empty() => Ok(s.clone()),
+                _ => bail!("{what} must be an array of non-empty strings"),
+            })
+            .collect(),
+        _ => bail!("{what} must be an array of non-empty strings"),
+    }
+}
+
+/// One variable of `[env]` or `[profile.<name>.env]`.
+fn parse_env_var(name: &str, value: &Value, section: &str) -> Result<EnvVar> {
+    if !is_env_name(name) {
+        bail!("{section}: invalid variable name `{name}` (use letters, digits and `_`, not starting with a digit)");
+    }
+    Ok(match value {
+        Value::String(_) | Value::Integer(_) | Value::Boolean(_) => {
+            let value = match value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            EnvVar { value: Some(value), ..Default::default() }
+        }
+        Value::Table(_) => {
+            let raw: RawEnvVar = value.clone().try_into().with_context(|| format!("{section}: invalid `{name}`"))?;
+            match (&raw.value, raw.required) {
+                (None, false) => bail!("{section}: `{name}` needs a `value`, or `required = true`"),
+                (None, true) if raw.relative => bail!("{section}: `{name}` sets `relative` without a `value`"),
+                (Some(_), true) => bail!("{section}: `{name}` sets both `value` and `required`; a required variable has no default"),
+                _ => {}
+            }
+            EnvVar { value: raw.value, force: raw.force, relative: raw.relative, required: raw.required }
+        }
+        _ => bail!("{section}: `{name}` must be a string or a table"),
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1406,8 +1496,9 @@ impl RawManifest {
             compiler_plugins,
             process_plugins,
             tasks,
-            dev_profile: self.profile.dev.unwrap_or_default().apply(Profile::dev()),
-            release_profile: self.profile.release.unwrap_or_default().apply(Profile::release()),
+            env: parse_env(&self.env, "[env]", true)?,
+            dev_profile: self.profile.dev.unwrap_or_default().apply(Profile::dev(), "dev")?,
+            release_profile: self.profile.release.unwrap_or_default().apply(Profile::release(), "release")?,
         })
     }
 }

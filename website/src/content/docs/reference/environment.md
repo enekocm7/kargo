@@ -3,6 +3,8 @@ title: Environment variables
 description: Environment variables Kargo reads and sets.
 ---
 
+Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml or in `.env` files, are not listed here. They are described in [Environment variables](../../guides/environment/). This page lists the variables Kargo itself reads.
+
 ## Variables Kargo reads
 
 | Variable | Purpose |

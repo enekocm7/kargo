@@ -197,7 +197,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             let jvm_target = jdk.and_then(|jdk| jvm.target_for(jdk.version).ok()).unwrap_or_else(|| jvm.jvm_target.clone());
             let main_class = match &jvm.main_class {
                 Some(main) => Some(main.clone()),
-                None => find_jvm_main_class(&sources(ctx, kind, false, &["kt", "java"]).kotlin_files(), "").ok(),
+                None => find_jvm_main_class(&sources(ctx, kind, false, &["kt", "java"])?.kotlin_files(), "").ok(),
             };
             let output = ws.output_dir(ctx.profile, kind);
             out["resource-roots"] = json!(roots(&[ws.resources()]));
@@ -221,7 +221,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         }
         TargetKind::Native => {
             let native = m.targets.native.as_ref().expect("the Native target is enabled");
-            let entry_point = native_entry_point(native, &sources(ctx, kind, false, &["kt"])).ok().flatten();
+            let entry_point = native_entry_point(native, &sources(ctx, kind, false, &["kt"])?).ok().flatten();
             out["native-kind"] = json!(native.kind.as_str());
             out["platforms"] = json!(native_platforms(ctx)?);
             out["entry-point"] = json!(entry_point);

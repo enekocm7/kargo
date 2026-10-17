@@ -16,6 +16,7 @@ use super::build::{
     native_resolution, warn_about_sources, wasm_resolution,
 };
 use super::context::{BuildContext, TargetSetup};
+use crate::env::EnvOptions;
 use crate::publication::{
     DependencyScope, PlatformKind, PlatformPublication, Publication, PublishedDependency, StagedModule, is_multiplatform, platform_module,
 };
@@ -145,7 +146,7 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     // Fail on a missing key before compiling anything.
     let signer = if sign { Some(Signer::from_env(ctx.shell())?) } else { None };
 
-    let env = hook_env(ctx);
+    let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ws, Hook::PreBuild, &env)?;
     warn_about_sources(ctx, &targets);
     let work = ws.profile_dir(ctx.profile).join("publish");

@@ -21,6 +21,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
+use crate::env::EnvOptions;
 use kargo_compiler::common_kotlin_args;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::wasm::WasmCompilation;
@@ -44,7 +45,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.build.targets)?;
     // Pre-build hooks may generate sources, so they run before checking.
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx))?;
+    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx, &EnvOptions::default())?)?;
     warn_about_sources(ctx, &targets);
 
     let checked = super::parallel_targets(&targets, |target| match target {
@@ -79,7 +80,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
     let fp_dir = out.join(".fingerprint");
 
     let libraries = wasm_libraries(ctx, &setup, false)?;
-    let mut main_sources = sources(ctx, TargetKind::Wasm, false, &["kt"]);
+    let mut main_sources = sources(ctx, TargetKind::Wasm, false, &["kt"])?;
     add_npm_declarations(ctx, &libraries, &mut main_sources, &mut kotlin_args)?;
     let main = WasmCompilation {
         name: wasm.module_name(&manifest.package),
@@ -97,7 +98,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
     };
     main.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ""))?;
 
-    let test_sources = sources(ctx, TargetKind::Wasm, true, &["kt"]);
+    let test_sources = sources(ctx, TargetKind::Wasm, true, &["kt"])?;
     if !tests || test_sources.kotlin_files().is_empty() {
         return Ok(());
     }
@@ -124,8 +125,8 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
 fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
-    let main_sources = sources(ctx, TargetKind::Native, false, &["kt"]);
-    let test_sources = sources(ctx, TargetKind::Native, true, &["kt"]);
+    let main_sources = sources(ctx, TargetKind::Native, false, &["kt"])?;
+    let test_sources = sources(ctx, TargetKind::Native, true, &["kt"])?;
     if main_sources.kotlin_files().is_empty() && (!tests || test_sources.kotlin_files().is_empty()) {
         return Ok(());
     }

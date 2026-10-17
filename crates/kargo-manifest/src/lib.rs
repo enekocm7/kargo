@@ -675,16 +675,48 @@ pub struct Profile {
     pub debug: bool,
     pub optimize: bool,
     pub compiler_args: Vec<String>,
+    /// `[profile.<name>.env]`: replaces `[env]` variable by variable.
+    pub env: EnvTable,
 }
 
 impl Profile {
     pub fn dev() -> Self {
-        Self { debug: true, optimize: false, compiler_args: Vec::new() }
+        Self { debug: true, optimize: false, compiler_args: Vec::new(), env: EnvTable::default() }
     }
 
     pub fn release() -> Self {
-        Self { debug: false, optimize: true, compiler_args: Vec::new() }
+        Self { debug: false, optimize: true, compiler_args: Vec::new(), env: EnvTable::default() }
     }
+}
+
+/// An `[env]` or `[profile.<name>.env]` table: the variables, the `.env` files to read and,
+/// in `[env]` only, the variables to expose to the code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvTable {
+    pub vars: BTreeMap<String, EnvVar>,
+    /// `env-files`: more `.env` files, read after the standard ones and relative to the package root.
+    pub files: Vec<String>,
+    /// `expose`: variables compiled into a generated `BuildConfig` object.
+    pub expose: Vec<String>,
+}
+
+/// A variable of `[env]` or `[profile.<name>.env]`: the program's environment for `kargo run`,
+/// `kargo test`, tasks and hooks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvVar {
+    /// The value; `None` for a `required` variable that the shell or a `.env` file must set.
+    pub value: Option<String>,
+    /// Use `value` even when the shell or a `.env` file sets the variable.
+    pub force: bool,
+    /// Resolve `value` against the package root.
+    pub relative: bool,
+    /// Fail before anything runs unless the shell or a `.env` file sets the variable.
+    pub required: bool,
+}
+
+/// Whether `name` is a valid environment variable name: letters, digits and `_`, not starting with a digit.
+pub fn is_env_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -908,6 +940,8 @@ pub struct Manifest {
     pub compiler_plugins: Vec<CompilerPlugin>,
     pub process_plugins: Vec<ProcessPlugin>,
     pub tasks: BTreeMap<String, Task>,
+    /// `[env]`: variables for `kargo run`, `kargo test`, tasks and hooks.
+    pub env: EnvTable,
     pub dev_profile: Profile,
     pub release_profile: Profile,
     pub toolchain: ToolchainSettings,

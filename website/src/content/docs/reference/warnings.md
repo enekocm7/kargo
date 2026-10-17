@@ -22,6 +22,7 @@ Warnings never change the exit code, and `-q` hides them. In a [workspace](../..
 | [Ignored Kotlin scripts](#ignored-kotlin-scripts) | `build`, `check`, `run`, `package`, `test` |
 | [Tasks hidden by built-in commands](#tasks-hidden-by-built-in-commands) | every command that works on a package: `build`, `check`, `run`, `test`, `package`, `doc`, `fmt`, `lint`, `fetch`, `tree` |
 | [Odd package versions](#odd-package-versions) | the same commands |
+| [`.env` file tracked by git](#env-file-tracked-by-git) | `run`, `test`, `task`, `env` |
 
 ## No sources
 
@@ -64,6 +65,14 @@ Available tasks:
 ```
 
 Rename the task to make `kargo <name>` work as a shorthand again.
+
+## `.env` file tracked by git
+
+```text
+warning: `.env` is tracked by git but sets API_TOKEN; keep secrets in a git-ignored `.local` file or in your shell
+```
+
+A `.env` file that git tracks is shared with everyone who clones the repository. Kargo warns when such a file sets a variable whose name looks like a secret (it contains `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or `CREDENTIAL`, or it is `KEY` or ends in `_KEY`) with a value. Move the secret into `.env.local` or `.env.<profile>.local`, which `kargo new` git-ignores, or into your shell, and remove the file from git with `git rm --cached .env`. Empty values don't count. Without git, or for files git doesn't track, there is no warning.
 
 ## Odd package versions
 

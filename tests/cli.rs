@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{LocalRepo, Project, manifest};
+use common::{LocalRepo, Project, manifest, which};
 use predicates::prelude::*;
 
 #[test]
@@ -37,6 +37,7 @@ fn new_creates_a_project() {
     assert!(root.join("src/Main.kt").is_file());
     assert!(root.join("tests/GreetingTest.kt").is_file());
     assert!(std::fs::read_to_string(root.join(".gitignore")).unwrap().contains("/workspace.json\n"), "kargo lsp's generated files");
+    assert!(std::fs::read_to_string(root.join(".gitignore")).unwrap().contains(".env.*.local\n"), "machine-specific .env files");
     assert!(!root.join(".git").exists(), "--no-vcs");
 
     p.kargo().args(["new", "my-app"]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));
@@ -706,6 +707,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "plugins",
         "android",
         "daemon",
+        "env",
         "metadata",
         "classpath",
         "ide",
@@ -2678,4 +2680,161 @@ fn workspace_tasks_run_at_the_root_and_per_member() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no task named `nope`; available tasks: gen, hello"));
+}
+
+#[test]
+fn env_command_lists_sources_and_hides_values() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("envy", "[env]\nAPP_NAME = \"demo\"\nLOG_LEVEL = \"debug\"\n\n[profile.release.env]\nLOG_LEVEL = \"info\"\n"),
+    );
+    p.file(".env", "# shared\nSECRET_TOKEN=\"t0ken\"\nAPP_NAME=from-file\n");
+    p.file(".env.release", "EXTRA=1\n");
+
+    let out = p.kargo().args(["env"]).env("LOG_LEVEL", "trace").assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("APP_NAME") && stdout.contains(".env:3"), "{stdout}");
+    assert!(stdout.contains("LOG_LEVEL") && stdout.contains("shell"), "{stdout}");
+    assert!(stdout.contains("SECRET_TOKEN") && stdout.contains("********"), "{stdout}");
+    assert!(!stdout.contains("t0ken") && !stdout.contains("from-file") && !stdout.contains("trace"), "{stdout}");
+    assert!(!stdout.contains("EXTRA"), "the release file is read only for --release:\n{stdout}");
+
+    let shown = p.kargo().args(["env", "--show-values", "--release"]).assert().success();
+    let shown = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
+    assert!(shown.contains("t0ken") && shown.contains("info") && shown.contains("EXTRA"), "{shown}");
+    assert!(shown.contains("[profile.release.env]"), "{shown}");
+}
+
+#[test]
+fn env_file_options_choose_the_files() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("envy", "[env]\nNAME = \"manifest\"\n"));
+    p.file(".env", "NAME=standard\n");
+    p.file("extra.env", "NAME=extra\n");
+
+    p.kargo().args(["env", "--show-values"]).assert().success().stdout(predicates::str::contains("standard"));
+    p.kargo()
+        .args(["env", "--show-values", "--env-file", "extra.env"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("extra").and(predicates::str::contains("extra.env:1")));
+    p.kargo().args(["env", "--show-values", "--no-env-file"]).assert().success().stdout(predicates::str::contains("manifest"));
+    p.kargo().args(["env", "--no-env-file", "--env-file", "extra.env"]).assert().failure().code(2);
+    p.kargo().args(["env", "--env-file", "missing.env"]).assert().failure().stderr(predicates::str::contains("missing.env"));
+}
+
+#[test]
+fn required_variables_are_needed_by_run_test_and_tasks_only() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("needy", "[env]\nDATABASE_URL = { required = true }\n\n[tasks]\nshow = \"echo hi\"\n"));
+
+    for args in [&["run"][..], &["test"], &["show"]] {
+        p.kargo()
+            .args(args)
+            .env_remove("DATABASE_URL")
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicates::str::contains("`DATABASE_URL` (declared in [env])"))
+            .stderr(predicates::str::contains("Compiling").not());
+    }
+    // A build (and its hooks) goes ahead without the variable.
+    p.kargo()
+        .args(["build", "--offline"])
+        .env_remove("DATABASE_URL")
+        .assert()
+        .stderr(predicates::str::contains("required environment").not());
+    // `kargo env` shows the gap, and `--check` makes it a failure.
+    p.kargo().args(["env"]).env_remove("DATABASE_URL").assert().success().stdout(predicates::str::contains("missing (required)"));
+    p.kargo().args(["env", "--check"]).env_remove("DATABASE_URL").assert().failure().stderr(predicates::str::contains("DATABASE_URL"));
+
+    p.file(".env.local", "DATABASE_URL=postgres://file\n");
+    p.kargo().args(["env", "--check"]).env_remove("DATABASE_URL").assert().success();
+}
+
+#[test]
+fn env_check_compares_with_env_example() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("checked", "[env]\nDATABASE_URL = { required = true }\n"));
+    p.file(".env.example", "DATABASE_URL=\nAPI_TOKEN=\nSHARED=\nOTHER=\n");
+    p.file(".env", "SHARED=1\n");
+
+    let out = p.kargo().args(["env", "--check"]).env_remove("DATABASE_URL").env("API_TOKEN", "from-shell").assert().failure().code(101);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("the environment is incomplete"), "{stderr}");
+    assert!(stderr.contains("`DATABASE_URL` is required but not set"), "{stderr}");
+    assert!(stderr.contains("`OTHER` is listed in .env.example but not set"), "{stderr}");
+    assert!(!stderr.contains("API_TOKEN") && !stderr.contains("SHARED") && !stderr.contains("DATABASE_URL` is listed"), "{stderr}");
+}
+
+#[test]
+fn env_files_and_expose_reach_the_environment_and_build_config() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("exposed", "[env]\nenv-files = [\"config/shared.env\"]\nexpose = [\"APP_NAME\", \"UNSET_ONE\"]\nAPP_NAME = \"demo\"\n"),
+    );
+    p.file("config/shared.env", "SHARED_NAME=shared\n");
+    p.kargo()
+        .args(["env", "--show-values"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("SHARED_NAME").and(predicates::str::contains("config/shared.env:1")));
+    p.kargo().args(["env", "--no-env-file", "--show-values"]).assert().success().stdout(predicates::str::contains("SHARED_NAME").not());
+
+    // `kargo metadata` looks for the JVM main class, which compiles the main sources' file list and so writes BuildConfig.
+    p.kargo().args(["metadata", "--no-deps"]).assert().success();
+    let build_config = p.read("target/debug/jvm/generated/env/BuildConfig.kt");
+    assert!(build_config.contains("package exposed\n"), "{build_config}");
+    assert!(build_config.contains("    const val APP_NAME: String = \"demo\"\n"), "{build_config}");
+    assert!(build_config.contains("    val UNSET_ONE: String? = null\n"), "{build_config}");
+}
+
+#[test]
+fn env_file_applies_to_tasks_before_or_after_the_name() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tasky", "[env]\nNAME = \"manifest\"\n\n[tasks]\nshow = \"echo $NAME\"\n"));
+    p.file("staging.env", "NAME=staging\n");
+    p.kargo().args(["task", "--env-file", "staging.env", "show"]).assert().success().stdout(predicates::str::contains("staging"));
+    p.kargo().args(["show", "--env-file=staging.env"]).assert().success().stdout(predicates::str::contains("staging"));
+    p.kargo().args(["show", "--no-env-file"]).assert().success().stdout(predicates::str::contains("manifest"));
+    p.kargo().args(["show", "--env-file"]).assert().failure().stderr(predicates::str::contains("needs a path"));
+    p.kargo().args(["task", "--no-env-file", "--env-file", "staging.env", "show"]).assert().failure().code(2);
+}
+
+#[test]
+fn tracked_env_file_with_secrets_is_warned_about() {
+    if which("git").is_none() {
+        return;
+    }
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("leaky", ""));
+    p.file(".env", "API_TOKEN=abc123\nAPP=1\n");
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(p.path()).output().unwrap();
+    git(&["init", "-q"]);
+    p.kargo().args(["env"]).assert().success().stderr(predicates::str::contains("not tracked").not());
+    git(&["add", ".env"]);
+    p.kargo()
+        .args(["env"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("`.env` is tracked by git but sets API_TOKEN"))
+        .stdout(predicates::str::contains("abc123").not());
+}
+
+#[cfg(unix)]
+#[test]
+fn tasks_run_with_the_project_environment() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tasky",
+            "[env]\nGREETING = \"hello\"\nLOG = { value = \"debug\", force = true }\n\n[tasks]\nshow = \"echo $GREETING $LOG > out.txt\"\n",
+        ),
+    );
+    p.file(".env", "GREETING=\"from file\"\n");
+    p.kargo().args(["task", "show"]).env("LOG", "trace").assert().success();
+    assert_eq!(p.read("out.txt"), "from file debug\n");
 }

@@ -9,6 +9,7 @@ use clap_complete::engine::{ArgValueCandidates, SubcommandCandidates};
 
 use kargo_manifest::edit::DependencySection;
 use kargo_manifest::{Scope, TargetKind};
+use kargo_ops::env::EnvOptions;
 use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::check::CheckOptions;
 use kargo_ops::ops::classpath::ClasspathScope;
@@ -343,6 +344,23 @@ enum ReportArg {
     Junit,
 }
 
+/// Which `.env` files a program's environment is read from.
+#[derive(Debug, Args)]
+struct EnvArgs {
+    /// Read this `.env` file after the standard ones, so it wins over them (repeatable)
+    #[arg(long = "env-file", value_name = "PATH", conflicts_with = "no_env_file")]
+    env_file: Vec<PathBuf>,
+    /// Do not read the `.env` files; the variables in kargo.toml still apply
+    #[arg(long)]
+    no_env_file: bool,
+}
+
+impl EnvArgs {
+    fn options(&self) -> EnvOptions {
+        EnvOptions { files: self.env_file.clone(), no_files: self.no_env_file }
+    }
+}
+
 #[derive(Debug, Args)]
 struct BuildArgs {
     /// Build with the release profile
@@ -478,6 +496,8 @@ enum Command {
         /// How to print compiler diagnostics
         #[arg(long, value_enum, default_value_t, value_name = "FMT")]
         message_format: MessageFormatArg,
+        #[command(flatten)]
+        env: EnvArgs,
         /// Arguments for the program
         #[arg(last = true)]
         args: Vec<String>,
@@ -516,6 +536,24 @@ enum Command {
         /// Output format of `--list`; `json` prints one JSON object per test
         #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
         format: FormatArg,
+        #[command(flatten)]
+        env: EnvArgs,
+    },
+    /// Show the environment `kargo run` and `kargo test` use, and where each variable comes from
+    Env {
+        /// Print the values instead of hiding them
+        #[arg(long)]
+        show_values: bool,
+        /// Fail when a required variable is unset or a key of .env.example is not set (for CI)
+        #[arg(long)]
+        check: bool,
+        /// Show the release profile's variables
+        #[arg(short, long)]
+        release: bool,
+        #[command(flatten)]
+        env: EnvArgs,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Generate API documentation from KDoc with Dokka
     #[command(visible_alias = "d")]
@@ -716,6 +754,8 @@ sources and javadoc jars, checksums and, when signing is on, GnuPG signatures. T
     },
     /// Run a task from [tasks], or list tasks
     Task {
+        #[command(flatten)]
+        env: EnvArgs,
         /// Task name (omit to list tasks)
         #[arg(add = ArgValueCandidates::new(complete::tasks))]
         name: Option<String>,
@@ -1141,6 +1181,41 @@ fn build_packages<T: Send>(
     }
 }
 
+/// The environment of a package's tasks: its variables from `[env]` and the `.env` files, then Kargo's own.
+fn task_env(shell: &Shell, project: &Project, ws: &Workspace, opts: &EnvOptions) -> Result<Vec<(String, String)>> {
+    let resolved = kargo_ops::env::resolve(ws, "dev", opts)?;
+    warnings::emit(shell, project, ws, resolved.tracked_secret_warnings(ws.root()));
+    let mut env = resolved.ensure_set()?.for_child();
+    env.extend(kargo_ops::plugins::base_env(ws, "dev"));
+    Ok(env)
+}
+
+/// Takes `--env-file <path>`, `--env-file=<path>` and `--no-env-file` from the front of a task's
+/// arguments, so `kargo deploy --env-file .env.staging` works like `kargo task --env-file
+/// .env.staging deploy`. The first other argument, and everything after it, belongs to the task.
+fn split_task_args(mut env: EnvOptions, args: &[String]) -> Result<(EnvOptions, &[String])> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        match arg.as_str() {
+            "--no-env-file" => env.no_files = true,
+            "--env-file" => {
+                let Some(path) = args.get(at + 1) else { bail!("`--env-file` needs a path") };
+                env.files.push(PathBuf::from(path));
+                at += 1;
+            }
+            _ => match arg.strip_prefix("--env-file=") {
+                Some(path) => env.files.push(PathBuf::from(path)),
+                None => break,
+            },
+        }
+        at += 1;
+    }
+    if env.no_files && !env.files.is_empty() {
+        bail!("`--env-file` and `--no-env-file` cannot be used together");
+    }
+    Ok((env, &args[at..]))
+}
+
 fn profile(release: bool) -> ProfileKind {
     if release { ProfileKind::Release } else { ProfileKind::Dev }
 }
@@ -1266,7 +1341,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, main, bin, example, port, open, debug, flavors, message_format, package, args } => {
+        Command::Run { release, target, main, bin, example, port, open, debug, flavors, message_format, package, env, args } => {
             set_message_format(message_format);
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
@@ -1278,11 +1353,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (_, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let code =
-                ops::run::run(&ctx, &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors })?;
+            let code = ops::run::run(
+                &ctx,
+                &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors, env: env.options() },
+            )?;
             Ok(exit_code(code))
         }
-        Command::Test { build, filter, no_run, no_fail_fast, include_tag, exclude_tag, failed, report, debug, list, format } => {
+        Command::Test { build, filter, no_run, no_fail_fast, include_tag, exclude_tag, failed, report, debug, list, format, env } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let junit_report = report == Some(ReportArg::Junit);
@@ -1298,6 +1375,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 include_tags: include_tag,
                 exclude_tags: exclude_tag,
                 failed,
+                env: env.options(),
             };
             let passed = build_packages(
                 config,
@@ -1314,6 +1392,12 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 shell.error("test failed");
                 Ok(FAILURE)
             }
+        }
+        Command::Env { show_values, check, release, env, package } => {
+            let project = load_project(global)?;
+            let index = project.select_one(&package.selection(), "`kargo env`")?;
+            ops::env::show(shell, &project, index, profile(release), &env.options(), show_values, check)?;
+            Ok(0)
         }
         Command::Doc { targets, open, packages } => {
             let project = load_project(global)?;
@@ -1622,7 +1706,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Task { name, list: _, args } => {
+        Command::Task { env, name, list: _, args } => {
             let project = load_project(global)?;
             match name {
                 None => {
@@ -1630,7 +1714,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     Ok(0)
                 }
                 Some(name) => {
-                    if !run_task(shell, &project, &name, &args)? {
+                    if !run_task(shell, &project, &name, &args, &env.options())? {
                         bail!("no task named `{name}`; available tasks: {}", task_names(&project).join(", "));
                     }
                     Ok(0)
@@ -1788,13 +1872,14 @@ fn task_package(project: &Project) -> Option<usize> {
 /// Runs the task `name`: the current package's, else the workspace's (`[workspace.tasks]`, at the
 /// workspace root), else, at the root of a workspace, the task of every member that has one (in
 /// dependency order, each in its member's directory). Returns `false` when no task has that name.
-fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String]) -> Result<bool> {
+fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String], env: &EnvOptions) -> Result<bool> {
+    let (env, args) = split_task_args(env.clone(), args)?;
     let package = task_package(project);
     if let Some(index) = package {
         let ws = project.package(index);
         if ws.manifest().tasks.contains_key(name) {
-            let env = kargo_ops::plugins::base_env(ws, "dev");
-            kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)?;
+            let vars = task_env(shell, project, ws, &env)?;
+            kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &vars)?;
             return Ok(true);
         }
     }
@@ -1814,8 +1899,8 @@ fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String]) -> Re
         .collect();
     for &index in &members {
         let ws = project.package(index);
-        let env = kargo_ops::plugins::base_env(ws, "dev");
-        kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &env)
+        let vars = task_env(shell, project, ws, &env)?;
+        kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &vars)
             .with_context(|| format!("task `{name}` of `{}` failed", ws.name()))?;
     }
     Ok(!members.is_empty())
@@ -2066,7 +2151,7 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u
     let (name, args) = argv.split_first().context("missing subcommand")?;
     let project = load_project(global).ok();
     if let Some(project) = &project
-        && run_task(config.shell(), project, name, args)?
+        && run_task(config.shell(), project, name, args, &EnvOptions::default())?
     {
         return Ok(0);
     }
