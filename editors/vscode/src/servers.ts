@@ -90,10 +90,10 @@ export class KargoServers implements vscode.Disposable {
             outputChannel: this.log,
             diagnosticCollectionName: 'kargo-lsp',
             middleware: {
-                // Kargo's Kotlin server has no code actions: it answers `textDocument/codeAction` for Kotlin and
-                // Java files with "not supported", which VS Code shows as an error. Only `kargo.toml` has them.
+                // Without a Kotlin server (`kargo.lsp.server` is `none`), `kargo lsp` answers `textDocument/codeAction`
+                // for Kotlin and Java files with "needs a Kotlin language server", which VS Code shows as an error.
                 provideCodeActions: (document, range, context, token, next) =>
-                    isManifest(document.uri) ? next(document, range, context, token) : undefined,
+                    settings.server !== 'none' || isManifest(document.uri) ? next(document, range, context, token) : undefined,
             },
         };
         const client = new LanguageClient('kargo', `Kargo (${folder.name})`, serverOptions, clientOptions);

@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use kargo_maven::Repository;
 use kargo_util::config::Config;
 
+use super::actions;
 use super::compiled;
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
@@ -53,7 +54,7 @@ fn pipe() -> (io::PipeReader, io::PipeWriter) {
 /// of which `found` had one.
 enum Event {
     Client(Option<Value>),
-    Project { generation: u64, model: Model, units: Vec<Arc<Unit>> },
+    Project { generation: u64, model: Box<Model>, units: Vec<Arc<Unit>> },
     Libraries { generation: u64, units: Vec<Arc<Unit>>, jdk: Option<Arc<Jdk>> },
     Fetching { generation: u64, modules: usize },
     Fetched { generation: u64, found: usize },
@@ -83,6 +84,8 @@ pub struct Model {
     /// which load as a library of Wasm code.
     pub npm_declarations: Vec<PathBuf>,
     pub repositories: Vec<Repository>,
+    /// The `kargo.toml` of each package.
+    pub manifests: Vec<PathBuf>,
 }
 
 impl Model {
@@ -113,6 +116,7 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             .filter_map(|n| names.iter().position(|m| *m == n))
             .collect();
         direct.push(deps);
+        model.manifests.push(package["manifest"].as_str().map(PathBuf::from).unwrap_or_default());
         let mut platforms = Platforms::NONE;
         for target in package["targets"].as_array().into_iter().flatten() {
             let kind = target["kind"].as_str().unwrap_or_default().to_owned();
@@ -170,6 +174,7 @@ fn fallback_model(root: &Path) -> Model {
     let mut model = Model { kotlin: kargo_manifest::DEFAULT_KOTLIN_VERSION.to_owned(), ..Model::default() };
     model.packages.visible = vec![vec![0]];
     model.packages.platforms = vec![Platforms::JVM];
+    model.manifests = vec![root.join(kargo_manifest::MANIFEST_NAME)];
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -446,7 +451,7 @@ fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache
         ..model
     };
     let units = scan(&model);
-    if tx.send(Event::Project { generation, model: model.clone(), units }).is_err() {
+    if tx.send(Event::Project { generation, model: Box::new(model.clone()), units }).is_err() {
         return;
     }
     let platforms = model.packages.platforms.iter().fold(Platforms::NONE, |all, p| all.union(*p));
@@ -596,6 +601,9 @@ struct State {
     generation: u64,
     snippets: bool,
     watch: bool,
+    /// Whether the editor takes `documentChanges` in workspace edits, and can create files there.
+    document_changes: bool,
+    create_files: bool,
     /// Whether the editor shows `$/progress`.
     work_done_progress: bool,
     load_options: LoadOptions,
@@ -625,6 +633,8 @@ impl State {
             generation: 0,
             snippets: false,
             watch: false,
+            document_changes: false,
+            create_files: false,
             work_done_progress: false,
             load_options: LoadOptions { dependencies, fetch_sources: true, tried: Arc::default() },
             progress: None,
@@ -674,7 +684,7 @@ impl State {
         match event {
             Event::Project { generation, model, units } if generation == self.load_generation => {
                 self.project_loaded = true;
-                self.model = model;
+                self.model = *model;
                 let open: HashMap<PathBuf, Arc<Unit>> =
                     self.open.values().filter_map(|p| self.files.get(p).map(|u| (p.clone(), Arc::clone(u)))).collect();
                 self.files = units.into_iter().map(|u| (u.path.clone(), u)).collect();
@@ -970,6 +980,24 @@ impl State {
                 let Some(unit) = unit else { return Ok(json!([])) };
                 Ok(features::document_symbols(&an, unit))
             }
+            "textDocument/codeAction" => {
+                let Some(unit) = unit else { return Ok(json!([])) };
+                let text = &an.unit(unit).text;
+                let start = text::offset(text, &params["range"]["start"]);
+                let end = text::offset(text, &params["range"]["end"]).max(start);
+                let strings = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+                let request = actions::Request {
+                    unit,
+                    range: start..end,
+                    only: strings(&params["context"]["only"]),
+                    diagnostics: params["context"]["diagnostics"].as_array().cloned().unwrap_or_default(),
+                    roots: &self.model.roots,
+                    manifests: &self.model.manifests,
+                    document_changes: self.document_changes,
+                    create_files: self.create_files,
+                };
+                Ok(json!(actions::code_actions(&an, &request)))
+            }
             "workspace/symbol" => Ok(features::workspace_symbols(&an, params["query"].as_str().unwrap_or_default())),
             _ => Err(Failure::NotFound),
         }
@@ -980,6 +1008,9 @@ impl State {
         self.snippets = completion["completionItem"]["snippetSupport"] == true;
         self.watch = params["capabilities"]["workspace"]["didChangeWatchedFiles"]["dynamicRegistration"] == true;
         self.work_done_progress = params["capabilities"]["window"]["workDoneProgress"] == true;
+        let workspace_edit = &params["capabilities"]["workspace"]["workspaceEdit"];
+        self.document_changes = workspace_edit["documentChanges"] == true;
+        self.create_files = workspace_edit["resourceOperations"].as_array().is_some_and(|ops| ops.iter().any(|o| o == "create"));
         self.load_options.fetch_sources = params["initializationOptions"]["fetchSources"] != false;
         self.root = params["rootUri"]
             .as_str()
@@ -1000,6 +1031,7 @@ impl State {
                 "renameProvider": { "prepareProvider": true },
                 "documentSymbolProvider": true,
                 "workspaceSymbolProvider": true,
+                "codeActionProvider": { "codeActionKinds": actions::KINDS },
             },
             "serverInfo": { "name": "kargo-kotlin", "version": env!("CARGO_PKG_VERSION") },
         })

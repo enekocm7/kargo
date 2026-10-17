@@ -1467,6 +1467,12 @@ mod tests {
         let (library, _) = editor.request(7, "textDocument/prepareRename", at(3, 9));
         assert_eq!(library["result"]["placeholder"], "user");
 
+        assert!(caps["codeActionProvider"]["codeActionKinds"].as_array().unwrap().contains(&json!("source.organizeImports")));
+        let range = json!({ "start": { "line": 3, "character": 4 }, "end": { "line": 3, "character": 4 } });
+        let params = json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [] } });
+        let (actions, _) = editor.request(9, "textDocument/codeAction", params);
+        assert_eq!(actions["result"], json!([]), "the Kotlin server answers code actions: none here");
+
         let (runnables, _) = editor.request(8, "kargo/runnables", json!({}));
         assert!(runnables["result"].as_array().is_some_and(|r| !r.is_empty()));
         assert!(editor.finish(), "shutdown, then exit");

@@ -21,6 +21,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Find references, highlights | Every use in the project, with the declaration |
 | Rename | Every reference in the project, and the declarations that must change with it: `expect` and `actual` declarations, overrides, named arguments |
 | Outline | Document symbols for the file, workspace symbols for the project |
+| Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
 | Errors | From [check on save](../editors/#check-on-save), which is on with this server: `kargo check` runs when you save a file and its errors for every target appear in the editor |
 
 ### Completion
@@ -49,6 +50,35 @@ To know the receiver's type, the server infers the types completion needs: liter
 Rename works on declarations of your project: classes, functions, properties, parameters and local variables. It changes every reference in every file of the project, including imports and string templates (`"$name"`), and the declarations that must keep the same name: the `actual` declarations of an `expect` one (and the other way around), the overrides of a member and the member it overrides, and named arguments (`greet(name = "x")`) of a parameter. A name that isn't a plain identifier, such as a keyword, gets backquotes.
 
 Declarations of the standard library and of other libraries can't be renamed; the editor says so before you type a name.
+
+### Code actions
+
+The server offers code actions in Kotlin files: the light bulb, or *Quick Fix* and *Source Action* in your editor.
+
+| Action | Offered on | Does |
+|---|---|---|
+| Import `<name>` | A class, object or call that doesn't resolve, or a name that `kargo check` reports as `Unresolved reference` | Adds the import, in sorted place among the others. Each declaration of that name your project and its libraries have is offered, and the only one is preferred. An extension function called on a receiver (`"a".myExt()`) is found too |
+| Organize imports | Anywhere (a *Source Action*, `source.organizeImports`) | Removes unused, duplicate and same-package imports and sorts the rest as IntelliJ IDEA and [`kargo fmt`](../formatting-and-linting/) do: other packages, then `java`, `javax`, `kotlin`, then aliased imports. Star imports and imports of operator functions (`getValue`, `plus`, `component1`, ...) stay. Not offered when a comment sits among the imports |
+| Add `<group:artifact>` to kargo.toml | An `import` of a well-known library that no dependency provides, such as `kotlinx.coroutines`, `kotlinx.serialization`, `kotlinx.datetime` or `io.ktor` | Runs [`kargo/addDependency`](../editors/#commands-for-editor-plugins), which adds the library at its latest version as `kargo add` does: to `[dev-dependencies]` from test code, to `[target.<target>.dependencies]` from `src-<target>/` |
+| Implement members | The header of a class or object that doesn't implement the abstract members of its supertypes | Writes an `override` with a `TODO()` body for each one, with the supertype's type arguments filled in (`Repo<User>` gives `fun find(id: Int): User`) and the imports they need |
+| Add `actual` for `<name>` | An `expect` declaration in `src/` that a target of the package lacks | Writes the `actual` declaration, with `TODO()` bodies, to `src-<target>/` at the common file's path with the target in its name (`Platform.kt` gets `Platform.jvm.kt`): appended to that file, or in a new one when the editor can create files. *To every target* does them all at once |
+| Add `override` | `kargo check`'s "hides member of supertype and needs an 'override' modifier" | Adds `override` before `fun`, `val` or `var` |
+| Remove variable | `kargo check`'s "Variable 'x' is never used" | Removes the declaration. An initializer that may have side effects (a call) stays as a statement. A destructured component or loop variable is renamed to `_` instead |
+
+With the cursor on `class Users : Repo<User> {}`, where `Repo<T>` declares `fun find(id: Int): T` and `val size: Int`, *Implement 2 members* gives:
+
+```kotlin title="src/app/Users.kt"
+class Users : Repo<User> {
+    override fun find(id: Int): User {
+        TODO("Not yet implemented")
+    }
+
+    override val size: Int
+        get() = TODO("Not yet implemented")
+}
+```
+
+Imports, the implemented members and the `actual` declarations come from the server's own analysis, so they work in every target's code. The quick fixes for compiler messages need [check on save](../editors/#check-on-save), which is on with this server.
 
 ## How it reads your project
 
@@ -125,6 +155,6 @@ The server reads declarations and infers types as far as completion and navigati
 - Libraries without sources have no documentation in hover, and a type parameter with several bounds keeps only the first.
 - Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native, plus the Native-only declarations from the distribution's klib, which have no documentation in hover.
 - Smart casts (`if (x is Foo) x.`), the branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
-- It has no formatting, quick fixes, signature help, inlay hints or semantic highlighting. Use [`kargo fmt`](../formatting-and-linting/) to format code.
+- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings, and no formatting, signature help, inlay hints or semantic highlighting. Use [`kargo fmt`](../formatting-and-linting/) to format code.
 
 For the full analysis of the Kotlin compiler, use IntelliJ IDEA with the Kargo plugin, or run JetBrains' Kotlin LSP behind `kargo lsp` with `--server kotlin-lsp`. See [Choosing the Kotlin server](../editors/#choosing-the-kotlin-server).
