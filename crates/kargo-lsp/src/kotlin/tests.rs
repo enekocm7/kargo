@@ -287,6 +287,44 @@ fn completion_inserts_calls_and_imports() {
 }
 
 #[test]
+fn completion_inserts_scaffolds_for_keywords_with_a_condition() {
+    let keyword = |items: &[Value], name: &str| items.iter().find(|i| i["label"] == name && i["kind"] == 14).unwrap().clone();
+
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    whi$0\n}\n")]);
+    let items = f.items();
+    let while_ = keyword(&items, "while");
+    assert_eq!(while_["textEdit"]["newText"], "while ($0)");
+    assert_eq!(while_["insertTextFormat"], 2);
+
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    i$0\n}\n")]);
+    let items = f.items();
+    assert_eq!(keyword(&items, "if")["textEdit"]["newText"], "if ($0)");
+
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    wh$0\n}\n")]);
+    let items = f.items();
+    assert_eq!(keyword(&items, "when")["textEdit"]["newText"], "when ($0) {}");
+
+    // Keywords without a condition stay plain text.
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    va$0\n}\n")]);
+    let items = f.items();
+    let val = keyword(&items, "val");
+    assert_eq!(val["textEdit"]["newText"], "val");
+    assert_eq!(val["insertTextFormat"], 1);
+
+    // Without snippet support, and when a parenthesis already follows, the plain keyword is inserted.
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    whi$0\n}\n")]);
+    let (u, offset) = f.cursor();
+    let list = features::completion(&f.an(), u, offset, CompletionOptions { snippets: false }, 0);
+    let plain = keyword(list["items"].as_array().unwrap(), "while");
+    assert_eq!(plain["textEdit"]["newText"], "while");
+    assert_eq!(plain["insertTextFormat"], 1);
+
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    whi$0(true)\n}\n")]);
+    let items = f.items();
+    assert_eq!(keyword(&items, "while")["textEdit"]["newText"], "while");
+}
+
+#[test]
 fn hovers_with_signatures_and_documentation() {
     let f = fixture(&[("src/Main.kt", "fun main() {\n    print$0ln(\"hi\")\n}\n")]);
     let hover = f.hover();

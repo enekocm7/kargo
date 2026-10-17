@@ -41,7 +41,7 @@ After a `.` you get the members of the receiver's type and its supertypes, and t
 - the file's declarations, its imports, its package, star imports and the packages Kotlin imports by default (`kotlin`, `kotlin.collections`, `kotlin.io`, `kotlin.text` and the rest);
 - keywords.
 
-Once you have typed a letter, classes and functions from other packages are offered too, with an edit that adds their `import`. Choosing a function inserts its parentheses and, in an editor that supports snippets, puts the cursor between them, or in the braces of a function that takes one lambda.
+Once you have typed a letter, classes and functions from other packages are offered too, with an edit that adds their `import`. Choosing a function inserts its parentheses and, in an editor that supports snippets, puts the cursor between them, or in the braces of a function that takes one lambda. Choosing `if`, `while`, `for` or `when` inserts the scaffold of its condition the same way (`if ($0)`, `for ($1 in $2)`, `when ($0) {}`), and the other keywords insert plain text.
 
 Annotations complete on their own. After `@` you get annotation classes only: those in scope, and once you have typed a letter, the others with an `import` added. `@Rest` offers Spring Web's `RestController`, for example. Inside the parentheses of an annotation you get the arguments it takes that you haven't given yet, as `defaultValue = `. The arguments of a Java annotation are the elements of its `@interface`, and those of an annotation written in Kotlin are its constructor parameters. Hover and go to definition work on annotations on classes, functions, parameters and properties, and on their arguments.
 
