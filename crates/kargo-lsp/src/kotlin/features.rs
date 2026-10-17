@@ -766,6 +766,18 @@ const KEYWORDS: &[&str] = &[
     "while",
 ];
 
+/// The snippet a keyword inserts when it takes a condition or a head in parentheses, with the
+/// cursor inside them. Other keywords insert their plain text.
+fn keyword_scaffold(word: &str) -> Option<&'static str> {
+    match word {
+        "if" => Some("if ($0)"),
+        "while" => Some("while ($0)"),
+        "for" => Some("for ($1 in $2)"),
+        "when" => Some("when ($0) {}"),
+        _ => None,
+    }
+}
+
 /// How completion items are grouped, best first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Group {
@@ -923,11 +935,17 @@ impl Collector<'_, '_> {
         if self.annotations_only || !matches_prefix(word, &self.prefix) || !self.seen.insert(format!("keyword|{word}")) {
             return;
         }
+        let scaffold = keyword_scaffold(word).filter(|_| self.opts.snippets && !self.paren_follows && !self.types_only);
+        let (new_text, snippet) = match scaffold {
+            Some(s) => (s.to_owned(), true),
+            None => (word.to_owned(), false),
+        };
         self.items.push(json!({
             "label": word,
             "kind": 14,
             "sortText": format!("{}{}", Group::Keyword as u8, word),
-            "textEdit": { "range": self.range, "newText": word },
+            "textEdit": { "range": self.range, "newText": new_text },
+            "insertTextFormat": if snippet { 2 } else { 1 },
         }));
     }
 
