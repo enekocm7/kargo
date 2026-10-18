@@ -57,6 +57,10 @@ With several targets enabled, the tests of every target compile at the same time
 
 On the JVM every class in `tests/` and `tests-jvm/` is scanned, whatever its name: a class called `T` or a Kotest spec called `UserSpec` runs just like `UserTest`. If test sources compiled but no test was found, or the filter matched nothing, `kargo test` reports an error and exits with `101` instead of silently passing.
 
+## Rerunning tests on change
+
+`kargo test --watch` runs the tests again after every change to the project's files, until you press Ctrl+C. A failing test does not stop it. See [Watch mode](../watch/).
+
 ## Testing every target
 
 By default `kargo test` stops at the first target whose tests fail or don't compile, like `cargo test`: the tests of later targets still compile, but don't run. It notes the targets it skipped:

@@ -8,3 +8,4 @@ pub mod hash;
 pub mod process;
 pub mod retry;
 pub mod shell;
+pub mod watch;

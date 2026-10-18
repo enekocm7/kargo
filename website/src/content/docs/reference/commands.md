@@ -210,6 +210,11 @@ Build and run the program. Arguments after `--` go to the program.
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `--flavor <name>` | Android: install this [product flavor](../../guides/android/#product-flavors) (repeatable, one per dimension; default: the first flavor of each dimension). Needs `-t android` |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
+| `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for Android or Wasm browser apps. See [Watch mode](../../guides/watch/) |
+| `--clear` | With `--watch`: clear the terminal before each run |
+| `--ignore <glob>` | With `--watch`: leave out the files matching this gitignore-style pattern, on top of `.gitignore`. Repeatable |
+
+`--clear` and `--ignore` need `--watch`.
 
 `--main`, `--bin` and `--example` exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
 
@@ -273,10 +278,33 @@ kargo test [filter] [options]
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to test, in dependency order. The command fails if any test failed |
 | `-j, --jobs <n>` | How many packages are tested at the same time (default 1, so test output doesn't interleave) |
+| `--watch` | Run the tests again whenever the project's files change, until you press Ctrl+C. A failing test does not stop watching. Conflicts with `--list` and `--debug`. See [Watch mode](../../guides/watch/#rerun-tests-on-change) |
+| `--clear`, `--ignore <glob>` | With `--watch`, as for [`kargo run`](#kargo-run-r) |
 
 By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
 Wasm tests run on Node.js, or with `environment = "browser"` in a headless browser: Chrome, Edge, Chromium, Brave or Firefox, found on `PATH` or named by `KARGO_BROWSER`. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser).
+
+## `kargo watch`
+
+Run a kargo command again whenever the project's files change. See [Watch mode](../../guides/watch/).
+
+```sh
+kargo watch                          # kargo build on every change
+kargo watch check                    # kargo check on every change
+kargo watch -x "test -t jvm" -x run  # two commands, in order
+```
+
+| Option | Meaning |
+|---|---|
+| `[command]...` | The command to run on each change, with its arguments, such as `check` or `test -t jvm`. Default: `build`. Conflicts with `-x` |
+| `-x, --exec <command>` | A command line to run on each change, split on spaces (quotes are not interpreted). Repeatable. The commands run in order, and the ones after a failing command wait for the next change |
+| `--clear` | Clear the terminal before each run |
+| `--ignore <glob>` | Leave out the files matching this gitignore-style pattern, on top of `.gitignore`. Repeatable |
+
+Each command runs as its own `kargo` process, with the global flags given to `kargo watch` (`-v`, `-q`, `--offline`, `--locked`, `--refresh`, `--system-gradle`, `--manifest-path`). Put the watch options before the command, as in `kargo watch --clear test`.
+
+`kargo watch` waits for each command to finish before it watches again, so a command that keeps running, such as `run`, keeps it from seeing changes. To restart a program on change, use [`kargo run --watch`](#kargo-run-r). A failing command does not stop `kargo watch`; it only exits with an error when it cannot start, for example outside a project.
 
 ## `kargo doc` (`d`)
 
