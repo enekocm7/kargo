@@ -14,7 +14,8 @@ Kargo gives editors what they need to understand a project without reading `karg
 | IntelliJ IDEA, Android Studio | The [Kargo plugin](#intellij-idea-and-android-studio) | The IDE's own Kotlin support, with your dependencies imported. JVM, Kotlin/Native and Wasm modules | Run configurations, Run and Debug icons, a test tree and the JVM debugger |
 | VS Code | The [Kargo extension](#visual-studio-code) | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Tasks with compiler errors in the Problems view, a test explorer, Run and Debug buttons, and debugging through `kargo dap` |
 | Zed | The [Kargo extension](#zed) | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Run buttons from `kargo ide --zed`, debugging through `kargo dap`, and test results in the terminal |
-| Neovim, Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
+| Neovim | The [Neovim plugin](#neovim) in `editors/neovim` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | `:Kargo` commands with errors in the quickfix list, runnables, a neotest adapter for tests, and debugging with nvim-dap |
+| Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
 | Emacs and other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
 
 Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with each target's standard library, the JDK's sources, your `.java` files and your dependencies: from their sources jars once you fetch them, else from their compiled classes and klibs (see [Libraries](../kotlin-server/#libraries)). The npm packages of a Wasm target come from the [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) Kargo generates for them. Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
@@ -464,11 +465,29 @@ With that setting, Zed runs `kargo lsp` in the folder, and it completes, documen
 - Slash commands work in text threads; the agent panel's threads don't run them.
 
 
-## Other editors
+## Neovim
 
-Any editor with an LSP client can run `kargo lsp`. These are the setups we document:
+Kargo's Neovim plugin, in the `editors/neovim` directory of the repository, runs `kargo lsp` for Kotlin and `kargo.toml`, runs the Kargo commands with their errors in the quickfix list, lists the runnables of a package, shows the tests in [neotest](https://github.com/nvim-neotest/neotest), and debugs programs and tests with [nvim-dap](https://github.com/mfussenegger/nvim-dap). It needs Neovim 0.11 or newer and `kargo` on your `PATH`, see [Installation](../../getting-started/installation/).
 
-**Neovim** (0.11 or newer):
+### Install the Neovim plugin
+
+With [lazy.nvim](https://github.com/folke/lazy.nvim), point the plugin at its subdirectory of the repository:
+
+```lua title="init.lua"
+{
+  'enekocm7/kargo',
+  subdir = 'editors/neovim',
+  opts = {},
+}
+```
+
+Then enable the language server, which the plugin ships as `lsp/kargo.lua`:
+
+```lua title="init.lua"
+vim.lsp.enable('kargo')
+```
+
+The server starts for Kotlin and TOML files in a directory with a `kargo.lock` or `kargo.toml`, and imports the project as [Kargo's Kotlin server](../kotlin-server/) does. Saving `kargo.toml` re-imports it. Without the plugin, the server config alone is enough:
 
 ```lua title="init.lua"
 vim.lsp.config('kargo', {
@@ -478,6 +497,76 @@ vim.lsp.config('kargo', {
 })
 vim.lsp.enable('kargo')
 ```
+
+`setup()` takes two options, both optional:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `cmd` | `'kargo'` | The `kargo` executable, for the language server, the commands, tests and `kargo dap` |
+| `height` | `12` | The rows of the terminal split that commands run in |
+
+```lua title="init.lua"
+require('kargo').setup({ cmd = vim.fn.expand('~/.cargo/bin/kargo') })
+```
+
+### Commands
+
+`:Kargo` runs a Kargo command in the project of the current buffer, the nearest directory with a `kargo.toml`:
+
+| Command | Does |
+|---|---|
+| `:Kargo build [args]` | Runs `kargo build --message-format json`. Compiler errors and warnings go to the quickfix list, titled `kargo build`, and are shown as diagnostics in their files |
+| `:Kargo check [args]` | The same for `kargo check` |
+| `:Kargo test [filter]` | Runs `kargo test --message-format json`. Failing tests go to the quickfix list, and a notification gives the counts |
+| `:Kargo add [coords]` | Adds dependencies through the language server, which edits `kargo.toml` in the buffer. Without coordinates it asks for them. Without a running server it runs `kargo add` in a terminal |
+| `:Kargo runnables` | Picks one of the programs, tests and tasks of the buffer's package and runs it in a terminal split. The picker is `vim.ui.select`, so Telescope, fzf-lua or snacks.picker show it when they override it |
+| `:Kargo <command> [args]` | Any other command, such as `run`, `clean`, `update`, `remove`, `task` or `tree`, runs in a terminal split. Buffers are reloaded when it exits, since `kargo remove` changes `kargo.toml` |
+
+`build`, `check` and `test` don't open a terminal, so their output is the messages Kargo prints as JSON. The status lines they print go to a notification when they fail without a diagnostic, for example a `kargo.toml` that doesn't parse.
+
+Map the commands you use often:
+
+```lua title="init.lua"
+vim.keymap.set('n', '<leader>kb', '<cmd>Kargo build<cr>', { desc = 'Kargo build' })
+vim.keymap.set('n', '<leader>kt', '<cmd>Kargo test<cr>', { desc = 'Kargo test' })
+vim.keymap.set('n', '<leader>kr', '<cmd>Kargo runnables<cr>', { desc = 'Kargo runnables' })
+```
+
+### Tests with neotest
+
+The plugin includes a neotest adapter, `neotest-kargo`. It finds the tests of the Kotlin files under `tests/`, under `tests-<target>/` and in files named `*Test.kt` or `*Tests.kt`: a `fun` below a `@Test` or `@ParameterizedTest` annotation, in the class declared above it. Discovery reads the file and doesn't compile it, so the tests of a file appear as you type, and [`kargo test --list`](../../reference/machine-readable-output/#test-discovery) stays the authority for what runs.
+
+```lua title="init.lua"
+require('neotest').setup({
+  adapters = { require('neotest-kargo') },
+})
+```
+
+Each test runs with `kargo test --message-format json` and reports its result on its line. A class runs its tests, and a file runs the tests of its package, since `kargo test` filters by a substring of the qualified name. A failure shows the assertion message at the line in the test file that the stack trace names.
+
+:::note
+The adapter finds tests by reading the source, so it doesn't know what the compiler makes of it. A test in a nested class gets its inner class's name without the outer one, which `kargo test` doesn't match, and tests that a build plugin generates don't appear at all. `kargo test --list` lists what Kargo actually runs.
+:::
+
+### Debugging with nvim-dap
+
+The plugin registers a `kargo` adapter with nvim-dap, which runs [`kargo dap`](#debug-adapter) in the project of the buffer. Call its setup once after nvim-dap is loaded:
+
+```lua title="init.lua"
+require('kargo.dap').setup()
+```
+
+It adds three configurations for Kotlin buffers: `kargo run` and `kargo test`, which launch the program or the tests with `--debug`, and `Attach to port 5005`, for a JVM started with `kargo run --debug`. Start one with `:lua require('dap').continue()` and pick it. Debugging works for JVM programs and tests, as described in [Debugging](#debugging) and [Debug adapter](#debug-adapter) below.
+
+### Limitations of Neovim
+
+- There are no Run and Debug code lenses above `main` and the tests. Use `:Kargo runnables`, the neotest adapter, or `require('dap').continue()` instead.
+- There is no command to switch the active target. Pass `-t <target>` to a command, such as `:Kargo build -t wasm`.
+- The plugin isn't in the Mason registry yet. Install `kargo` yourself, as described in [Installation](../../getting-started/installation/).
+
+## Other editors
+
+Any editor with an LSP client can run `kargo lsp`. These are the setups we document, next to [Neovim](#neovim) above:
 
 **Helix**:
 
@@ -901,17 +990,7 @@ Tests are debugged the same way, with `["test", "com.example.app.MathTest.adds"]
 
 kotlin-debug-adapter expects Gradle's directory layout to find classes and source files. Kargo makes your layout fit: it rewrites the source paths between the editor and the adapter, so breakpoints in `src/`, `src-jvm/` and `tests/` resolve, and stack frames open your files. A breakpoint resolves in the top-level functions of its file, in the classes, objects and interfaces the file declares at the top level, and in the class an `@file:JvmName` names.
 
-**Neovim** with [nvim-dap](https://github.com/mfussenegger/nvim-dap):
-
-```lua title="init.lua"
-local dap = require('dap')
-dap.adapters.kargo = { type = 'executable', command = 'kargo', args = { 'dap' } }
-dap.configurations.kotlin = {
-  { type = 'kargo', request = 'launch', name = 'kargo run', args = { 'run' } },
-  { type = 'kargo', request = 'launch', name = 'kargo test', args = { 'test' } },
-  { type = 'kargo', request = 'attach', name = 'Attach to port 5005', port = 5005 },
-}
-```
+**Neovim** with [nvim-dap](https://github.com/mfussenegger/nvim-dap) is set up by the [Neovim plugin](#debugging-with-nvim-dap), or by hand with the same `kargo dap` adapter.
 
 **Helix**:
 
