@@ -38,7 +38,7 @@ pub struct CheckOptions {
 
 /// Output directory of `kargo check` for one target.
 fn check_dir(ctx: &BuildContext, target: TargetKind) -> PathBuf {
-    ctx.ws.profile_dir(ctx.profile).join("check").join(target.as_str())
+    ctx.ws.profile_dir(&ctx.profile).join("check").join(target.as_str())
 }
 
 pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
@@ -74,7 +74,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
     let setup = ctx.setup(TargetKind::Wasm)?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let profile = ctx.ws.profile(ctx.profile);
+    let profile = ctx.ws.profile(&ctx.profile)?;
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let out = check_dir(ctx, TargetKind::Wasm);
     let fp_dir = out.join(".fingerprint");
@@ -138,7 +138,7 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     let setup = ctx.setup(TargetKind::Native)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
+    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(&ctx.profile)?, &setup.contributions.compiler_args);
     let out = check_dir(ctx, TargetKind::Native);
     let fp_dir = out.join(".fingerprint");
 

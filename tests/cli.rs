@@ -2884,3 +2884,36 @@ fn script_reports_its_header_before_compiling() {
         .code(101)
         .stderr(predicate::str::contains("needs the Kotlin compiler plugin").and(predicate::str::contains("move the code to a .kt file")));
 }
+
+#[test]
+fn custom_profiles_are_chosen_by_name() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "\n[profile.staging]\ninherits = \"release\"\n[profile.staging.env]\nMODE = \"staging\"\n"));
+    // `--release` and `--profile` choose one profile between them.
+    p.kargo()
+        .args(["build", "--release", "--profile", "staging"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+    // A profile kargo.toml does not define fails before anything is compiled.
+    p.kargo()
+        .args(["build", "--profile", "qa"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no profile named `qa` in kargo.toml"));
+    // The profile's variables come from its own table, which inherits from `release`.
+    p.kargo()
+        .args(["env", "--profile", "staging", "--show-values"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MODE  [profile.staging.env]  staging"));
+    // `kargo clean --profile` removes that profile's output and leaves the others.
+    for dir in ["target/staging/jvm", "target/release/jvm"] {
+        std::fs::create_dir_all(p.path().join(dir)).unwrap();
+    }
+    p.kargo().args(["clean", "--profile", "staging"]).assert().success();
+    assert!(!p.path().join("target/staging").exists());
+    assert!(p.path().join("target/release/jvm").is_dir());
+}

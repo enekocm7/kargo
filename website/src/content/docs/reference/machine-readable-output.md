@@ -196,7 +196,7 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `members` | The names of the workspace members (the single package otherwise) |
 | `default-members` | The members commands work on at the workspace root: [`default-members`](../manifest/#workspace), else every member |
 | `lockfile`, `target-dir` | The project's `kargo.lock` and build directory |
-| `profile` | `dev`, or `release` with `--release`: the profile whose output directories and compiler arguments are shown |
+| `profile` | `dev`, `release` with `--release`, or the name given to `--profile`: the profile whose output directories and compiler arguments are shown |
 | `resolved` | `false` with `--no-deps`. Then every `dependencies` is `null`, `toolchain.jdk.home` is `null` and plugins have no `jar` |
 | `toolchain.kotlin` | The Kotlin version |
 | `toolchain.jdk` | The `[toolchain] jdk` request, and the `home` and major `version` of the JDK it resolves to (`null` when there is none) |

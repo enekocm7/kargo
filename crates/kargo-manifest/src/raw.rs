@@ -36,7 +36,7 @@ pub(super) struct RawManifest {
     #[serde(default)]
     env: toml::Table,
     #[serde(default)]
-    profile: RawProfiles,
+    profile: BTreeMap<String, RawProfile>,
     #[serde(default)]
     toolchain: RawToolchain,
     #[serde(default)]
@@ -529,37 +529,128 @@ pub struct SpringBootConfig {
     pub jpa: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct RawProfiles {
-    dev: Option<RawProfile>,
-    release: Option<RawProfile>,
-}
-
+/// One `[profile.<name>]` table. Unset keys come from the profile it `inherits` from.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawProfile {
+    inherits: Option<String>,
     debug: Option<bool>,
     optimize: Option<bool>,
-    #[serde(default)]
-    compiler_args: Vec<String>,
+    compiler_args: Option<Vec<String>>,
+    jvm_args: Option<Vec<String>>,
     #[serde(default)]
     env: toml::Table,
+    dependencies: Option<toml::Table>,
 }
 
+/// The profiles every manifest has, which custom profiles may not replace.
+const BUILTIN_PROFILES: [&str; 2] = ["dev", "release"];
+
+/// Names of output directories under `target/` that a profile must not take: `debug` is the
+/// output of `dev`, the others belong to `android` and `lint`.
+const RESERVED_PROFILE_NAMES: [&str; 3] = ["debug", "android", "lint"];
+
 impl RawProfile {
-    /// `name` is the profile's name in the manifest, for error messages.
-    fn apply(self, mut base: Profile, name: &str) -> Result<Profile> {
+    /// The profile this one inherits from: `dev` unless `inherits` says otherwise.
+    fn parent(&self) -> &str {
+        self.inherits.as_deref().unwrap_or("dev")
+    }
+
+    /// Applies this table's keys over `base`, the profile it inherits from. `name` is the profile's
+    /// name in the manifest, for error messages.
+    fn apply(self, mut base: Profile, name: &str, deps: &mut DependencyParser) -> Result<Profile> {
         if let Some(d) = self.debug {
             base.debug = d;
         }
         if let Some(o) = self.optimize {
             base.optimize = o;
         }
-        base.compiler_args = self.compiler_args;
-        base.env = parse_env(&self.env, &format!("[profile.{name}.env]"), false)?;
+        if let Some(args) = self.compiler_args {
+            base.compiler_args = args;
+        }
+        if let Some(args) = self.jvm_args {
+            base.jvm_args = args;
+        }
+        // Variables and `.env` files add to the inherited ones; a variable of the same name replaces its value.
+        let own_env = parse_env(&self.env, &format!("[profile.{name}.env]"), false)?;
+        base.env.vars.extend(own_env.vars);
+        base.env.files.extend(own_env.files);
+        if let Some(table) = self.dependencies {
+            let section = format!("profile.{name}.dependencies");
+            let paths = deps.paths.len();
+            let own = deps.parse(&table, &section, false, None)?;
+            if deps.paths.len() != paths {
+                bail!("[{section}] takes Maven dependencies; declare path dependencies in [dependencies]");
+            }
+            for dep in own {
+                base.dependencies.retain(|d| !d.same_artifact(&dep));
+                base.dependencies.push(dep);
+            }
+        }
         Ok(base)
     }
+}
+
+/// Resolves the `[profile.<name>]` tables. `dev` and `release` start from the built-in defaults and
+/// may not inherit; a custom profile starts from the profile it inherits from, so it is resolved
+/// after that one.
+fn resolve_profiles(raw: BTreeMap<String, RawProfile>, deps: &mut DependencyParser) -> Result<BTreeMap<String, Profile>> {
+    let mut profiles = BTreeMap::from([("dev".to_owned(), Profile::dev()), ("release".to_owned(), Profile::release())]);
+    let mut custom = BTreeMap::new();
+    for (name, profile) in raw {
+        if BUILTIN_PROFILES.contains(&name.as_str()) {
+            if profile.inherits.is_some() {
+                bail!("[profile.{name}]: `inherits` is for custom profiles; `dev` and `release` are the built-in profiles");
+            }
+            let base = profiles.remove(&name).expect("built-in profile");
+            let resolved = profile.apply(base, &name, deps)?;
+            profiles.insert(name, resolved);
+        } else {
+            validate_profile_name(&name)?;
+            custom.insert(name, profile);
+        }
+    }
+    while !custom.is_empty() {
+        let ready: Vec<String> = custom.iter().filter(|(_, p)| profiles.contains_key(p.parent())).map(|(n, _)| n.clone()).collect();
+        if ready.is_empty() {
+            // Follow the `inherits` of one unresolved profile: the chain ends at an unknown profile or loops back.
+            let mut chain = vec![custom.keys().next().expect("custom profiles are left").clone()];
+            loop {
+                let parent = custom[chain.last().expect("chain is not empty")].parent().to_owned();
+                if !custom.contains_key(&parent) {
+                    bail!(
+                        "[profile.{}] inherits from `{parent}`, which is not a profile; use `dev`, `release` or a profile of this manifest",
+                        chain.last().expect("chain is not empty")
+                    );
+                }
+                if let Some(at) = chain.iter().position(|n| *n == parent) {
+                    bail!("the `inherits` of [profile.*] loops: {} -> {parent}", chain[at..].join(" -> "));
+                }
+                chain.push(parent);
+            }
+        }
+        for name in ready {
+            let profile = custom.remove(&name).expect("ready profile");
+            let base = profiles[profile.parent()].clone();
+            let resolved = profile.apply(base, &name, deps)?;
+            profiles.insert(name, resolved);
+        }
+    }
+    Ok(profiles)
+}
+
+/// Checks a custom profile's name: it becomes an output directory `target/<name>`.
+fn validate_profile_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name.starts_with(|c: char| c.is_ascii_alphabetic())
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("invalid profile name `{name}` (use letters, digits, `-` and `_`, starting with a letter)");
+    }
+    if RESERVED_PROFILE_NAMES.contains(&name) {
+        bail!("profile name `{name}` is reserved; its output would be target/{name}, which Kargo uses for something else");
+    }
+    Ok(())
 }
 
 /// The fields of a table-form variable in `[env]`.
@@ -1432,6 +1523,7 @@ impl RawManifest {
 
         let dependencies = deps.parse(&self.dependencies, "dependencies", false, None)?;
         let dev_dependencies = deps.parse(&self.dev_dependencies, "dev-dependencies", true, None)?;
+        let profiles = resolve_profiles(self.profile, &mut deps)?;
         let path_dependencies = deps.paths;
         for (i, dep) in path_dependencies.iter().enumerate() {
             if path_dependencies[..i].iter().any(|d| d.name == dep.name && d.dev == dep.dev && d.target == dep.target) {
@@ -1497,8 +1589,7 @@ impl RawManifest {
             process_plugins,
             tasks,
             env: parse_env(&self.env, "[env]", true)?,
-            dev_profile: self.profile.dev.unwrap_or_default().apply(Profile::dev(), "dev")?,
-            release_profile: self.profile.release.unwrap_or_default().apply(Profile::release(), "release")?,
+            profiles,
         })
     }
 }

@@ -211,6 +211,10 @@ AndroidX and other Android libraries come from Google's Maven repository, which 
 "androidx.lifecycle:lifecycle-runtime-ktx" = "2.9.4"
 ```
 
+### Profile dependencies
+
+`[profile.dev.dependencies]` and `[profile.release.dependencies]` become `debugImplementation` and `releaseImplementation` in the generated Gradle project, so a debug-only library is in debug builds alone. A custom profile does not build for Android yet, and a processor or KSP dependency in a profile is not supported there: put it in `[dependencies]`.
+
 ## Sharing code with other targets
 
 Android is just another target. Common code in `src/` is shared with JVM, Wasm and Native, and `src-android/` holds `actual` implementations. See [Multiplatform projects](../multiplatform/).

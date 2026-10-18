@@ -24,8 +24,8 @@ fn minimal_manifest_defaults_to_jvm() {
     assert_eq!(m.targets.jvm.as_ref().unwrap().jvm_target, DEFAULT_JVM_TARGET);
     assert_eq!(m.repositories.len(), 1);
     assert_eq!(m.repositories[0].url, kargo_maven::repo::MAVEN_CENTRAL);
-    assert!(m.dev_profile.debug && !m.dev_profile.optimize);
-    assert!(!m.release_profile.debug && m.release_profile.optimize);
+    assert!(m.profiles["dev"].debug && !m.profiles["dev"].optimize);
+    assert!(!m.profiles["release"].debug && m.profiles["release"].optimize);
 }
 
 #[test]
@@ -191,8 +191,8 @@ optimize = true
     assert_eq!(m.tasks["gen"].hooks, [Hook::PreBuild]);
     assert_eq!(m.tasks["all"].depends_on, ["fmt", "gen"]);
 
-    assert_eq!(m.release_profile.compiler_args, ["-Xno-call-assertions"]);
-    assert!(m.dev_profile.optimize && m.dev_profile.debug);
+    assert_eq!(m.profiles["release"].compiler_args, ["-Xno-call-assertions"]);
+    assert!(m.profiles["dev"].optimize && m.profiles["dev"].debug);
 
     let jvm_deps = m.dependencies_for(TargetKind::Jvm);
     assert_eq!(jvm_deps.len(), 8);
@@ -1032,8 +1032,8 @@ fn env_table_accepts_strings_and_detailed_variables() {
     assert_eq!(m.env.vars["LOG_LEVEL"], EnvVar { force: true, ..var("debug") });
     assert_eq!(m.env.vars["CONFIG_DIR"], EnvVar { relative: true, ..var("config") });
     assert_eq!(m.env.vars["DATABASE_URL"], EnvVar { required: true, ..Default::default() });
-    assert_eq!(m.release_profile.env.vars["LOG_LEVEL"], var("info"));
-    assert!(m.dev_profile.env.vars.is_empty());
+    assert_eq!(m.profiles["release"].env.vars["LOG_LEVEL"], var("info"));
+    assert!(m.profiles["dev"].env.vars.is_empty());
 }
 
 #[test]
@@ -1057,8 +1057,69 @@ fn env_table_reads_env_files_and_expose() {
     ));
     assert_eq!(m.env.expose, ["APP_NAME", "PORT"]);
     assert_eq!(m.env.files, [".env.shared"]);
-    assert_eq!(m.release_profile.env.files, ["config/release.env"]);
+    assert_eq!(m.profiles["release"].env.files, ["config/release.env"]);
     assert!(m.env.vars.contains_key("APP_NAME") && !m.env.vars.contains_key("expose"));
+}
+
+#[test]
+fn custom_profiles_inherit_and_override() {
+    let m = parse(&format!(
+        "{MINIMAL}\n[profile.release]\noptimize = true\ndebug = false\n\n\
+         [profile.staging]\ninherits = \"release\"\ndebug = true\njvm-args = [\"-Xmx1g\", \"-Dapp.env=staging\"]\n\
+         compiler-args = [\"-Xno-param-assertions\"]\n\n\
+         [profile.bench]\ninherits = \"staging\"\n\n[profile.quick]\noptimize = true\n\n\
+         [profile.dev]\njvm-args = [\"-ea\"]\n"
+    ));
+    let staging = &m.profiles["staging"];
+    assert!(staging.debug && staging.optimize);
+    assert_eq!(staging.jvm_args, ["-Xmx1g", "-Dapp.env=staging"]);
+    assert_eq!(staging.compiler_args, ["-Xno-param-assertions"]);
+    // Keys the profile does not set come from the profile it inherits from, through any number of steps.
+    let bench = &m.profiles["bench"];
+    assert!(bench.debug && bench.optimize);
+    assert_eq!((&bench.jvm_args, &bench.compiler_args), (&staging.jvm_args, &staging.compiler_args));
+    // Custom profiles inherit from `dev` unless they say otherwise.
+    assert!(m.profiles["quick"].debug && m.profiles["quick"].optimize);
+    assert_eq!(m.profiles["dev"].jvm_args, ["-ea"]);
+    assert!(m.profiles["dev"].debug && !m.profiles["dev"].optimize);
+    assert!(m.profile("missing").is_none());
+}
+
+#[test]
+fn profile_env_is_inherited_and_extended() {
+    let m = parse(&format!(
+        "{MINIMAL}\n[profile.dev.env]\nA = \"dev\"\nB = \"dev\"\nenv-files = [\"dev.env\"]\n\n\
+         [profile.staging.env]\nB = \"staging\"\nenv-files = [\"staging.env\"]\n"
+    ));
+    let staging = &m.profiles["staging"].env;
+    assert_eq!(staging.vars["A"], EnvVar { value: Some("dev".to_owned()), ..Default::default() });
+    assert_eq!(staging.vars["B"], EnvVar { value: Some("staging".to_owned()), ..Default::default() });
+    assert_eq!(staging.files, ["dev.env", "staging.env"]);
+    assert_eq!(m.profiles["dev"].env.files, ["dev.env"]);
+}
+
+#[test]
+fn profile_dependencies_are_inherited_and_replaced() {
+    let m = parse(&format!(
+        "{MINIMAL}\n[profile.dev.dependencies]\n\"com.example:leak\" = \"2.0\"\n\n\
+         [profile.release.dependencies]\n\"com.example:mock\" = \"1.0\"\n\n\
+         [profile.staging]\ninherits = \"dev\"\n\n[profile.staging.dependencies]\n\"com.example:leak\" = \"3.0\"\n"
+    ));
+    assert_eq!(m.profiles["release"].dependencies[0].name, "com.example:mock");
+    assert_eq!(m.profiles["dev"].dependencies.len(), 1);
+    let staging = &m.profiles["staging"].dependencies;
+    assert_eq!(staging.len(), 1, "a profile's dependency replaces the inherited one with the same artifact");
+    assert_eq!(staging[0].version.as_deref(), Some("3.0"));
+}
+
+#[test]
+fn profile_names_and_inheritance_are_checked() {
+    let err = |profile: &str| parse_err(&format!("{MINIMAL}\n{profile}\n"));
+    assert!(err("[profile.dev]\ninherits = \"release\"").contains("`inherits` is for custom profiles"));
+    assert!(err("[profile.staging]\ninherits = \"missing\"").contains("inherits from `missing`, which is not a profile"));
+    assert!(err("[profile.a]\ninherits = \"b\"\n[profile.b]\ninherits = \"a\"").contains("loops: a -> b -> a"));
+    assert!(err("[profile.debug]").contains("profile name `debug` is reserved"));
+    assert!(err("[profile.\"my profile\"]").contains("invalid profile name `my profile`"));
 }
 
 #[test]

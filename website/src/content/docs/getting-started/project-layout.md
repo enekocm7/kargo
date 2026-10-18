@@ -131,6 +131,7 @@ target/
 │   ├── native/                   one directory per platform; cinterop/ holds C bindings, bin/ the [[bin]] executables
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
+├── staging/                      same layout, built with --profile staging (a custom profile)
 ├── lint/                         Kargo's detekt settings for kargo lint
 ├── android/                      the generated Gradle project
 └── .kargo-lock                   build-directory lock (see below)

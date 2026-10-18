@@ -37,9 +37,9 @@ Put settings that differ between machines or profiles in `.env` files in the pac
 | File | Read by | Priority |
 |---|---|---|
 | `.env` | every profile | lowest of the files |
-| `.env.dev`, `.env.release` | that profile only | above `.env` |
+| `.env.dev`, `.env.release`, `.env.<name>` for a custom profile | that profile only | above `.env` |
 | `.env.local` | every profile | above the profile files |
-| `.env.dev.local`, `.env.release.local` | that profile only | highest of the standard files |
+| `.env.dev.local`, `.env.release.local`, `.env.<name>.local` | that profile only | highest of the standard files |
 
 A missing file is skipped. `kargo new` adds `.env.local` and `.env.*.local` to `.gitignore`, so machine-specific values and secrets stay out of the repository. Commit a `.env` with safe defaults if your team wants one.
 
@@ -128,7 +128,7 @@ LOG_LEVEL     [env]         ********
 note: values are hidden; pass --show-values to print them
 ```
 
-`--show-values` prints them, and `--release` shows the release profile's variables instead of the dev ones. The source is `shell`, a section of kargo.toml such as `[env]` or `[profile.release.env]`, or a `.env` file with its line number. A required variable that nothing sets is listed as `missing (required)`. `kargo env` itself succeeds, so you can look at a machine that isn't ready yet.
+`--show-values` prints them, and `--release` (or `--profile <name>`) shows that profile's variables instead of the dev ones. The source is `shell`, a section of kargo.toml such as `[env]` or `[profile.release.env]`, or a `.env` file with its line number. A required variable that nothing sets is listed as `missing (required)`. `kargo env` itself succeeds, so you can look at a machine that isn't ready yet.
 
 ### Checks for CI
 

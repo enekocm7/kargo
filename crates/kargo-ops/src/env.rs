@@ -204,11 +204,11 @@ impl ProjectEnv {
     }
 }
 
-/// Resolves the environment of `ws` for the profile named `profile` (`dev` or `release`), with
-/// the variables that are required but unset left in [`ProjectEnv::missing`].
+/// Resolves the environment of `ws` for the profile named `profile` (`dev`, `release` or a custom
+/// one), with the variables that are required but unset left in [`ProjectEnv::missing`].
 pub fn resolve(ws: &Workspace, profile: &str, opts: &EnvOptions) -> Result<ProjectEnv> {
     let manifest = ws.manifest();
-    let profile_env = if profile == "release" { &manifest.release_profile.env } else { &manifest.dev_profile.env };
+    let profile_env = &manifest.profile(profile).with_context(|| format!("no profile named `{profile}` in kargo.toml"))?.env;
     // Variables that are not valid Unicode are left out: `.env` values are text.
     let shell: BTreeMap<String, String> =
         std::env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
