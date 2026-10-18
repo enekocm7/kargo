@@ -43,7 +43,7 @@ These work with every command.
 | `-v`, `--verbose` | Show the compiler and tool commands Kargo runs |
 | `-q`, `--quiet` | Don't print Kargo's status messages |
 | `--offline` | Never use the network (also `KARGO_OFFLINE=1`) |
-| `--locked` | Fail if `kargo.lock` would need to change |
+| `--locked` | Fail if `kargo.lock` would need to change, and hash every cached artifact instead of trusting its `.stamp` |
 | `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
 | `--system-gradle` | Run Android builds with the `gradle` on `PATH` instead of a Kargo-managed Gradle (also `KARGO_SYSTEM_GRADLE=1`). A project `gradlew` still wins |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -117,7 +118,7 @@ impl Lockfile {
                             .map(|p| p.to_string_lossy().replace('\\', "/"))
                             .with_context(|| format!("{} is outside the Kargo cache", file.display()))?;
                         let file = client.fetch_verified(&rel)?;
-                        let sha256 = hash::sha256_file(&file).with_context(|| format!("failed to hash {}", file.display()))?;
+                        let sha256 = cached_sha256(&file, false)?;
                         Ok(LockedFile { path: rel, sha256 })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -144,9 +145,9 @@ impl Lockfile {
         Ok(())
     }
 
-    /// Reuses a locked resolution if its inputs match, re-downloading any
-    /// missing artifact and verifying its checksum.
-    pub fn restore(&self, key: &str, inputs: &str, client: &MavenClient) -> Result<Option<Resolution>> {
+    /// Reuses a locked resolution if its inputs match, checking every artifact against its locked SHA-256.
+    /// `trust_stamps` lets an unchanged cached file skip hashing (see [`cached_sha256`]); `--locked` turns it off.
+    pub fn restore(&self, key: &str, inputs: &str, client: &MavenClient, trust_stamps: bool) -> Result<Option<Resolution>> {
         let Some(locked) = self.resolutions.get(key) else { return Ok(None) };
         if locked.inputs != inputs {
             return Ok(None);
@@ -159,11 +160,29 @@ impl Lockfile {
             }
         }
         let local = |path: &str| path.split('/').fold(client.cache_dir().to_path_buf(), |p, seg| p.join(seg));
+        let (cached, missing): (Vec<&LockedFile>, Vec<&LockedFile>) =
+            locked.packages.iter().flat_map(|p| &p.files).partition(|f| local(&f.path).is_file());
+
+        // A cached copy is used only if it matches the lock. Unlike a missing file it is not downloaded again
+        // here: the error says how to replace it, so the cache is never changed behind the user's back.
+        let hashes = kargo_maven::par_map_io(&cached, |file| cached_sha256(&local(&file.path), trust_stamps));
+        for (file, actual) in cached.iter().zip(hashes) {
+            let actual = actual?;
+            if actual != file.sha256 {
+                bail!(
+                    "checksum mismatch for {} (locked sha256 {}, cached {actual}); delete {} so it is downloaded again, \
+                     or run `kargo update` to re-lock it if the lock entry is wrong",
+                    file.path,
+                    file.sha256,
+                    local(&file.path).display()
+                );
+            }
+        }
+
         // Download whatever is missing from the cache in parallel (a fresh CI machine has nothing).
-        let missing: Vec<&LockedFile> = locked.packages.iter().flat_map(|p| &p.files).filter(|f| !local(&f.path).is_file()).collect();
         let downloaded: Vec<Result<(PathBuf, String)>> = kargo_maven::par_map_io(&missing, |file| {
             let fetched = client.fetch_required(&file.path)?;
-            let actual = hash::sha256_file(&fetched)?;
+            let actual = cached_sha256(&fetched, false)?;
             Ok((fetched, actual))
         });
         let mut downloaded: std::collections::HashMap<&str, Result<(PathBuf, String)>> =
@@ -252,6 +271,43 @@ pub struct LockChange {
     pub after: Vec<String>,
 }
 
+/// The SHA-256 of a file in the cache. Hashing a whole dependency tree on every build is slow, so the hash is
+/// kept in a `.stamp` file next to the file, with the size and modification time it was computed for. With
+/// `trust_stamp`, a file whose size and modification time are unchanged reuses that hash. Without it, which
+/// `--locked` asks for, the file is always hashed: a copy whose content changed but whose size and time did
+/// not is only caught that way.
+fn cached_sha256(path: &Path, trust_stamp: bool) -> Result<String> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".stamp");
+    let stamp = PathBuf::from(name);
+    // Taken before hashing, so a file that changes meanwhile no longer matches the stamp written for it.
+    let fingerprint = file_fingerprint(path);
+    let trusted = if trust_stamp { fingerprint.as_deref().and_then(|f| stamped_sha256(&stamp, f)) } else { None };
+    if let Some(sha256) = trusted {
+        return Ok(sha256);
+    }
+    let sha256 = hash::sha256_file(path).with_context(|| format!("failed to hash {}", path.display()))?;
+    if let Some(fingerprint) = &fingerprint {
+        // A stamp only saves time, so one that cannot be written is not an error.
+        let _ = kargo_util::fs::write_string_atomic(&stamp, &format!("{fingerprint} {sha256}\n"));
+    }
+    Ok(sha256)
+}
+
+/// The size and modification time of a file, which tell whether it changed since it was hashed.
+fn file_fingerprint(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(format!("{} {}", meta.len(), modified.as_nanos()))
+}
+
+/// The hash a stamp recorded for a file with this fingerprint, if the stamp is for that file.
+fn stamped_sha256(stamp: &Path, fingerprint: &str) -> Option<String> {
+    let recorded = std::fs::read_to_string(stamp).ok()?;
+    let sha256 = recorded.strip_prefix(fingerprint)?.strip_prefix(' ')?;
+    Some(sha256.trim_end().to_owned())
+}
+
 /// Parses `group:artifact[:requested-version]`; versions may contain `:` only in ranges, which never do.
 fn parse_locked_dependency(entry: &str) -> Result<(ModuleId, Option<String>)> {
     let mut parts = entry.splitn(3, ':');
@@ -306,11 +362,11 @@ mod tests {
         let loaded = Lockfile::load(&path).unwrap();
         assert_eq!(loaded, lock);
 
-        let restored = loaded.restore("jvm/runtime", "abc", &client).unwrap().unwrap();
+        let restored = loaded.restore("jvm/runtime", "abc", &client, true).unwrap().unwrap();
         assert_eq!(restored.nodes[0].files, resolution.nodes[0].files);
         assert_eq!(restored.nodes[0].dependencies[0], ("g:b".parse().unwrap(), Some("2".to_owned())));
-        assert!(loaded.restore("jvm/runtime", "different", &client).unwrap().is_none());
-        assert!(loaded.restore("missing", "abc", &client).unwrap().is_none());
+        assert!(loaded.restore("jvm/runtime", "different", &client, true).unwrap().is_none());
+        assert!(loaded.restore("missing", "abc", &client, true).unwrap().is_none());
     }
 
     #[test]
@@ -326,9 +382,39 @@ mod tests {
             let config = Config::new(home, Shell::new(Verbosity::Quiet));
             MavenClient::new(&config, vec![Repository::new("r", format!("file://{}", repo.path().display()))])
         };
-        let err = lock.restore("k", "i", &fresh_client).unwrap_err();
+        let err = lock.restore("k", "i", &fresh_client, true).unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"), "{err}");
         assert!(err.to_string().contains("kargo.lock entry is likely wrong"), "{err}");
+    }
+
+    #[test]
+    fn restore_rejects_cached_artifacts_that_do_not_match() {
+        let (_repo, _home, client, resolution) = setup();
+        let mut lock = Lockfile::default();
+        lock.record("k", "i", &resolution, &client).unwrap();
+        // A changed size is caught even when the stamp is trusted.
+        let cached = &resolution.nodes[0].files[0];
+        std::fs::write(cached, "tampered").unwrap();
+        for trust_stamps in [true, false] {
+            let err = lock.restore("k", "i", &client, trust_stamps).unwrap_err();
+            assert!(err.to_string().contains("checksum mismatch for g/a/1.0/a-1.0.jar"), "{err}");
+            assert!(err.to_string().contains("so it is downloaded again"), "{err}");
+        }
+        assert_eq!(std::fs::read_to_string(cached).unwrap(), "tampered", "the cached file is left for the user to delete");
+    }
+
+    #[test]
+    fn locked_restore_hashes_cached_artifacts_despite_stamps() {
+        let (_repo, _home, client, resolution) = setup();
+        let mut lock = Lockfile::default();
+        lock.record("k", "i", &resolution, &client).unwrap();
+        let cached = &resolution.nodes[0].files[0];
+        let modified = std::fs::metadata(cached).unwrap().modified().unwrap();
+        // Same size, and the modification time put back: only a hash sees the change.
+        std::fs::write(cached, "JAR-BYTES").unwrap();
+        std::fs::File::options().write(true).open(cached).unwrap().set_modified(modified).unwrap();
+        assert!(lock.restore("k", "i", &client, true).unwrap().is_some(), "a stamp whose size and time still match is trusted");
+        assert!(lock.restore("k", "i", &client, false).is_err(), "--locked hashes the cached file");
     }
 
     #[test]
