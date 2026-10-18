@@ -85,6 +85,8 @@ The first run of a `.kts` script compiles it, and the Kotlin compiler runs the s
 
 A `.kt` file is compiled once and then started the same way.
 
+A script exits when it returns, even if it started threads that are still running, as the `kotlin` command does. A library that leaves a non-daemon thread behind, such as an HTTP client's dispatcher, therefore doesn't keep the terminal waiting.
+
 With `--offline`, a script that has run before works from the cache without the network. A script that has never run needs the network to resolve its dependencies and compiler.
 
 :::note
@@ -93,7 +95,7 @@ Compiler messages give the line numbers of your file. The path they show is Karg
 
 ## Editors
 
-The [language server](../editors/#language-server) treats a `.kts` file as a Kargo script when it lies outside any project, or when its shebang runs `kargo script`. A `.kts` file inside a project is a build script that Kargo does not run, so the server leaves it alone unless its shebang says otherwise.
+The [language server](../editors/#language-server) treats a `.kts` file as a Kargo script when it lies outside any project, or when its shebang runs `kargo script`. A `.kts` file inside a project is a build script that Kargo does not run, so the server leaves it alone unless its shebang says otherwise. In Zed, a folder with only scripts needs a setting to start the server; see [Kargo scripts in Zed](../editors/#kargo-scripts-in-zed).
 
 For a Kargo script, the server completes the annotation names, the values of `@file:Jdk`, `@file:Framework` and `@file:Repository`, the coordinates and versions of `@file:DependsOn`, and the versions of `@file:Kotlin`. It shows what each annotation means on hover, and it reports a header that `kargo script` would reject, such as a dependency without a version, as a diagnostic on that annotation. The rest of the file goes to the Kotlin server.
 
