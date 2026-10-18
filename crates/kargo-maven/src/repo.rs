@@ -284,7 +284,7 @@ impl MavenClient {
             if !src.is_file() {
                 return Ok(Fetch::Missing);
             }
-            kfs::write_atomic(dest, |f| io::copy(&mut std::fs::File::open(&src)?, f).map(|_| ()))?;
+            kfs::write_atomic_if_absent(dest, |f| io::copy(&mut std::fs::File::open(&src)?, f).map(|_| ()))?;
             self.mark_verified(rel);
             return Ok(Fetch::Found);
         }
@@ -298,7 +298,7 @@ impl MavenClient {
             self.shell.status("Downloading", file_name);
         }
         let mut reader = response.into_body().into_reader();
-        kfs::write_atomic(dest, |f| io::copy(&mut reader, f).map(|_| ())).with_context(|| format!("failed to download {url}"))?;
+        kfs::write_atomic_if_absent(dest, |f| io::copy(&mut reader, f).map(|_| ())).with_context(|| format!("failed to download {url}"))?;
 
         match self.verify_checksum(repo, rel, dest) {
             Ok(true) => self.mark_verified(rel),
