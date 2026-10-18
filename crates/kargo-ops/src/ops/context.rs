@@ -490,7 +490,8 @@ impl<'a> BuildContext<'a> {
         let inputs = self.inputs_fingerprint(&platform, roots, boms);
         if !self.config.refresh() {
             let lock = self.shared.lock.lock().expect("lock poisoned");
-            if let Some(res) = lock.restore(key, &inputs, &self.client)? {
+            // Under --locked, cached artifacts are hashed rather than trusted by their stamps.
+            if let Some(res) = lock.restore(key, &inputs, &self.client, !self.locked)? {
                 return Ok(res);
             }
         }

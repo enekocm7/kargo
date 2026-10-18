@@ -120,7 +120,7 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 
 | Flag | Why in CI |
 |---|---|
-| `--locked` | Fail instead of silently changing `kargo.lock` |
+| `--locked` | Fail instead of silently changing `kargo.lock`, and check every cached artifact against it |
 | `--offline` | Make sure a step uses only what's cached |
 | `kargo fetch` | Download everything in a step of its own (add `--tools` for the doc, fmt and lint tools), so the steps after it can use `--offline` |
 | `kargo test --no-fail-fast` | Test every target and print a result per target instead of stopping at the first failure (or set [`[test] fail-fast = false`](../../reference/manifest/#test)) |

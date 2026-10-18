@@ -348,7 +348,7 @@ Repositories often delete old snapshot builds. If a locked build is gone, the bu
 
 ## The lockfile
 
-`kargo.lock` records the exact version of every resolved module and the SHA-256 of every downloaded file. Commit it, so everyone builds with the same dependencies.
+`kargo.lock` records the exact version of every resolved module and the SHA-256 of every file it downloads. Kargo checks each file it uses against those checksums, cached copies included. Commit it, so everyone builds with the same dependencies.
 
 ```sh
 kargo update        # re-resolve everything and rewrite kargo.lock

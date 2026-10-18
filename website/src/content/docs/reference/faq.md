@@ -193,4 +193,4 @@ Kargo writes a new `kargo.toml`, `kargo.lock` or jar to a temporary file and the
 
 ### "checksum mismatch" for a locked artifact
 
-A re-downloaded file doesn't match the SHA-256 in `kargo.lock`. Read the rest of the message: if the download matches the checksum the repository publishes, the lockfile entry is the suspect and `kargo update` re-locks it. If the repository publishes no checksum, find out why the artifact changed before you re-lock. See [Checksum mismatches](../lockfile/#checksum-mismatches).
+A file doesn't match the SHA-256 in `kargo.lock`. If the message says `cached`, the copy in `~/.kargo/cache` is the one that differs: it was corrupted, edited, or replaced, and Kargo won't use it. Delete the file named in the message and build again to download it afresh. If the message says the download differs, read the rest of it: if the download matches the checksum the repository publishes, the lockfile entry is the suspect and `kargo update` re-locks it. If the repository publishes no checksum, find out why the artifact changed before you re-lock. See [Checksum mismatches](../lockfile/#checksum-mismatches).
