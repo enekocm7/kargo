@@ -222,6 +222,25 @@ How each target runs:
 | Native | the executable built for the host platform |
 | Android | installs on the connected device with Gradle, then launches it with `adb` |
 
+## `kargo script`
+
+Run a single Kotlin file without a project. A `.kts` script takes its dependencies, repositories, Kotlin version, JDK and frameworks from `@file:` annotations at its top; a `.kt` file takes them from a `/* kargo ... */` front matter. See [Kotlin scripts](../../guides/scripts/).
+
+```sh
+kargo script fetch.kts https://example.com
+kargo script -e 'println(1 + 1)'
+```
+
+| Option | Meaning |
+|---|---|
+| `<file>` | The `.kts` script or `.kt` file to run. Required unless `-e` is given |
+| `-e, --expr <code>` | Run this Kotlin code instead of a file. Every positional argument is then one of the script's arguments |
+| `[args]...` | Arguments for the script. Use `--` before an argument that starts with `-` |
+
+The global flags apply: `--offline` runs from the cache alone, `-v` shows the compiler commands, `-q` hides Kargo's status lines.
+
+Exit codes: the script's own exit code when it runs; `1` when the script throws an exception; `101` when the header is invalid or the file does not compile; `2` for a usage error, such as no file. Compiled scripts are cached in `~/.kargo/cache/scripts`.
+
 ## `kargo test` (`t`)
 
 Build and run tests.

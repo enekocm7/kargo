@@ -68,7 +68,7 @@ If the project really has several programs, keep them all: run one with `kargo r
 
 ### A `.kts` script does nothing, or a task named `build` doesn't run
 
-Kargo doesn't compile or run Kotlin scripts, and `kargo build` always runs the built-in command, not a task of that name. Both print a warning that says what to do instead: put the code in a `.kt` file, and run the task with `kargo task build` or rename it. See [Warnings](../warnings/).
+Kargo doesn't compile or run the Kotlin scripts (`.kts`) inside a project, and `kargo build` always runs the built-in command, not a task of that name. Both print a warning that says what to do instead: put the code in a `.kt` file, and run the task with `kargo task build` or rename it. See [Warnings](../warnings/). To run a script on its own, outside a project, use [`kargo script`](../../guides/scripts/).
 
 ### `cannot find symbol` for a generated class such as `AutoValue_Person`
 

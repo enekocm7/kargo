@@ -40,7 +40,7 @@ use kargo_toolchain::{LanguageServer, ServerKind};
 use kargo_util::config::Config;
 
 use crate::jsonrpc::{self, Kind};
-use crate::{actions, check, deps, manifest, project, text};
+use crate::{actions, check, deps, manifest, project, script, text};
 
 /// The Kotlin language server behind `kargo lsp`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -527,6 +527,16 @@ impl Server {
                         };
                         self.send(&reply)?;
                     }
+                    _ if matches!(method.as_str(), "textDocument/completion" | "textDocument/hover")
+                        && document_uri(&message).is_some_and(|uri| script::is_script_uri(uri) && self.docs.contains_key(uri)) =>
+                    {
+                        match self.script_request(&method, &message) {
+                            script::Answer::Now(result) => self.send(&jsonrpc::response(&id, result))?,
+                            // Answered by the worker thread when it is done.
+                            script::Answer::Later => {}
+                            script::Answer::Backend => self.forward_request(message, Value::Null)?,
+                        }
+                    }
                     _ if document_uri(&message).is_some_and(is_kargo_document) => {
                         if !self.dependency_completion(&method, &message) {
                             let result = self.manifest_request(&method, &message);
@@ -560,6 +570,11 @@ impl Server {
                     "textDocument/didOpen" | "textDocument/didClose" | "textDocument/didSave" => {
                         self.send_backend(&message);
                         self.source_notification(&method, &message)?;
+                        self.script_notification(&method, &message)?;
+                    }
+                    "textDocument/didChange" => {
+                        self.send_backend(&message);
+                        self.script_notification(&method, &message)?;
                     }
                     _ => self.send_backend(&message),
                 }
@@ -614,7 +629,10 @@ impl Server {
                 let uri = message["params"]["uri"].as_str().unwrap_or_default().to_owned();
                 let theirs = message["params"]["diagnostics"].as_array().cloned().unwrap_or_default();
                 let key = check::uri_key(&uri);
-                let ours = self.check_diagnostics(&key);
+                let mut ours = self.check_diagnostics(&key);
+                if let Some(text) = self.docs.get(&uri).filter(|_| script::is_script_uri(&uri)) {
+                    ours.extend(script::diagnostics(text));
+                }
                 message["params"]["diagnostics"] = json!(check::merge(&theirs, &ours));
                 self.backend_pushed.insert(key, theirs);
             }
@@ -1237,6 +1255,102 @@ impl Server {
         self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": check::merge(&theirs, &ours) }))
     }
 
+    /// Answers a completion or hover on a Kargo script's `@file:` annotation. The network-bound
+    /// values (`DependsOn` and `Kotlin` versions) go to a worker thread.
+    fn script_request(&self, method: &str, message: &Value) -> script::Answer {
+        let uri = document_uri(message).unwrap_or_default().to_owned();
+        let Some(text) = self.docs.get(&uri) else { return script::Answer::Backend };
+        let offset = text::offset(text, &message["params"]["position"]);
+        if method == "textDocument/hover" {
+            return script::hover(text, offset).map_or(script::Answer::Backend, script::Answer::Now);
+        }
+        let Some(request) = script::request(text, offset) else { return script::Answer::Backend };
+        if matches!(&request, script::Request::Value { name, .. } if name == "DependsOn" || name == "Kotlin") {
+            self.script_versions(message["id"].clone(), text.clone(), request);
+            return script::Answer::Later;
+        }
+        script::Answer::Now(json!({ "isIncomplete": false, "items": script::completion(text, &request) }))
+    }
+
+    /// Completes the coordinate or version of `@file:DependsOn`, and the version of `@file:Kotlin`,
+    /// on a worker thread: coordinates from the search, versions from the script's repositories.
+    fn script_versions(&self, id: Value, text: String, request: script::Request) {
+        let (config, searcher, tx) = (self.config.clone(), Arc::clone(&self.searcher), self.tx.clone());
+        let repositories = kargo_ops::script::declared_repositories(&text);
+        thread::spawn(move || {
+            let script::Request::Value { name, partial, range } = &request else {
+                let _ = tx.send(Event::Reply(jsonrpc::response(&id, json!({ "isIncomplete": false, "items": [] }))));
+                return;
+            };
+            let result = if name == "Kotlin" {
+                let module = kargo_maven::ModuleId::new("org.jetbrains.kotlin", "kotlin-compiler-embeddable");
+                let versions = deps::versions(&config, repositories, &module);
+                let request = deps::Request::Version { module, range: range.clone(), quoted: true };
+                json!({ "isIncomplete": false, "items": deps::version_items(&text, &request, &versions) })
+            } else if let Some(colon) = partial.rfind(':').filter(|_| partial.matches(':').count() >= 2) {
+                // `group:artifact:` typed: complete the version after the last colon.
+                let Ok(module) = partial[..colon].parse::<kargo_maven::ModuleId>() else {
+                    let _ = tx.send(Event::Reply(jsonrpc::response(&id, json!({ "isIncomplete": false, "items": [] }))));
+                    return;
+                };
+                let versions = deps::versions(&config, repositories, &module);
+                let version = deps::Request::Version { module, range: range.start + colon + 1..range.end, quoted: true };
+                json!({ "isIncomplete": false, "items": deps::version_items(&text, &version, &versions) })
+            } else if partial.len() >= 2 {
+                let hits = searcher.search(partial).unwrap_or_default();
+                let coordinate = deps::Request::Coordinate {
+                    partial: partial.clone(),
+                    range: range.clone(),
+                    key: false,
+                    quoted: true,
+                    has_value: false,
+                };
+                json!({ "isIncomplete": true, "items": deps::coordinate_items(&text, &coordinate, &hits) })
+            } else {
+                json!({ "isIncomplete": false, "items": [] })
+            };
+            let _ = tx.send(Event::Reply(jsonrpc::response(&id, result)));
+        });
+    }
+
+    /// Tracks the Kargo scripts the editor opens, changes and closes, and publishes the problems of
+    /// their headers. Other `.kts` files are left to the Kotlin server.
+    fn script_notification(&mut self, method: &str, message: &Value) -> Result<()> {
+        let Some(uri) = document_uri(message).map(str::to_owned) else { return Ok(()) };
+        if !script::is_script_uri(&uri) {
+            return Ok(());
+        }
+        let params = &message["params"];
+        match method {
+            "textDocument/didOpen" => {
+                let text = params["textDocument"]["text"].as_str().unwrap_or_default();
+                if text::uri_to_path(&uri).is_some_and(|path| script::is_kargo_script(&path, text)) {
+                    self.docs.insert(uri.clone(), text.to_owned());
+                    self.publish_script(&uri)?;
+                }
+            }
+            "textDocument/didChange" => {
+                if let Some(text) = self.docs.get_mut(&uri) {
+                    text::apply_changes(text, params["contentChanges"].as_array().map(Vec::as_slice).unwrap_or_default());
+                    self.publish_script(&uri)?;
+                }
+            }
+            "textDocument/didClose" if self.docs.remove(&uri).is_some() => {
+                self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] }))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Publishes the problems of a tracked Kargo script's header; the backend's own diagnostics are
+    /// added to them when it reports.
+    fn publish_script(&mut self, uri: &str) -> Result<()> {
+        let Some(text) = self.docs.get(uri) else { return Ok(()) };
+        let diagnostics = script::diagnostics(text);
+        self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics }))
+    }
+
     fn publish(&mut self, uri: &str) -> Result<()> {
         let Some(text) = self.docs.get(uri) else { return Ok(()) };
         let path = text::uri_to_path(uri).unwrap_or_else(|| PathBuf::from(kargo_manifest::MANIFEST_NAME));
@@ -1365,6 +1479,42 @@ mod tests {
     }
 
     const MANIFEST: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[tasks]\nhello = \"echo hi\"\n";
+
+    #[test]
+    fn serves_kargo_scripts_annotations_and_their_problems() {
+        // A script outside any project is a Kargo script.
+        let dir = tempfile::tempdir().unwrap();
+        let uri = text::path_to_uri(&dir.path().join("fetch.kts"));
+        let (mut editor, _home) = Editor::start(Options::default(), None);
+        let (init, _) = editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} }));
+        assert_eq!(init["result"]["capabilities"]["hoverProvider"], true);
+        editor.send(jsonrpc::notification("initialized", json!({})));
+
+        let text = "@file:DependsOn(\"a:b\")\n@file:Ke\nprintln(1)\n";
+        editor.send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }),
+        ));
+        // The header's problems are published as the script opens: `a:b` has no version.
+        let published = editor.recv();
+        assert_eq!(published["method"], "textDocument/publishDiagnostics", "{published}");
+        assert_eq!(published["params"]["diagnostics"][0]["range"]["start"], json!({ "line": 0, "character": 0 }));
+        assert!(published["params"]["diagnostics"][0]["message"].as_str().unwrap().contains("version pinned"), "{published}");
+
+        let (completion, _) = editor.request(
+            2,
+            "textDocument/completion",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": 1, "character": 9 } }),
+        );
+        let labels: Vec<&str> = completion["result"]["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+        assert!(labels.contains(&"Kotlin") && labels.contains(&"DependsOn"), "{labels:?}");
+
+        let (hover, _) =
+            editor.request(3, "textDocument/hover", json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 9 } }));
+        assert!(hover["result"]["contents"]["value"].as_str().unwrap().contains("@file:DependsOn"), "{hover}");
+
+        assert!(editor.finish());
+    }
 
     #[test]
     fn serves_kargo_toml_without_a_kotlin_server() {

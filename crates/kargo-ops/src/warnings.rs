@@ -91,7 +91,7 @@ pub fn ignored_files(ws: &Workspace) -> Vec<String> {
     let mut messages: Vec<String> = scripts
         .iter()
         .take(LISTED_FILES)
-        .map(|file| format!("`{file}` is ignored: Kargo does not compile or run Kotlin scripts (.kts); put the code in a .kt file"))
+        .map(|file| format!("`{file}` is ignored: Kargo does not compile or run Kotlin scripts (.kts); put the code in a .kt file, or run it with `kargo script <file>`"))
         .collect();
     if scripts.len() > LISTED_FILES {
         messages.push(format!("{} more Kotlin scripts (.kts) are ignored too", scripts.len() - LISTED_FILES));

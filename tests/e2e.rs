@@ -1810,3 +1810,78 @@ fn dap_debugs_programs_and_tests() {
     let mut dap = Dap::start(&dir);
     dap.stops_at(&["test"], &dir.join("tests").join("GreetingTest.kt"), 9);
 }
+
+#[test]
+fn scripts_run_with_their_arguments_and_are_cached() {
+    require_e2e!();
+    let e = E2e::new();
+    e.write(
+        "fetch.kts",
+        "#!/usr/bin/env -S kargo script\n@file:DependsOn(\"org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2\")\n\nimport kotlinx.coroutines.runBlocking\nimport kotlinx.coroutines.delay\n\nrunBlocking { delay(1) }\nprintln(\"hello ${args.joinToString(\"|\")}\")\n",
+    );
+    e.kargo("").args(["script", "fetch.kts", "world", "--flag"]).assert().success().stdout("hello world|--flag\n");
+    // The second run starts the classes the first one compiled, so it does not compile again.
+    e.kargo("")
+        .args(["script", "fetch.kts", "again"])
+        .assert()
+        .success()
+        .stdout("hello again\n")
+        .stderr(predicate::str::contains("Compiling").not());
+}
+
+#[test]
+fn scripts_report_failures_like_programs() {
+    require_e2e!();
+    let e = E2e::new();
+    e.write("boom.kts", "println(\"before\")\nthrow IllegalStateException(\"boom\")\n");
+    e.kargo("").args(["script", "boom.kts"]).assert().code(1).stdout("before\n").stderr(predicate::str::contains("boom"));
+    // The cached classes throw the same way.
+    e.kargo("").args(["script", "boom.kts"]).assert().code(1).stdout("before\n");
+    e.write("bad.kts", "println(undefinedThing)\n");
+    e.kargo("").args(["script", "bad.kts"]).assert().code(101).stderr(predicate::str::contains("unresolved reference"));
+}
+
+#[test]
+fn kotlin_files_with_front_matter_and_expressions() {
+    require_e2e!();
+    let e = E2e::new();
+    e.write(
+        "tool.kt",
+        "/* kargo\n[dependencies]\n\"com.github.ajalt.clikt:clikt\" = \"5.0.0\"\n*/\nfun main(args: Array<String>) {\n    println(\"kt \" + args.joinToString())\n}\n",
+    );
+    e.kargo("").args(["script", "tool.kt", "a", "b"]).assert().success().stdout("kt a, b\n");
+    e.kargo("").args(["script", "tool.kt", "a", "b"]).assert().success().stdout("kt a, b\n");
+    e.kargo("").args(["script", "-e", "println(1 + 1)"]).assert().success().stdout("2\n");
+    e.kargo("").args(["script", "-e", "println(args.joinToString(\"|\"))", "--", "--a", "b"]).assert().success().stdout("--a|b\n");
+    e.write("no-main.kt", "/* kargo\n*/\nval x = 1\n");
+    e.kargo("").args(["script", "no-main.kt"]).assert().code(101).stderr(predicate::str::contains("no `main` function found"));
+}
+
+#[test]
+fn script_annotations_set_kotlin_jdk_and_frameworks() {
+    require_e2e!();
+    let e = E2e::new();
+    e.write(
+        "settings.kts",
+        "@file:Kotlin(\"2.4.21\")\n@file:Jdk(\"system\")\n@file:Framework(\"coroutines\")\nimport kotlinx.coroutines.*\nprintln(runBlocking { async { 6 * 7 }.await() })\n",
+    );
+    e.kargo("").args(["script", "settings.kts"]).assert().success().stdout("42\n");
+    e.write("dotted.main.kts", "println(\"dotted\")\n");
+    e.kargo("").args(["script", "dotted.main.kts"]).assert().success().stdout("dotted\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn shebang_runs_the_script() {
+    require_e2e!();
+    use std::os::unix::fs::PermissionsExt;
+    let e = E2e::new();
+    e.write("hi.kts", "#!/usr/bin/env -S kargo script\nprintln(\"shebang \" + args.size)\n");
+    let script = e.dir.path().join("hi.kts");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bin_dir = std::path::Path::new(env!("CARGO_BIN_EXE_kargo")).parent().unwrap();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
+    let output = StdCommand::new(&script).arg("x").env("PATH", path).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "shebang 1\n");
+}

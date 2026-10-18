@@ -43,6 +43,7 @@ export default defineConfig({
 						{ label: 'Workspaces', slug: 'guides/workspaces' },
 						{ label: 'Testing', slug: 'guides/testing' },
 						{ label: 'Several programs', slug: 'guides/multiple-programs' },
+						{ label: 'Kotlin scripts', slug: 'guides/scripts' },
 						{ label: 'API documentation', slug: 'guides/documentation' },
 						{ label: 'Formatting and linting', slug: 'guides/formatting-and-linting' },
 						{ label: 'Publishing a library', slug: 'guides/publishing' },

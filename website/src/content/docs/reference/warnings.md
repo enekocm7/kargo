@@ -10,7 +10,7 @@ $ kargo build
 warning: package version `not.a.version.x` does not look like a version (expected something like `1.0.0`); it becomes part of the jar's file name and of its Maven coordinates
 warning: task `build` is hidden by the built-in `kargo build` command; run the task with `kargo task build` or rename it
 warning: no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target
-warning: `src/script.kts` is ignored: Kargo does not compile or run Kotlin scripts (.kts); put the code in a .kt file
+warning: `src/script.kts` is ignored: Kargo does not compile or run Kotlin scripts (.kts); put the code in a .kt file, or run it with `kargo script <file>`
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.17s
 ```
 
@@ -40,10 +40,10 @@ A target with nothing to compile still "builds": there is nothing to fail, so `k
 ## Ignored Kotlin scripts
 
 ```text
-warning: `src/script.kts` is ignored: Kargo does not compile or run Kotlin scripts (.kts); put the code in a .kt file
+warning: `src/script.kts` is ignored: Kargo does not compile or run Kotlin scripts (.kts); put the code in a .kt file, or run it with `kargo script <file>`
 ```
 
-Kargo compiles `.kt` and `.java` files. A `.kts` file in `src/`, `src-<target>/`, `tests/`, `tests-<target>/` or `examples/` is not compiled and not run, so its code silently does nothing. Move the code into a `.kt` file (a program needs a `fun main`), or delete the file if it is a Gradle build script left over from a [migration](../../migration/from-gradle/).
+Kargo compiles `.kt` and `.java` files. A `.kts` file in `src/`, `src-<target>/`, `tests/`, `tests-<target>/` or `examples/` is not compiled and not run, so its code silently does nothing. Move the code into a `.kt` file (a program needs a `fun main`), or delete the file if it is a Gradle build script left over from a [migration](../../migration/from-gradle/). To run a script on its own, without a project, use [`kargo script`](../../guides/scripts/).
 
 Kargo names the first five scripts and counts the rest. A `.kts` file under `resources/` or `test-resources/` is data and is not reported.
 

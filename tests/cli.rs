@@ -700,6 +700,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "toolchain",
     ];
     const UNCOMMON: &[&str] = &[
+        "script",
         "outdated",
         "upgrade",
         "target",
@@ -2837,4 +2838,49 @@ fn tasks_run_with_the_project_environment() {
     p.file(".env", "GREETING=\"from file\"\n");
     p.kargo().args(["task", "show"]).env("LOG", "trace").assert().success();
     assert_eq!(p.read("out.txt"), "from file debug\n");
+}
+
+#[test]
+fn script_needs_a_file_or_code() {
+    let p = Project::new();
+    // clap rejects the missing file as a usage error.
+    p.kargo().arg("script").assert().failure().code(2).stderr(predicate::str::contains("<FILE>"));
+    p.kargo()
+        .args(["script", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Run a Kotlin script (.kts) or a .kt file without a project"));
+}
+
+#[test]
+fn script_runs_only_kotlin_files() {
+    let p = Project::new();
+    p.file("notes.txt", "hi");
+    p.kargo()
+        .args(["script", "notes.txt"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`kargo script` runs a .kts script or a .kt file, not notes.txt"));
+}
+
+#[test]
+fn script_reports_its_header_before_compiling() {
+    let p = Project::new();
+    p.file("pinned.kts", "@file:DependsOn(\"org.example:lib\")\nprintln(1)\n");
+    p.kargo()
+        .args(["script", "pinned.kts"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("line 1: invalid @file:DependsOn").and(predicate::str::contains("version pinned")));
+    p.file("flask.kts", "@file:Framework(\"flask\")\nprintln(1)\n");
+    p.kargo().args(["script", "flask.kts"]).assert().failure().code(101).stderr(predicate::str::contains("unknown framework `flask`"));
+    p.file("plugin.kts", "@file:Framework(\"serialization\")\nprintln(1)\n");
+    p.kargo()
+        .args(["script", "plugin.kts"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("needs the Kotlin compiler plugin").and(predicate::str::contains("move the code to a .kt file")));
 }
