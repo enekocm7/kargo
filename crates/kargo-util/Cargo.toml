@@ -12,6 +12,7 @@ anstyle.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 hex.workspace = true
+ignore.workspace = true
 md5.workspace = true
 sha1.workspace = true
 sha2.workspace = true

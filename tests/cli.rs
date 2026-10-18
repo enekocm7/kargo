@@ -685,6 +685,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "check",
         "run",
         "test",
+        "watch",
         "add",
         "remove",
         "update",
@@ -1550,6 +1551,51 @@ fn run_rejects_wasm_libraries() {
         .failure()
         .code(101)
         .stderr(predicate::str::contains("kind = \"library\" builds an npm package and has no program to run"));
+}
+
+#[test]
+fn watch_options_are_checked_before_anything_builds() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.android]\nnamespace = \"com.example.app\"\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    // `--clear` and `--ignore` only mean something with `--watch`.
+    p.kargo()
+        .args(["run", "--clear"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--clear` and `--ignore` only apply with `--watch`"));
+    p.kargo()
+        .args(["test", "--ignore", "*.log"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("only apply with `--watch`"));
+    // Combinations that cannot work are refused by the parser.
+    p.kargo().args(["run", "--watch", "--debug"]).assert().failure().code(2).stderr(predicate::str::contains("cannot be used with"));
+    p.kargo().args(["test", "--watch", "--list"]).assert().failure().code(2).stderr(predicate::str::contains("cannot be used with"));
+    // Android apps run inside Gradle, so there is nothing for the watcher to restart.
+    p.kargo()
+        .args(["run", "--watch", "-t", "android"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--watch` does not run Android apps"));
+}
+
+#[test]
+fn watch_needs_a_project_and_valid_patterns() {
+    let p = Project::new();
+    p.kargo().arg("watch").assert().failure().code(101).stderr(predicate::str::contains("could not find `kargo.toml`"));
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.kargo()
+        .args(["watch", "--ignore", "[z-a]"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("invalid --ignore pattern `[z-a]`"));
+    p.kargo().args(["watch", "-x", " "]).assert().failure().code(101).stderr(predicate::str::contains("`-x` needs a command"));
 }
 
 #[test]

@@ -69,6 +69,14 @@ impl Shell {
         self.print_left(ERROR, "error", message);
     }
 
+    /// Clears the terminal before a watched run (`--clear`), when stderr is a terminal.
+    pub fn clear(&self) {
+        if self.verbosity >= Verbosity::Normal && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            let mut err = anstream::stderr().lock();
+            let _ = write!(err, "\x1b[2J\x1b[1;1H");
+        }
+    }
+
     fn print(&self, style: Style, verb: impl Display, message: impl Display) {
         let mut err = anstream::stderr().lock();
         let _ = writeln!(err, "{style}{verb:>12}{style:#} {message}");

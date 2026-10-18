@@ -1895,3 +1895,50 @@ fn scripts_exit_when_they_return_even_with_threads_left_running() {
     e.kargo("").args(["script", "leftover.kts"]).timeout(std::time::Duration::from_secs(300)).assert().success().stdout("done\n");
     e.kargo("").args(["script", "leftover.kts"]).timeout(std::time::Duration::from_secs(60)).assert().success().stdout("done\n");
 }
+
+#[test]
+fn jvm_run_watch_restarts_the_program_after_a_change() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    // The program prints once and exits, so nothing outlives the test but Kargo, which is killed at the end.
+    t.write("app/src/Main.kt", "fun main() { println(\"first\") }\n");
+    let stderr = std::fs::File::create(t.dir.path().join("watch.err")).unwrap();
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("kargo"))
+        .args(["run", "--watch"])
+        .current_dir(t.dir.path().join("app"))
+        .env_remove("KARGO_TARGET_DIR")
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(stderr)
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)).map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut wait_for = |text: &str| {
+        let timeout = std::time::Duration::from_secs(300);
+        loop {
+            match rx.recv_timeout(timeout) {
+                Ok(line) if line == text => break,
+                Ok(_) => {}
+                Err(e) => {
+                    let log = std::fs::read_to_string(t.dir.path().join("watch.err")).unwrap_or_default();
+                    let _ = child.kill();
+                    panic!("no `{text}` from kargo run --watch: {e}\n{log}");
+                }
+            }
+        }
+    };
+    wait_for("first");
+    t.write("app/src/Main.kt", "fun main() { println(\"second\") }\n");
+    wait_for("second");
+    let _ = child.kill();
+    let _ = child.wait();
+}

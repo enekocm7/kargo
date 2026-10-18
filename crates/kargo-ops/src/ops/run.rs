@@ -2,8 +2,13 @@
 //! `main` (`--main`) or an example from `examples/` (`--example`).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::Instant;
+
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
+use std::{thread, time::Duration};
 
 use anyhow::{Context, Result, bail};
 
@@ -25,6 +30,7 @@ use kargo_maven::Platform;
 use kargo_toolchain::native::Host;
 use kargo_util::fs::join_paths;
 use kargo_util::process;
+use kargo_util::shell::Shell;
 
 /// Which program `kargo run` starts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -171,8 +177,31 @@ fn bin_hint(ctx: &BuildContext) -> String {
     format!("\nrun a [[bin]] with `kargo run --bin <name>`; available bins: {}", names.join(", "))
 }
 
-/// Builds and runs; returns the program's exit code.
-pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
+/// A built program, ready to start: its command and the label `kargo run` shows for it.
+pub struct Launch {
+    cmd: Command,
+    label: String,
+}
+
+impl Launch {
+    /// Starts the program, printing the `Running` status line.
+    pub fn spawn(mut self, shell: &Shell) -> Result<Child> {
+        shell.status("Running", format!("`{}`", self.label));
+        shell.verbose("Command", process::describe(&self.cmd));
+        self.cmd.spawn().with_context(|| format!("failed to start `{}`", self.cmd.get_program().to_string_lossy()))
+    }
+}
+
+/// What `kargo run` does once the program is built.
+pub enum Start {
+    /// Start this program as a child process.
+    Process(Box<Launch>),
+    /// The program already ran in the foreground (Android and browser apps), with this exit code.
+    Finished(i32),
+}
+
+/// Builds the program and returns how to start it. Android and browser apps run in the foreground here instead.
+pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
     validate(ctx, target, opts)?;
     // Fails before anything builds when a required variable is not set. Android and Wasm browser
@@ -214,7 +243,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
             if wasm.environment == WasmEnvironment::Browser {
-                return serve_wasm_app(ctx, &wasm, opts);
+                return Ok(Start::Finished(serve_wasm_app(ctx, &wasm, opts)?));
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             cmd.arg(&wasm.module);
@@ -230,7 +259,7 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         }
         TargetKind::Android => {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
-            return crate::gradle::run(ctx, &opts.flavors);
+            return Ok(Start::Finished(crate::gradle::run(ctx, &opts.flavors)?));
         }
     };
     cmd.args(&opts.args).current_dir(ctx.ws.root()).envs(project_env);
@@ -239,10 +268,94 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
         label.push_str(&process::quote_for_display(arg));
     }
     ctx.unlock()?;
-    ctx.shell().status("Running", format!("`{label}`"));
-    ctx.shell().verbose("Command", process::describe(&cmd));
-    let status = cmd.status().with_context(|| format!("failed to start `{}`", cmd.get_program().to_string_lossy()))?;
-    Ok(status.code().unwrap_or(1))
+    Ok(Start::Process(Box::new(Launch { cmd, label })))
+}
+
+/// Builds and runs; returns the program's exit code.
+pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
+    match start(ctx, opts)? {
+        Start::Process(launch) => {
+            let status = launch.spawn(ctx.shell())?.wait().context("failed to wait for the program")?;
+            Ok(status.code().unwrap_or(1))
+        }
+        Start::Finished(code) => Ok(code),
+    }
+}
+
+/// Fails before anything builds when `kargo run --watch` cannot keep the program running, since Android and browser apps run
+/// in the foreground themselves. Then checks the rest of the options as [`start`] does.
+pub fn check_watchable(ctx: &BuildContext, opts: &RunOptions) -> Result<()> {
+    let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
+    let browser = ctx.ws.manifest().targets.wasm.as_ref().is_some_and(|w| w.environment == WasmEnvironment::Browser);
+    if target == TargetKind::Android {
+        bail!("`--watch` does not run Android apps: the app runs inside Gradle; use `kargo run -t android` instead");
+    }
+    if target == TargetKind::Wasm && browser {
+        bail!("`--watch` does not serve browser apps yet; `kargo run` serves one until Ctrl+C");
+    }
+    validate(ctx, target, opts)
+}
+
+/// The program `kargo run --watch` keeps running. A build that succeeds replaces it; a build that fails leaves it running.
+#[derive(Default)]
+pub struct Running {
+    child: Option<Child>,
+}
+
+impl Running {
+    /// Stops the program that is running, if any, and starts `launch` in its place.
+    pub fn replace(&mut self, launch: Launch, shell: &Shell) -> Result<()> {
+        self.stop();
+        self.child = Some(launch.spawn(shell)?);
+        Ok(())
+    }
+
+    /// Stops the program that is running, if any.
+    pub fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            terminate(&mut child);
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// How long a program has to exit after SIGTERM before it is killed.
+#[cfg(unix)]
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Stops `child`. On Unix it gets SIGTERM first, so a server can close its sockets and run its shutdown hooks. Windows has no
+/// such signal for a console program, so there the program is killed at once.
+fn terminate(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        if signal_and_wait(child, STOP_TIMEOUT) {
+            return;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Sends SIGTERM to `child` and waits up to `timeout` for it to exit. Returns whether it did.
+#[cfg(unix)]
+fn signal_and_wait(child: &mut Child, timeout: Duration) -> bool {
+    let _ = Command::new("kill").arg("-TERM").arg(child.id().to_string()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 /// Serves a Wasm browser app until the process is stopped (Ctrl+C).
@@ -450,5 +563,15 @@ mod tests {
     #[test]
     fn debugger_listens_on_loopback() {
         assert_eq!(jdwp_option(5005), "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:5005");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_is_stopped_with_sigterm_before_it_is_killed() {
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let start = Instant::now();
+        terminate(&mut child);
+        assert!(start.elapsed() < STOP_TIMEOUT, "the program was not stopped by SIGTERM");
+        assert!(child.try_wait().unwrap().is_some_and(|status| !status.success()));
     }
 }

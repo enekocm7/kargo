@@ -18,9 +18,10 @@ use kargo_ops::ops::doc::DocOptions;
 use kargo_ops::ops::fmt::FmtOptions;
 use kargo_ops::ops::lint::LintOptions;
 use kargo_ops::ops::publish::PublishOptions;
-use kargo_ops::ops::run::{Program, RunOptions};
+use kargo_ops::ops::run::{Program, RunOptions, Running, Start};
 use kargo_ops::ops::test::{ListFormat, TestOptions};
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
+use kargo_ops::ops::watch::{WatchOptions, WatchSet};
 use kargo_ops::ops::{self, Configuration, new::NewOptions};
 use kargo_ops::warnings;
 use kargo_ops::workspace::{ProfileKind, Project, Selection, Workspace};
@@ -44,6 +45,7 @@ const COMMON_COMMANDS: &[&str] = &[
     "check",
     "run",
     "test",
+    "watch",
     "add",
     "remove",
     "update",
@@ -385,6 +387,24 @@ impl BuildArgs {
     }
 }
 
+/// Options of `--watch` and of `kargo watch`.
+#[derive(Debug, Args)]
+struct WatchArgs {
+    /// Clear the terminal before each run
+    #[arg(long)]
+    clear: bool,
+    /// Leave out the files matching this gitignore-style pattern (repeatable), on top of .gitignore;
+    /// target/ and files whose name starts with a dot are always left out
+    #[arg(long, value_name = "GLOB")]
+    ignore: Vec<String>,
+}
+
+impl WatchArgs {
+    fn options(&self) -> WatchOptions {
+        WatchOptions { clear: self.clear, ignore: self.ignore.clone() }
+    }
+}
+
 fn set_message_format(format: MessageFormatArg) {
     kargo_compiler::diagnostics::set_json(format == MessageFormatArg::Json);
 }
@@ -496,6 +516,11 @@ enum Command {
         /// How to print compiler diagnostics
         #[arg(long, value_enum, default_value_t, value_name = "FMT")]
         message_format: MessageFormatArg,
+        /// Rebuild and restart the program when its files change (Ctrl+C stops it)
+        #[arg(long, conflicts_with = "debug")]
+        watch: bool,
+        #[command(flatten)]
+        watch_args: WatchArgs,
         #[command(flatten)]
         env: EnvArgs,
         /// Arguments for the program
@@ -548,8 +573,24 @@ enum Command {
         /// Output format of `--list`; `json` prints one JSON object per test
         #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
         format: FormatArg,
+        /// Run the tests again when the project's files change (Ctrl+C stops it)
+        #[arg(long, conflicts_with_all = ["list", "debug"])]
+        watch: bool,
+        #[command(flatten)]
+        watch_args: WatchArgs,
         #[command(flatten)]
         env: EnvArgs,
+    },
+    /// Run a kargo command again whenever the project's files change
+    Watch {
+        /// Command to run on each change, such as `-x check` (repeatable). The commands run in order, and the ones after a failing command wait for the next change. Arguments are split on spaces; quotes are not interpreted
+        #[arg(short = 'x', long = "exec", value_name = "COMMAND", conflicts_with = "command")]
+        exec: Vec<String>,
+        /// Command to run on each change, with its arguments, as in `kargo watch test -t jvm` (default: `build`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "COMMAND")]
+        command: Vec<String>,
+        #[command(flatten)]
+        watch_args: WatchArgs,
     },
     /// Show the environment `kargo run` and `kargo test` use, and where each variable comes from
     Env {
@@ -1228,6 +1269,121 @@ fn split_task_args(mut env: EnvOptions, args: &[String]) -> Result<(EnvOptions, 
     Ok((env, &args[at..]))
 }
 
+/// Loads the project for one round of a watched command. A project that no longer loads is reported, and watching goes on:
+/// fixing the manifest is itself a change.
+fn reload(global: &GlobalArgs, shell: &Shell) -> Option<Project> {
+    load_project(global).map_err(|err| report_error(shell, &err)).ok()
+}
+
+/// The `--watch` options of `run` and `test`; `--clear` and `--ignore` have no effect without `--watch`.
+fn watch_options(watch: bool, args: &WatchArgs) -> Result<Option<WatchOptions>> {
+    if !watch && (args.clear || !args.ignore.is_empty()) {
+        bail!("`--clear` and `--ignore` only apply with `--watch`");
+    }
+    Ok(watch.then(|| args.options()))
+}
+
+/// Compiles and runs the tests of the selected packages. `Ok(false)` when a test failed.
+fn run_tests(config: &Config, project: &Project, global: &GlobalArgs, build: &BuildArgs, opts: &TestOptions) -> Result<bool> {
+    let passed = build_packages(
+        config,
+        project,
+        &build.packages.selection(),
+        global,
+        opts.build.profile(),
+        (build.jobs.or(Some(1)), true),
+        |ctx| ops::test::test(ctx, opts),
+    )?;
+    Ok(passed.iter().all(|ok| *ok))
+}
+
+/// One round of `kargo run --watch`: builds the program as the project is now, and starts it in place of the running one
+/// when the build succeeds. A failed build leaves the running program alone.
+fn restart_program(
+    config: &Config,
+    project: &Project,
+    global: &GlobalArgs,
+    package: &OnePackageArg,
+    release: bool,
+    opts: &RunOptions,
+    running: &mut Running,
+) -> Result<()> {
+    let index = project.select_one(&package.selection(), "`kargo run`")?;
+    warn_manifest(config.shell(), project, project.package(index));
+    let ctx = context(config, project, index, global, profile(release))?;
+    match ops::run::start(&ctx, opts)? {
+        Start::Process(launch) => running.replace(*launch, config.shell()),
+        // `check_watchable` refused these targets before the first round.
+        Start::Finished(_) => bail!("`--watch` cannot run this program"),
+    }
+}
+
+/// The commands `kargo watch` runs on each change: the one given as arguments, the `-x` ones in order, or `build`.
+fn watch_commands(exec: Vec<String>, command: Vec<String>) -> Result<Vec<Vec<String>>> {
+    if !command.is_empty() {
+        return Ok(vec![command]);
+    }
+    if exec.is_empty() {
+        return Ok(vec![vec!["build".to_owned()]]);
+    }
+    exec.iter()
+        .map(|line| {
+            let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+            if words.is_empty() {
+                bail!("`-x` needs a command, such as `-x check`");
+            }
+            Ok(words)
+        })
+        .collect()
+}
+
+/// The global flags `kargo watch` passes on to the commands it runs.
+fn forwarded_args(global: &GlobalArgs) -> Vec<String> {
+    let mut args = Vec::new();
+    if global.verbose {
+        args.push("--verbose".to_owned());
+    }
+    if global.quiet {
+        args.push("--quiet".to_owned());
+    }
+    if global.offline {
+        args.push("--offline".to_owned());
+    }
+    if global.locked {
+        args.push("--locked".to_owned());
+    }
+    if global.refresh {
+        args.push("--refresh".to_owned());
+    }
+    if global.system_gradle {
+        args.push("--system-gradle".to_owned());
+    }
+    if let Some(path) = &global.manifest_path {
+        args.push("--manifest-path".to_owned());
+        args.push(path.display().to_string());
+    }
+    args
+}
+
+/// Runs each command as its own `kargo` process, in order. The first one that fails ends the round.
+fn run_commands(shell: &Shell, exe: &Path, forwarded: &[String], commands: &[Vec<String>]) {
+    for command in commands {
+        let line = command.join(" ");
+        shell.status("Running", format!("`kargo {line}`"));
+        match std::process::Command::new(exe).args(forwarded).args(command).status() {
+            Ok(status) if status.success() => {}
+            Ok(_) => {
+                shell.error(format!("`kargo {line}` failed; the commands after it wait for the next change"));
+                return;
+            }
+            Err(err) => {
+                shell.error(format!("failed to run `kargo {line}`: {err}"));
+                return;
+            }
+        }
+    }
+}
+
 fn profile(release: bool) -> ProfileKind {
     if release { ProfileKind::Release } else { ProfileKind::Dev }
 }
@@ -1353,8 +1509,25 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run { release, target, main, bin, example, port, open, debug, flavors, message_format, package, env, args } => {
+        Command::Run {
+            release,
+            target,
+            main,
+            bin,
+            example,
+            port,
+            open,
+            debug,
+            flavors,
+            message_format,
+            package,
+            env,
+            watch,
+            watch_args,
+            args,
+        } => {
             set_message_format(message_format);
+            let watch = watch_options(watch, &watch_args)?;
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             warn_manifest(shell, &project, project.package(index));
@@ -1365,11 +1538,24 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (_, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let code = ops::run::run(
-                &ctx,
-                &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors, env: env.options() },
-            )?;
-            Ok(exit_code(code))
+            let opts =
+                RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors, env: env.options() };
+            let Some(watch) = watch else {
+                let code = ops::run::run(&ctx, &opts)?;
+                return Ok(exit_code(code));
+            };
+            ops::run::check_watchable(&ctx, &opts)?;
+            drop(ctx);
+            let mut running = Running::default();
+            ops::watch::repeatedly(shell, &watch, WatchSet::of(&project), || {
+                let project = reload(global, shell)?;
+                let set = WatchSet::of(&project);
+                if let Err(err) = restart_program(config, &project, global, &package, release, &opts, &mut running) {
+                    report_error(shell, &err);
+                }
+                Some(set)
+            })?;
+            Ok(0)
         }
         Command::Script { file, expr, mut args } => {
             let source = match (expr, file) {
@@ -1383,8 +1569,24 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             };
             Ok(exit_code(kargo_ops::script::run(config, &source, &args)?))
         }
-        Command::Test { build, filter, no_run, no_fail_fast, include_tag, exclude_tag, failed, report, debug, list, format, env } => {
+        Command::Test {
+            build,
+            filter,
+            no_run,
+            no_fail_fast,
+            include_tag,
+            exclude_tag,
+            failed,
+            report,
+            debug,
+            list,
+            format,
+            watch,
+            watch_args,
+            env,
+        } => {
             set_message_format(build.message_format);
+            let watch = watch_options(watch, &watch_args)?;
             let project = load_project(global)?;
             let junit_report = report == Some(ReportArg::Junit);
             let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
@@ -1401,21 +1603,39 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 failed,
                 env: env.options(),
             };
-            let passed = build_packages(
-                config,
-                &project,
-                &build.packages.selection(),
-                global,
-                opts.build.profile(),
-                (build.jobs.or(Some(1)), true),
-                |ctx| ops::test::test(ctx, &opts),
-            )?;
-            if passed.iter().all(|ok| *ok) {
-                Ok(0)
-            } else {
-                shell.error("test failed");
-                Ok(FAILURE)
-            }
+            let Some(watch) = watch else {
+                return if run_tests(config, &project, global, &build, &opts)? {
+                    Ok(0)
+                } else {
+                    shell.error("test failed");
+                    Ok(FAILURE)
+                };
+            };
+            ops::watch::repeatedly(shell, &watch, WatchSet::of(&project), || {
+                let project = reload(global, shell)?;
+                let set = WatchSet::of(&project);
+                match run_tests(config, &project, global, &build, &opts) {
+                    Ok(true) => {}
+                    Ok(false) => shell.error("test failed"),
+                    Err(err) => report_error(shell, &err),
+                }
+                Some(set)
+            })?;
+            Ok(0)
+        }
+        Command::Watch { exec, command, watch_args } => {
+            let watch = watch_args.options();
+            let commands = watch_commands(exec, command)?;
+            let project = load_project(global)?;
+            let exe = std::env::current_exe().context("failed to find the kargo executable")?;
+            let forwarded = forwarded_args(global);
+            ops::watch::repeatedly(shell, &watch, WatchSet::of(&project), || {
+                let project = reload(global, shell)?;
+                let set = WatchSet::of(&project);
+                run_commands(shell, &exe, &forwarded, &commands);
+                Some(set)
+            })?;
+            Ok(0)
         }
         Command::Env { show_values, check, release, env, package } => {
             let project = load_project(global)?;
@@ -2390,5 +2610,50 @@ mod tests {
         assert_eq!(section(true, None), DependencySection::Dev);
         assert_eq!(section(false, Some(TargetArg::Wasm)), DependencySection::Target(TargetKind::Wasm));
         assert_eq!(section(false, None), DependencySection::Main);
+    }
+
+    #[test]
+    fn parses_watch_flags() {
+        let cli = Cli::try_parse_from(["kargo", "run", "--watch", "--clear", "--ignore", "*.log", "--", "x"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run { watch: true, ref watch_args, ref args, .. }
+                if watch_args.clear && watch_args.ignore == ["*.log"] && args == &["x"]
+        ));
+        assert!(Cli::try_parse_from(["kargo", "run", "--watch", "--debug"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "test", "--watch", "MathTest"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { watch: true, ref filter, .. } if filter.as_deref() == Some("MathTest")));
+        assert!(Cli::try_parse_from(["kargo", "test", "--watch", "--list"]).is_err());
+
+        let cli = Cli::try_parse_from(["kargo", "watch"]).unwrap();
+        assert!(matches!(cli.command, Command::Watch { ref exec, ref command, .. } if exec.is_empty() && command.is_empty()));
+        let cli = Cli::try_parse_from(["kargo", "watch", "-x", "test -t jvm", "-x", "run"]).unwrap();
+        assert!(matches!(cli.command, Command::Watch { ref exec, .. } if exec == &["test -t jvm", "run"]));
+        let cli = Cli::try_parse_from(["kargo", "watch", "--clear", "test", "-t", "jvm"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Watch { ref command, ref watch_args, .. } if command == &["test", "-t", "jvm"] && watch_args.clear
+        ));
+        assert!(Cli::try_parse_from(["kargo", "watch", "-x", "check", "build"]).is_err());
+    }
+
+    #[test]
+    fn clear_and_ignore_need_watch() {
+        assert!(watch_options(false, &WatchArgs { clear: true, ignore: Vec::new() }).is_err());
+        assert!(watch_options(false, &WatchArgs { clear: false, ignore: vec!["*.log".to_owned()] }).is_err());
+        assert!(watch_options(false, &WatchArgs { clear: false, ignore: Vec::new() }).unwrap().is_none());
+        let options = watch_options(true, &WatchArgs { clear: true, ignore: Vec::new() }).unwrap().unwrap();
+        assert!(options.clear);
+    }
+
+    #[test]
+    fn watch_commands_default_to_build_and_split_on_spaces() {
+        assert_eq!(watch_commands(Vec::new(), Vec::new()).unwrap(), [vec!["build".to_owned()]]);
+        assert_eq!(
+            watch_commands(vec!["test  -t jvm".to_owned()], Vec::new()).unwrap(),
+            [vec!["test".to_owned(), "-t".into(), "jvm".into()]]
+        );
+        assert_eq!(watch_commands(Vec::new(), vec!["check".to_owned()]).unwrap(), [vec!["check".to_owned()]]);
+        assert!(watch_commands(vec!["  ".to_owned()], Vec::new()).is_err());
     }
 }
