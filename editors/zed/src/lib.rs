@@ -23,6 +23,9 @@ const SERVER: &str = "kargo";
 /// The debug adapter's name.
 const ADAPTER: &str = "Kargo";
 
+const NOT_A_PROJECT: &str = "not a Kargo project: there is no kargo.toml at the root of this folder; to run `kargo lsp` for \
+Kargo scripts here, set `lsp.kargo.settings.scripts` to true in Zed's settings";
+
 const NOT_INSTALLED: &str = "Kargo is not installed: install it (https://enekocm7.github.io/kargo/getting-started/installation/) \
 or set its path in `lsp.kargo.binary.path` in Zed's settings";
 
@@ -38,6 +41,13 @@ impl KargoExtension {
     fn is_kargo_project(worktree: &Worktree) -> bool {
         worktree.read_text_file("kargo.toml").is_ok()
     }
+
+    /// Whether `lsp.kargo.settings.scripts` is true: `kargo lsp` then also runs in a folder without a
+    /// `kargo.toml`, to serve the Kargo scripts in it. Off by default, since the server would take over the
+    /// Kotlin files of a folder that another tool manages.
+    fn serves_scripts(settings: &LspSettings) -> bool {
+        settings.settings.as_ref().and_then(|s| s.get("scripts")).and_then(Value::as_bool).unwrap_or(false)
+    }
 }
 
 impl zed::Extension for KargoExtension {
@@ -46,10 +56,10 @@ impl zed::Extension for KargoExtension {
     }
 
     fn language_server_command(&mut self, _id: &LanguageServerId, worktree: &Worktree) -> zed::Result<zed::Command> {
-        if !Self::is_kargo_project(worktree) {
-            return Err("not a Kargo project: there is no kargo.toml at the root of this folder".to_owned());
-        }
         let settings = LspSettings::for_worktree(SERVER, worktree).unwrap_or_default();
+        if !Self::is_kargo_project(worktree) && !Self::serves_scripts(&settings) {
+            return Err(NOT_A_PROJECT.to_owned());
+        }
         let binary = settings.binary.as_ref();
         let mut args = vec!["lsp".to_owned()];
         args.extend(binary.and_then(|b| b.arguments.clone()).unwrap_or_default());

@@ -32,7 +32,7 @@ use crate::builtins::{self, FRAMEWORK_NAMES};
 use crate::ops::context::{MIN_JDK, to_request};
 
 /// Written into every cache key; bump it when what an entry holds changes.
-const FORMAT: &str = "2";
+const FORMAT: &str = "3";
 /// The script template that gives a script its `args`.
 const SCRIPT_TEMPLATE: &str = "kotlin.script.templates.standard.ScriptTemplateWithArgs";
 /// The Kotlin scripting runtime a compiled script needs at run time.
@@ -351,7 +351,9 @@ fn build(
             let src = entry.join("src");
             std::fs::create_dir_all(&src)?;
             let path = src.join(&script.name);
-            write_string_atomic(&path, &script.code)?;
+            // The compiler waits for threads the script leaves running when it returns normally, so
+            // the copy ends by exiting, as an exception already does. Line numbers are unchanged.
+            write_string_atomic(&path, &format!("{}\nkotlin.system.exitProcess(0)\n", script.code))?;
             path
         }
     };
@@ -384,10 +386,11 @@ fn build(
     let main_class = if script.is_script {
         // The scripting compiler's own `main` needs metadata it keeps only in memory, so the
         // cached classes are started through a launcher that calls the script's constructor,
-        // which runs its top-level code. A failure inside the script is rethrown unwrapped.
+        // which runs its top-level code. Like the `kotlin` runner, the launcher exits when the script
+        // returns, even if the script left threads running, and a failure inside it exits with 1.
         let launcher = entry.join("src").join(LAUNCHER_SOURCE);
         let source = format!(
-            "fun main(args: Array<String>) {{\n    try {{\n        Class.forName(\"{main_class}\").getConstructor(Array<String>::class.java).newInstance(args)\n    }} catch (e: java.lang.reflect.InvocationTargetException) {{\n        throw e.targetException\n    }}\n}}\n"
+            "import kotlin.system.exitProcess\n\nfun main(args: Array<String>) {{\n    val code = try {{\n        Class.forName(\"{main_class}\").getConstructor(Array<String>::class.java).newInstance(args)\n        0\n    }} catch (e: java.lang.reflect.InvocationTargetException) {{\n        e.targetException.printStackTrace()\n        1\n    }}\n    System.out.flush()\n    exitProcess(code)\n}}\n"
         );
         write_string_atomic(&launcher, &source)?;
         let mut launch_classpath = vec![staging.clone()];

@@ -439,6 +439,22 @@ Type `/kargo-metadata` in a text thread of the assistant panel to insert the pro
 
 `kargo lsp` validates `kargo.toml` against Kargo's [JSON Schema](#completion-and-validation-in-kargotoml) and Kargo's own rules, so you don't need anything else. If you also use Zed's TOML language server (Taplo), add `#:schema https://enekocm7.github.io/kargo/schemas/kargo.json` as the first line of `kargo.toml` for Taplo's completion too, or limit `kargo.toml` to Kargo's server.
 
+### Kargo scripts in Zed
+
+The extension starts `kargo lsp` for a folder with a `kargo.toml` at its root. A folder with only [Kotlin scripts](../scripts/) has no `kargo.toml`, so the server stays off there unless you turn it on for that folder:
+
+```json title="Zed settings.json"
+{
+  "lsp": {
+    "kargo": {
+      "settings": { "scripts": true }
+    }
+  }
+}
+```
+
+With that setting, Zed runs `kargo lsp` in the folder, and it completes, documents and checks the `@file:` annotations of the Kargo scripts in it. It stays off by default, because in a folder that another tool manages the server would take over the Kotlin files as well.
+
 ### Limitations of Zed
 
 - Zed has no test explorer: run tests from their buttons or tasks, and read the results in the terminal. A failed test is re-run from its button.

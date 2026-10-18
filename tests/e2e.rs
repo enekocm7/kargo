@@ -1885,3 +1885,13 @@ fn shebang_runs_the_script() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "shebang 1\n");
 }
+
+#[test]
+fn scripts_exit_when_they_return_even_with_threads_left_running() {
+    require_e2e!();
+    let e = E2e::new();
+    e.write("leftover.kts", "Thread { Thread.sleep(600_000) }.start()\nprintln(\"done\")\n");
+    // Without the explicit exit, the thread would keep the first run, and then the cached one, alive for ten minutes.
+    e.kargo("").args(["script", "leftover.kts"]).timeout(std::time::Duration::from_secs(300)).assert().success().stdout("done\n");
+    e.kargo("").args(["script", "leftover.kts"]).timeout(std::time::Duration::from_secs(60)).assert().success().stdout("done\n");
+}
