@@ -86,8 +86,8 @@ pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
     let (cli, plugins) = dokka(ctx, dokka_version)?;
 
     let pkg = &manifest.package;
-    let out = ws.profile_dir(ctx.profile).join("doc");
-    let work = ws.profile_dir(ctx.profile).join("dokka");
+    let out = ws.profile_dir(&ctx.profile).join("doc");
+    let work = ws.profile_dir(&ctx.profile).join("dokka");
     std::fs::create_dir_all(&work).with_context(|| format!("failed to create {}", work.display()))?;
     remove_dir_all_if_exists(&out)?;
 

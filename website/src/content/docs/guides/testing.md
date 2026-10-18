@@ -46,6 +46,7 @@ kargo test --no-run        # compile tests without running them
 kargo test --no-fail-fast  # test every target even if one fails
 kargo check --tests        # type-check tests without linking (fastest; see kargo check)
 kargo test --release       # with the release profile
+kargo test --profile staging # with a custom profile: its jvm-args reach the test JVM too
 ```
 
 `kargo test` exits with status `101` if a test fails, so it works in scripts and CI.

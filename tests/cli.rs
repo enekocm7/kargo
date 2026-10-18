@@ -509,6 +509,41 @@ fn corrupt_cached_artifact_is_redownloaded_before_locking() {
 }
 
 #[test]
+fn tampered_cached_artifact_fails_the_build_instead_of_being_used() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tampered",
+            &format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url()),
+        ),
+    );
+    let cached = p.home.path().join("cache/maven/g/lib/1.0/lib-1.0.jar");
+    p.kargo().args(["tree", "--offline"]).assert().success();
+    let lock = p.read("kargo.lock");
+
+    // A cached jar that no longer matches kargo.lock is an error, with or without --locked, and is left alone.
+    std::fs::write(&cached, "tampered").unwrap();
+    p.kargo()
+        .args(["tree", "--offline"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("checksum mismatch for g/lib/1.0/lib-1.0.jar"))
+        .stderr(predicate::str::contains("so it is downloaded again"));
+    p.kargo().args(["tree", "--offline", "--locked"]).assert().failure().code(101).stderr(predicate::str::contains("checksum mismatch"));
+    assert_eq!(std::fs::read_to_string(&cached).unwrap(), "tampered");
+    assert_eq!(p.read("kargo.lock"), lock);
+
+    // Deleting it lets the next build download the jar again and check it against the lockfile.
+    std::fs::remove_file(&cached).unwrap();
+    p.kargo().args(["tree", "--offline", "--locked"]).assert().success();
+    assert_eq!(std::fs::read_to_string(&cached).unwrap(), "jar g:lib 1.0");
+}
+
+#[test]
 fn timestamped_snapshots_resolve_through_maven_metadata() {
     let repo = LocalRepo::new();
     repo.publish_snapshot("com.acme:lib", "1.0-SNAPSHOT", "20240101.120000-1", &[("com.acme:util", "2.0-SNAPSHOT")])
@@ -2309,7 +2344,11 @@ fn ide_writes_workspace_json_and_keeps_it_current() {
     p.kargo().args(["--offline", "ide"]).assert().success().stderr(predicates::str::contains("workspace.json is up to date"));
 
     // A command that changes kargo.toml writes it again.
-    p.kargo().args(["add", "g:extra:1.0", "--dev"]).assert().success().stderr(predicates::str::contains("Wrote workspace.json"));
+    p.kargo()
+        .args(["--offline", "add", "g:extra:1.0", "--dev"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Wrote workspace.json"));
     assert!(libraries().contains(&"Kargo: g:extra:1.0".to_owned()), "{:?}", libraries());
 
     // fwcd's server gets a script printing the test classpath.
@@ -2929,4 +2968,37 @@ fn script_reports_its_header_before_compiling() {
         .failure()
         .code(101)
         .stderr(predicate::str::contains("needs the Kotlin compiler plugin").and(predicate::str::contains("move the code to a .kt file")));
+}
+
+#[test]
+fn custom_profiles_are_chosen_by_name() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "\n[profile.staging]\ninherits = \"release\"\n[profile.staging.env]\nMODE = \"staging\"\n"));
+    // `--release` and `--profile` choose one profile between them.
+    p.kargo()
+        .args(["build", "--release", "--profile", "staging"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+    // A profile kargo.toml does not define fails before anything is compiled.
+    p.kargo()
+        .args(["build", "--profile", "qa"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no profile named `qa` in kargo.toml"));
+    // The profile's variables come from its own table, which inherits from `release`.
+    p.kargo()
+        .args(["env", "--profile", "staging", "--show-values"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MODE  [profile.staging.env]  staging"));
+    // `kargo clean --profile` removes that profile's output and leaves the others.
+    for dir in ["target/staging/jvm", "target/release/jvm"] {
+        std::fs::create_dir_all(p.path().join(dir)).unwrap();
+    }
+    p.kargo().args(["clean", "--profile", "staging"]).assert().success();
+    assert!(!p.path().join("target/staging").exists());
+    assert!(p.path().join("target/release/jvm").is_dir());
 }

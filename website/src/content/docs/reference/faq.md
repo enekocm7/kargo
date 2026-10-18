@@ -187,6 +187,10 @@ kargo build --refresh       # re-check repositories, ignoring cached metadata an
 
 Another Kargo process is building or resolving the same project, for example an IDE, a file watcher or a second terminal. The command continues once the other process finishes. If nothing else is running, check for a hung `kargo` process (a stuck hook, for example) and stop it. The operating system releases the lock when that process exits. See [Concurrent commands](../commands/#concurrent-commands).
 
+### `failed to move ... to ...` on Windows
+
+Kargo writes a new `kargo.toml`, `kargo.lock` or jar to a temporary file and then renames it over the old one. Windows refuses that rename while another program has the old file open without allowing it to be replaced. The usual culprits are an editor or IDE that keeps `kargo.toml` open, an antivirus scan that is still reading a file Kargo just wrote, and a `java -jar` that is still running the jar Kargo is about to replace. Kargo retries for about six seconds, then stops with this error. The old file stays in place, so close the program and run the command again.
+
 ### "checksum mismatch" for a locked artifact
 
-A re-downloaded file doesn't match the SHA-256 in `kargo.lock`. Read the rest of the message: if the download matches the checksum the repository publishes, the lockfile entry is the suspect and `kargo update` re-locks it. If the repository publishes no checksum, find out why the artifact changed before you re-lock. See [Checksum mismatches](../lockfile/#checksum-mismatches).
+A file doesn't match the SHA-256 in `kargo.lock`. If the message says `cached`, the copy in `~/.kargo/cache` is the one that differs: it was corrupted, edited, or replaced, and Kargo won't use it. Delete the file named in the message and build again to download it afresh. If the message says the download differs, read the rest of it: if the download matches the checksum the repository publishes, the lockfile entry is the suspect and `kargo update` re-locks it. If the repository publishes no checksum, find out why the artifact changed before you re-lock. See [Checksum mismatches](../lockfile/#checksum-mismatches).

@@ -86,7 +86,11 @@ fn configuration(scope: Scope, test: bool, exported: bool) -> &'static str {
 }
 
 fn dependency_line(d: &Dependency, test: bool) -> String {
-    let conf = configuration(d.scope, test, d.exported);
+    dependency_line_in(d, configuration(d.scope, test, d.exported))
+}
+
+/// The Gradle line of `d` in the configuration `conf`.
+fn dependency_line_in(d: &Dependency, conf: &str) -> String {
     if d.bom {
         return format!("    {conf}(platform({}))", kts_string(&coord(d)));
     }
@@ -340,6 +344,12 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     for d in manifest.dependencies_for(TargetKind::Android) {
         push(&mut s, &d, false);
     }
+    // The dependencies of the dev and release profiles are in the configurations of their build types.
+    for (profile, build_type) in [("dev", "debug"), ("release", "release")] {
+        for d in &manifest.profile(profile).expect("built-in profile").dependencies {
+            let _ = writeln!(s, "{}", profile_dependency_line(d, profile, build_type)?);
+        }
+    }
     for d in
         contributions.dependencies.iter().filter(|d| !(d.module.group == "org.jetbrains.kotlin" && d.module.artifact == "kotlin-stdlib"))
     {
@@ -373,6 +383,19 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let _ = writeln!(s, "}}");
     s.push_str(&doc_classpath_task_kts(&variant_name(&default_flavors(cfg, &[])?, "debug")));
     Ok(s)
+}
+
+/// The Gradle line of a `[profile.<profile>.dependencies]` entry, in the configuration of its build
+/// type: `debugImplementation` for the dev profile, so only debug builds get the dependency.
+/// Processors and KSP are configured per variant in Gradle, so they are not supported here.
+fn profile_dependency_line(d: &Dependency, profile: &str, build_type: &str) -> Result<String> {
+    if matches!(d.scope, Scope::Processor | Scope::Ksp) {
+        bail!(
+            "`{}` in [profile.{profile}.dependencies] needs a scope the Android target cannot give to one build type; use [dependencies]",
+            d.name
+        );
+    }
+    Ok(dependency_line_in(d, &format!("{build_type}{}", capitalize(configuration(d.scope, false, d.exported)))))
 }
 
 fn has_build_config(cfg: &AndroidConfig) -> bool {
@@ -728,11 +751,13 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The AGP build type of `profile`.
-fn build_type(profile: ProfileKind) -> &'static str {
+/// The AGP build type of `profile`. Custom profiles have no build type yet: the generated Gradle
+/// project declares only `debug` and `release`.
+fn build_type(profile: &ProfileKind) -> Result<&'static str> {
     match profile {
-        ProfileKind::Dev => "debug",
-        ProfileKind::Release => "release",
+        ProfileKind::Dev => Ok("debug"),
+        ProfileKind::Release => Ok("release"),
+        ProfileKind::Custom(name) => bail!("the Android target builds the dev and release profiles only; `{name}` is not supported yet"),
     }
 }
 
@@ -744,14 +769,14 @@ fn android_config<'a>(ctx: &'a BuildContext) -> Result<&'a AndroidConfig> {
 /// first flavor of each dimension, capitalized for task names (`FreeRelease`).
 fn default_variant(ctx: &BuildContext) -> Result<String> {
     let cfg = android_config(ctx)?;
-    Ok(capitalize(&variant_name(&default_flavors(cfg, &[])?, build_type(ctx.profile))))
+    Ok(capitalize(&variant_name(&default_flavors(cfg, &[])?, build_type(&ctx.profile)?)))
 }
 
 /// Checks, before Gradle runs, what signing the build type of `ctx` needs: the keystore
 /// exists and the environment variables with its passwords are set.
 fn check_signing(ctx: &BuildContext) -> Result<()> {
     let cfg = android_config(ctx)?;
-    let build_type = build_type(ctx.profile);
+    let build_type = build_type(&ctx.profile)?;
     let Some(signing) = cfg.signing.get(build_type) else {
         return Ok(());
     };
@@ -972,7 +997,7 @@ pub fn build(ctx: &BuildContext) -> Result<PathBuf> {
     let cfg = android_config(ctx)?;
     compiling(ctx, TargetKind::Android, ", gradle");
     check_signing(ctx)?;
-    let build_type = build_type(ctx.profile);
+    let build_type = build_type(&ctx.profile)?;
     let task = format!("assemble{}", capitalize(build_type));
     if !gradle(ctx, std::slice::from_ref(&task))? {
         bail!("Gradle `{task}` failed");
@@ -996,7 +1021,7 @@ pub fn package(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     let is_app = cfg.kind == "application";
     compiling(ctx, TargetKind::Android, ", gradle");
     check_signing(ctx)?;
-    let build_type = build_type(ctx.profile);
+    let build_type = build_type(&ctx.profile)?;
     let mut tasks = Vec::new();
     for flavors in flavor_combinations(cfg) {
         let variant = capitalize(&variant_name(&flavors, build_type));
@@ -1023,7 +1048,7 @@ pub fn package(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     if found.is_empty() {
         bail!("Gradle `{}` produced no APK, AAB or AAR under {}", tasks.join("`, `"), outputs.display());
     }
-    let dest = ctx.ws.output_dir(ctx.profile, TargetKind::Android);
+    let dest = ctx.ws.output_dir(&ctx.profile, TargetKind::Android);
     std::fs::create_dir_all(&dest).with_context(|| format!("failed to create {}", dest.display()))?;
     let mut copied = Vec::new();
     for file in found {
@@ -1131,7 +1156,7 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
 pub fn run(ctx: &BuildContext, flavors: &[String]) -> Result<i32> {
     let cfg = android_config(ctx)?;
     let flavors = validate_run(ctx, flavors)?;
-    let build_type = build_type(ctx.profile);
+    let build_type = build_type(&ctx.profile)?;
     if !flavors.is_empty() {
         ctx.shell().verbose("Using", format!("flavor {}", flavors.join(", ")));
     }
@@ -1405,6 +1430,20 @@ mod tests {
     }
 
     #[test]
+    fn profile_dependencies_go_to_their_build_type() {
+        let leak = Dependency::new("com.squareup.leakcanary:leakcanary-android".parse().unwrap(), Some("2.14".into()));
+        let line = profile_dependency_line(&leak, "dev", "debug").unwrap();
+        assert!(line.starts_with("    debugImplementation(\"com.squareup.leakcanary:leakcanary-android:2.14\")"), "{line}");
+        let mut provided = leak.clone();
+        provided.scope = Scope::Provided;
+        assert!(profile_dependency_line(&provided, "release", "release").unwrap().starts_with("    releaseCompileOnly("));
+        let mut processor = leak;
+        processor.scope = Scope::Processor;
+        let err = profile_dependency_line(&processor, "dev", "debug").unwrap_err();
+        assert!(format!("{err:#}").contains("[profile.dev.dependencies]"), "{err:#}");
+    }
+
+    #[test]
     fn chooses_gradle_by_precedence() {
         use kargo_util::shell::{Shell, Verbosity};
         let home = tempfile::tempdir().unwrap();
@@ -1487,7 +1526,7 @@ mod tests {
         // The jar of `model` would need a compiler; pretend it is built.
         context_for(&dir.path().join("app/kargo.toml"), home.path(), |ctx| {
             let model = ctx.project.packages().iter().position(|p| p.name() == "model").unwrap();
-            let jar = ctx.project.package(model).output_dir(ProfileKind::Dev, TargetKind::Jvm).join("model-1.0.0.jar");
+            let jar = ctx.project.package(model).output_dir(&ProfileKind::Dev, TargetKind::Jvm).join("model-1.0.0.jar");
             ctx.built_artifact("model/jvm".to_owned(), || Ok(Some(jar.clone()))).unwrap();
 
             let mut subprojects = Vec::new();

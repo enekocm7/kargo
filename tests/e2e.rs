@@ -1942,3 +1942,40 @@ fn jvm_run_watch_restarts_the_program_after_a_change() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn custom_profiles_have_their_own_output_jvm_args_and_dependencies() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write(
+        "app/kargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[profile.dev]\njvm-args = [\"-Dapp.env=dev\"]\n\n\
+         [profile.staging]\ninherits = \"release\"\ndebug = true\njvm-args = [\"-Dapp.env=staging\", \"-Xmx96m\"]\n\n\
+         [profile.staging.dependencies]\n\"com.google.code.gson:gson\" = \"2.11.0\"\n",
+    );
+    // The template's test calls `greeting` in the package `com.example.app`, so it stays there.
+    t.write(
+        "app/src/Main.kt",
+        "package com.example.app\n\nfun greeting(name: String) = \"Hello, $name!\"\n\nfun main() { println(\"env=${System.getProperty(\"app.env\")}\") }\n",
+    );
+    t.write(
+        "app/tests/ProfileTest.kt",
+        "import kotlin.test.*\nclass ProfileTest { @Test fun jvmArgsOfTheProfileApply() = assertEquals(\"staging\", System.getProperty(\"app.env\")) }\n",
+    );
+
+    // The profile builds into its own directory, with the dependencies only it has.
+    t.kargo("app").args(["build", "--profile", "staging"]).assert().success().stderr(predicate::str::contains("`staging` profile"));
+    let lib = |profile: &str| std::fs::read_dir(t.dir.path().join("app/target").join(profile).join("jvm/lib")).unwrap();
+    assert!(lib("staging").any(|e| e.unwrap().file_name().to_string_lossy().starts_with("gson-")));
+    t.kargo("app").arg("build").assert().success();
+    assert!(lib("debug").all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("gson-")));
+    // The lockfile resolves the profile's own dependencies apart from the shared resolution.
+    let lock = std::fs::read_to_string(t.dir.path().join("app/kargo.lock")).unwrap();
+    assert!(lock.contains("[resolution.\"jvm/runtime@staging\"]") && lock.contains("[resolution.\"jvm/runtime\"]"), "{lock}");
+
+    // `jvm-args` of the profile reach the program (`run`) and the tests (`test`).
+    t.kargo("app").arg("run").assert().success().stdout(predicate::str::contains("env=dev"));
+    t.kargo("app").args(["run", "--profile", "staging"]).assert().success().stdout(predicate::str::contains("env=staging"));
+    t.kargo("app").args(["test", "--profile", "staging"]).assert().success();
+}

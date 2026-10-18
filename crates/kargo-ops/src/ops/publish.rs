@@ -149,7 +149,7 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ws, Hook::PreBuild, &env)?;
     warn_about_sources(ctx, &targets);
-    let work = ws.profile_dir(ctx.profile).join("publish");
+    let work = ws.profile_dir(&ctx.profile).join("publish");
     remove_dir_all_if_exists(&work)?;
     let jars = work.join("jars");
     std::fs::create_dir_all(&jars).with_context(|| format!("failed to create {}", jars.display()))?;
@@ -577,7 +577,7 @@ fn publish_to_central(ctx: &BuildContext, repo_dir: &Path, work: &Path, coordina
 pub fn package_library(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Result<PathBuf> {
     let ws = ctx.ws;
     let pkg = &ws.manifest().package;
-    let dir = ws.profile_dir(ctx.profile).join("package");
+    let dir = ws.profile_dir(&ctx.profile).join("package");
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let jar = dir.join(format!("{}-{}.jar", pkg.name, pkg.version));
     ctx.shell().status("Packaging", format!("{} v{} ({})", pkg.name, pkg.version, jar.display()));
@@ -588,7 +588,7 @@ pub fn package_library(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Resu
         implementation_version: Some(pkg.version.clone()),
     };
     write_jar(&jar, &jvm.classes, &manifest, &[])?;
-    let work = ws.profile_dir(ctx.profile).join("package-work");
+    let work = ws.profile_dir(&ctx.profile).join("package-work");
     let sources = sources_jar(&work, "jvm", &[("", ws.common_sources()), ("", ws.target_sources(TargetKind::Jvm))])?;
     let dest = dir.join(format!("{}-{}-sources.jar", pkg.name, pkg.version));
     std::fs::copy(&sources, &dest).with_context(|| format!("failed to write {}", dest.display()))?;

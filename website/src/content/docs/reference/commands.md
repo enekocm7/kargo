@@ -43,7 +43,7 @@ These work with every command.
 | `-v`, `--verbose` | Show the compiler and tool commands Kargo runs |
 | `-q`, `--quiet` | Don't print Kargo's status messages |
 | `--offline` | Never use the network (also `KARGO_OFFLINE=1`) |
-| `--locked` | Fail if `kargo.lock` would need to change |
+| `--locked` | Fail if `kargo.lock` would need to change, and hash every cached artifact instead of trusting its `.stamp` |
 | `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
 | `--system-gradle` | Run Android builds with the `gradle` on `PATH` instead of a Kargo-managed Gradle (also `KARGO_SYSTEM_GRADLE=1`). A project `gradlew` still wins |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
@@ -132,6 +132,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `--keep-going` | Build every target even if one fails, then report each failure and which targets failed and succeeded |
 | `--message-format <fmt>` | `human` (default) or `json`: print each compiler diagnostic as a JSON object on stdout. See [Machine-readable output](../machine-readable-output/#compiler-diagnostics) |
 | `-r, --release` | Use the release profile |
+| `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
 | `-j, --jobs <n>` | How many workspace members build at the same time (default: the number of CPUs) |
@@ -145,6 +146,7 @@ For Wasm, a release build removes dead code, runs `wasm-opt` when it is installe
 ```sh
 kargo build
 kargo build --release -t jvm -t native
+kargo build --profile staging
 kargo build -p calc
 kargo build --message-format json
 ```
@@ -167,6 +169,7 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | `--keep-going` | Check every target even if one fails, then report each failure (as for `kargo build`) |
 | `--message-format <fmt>` | `human` (default) or `json`, as for `kargo build` |
 | `-r, --release` | Use the release profile |
+| `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to check |
 | `-j, --jobs <n>` | How many workspace members are checked at the same time (default: the number of CPUs) |
@@ -194,6 +197,7 @@ Build and run the program. Arguments after `--` go to the program.
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Use the release profile |
+| `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `android` |
 | `-p, --package <name>` | The package to run; required at the root of a workspace with several members |
 | `--main <name>` | Run another `main`: a JVM class such as `com.example.tools.MigrateKt`, or on Native an entry function such as `com.example.tools.main`. `--entry-point` is an alias |
@@ -268,6 +272,7 @@ kargo test [filter] [options]
 | `--format <fmt>` | With `--list`: `text` (default) or `json`, one [`test-discovered`](../machine-readable-output/#test-discovery) object per test |
 | `--message-format <fmt>` | `human` (default) or `json`: compiler diagnostics and each test's start and result as [JSON messages](../machine-readable-output/#test-results) on stdout; the test report moves to stderr |
 | `-r, --release` | Use the release profile |
+| `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
@@ -528,6 +533,7 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Use the release profile |
+| `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | `jvm` (the default when enabled) or `android` |
 | `-p, --package <name>` | The package to build the jar for; required at the root of a workspace with several members |
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
@@ -600,18 +606,20 @@ Delete everything in `target/` except the build-directory lock, `target/.kargo-l
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Only delete the release profile's output |
+| `--profile <name>` | Only delete the output of a custom profile (`target/<name>/`), even one that kargo.toml no longer defines |
 
 ## `kargo env`
 
 Show the environment `kargo run` and `kargo test` start programs with: each variable, the source that set it (`shell`, `[env]`, `[profile.<name>.env]` or a `.env` file with its line number) and its value.
 
 ```sh
-kargo env [--release] [--show-values] [--check] [--env-file <path>] [--no-env-file] [-p <name>]
+kargo env [--release | --profile <name>] [--show-values] [--check] [--env-file <path>] [--no-env-file] [-p <name>]
 ```
 
 | Option | Meaning |
 |---|---|
 | `-r, --release` | Show the release profile's variables |
+| `--profile <name>` | Show a custom profile's variables, which include those it inherits |
 | `--show-values` | Print the values. Without it they show as `********`, because they often hold secrets |
 | `--check` | Fail (exit code 101) listing each required variable that is not set, and each key of `.env.example` that neither the shell nor a source sets. For CI |
 | `--env-file <path>`, `--no-env-file` | As for `kargo run` |
@@ -694,6 +702,7 @@ kargo metadata --fingerprint
 | `--format <fmt>` | `json`, the only format (default) |
 | `--no-deps` | Leave out the resolved dependencies, plugin jars and the JDK. Nothing is downloaded or locked |
 | `-r, --release` | Describe the release profile's output directories and compiler arguments |
+| `--profile <name>` | Describe a custom profile's output directories and compiler arguments |
 | `--fingerprint` | Only print a hash of every `kargo.toml` and `kargo.lock`. It is the `fingerprint` of the document, and it changes when the metadata may have changed |
 
 The output has a `"version": 1` field and is described in [Machine-readable output](../machine-readable-output/#kargo-metadata). See [Editor integration](../../guides/editors/) for how editors use it.

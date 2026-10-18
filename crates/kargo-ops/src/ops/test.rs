@@ -262,7 +262,7 @@ fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
 
 /// Clears and returns `target/<profile>/<target>/test-reports`, where `--report junit` writes.
 fn reports_dir(ctx: &BuildContext, target: TargetKind) -> Result<PathBuf> {
-    let dir = ctx.ws.output_dir(ctx.profile, target).join("test-reports");
+    let dir = ctx.ws.output_dir(&ctx.profile, target).join("test-reports");
     kargo_util::fs::remove_dir_all_if_exists(&dir)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     Ok(dir)
@@ -322,7 +322,7 @@ fn record_jvm_failures(ctx: &BuildContext, failed: Option<&[String]>) -> Result<
 }
 
 fn failures_file(ctx: &BuildContext) -> PathBuf {
-    ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-failures")
+    ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("test-failures")
 }
 
 /// The test classes with a failed test in the JUnit XML reports of a run, in name order.
@@ -441,7 +441,9 @@ fn junit_command(
     if opts.debug.is_none() {
         cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)));
     }
-    cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).args(&ctx.ws.manifest().test.jvm_args);
+    // Same order as `kargo run`: `[target.jvm]`, the profile, then `[test]`, which is the most specific.
+    let profile = ctx.ws.profile(&ctx.profile)?;
+    cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).args(&profile.jvm_args).args(&ctx.ws.manifest().test.jvm_args);
     // Without a terminal the launcher's probe for the terminal width prints `stty: /dev/tty: No such device`.
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         cmd.arg(format!("-D{JUNIT_USAGE_WIDTH_PROPERTY}=120"));
@@ -643,9 +645,9 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     let jdk = ctx.jvm_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
+    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(&ctx.profile)?, &setup.contributions.compiler_args);
     let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
-    let test_classes = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("test-classes");
+    let test_classes = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("test-classes");
     let processor_path = jvm_processor_path(ctx, &setup, true)?;
     let javac_args = jvm_javac_args(&setup, jvm);
     let jvm_target = jvm.target_for(jdk.version)?;
@@ -705,9 +707,9 @@ pub(crate) fn build_jvm_test_fixtures(ctx: &BuildContext) -> Result<Option<PathB
     let jdk = ctx.jvm_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let kotlin_args = common_kotlin_args(manifest, ws.profile(ctx.profile), &setup.contributions.compiler_args);
+    let kotlin_args = common_kotlin_args(manifest, ws.profile(&ctx.profile)?, &setup.contributions.compiler_args);
     let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
-    let out = ws.output_dir(ctx.profile, TargetKind::Jvm);
+    let out = ws.output_dir(&ctx.profile, TargetKind::Jvm);
     let name = format!("{}-test-fixtures", manifest.package.name);
     let unit = JvmCompilation {
         name: &name,
@@ -1080,7 +1082,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let profile = ctx.ws.profile(ctx.profile);
+    let profile = ctx.ws.profile(&ctx.profile)?;
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     super::build::npm_opt_in(ctx, &mut kotlin_args);
     let name = format!("{}-test", wasm.module_name(&manifest.package));
@@ -1093,7 +1095,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         friends: main.map(|m| vec![m.klib]).unwrap_or_default(),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
-        output: ctx.ws.output_dir(ctx.profile, TargetKind::Wasm).join("test"),
+        output: ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test"),
         debug: true,
         optimize: false,
         declarations: false,
@@ -1182,7 +1184,7 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     libraries.extend(native_cinterop(ctx, host)?);
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let profile = ctx.ws.profile(ctx.profile);
+    let profile = ctx.ws.profile(&ctx.profile)?;
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut all = sources(ctx, TargetKind::Native, false, &["kt"])?;
     all.extend(&tests);
@@ -1197,7 +1199,7 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
         kotlin_args: &kotlin_args,
         entry_point: None,
         linker_options: &manifest.targets.native.as_ref().map(|n| n.linker_options.clone()).unwrap_or_default(),
-        output_dir: ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(host).join("test"),
+        output_dir: ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(host).join("test"),
         debug: true,
         optimize: false,
         test_runner: true,

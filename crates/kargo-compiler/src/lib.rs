@@ -281,7 +281,7 @@ mod tests {
             "[package]\nname = \"a\"\nversion = \"1\"\n[kotlin]\nlanguage-version = \"2.3\"\nopt-in = [\"X\"]\nwarnings-as-errors = true\ncompiler-args = [\"-Xfoo\"]\n",
         )
         .unwrap();
-        let args = common_kotlin_args(&m, &m.release_profile, &["-Xjsr305=strict".into()]);
+        let args = common_kotlin_args(&m, &m.profiles["release"], &["-Xjsr305=strict".into()]);
         assert_eq!(args, ["-language-version=2.3", "-opt-in=X", "-Werror", "-Xjsr305=strict", "-Xfoo"]);
     }
 }

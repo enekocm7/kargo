@@ -15,7 +15,7 @@ use super::build::{ALL_SCOPES, native_entry_point, native_platforms, sources, wa
 use super::context::{BuildContext, TargetSetup};
 use crate::builtins;
 use crate::npm;
-use crate::workspace::{ProfileKind, Project, Workspace};
+use crate::workspace::{Project, Workspace};
 use kargo_compiler::common_kotlin_args;
 use kargo_compiler::mainclass::find_jvm_main_class;
 use kargo_manifest::{Scope, TargetKind};
@@ -76,10 +76,7 @@ pub fn metadata(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
         }
     };
     let native = kargo_toolchain::NativeToolchain::find(ctx.config, &manifest.kotlin.version)?;
-    let profile = match ctx.profile {
-        ProfileKind::Dev => "dev",
-        ProfileKind::Release => "release",
-    };
+    let profile = ctx.profile.name();
     Ok(json!({
         "version": FORMAT_VERSION,
         "kargo-version": env!("CARGO_PKG_VERSION"),
@@ -179,7 +176,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         // Test fixtures compile like tests, so editors treat them as test sources too.
         "test-roots": roots(&[ws.common_tests(), ws.target_tests(kind), ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
         "test-fixture-roots": roots(&[ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
-        "output-dir": path(&ws.output_dir(ctx.profile, kind)),
+        "output-dir": path(&ws.output_dir(&ctx.profile, kind)),
     });
     if kind == TargetKind::Android {
         // Gradle compiles Android code and resolves its dependencies.
@@ -187,7 +184,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         return Ok(out);
     }
     let setup = ctx.setup(kind)?;
-    out["compiler-args"] = json!(common_kotlin_args(m, ws.profile(ctx.profile), &setup.contributions.compiler_args));
+    out["compiler-args"] = json!(common_kotlin_args(m, ws.profile(&ctx.profile)?, &setup.contributions.compiler_args));
     out["compiler-plugins"] = compiler_plugins(ctx, &setup, opts)?;
     match kind {
         TargetKind::Jvm => {
@@ -199,7 +196,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
                 Some(main) => Some(main.clone()),
                 None => find_jvm_main_class(&sources(ctx, kind, false, &["kt", "java"])?.kotlin_files(), "").ok(),
             };
-            let output = ws.output_dir(ctx.profile, kind);
+            let output = ws.output_dir(&ctx.profile, kind);
             out["resource-roots"] = json!(roots(&[ws.resources()]));
             out["test-resource-roots"] = json!(roots(&[ws.test_resources()]));
             out["classes-dir"] = json!(path(&output.join("classes")));
@@ -217,7 +214,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, &setup)?) };
             // The Kotlin declarations generated for `[target.wasm.npm-dependencies]`, once a build wrote them.
             out["npm-declarations"] =
-                if wasm.npm_dependencies.is_empty() { Value::Null } else { json!(path(&npm::declarations_dir(ws, ctx.profile))) };
+                if wasm.npm_dependencies.is_empty() { Value::Null } else { json!(path(&npm::declarations_dir(ws, &ctx.profile))) };
         }
         TargetKind::Native => {
             let native = m.targets.native.as_ref().expect("the Native target is enabled");
@@ -321,8 +318,8 @@ fn klib_entry(platform: &str, main: Vec<Value>, test: Vec<Value>) -> Value {
 fn npm_packages(ctx: &BuildContext, setup: &TargetSetup) -> Result<Vec<Value>> {
     let main = npm::dependencies(ctx, &wasm_resolution(ctx, setup, false)?.files())?;
     let test = npm::dependencies(ctx, &wasm_resolution(ctx, setup, true)?.files())?;
-    let main_dir = ctx.ws.profile_dir(ctx.profile).join("node_modules");
-    let test_dir = ctx.ws.output_dir(ctx.profile, TargetKind::Wasm).join("test").join("node_modules");
+    let main_dir = ctx.ws.profile_dir(&ctx.profile).join("node_modules");
+    let test_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test").join("node_modules");
     Ok(npm_listing(&main, &test, &main_dir, &test_dir))
 }
 
@@ -394,6 +391,7 @@ pub fn fetch_sources(ctx: &BuildContext, targets: &[TargetKind]) -> Result<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::ProfileKind;
     use kargo_util::config::Config;
     use kargo_util::shell::{Shell, Verbosity};
 

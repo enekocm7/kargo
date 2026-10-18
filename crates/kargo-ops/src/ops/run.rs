@@ -21,6 +21,7 @@ use super::context::BuildContext;
 use crate::env::EnvOptions;
 use crate::warnings;
 use crate::web;
+use crate::workspace::ProfileKind;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::mainclass::find_entry_point_in;
 use kargo_compiler::native::NativeCompilation;
@@ -60,7 +61,8 @@ impl Program {
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     pub target: Option<TargetKind>,
-    pub release: bool,
+    /// The profile to run: `dev`, `release` (`--release`) or a custom one (`--profile <name>`).
+    pub profile: ProfileKind,
     pub program: Program,
     pub args: Vec<String>,
     /// The port a Wasm browser app is served on (`--port`); `None` uses [`DEFAULT_PORT`].
@@ -218,7 +220,7 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
     let results = if separate_native {
         BuildResults::default()
     } else {
-        build(ctx, &BuildOptions { targets: vec![target], release: opts.release, keep_going: false })?
+        build(ctx, &BuildOptions { targets: vec![target], profile: opts.profile.clone(), keep_going: false })?
     };
 
     let root = ctx.ws.root();
@@ -417,14 +419,14 @@ fn compile_jvm_example(ctx: &BuildContext, name: &str, file: &Path, main_classes
     let jdk = ctx.jvm_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
+    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(&ctx.profile)?, &setup.contributions.compiler_args);
     let processor_path = jvm_processor_path(ctx, &setup, true)?;
     let javac_args = jvm_javac_args(&setup, jvm);
     let jvm_target = jvm.target_for(jdk.version)?;
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(dev_cp);
-    let output = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join("examples").join(name);
+    let output = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("examples").join(name);
     // Each example is its own module, so examples may each declare `fun main` in the same package.
     let module = format!("{}-example-{name}", manifest.package.name);
     let unit = JvmCompilation {
@@ -489,12 +491,12 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let profile = ctx.ws.profile(ctx.profile);
+    let profile = ctx.ws.profile(&ctx.profile)?;
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut libraries = native_libraries(ctx, &setup, &host, example.is_some())?;
     libraries.extend(native_cinterop(ctx, &host)?);
 
-    let out = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(&host);
+    let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(&host);
     let unit = |name, kind, sources, libraries, entry_point, dir: PathBuf| NativeCompilation {
         name,
         konan_target: host.clone(),

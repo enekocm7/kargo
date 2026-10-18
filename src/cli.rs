@@ -366,8 +366,11 @@ impl EnvArgs {
 #[derive(Debug, Args)]
 struct BuildArgs {
     /// Build with the release profile
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "profile")]
     release: bool,
+    /// Build with a custom profile from kargo.toml, such as `staging` (`[profile.staging]`)
+    #[arg(long, value_name = "NAME", conflicts_with = "release")]
+    profile: Option<String>,
     /// Only this target (repeatable); defaults to all enabled targets
     #[arg(short, long = "target", value_enum)]
     targets: Vec<TargetArg>,
@@ -383,7 +386,11 @@ struct BuildArgs {
 
 impl BuildArgs {
     fn options(&self) -> BuildOptions {
-        BuildOptions { targets: self.targets.iter().map(|t| (*t).into()).collect(), release: self.release, keep_going: false }
+        BuildOptions {
+            targets: self.targets.iter().map(|t| (*t).into()).collect(),
+            profile: profile_kind(self.release, self.profile.as_deref()),
+            keep_going: false,
+        }
     }
 }
 
@@ -485,8 +492,11 @@ enum Command {
     /// Build and run the program
     #[command(visible_alias = "r")]
     Run {
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "profile")]
         release: bool,
+        /// Run with a custom profile from kargo.toml (`[profile.<name>]`)
+        #[arg(long, value_name = "NAME", conflicts_with = "release")]
+        profile: Option<String>,
         /// Target to run (defaults to jvm, then native, wasm, android)
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
@@ -601,8 +611,11 @@ enum Command {
         #[arg(long)]
         check: bool,
         /// Show the release profile's variables
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "profile")]
         release: bool,
+        /// Show the variables of a custom profile from kargo.toml
+        #[arg(long, value_name = "NAME", conflicts_with = "release")]
+        profile: Option<String>,
         #[command(flatten)]
         env: EnvArgs,
         #[command(flatten)]
@@ -766,13 +779,19 @@ enum Command {
     /// Remove build output
     Clean {
         /// Only remove the release profile output
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "profile")]
         release: bool,
+        /// Only remove the output of a custom profile
+        #[arg(long, value_name = "NAME", conflicts_with = "release")]
+        profile: Option<String>,
     },
     /// Build a self-contained executable jar, or a library's jar and sources jar (JVM); APKs and App Bundles (Android)
     Package {
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "profile")]
         release: bool,
+        /// Package a custom profile from kargo.toml
+        #[arg(long, value_name = "NAME", conflicts_with = "release")]
+        profile: Option<String>,
         /// Target to package: jvm (default when enabled) or android
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
@@ -851,10 +870,13 @@ classpath or klib path of every target and scope. The `version` field is the for
         #[arg(long)]
         no_deps: bool,
         /// Describe the release profile instead of the dev profile
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "profile")]
         release: bool,
+        /// Describe a custom profile from kargo.toml instead of the dev profile
+        #[arg(long, value_name = "NAME", conflicts_with = "release")]
+        profile: Option<String>,
         /// Only print the fingerprint of kargo.toml and kargo.lock (changes when the metadata may have changed)
-        #[arg(long, conflicts_with_all = ["no_deps", "release"])]
+        #[arg(long, conflicts_with_all = ["no_deps", "release", "profile"])]
         fingerprint: bool,
     },
     /// Print the resolved classpath of a target, for editors, scripts and tools
@@ -1290,7 +1312,7 @@ fn run_tests(config: &Config, project: &Project, global: &GlobalArgs, build: &Bu
         project,
         &build.packages.selection(),
         global,
-        opts.build.profile(),
+        opts.build.profile.clone(),
         (build.jobs.or(Some(1)), true),
         |ctx| ops::test::test(ctx, opts),
     )?;
@@ -1304,13 +1326,12 @@ fn restart_program(
     project: &Project,
     global: &GlobalArgs,
     package: &OnePackageArg,
-    release: bool,
     opts: &RunOptions,
     running: &mut Running,
 ) -> Result<()> {
     let index = project.select_one(&package.selection(), "`kargo run`")?;
     warn_manifest(config.shell(), project, project.package(index));
-    let ctx = context(config, project, index, global, profile(release))?;
+    let ctx = context(config, project, index, global, opts.profile.clone())?;
     match ops::run::start(&ctx, opts)? {
         Start::Process(launch) => running.replace(*launch, config.shell()),
         // `check_watchable` refused these targets before the first round.
@@ -1384,8 +1405,13 @@ fn run_commands(shell: &Shell, exe: &Path, forwarded: &[String], commands: &[Vec
     }
 }
 
-fn profile(release: bool) -> ProfileKind {
-    if release { ProfileKind::Release } else { ProfileKind::Dev }
+/// The profile a command works with: `--release`, `--profile <name>`, or `dev` by default.
+fn profile_kind(release: bool, name: Option<&str>) -> ProfileKind {
+    match (release, name) {
+        (true, _) => ProfileKind::Release,
+        (false, Some(name)) => ProfileKind::from_name(name),
+        (false, None) => ProfileKind::Dev,
+    }
 }
 
 fn section(dev: bool, target: Option<TargetArg>) -> DependencySection {
@@ -1492,7 +1518,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let project = load_project(global)?;
             let opts = BuildOptions { keep_going, ..build.options() };
             let results =
-                build_packages(config, &project, &build.packages.selection(), global, opts.profile(), (build.jobs, false), |ctx| {
+                build_packages(config, &project, &build.packages.selection(), global, opts.profile.clone(), (build.jobs, false), |ctx| {
                     ops::build::build(ctx, &opts)
                 });
             build_finished(build.message_format, results.map(|_| ()))?;
@@ -1502,15 +1528,21 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let opts = CheckOptions { build: BuildOptions { keep_going, ..build.options() }, tests };
-            let results =
-                build_packages(config, &project, &build.packages.selection(), global, opts.build.profile(), (build.jobs, tests), |ctx| {
-                    ops::check::check(ctx, &opts)
-                });
+            let results = build_packages(
+                config,
+                &project,
+                &build.packages.selection(),
+                global,
+                opts.build.profile.clone(),
+                (build.jobs, tests),
+                |ctx| ops::check::check(ctx, &opts),
+            );
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
         Command::Run {
             release,
+            profile,
             target,
             main,
             bin,
@@ -1531,7 +1563,8 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             warn_manifest(shell, &project, project.package(index));
-            let ctx = context(config, &project, index, global, profile(release))?;
+            let profile = profile_kind(release, profile.as_deref());
+            let ctx = context(config, &project, index, global, profile.clone())?;
             let program = match (main, bin, example) {
                 (Some(main), _, _) => Program::Main(main),
                 (_, Some(bin), _) => Program::Bin(bin),
@@ -1539,7 +1572,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 _ => Program::Default,
             };
             let opts =
-                RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors, env: env.options() };
+                RunOptions { target: target.map(Into::into), profile, program, args, port, open, debug, flavors, env: env.options() };
             let Some(watch) = watch else {
                 let code = ops::run::run(&ctx, &opts)?;
                 return Ok(exit_code(code));
@@ -1550,7 +1583,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             ops::watch::repeatedly(shell, &watch, WatchSet::of(&project), || {
                 let project = reload(global, shell)?;
                 let set = WatchSet::of(&project);
-                if let Err(err) = restart_program(config, &project, global, &package, release, &opts, &mut running) {
+                if let Err(err) = restart_program(config, &project, global, &package, &opts, &mut running) {
                     report_error(shell, &err);
                 }
                 Some(set)
@@ -1637,10 +1670,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             })?;
             Ok(0)
         }
-        Command::Env { show_values, check, release, env, package } => {
+        Command::Env { show_values, check, release, profile, env, package } => {
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo env`")?;
-            ops::env::show(shell, &project, index, profile(release), &env.options(), show_values, check)?;
+            let profile = profile_kind(release, profile.as_deref());
+            ops::env::show(shell, &project, index, profile, &env.options(), show_values, check)?;
             Ok(0)
         }
         Command::Doc { targets, open, packages } => {
@@ -1781,13 +1815,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Metadata { format: MetadataFormatArg::Json, no_deps, release, fingerprint } => {
+        Command::Metadata { format: MetadataFormatArg::Json, no_deps, release, profile, fingerprint } => {
             let project = load_project(global)?;
             if fingerprint {
                 println!("{}", ops::metadata::fingerprint(&project));
                 return Ok(0);
             }
-            let ctx = context(config, &project, project.members()[0], global, profile(release))?;
+            let ctx = context(config, &project, project.members()[0], global, profile_kind(release, profile.as_deref()))?;
             let doc = ops::metadata::metadata(&ctx, &ops::metadata::MetadataOptions { no_deps })?;
             println!("{}", serde_json::to_string_pretty(&doc)?);
             Ok(0)
@@ -1908,17 +1942,19 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Clean { release } => {
+        Command::Clean { release, profile } => {
             let project = load_project(global)?;
-            let removed = ops::clean(project.package(project.members()[0]), shell, release.then_some(ProfileKind::Release))?;
+            // Without a profile, everything under target/ goes.
+            let only = (release || profile.is_some()).then(|| profile_kind(release, profile.as_deref()));
+            let removed = ops::clean(project.package(project.members()[0]), shell, only)?;
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, target, bin, fat, package } => {
+        Command::Package { release, profile, target, bin, fat, package } => {
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
-            let ctx = context(config, &project, index, global, profile(release))?;
+            let ctx = context(config, &project, index, global, profile_kind(release, profile.as_deref()))?;
             for file in ops::package(&ctx, target.map(Into::into), bin.as_deref(), fat)? {
                 println!("{}", file.display());
             }
@@ -2477,7 +2513,7 @@ mod tests {
         match cli.command {
             Command::Build { build, keep_going } => {
                 let o = build.options();
-                assert!(o.release);
+                assert_eq!(o.profile, ProfileKind::Release);
                 assert!(!keep_going);
                 assert_eq!(o.targets, [TargetKind::Jvm, TargetKind::Native]);
             }

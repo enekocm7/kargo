@@ -244,6 +244,23 @@ kargo tree --depth 1             # direct dependencies only
 kargo tree --duplicates          # only modules requested in more than one version
 ```
 
+## Dependencies of one profile
+
+A dependency that only some builds need goes in the profile table: an HTTP logger in debug builds, or a mock server in a staging build. It is added to the build of every target with that profile, and to no other profile:
+
+```toml title="kargo.toml"
+[profile.dev.dependencies]
+"com.squareup.okhttp3:logging-interceptor" = "4.12.0"
+
+[profile.staging]
+inherits = "release"
+
+[profile.staging.dependencies]
+"com.squareup.okhttp3:mockwebserver" = "4.12.0"
+```
+
+`kargo build --profile staging` and `kargo run --profile staging` have the mock server, and `kargo build` does not. A profile with dependencies of its own resolves them in its own entry of `kargo.lock` (`jvm/runtime@staging`), and the others keep their shared entries. A dependency with the same artifact as one of the manifest replaces it for that profile. See [Profiles](../../reference/manifest/#profilename) for the keys, and [On Android](../android/) for how the Android target applies them.
+
 ## Multiplatform libraries
 
 Kotlin Multiplatform libraries publish one Maven module per platform plus Gradle module metadata. Add the **common** coordinates and Kargo picks the right variant for each target:
@@ -331,7 +348,7 @@ Repositories often delete old snapshot builds. If a locked build is gone, the bu
 
 ## The lockfile
 
-`kargo.lock` records the exact version of every resolved module and the SHA-256 of every downloaded file. Commit it, so everyone builds with the same dependencies.
+`kargo.lock` records the exact version of every resolved module and the SHA-256 of every file it downloads. Kargo checks each file it uses against those checksums, cached copies included. Commit it, so everyone builds with the same dependencies.
 
 ```sh
 kargo update        # re-resolve everything and rewrite kargo.lock

@@ -214,7 +214,7 @@ pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> 
 
 /// `kargo clean`: removes the build directory (or one profile of it).
 pub fn clean(ws: &Workspace, shell: &Shell, profile: Option<crate::workspace::ProfileKind>) -> Result<PathBuf> {
-    let dir = match profile {
+    let dir = match &profile {
         Some(p) => ws.target_dir().join(p.dir_name()),
         None => ws.target_dir().to_path_buf(),
     };
@@ -325,8 +325,8 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 let (main, test) = (main?.files(), test?.files());
                 // Where `kargo build` and `kargo test` install them (see `npm::install`): the main packages
                 // next to the build, and the test ones in the test output when they differ.
-                crate::npm::fetch(ctx, &main, &ctx.ws.profile_dir(ctx.profile))?;
-                let test_dir = ctx.ws.output_dir(ctx.profile, TargetKind::Wasm).join("test");
+                crate::npm::fetch(ctx, &main, &ctx.ws.profile_dir(&ctx.profile))?;
+                let test_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test");
                 if crate::npm::dependencies(ctx, &test)? != crate::npm::dependencies(ctx, &main)? {
                     crate::npm::fetch(ctx, &test, &test_dir)?;
                 }
@@ -445,7 +445,7 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathB
         return Ok(jar);
     }
     let name = bin.unwrap_or(&pkg.name);
-    let dest = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm).join(format!("{name}-{}-all.jar", pkg.version));
+    let dest = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(format!("{name}-{}-all.jar", pkg.version));
     ctx.shell().status("Packaging", format!("{name} v{} ({})", pkg.version, dest.display()));
     let manifest = JarManifest {
         main_class: bin_main.or(jvm.main_class),
