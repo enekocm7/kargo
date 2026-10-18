@@ -56,6 +56,11 @@ impl Config {
         self.home.join("cache").join("maven")
     }
 
+    /// Compiled single-file scripts (`kargo script`), one directory per script and settings.
+    pub fn scripts_cache(&self) -> PathBuf {
+        self.home.join("cache").join("scripts")
+    }
+
     /// Extracted toolchains (e.g. Kotlin/Native distributions).
     pub fn toolchains_dir(&self) -> PathBuf {
         self.home.join("toolchains")

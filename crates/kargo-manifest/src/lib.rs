@@ -21,6 +21,7 @@
 
 pub mod edit;
 mod raw;
+pub mod script;
 
 use std::collections::BTreeMap;
 use std::fmt;

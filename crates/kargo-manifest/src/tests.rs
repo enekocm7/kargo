@@ -1078,3 +1078,126 @@ fn env_table_rejects_bad_files_and_expose() {
     let profile = format!("{MINIMAL}\n[profile.dev.env]\nexpose = [\"A\"]\n");
     assert!(parse_err(&profile).contains("`expose` belongs in [env]"));
 }
+
+mod script {
+    use crate::JdkRequest;
+    use crate::script::*;
+
+    fn kts(text: &str) -> KtsScript {
+        parse_kts(text).unwrap_or_else(|e| panic!("{e:#}"))
+    }
+
+    fn settings(text: &str) -> Settings {
+        settings_from_annotations(text, &kts(text).annotations).unwrap_or_else(|e| panic!("{e:#}"))
+    }
+
+    #[test]
+    fn reads_the_header_annotations_and_blanks_them() {
+        let text = "#!/usr/bin/env -S kargo script\n@file:DependsOn(\"a:b:1.0\")\n@file:Kotlin(\"2.3.0\")\n\nprintln(1)\n";
+        let script = kts(text);
+        assert_eq!(script.annotations.len(), 2);
+        assert_eq!(script.annotations[0].name, "DependsOn");
+        assert_eq!(script.annotations[0].args, ["a:b:1.0"]);
+        assert_eq!(script.code.lines().count(), text.lines().count());
+        assert!(script.code.starts_with("#!/usr/bin/env -S kargo script\n"));
+        assert!(script.code.ends_with("\n\nprintln(1)\n"), "{:?}", script.code);
+        assert!(!script.code.contains("@file"));
+    }
+
+    #[test]
+    fn skips_comments_before_annotations() {
+        let text = "// first\n/* block /* nested */ still */\n@file:Jdk(\"21\")\nfun f() = 1\n";
+        let script = kts(text);
+        assert_eq!(settings(text).jdk, Some(JdkRequest::Major(21)));
+        assert!(script.code.contains("fun f() = 1"));
+    }
+
+    #[test]
+    fn stops_at_the_first_declaration() {
+        let text = "val x = 1\n@file:DependsOn(\"a:b:1\")\n";
+        assert!(kts(text).annotations.is_empty());
+        assert!(kts(text).code.contains("@file:DependsOn"));
+    }
+
+    #[test]
+    fn keeps_other_annotations_for_the_compiler() {
+        let text = "@file:Suppress(\"UNUSED\")\n@file:DependsOn(\"a:b:1\")\nprintln(1)\n";
+        let script = kts(text);
+        assert_eq!(script.annotations.len(), 1);
+        assert!(script.code.contains("@file:Suppress(\"UNUSED\")"));
+        assert!(!script.code.contains("DependsOn"));
+    }
+
+    #[test]
+    fn reads_array_and_multi_argument_forms() {
+        let text = "@file:DependsOn([\"a:b:1\", \"c:d:2\"])\n@file:Repository(\"https://example.com/m2/\", \"mavenCentral\")\n";
+        let s = settings(text);
+        assert_eq!(s.dependencies.iter().map(ToString::to_string).collect::<Vec<_>>(), ["a:b:1", "c:d:2"]);
+        assert_eq!(s.repositories, ["https://example.com/m2", "mavenCentral"]);
+    }
+
+    #[test]
+    fn reads_string_escapes_and_raw_strings() {
+        let s = settings("@file:Framework(\"a\\\"b\", \"\"\"c\"d\"\"\")\n");
+        assert_eq!(s.frameworks, ["a\"b", "c\"d"]);
+    }
+
+    #[test]
+    fn rejects_malformed_known_annotations_with_their_line() {
+        let err = format!(
+            "{:#}",
+            parse_kts("\n@file:DependsOn(\"a:b\")\n")
+                .and_then(|s| settings_from_annotations("\n@file:DependsOn(\"a:b\")\n", &s.annotations))
+                .unwrap_err()
+        );
+        assert!(err.starts_with("line 2: invalid @file:DependsOn"), "{err}");
+        assert!(err.contains("version pinned"), "{err}");
+        let err = format!("{:#}", parse_kts("\n@file:Kotlin(\"unterminated)\n").unwrap_err());
+        assert!(err.starts_with("line 2: invalid @file:Kotlin"), "{err}");
+    }
+
+    #[test]
+    fn rejects_import_until_it_is_supported() {
+        let err = format!("{:#}", parse_kts("@file:Import(\"other.kts\")\n").unwrap_err());
+        assert!(err.contains("@file:Import is not supported yet"), "{err}");
+    }
+
+    #[test]
+    fn rejects_repositories_that_are_not_urls() {
+        let err = format!(
+            "{:#}",
+            parse_kts("@file:Repository(\"ftp://x\")\n")
+                .and_then(|s| settings_from_annotations("@file:Repository(\"ftp://x\")\n", &s.annotations))
+                .unwrap_err()
+        );
+        assert!(err.contains("invalid repository"), "{err}");
+    }
+
+    #[test]
+    fn recognises_kargo_scripts() {
+        assert!(is_kargo_script("println(1)", false), "outside a project every .kts is a script");
+        assert!(!is_kargo_script("println(1)", true), "inside a project only a kargo shebang makes one");
+        assert!(is_kargo_script("#!/usr/bin/env -S kargo script\nprintln(1)", true));
+        assert!(is_kargo_script("#!/usr/local/bin/kargo script\n", true));
+        assert!(!is_kargo_script("#!/usr/bin/env kotlin\n", true));
+    }
+
+    #[test]
+    fn reads_kt_front_matter() {
+        let text = "#!/usr/bin/env -S kargo script\n/* kargo\nkotlin = \"2.3.0\"\njdk = \"21\"\nrepositories = [\"https://jitpack.io\"]\nframeworks = [\"serialization\"]\n[dependencies]\n\"com.github.ajalt.clikt:clikt\" = \"5.0.0\"\n*/\nfun main() {}\n";
+        let s = parse_kt_front_matter(text).unwrap().expect("front matter");
+        assert_eq!(s.kotlin.as_deref(), Some("2.3.0"));
+        assert_eq!(s.jdk, Some(JdkRequest::Major(21)));
+        assert_eq!(s.repositories, ["https://jitpack.io"]);
+        assert_eq!(s.frameworks, ["serialization"]);
+        assert_eq!(s.dependencies[0].to_string(), "com.github.ajalt.clikt:clikt:5.0.0");
+    }
+
+    #[test]
+    fn ignores_other_block_comments_and_rejects_unknown_front_matter_keys() {
+        assert!(parse_kt_front_matter("/** KDoc */\nfun main() {}\n").unwrap().is_none());
+        assert!(parse_kt_front_matter("fun main() {}\n").unwrap().is_none());
+        let err = format!("{:#}", parse_kt_front_matter("/* kargo\nflavour = \"x\"\n*/\n").unwrap_err());
+        assert!(err.contains("unknown key `flavour`"), "{err}");
+    }
+}

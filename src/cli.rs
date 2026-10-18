@@ -502,6 +502,18 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Run a Kotlin script (.kts) or a .kt file without a project
+    Script {
+        /// The .kts or .kt file to run (not needed with --expr)
+        #[arg(required_unless_present = "expr", value_name = "FILE")]
+        file: Option<String>,
+        /// Run this Kotlin code instead of a file
+        #[arg(short, long, value_name = "CODE")]
+        expr: Option<String>,
+        /// Arguments for the script
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Compile and run tests
     #[command(visible_alias = "t")]
     Test {
@@ -1358,6 +1370,18 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 &RunOptions { target: target.map(Into::into), release, program, args, port, open, debug, flavors, env: env.options() },
             )?;
             Ok(exit_code(code))
+        }
+        Command::Script { file, expr, mut args } => {
+            let source = match (expr, file) {
+                // With --expr every positional is an argument, since the file slot is the first one.
+                (Some(code), file) => {
+                    args.splice(0..0, file);
+                    kargo_ops::script::Source::Expression(code)
+                }
+                (None, Some(file)) => kargo_ops::script::Source::File(file.into()),
+                (None, None) => bail!("give a .kts or .kt file to run, or code with --expr"),
+            };
+            Ok(exit_code(kargo_ops::script::run(config, &source, &args)?))
         }
         Command::Test { build, filter, no_run, no_fail_fast, include_tag, exclude_tag, failed, report, debug, list, format, env } => {
             set_message_format(build.message_format);

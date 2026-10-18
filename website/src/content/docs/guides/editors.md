@@ -635,6 +635,10 @@ The `kargo/runnables` request lists what can be run in the project, with the com
 
 Programs are listed per target (`run -t <target>`), then each `[[bin]]` (`run --bin <name>`) and example (`run --example <name>`); tests per target (`test -t <target>`, append a filter to run one test); and tasks as `task <name>`. Kargo advertises `"experimental": { "kargo": { "runnables": true } }` in its capabilities so plugins can check for the request.
 
+### Kotlin scripts
+
+A `.kts` file outside a project, or one whose shebang runs `kargo script`, is a [Kotlin script](../scripts/). For those, `kargo lsp` completes the `@file:` annotations and their values, shows what each annotation means on hover, and reports a header that `kargo script` would reject as a diagnostic on that annotation. The rest of the file goes to the Kotlin server, as for any other Kotlin file. See [Kotlin scripts](../scripts/#editors).
+
 ## Completion and validation in `kargo.toml`
 
 Kargo publishes a [JSON Schema](https://json-schema.org/) for `kargo.toml` at:

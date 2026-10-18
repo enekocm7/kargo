@@ -21,6 +21,7 @@ pub mod kotlin;
 pub mod manifest;
 pub mod project;
 pub mod schema;
+pub mod script;
 pub mod server;
 pub mod text;
 pub mod zed;
