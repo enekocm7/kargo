@@ -7,9 +7,37 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-/// Creates a temporary sibling file, lets `write` fill it, then renames it into
-/// place so readers never observe a partially written file.
+/// Creates a temporary sibling file, lets `write` fill it, then renames it over
+/// `path` so readers never observe a partially written file. A file that can't be
+/// replaced is an error: the content the caller wrote must not be silently dropped.
 pub fn write_atomic(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> Result<()> {
+    write_via_temp(path, write, |tmp| rename_with_retries(tmp, path))
+}
+
+/// Like [`write_atomic`], for content addressed by its name, such as a download cache entry.
+/// If the rename fails because another process has already put a file at `path`, that file is
+/// kept: it holds the same content, so the write has still succeeded.
+pub fn write_atomic_if_absent(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> Result<()> {
+    write_via_temp(path, write, |tmp| match rename_with_retries(tmp, path) {
+        Err(_) if path.exists() => {
+            let _ = fs::remove_file(tmp);
+            Ok(())
+        }
+        result => result,
+    })
+}
+
+pub fn write_string_atomic(path: &Path, contents: &str) -> Result<()> {
+    write_atomic(path, |f| f.write_all(contents.as_bytes()))
+}
+
+/// Fills a temporary sibling of `path` with `write`, then hands it to `place` to move into position.
+/// The temporary file is removed when anything fails.
+fn write_via_temp(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+    place: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<()> {
     let dir = path.parent().context("path has no parent directory")?;
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let file_name = path.file_name().context("path has no file name")?.to_string_lossy();
@@ -19,29 +47,12 @@ pub fn write_atomic(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result
         write(&mut file).with_context(|| format!("failed to write {}", tmp.display()))?;
         file.flush()?;
         drop(file);
-        rename_replacing(&tmp, path)
+        place(&tmp).with_context(|| format!("failed to move {} to {}", tmp.display(), path.display()))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     result
-}
-
-pub fn write_string_atomic(path: &Path, contents: &str) -> Result<()> {
-    write_atomic(path, |f| f.write_all(contents.as_bytes()))
-}
-
-fn rename_replacing(from: &Path, to: &Path) -> Result<()> {
-    match fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        // On Windows a concurrent process may hold or have produced the same
-        // file; if it now exists, theirs is as good as ours.
-        Err(_) if to.exists() => {
-            let _ = fs::remove_file(from);
-            Ok(())
-        }
-        Err(e) => Err(e).with_context(|| format!("failed to move {} to {}", from.display(), to.display())),
-    }
 }
 
 /// How many times [`rename_with_retries`] tries again after a rename that failed because a file was in use.
@@ -50,13 +61,13 @@ const RENAME_RETRIES: u32 = 6;
 /// Renames `from` to `to`, retrying briefly when Windows refuses because a file in the tree is
 /// in use. Antivirus and the search indexer hold handles on freshly written files, which fails
 /// the rename with "Access is denied" (or a sharing violation) for a moment; rustup retries the
-/// same way.
+/// same way. A destination another program holds open is retried too, then returned as an error.
 pub fn rename_with_retries(from: &Path, to: &Path) -> io::Result<()> {
     let mut retry = 0;
     loop {
         match fs::rename(from, to) {
-            // Once the destination exists the rename is hopeless: the caller decides what that means.
-            Err(e) if retry < RENAME_RETRIES && !to.exists() && is_in_use(&e) => {
+            // A directory in the way is never replaced by a rename, so waiting won't help: the caller decides.
+            Err(e) if retry < RENAME_RETRIES && !to.is_dir() && is_in_use(&e) => {
                 std::thread::sleep(Duration::from_millis(100 << retry));
                 retry += 1;
             }
@@ -169,6 +180,36 @@ mod tests {
     }
 
     #[test]
+    fn atomic_write_reports_a_destination_it_cannot_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory in the way makes the rename fail on every platform. The write must fail
+        // with the path, not report success while the old content stays.
+        let path = dir.path().join("kargo.toml");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("inside"), "").unwrap();
+        let err = write_string_atomic(&path, "new").unwrap_err();
+        assert!(format!("{err:#}").contains(&path.display().to_string()), "{err:#}");
+        assert!(path.join("inside").is_file());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "the temporary file is removed");
+    }
+
+    #[test]
+    fn cache_writes_keep_a_destination_another_writer_filled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache/entry.jar");
+        write_atomic_if_absent(&path, |f| f.write_all(b"one")).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one");
+
+        // A directory in the way stands in for a file another process renamed into place first:
+        // the rename fails, and the write still succeeds because that file holds the same content.
+        let taken = dir.path().join("cache/taken.jar");
+        fs::create_dir(&taken).unwrap();
+        write_atomic_if_absent(&taken, |f| f.write_all(b"two")).unwrap();
+        assert!(taken.is_dir());
+        assert_eq!(fs::read_dir(dir.path().join("cache")).unwrap().count(), 2, "no temporary files left behind");
+    }
+
+    #[test]
     fn collects_sorted_files_by_extension() {
         let dir = tempfile::tempdir().unwrap();
         for f in ["b.kt", "a/c.kt", "a/d.java", "e.txt"] {
@@ -233,5 +274,25 @@ mod tests {
         rename_with_retries(&from, &dir.path().join("to")).unwrap();
         releaser.join().unwrap();
         assert_eq!(fs::read_to_string(dir.path().join("to/busy")).unwrap(), "x");
+    }
+
+    /// An editor or antivirus that holds `kargo.toml` open without sharing deletes used to make the
+    /// write report success while the old file stayed; the replacement now waits for the handle.
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_waits_for_a_destination_that_is_in_use() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kargo.toml");
+        fs::write(&path, "old").unwrap();
+        let busy = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(busy);
+        });
+        write_string_atomic(&path, "new").unwrap();
+        releaser.join().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
     }
 }

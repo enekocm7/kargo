@@ -121,7 +121,8 @@ fn fetch_to(url: &str, dest: &Path) -> Result<(), Failure> {
     // A connection dropped while the body streams is worth another attempt; a file that can't be
     // written is not. Either way nothing is left at `dest`.
     let mut body_failed = false;
-    let written = kargo_util::fs::write_atomic(dest, |f| io::copy(&mut reader, f).map(|_| ()).inspect_err(|_| body_failed = true));
+    let written =
+        kargo_util::fs::write_atomic_if_absent(dest, |f| io::copy(&mut reader, f).map(|_| ()).inspect_err(|_| body_failed = true));
     written.map_err(|e| {
         let err = e.context(format!("failed to download {url}"));
         if body_failed { Failure::Transient(err) } else { Failure::Permanent(err) }
