@@ -58,27 +58,39 @@ pub struct Workspace {
     path_deps: Vec<(PathDependency, usize)>,
 }
 
-/// Build profile selected on the command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Build profile selected on the command line: `dev`, `release` or a custom `[profile.<name>]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ProfileKind {
     #[default]
     Dev,
     Release,
+    Custom(String),
 }
 
 impl ProfileKind {
-    /// The profile's name in kargo.toml and in `.env.<name>` files: `dev` or `release`.
-    pub fn name(self) -> &'static str {
-        match self {
-            ProfileKind::Dev => "dev",
-            ProfileKind::Release => "release",
+    /// The profile called `name`: `dev` and `release` are the built-in ones, anything else is custom.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "dev" => ProfileKind::Dev,
+            "release" => ProfileKind::Release,
+            other => ProfileKind::Custom(other.to_owned()),
         }
     }
 
-    pub fn dir_name(self) -> &'static str {
+    /// The profile's name in kargo.toml and in `.env.<name>` files: `dev`, `release` or the custom name.
+    pub fn name(&self) -> &str {
+        match self {
+            ProfileKind::Dev => "dev",
+            ProfileKind::Release => "release",
+            ProfileKind::Custom(name) => name,
+        }
+    }
+
+    /// The profile's directory under `target/`: `debug` for `dev`, otherwise the name.
+    pub fn dir_name(&self) -> &str {
         match self {
             ProfileKind::Dev => "debug",
-            ProfileKind::Release => "release",
+            other => other.name(),
         }
     }
 }
@@ -188,15 +200,15 @@ impl Workspace {
         Manifest::parse_in(text, self.workspace.as_deref())
     }
 
-    pub fn profile(&self, kind: ProfileKind) -> &Profile {
-        match kind {
-            ProfileKind::Dev => &self.manifest.dev_profile,
-            ProfileKind::Release => &self.manifest.release_profile,
-        }
+    /// The settings of profile `kind`; fails for a custom profile this package's kargo.toml does not define.
+    pub fn profile(&self, kind: &ProfileKind) -> Result<&Profile> {
+        self.manifest.profile(kind.name()).with_context(|| {
+            format!("no profile named `{}` in {}; add [profile.{}] to kargo.toml", kind.name(), MANIFEST_NAME, kind.name())
+        })
     }
 
     /// This package's directory for one profile: `target/debug`, or `target/debug/<member>` in a workspace.
-    pub fn profile_dir(&self, profile: ProfileKind) -> PathBuf {
+    pub fn profile_dir(&self, profile: &ProfileKind) -> PathBuf {
         let dir = self.target_dir.join(profile.dir_name());
         match &self.out_prefix {
             Some(prefix) => dir.join(prefix),
@@ -205,7 +217,7 @@ impl Workspace {
     }
 
     /// Output directory for one target and profile, e.g. `target/debug/jvm`.
-    pub fn output_dir(&self, profile: ProfileKind, target: TargetKind) -> PathBuf {
+    pub fn output_dir(&self, profile: &ProfileKind, target: TargetKind) -> PathBuf {
         self.profile_dir(profile).join(target.as_str())
     }
 
@@ -730,6 +742,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn profile_names_and_directories() {
+        assert_eq!(ProfileKind::from_name("dev"), ProfileKind::Dev);
+        assert_eq!(ProfileKind::from_name("release"), ProfileKind::Release);
+        let staging = ProfileKind::from_name("staging");
+        assert_eq!(staging, ProfileKind::Custom("staging".to_owned()));
+        assert_eq!((staging.name(), staging.dir_name()), ("staging", "staging"));
+        // `dev` builds into `target/debug`, the directory of its `debug` build type.
+        assert_eq!((ProfileKind::Dev.name(), ProfileKind::Dev.dir_name()), ("dev", "debug"));
+        assert_eq!((ProfileKind::Release.name(), ProfileKind::Release.dir_name()), ("release", "release"));
+    }
+
+    #[test]
     fn discovers_manifest_in_parent() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(MANIFEST_NAME), "[package]\nname = \"w\"\nversion = \"0.1.0\"\n").unwrap();
@@ -738,7 +762,7 @@ mod tests {
         let ws = Workspace::discover(&nested, None).unwrap();
         assert_eq!(ws.name(), "w");
         assert_eq!(ws.root(), dunce_canonicalize(dir.path()));
-        assert!(ws.output_dir(ProfileKind::Release, TargetKind::Jvm).ends_with("target/release/jvm"));
+        assert!(ws.output_dir(&ProfileKind::Release, TargetKind::Jvm).ends_with("target/release/jvm"));
         assert!(ws.target_sources(TargetKind::Native).ends_with("src-native"));
         assert!(ws.target_tests(TargetKind::Jvm).ends_with("tests-jvm"));
         assert!(!ws.root().to_string_lossy().starts_with(r"\\?\"));
@@ -814,7 +838,7 @@ core = { path = \"../libs/core\" }
         assert_eq!(app.path_dependencies()[0].1, 1);
         assert_eq!(app.lockfile_path(), root.join("kargo.lock"));
         assert_eq!(core.lockfile_path(), root.join("kargo.lock"));
-        assert!(app.output_dir(ProfileKind::Dev, TargetKind::Jvm).ends_with("target/debug/app/jvm"));
+        assert!(app.output_dir(&ProfileKind::Dev, TargetKind::Jvm).ends_with("target/debug/app/jvm"));
         assert!(core.work_dir("lint").ends_with("target/lint/core"));
         assert_eq!(app.lock_key("jvm/runtime"), "app/jvm/runtime");
         assert_eq!(core.manifest().kotlin.version, "2.3.0");
@@ -939,8 +963,8 @@ calc = { path = \"../calc\" }
         assert_eq!(project.packages().len(), 2);
         let (calc, mathlib) = (project.package(0), project.package(1));
         // The consumer keeps the plain layout; its dependency builds under `deps/`.
-        assert!(calc.output_dir(ProfileKind::Dev, TargetKind::Jvm).ends_with("calc/target/debug/jvm"));
-        assert!(mathlib.output_dir(ProfileKind::Dev, TargetKind::Jvm).ends_with("calc/target/debug/deps/mathlib/jvm"));
+        assert!(calc.output_dir(&ProfileKind::Dev, TargetKind::Jvm).ends_with("calc/target/debug/jvm"));
+        assert!(mathlib.output_dir(&ProfileKind::Dev, TargetKind::Jvm).ends_with("calc/target/debug/deps/mathlib/jvm"));
         assert_eq!(calc.lock_key("jvm/runtime"), "jvm/runtime");
         assert_eq!(mathlib.lock_key("jvm/runtime"), "mathlib/jvm/runtime");
         assert_eq!(mathlib.lockfile_path(), root.join("calc/kargo.lock"));

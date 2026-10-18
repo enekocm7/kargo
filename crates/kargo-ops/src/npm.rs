@@ -65,7 +65,7 @@ pub fn fetch(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<()
 }
 
 /// Where [`declarations`] writes the Kotlin declarations of the npm packages.
-pub fn declarations_dir(ws: &Workspace, profile: ProfileKind) -> PathBuf {
+pub fn declarations_dir(ws: &Workspace, profile: &ProfileKind) -> PathBuf {
     ws.profile_dir(profile).join("generated").join("npm")
 }
 
@@ -85,14 +85,14 @@ pub fn interop_opt_in(manifest: &Manifest) -> Option<String> {
 ///
 /// The files are written again only when the installed packages change.
 pub fn declarations(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let out = declarations_dir(ctx.ws, ctx.profile);
+    let out = declarations_dir(ctx.ws, &ctx.profile);
     let packages: Vec<String> =
         ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.npm_dependencies.keys().cloned().collect()).unwrap_or_default();
     if packages.is_empty() {
         remove_dir_all_if_exists(&out)?;
         return Ok(Vec::new());
     }
-    let profile_dir = ctx.ws.profile_dir(ctx.profile);
+    let profile_dir = ctx.ws.profile_dir(&ctx.profile);
     let Some(node_modules) = install(ctx, libraries, &profile_dir)? else { return Ok(Vec::new()) };
     let types: BTreeMap<String, String> = packages
         .iter()

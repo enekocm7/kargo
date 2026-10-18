@@ -671,22 +671,32 @@ impl Task {
     }
 }
 
+/// A build profile: `dev`, `release` or a custom `[profile.<name>]` with its `inherits` resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     pub debug: bool,
     pub optimize: bool,
     pub compiler_args: Vec<String>,
+    /// `jvm-args`: JVM options for `kargo run` and `kargo test`, after `[target.jvm] jvm-args`.
+    pub jvm_args: Vec<String>,
     /// `[profile.<name>.env]`: replaces `[env]` variable by variable.
     pub env: EnvTable,
+    /// `[profile.<name>.dependencies]`: dependencies only this profile's builds have. They are added
+    /// to the dependencies of every target and replace the ones with the same artifact.
+    pub dependencies: Vec<Dependency>,
 }
 
 impl Profile {
     pub fn dev() -> Self {
-        Self { debug: true, optimize: false, compiler_args: Vec::new(), env: EnvTable::default() }
+        Self::builtin(true, false)
     }
 
     pub fn release() -> Self {
-        Self { debug: false, optimize: true, compiler_args: Vec::new(), env: EnvTable::default() }
+        Self::builtin(false, true)
+    }
+
+    fn builtin(debug: bool, optimize: bool) -> Self {
+        Self { debug, optimize, compiler_args: Vec::new(), jvm_args: Vec::new(), env: EnvTable::default(), dependencies: Vec::new() }
     }
 }
 
@@ -943,8 +953,8 @@ pub struct Manifest {
     pub tasks: BTreeMap<String, Task>,
     /// `[env]`: variables for `kargo run`, `kargo test`, tasks and hooks.
     pub env: EnvTable,
-    pub dev_profile: Profile,
-    pub release_profile: Profile,
+    /// Every profile by name: `dev` and `release` (always present) and the custom `[profile.<name>]` tables.
+    pub profiles: BTreeMap<String, Profile>,
     pub toolchain: ToolchainSettings,
     pub doc: DocSettings,
     pub fmt: FmtSettings,
@@ -987,6 +997,11 @@ impl Manifest {
     /// Dependencies for `target`, including the common ones.
     pub fn dependencies_for(&self, target: TargetKind) -> Vec<Dependency> {
         self.dependencies.iter().chain(self.targets.dependencies(target)).cloned().collect()
+    }
+
+    /// The profile named `name`: `dev`, `release` or a custom `[profile.<name>]`.
+    pub fn profile(&self, name: &str) -> Option<&Profile> {
+        self.profiles.get(name)
     }
 }
 

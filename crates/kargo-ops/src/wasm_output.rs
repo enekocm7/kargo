@@ -24,7 +24,7 @@ const OPTIMIZED_MARKER: &str = ".kargo-wasm-opt";
 /// browser app, the `package.json` of a library, and for release builds `wasm-opt`
 /// and the size report.
 pub fn finish(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
-    if ctx.ws.profile(ctx.profile).optimize {
+    if ctx.ws.profile(&ctx.profile)?.optimize {
         optimize(ctx, build)?;
     }
     if build.kind == WasmKind::Library {
@@ -37,7 +37,7 @@ pub fn finish(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
     if build.environment == WasmEnvironment::Browser && build.kind == WasmKind::Application {
         assemble_site(ctx, build)?;
     }
-    if ctx.ws.profile(ctx.profile).optimize {
+    if ctx.ws.profile(&ctx.profile)?.optimize {
         report_size(ctx, build);
     }
     Ok(())

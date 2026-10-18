@@ -207,6 +207,14 @@ fn merge_inherited(deps: &mut Vec<Dependency>, own: usize, inherited: Vec<Depend
     }
 }
 
+/// Adds the dependencies of the selected profile to `user`; a profile's dependency replaces the
+/// one with the same artifact, as the profile is the more specific declaration.
+fn with_profile_dependencies(mut user: Vec<Dependency>, profile: &[Dependency]) -> Vec<Dependency> {
+    user.retain(|d| !profile.iter().any(|p| p.same_artifact(d)));
+    user.extend(profile.iter().cloned());
+    user
+}
+
 /// Appends `extra` dependencies unless the user already declared that artifact of the module.
 fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
     let mut out: Vec<Dependency> = user.to_vec();
@@ -222,6 +230,7 @@ impl<'a> BuildContext<'a> {
     /// The context for building `package` of `project`; it owns `kargo.lock`.
     pub fn new(config: &'a Config, project: &'a Project, package: usize, profile: ProfileKind) -> Result<Self> {
         kargo_compiler::daemon::configure(config.home());
+        project.package(package).profile(&profile)?;
         // Taken before reading kargo.lock so a concurrent process's write is seen.
         let build_lock = project.package(package).lock(config.shell())?;
         let lock = Lockfile::load(&project.lockfile_path())?;
@@ -256,7 +265,7 @@ impl<'a> BuildContext<'a> {
             project: self.project,
             ws: self.project.package(package),
             package,
-            profile: self.profile,
+            profile: self.profile.clone(),
             client: self.client.clone(),
             locked: self.locked,
             dry_run: self.dry_run,
@@ -410,7 +419,7 @@ impl<'a> BuildContext<'a> {
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {
         let manifest = self.ws.manifest();
         let contributions = builtins::contributions(manifest, target, self.ws.root())?;
-        let user = manifest.dependencies_for(target);
+        let user = with_profile_dependencies(manifest.dependencies_for(target), &self.ws.profile(&self.profile)?.dependencies);
         let mut all = merge_deps(&user, &contributions.dependencies);
         let mut dev_all = merge_deps(&manifest.dev_dependencies, &contributions.dev_dependencies);
         let (own, dev_own) = (all.len(), dev_all.len());
@@ -468,9 +477,16 @@ impl<'a> BuildContext<'a> {
         fp.finish()
     }
 
+    /// The resolution `key` of this profile. A profile with dependencies of its own resolves them with
+    /// the others (`jvm/runtime@staging`); other profiles keep sharing the entries of the default ones.
+    fn profile_resolution(&self, key: &str) -> Result<String> {
+        let profile = self.ws.profile(&self.profile)?;
+        Ok(if profile.dependencies.is_empty() { key.to_owned() } else { format!("{key}@{}", self.profile.name()) })
+    }
+
     /// Resolves `roots` for `platform`, reusing `kargo.lock` when possible.
     pub fn resolve(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
-        let key = &self.ws.lock_key(key);
+        let key = &self.ws.lock_key(&self.profile_resolution(key)?);
         let inputs = self.inputs_fingerprint(&platform, roots, boms);
         if !self.config.refresh() {
             let lock = self.shared.lock.lock().expect("lock poisoned");
@@ -566,7 +582,7 @@ impl<'a> BuildContext<'a> {
     }
 
     pub fn fingerprint_dir(&self, target: TargetKind) -> PathBuf {
-        self.ws.output_dir(self.profile, target).join(".fingerprint")
+        self.ws.output_dir(&self.profile, target).join(".fingerprint")
     }
 }
 
@@ -586,6 +602,15 @@ impl Drop for BuildContext<'_> {
 mod tests {
     use super::*;
     use crate::workspace::Project;
+
+    #[test]
+    fn profile_dependencies_replace_the_ones_with_the_same_artifact() {
+        let dep = |coord: &str, version: &str| Dependency::new(coord.parse().unwrap(), Some(version.to_owned()));
+        let user = vec![dep("g:a", "1"), dep("g:b", "1")];
+        let merged = with_profile_dependencies(user, &[dep("g:a", "2"), dep("g:c", "1")]);
+        let versions: Vec<_> = merged.iter().map(|d| (d.module.artifact.as_str(), d.version.as_deref().unwrap())).collect();
+        assert_eq!(versions, [("b", "1"), ("a", "2"), ("c", "1")]);
+    }
 
     #[test]
     fn exported_dependencies_keep_their_scope() {

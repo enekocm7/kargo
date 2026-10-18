@@ -215,13 +215,13 @@
       "description": "Variables for `kargo run`, `kargo test`, tasks and hooks. See `kargo env`."
     },
     "profile": {
-      "description": "Build profiles.",
+      "description": "Build profiles: `dev` and `release`, and custom ones such as `[profile.staging]` that build with `--profile staging`.",
       "type": "object",
-      "additionalProperties": false,
       "properties": {
         "dev": { "$ref": "#/definitions/profile" },
         "release": { "$ref": "#/definitions/profile" }
-      }
+      },
+      "additionalProperties": { "$ref": "#/definitions/profile" }
     },
     "doc": {
       "description": "Options for `kargo doc` (Dokka).",
@@ -579,10 +579,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "inherits": { "description": "The profile this one starts from: `dev` (the default), `release` or another custom profile. Not for `dev` and `release`.", "type": "string" },
         "debug": { "description": "Include debug information.", "type": "boolean" },
         "optimize": { "description": "Optimize (mainly Native and Wasm).", "type": "boolean" },
         "compiler-args": { "description": "Extra compiler arguments for this profile.", "type": "array", "items": { "type": "string" } },
-        "env": { "$ref": "#/definitions/profile-env" }
+        "jvm-args": { "description": "JVM options for `kargo run` and `kargo test`, after `[target.jvm] jvm-args`.", "type": "array", "items": { "type": "string" } },
+        "env": { "$ref": "#/definitions/profile-env" },
+        "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies only this profile's builds have." }
       }
     }
   }

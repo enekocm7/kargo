@@ -27,8 +27,8 @@ $ kargo test
 |---|---|
 | `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace |
 | `kargo init [dir]` | Create a project in an existing directory |
-| `kargo build [--release] [-t <target>] [--keep-going] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
-| `kargo check [--tests] [--release] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
+| `kargo build [--release \| --profile <name>] [-t <target>] [--keep-going] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
+| `kargo check [--tests] [--release \| --profile <name>] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--flavor <name>] [--env-file <path>] [--no-env-file] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--flavor` picks the Android product flavor to install |
 | `kargo script <file> [args]...` / `kargo script -e <code> [args]...` | Run a single Kotlin file without a project: a `.kts` script with `@file:DependsOn` and other `@file:` annotations, or a `.kt` file with a `/* kargo ... */` front matter; dependencies resolve and cache like a project's, and a second run of an unchanged script starts without compiling; `-e` runs code from the command line; `--` separates arguments that start with `-` |
 | `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [--env-file <path>] [--no-env-file] [-t <target>]` | Compile and run tests; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
@@ -43,7 +43,7 @@ $ kargo test
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
-| `kargo package [--release] [-t jvm\|android] [--bin <name>] [--fat]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
+| `kargo package [--release \| --profile <name>] [-t jvm\|android] [--bin <name>] [--fat]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors, `--tools` the Dokka, ktlint and detekt tools |
 | `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
@@ -53,7 +53,7 @@ $ kargo test
 | `kargo dap` | Debug adapter for editors over stdio: kotlin-debug-adapter on the project's JDK, launching `kargo run` or `kargo test` with `--debug` and mapping Kargo's source layout so breakpoints and stack frames find your files |
 | `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
 | `kargo task [--env-file <path>] [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks; `--env-file` picks the `.env` files of a package task |
-| `kargo env [--release] [--show-values] [--check]` | Show the environment `kargo run` and `kargo test` use: each variable, where it comes from, and its value (hidden unless `--show-values`); `--check` fails on unset required variables and on keys of `.env.example` that nothing sets |
+| `kargo env [--release \| --profile <name>] [--show-values] [--check]` | Show the environment `kargo run` and `kargo test` use: each variable, where it comes from, and its value (hidden unless `--show-values`); `--check` fails on unset required variables and on keys of `.env.example` that nothing sets |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, Kotlin/Native and Gradle distributions, the Kotlin language servers behind `kargo lsp` and the debug adapter behind `kargo dap` |
@@ -81,7 +81,7 @@ resources/           JVM resources (test-resources/ for tests); the files and in
 android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
 examples/            example programs: kargo run --example <name>
-target/              build output: target/<debug|release>/<target>/
+target/              build output: target/<debug|release|name>/<target>/ (a custom profile's name)
 ```
 
 A workspace is a directory whose `kargo.toml` has a `[workspace]` with `members` (each a package like the one above, or a glob such as `libs/*`). Members share the workspace's `kargo.lock` and `target/`, and build into `target/<profile>/<member>/<target>/`.
@@ -186,6 +186,10 @@ DATABASE_URL = { required = true }   # fails early unless the shell or a .env fi
 
 [profile.release]
 compiler-args = []          # also: debug, optimize
+
+[profile.staging]           # kargo build --profile staging
+inherits = "release"        # the profile it starts from (default "dev")
+jvm-args = ["-Xmx1g"]       # for kargo run and kargo test; also: dependencies, env
 
 [doc]                       # kargo doc (Dokka); every key is optional
 includes = ["docs/module.md"]

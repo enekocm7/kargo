@@ -44,7 +44,7 @@ For tasks, hook plugins and `kargo-*` subcommands:
 | `KARGO_MANIFEST_DIR` | The project root (the workspace root for a `[workspace.tasks]` task run at the root) |
 | `KARGO_WORKSPACE_DIR` | The workspace root, in a workspace |
 | `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PKG_GROUP` | From `[package]` |
-| `KARGO_PROFILE` | `dev` or `release` |
+| `KARGO_PROFILE` | The profile: `dev`, `release` or a custom profile's name (`--profile staging`) |
 | `KARGO_TARGET_DIR` | The output directory |
 | `KARGO_KOTLIN_VERSION` | From `[kotlin]` |
 | `KARGO_TASK` | The running task's name (tasks only) |

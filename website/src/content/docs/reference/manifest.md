@@ -148,7 +148,7 @@ jvm-args = ["-Xmx1g"]
 | `fail-fast` | `true` | Stop at the first target whose tests fail or don't compile. `false` tests every target and prints a result per target, like `kargo test --no-fail-fast` |
 | `timeout` | none | How long the whole test run may take, such as `"30s"`, `"5m"` or `"1h"`, counted from when the tests start running. The run is stopped and fails when it passes. Applies to the JVM, Native and Wasm targets, not Android |
 | `test-timeout` | none | How long one JVM test may take, such as `"30s"`. A test that runs longer fails, and the run goes on. Applies to tests run by JUnit Jupiter |
-| `jvm-args` | `[]` | JVM arguments for the test process, after `[target.jvm] jvm-args` |
+| `jvm-args` | `[]` | JVM arguments for the test process, after `[target.jvm] jvm-args` and the profile's [`jvm-args`](#profilename) |
 
 See [Testing every target](../../guides/testing/#testing-every-target) and [Timeouts](../../guides/testing/#timeouts).
 
@@ -231,7 +231,7 @@ wasm-opt = false          # false, or the path of a wasm-opt executable; default
 | `wasm-opt` | `true` | In release builds, run Binaryen's `wasm-opt` over the module when there is one on `PATH`. `false` never runs it; a string is the path of the executable to run, relative to the project. See [Release builds](../../guides/wasm/#release-builds) |
 | `npm-dependencies` | none | A table of npm packages (`name = "version"`) to install in addition to those the klibs ask for. Your version wins on a conflict. Each gets [Kotlin declarations](../../guides/wasm/#kotlin-declarations-for-npm-packages) generated from its TypeScript ones |
 
-With `optimize = true`, as in the [release profile](#profiledev-and-profilerelease), a Wasm build removes code nothing reaches, runs `wasm-opt` and reports the size of the output.
+With `optimize = true`, as in the [release profile](#profilename), a Wasm build removes code nothing reaches, runs `wasm-opt` and reports the size of the output.
 
 ### `[target.native]`
 
@@ -574,18 +574,42 @@ release-notes.workspace = true
 
 See [Workspaces and path dependencies](../../guides/workspaces/).
 
-## `[profile.dev]` and `[profile.release]`
+## `[profile.<name>]`
+
+`dev` (the default) and `release` (`--release`) always exist. Any other name is a custom profile, selected with `--profile <name>`. A custom profile starts from the settings of the profile it `inherits` from, and sets only what differs:
 
 ```toml
 [profile.release]
 debug = false
 optimize = true
 compiler-args = ["-Xno-call-assertions"]
+
+[profile.staging]
+inherits = "release"
+debug = true
+jvm-args = ["-Xmx1g", "-Dapp.env=staging"]
+
+[profile.staging.dependencies]
+"com.squareup.leakcanary:leakcanary-android" = "2.14"
 ```
 
-| Key | `dev` default | `release` default | Meaning |
-|---|---|---|---|
-| `debug` | `true` | `false` | Include debug information |
-| `optimize` | `false` | `true` | Optimize (mainly affects Native and Wasm; for Wasm it removes dead code, see [Release builds](../../guides/wasm/#release-builds)) |
-| `compiler-args` | `[]` | `[]` | Extra compiler arguments for this profile |
-| `env` | `{}` | `{}` | `[profile.<name>.env]`: variables that replace `[env]` for this profile, one by one, and an `env-files` list of its own. Same format as `[env]`, but without `expose` |
+```console
+$ kargo build --profile staging
+$ kargo run --profile staging
+```
+
+| Key | `dev` default | `release` default | Custom profile default | Meaning |
+|---|---|---|---|---|
+| `inherits` | not allowed | not allowed | `"dev"` | The profile this one starts from: `dev`, `release` or another custom profile. Keys it does not set come from there, through any number of steps |
+| `debug` | `true` | `false` | inherited | Include debug information |
+| `optimize` | `false` | `true` | inherited | Optimize (mainly affects Native and Wasm; for Wasm it removes dead code, see [Release builds](../../guides/wasm/#release-builds)) |
+| `compiler-args` | `[]` | `[]` | inherited | Extra compiler arguments for this profile |
+| `jvm-args` | `[]` | `[]` | inherited | JVM options for `kargo run` and `kargo test`, after `[target.jvm] jvm-args` (`kargo test` puts `[test] jvm-args` last) |
+| `env` | `{}` | `{}` | inherited | `[profile.<name>.env]`: variables that replace the inherited ones of the same name, and an `env-files` list added to the inherited list. Same format as `[env]`, but without `expose` |
+| `dependencies` | `{}` | `{}` | inherited | `[profile.<name>.dependencies]`: dependencies only this profile's builds have, in the format of [`[dependencies]`](#dependencies-and-dev-dependencies). One with the same artifact as an inherited one replaces it |
+
+A custom profile's name is a letter, then letters, digits, `-` or `_`. Its output goes to `target/<name>/<target>/`, and its variables come from `.env.<name>` files as well (see [Environment](../../guides/environment/)). `debug` is the output of `dev`, and `android` and `lint` belong to other things under `target/`, so these names are reserved.
+
+Path dependencies are not allowed in a profile. A profile's dependencies are not inherited by the packages that depend on yours. In a [workspace](../../guides/workspaces/), every member you build with `--profile` must define that profile.
+
+Dependencies of a profile are part of every target's build with that profile, and `kargo.lock` resolves them with the others. A profile that has dependencies of its own gets a separate resolution there (for example `jvm/runtime@staging`), so the profiles without dependencies keep sharing `jvm/runtime`. See [Lockfile](../lockfile/#what-it-records). On Android, the dependencies of `dev` and `release` go to the `debug` and `release` build types (`debugImplementation`, `releaseImplementation`); a custom profile does not build for Android yet.

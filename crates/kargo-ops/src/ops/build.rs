@@ -26,15 +26,10 @@ use kargo_util::fs::collect_files;
 pub struct BuildOptions {
     /// Targets to build; empty means every enabled target.
     pub targets: Vec<kargo_manifest::TargetKind>,
-    pub release: bool,
+    /// The profile to build: `dev`, `release` (`--release`) or a custom one (`--profile <name>`).
+    pub profile: ProfileKind,
     /// Build every target even when one fails, then report all failures (`--keep-going`).
     pub keep_going: bool,
-}
-
-impl BuildOptions {
-    pub fn profile(&self) -> ProfileKind {
-        if self.release { ProfileKind::Release } else { ProfileKind::Dev }
-    }
 }
 
 /// Outputs of the JVM target.
@@ -48,6 +43,7 @@ pub struct JvmBuild {
     pub main_class: Option<String>,
     /// Why no main class was detected, when `main_class` is `None`.
     pub main_class_error: Option<String>,
+    /// JVM options for `kargo run`: `[target.jvm] jvm-args`, then the profile's `jvm-args`.
     pub jvm_args: Vec<String>,
 }
 
@@ -120,7 +116,7 @@ fn add_build_config(ctx: &BuildContext, target: TargetKind, sources: &mut Source
     let env = ctx.resolve_env(&EnvOptions::default())?;
     let package = build_config_package(manifest.package.group.as_deref(), &manifest.package.name);
     let contents = build_config_source(&package, &manifest.env.expose, &env);
-    let path = ctx.ws.output_dir(ctx.profile, target).join("generated").join("env").join("BuildConfig.kt");
+    let path = ctx.ws.output_dir(&ctx.profile, target).join("generated").join("env").join("BuildConfig.kt");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(contents.as_str()) {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -196,11 +192,16 @@ pub fn hook_env(ctx: &BuildContext, opts: &EnvOptions) -> Result<Vec<(String, St
 }
 
 pub fn finished(ctx: &BuildContext, start: Instant) {
-    let (name, detail) = match ctx.profile {
-        ProfileKind::Dev => ("dev", "unoptimized + debuginfo"),
-        ProfileKind::Release => ("release", "optimized"),
+    let detail = match ctx.profile {
+        ProfileKind::Dev => "unoptimized + debuginfo".to_owned(),
+        ProfileKind::Release => "optimized".to_owned(),
+        ProfileKind::Custom(_) => match ctx.ws.profile(&ctx.profile) {
+            Ok(p) => format!("{}{}", if p.optimize { "optimized" } else { "unoptimized" }, if p.debug { " + debuginfo" } else { "" }),
+            Err(_) => "custom".to_owned(),
+        },
     };
-    ctx.shell().status("Finished", format!("`{name}` profile [{detail}] target(s) in {:.2}s", start.elapsed().as_secs_f64()));
+    ctx.shell()
+        .status("Finished", format!("`{}` profile [{detail}] target(s) in {:.2}s", ctx.profile.name(), start.elapsed().as_secs_f64()));
 }
 
 pub fn compiling(ctx: &BuildContext, target: TargetKind, what: &str) {
@@ -315,7 +316,7 @@ pub(crate) fn run_jvm_ksp(
         jvm_target: unit.jvm_target,
         language_version: &language_version,
         api_version: &api_version,
-        output: ws.output_dir(ctx.profile, TargetKind::Jvm).join("generated").join("ksp").join(dir),
+        output: ws.output_dir(&ctx.profile, TargetKind::Jvm).join("generated").join("ksp").join(dir),
         project_dir: ws.root(),
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
@@ -366,9 +367,9 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let classpath = jvm_compile_classpath(ctx, &classpaths)?;
     let processor_path = jvm_processor_path(ctx, &setup, false)?;
     let javac_args = jvm_javac_args(&setup, jvm);
-    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(ctx.profile), &setup.contributions.compiler_args);
+    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(&ctx.profile)?, &setup.contributions.compiler_args);
 
-    let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
+    let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm);
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     let classes = out.join("classes");
     let jvm_target = jvm.target_for(jdk.version)?;
@@ -406,7 +407,7 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
     let jvm = jvm_settings(ctx)?;
     let JvmClasses { classes, sources: srcs, classpaths, outcome } = compile_jvm(ctx, "Compiling")?;
     let changed = outcome == Outcome::Compiled;
-    let out = ctx.ws.output_dir(ctx.profile, TargetKind::Jvm);
+    let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm);
 
     // A library has no main class, so a failed detection only matters to `kargo run`.
     let (main_class, main_class_error) = match &jvm.main_class {
@@ -435,7 +436,9 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
         kargo_compiler::abi::update_stamp(&jar)?;
     }
 
-    Ok(JvmBuild { classes, jar, lib_dir, runtime_classpath, main_class, main_class_error, jvm_args: jvm.jvm_args.clone() })
+    // The profile's options come after `[target.jvm] jvm-args`, so they override them.
+    let jvm_args = jvm.jvm_args.iter().chain(&ctx.ws.profile(&ctx.profile)?.jvm_args).cloned().collect();
+    Ok(JvmBuild { classes, jar, lib_dir, runtime_classpath, main_class, main_class_error, jvm_args })
 }
 
 /// Copies runtime dependencies into `lib/`, returning their file names in classpath order.
@@ -500,7 +503,7 @@ pub fn prepare_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     let Some(mut build) = compile_wasm(ctx, true)? else { return Ok(None) };
     // Outside the Wasm output directory, which is wiped on every recompile;
     // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
-    build.node_modules = crate::npm::install(ctx, &build.libraries, &ctx.ws.profile_dir(ctx.profile))?;
+    build.node_modules = crate::npm::install(ctx, &build.libraries, &ctx.ws.profile_dir(&ctx.profile))?;
     Ok(Some(build))
 }
 
@@ -516,7 +519,7 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
     );
     let (jdk, compiler, plugins) = toolchain?;
     let libraries = libraries?;
-    let profile = ctx.ws.profile(ctx.profile);
+    let profile = ctx.ws.profile(&ctx.profile)?;
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut srcs = sources(ctx, TargetKind::Wasm, false, &["kt"])?;
     add_npm_declarations(ctx, &libraries, &mut srcs, &mut kotlin_args)?;
@@ -528,7 +531,7 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
         friends: Vec::new(),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
-        output: ctx.ws.output_dir(ctx.profile, TargetKind::Wasm),
+        output: ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm),
         debug: profile.debug,
         optimize: profile.optimize,
         declarations: wasm.kind == WasmKind::Library,
@@ -618,9 +621,9 @@ pub fn native_klib(ctx: &BuildContext, konan_target: &str) -> Result<Option<Path
     let setup = ctx.setup(TargetKind::Native)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let profile = ctx.ws.profile(ctx.profile);
+    let profile = ctx.ws.profile(&ctx.profile)?;
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
-    let out = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(konan_target);
+    let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target);
     // A library's own build already produces the klib; anything else gets a separate one.
     let (output_dir, fp_dir) = match native.kind {
         NativeKind::Library => (out, ctx.fingerprint_dir(TargetKind::Native)),
@@ -677,7 +680,7 @@ pub fn native_cinterop(ctx: &BuildContext, konan_target: &str) -> Result<Vec<Pat
         return Ok(Vec::new());
     }
     let toolchain = ctx.native_toolchain()?;
-    let output_dir = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(konan_target).join("cinterop");
+    let output_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target).join("cinterop");
     let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
     defs.into_iter()
         .map(|(interop, def)| {
@@ -780,7 +783,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
-    let profile = ctx.ws.profile(ctx.profile);
+    let profile = ctx.ws.profile(&ctx.profile)?;
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
 
     let platforms = native_platforms(ctx)?;
@@ -788,7 +791,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     let built = super::parallel_map(&platforms, |konan_target| -> Result<Vec<NativeBuild>> {
         let mut libraries = native_libraries(ctx, &setup, konan_target, false)?;
         libraries.extend(native_cinterop(ctx, konan_target)?);
-        let out = ctx.ws.output_dir(ctx.profile, TargetKind::Native).join(konan_target);
+        let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target);
         let mut builds = Vec::new();
         for program in &programs {
             // Bins link into `bin/` with their own fingerprints, so one named like the package does not clash.
