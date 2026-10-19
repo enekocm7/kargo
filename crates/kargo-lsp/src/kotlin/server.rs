@@ -167,6 +167,11 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             };
             add("source-roots", SetKind::Main);
             add("test-roots", SetKind::Test);
+            // The generated `Res` class of Compose resources, which code in `src/` uses.
+            if let Some(dir) = target["compose-resources"]["source-root"].as_str() {
+                let set = SourceSet { package: pi, kind: SetKind::Main, target: None };
+                model.roots.push((PathBuf::from(dir), set));
+            }
         }
         model.packages.platforms.push(platforms);
         for file in package["examples"].as_array().into_iter().flatten().filter_map(|e| e["path"].as_str()) {
@@ -1169,7 +1174,12 @@ mod tests {
                     "name": "app",
                     "path-dependencies": [{ "package": "lib" }],
                     "targets": [
-                        { "kind": "jvm", "source-roots": ["/p/src", "/p/src-jvm"], "test-roots": ["/p/tests", "/p/tests-jvm", "/p/test-fixtures", "/p/test-fixtures-jvm"] },
+                        {
+                            "kind": "jvm",
+                            "source-roots": ["/p/src", "/p/src-jvm"],
+                            "test-roots": ["/p/tests", "/p/tests-jvm", "/p/test-fixtures", "/p/test-fixtures-jvm"],
+                            "compose-resources": { "source-root": "/p/target/debug/jvm/generated/compose-resources/kotlin" },
+                        },
                         {
                             "kind": "wasm",
                             "source-roots": ["/p/src", "/p/src-wasm"],
@@ -1200,6 +1210,7 @@ mod tests {
         assert_eq!(set("/p/tests-jvm/T.kt"), (0, SetKind::Test, Some("jvm".into())));
         assert_eq!(set("/p/test-fixtures/F.kt"), (0, SetKind::Test, None));
         assert_eq!(set("/p/examples/demo.kt"), (0, SetKind::Example, None));
+        assert_eq!(set("/p/target/debug/jvm/generated/compose-resources/kotlin/Res.kt"), (0, SetKind::Main, None));
         assert_eq!(set("/p/lib/src-native/N.kt"), (1, SetKind::Main, Some("native".into())));
         assert_eq!(model.origin(Path::new("/elsewhere/X.kt")), Origin::Loose);
     }

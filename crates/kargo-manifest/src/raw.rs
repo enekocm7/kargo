@@ -154,7 +154,7 @@ struct RawInstaller {
     description: Option<String>,
     app_version: Option<String>,
     #[serde(rename = "type")]
-    kind: Option<String>,
+    kind: Option<Value>,
     icon: Option<Value>,
     license_file: Option<PathBuf>,
     menu: Option<bool>,
@@ -164,6 +164,27 @@ struct RawInstaller {
     bundle_id: Option<String>,
     signing_identity: Option<String>,
     category: Option<String>,
+    #[serde(default)]
+    file_associations: Vec<RawFileAssociation>,
+    notarize: Option<RawNotarize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawFileAssociation {
+    extension: String,
+    mime_type: String,
+    description: Option<String>,
+    icon: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawNotarize {
+    apple_id_env: Option<String>,
+    password_env: Option<String>,
+    team_id: Option<String>,
+    keychain_profile: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -778,6 +799,11 @@ pub struct ComposeConfig {
     pub version: Option<String>,
     /// Add Material 3 (default true).
     pub material3: Option<bool>,
+    /// The package of the generated `Res` class of `composeResources/`; defaults to
+    /// `<group>.<name>.generated.resources`.
+    pub resources_package: Option<String>,
+    /// Make `Res` and its accessors `public` instead of `internal`, so other modules can use them.
+    pub public_resources: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -1754,6 +1780,15 @@ impl RawManifest {
             lombok: self.frameworks.lombok.and_then(Toggle::into_option),
             spring_boot: self.frameworks.spring_boot.and_then(Toggle::into_option),
         };
+        if let Some(package) = frameworks.compose.as_ref().and_then(|c| c.resources_package.as_deref())
+            && (package.is_empty()
+                || !package.split('.').all(|part| {
+                    part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                        && part.chars().all(|c| c.is_alphanumeric() || c == '_')
+                }))
+        {
+            bail!("[frameworks.compose] `resources-package` must be a Kotlin package name such as \"com.example.res\", got `{package}`");
+        }
         // Compose Multiplatform depends on androidx artifacts hosted by Google.
         if frameworks.compose.is_some() && !repositories.iter().any(|r| r.url == kargo_maven::repo::GOOGLE) {
             repositories.insert(1, Repository::google());
@@ -2175,7 +2210,39 @@ impl RawNativeImage {
 
 impl RawInstaller {
     fn validate(self) -> Result<InstallerSettings> {
-        let kind = self.kind.as_deref().map(str::parse).transpose().context("invalid [package.installer] `type`")?;
+        let kinds: Vec<InstallerType> = match self.kind {
+            None => Vec::new(),
+            Some(Value::String(kind)) => vec![kind.parse().context("invalid [package.installer] `type`")?],
+            Some(Value::Array(kinds)) if !kinds.is_empty() => kinds
+                .iter()
+                .map(|k| match k {
+                    Value::String(kind) => kind.parse().context("invalid [package.installer] `type`"),
+                    _ => bail!("[package.installer] `type` entries must be strings such as \"msi\""),
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => bail!("[package.installer] `type` must be a type such as \"msi\" or a list such as [\"msi\", \"dmg\", \"deb\"]"),
+        };
+        let mut file_associations: Vec<FileAssociation> = Vec::new();
+        for raw in self.file_associations {
+            let extension = raw.extension.strip_prefix('.').unwrap_or(&raw.extension).to_owned();
+            if extension.is_empty() || !extension.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+                bail!(
+                    "[package.installer] `file-associations` extensions must be letters and digits such as \"note\", got `{}`",
+                    raw.extension
+                );
+            }
+            if !raw.mime_type.contains('/') || raw.mime_type.contains(char::is_whitespace) {
+                bail!("[package.installer] `file-associations` needs a MIME type such as \"application/x-note\", got `{}`", raw.mime_type);
+            }
+            if file_associations.iter().any(|a| a.extension == extension) {
+                bail!("[package.installer] `file-associations` lists the extension `{extension}` more than once");
+            }
+            file_associations.push(FileAssociation { extension, mime_type: raw.mime_type, description: raw.description, icon: raw.icon });
+        }
+        let notarize = self.notarize.map(RawNotarize::validate).transpose()?;
+        if notarize.is_some() && self.signing_identity.is_none() {
+            bail!("[package.installer] `notarize` needs `signing-identity`: Apple notarizes only signed applications");
+        }
         let icon = match self.icon {
             None => InstallerIcons::default(),
             Some(Value::String(path)) => {
@@ -2210,7 +2277,7 @@ impl RawInstaller {
             vendor: self.vendor,
             description: self.description,
             app_version: self.app_version,
-            kind,
+            kinds,
             icon,
             license_file: self.license_file,
             menu: self.menu.unwrap_or(false),
@@ -2220,7 +2287,35 @@ impl RawInstaller {
             bundle_id: self.bundle_id,
             signing_identity: self.signing_identity,
             category: self.category,
+            file_associations,
+            notarize,
         })
+    }
+}
+
+impl RawNotarize {
+    fn validate(self) -> Result<Notarization> {
+        const USAGE: &str = "set either `keychain-profile`, or `apple-id-env`, `password-env` and `team-id`";
+        let env_name = |key: &str, name: String| -> Result<String> {
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                bail!("[package.installer] notarize `{key}` must name an environment variable such as \"APPLE_ID\", got `{name}`");
+            }
+            Ok(name)
+        };
+        match (self.keychain_profile, self.apple_id_env, self.password_env, self.team_id) {
+            (Some(profile), None, None, None) if !profile.is_empty() => Ok(Notarization::KeychainProfile(profile)),
+            (None, Some(apple_id_env), Some(password_env), Some(team_id)) => {
+                if team_id.is_empty() || !team_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    bail!("[package.installer] notarize `team-id` must be an Apple team ID such as \"ABCDE12345\", got `{team_id}`");
+                }
+                Ok(Notarization::AppleId {
+                    apple_id_env: env_name("apple-id-env", apple_id_env)?,
+                    password_env: env_name("password-env", password_env)?,
+                    team_id,
+                })
+            }
+            _ => bail!("[package.installer] `notarize`: {USAGE}"),
+        }
     }
 }
 

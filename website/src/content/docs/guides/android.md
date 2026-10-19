@@ -43,6 +43,8 @@ myapp/
     └── assets/
 ```
 
+With `-w compose`, you can also put Compose Multiplatform resources in `composeResources/` and read them through the generated `Res` class, as on the desktop: Kargo adds the resources runtime and packs the files into the APK's assets. Code in `src/` that uses `Res` then works on both targets. See [Compose resources](../compose/#resources).
+
 ### Add Android to an existing project
 
 ```sh

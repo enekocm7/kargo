@@ -101,12 +101,35 @@ fn toml_value(value: &Value) -> String {
     }
 }
 
+/// The schema node at `path`, through `properties`, `additionalProperties` (for `sample`) and
+/// the alternatives of `anyOf`.
+fn node_at<'a>(root: &'a Value, node: &'a Value, path: &[String]) -> Option<&'a Value> {
+    let node = resolve(root, node);
+    let Some((first, rest)) = path.split_first() else { return Some(node) };
+    let child = if first == "sample" { node.get("additionalProperties") } else { node.get("properties").and_then(|p| p.get(first)) };
+    if let Some(found) = child.and_then(|c| node_at(root, c, rest)) {
+        return Some(found);
+    }
+    node.get("anyOf")?.as_array()?.iter().find_map(|alt| node_at(root, alt, path))
+}
+
 /// A one-line TOML document setting `path` to `value` (with dotted, quoted keys).
-fn toml_line(path: &[String], value: &Value) -> String {
+fn toml_line(root: &Value, path: &[String], value: &Value) -> String {
     if let Some(i) = path.iter().position(|s| s == "[]") {
-        // An array of tables, such as [[bin]]: one element with a name and the key.
+        // An array of tables, such as [[bin]]: one element with the keys it requires (a name,
+        // unless the schema says otherwise) and the key.
         let mut element = Map::new();
-        element.insert("name".to_owned(), Value::from("tool"));
+        let items = node_at(root, root, &path[..i]).map(|array| resolve(root, &array["items"]));
+        match items.and_then(|items| items.get("required").and_then(Value::as_array).map(|r| (items, r))) {
+            Some((items, required)) => {
+                for key in required.iter().filter_map(Value::as_str) {
+                    element.insert(key.to_owned(), sample(root, &items["properties"][key]));
+                }
+            }
+            None => {
+                element.insert("name".to_owned(), Value::from("tool"));
+            }
+        }
         let rest = &path[i + 1..];
         let mut inner = value.clone();
         for key in rest.iter().rev() {
@@ -133,7 +156,7 @@ fn every_schema_key_is_accepted_by_the_parser() {
     leaves(&root, &root, Vec::new(), &mut all);
     assert!(all.len() > 100, "the schema should describe every key, found {}", all.len());
     for (path, value) in all {
-        let line = toml_line(&path, &value);
+        let line = toml_line(&root, &path, &value);
         let error = if path[0] == "workspace" {
             let mut text = String::from("workspace.members = [\"app\"]\n");
             if path[1] != "members" {
@@ -183,10 +206,7 @@ fn schema_enums_match_kargo() {
         enum_values(&props["target"]["properties"]["wasm"]["properties"]["package-manager"]),
         names(PackageManager::ALL.iter().map(|p| p.as_str()).collect())
     );
-    assert_eq!(
-        enum_values(&props["package"]["properties"]["installer"]["properties"]["type"]),
-        names(InstallerType::ALL.iter().map(|t| t.as_str()).collect())
-    );
+    assert_eq!(enum_values(&root["definitions"]["installer-type"]), names(InstallerType::ALL.iter().map(|t| t.as_str()).collect()));
     let mut targets = property_names(&props["target"]);
     let mut expected: Vec<&str> = TargetKind::ALL.iter().map(|t| t.as_str()).collect();
     targets.sort();

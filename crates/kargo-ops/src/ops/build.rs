@@ -106,8 +106,37 @@ pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: 
     let mut set = SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str());
     if !tests {
         add_build_config(ctx, target, &mut set)?;
+        add_compose_resources(ctx, target, &mut set)?;
     }
     Ok(set)
+}
+
+/// Adds a generated source file to the platform fragment, unless that would make a `src/`-only
+/// compilation multiplatform (as with KSP and npm declarations).
+fn add_generated_source(sources: &mut SourceSet, path: PathBuf) {
+    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
+        sources.platform.push(path);
+    } else {
+        sources.common.push(path);
+    }
+}
+
+/// Generates the `Res` class of `composeResources/` for the JVM target and adds it to the main
+/// sources; [`compose_resources_dir`] holds the files it reads. (Android's comes from `gradle.rs`.)
+fn add_compose_resources(ctx: &BuildContext, target: TargetKind, sources: &mut SourceSet) -> Result<()> {
+    if target != TargetKind::Jvm {
+        return Ok(());
+    }
+    let out = crate::compose::resources::output_dir(&ctx.ws.output_dir(&ctx.profile, target));
+    if let Some(generated) = crate::compose::resources::generate(ctx.ws.root(), ctx.ws.manifest(), &out)? {
+        add_generated_source(sources, generated.source);
+    }
+    Ok(())
+}
+
+/// The resources that the generated `Res` class reads, once [`sources`] wrote them.
+pub fn compose_resources_dir(ctx: &BuildContext) -> PathBuf {
+    crate::compose::resources::output_dir(&ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm)).join("resources")
 }
 
 /// Writes the `BuildConfig` object of `[env] expose` into the build directory and adds it to the
@@ -128,13 +157,7 @@ fn add_build_config(ctx: &BuildContext, target: TargetKind, sources: &mut Source
         }
         std::fs::write(&path, &contents).with_context(|| format!("failed to write {}", path.display()))?;
     }
-    // As with KSP and npm declarations: the platform fragment, unless that would make a `src/`-only
-    // compilation multiplatform.
-    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
-        sources.platform.push(path);
-    } else {
-        sources.common.push(path);
-    }
+    add_generated_source(sources, path);
     Ok(())
 }
 
@@ -383,6 +406,10 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let jvm_target = jvm.target_for(jdk.version)?;
     let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"])?;
     let mut resources = vec![ctx.ws.resources()];
+    let compose_resources = compose_resources_dir(ctx);
+    if compose_resources.is_dir() {
+        resources.push(compose_resources);
+    }
     let ksp = JvmKspUnit {
         name: &manifest.package.name,
         test: false,

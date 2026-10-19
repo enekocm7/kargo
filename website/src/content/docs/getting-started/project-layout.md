@@ -19,6 +19,7 @@ my-app/
 ├── test-fixtures/       test helpers shared with the tests of packages that depend on this one (JVM)
 ├── resources/           JVM resources, put on the classpath and in the jar; also the files of a Wasm browser app
 ├── test-resources/      resources for JVM tests
+├── composeResources/    Compose images, fonts, strings and files, read through the generated Res class
 ├── android/             AndroidManifest.xml, res/, assets/
 ├── interop/             cinterop .def files for C libraries (Kotlin/Native)
 ├── c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
@@ -49,6 +50,8 @@ See [Multiplatform projects](../../guides/multiplatform/) for a complete example
 `kargo target add <target>` creates `src-<target>/` (with a `.gitkeep`) when it does not exist yet, and `kargo target remove` leaves it in place.
 
 Subdirectories are fine. You don't need to mirror the package name in the folder structure, but it's a good habit.
+
+With `[frameworks] compose`, `composeResources/` holds the images, fonts, strings and files of a Compose application; see [Compose resources](../../guides/compose/#resources).
 
 Kargo compiles `.kt` files (and `.java` files on the JVM). Kotlin scripts (`.kts`) in a project are not compiled or run, and a target with no sources has nothing to build; `kargo build` prints a [warning](../../reference/warnings/) for both instead of staying silent.
 
@@ -123,6 +126,7 @@ target/
 │   ├── jvm/
 │   │   ├── classes/              compiled classes
 │   │   ├── lib/                  runtime dependency jars
+│   │   ├── generated/            sources Kargo writes: compose-resources/ (the Res class), env/ (BuildConfig), ksp/ (KSP output)
 │   │   ├── examples/             compiled examples, one directory each
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/                     the module (.mjs, .wasm); for a browser app also index.html and resources/, for a library package.json and .d.mts

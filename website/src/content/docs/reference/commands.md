@@ -541,7 +541,7 @@ Build a self-contained, runnable fat jar with all runtime dependencies, path dep
 | `native-image` | `target/<profile>/jvm/package/<name>` (`<name>.exe` on Windows): a native executable built by GraalVM's `native-image` |
 | `installer` | An installer built by `jpackage` into `target/<profile>/jvm/package/`: `.msi` on Windows, `.dmg` on macOS, `.deb` on Linux, or the [`[package.installer]`](../manifest/#packageinstaller) `type` |
 
-`jlink`, `native-image` and `installer` need a main class and build for the OS and CPU Kargo runs on. See [Distributing applications](../../guides/distributing/).
+`jlink`, `native-image` and `installer` need a main class and build for the OS and CPU Kargo runs on. An installer can also register file associations, and on macOS be signed and notarized. See [Distributing applications](../../guides/distributing/).
 
 A library (a project without a `main` function or `main-class`) gets what you would publish instead: `target/<profile>/package/<name>-<version>.jar` with only its own classes (no Kotlin standard library, no `Class-Path`) and `<name>-<version>-sources.jar` next to it. Pass `--fat` for the fat jar anyway. `kargo publish --dry-run` shows everything a [publication](../../guides/publishing/) holds, POM included.
 
@@ -556,6 +556,8 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
 | `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library (JVM) |
 | `--format <format>` | `jar` (default), `jlink`, `native-image` or `installer` (JVM) |
+| `--desktop` | Package the [Compose Desktop](../../guides/compose/#distributing) application: an installer for this OS unless `--format` says otherwise, with the JDK modules, options and Skiko native library Compose needs. Needs `[frameworks] compose` |
+| `--platforms <list>` | With `--desktop --format jar`: the platforms whose Skiko natives the jar carries instead of only the host's, so it runs on each of them. `all`, or some of `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`, `linux-x64`, `linux-arm64` |
 
 ## `kargo publish`
 

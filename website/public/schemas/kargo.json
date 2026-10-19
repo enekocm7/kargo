@@ -42,7 +42,7 @@
           }
         },
         "installer": {
-          "description": "Options for `kargo package --format installer` (jpackage).",
+          "description": "Options for `kargo package --format installer` and `--desktop` (jpackage).",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -50,7 +50,13 @@
             "vendor": { "description": "The vendor shown by the installer.", "type": "string" },
             "description": { "description": "The description shown by the installer. Default: [package] description.", "type": "string" },
             "app-version": { "description": "One to three numbers such as \"1.2.3\". Default: the numbers at the start of [package] version.", "type": "string", "pattern": "^[0-9]{1,9}(\\.[0-9]{1,9}){0,2}$", "examples": ["1.2.3"] },
-            "type": { "description": "What jpackage builds. Default: msi on Windows, dmg on macOS, deb on Linux.", "enum": ["msi", "exe", "dmg", "pkg", "deb", "rpm", "app-image"] },
+            "type": {
+              "description": "What jpackage builds: one type, or a list from which each OS builds its own. Default: msi on Windows, dmg on macOS, deb on Linux.",
+              "anyOf": [
+                { "$ref": "#/definitions/installer-type" },
+                { "type": "array", "items": { "$ref": "#/definitions/installer-type" }, "minItems": 1, "examples": [["msi", "dmg", "deb"]] }
+              ]
+            },
             "icon": {
               "description": "The icon: one path for every OS, or one per OS (.ico on Windows, .icns on macOS, .png on Linux).",
               "anyOf": [
@@ -73,7 +79,45 @@
             "upgrade-uuid": { "description": "Windows: the upgrade code that lets a newer .msi replace an older one. Keep it across releases.", "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "examples": ["0b5b2d6e-8f5c-4a37-9d1e-3a6c2f4b7e90"] },
             "bundle-id": { "description": "macOS: the bundle identifier.", "type": "string", "examples": ["com.example.hello"] },
             "signing-identity": { "description": "macOS: sign the app with this keychain identity.", "type": "string" },
-            "category": { "description": "Linux: the package's section or group.", "type": "string" }
+            "category": { "description": "Linux: the package's section or group.", "type": "string" },
+            "file-associations": {
+              "description": "File types the installed application opens.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["extension", "mime-type"],
+                "properties": {
+                  "extension": { "description": "The file extension, without the dot.", "type": "string", "examples": ["note"] },
+                  "mime-type": { "description": "The file type's MIME type.", "type": "string", "examples": ["application/x-note"] },
+                  "description": { "description": "The file type's name, shown by the OS.", "type": "string" },
+                  "icon": { "description": "The file type's icon, relative to the project root.", "type": "string" }
+                }
+              }
+            },
+            "notarize": {
+              "description": "macOS: notarize each .dmg and .pkg with `xcrun notarytool` and staple the ticket. Needs `signing-identity`.",
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["apple-id-env", "password-env", "team-id"],
+                  "properties": {
+                    "apple-id-env": { "description": "The environment variable that holds the Apple ID.", "type": "string", "examples": ["APPLE_ID"] },
+                    "password-env": { "description": "The environment variable that holds an app-specific password.", "type": "string", "examples": ["APPLE_APP_PASSWORD"] },
+                    "team-id": { "description": "The Apple Developer team ID.", "type": "string", "examples": ["ABCDE12345"] }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["keychain-profile"],
+                  "properties": {
+                    "keychain-profile": { "description": "Credentials saved with `xcrun notarytool store-credentials`.", "type": "string" }
+                  }
+                }
+              ]
+            }
           }
         }
       }
@@ -584,7 +628,9 @@
               "additionalProperties": false,
               "properties": {
                 "version": { "type": "string", "default": "1.12.1" },
-                "material3": { "description": "Add Material 3.", "type": "boolean", "default": true }
+                "material3": { "description": "Add Material 3.", "type": "boolean", "default": true },
+                "resources-package": { "description": "The package of the `Res` class generated from composeResources/. Default: <group>.<name>.generated.resources.", "type": "string", "examples": ["com.example.app.res"] },
+                "public-resources": { "description": "Make `Res` and its accessors public instead of internal.", "type": "boolean", "default": false }
               }
             },
             { "$ref": "#/definitions/inherit" }
@@ -742,6 +788,7 @@
       "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }]
     },
     "hook": { "enum": ["pre-build", "post-build", "pre-test", "post-test", "pre-run", "post-package"] },
+    "installer-type": { "enum": ["msi", "exe", "dmg", "pkg", "deb", "rpm", "app-image"] },
     "env": {
       "description": "Variables for the program: a string, or a table with `value`, `force`, `relative` or `required`. Also `env-files` and `expose`.",
       "type": "object",

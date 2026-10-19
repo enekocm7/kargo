@@ -1448,7 +1448,8 @@ category = "Development"
     assert!(native.static_link && !native.metadata_repository);
     assert_eq!(native.initialize_at_build_time, ["kotlinx.serialization"]);
     let installer = &m.packaging.installer;
-    assert_eq!(installer.kind, Some(InstallerType::AppImage));
+    assert_eq!(installer.kinds, [InstallerType::AppImage]);
+    assert_eq!(installer.kinds_for("windows"), [InstallerType::AppImage]);
     assert_eq!(installer.icon.for_os("windows"), Some(Path::new("icons/app.ico")));
     assert_eq!(installer.icon.for_os("macos"), None);
     assert_eq!(installer.icon.for_os("linux"), Some(Path::new("icons/app.png")));
@@ -1468,6 +1469,73 @@ category = "Development"
     assert!(parse_err(&with("[package.jlink]\nmodules = [\"java naming\"]")).contains("module names"));
     assert!(parse_err(&with("[package.jlink]\njdeps = false")).contains("needs `modules`"));
     assert!(parse_err(&with("[package.native-image]\nstatic = \"yes\"")).contains("static"));
+}
+
+#[test]
+fn desktop_installers() {
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[package.installer]
+name = "Notes"
+type = ["msi", "dmg", "deb", "app-image"]
+file-associations = [
+    {{ extension = ".note", mime-type = "application/x-note", description = "Note", icon = "icons/note.ico" }},
+    {{ extension = "notes", mime-type = "application/x-notes" }},
+]
+signing-identity = "Developer ID Application: Example (ABCDE12345)"
+notarize = {{ apple-id-env = "APPLE_ID", password-env = "APPLE_APP_PASSWORD", team-id = "ABCDE12345" }}
+
+[frameworks]
+compose = {{ resources-package = "com.example.notes.res", public-resources = true }}
+"#
+    ));
+    let installer = &m.packaging.installer;
+    assert_eq!(installer.kinds_for("windows"), [InstallerType::Msi, InstallerType::AppImage]);
+    assert_eq!(installer.kinds_for("macos"), [InstallerType::Dmg, InstallerType::AppImage]);
+    assert_eq!(installer.kinds_for("linux"), [InstallerType::Deb, InstallerType::AppImage]);
+    assert_eq!(installer.app_name("notes"), "Notes");
+    let first = &installer.file_associations[0];
+    assert_eq!((first.extension.as_str(), first.mime_type.as_str()), ("note", "application/x-note"));
+    assert_eq!(first.icon.as_deref(), Some(Path::new("icons/note.ico")));
+    assert!(installer.file_associations[1].description.is_none());
+    assert_eq!(
+        installer.notarize,
+        Some(Notarization::AppleId {
+            apple_id_env: "APPLE_ID".into(),
+            password_env: "APPLE_APP_PASSWORD".into(),
+            team_id: "ABCDE12345".into()
+        })
+    );
+    let compose = m.frameworks.compose.as_ref().unwrap();
+    assert_eq!(compose.resources_package.as_deref(), Some("com.example.notes.res"));
+    assert_eq!(compose.public_resources, Some(true));
+
+    let only_mac = parse(&format!("{MINIMAL}\n[package.installer]\ntype = [\"dmg\"]\n"));
+    assert!(only_mac.packaging.installer.kinds_for("windows").is_empty());
+    let default = parse(MINIMAL);
+    assert_eq!(default.packaging.installer.kinds_for("macos"), [InstallerType::Dmg]);
+    let profile = parse(&format!(
+        "{MINIMAL}\n[package.installer]\nsigning-identity = \"Developer ID\"\nnotarize = {{ keychain-profile = \"kargo\" }}\n"
+    ));
+    assert_eq!(profile.packaging.installer.notarize, Some(Notarization::KeychainProfile("kargo".into())));
+
+    let with = |text: &str| format!("{MINIMAL}\n{text}\n");
+    assert!(parse_err(&with("[package.installer]\ntype = []")).contains("list"));
+    assert!(parse_err(&with("[package.installer]\ntype = [\"msi\", \"zip\"]")).contains("unknown installer type `zip`"));
+    assert!(
+        parse_err(&with("[package.installer]\nfile-associations = [{ extension = \"a b\", mime-type = \"x/y\" }]")).contains("extensions")
+    );
+    assert!(parse_err(&with("[package.installer]\nfile-associations = [{ extension = \"a\", mime-type = \"text\" }]")).contains("MIME"));
+    assert!(parse_err(&with("[package.installer]\nfile-associations = [{ extension = \"a\" }]")).contains("mime-type"));
+    let twice = "[package.installer]\nfile-associations = [{ extension = \"a\", mime-type = \"x/a\" }, { extension = \".a\", mime-type = \"x/b\" }]";
+    assert!(parse_err(&with(twice)).contains("more than once"));
+    assert!(parse_err(&with("[package.installer]\nnotarize = { keychain-profile = \"p\" }")).contains("signing-identity"));
+    let partial = "[package.installer]\nsigning-identity = \"x\"\nnotarize = { apple-id-env = \"APPLE_ID\" }";
+    assert!(parse_err(&with(partial)).contains("keychain-profile"));
+    let bad_env =
+        "[package.installer]\nsigning-identity = \"x\"\nnotarize = { apple-id-env = \"$ID\", password-env = \"P\", team-id = \"T1\" }";
+    assert!(parse_err(&with(bad_env)).contains("environment variable"));
+    assert!(parse_err(&with("[frameworks]\ncompose = { resources-package = \"1res\" }")).contains("resources-package"));
 }
 
 #[test]

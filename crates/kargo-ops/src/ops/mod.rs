@@ -386,37 +386,70 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
     ctx.save_lockfile()
 }
 
+/// What `kargo package` builds.
+#[derive(Debug, Clone, Default)]
+pub struct PackageOptions {
+    pub target: Option<TargetKind>,
+    /// Launch this `[[bin]]` instead of the main class.
+    pub bin: Option<String>,
+    /// Build the self-contained jar even for a library.
+    pub fat: bool,
+    /// `--format`; `None` is a jar, or an installer with `desktop`.
+    pub format: Option<PackageFormat>,
+    /// `--desktop`: package a Compose Desktop application.
+    pub desktop: bool,
+    /// `--platforms`: the Compose Desktop platforms whose Skiko natives the jar carries.
+    pub platforms: Vec<String>,
+}
+
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target, launching
 /// the project's main class or, with `bin`, that `[[bin]]` (`<bin>-<version>-all.jar`).
 /// A library (no main class) gets a jar of its own classes and a sources jar instead,
 /// unless `fat` asks for the self-contained jar. Other formats build a `jlink` runtime image,
-/// a GraalVM native executable or a `jpackage` installer (see [`packaging`]).
-pub fn package(
-    ctx: &BuildContext,
-    target: Option<TargetKind>,
-    bin: Option<&str>,
-    fat: bool,
-    format: PackageFormat,
-) -> Result<Vec<PathBuf>> {
+/// a GraalVM native executable or a `jpackage` installer (see [`packaging`]). `desktop` packages a
+/// Compose Desktop application: an installer by default, or with `platforms` a jar that runs on
+/// each of them (see [`crate::compose`]).
+pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>> {
     let targets = &ctx.ws.manifest().targets;
-    let target = match target {
+    let target = match opts.target {
         Some(t) if !targets.is_enabled(t) => bail!("target `{t}` is not enabled in kargo.toml"),
         Some(t) => t,
-        None if !targets.is_enabled(TargetKind::Jvm) && targets.is_enabled(TargetKind::Android) => TargetKind::Android,
+        None if !targets.is_enabled(TargetKind::Jvm) && targets.is_enabled(TargetKind::Android) && !opts.desktop => TargetKind::Android,
         None => TargetKind::Jvm,
     };
+    let format = opts.format.unwrap_or(if opts.desktop { PackageFormat::Installer } else { PackageFormat::Jar });
+    let platforms = crate::compose::parse_platforms(&opts.platforms)?;
+    if opts.desktop {
+        if !crate::compose::enabled(ctx.ws.manifest()) {
+            bail!("`--desktop` packages a Compose Desktop application; enable Compose with `[frameworks] compose = true`");
+        }
+        if target != TargetKind::Jvm {
+            bail!("`--desktop` packages the jvm target, not {target}; Compose for Android is packaged with `kargo package -t android`");
+        }
+    }
+    if !platforms.is_empty() {
+        if !opts.desktop {
+            bail!("`--platforms` needs `--desktop`: it adds the Compose Desktop natives of other platforms to the jar");
+        }
+        if format != PackageFormat::Jar {
+            bail!(
+                "`--platforms` builds a jar with the Skiko natives of several platforms and needs `--format jar`; `--format {}` builds for the OS it runs on",
+                format.as_str()
+            );
+        }
+    }
     if format != PackageFormat::Jar {
         if target != TargetKind::Jvm {
             bail!("`--format {}` packages a JVM application and needs the jvm target, not {target}", format.as_str());
         }
-        if fat {
+        if opts.fat {
             bail!("`--fat` builds a jar and does not apply to `--format {}`", format.as_str());
         }
     }
     match target {
-        TargetKind::Jvm => package_jvm(ctx, bin, fat, format),
+        TargetKind::Jvm => package_jvm(ctx, opts.bin.as_deref(), opts.fat, format, &platforms),
         TargetKind::Android => {
-            if bin.is_some() || fat {
+            if opts.bin.is_some() || opts.fat {
                 bail!("`--bin` and `--fat` build JVM jars and do not apply to `kargo package -t android`");
             }
             package_android(ctx)
@@ -438,7 +471,7 @@ fn package_android(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: PackageFormat) -> Result<Vec<PathBuf>> {
+fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: PackageFormat, platforms: &[&str]) -> Result<Vec<PathBuf>> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
         bail!("`kargo package` creates an executable jar and needs the JVM target; use `kargo build` for other targets");
     }
@@ -465,8 +498,10 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: Package
         Ok(packaging::App { name, main_class, jvm: &jvm, dir: ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("package") })
     };
     let files = match format {
-        PackageFormat::Jar if bin.is_none() && !fat && jvm.main_class.is_none() => vec![publish::package_library(ctx, &jvm)?],
-        PackageFormat::Jar => vec![fat_jar(ctx, &jvm, name, bin_main)?],
+        PackageFormat::Jar if bin.is_none() && !fat && platforms.is_empty() && jvm.main_class.is_none() => {
+            vec![publish::package_library(ctx, &jvm)?]
+        }
+        PackageFormat::Jar => vec![fat_jar(ctx, &jvm, name, bin_main, platforms)?],
         PackageFormat::Jlink => vec![packaging::jlink_image(ctx, &app(bin_main)?)?],
         PackageFormat::NativeImage => vec![packaging::native_image(ctx, &app(bin_main)?)?],
         PackageFormat::Installer => packaging::installer(ctx, &app(bin_main)?)?,
@@ -478,20 +513,40 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: Package
     Ok(files)
 }
 
-/// The self-contained `<name>-<version>-all.jar`.
-fn fat_jar(ctx: &BuildContext, jvm: &build::JvmBuild, name: &str, bin_main: Option<String>) -> Result<PathBuf> {
+/// The self-contained `<name>-<version>-all.jar`. With `platforms` (`--desktop --platforms`), it
+/// also carries the Skiko natives of those Compose Desktop platforms besides the host's.
+fn fat_jar(ctx: &BuildContext, jvm: &build::JvmBuild, name: &str, bin_main: Option<String>, platforms: &[&str]) -> Result<PathBuf> {
     let pkg = &ctx.ws.manifest().package;
     let dest = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(format!("{name}-{}-all.jar", pkg.version));
-    ctx.shell().status("Packaging", format!("{name} v{} ({})", pkg.version, dest.display()));
     let manifest = JarManifest {
         main_class: bin_main.or_else(|| jvm.main_class.clone()),
         class_path: Vec::new(),
         implementation_title: Some(pkg.name.clone()),
         implementation_version: Some(pkg.version.clone()),
     };
-    let jars: Vec<PathBuf> = jvm.runtime_classpath.iter().filter(|p| p.extension().is_some_and(|e| e == "jar")).cloned().collect();
+    let mut jars: Vec<PathBuf> = jvm.runtime_classpath.iter().filter(|p| p.extension().is_some_and(|e| e == "jar")).cloned().collect();
+    if platforms.is_empty() {
+        ctx.shell().status("Packaging", format!("{name} v{} ({})", pkg.version, dest.display()));
+    } else {
+        ctx.shell().status("Packaging", format!("{name} v{} for {} ({})", pkg.version, platforms.join(", "), dest.display()));
+        jars.retain(|j| !crate::compose::is_skiko_runtime_jar(j));
+        jars.extend(skiko_runtime_jars(ctx, jvm, platforms)?);
+    }
     write_jar(&dest, &jvm.classes, &manifest, &jars).context("failed to create the fat jar")?;
     Ok(dest)
+}
+
+/// The Skiko native library jars of `platforms`, in the version the build resolved for the host.
+fn skiko_runtime_jars(ctx: &BuildContext, jvm: &build::JvmBuild, platforms: &[&str]) -> Result<Vec<PathBuf>> {
+    let Some(version) = crate::compose::skiko_version(&jvm.runtime_modules) else {
+        bail!("`--platforms` adds Skiko's natives, but the build resolved no `org.jetbrains.skiko:skiko-awt-runtime-*` dependency");
+    };
+    let fetched = parallel_map(platforms, |platform| {
+        let artifact = crate::compose::skiko_runtime_artifact(platform);
+        ctx.tool_jar(crate::compose::SKIKO_GROUP, &artifact, version)
+            .with_context(|| format!("failed to fetch {}:{artifact}:{version} for {platform}", crate::compose::SKIKO_GROUP))
+    });
+    fetched.into_iter().collect()
 }
 
 #[cfg(test)]

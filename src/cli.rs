@@ -840,7 +840,11 @@ enum Command {
   installer     an .msi, .dmg or .deb (see [package.installer] type) built by jpackage
 
 jlink, native-image and installer build for the OS and CPU they run on. Their output goes to
-target/<profile>/jvm/package/."
+target/<profile>/jvm/package/.
+
+`--desktop` packages a Compose Desktop application ([frameworks] compose): an installer for this
+OS by default, with Skiko's native library next to the app so macOS signs and notarizes it.
+`--desktop --format jar --platforms all` builds a jar that runs on every OS Compose supports."
     )]
     Package {
         #[arg(short, long, conflicts_with = "profile")]
@@ -857,9 +861,15 @@ target/<profile>/jvm/package/."
         /// Build the self-contained <name>-<version>-all.jar even for a library (no main function)
         #[arg(long)]
         fat: bool,
-        /// What to build for the JVM: jar, jlink, native-image or installer
-        #[arg(long, value_enum, default_value_t, value_name = "FORMAT")]
-        format: PackageFormatArg,
+        /// What to build for the JVM: jar (default), jlink, native-image or installer (default with --desktop)
+        #[arg(long, value_enum, value_name = "FORMAT")]
+        format: Option<PackageFormatArg>,
+        /// Package the Compose Desktop application: an installer for this OS, or with --format jar a jar
+        #[arg(long)]
+        desktop: bool,
+        /// With --desktop --format jar: the platforms whose Skiko natives the jar carries (all, or e.g. windows-x64,macos-arm64)
+        #[arg(long, value_name = "PLATFORMS", value_delimiter = ',', requires = "desktop")]
+        platforms: Vec<String>,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -2026,12 +2036,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, profile, target, bin, fat, format, package } => {
+        Command::Package { release, profile, target, bin, fat, format, desktop, platforms, package } => {
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
             let ctx = context(config, &project, index, global, profile_kind(release, profile.as_deref()))?;
-            for file in ops::package(&ctx, target.map(Into::into), bin.as_deref(), fat, format.into())? {
+            let opts = ops::PackageOptions { target: target.map(Into::into), bin, fat, format: format.map(Into::into), desktop, platforms };
+            for file in ops::package(&ctx, &opts)? {
                 println!("{}", file.display());
             }
             Ok(0)
@@ -2621,7 +2632,13 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "package", "--bin", "migrate"]).unwrap();
         assert!(matches!(cli.command, Command::Package { bin: Some(ref b), .. } if b == "migrate"));
         let cli = Cli::try_parse_from(["kargo", "package", "--fat"]).unwrap();
-        assert!(matches!(cli.command, Command::Package { fat: true, bin: None, .. }));
+        assert!(matches!(cli.command, Command::Package { fat: true, bin: None, format: None, desktop: false, .. }));
+        let cli = Cli::try_parse_from(["kargo", "package", "--desktop", "--format", "jar", "--platforms", "all,linux-x64"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Package { desktop: true, format: Some(PackageFormatArg::Jar), ref platforms, .. } if platforms == &["all", "linux-x64"]
+        ));
+        assert!(Cli::try_parse_from(["kargo", "package", "--platforms", "all"]).is_err(), "--platforms needs --desktop");
         let cli = Cli::try_parse_from(["kargo", "publish", "--repository", "company", "--dry-run", "--workspace"]).unwrap();
         assert!(matches!(
             cli.command,
