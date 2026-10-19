@@ -544,8 +544,7 @@ impl<'a> BuildContext<'a> {
 
     /// Fetches the self-contained (`-all` classifier) jar of a command-line tool such as ktlint or detekt.
     pub fn tool_fat_jar(&self, group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
-        let jar = kargo_maven::Artifact::new(kargo_maven::ModuleId::new(group, artifact), version).with_classifier(Some("all".to_owned()));
-        self.client.fetch_required(&jar.repo_path())
+        fat_jar(&self.client, group, artifact, version)
     }
 
     /// Persists `kargo.lock` if any resolution changed it.
@@ -585,6 +584,13 @@ impl<'a> BuildContext<'a> {
     pub fn fingerprint_dir(&self, target: TargetKind) -> PathBuf {
         self.ws.output_dir(&self.profile, target).join(".fingerprint")
     }
+}
+
+/// Fetches the self-contained (`-all` classifier) jar of a command-line tool, for callers that
+/// have no [`BuildContext`] (and so don't take the lock on `target/`).
+pub fn fat_jar(client: &MavenClient, group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
+    let jar = kargo_maven::Artifact::new(kargo_maven::ModuleId::new(group, artifact), version).with_classifier(Some("all".to_owned()));
+    client.fetch_required(&jar.repo_path())
 }
 
 impl Drop for BuildContext<'_> {

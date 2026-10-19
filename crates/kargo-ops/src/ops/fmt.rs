@@ -7,16 +7,24 @@
 //! The files are every `.kt` and `.kts` file under `src/`, `src-<target>/`,
 //! `tests/` and `tests-<target>/`, minus `[fmt] exclude`. They are handed to
 //! ktlint as globs on stdin, which keeps the command line short on Windows.
+//!
+//! [`format_text`] formats one document's text instead (ktlint's `--stdin` mode), for the
+//! language server's `textDocument/formatting`.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
-use super::context::BuildContext;
+use super::context::{BuildContext, MIN_JDK, fat_jar};
+use crate::workspace::Project;
 use kargo_manifest::FmtSettings;
+use kargo_maven::MavenClient;
+use kargo_toolchain::Jdk;
+use kargo_util::config::Config;
 use kargo_util::fs::collect_files;
 use kargo_util::process;
 use kargo_util::shell::Verbosity;
@@ -59,12 +67,8 @@ pub fn fmt(ctx: &BuildContext, opts: &FmtOptions) -> Result<bool> {
     } else {
         ctx.shell().status("Formatting", format!("{} v{} (ktlint {version})", pkg.name, pkg.version));
     }
-    let mut cmd = Command::new(jdk.java());
-    if jdk.version >= 23 {
-        // ktlint bundles IntelliJ code that uses sun.misc.Unsafe, which JDK 23+ warns about on every run.
-        cmd.arg("--sun-misc-unsafe-memory-access=allow");
-    }
-    cmd.current_dir(ws.root()).arg("-jar").arg(&jar).args(ktlint_args(opts.check, ctx.shell().verbosity()));
+    let mut cmd = ktlint_command(jdk, &jar);
+    cmd.current_dir(ws.root()).args(ktlint_args(opts.check, ctx.shell().verbosity()));
     cmd.stdin(Stdio::piped());
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.spawn().with_context(|| format!("failed to start ktlint (`{}`)", cmd.get_program().to_string_lossy()))?;
@@ -81,6 +85,85 @@ pub fn fmt(ctx: &BuildContext, opts: &FmtOptions) -> Result<bool> {
         Some(1) => Ok(false),
         _ => bail!("ktlint failed ({}); see its output above", process::describe_status(status)),
     }
+}
+
+/// `java -jar ktlint`, with the flags the JDK needs.
+fn ktlint_command(jdk: &Jdk, jar: &Path) -> Command {
+    let mut cmd = Command::new(jdk.java());
+    if jdk.version >= 23 {
+        // ktlint bundles IntelliJ code that uses sun.misc.Unsafe, which JDK 23+ warns about on every run.
+        cmd.arg("--sun-misc-unsafe-memory-access=allow");
+    }
+    cmd.arg("-jar").arg(jar);
+    cmd
+}
+
+/// Formats the text of the Kotlin file `file` of `package` like `kargo fmt` would: with the same
+/// ktlint, on the package's JDK, reading the rules from the `.editorconfig` files above `file`.
+/// The text goes through ktlint's `--stdin` mode, so the file on disk is not read or changed.
+///
+/// Returns `None` for a file `[fmt] exclude` leaves out. Unlike [`fmt`], this takes no lock on
+/// `target/` and prints nothing, so it can run while the project builds. Downloading ktlint and
+/// the JDK follows `--offline` like `kargo fmt`.
+pub fn format_text(config: &Config, project: &Project, package: usize, file: &Path, text: &str) -> Result<Option<String>> {
+    let ws = project.package(package);
+    let settings = &ws.manifest().fmt;
+    if excluded(ws.root(), file, settings)? {
+        return Ok(None);
+    }
+    let version = settings.ktlint_version.as_deref().unwrap_or(KTLINT_VERSION);
+    let jdk = kargo_toolchain::jdks::resolve(config, &ws.manifest().toolchain.jdk)?;
+    jdk.require_version(MIN_JDK)?;
+    let client = MavenClient::new(config, project.repositories());
+    let jar = fat_jar(&client, KTLINT_GROUP, "ktlint-cli", version).with_context(|| format!("failed to fetch ktlint {version}"))?;
+
+    let mut cmd = ktlint_command(&jdk, &jar);
+    // No log at all: ktlint writes it to stdout, where only the formatted text may be.
+    cmd.current_dir(ws.root()).args(["--format", "--stdin", "--log-level=none"]);
+    // The virtual location of the text: where ktlint looks for `.editorconfig` files.
+    cmd.arg(format!("--stdin-path={}", file.display()));
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().with_context(|| format!("failed to start ktlint (`{}`)", cmd.get_program().to_string_lossy()))?;
+    let mut stdin = child.stdin.take().context("failed to open ktlint's stdin")?;
+    // On a thread, so a long file can't fill ktlint's output pipe while we are still writing.
+    let input = text.to_owned();
+    let writer = thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output().context("failed to wait for ktlint")?;
+    writer.join().map_err(|_| anyhow::anyhow!("failed to pass the text to ktlint"))?.context("failed to pass the text to ktlint")?;
+    // Exit code 1 means violations ktlint can't fix remain; the text is still formatted.
+    // No text at all means it could not read the file, a syntax error for one.
+    let formatted = String::from_utf8(output.stdout).context("ktlint printed text that is not UTF-8")?;
+    if formatted.is_empty() && !text.trim().is_empty() {
+        bail!("ktlint could not format {}: {}", file.display(), ktlint_problem(&String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(Some(formatted))
+}
+
+/// Whether `[fmt] exclude` leaves out `file`. The patterns are relative to the package root and
+/// use `.gitignore` syntax, as ktlint reads them.
+fn excluded(root: &Path, file: &Path, settings: &FmtSettings) -> Result<bool> {
+    if settings.exclude.is_empty() {
+        return Ok(false);
+    }
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    for pattern in &settings.exclude {
+        builder.add_line(None, pattern).with_context(|| format!("invalid [fmt] exclude pattern `{pattern}`"))?;
+    }
+    let matcher = builder.build().context("failed to read the [fmt] exclude patterns")?;
+    let Ok(relative) = file.strip_prefix(root) else { return Ok(false) };
+    Ok(matcher.matched_path_or_any_parents(relative, false).is_ignore())
+}
+
+/// Why ktlint printed no text: its stderr without the JVM's warnings and its summary.
+fn ktlint_problem(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .take_while(|l| !l.starts_with("Summary error count"))
+        .filter(|l| !l.is_empty() && !l.starts_with("WARNING:"))
+        .collect();
+    // For a syntax error the log line only says "Can not parse input"; the next one has the position.
+    lines.iter().find(|l| l.contains("Not a valid Kotlin file")).map_or_else(|| lines.join("; "), |l| (*l).to_owned())
 }
 
 /// The existing source roots, failing if none of them holds a Kotlin file.
@@ -126,6 +209,24 @@ mod tests {
             ktlint_patterns(&roots, &settings),
             ["src/**/*.kt", "src/**/*.kts", "tests-jvm/**/*.kt", "tests-jvm/**/*.kts", "!src/generated/**"]
         );
+    }
+
+    #[test]
+    fn exclude_patterns_match_like_ktlints() {
+        let settings = FmtSettings { ktlint_version: None, exclude: vec!["src/generated/**".to_owned(), "**/*Generated.kt".to_owned()] };
+        let root = Path::new("/p");
+        assert!(excluded(root, Path::new("/p/src/generated/A.kt"), &settings).unwrap());
+        assert!(excluded(root, Path::new("/p/src/UserGenerated.kt"), &settings).unwrap());
+        assert!(!excluded(root, Path::new("/p/src/Main.kt"), &settings).unwrap());
+        assert!(!excluded(root, Path::new("/elsewhere/src/generated/A.kt"), &settings).unwrap());
+        assert!(!excluded(root, Path::new("/p/src/generated/A.kt"), &FmtSettings::default()).unwrap());
+    }
+
+    #[test]
+    fn reports_why_ktlint_gave_no_text() {
+        let stderr = "WARNING: restricted\n<stdin>:1:7: Not a valid Kotlin file (1:7 expecting ')') ()\n\nSummary error count (descending) by rule:\n  Not a valid Kotlin file: 1\n";
+        assert_eq!(ktlint_problem(stderr), "<stdin>:1:7: Not a valid Kotlin file (1:7 expecting ')') ()");
+        assert_eq!(ktlint_problem("boom\nWARNING: x"), "boom");
     }
 
     #[test]
