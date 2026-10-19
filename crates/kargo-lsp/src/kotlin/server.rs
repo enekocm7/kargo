@@ -21,6 +21,7 @@ use rayon::prelude::*;
 use serde_json::{Value, json};
 
 use kargo_maven::Repository;
+use kargo_ops::workspace::Project;
 use kargo_util::config::Config;
 
 use super::actions;
@@ -31,7 +32,7 @@ use super::jdk::Jdk;
 use super::library::{self, CompiledLibrary, SourcesJar, UnitCache};
 use super::resolve::{Analyzer, Packages};
 use crate::jsonrpc::{self, Kind};
-use crate::text;
+use crate::{check, text};
 
 /// Starts the server on a thread. Returns the stream it writes to and the one it reads from.
 pub fn spawn(config: Config) -> (Box<dyn BufRead + Send>, Box<dyn Write + Send>) {
@@ -51,14 +52,39 @@ fn pipe() -> (io::PipeReader, io::PipeWriter) {
 
 /// What the server's loop handles: an editor message, or what a load of the project sent.
 /// `Fetching` and `Fetched` begin and end downloading the sources jars of `modules` dependencies,
-/// of which `found` had one.
+/// of which `found` had one. `Formatted` is the answer to the `textDocument/formatting` request
+/// `id` for the document `uri`, which had the text `original` when it was asked.
 enum Event {
     Client(Option<Value>),
     Project { generation: u64, model: Box<Model>, units: Vec<Arc<Unit>> },
     Libraries { generation: u64, units: Vec<Arc<Unit>>, jdk: Option<Arc<Jdk>> },
     Fetching { generation: u64, modules: usize },
     Fetched { generation: u64, found: usize },
+    Formatted { id: Value, uri: String, original: String, outcome: anyhow::Result<Option<String>> },
 }
+
+/// Formats the text of a Kotlin file; `None` when the file is not to be formatted.
+pub(crate) type Formatter = Arc<dyn Fn(&Config, &Path, &str) -> anyhow::Result<Option<String>> + Send + Sync>;
+
+/// The formatter that runs `kargo fmt`'s ktlint ([`kargo_ops::ops::fmt::format_text`]) for the
+/// package the file belongs to. A file outside any package is left alone.
+pub(crate) fn ktlint_formatter() -> Formatter {
+    Arc::new(|config, path, text| {
+        let Some(manifest) = check::manifest_for(path) else { return Ok(None) };
+        let project = Project::load(&manifest)?;
+        // The package with the deepest root above the file, for a workspace or path dependencies.
+        let package = (0..project.packages().len())
+            .filter(|&i| path.starts_with(project.package(i).root()))
+            .max_by_key(|&i| project.package(i).root().components().count());
+        let Some(package) = package else { return Ok(None) };
+        kargo_ops::ops::fmt::format_text(config, &project, package, path, text)
+    })
+}
+
+/// The error code of a request that failed because the document changed while it ran.
+const CONTENT_MODIFIED: i64 = -32801;
+/// The error code of a request that could not be carried out.
+const REQUEST_FAILED: i64 = -32803;
 
 /// The `$/progress` of downloading sources jars, once the editor accepted its token.
 struct Progress {
@@ -543,7 +569,7 @@ fn read(path: &Path) -> String {
 
 /// Runs the server until the stream closes or `exit` arrives.
 pub fn serve(config: Config, input: impl BufRead + Send + 'static, output: impl Write + Send + 'static) -> anyhow::Result<()> {
-    serve_with(config, input, output, true)
+    serve_with(config, input, output, true, ktlint_formatter())
 }
 
 pub(crate) fn serve_with(
@@ -551,6 +577,7 @@ pub(crate) fn serve_with(
     input: impl BufRead + Send + 'static,
     output: impl Write + Send + 'static,
     dependencies: bool,
+    formatter: Formatter,
 ) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
     let client_tx = tx.clone();
@@ -564,7 +591,7 @@ pub(crate) fn serve_with(
             }
         }
     });
-    let mut state = State::new(config, Box::new(output), tx, dependencies);
+    let mut state = State::new(config, Box::new(output), tx, dependencies, formatter);
     loop {
         let event = match state.queued.pop_front() {
             Some(message) => Event::Client(message),
@@ -616,10 +643,11 @@ struct State {
     libraries_loaded: bool,
     /// Editor messages that arrived while waiting for a load.
     queued: VecDeque<Option<Value>>,
+    formatter: Formatter,
 }
 
 impl State {
-    fn new(config: Config, out: Box<dyn Write + Send>, tx: Sender<Event>, dependencies: bool) -> Self {
+    fn new(config: Config, out: Box<dyn Write + Send>, tx: Sender<Event>, dependencies: bool, formatter: Formatter) -> Self {
         Self {
             config,
             out,
@@ -644,6 +672,7 @@ impl State {
             project_loaded: false,
             libraries_loaded: false,
             queued: VecDeque::new(),
+            formatter,
         }
     }
 
@@ -712,6 +741,22 @@ impl State {
             }
             Event::Fetched { generation, found } if self.progress.as_ref().is_some_and(|p| p.generation == generation) => {
                 self.end_progress(Some(format!("{found} sources jar{}", if found == 1 { "" } else { "s" })));
+            }
+            Event::Formatted { id, uri, original, outcome } => {
+                let current = self.open.get(&uri).and_then(|p| self.files.get(p)).map(|u| u.text.as_str());
+                let reply = if current != Some(original.as_str()) {
+                    // The edit would apply to text that is gone.
+                    jsonrpc::error(&id, CONTENT_MODIFIED, "the document changed while it was being formatted")
+                } else {
+                    match outcome {
+                        Ok(Some(formatted)) => {
+                            jsonrpc::response(&id, json!(text::edit(&original, &formatted).into_iter().collect::<Vec<_>>()))
+                        }
+                        Ok(None) => jsonrpc::response(&id, json!([])),
+                        Err(e) => jsonrpc::error(&id, REQUEST_FAILED, format!("{e:#}")),
+                    }
+                };
+                let _ = self.send(&reply);
             }
             _ => {}
         }
@@ -828,6 +873,10 @@ impl State {
             },
             Kind::Request => {
                 let id = message["id"].clone();
+                if method == "textDocument/formatting" {
+                    self.format(id, params)?;
+                    return Ok(true);
+                }
                 let reply = match self.request(&method, params) {
                     Ok(result) => jsonrpc::response(&id, result),
                     Err(Failure::NotFound) => jsonrpc::error(&id, jsonrpc::METHOD_NOT_FOUND, format!("`{method}` is not supported")),
@@ -837,6 +886,20 @@ impl State {
             }
         }
         Ok(true)
+    }
+
+    /// Formats an open document with ktlint on a worker thread, which answers when it is done.
+    /// The JVM takes a while to start, and the other requests must not wait for it.
+    fn format(&mut self, id: Value, params: &Value) -> anyhow::Result<()> {
+        let uri = params["textDocument"]["uri"].as_str().unwrap_or_default().to_owned();
+        let open = self.open.get(&uri).and_then(|path| self.files.get(path).map(|unit| (path.clone(), unit.text.clone())));
+        let Some((path, original)) = open else { return self.send(&jsonrpc::response(&id, Value::Null)) };
+        let (config, tx, formatter) = (self.config.clone(), self.tx.clone(), Arc::clone(&self.formatter));
+        thread::spawn(move || {
+            let outcome = formatter(&config, &path, &original);
+            let _ = tx.send(Event::Formatted { id, uri, original, outcome });
+        });
+        Ok(())
     }
 
     fn set_file(&mut self, path: PathBuf, text: String) {
@@ -1031,6 +1094,7 @@ impl State {
                 "documentHighlightProvider": true,
                 "renameProvider": { "prepareProvider": true },
                 "documentSymbolProvider": true,
+                "documentFormattingProvider": true,
                 "workspaceSymbolProvider": true,
                 "codeActionProvider": { "codeActionKinds": actions::KINDS },
             },
@@ -1446,5 +1510,132 @@ local = \"{url}\"
                 ("/c/lib-wasm-sources.jar", Platforms::WASM, Platforms::NONE),
             ]
         );
+    }
+
+    /// An editor talking to the server with a formatter of the test's own.
+    struct Editor {
+        input: io::PipeWriter,
+        output: BufReader<io::PipeReader>,
+        server: Option<thread::JoinHandle<anyhow::Result<()>>>,
+    }
+
+    impl Editor {
+        fn start(formatter: Formatter) -> Self {
+            let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+            let (server_in, input) = io::pipe().unwrap();
+            let (output, server_out) = io::pipe().unwrap();
+            let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, formatter));
+            let mut editor = Self { input, output: BufReader::new(output), server: Some(server) };
+            editor.send(jsonrpc::request("0", "initialize", json!({ "capabilities": {} })));
+            let init = editor.reply("0");
+            assert_eq!(init["result"]["capabilities"]["documentFormattingProvider"], true, "{init}");
+            editor
+        }
+
+        fn send(&mut self, message: Value) {
+            jsonrpc::write(&mut self.input, &message).unwrap();
+        }
+
+        fn reply(&mut self, id: &str) -> Value {
+            loop {
+                let message = jsonrpc::read(&mut self.output).unwrap().expect("a message");
+                if message["id"].as_str() == Some(id) && message.get("method").is_none() {
+                    return message;
+                }
+            }
+        }
+
+        fn open(&mut self, uri: &str, text: &str) {
+            let document = json!({ "uri": uri, "languageId": "kotlin", "version": 1, "text": text });
+            self.send(jsonrpc::notification("textDocument/didOpen", json!({ "textDocument": document })));
+        }
+
+        fn format(&mut self, id: &str, uri: &str) {
+            self.send(jsonrpc::request(
+                id,
+                "textDocument/formatting",
+                json!({ "textDocument": { "uri": uri }, "options": { "tabSize": 4 } }),
+            ));
+        }
+
+        fn finish(mut self) {
+            self.send(jsonrpc::request("shutdown", "shutdown", Value::Null));
+            self.send(jsonrpc::notification("exit", Value::Null));
+            self.server.take().unwrap().join().unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn formats_a_document_with_one_minimal_edit() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let mut editor = Editor::start(Arc::new(move |_, path, text| {
+            log.lock().unwrap().push((path.to_path_buf(), text.to_owned()));
+            Ok(Some(text.replace("fun   main", "fun main")))
+        }));
+        let uri = "file:///p/src/Main.kt";
+        editor.open(uri, "fun   main() {}\n");
+        editor.format("1", uri);
+        let reply = editor.reply("1");
+        assert_eq!(
+            reply["result"],
+            json!([{ "range": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 6 } }, "newText": "" }]),
+            "{reply}"
+        );
+        assert_eq!(seen.lock().unwrap().as_slice(), [(PathBuf::from("/p/src/Main.kt"), "fun   main() {}\n".to_owned())]);
+        editor.finish();
+    }
+
+    #[test]
+    fn formatting_needs_no_edit_for_formatted_text_and_excluded_files() {
+        let mut editor =
+            Editor::start(Arc::new(|_, path, text| Ok(if path.ends_with("Generated.kt") { None } else { Some(text.to_owned()) })));
+        for (id, name) in [("1", "Main.kt"), ("2", "Generated.kt")] {
+            let uri = format!("file:///p/src/{name}");
+            editor.open(&uri, "fun   main() {}\n");
+            editor.format(id, &uri);
+            assert_eq!(editor.reply(id)["result"], json!([]), "{name}");
+        }
+        // A document the editor did not open has nothing to format.
+        editor.format("3", "file:///p/src/Closed.kt");
+        assert_eq!(editor.reply("3")["result"], Value::Null);
+        editor.finish();
+    }
+
+    #[test]
+    fn formatting_failures_are_reported_to_the_editor() {
+        let mut editor = Editor::start(Arc::new(|_, _, _| anyhow::bail!("ktlint could not format Main.kt: Not a valid Kotlin file")));
+        let uri = "file:///p/src/Main.kt";
+        editor.open(uri, "fun main( {\n");
+        editor.format("1", uri);
+        let reply = editor.reply("1");
+        assert_eq!(reply["error"]["code"], REQUEST_FAILED, "{reply}");
+        assert!(reply["error"]["message"].as_str().unwrap().contains("Not a valid Kotlin file"), "{reply}");
+        editor.finish();
+    }
+
+    #[test]
+    fn formatting_stale_text_is_rejected_and_the_server_stays_responsive() {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        let mut editor = Editor::start(Arc::new(move |_, _, text| {
+            let _ = gate.lock().unwrap().recv();
+            Ok(Some(text.trim_end().to_owned()))
+        }));
+        let uri = "file:///p/src/Main.kt";
+        editor.open(uri, "fun main() {}\n\n");
+        editor.format("1", uri);
+        // The server answers other requests while ktlint runs; the document changes meanwhile.
+        editor.send(jsonrpc::request("2", "textDocument/documentSymbol", json!({ "textDocument": { "uri": uri } })));
+        let symbols = editor.reply("2");
+        assert!(symbols["result"].is_array(), "{symbols}");
+        let change = json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": "fun other() {}\n\n" }] });
+        editor.send(jsonrpc::notification("textDocument/didChange", change));
+        editor.send(jsonrpc::request("3", "textDocument/documentSymbol", json!({ "textDocument": { "uri": uri } })));
+        let _ = editor.reply("3");
+        release.send(()).unwrap();
+        let reply = editor.reply("1");
+        assert_eq!(reply["error"]["code"], CONTENT_MODIFIED, "{reply}");
+        editor.finish();
     }
 }

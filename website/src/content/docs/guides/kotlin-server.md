@@ -21,6 +21,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Find references, highlights | Every use in the project, with the declaration |
 | Rename | Every reference in the project, and the declarations that must change with it: `expect` and `actual` declarations, overrides, named arguments |
 | Outline | Document symbols for the file, workspace symbols for the project |
+| Formatting | The whole file, formatted by ktlint with the project's `.editorconfig` and `[fmt]` settings, as `kargo fmt` does. See [Formatting](#formatting) |
 | Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
 | Errors | From [check on save](../editors/#check-on-save), which is on with this server: `kargo check` runs when you save a file and its errors for every target appear in the editor |
 
@@ -52,6 +53,16 @@ To know the receiver's type, the server infers the types completion needs: liter
 Rename works on declarations of your project: classes, functions, properties, parameters and local variables. It changes every reference in every file of the project, including imports and string templates (`"$name"`), and the declarations that must keep the same name: the `actual` declarations of an `expect` one (and the other way around), the overrides of a member and the member it overrides, and named arguments (`greet(name = "x")`) of a parameter. A name that isn't a plain identifier, such as a keyword, gets backquotes.
 
 Declarations of the standard library and of other libraries can't be renamed; the editor says so before you type a name.
+
+### Formatting
+
+*Format Document* (and format on save, where your editor has it) formats the open file with the same ktlint that [`kargo fmt`](../formatting-and-linting/) runs, so the editor and the command never disagree. The text of the editor goes through ktlint, so it formats what you see, saved or not, and ktlint reads the rules from the `.editorconfig` files above the file and the [`[fmt]`](../../reference/manifest/#fmt) settings of the package it belongs to. A file that `[fmt] exclude` leaves out is not changed.
+
+The server answers with a single edit that covers only the lines that changed, so the cursor, folds and undo history stay where they were. ktlint runs on the package's JDK on a separate thread: the first format after the editor starts waits while Kargo downloads ktlint (and a JDK, if `[toolchain] jdk` asks for one that isn't installed), and each one after that takes a second or so, during which completion and the other requests keep working. Offline (`kargo --offline lsp`), it works once ktlint and the JDK are in Kargo's cache, as `kargo fmt` does. If you type while it runs, the editor is told the document changed and the result is dropped; format again.
+
+A file with a syntax error can't be formatted. The editor shows ktlint's message (`Not a valid Kotlin file (1:7 expecting ')')`) and the text stays as it is. Problems ktlint can't fix by itself, such as a file name that isn't PascalCase, don't stop the rest of the file from being formatted; [`kargo fmt`](../formatting-and-linting/) lists them.
+
+Only whole files are formatted: ktlint has no way to format a range, so *Format Selection* is not offered. Formatting covers `.kt` files; `.kts` scripts are not formatted by the server. To format on save, turn on your editor's own setting: see [Formatting from your editor](../formatting-and-linting/#formatting-from-your-editor).
 
 ### Code actions
 
@@ -157,6 +168,6 @@ The server reads declarations and infers types as far as completion and navigati
 - Libraries without sources have no documentation in hover, and a type parameter with several bounds keeps only the first.
 - Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native, plus the Native-only declarations from the distribution's klib, which have no documentation in hover.
 - Smart casts (`if (x is Foo) x.`), the branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
-- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings, and no formatting, signature help, inlay hints or semantic highlighting. Use [`kargo fmt`](../formatting-and-linting/) to format code.
+- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings, and no signature help, inlay hints or semantic highlighting. [Formatting](#formatting) is ktlint's: whole files only.
 
 For the full analysis of the Kotlin compiler, use IntelliJ IDEA with the Kargo plugin, or run JetBrains' Kotlin LSP behind `kargo lsp` with `--server kotlin-lsp`. See [Choosing the Kotlin server](../editors/#choosing-the-kotlin-server).
