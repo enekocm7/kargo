@@ -3,6 +3,7 @@
 //! the high-level operations behind each CLI command.
 
 pub mod builtins;
+pub mod compose;
 pub mod dts;
 pub mod env;
 pub mod gradle;

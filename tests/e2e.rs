@@ -1409,6 +1409,36 @@ fn native_c_sources_and_platform_options() {
 }
 
 #[test]
+fn android_compose_resources() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs the Android SDK)");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["droid", "--target", "android", "--with", "compose"]);
+    t.write("droid/composeResources/values/strings.xml", "<resources><string name=\"app_name\">Droid</string></resources>\n");
+    t.write(
+        "droid/src/Strings.kt",
+        r#"package com.example.droid
+
+import androidx.compose.runtime.Composable
+import com.example.droid.generated.resources.*
+import org.jetbrains.compose.resources.stringResource
+
+@Composable
+fun appName(): String = stringResource(Res.string.app_name)
+"#,
+    );
+    t.kargo("droid").arg("build").assert().success();
+    let apk = t.dir.path().join("droid/target/android/build/outputs/apk/debug/droid-debug.apk");
+    let zip = zip::ZipArchive::new(std::fs::File::open(&apk).unwrap()).unwrap();
+    let names: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).collect();
+    let cvr = "assets/composeResources/com.example.droid.generated.resources/values/strings.cvr";
+    assert!(names.iter().any(|n| n == cvr), "{cvr} is missing from {}", apk.display());
+}
+
+#[test]
 fn android_app_with_compose() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
@@ -2092,6 +2122,75 @@ fn jvm_packages_runtime_images_and_app_images() {
     };
     let out = run_without_java(&launcher, &["x"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hi there x");
+}
+
+#[test]
+fn compose_desktop_resources_and_packages() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["ui", "--with", "compose"]);
+    t.write(
+        "ui/src/Main.kt",
+        r#"package com.example.ui
+
+import com.example.ui.generated.resources.*
+import kotlinx.coroutines.runBlocking
+import org.jetbrains.compose.resources.getPluralString
+import org.jetbrains.compose.resources.getString
+
+fun main(): Unit = runBlocking {
+    println(getString(Res.string.app_name) + " " + getPluralString(Res.plurals.notes, 2, 2))
+    println(Res.readBytes("files/data.json").decodeToString())
+    // Loads Skiko's native library.
+    println("skia " + org.jetbrains.skia.Surface.makeRasterN32Premul(4, 4).width)
+}
+"#,
+    );
+    t.write(
+        "ui/composeResources/values/strings.xml",
+        r#"<resources>
+    <string name="app_name">Notes</string>
+    <plurals name="notes"><item quantity="one">%1$d note</item><item quantity="other">%1$d notes</item></plurals>
+</resources>
+"#,
+    );
+    t.write("ui/composeResources/files/data.json", r#"{"ok":true}"#);
+    let manifest = std::fs::read_to_string(t.dir.path().join("ui/kargo.toml")).unwrap();
+    t.write("ui/kargo.toml", &format!("{manifest}\n[package.installer]\nname = \"Notes\"\ntype = \"app-image\"\nconsole = true\n"));
+    let expected = "Notes 2 notes\n{\"ok\":true}\nskia 4";
+    let run = t.kargo("ui").args(["run", "-q"]).assert().success().get_output().stdout.clone();
+    assert_eq!(String::from_utf8_lossy(&run).replace("\r\n", "\n").trim(), expected);
+
+    // The application image carries Skiko's library outside the jars and runs without Java.
+    let app = t.kargo("ui").args(["package", "-q", "--desktop"]).assert().success().get_output().stdout.clone();
+    let app = std::path::PathBuf::from(String::from_utf8(app).unwrap().trim());
+    let (launcher, content) = match std::env::consts::OS {
+        "windows" => (app.join("Notes.exe"), app.join("app")),
+        "macos" => (app.join("Contents/MacOS/Notes"), app.join("Contents/app")),
+        _ => (app.join("bin/Notes"), app.join("lib/app")),
+    };
+    let names: Vec<String> = std::fs::read_dir(&content).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().any(|n| n.contains("skiko-") && !n.ends_with(".jar")), "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("skiko-awt-runtime-")), "{names:?}");
+    let out = run_without_java(&launcher, &[]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n").trim(), expected, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // A jar for every platform.
+    let jar = t
+        .kargo("ui")
+        .args(["package", "-q", "--desktop", "--format", "jar", "--platforms", "all"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let jar = std::path::PathBuf::from(String::from_utf8(jar).unwrap().trim());
+    let archive = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
+    let natives: Vec<String> =
+        archive.file_names().map(|n| n.unwrap().into_owned()).filter(|n| n.contains("skiko-") && !n.ends_with(".sha256")).collect();
+    for platform in ["windows-x64", "windows-arm64", "macos-x64", "macos-arm64", "linux-x64", "linux-arm64"] {
+        assert!(natives.iter().any(|n| n.contains(platform)), "{platform} in {natives:?}");
+    }
 }
 
 #[test]

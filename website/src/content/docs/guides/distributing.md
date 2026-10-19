@@ -140,7 +140,32 @@ $ kargo package --release --format installer
 C:\hello\target\release\jvm\package\Hello-1.2.0.msi
 ```
 
-The installer type defaults to the host's: `.msi` on Windows, `.dmg` on macOS, `.deb` on Linux. Set `type` to `exe`, `pkg` or `rpm` for the others, or to `app-image` for the installed application's directory without an installer, which builds on every OS. See [`[package.installer]`](../../reference/manifest/#packageinstaller) for every key.
+The installer type defaults to the host's: `.msi` on Windows, `.dmg` on macOS, `.deb` on Linux. Set `type` to `exe`, `pkg` or `rpm` for the others, or to `app-image` for the installed application's directory without an installer, which builds on every OS. `type` can also be a list such as `["msi", "dmg", "deb"]`: each OS builds the types in it that it can build, so one `kargo.toml` serves a CI matrix of Windows, macOS and Linux runners. See [`[package.installer]`](../../reference/manifest/#packageinstaller) for every key.
+
+### File associations
+
+```toml title="kargo.toml"
+[package.installer]
+file-associations = [
+    { extension = "note", mime-type = "application/x-note", description = "Note", icon = "packaging/note.ico" },
+]
+```
+
+The installed application opens files of these types, which the OS passes to `main` as arguments. Application images (`app-image`) are not installed, so they register none.
+
+### Signing and notarizing on macOS
+
+`signing-identity` makes `jpackage` sign the application with a certificate from your keychain. To open on other Macs without a Gatekeeper warning, a signed `.dmg` or `.pkg` must also be notarized by Apple:
+
+```toml title="kargo.toml"
+[package.installer]
+signing-identity = "Developer ID Application: Example Inc (ABCDE12345)"
+notarize = { apple-id-env = "APPLE_ID", password-env = "APPLE_APP_PASSWORD", team-id = "ABCDE12345" }
+```
+
+After `jpackage`, Kargo runs `xcrun notarytool submit --wait` on each `.dmg` and `.pkg`, with the Apple ID and the [app-specific password](https://support.apple.com/en-us/102654) read from the environment variables that `apple-id-env` and `password-env` name, then staples the ticket with `xcrun stapler staple`. `notarize = { keychain-profile = "<name>" }` uses credentials saved with `xcrun notarytool store-credentials` instead. Notarizing takes a few minutes; when Apple rejects the upload, the error shows the service's answer, and `xcrun notarytool log <submission id>` explains it.
+
+For [Compose Desktop](../compose/#distributing) applications, use `kargo package --desktop`: it builds an installer and adds the JDK modules and options Compose needs, and moves Skiko's native library out of its jar so that it is signed and notarized too.
 
 What each OS needs:
 

@@ -162,6 +162,10 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
                     let cv = fw.coroutines.as_ref().and_then(|co| co.version.as_deref()).unwrap_or(COROUTINES_VERSION);
                     c.dependencies.push(dep("org.jetbrains.kotlinx:kotlinx-coroutines-swing", Some(cv)));
                 }
+                // The runtime of the generated `Res` class.
+                if crate::compose::resources::present(project_dir) {
+                    c.dependencies.push(dep(crate::compose::resources::RUNTIME, Some(v)));
+                }
             }
             TargetKind::Wasm => bail!(
                 "Compose for Web (Wasm) needs the Compose Gradle plugin's resource pipeline and is not supported by Kargo's direct Wasm backend; use the JVM (desktop) or Android target for Compose"
@@ -399,6 +403,13 @@ mod tests {
         assert!(deps.contains(&"org.jetbrains.kotlinx:kotlinx-coroutines-swing".to_owned()));
         assert_eq!(c.plugins[0].id.as_deref(), Some("androidx.compose.compiler.plugins.kotlin"));
         assert!(contributions(&m, TargetKind::Wasm, Path::new(".")).is_err());
+        assert!(!deps.iter().any(|d| d.contains("components-resources")), "no composeResources/, no resources runtime");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("composeResources/drawable")).unwrap();
+        let c = contributions(&m, TargetKind::Jvm, dir.path()).unwrap();
+        let resources = c.dependencies.iter().find(|d| d.module.artifact == "components-resources").unwrap();
+        assert_eq!(resources.version.as_deref(), Some(COMPOSE_VERSION));
     }
 
     #[test]

@@ -108,11 +108,13 @@ See the [Spring Boot guide](../spring-boot/).
 [frameworks]
 compose = true
 # or
-compose = { version = "1.12.1", material3 = true }
+compose = { version = "1.12.1", material3 = true, resources-package = "com.example.res", public-resources = false }
 ```
 
 - On the **JVM** it sets up [Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) for desktop: the Compose compiler plugin, the desktop runtime for your OS and Material 3 (disable with `material3 = false`).
 - On **Android** it enables Jetpack Compose in the generated Gradle project.
+- On both, a `composeResources/` directory gets the generated `Res` class of Compose Multiplatform resources (`Res.drawable.*`, `Res.string.*`, ...) and the resources runtime. `resources-package` and `public-resources` set the package and the visibility of `Res`.
+- `kargo package --desktop` builds an installer (or with `--platforms all` a jar for every OS) of a desktop application.
 - Compose is not available on the Wasm or Native targets.
 
 See the [Compose Desktop guide](../compose/).

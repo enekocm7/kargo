@@ -47,6 +47,7 @@ impl WatchSet {
             paths.extend(TargetKind::ALL.iter().map(|t| package.target_test_fixtures(*t)));
             paths.push(package.examples_dir());
             paths.push(package.resources());
+            paths.push(package.root().join(crate::compose::resources::DIR));
             paths.push(package.test_resources());
             paths.push(package.root().join("android"));
             paths.push(package.root().join("interop"));

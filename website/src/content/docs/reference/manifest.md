@@ -78,7 +78,7 @@ metadata-repository = true
 
 ### `[package.installer]`
 
-Options for `kargo package --format installer`, which runs `jpackage`. See [Installers](../../guides/distributing/#installers).
+Options for `kargo package --format installer` and `kargo package --desktop`, which run `jpackage`. See [Installers](../../guides/distributing/#installers). On macOS, `kargo run` of a Compose application also shows `name` and `icon` in the Dock.
 
 ```toml
 [package.installer]
@@ -86,7 +86,7 @@ name = "Hello"                       # default: the package name (or --bin)
 vendor = "Example Inc."
 description = "Says hello"           # default: [package] description
 app-version = "1.2.3"                # default: the numbers at the start of [package] version
-type = "msi"                         # default: msi on Windows, dmg on macOS, deb on Linux
+type = ["msi", "dmg", "deb"]         # or one type; default: msi on Windows, dmg on macOS, deb on Linux
 icon = { windows = "packaging/app.ico", macos = "packaging/app.icns", linux = "packaging/app.png" }
 license-file = "LICENSE"
 menu = true
@@ -96,6 +96,8 @@ upgrade-uuid = "0b5b2d6e-8f5c-4a37-9d1e-3a6c2f4b7e90"
 bundle-id = "com.example.hello"
 signing-identity = "Developer ID Application: Example Inc. (TEAMID)"
 category = "utils"
+file-associations = [{ extension = "note", mime-type = "application/x-note", description = "Note", icon = "packaging/note.ico" }]
+notarize = { apple-id-env = "APPLE_ID", password-env = "APPLE_APP_PASSWORD", team-id = "ABCDE12345" }
 ```
 
 | Key | OS | Meaning |
@@ -104,7 +106,7 @@ category = "utils"
 | `vendor` | all | The vendor shown by the installer |
 | `description` | all | The description shown by the installer |
 | `app-version` | all | One to three numbers, such as `1.2.3`, which every installer format accepts. Defaults to the numbers at the start of `[package] version` (`1.2.3-SNAPSHOT` gives `1.2.3`) |
-| `type` | all | `msi` or `exe` (Windows), `dmg` or `pkg` (macOS), `deb` or `rpm` (Linux), or `app-image`: the application directory without an installer, on any OS |
+| `type` | all | `msi` or `exe` (Windows), `dmg` or `pkg` (macOS), `deb` or `rpm` (Linux), or `app-image`: the application directory without an installer, on any OS. A list builds the types the host OS builds and skips the others; it is an error when it has none for the host |
 | `icon` | all | One path for every OS, or a table with `windows` (`.ico`), `macos` (`.icns`) and `linux` (`.png`) paths, relative to the project root |
 | `license-file` | all | A license the installer shows |
 | `menu` | Windows, Linux | Add a Start menu (Windows) or desktop menu (Linux) entry |
@@ -114,6 +116,8 @@ category = "utils"
 | `bundle-id` | macOS | The bundle identifier, such as `com.example.hello` |
 | `signing-identity` | macOS | Sign the app with this identity from the keychain |
 | `category` | Linux | The package's section or group (`--linux-app-category`) |
+| `file-associations` | all | File types the installed application opens: a list of `{ extension, mime-type, description, icon }` tables (`description` and `icon` optional). Not registered by `app-image` |
+| `notarize` | macOS | Notarize each `.dmg` and `.pkg` and staple the ticket: `{ apple-id-env, password-env, team-id }`, naming the environment variables that hold the Apple ID and the app-specific password, or `{ keychain-profile }` for credentials saved by `xcrun notarytool store-credentials`. Needs `signing-identity`; ignored on other OSes |
 
 ## `[kotlin]`
 
@@ -561,13 +565,15 @@ local = "maven-local"
 [frameworks]
 serialization = true      # or { version, formats = ["json", "cbor", "protobuf", "properties", "hocon", "core"] }
 coroutines = true         # or a version string: "1.11.0"
-compose = true            # or { version, material3 = true }
+compose = true            # or { version, material3 = true, resources-package, public-resources = false }
 ktor = { server = "netty", client = "cio", server-plugins = [], client-plugins = [], json = true, version = "3.6.0" }
 spring-boot = true        # or { version, starters = ["web"], jpa = false }
 lombok = true             # or { version, config = "lombok.config" }
 ```
 
 Each can also be `false`. Default versions: serialization 1.11.0, coroutines 1.11.0, Compose 1.12.1 (Material 3 1.9.0), Ktor 3.6.0, Spring Boot 4.1.1, Lombok 1.18.48.
+
+For Compose, `resources-package` is the package of the `Res` class generated from `composeResources/` (default `<group>.<name>.generated.resources`, in lower case), and `public-resources = true` makes `Res` and its accessors `public` instead of `internal`. See [Compose resources](../../guides/compose/#resources).
 
 See [Built-in frameworks](../../guides/frameworks/).
 
