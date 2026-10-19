@@ -21,6 +21,7 @@ my-app/
 ├── test-resources/      resources for JVM tests
 ├── android/             AndroidManifest.xml, res/, assets/
 ├── interop/             cinterop .def files for C libraries (Kotlin/Native)
+├── c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
 ├── examples/            example programs, run with kargo run --example <name>
 └── target/              build output (git-ignored)
 ```
@@ -128,7 +129,7 @@ target/
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
 │   ├── npm-types/                @types packages for npm dependencies without TypeScript declarations
 │   ├── generated/npm/            Kotlin declarations generated for [target.wasm.npm-dependencies]
-│   ├── native/                   one directory per platform; cinterop/ holds C bindings, bin/ the [[bin]] executables
+│   ├── native/                   one directory per platform; cinterop/ holds C bindings, c/ the compiled C sources, include/ the C header of a shared or static library, bin/ the [[bin]] executables
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
 ├── staging/                      same layout, built with --profile staging (a custom profile)

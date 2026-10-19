@@ -1198,11 +1198,13 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         entry_point: None,
-        linker_options: &manifest.targets.native.as_ref().map(|n| n.linker_options.clone()).unwrap_or_default(),
+        link: crate::native_interop::native_link(ctx, host)?,
         output_dir: ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(host).join("test"),
         debug: true,
         optimize: false,
         test_runner: true,
+        exported: Vec::new(),
+        bundle_id: None,
     };
     let outcome =
         unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| compiling(ctx, TargetKind::Native, ", tests"))?;

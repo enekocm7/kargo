@@ -604,6 +604,7 @@ dependencies = [
  "base64",
  "dirs",
  "flate2",
+ "ignore",
  "kargo-compiler",
  "kargo-manifest",
  "kargo-maven",
@@ -613,6 +614,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "walkdir",
 ]
 
 [[package]]

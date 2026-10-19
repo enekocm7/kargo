@@ -172,6 +172,38 @@ pub fn add_frameworks(config: &Config, ws: &Workspace, names: &[String]) -> Resu
     editor.save()
 }
 
+/// `kargo add --cinterop <name>`: adds `[target.native.cinterop.<name>]` and, unless it exists,
+/// `interop/<name>.def` binding `headers` (default `<name>.h`).
+pub fn add_cinterop(config: &Config, ws: &Workspace, name: &str, headers: &[String], pkg_config: Option<&str>) -> Result<()> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        bail!("invalid cinterop name `{name}` (use letters, digits, `_` and `-`)");
+    }
+    let package = name.replace('-', "_");
+    let package = if package.starts_with(|c: char| c.is_ascii_digit()) { format!("c{package}") } else { package };
+    let mut editor = ManifestEditor::load(&ws.manifest_path())?;
+    if !editor.add_cinterop(name, &package, pkg_config)? {
+        bail!("[target.native.cinterop.{name}] already exists in kargo.toml");
+    }
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    let def = ws.root().join("interop").join(format!("{name}.def"));
+    let headers = if headers.is_empty() { vec![format!("{name}.h")] } else { headers.to_vec() };
+    if def.exists() {
+        config.shell().note(format!("keeping the existing {}", def.display()));
+    } else {
+        std::fs::create_dir_all(def.parent().expect("the def file has a directory"))?;
+        let text = format!(
+            "# The C library behind [target.native.cinterop.{name}] in kargo.toml.\n\
+             # Keys: https://kotlinlang.org/docs/native-definition-file.html\n\
+             headers = {}\n",
+            headers.join(" ")
+        );
+        std::fs::write(&def, text).with_context(|| format!("failed to write {}", def.display()))?;
+    }
+    editor.save()?;
+    config.shell().status("Adding", format!("C library `{name}` (package `{package}`, interop/{name}.def)"));
+    Ok(())
+}
+
 pub fn remove(config: &Config, ws: &Workspace, names: &[String], section: DependencySection) -> Result<()> {
     if names.is_empty() {
         bail!("nothing to remove");

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use super::new::{NewOptions, android_files, target_section};
 use crate::workspace::Workspace;
 use kargo_manifest::edit::ManifestEditor;
-use kargo_manifest::{Manifest, NativeKind, TargetKind};
+use kargo_manifest::{Manifest, TargetKind};
 use kargo_util::shell::Shell;
 
 /// What `kargo target add` changed.
@@ -267,13 +267,7 @@ pub fn list(ws: &Workspace) -> Result<(Vec<TargetInfo>, Vec<TargetKind>)> {
         enabled.push(TargetInfo { target: TargetKind::Wasm, implicit: false, settings });
     }
     if let Some(native) = &targets.native {
-        let kind = match native.kind {
-            NativeKind::Executable => "executable",
-            NativeKind::Library => "library",
-            NativeKind::Shared => "shared",
-            NativeKind::Static => "static",
-        };
-        let settings = vec![("platforms", native.platforms.join(", ")), ("kind", kind.to_owned())];
+        let settings = vec![("platforms", native.platforms.join(", ")), ("kind", native.kind.as_str().to_owned())];
         enabled.push(TargetInfo { target: TargetKind::Native, implicit: false, settings });
     }
     if let Some(android) = &targets.android {

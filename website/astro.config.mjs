@@ -51,6 +51,7 @@ export default defineConfig({
 						{ label: 'Multiplatform projects', slug: 'guides/multiplatform' },
 						{ label: 'WebAssembly', slug: 'guides/wasm' },
 						{ label: 'Kotlin/Native', slug: 'guides/native' },
+						{ label: 'C interop', slug: 'guides/c-interop' },
 						{ label: 'Android', slug: 'guides/android' },
 						{ label: 'Built-in frameworks', slug: 'guides/frameworks' },
 						{ label: 'A REST API with Ktor', slug: 'guides/ktor' },

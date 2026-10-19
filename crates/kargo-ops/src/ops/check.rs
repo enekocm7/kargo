@@ -155,11 +155,13 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
             plugins: &plugins,
             kotlin_args: &kotlin_args,
             entry_point: None,
-            linker_options: &[],
+            link: Default::default(),
             output_dir: out.join(konan_target),
             debug: false,
             optimize: false,
             test_runner: false,
+            exported: Vec::new(),
+            bundle_id: None,
         };
         // The C bindings are needed to analyze code that calls them.
         let bindings = native_cinterop(ctx, konan_target)?;

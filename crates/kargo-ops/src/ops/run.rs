@@ -220,7 +220,7 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
     let results = if separate_native {
         BuildResults::default()
     } else {
-        build(ctx, &BuildOptions { targets: vec![target], profile: opts.profile.clone(), keep_going: false })?
+        build(ctx, &BuildOptions { targets: vec![target], profile: opts.profile.clone(), ..Default::default() })?
     };
 
     let root = ctx.ws.root();
@@ -477,7 +477,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     let manifest = ctx.ws.manifest();
-    let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
+    manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let host = Host::current()?.konan_target.to_owned();
     let setup = ctx.setup(TargetKind::Native)?;
     let main_sources = sources(ctx, TargetKind::Native, false, &["kt"])?;
@@ -495,6 +495,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut libraries = native_libraries(ctx, &setup, &host, example.is_some())?;
     libraries.extend(native_cinterop(ctx, &host)?);
+    let link = crate::native_interop::native_link(ctx, &host)?;
 
     let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(&host);
     let unit = |name, kind, sources, libraries, entry_point, dir: PathBuf| NativeCompilation {
@@ -506,11 +507,13 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         entry_point,
-        linker_options: &native.linker_options,
+        link: link.clone(),
         output_dir: out.join(dir),
         debug: profile.debug,
         optimize: profile.optimize,
         test_runner: false,
+        exported: Vec::new(),
+        bundle_id: None,
     };
     let artifact = match (program, example) {
         (Program::Main(entry), _) => {

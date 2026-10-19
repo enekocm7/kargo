@@ -285,6 +285,36 @@ impl ManifestEditor {
         Ok(removed)
     }
 
+    /// Adds `[target.native.cinterop.<name>]` with the Kotlin package of the bindings and, when given,
+    /// its `pkg-config` package. Returns `false`, changing nothing, when the entry exists already.
+    pub fn add_cinterop(&mut self, name: &str, package: &str, pkg_config: Option<&str>) -> Result<bool> {
+        let native = self
+            .doc
+            .get_mut("target")
+            .and_then(|t| t.get_mut("native"))
+            .and_then(Item::as_table_mut)
+            .context("kargo.toml has no [target.native]; add the native target first with `kargo target add native`")?;
+        let cinterop = native
+            .entry("cinterop")
+            .or_insert_with(|| {
+                let mut t = Table::new();
+                t.set_implicit(true);
+                Item::Table(t)
+            })
+            .as_table_mut()
+            .context("`cinterop` in [target.native] is not a table")?;
+        if cinterop.contains_key(name) {
+            return Ok(false);
+        }
+        let mut entry = Table::new();
+        entry.insert("package", toml_edit::value(package));
+        if let Some(pkg_config) = pkg_config {
+            entry.insert("pkg-config", toml_edit::value(pkg_config));
+        }
+        cinterop.insert(name, Item::Table(entry));
+        Ok(true)
+    }
+
     /// Enables a built-in framework (`[frameworks] name = true`) unless configured already.
     pub fn enable_framework(&mut self, name: &str) -> Result<bool> {
         let frameworks = self
@@ -542,5 +572,25 @@ members = [\"app\"]
         .unwrap();
         let m = crate::Manifest::parse(&ed.contents()).unwrap();
         assert!(m.dependencies.iter().any(|d| d.bom));
+    }
+
+    #[test]
+    fn adds_cinterop_entries() {
+        let mut ed = editor();
+        let err = ed.add_cinterop("sqlite", "sqlite", None).unwrap_err().to_string();
+        assert!(err.contains("kargo target add native"), "{err}");
+        ed.add_target(TargetKind::Native, "[target.native]\nplatforms = [\"host\"]\n").unwrap();
+        assert!(ed.add_cinterop("sqlite", "sqlite", Some("sqlite3")).unwrap());
+        assert!(ed.add_cinterop("my-lib", "my_lib", None).unwrap());
+        assert!(!ed.add_cinterop("sqlite", "other", None).unwrap());
+        let out = ed.contents();
+        assert!(
+            out.ends_with(
+                "[target.native]\nplatforms = [\"host\"]\n\n[target.native.cinterop.sqlite]\npackage = \"sqlite\"\npkg-config = \"sqlite3\"\n\n[target.native.cinterop.my-lib]\npackage = \"my_lib\"\n"
+            ),
+            "{out}"
+        );
+        let m = crate::Manifest::parse(&out).unwrap();
+        assert_eq!(m.targets.native.unwrap().cinterop.len(), 2);
     }
 }

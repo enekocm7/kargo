@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use super::context::{BuildContext, TargetSetup};
 use super::local::{self, LocalTarget};
 use crate::env::{EnvOptions, build_config_package, build_config_source};
+use crate::native_interop;
 use crate::warnings;
 use crate::workspace::ProfileKind;
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -30,6 +31,8 @@ pub struct BuildOptions {
     pub profile: ProfileKind,
     /// Build every target even when one fails, then report all failures (`--keep-going`).
     pub keep_going: bool,
+    /// Combine the Apple frameworks into an XCFramework (`--xcframework`).
+    pub xcframework: bool,
 }
 
 /// Outputs of the JVM target.
@@ -165,6 +168,9 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         results.wasm = results.wasm.or(r.wasm);
         results.native.extend(r.native);
         results.android = results.android.or(r.android);
+    }
+    if opts.xcframework {
+        create_xcframework(ctx, &results.native)?;
     }
 
     let mut env = env;
@@ -629,30 +635,37 @@ pub fn native_klib(ctx: &BuildContext, konan_target: &str) -> Result<Option<Path
         NativeKind::Library => (out, ctx.fingerprint_dir(TargetKind::Native)),
         _ => (out.join("klib"), ctx.fingerprint_dir(TargetKind::Native).join("klib")),
     };
+    let mut libraries = native_libraries(ctx, &setup, konan_target, false)?;
+    libraries.extend(native_cinterop(ctx, konan_target)?);
     let unit = NativeCompilation {
         name: &manifest.package.name,
         konan_target: konan_target.to_owned(),
         kind: NativeKind::Library,
         sources: srcs,
-        libraries: native_libraries(ctx, &setup, konan_target, false)?,
+        libraries,
         plugins: &plugins,
         kotlin_args: &kotlin_args,
         entry_point: None,
-        linker_options: &native.linker_options,
+        // The klib packs the C sources' library, so whatever links it gets their code.
+        link: native_interop::native_link(ctx, konan_target)?,
         output_dir,
         debug: profile.debug,
         optimize: profile.optimize,
         test_runner: false,
+        exported: Vec::new(),
+        bundle_id: None,
     };
     let what = format!(", {konan_target}");
     unit.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
     Ok(Some(unit.artifact()))
 }
 
-/// The `.def` file of every `[target.native.cinterop]` entry (`None` for a headers-only one),
-/// failing on a missing file before any toolchain is downloaded.
+/// The `.def` file of every `[target.native.cinterop]` entry (`None` for one described by
+/// `headers` or `modules` alone), failing on a missing file, C source or `pkg-config` package
+/// before any toolchain is downloaded.
 pub fn native_cinterop_defs<'a>(ctx: &BuildContext<'a>) -> Result<Vec<(&'a Cinterop, Option<PathBuf>)>> {
     let native = ctx.ws.manifest().targets.native.as_ref().context("the Native target is not enabled")?;
+    native_interop::check(ctx, &native_platforms(ctx)?)?;
     native
         .cinterop
         .iter()
@@ -660,7 +673,7 @@ pub fn native_cinterop_defs<'a>(ctx: &BuildContext<'a>) -> Result<Vec<(&'a Cinte
             let def = ctx.ws.root().join(interop.def_path());
             if def.is_file() {
                 Ok((interop, Some(def)))
-            } else if interop.def.is_none() && !interop.headers.is_empty() {
+            } else if interop.def.is_none() && interop.describes_library() {
                 Ok((interop, None))
             } else {
                 bail!(
@@ -684,8 +697,14 @@ pub fn native_cinterop(ctx: &BuildContext, konan_target: &str) -> Result<Vec<Pat
     let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
     defs.into_iter()
         .map(|(interop, def)| {
-            let unit =
-                CinteropUnit { interop, konan_target: konan_target.to_owned(), root: ctx.ws.root(), def, output_dir: output_dir.clone() };
+            let unit = CinteropUnit {
+                interop,
+                konan_target: konan_target.to_owned(),
+                root: ctx.ws.root(),
+                def: native_interop::cinterop_def(interop, def, &output_dir)?,
+                options: native_interop::cinterop_options(ctx, interop, konan_target)?,
+                output_dir: output_dir.clone(),
+            };
             unit.generate(ctx.shell(), toolchain, &fp_dir, &|| {
                 ctx.shell().status("Generating", format!("{} C bindings ({konan_target})", interop.name))
             })?;
@@ -787,16 +806,24 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
 
     let platforms = native_platforms(ctx)?;
+    // A framework's name is a Swift module name, which cannot have dashes.
+    let own_name = match native.kind {
+        NativeKind::Framework => manifest.package.name.replace('-', "_"),
+        _ => manifest.package.name.clone(),
+    };
+    let bundle_id = native.bundle_id.clone().or_else(|| manifest.package.group.as_ref().map(|g| format!("{g}.{own_name}")));
     // Each platform is a separate Kotlin/Native compiler process.
     let built = super::parallel_map(&platforms, |konan_target| -> Result<Vec<NativeBuild>> {
         let mut libraries = native_libraries(ctx, &setup, konan_target, false)?;
         libraries.extend(native_cinterop(ctx, konan_target)?);
+        let link = native_interop::native_link(ctx, konan_target)?;
+        let exported = native_interop::exported_klibs(ctx, &setup, konan_target)?;
         let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target);
         let mut builds = Vec::new();
         for program in &programs {
             // Bins link into `bin/` with their own fingerprints, so one named like the package does not clash.
             let (name, output_dir, fp_dir, what) = match &program.bin {
-                None => (manifest.package.name.as_str(), out.clone(), ctx.fingerprint_dir(TargetKind::Native), format!(", {konan_target}")),
+                None => (own_name.as_str(), out.clone(), ctx.fingerprint_dir(TargetKind::Native), format!(", {konan_target}")),
                 Some(bin) => {
                     let fp_dir = ctx.fingerprint_dir(TargetKind::Native).join("bin");
                     std::fs::create_dir_all(&fp_dir)?;
@@ -812,11 +839,13 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
                 plugins: &plugins,
                 kotlin_args: &kotlin_args,
                 entry_point: program.entry_point.clone(),
-                linker_options: &native.linker_options,
+                link: link.clone(),
                 output_dir,
                 debug: profile.debug,
                 optimize: profile.optimize,
                 test_runner: false,
+                exported: exported.clone(),
+                bundle_id: bundle_id.clone(),
             };
             unit.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
             builds.push(NativeBuild {
@@ -833,4 +862,72 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
         builds.extend(b?);
     }
     Ok(builds)
+}
+
+/// The slice of an XCFramework a Konan target's framework goes into: the devices or the
+/// simulators of one Apple OS. `None` for a platform that is not Apple's.
+pub fn xcframework_slice(konan_target: &str) -> Option<&'static str> {
+    Some(match konan_target {
+        "ios_arm64" => "ios",
+        "ios_x64" | "ios_simulator_arm64" => "ios-simulator",
+        t if t.starts_with("macos_") => "macos",
+        "tvos_arm64" => "tvos",
+        "tvos_x64" | "tvos_simulator_arm64" => "tvos-simulator",
+        "watchos_arm32" | "watchos_arm64" | "watchos_device_arm64" => "watchos",
+        "watchos_x64" | "watchos_simulator_arm64" => "watchos-simulator",
+        _ => return None,
+    })
+}
+
+/// Combines the frameworks of a build into `target/<profile>/native/<name>.xcframework` with
+/// `xcodebuild -create-xcframework`. Frameworks for the same slice (the iOS simulators on arm64 and
+/// x64) are merged into one with `lipo` first, since a slice holds a single framework.
+pub fn create_xcframework(ctx: &BuildContext, builds: &[NativeBuild]) -> Result<PathBuf> {
+    let frameworks: Vec<&NativeBuild> = builds.iter().filter(|b| b.kind == NativeKind::Framework && b.bin.is_none()).collect();
+    let Some(first) = frameworks.first() else {
+        bail!("`--xcframework` combines frameworks; set kind = \"framework\" in [target.native] and list Apple `platforms`");
+    };
+    if !cfg!(target_os = "macos") {
+        bail!("`--xcframework` runs xcodebuild, which needs macOS with Xcode; build the frameworks here and combine them on a Mac");
+    }
+    let name = first.artifact.file_stem().context("a framework has a name")?.to_string_lossy().into_owned();
+    let mut slices: std::collections::BTreeMap<&str, Vec<&Path>> = std::collections::BTreeMap::new();
+    for build in &frameworks {
+        let slice = xcframework_slice(&build.konan_target).with_context(|| format!("{} is not an Apple platform", build.konan_target))?;
+        slices.entry(slice).or_default().push(&build.artifact);
+    }
+    let native_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Native);
+    let binary = |framework: &Path| {
+        let versioned = framework.join("Versions").join("A").join(&name);
+        if versioned.is_file() { versioned } else { framework.join(&name) }
+    };
+    let mut parts = Vec::new();
+    for (slice, frameworks) in slices {
+        if let [only] = frameworks.as_slice() {
+            parts.push(only.to_path_buf());
+            continue;
+        }
+        let merged = native_dir.join("xcframework").join(slice).join(format!("{name}.framework"));
+        kargo_util::fs::remove_dir_all_if_exists(&merged)?;
+        std::fs::create_dir_all(merged.parent().expect("a framework has a parent"))?;
+        // `cp -R` keeps the symbolic links of a versioned macOS framework.
+        let mut copy = std::process::Command::new("cp");
+        copy.arg("-R").arg(frameworks[0]).arg(&merged);
+        kargo_util::process::run(ctx.shell(), &mut copy, "cp")?;
+        let mut lipo = std::process::Command::new("lipo");
+        lipo.arg("-create").args(frameworks.iter().map(|f| binary(f))).arg("-output").arg(binary(&merged));
+        kargo_util::process::run(ctx.shell(), &mut lipo, "lipo")?;
+        parts.push(merged);
+    }
+    let output = native_dir.join(format!("{name}.xcframework"));
+    kargo_util::fs::remove_dir_all_if_exists(&output)?;
+    ctx.shell().status("Packaging", format!("{name}.xcframework"));
+    let mut xcodebuild = std::process::Command::new("xcodebuild");
+    xcodebuild.arg("-create-xcframework");
+    for part in &parts {
+        xcodebuild.arg("-framework").arg(part);
+    }
+    xcodebuild.arg("-output").arg(&output);
+    kargo_util::process::run(ctx.shell(), &mut xcodebuild, "xcodebuild")?;
+    Ok(output)
 }

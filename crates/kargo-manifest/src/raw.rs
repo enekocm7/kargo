@@ -191,9 +191,92 @@ struct RawNative {
     #[serde(default)]
     linker_options: Vec<String>,
     #[serde(default)]
+    static_libraries: Vec<String>,
+    #[serde(default)]
+    library_paths: Vec<PathBuf>,
+    #[serde(default)]
+    frameworks: Vec<String>,
+    #[serde(default)]
+    platform: BTreeMap<String, RawLinkOptions>,
+    #[serde(default)]
     cinterop: BTreeMap<String, RawCinterop>,
+    c_sources: Option<RawCSources>,
+    bundle_id: Option<String>,
+    #[serde(default)]
+    export: Vec<String>,
     #[serde(default)]
     dependencies: toml::Table,
+}
+
+/// `[target.native.platform.<konan-target>]`: linker options for one platform.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawLinkOptions {
+    #[serde(default)]
+    linker_options: Vec<String>,
+    #[serde(default)]
+    static_libraries: Vec<String>,
+    #[serde(default)]
+    library_paths: Vec<PathBuf>,
+    #[serde(default)]
+    frameworks: Vec<String>,
+}
+
+impl RawLinkOptions {
+    fn into_options(self) -> NativeOptions {
+        NativeOptions {
+            compiler_options: Vec::new(),
+            linker_options: self.linker_options,
+            static_libraries: self.static_libraries,
+            library_paths: self.library_paths,
+            frameworks: self.frameworks,
+        }
+    }
+}
+
+/// `[target.native.cinterop.<name>.platform.<konan-target>]`: options of a C library for one platform.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawNativeOptions {
+    #[serde(default)]
+    compiler_options: Vec<String>,
+    #[serde(default)]
+    linker_options: Vec<String>,
+    #[serde(default)]
+    static_libraries: Vec<String>,
+    #[serde(default)]
+    library_paths: Vec<PathBuf>,
+    #[serde(default)]
+    frameworks: Vec<String>,
+}
+
+impl RawNativeOptions {
+    fn into_options(self) -> NativeOptions {
+        NativeOptions {
+            compiler_options: self.compiler_options,
+            linker_options: self.linker_options,
+            static_libraries: self.static_libraries,
+            library_paths: self.library_paths,
+            frameworks: self.frameworks,
+        }
+    }
+}
+
+/// A string or a list of strings.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            OneOrMany::One(s) => vec![s],
+            OneOrMany::Many(v) => v,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -207,6 +290,163 @@ struct RawCinterop {
     compiler_options: Vec<String>,
     #[serde(default)]
     linker_options: Vec<String>,
+    #[serde(default)]
+    static_libraries: Vec<String>,
+    #[serde(default)]
+    library_paths: Vec<PathBuf>,
+    #[serde(default)]
+    frameworks: Vec<String>,
+    #[serde(default)]
+    platform: BTreeMap<String, RawNativeOptions>,
+    #[serde(default)]
+    header_filter: Vec<String>,
+    #[serde(default)]
+    excluded_functions: Vec<String>,
+    #[serde(default)]
+    strict_enums: Vec<String>,
+    #[serde(default)]
+    non_strict_enums: Vec<String>,
+    #[serde(default)]
+    modules: Vec<String>,
+    language: Option<String>,
+    pkg_config: Option<OneOrMany>,
+    link: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawCSources {
+    sources: Option<Vec<String>>,
+    include_dirs: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    defines: Vec<String>,
+    #[serde(default)]
+    compiler_options: Vec<String>,
+    #[serde(default)]
+    platform: BTreeMap<String, RawCFlags>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawCFlags {
+    #[serde(default)]
+    defines: Vec<String>,
+    #[serde(default)]
+    compiler_options: Vec<String>,
+}
+
+/// The `platform.<konan-target>` tables of `section`, by normalized Konan target name.
+fn platform_tables<R, T>(section: &str, raw: BTreeMap<String, R>, convert: impl Fn(R) -> T) -> Result<BTreeMap<String, T>> {
+    let mut out = BTreeMap::new();
+    for (key, value) in raw {
+        if key == "host" {
+            bail!("[{section}.platform.host] is not supported; name the Kotlin/Native platform, such as `linux_x64` or `macos_arm64`");
+        }
+        let target = normalize_konan_target(&key).with_context(|| format!("invalid table [{section}.platform.{key}]"))?;
+        if out.insert(target.clone(), convert(value)).is_some() {
+            bail!("[{section}.platform] lists `{target}` twice");
+        }
+    }
+    Ok(out)
+}
+
+/// Checks the options of `section` and of its platform tables.
+fn validate_options(section: &str, common: &NativeOptions, platform: &BTreeMap<String, NativeOptions>) -> Result<()> {
+    let tables = std::iter::once((common, section.to_owned())).chain(platform.iter().map(|(t, o)| (o, format!("{section}.platform.{t}"))));
+    for (options, section) in tables {
+        if let Some(bad) = options.static_libraries.iter().find(|l| l.is_empty() || l.contains(['/', '\\'])) {
+            bail!(
+                "invalid static library `{bad}` in [{section}]: give the file name (such as `libfoo.a`) and its directory in `library-paths`"
+            );
+        }
+        if let Some(bad) = options.frameworks.iter().find(|f| f.is_empty() || f.contains(['/', '\\']) || f.ends_with(".framework")) {
+            bail!("invalid framework `{bad}` in [{section}]: give the framework's name, such as `Foundation`");
+        }
+    }
+    Ok(())
+}
+
+fn validate_cinterop(name: String, c: RawCinterop) -> Result<Cinterop> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        bail!("invalid cinterop name `{name}` in [target.native.cinterop] (use letters, digits, `_` and `-`)");
+    }
+    if let Some(pkg) = &c.package
+        && (pkg.is_empty() || !pkg.split('.').all(|part| !part.is_empty()))
+    {
+        bail!("invalid package `{pkg}` in [target.native.cinterop.{name}]");
+    }
+    let section = format!("target.native.cinterop.{name}");
+    let language = match c.language.as_deref() {
+        None => None,
+        Some("C" | "c") => Some(CLanguage::C),
+        Some("Objective-C" | "objective-c" | "objc") => Some(CLanguage::ObjectiveC),
+        Some(other) => bail!("unknown language `{other}` in [{section}] (expected \"C\" or \"Objective-C\")"),
+    };
+    let link = match c.link.as_deref() {
+        None | Some("dynamic") => LinkMode::Dynamic,
+        Some("static") => LinkMode::Static,
+        Some(other) => bail!("unknown link `{other}` in [{section}] (expected \"dynamic\" or \"static\")"),
+    };
+    let pkg_config = c.pkg_config.map(OneOrMany::into_vec).unwrap_or_default();
+    if let Some(bad) = pkg_config.iter().find(|p| p.trim().is_empty() || p.contains(char::is_whitespace)) {
+        bail!("invalid pkg-config package `{bad}` in [{section}]");
+    }
+    for value in c.header_filter.iter().chain(&c.excluded_functions).chain(&c.strict_enums).chain(&c.non_strict_enums).chain(&c.modules) {
+        if value.trim().is_empty() || value.contains(char::is_whitespace) {
+            bail!("invalid entry `{value}` in [{section}]: `.def` lists are separated by spaces, so entries cannot contain any");
+        }
+    }
+    let platform = platform_tables(&section, c.platform, RawNativeOptions::into_options)?;
+    let options = NativeOptions {
+        compiler_options: c.compiler_options,
+        linker_options: c.linker_options,
+        static_libraries: c.static_libraries,
+        library_paths: c.library_paths,
+        frameworks: c.frameworks,
+    };
+    validate_options(&section, &options, &platform)?;
+    Ok(Cinterop {
+        name,
+        def: c.def,
+        package: c.package,
+        headers: c.headers,
+        options,
+        platform,
+        header_filter: c.header_filter,
+        excluded_functions: c.excluded_functions,
+        strict_enums: c.strict_enums,
+        non_strict_enums: c.non_strict_enums,
+        modules: c.modules,
+        language,
+        pkg_config,
+        link,
+    })
+}
+
+fn validate_c_sources(c: RawCSources) -> Result<CSources> {
+    let section = "target.native.c-sources";
+    let sources = c.sources.unwrap_or_else(|| vec![CSources::DEFAULT_DIR.to_owned()]);
+    if sources.is_empty() {
+        bail!("[{section}] `sources` is empty; list C files, directories or globs, or remove the table");
+    }
+    for source in &sources {
+        if source.trim().is_empty() || Path::new(source).is_absolute() || Path::new(source).components().any(|c| c.as_os_str() == "..") {
+            bail!("invalid source `{source}` in [{section}] (use a path or glob inside the project)");
+        }
+    }
+    for define in c.defines.iter().chain(c.platform.values().flat_map(|p| &p.defines)) {
+        if define.is_empty() || define.starts_with('=') || define.starts_with("-D") {
+            bail!("invalid define `{define}` in [{section}] (write `NAME` or `NAME=value`)");
+        }
+    }
+    let platform = platform_tables(section, c.platform, |f| CFlags { defines: f.defines, compiler_options: f.compiler_options })?;
+    Ok(CSources {
+        sources,
+        include_dirs: c.include_dirs.unwrap_or_else(|| vec![PathBuf::from(CSources::DEFAULT_DIR)]),
+        defines: c.defines,
+        compiler_options: c.compiler_options,
+        platform,
+    })
 }
 
 /// Android build settings (rendered into the generated Gradle project).
@@ -1346,38 +1586,52 @@ impl RawManifest {
                                 Some("library") | Some("klib") => NativeKind::Library,
                                 Some("shared") | Some("dynamic") => NativeKind::Shared,
                                 Some("static") => NativeKind::Static,
-                                Some(other) => bail!("unknown native kind `{other}` (expected executable, library, shared or static)"),
+                                Some("framework") => NativeKind::Framework,
+                                Some(other) => {
+                                    bail!("unknown native kind `{other}` (expected executable, library, shared, static or framework)")
+                                }
                             };
+                            if kind == NativeKind::Framework
+                                && let Some(other) = platforms.iter().find(|p| p.as_str() != "host" && !is_apple_target(p))
+                            {
+                                bail!(
+                                    "[target.native] kind = \"framework\" builds Apple frameworks, but `platforms` lists `{other}`; \
+                                     list only macOS, iOS, tvOS or watchOS platforms"
+                                );
+                            }
+                            if n.bundle_id.is_some() && kind != NativeKind::Framework {
+                                bail!("[target.native] `bundle-id` only applies to kind = \"framework\"");
+                            }
+                            if !n.export.is_empty() && !matches!(kind, NativeKind::Framework | NativeKind::Shared | NativeKind::Static) {
+                                bail!("[target.native] `export` only applies to kind = \"framework\", \"shared\" or \"static\"");
+                            }
+                            if let Some(bad) = n.export.iter().find(|e| e.split(':').count() != 2 || e.split(':').any(str::is_empty)) {
+                                bail!("invalid entry `{bad}` in [target.native] export (expected `group:artifact` of a dependency)");
+                            }
                             let cinterop = n
                                 .cinterop
                                 .into_iter()
-                                .map(|(name, c)| -> Result<Cinterop> {
-                                    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                                        bail!(
-                                            "invalid cinterop name `{name}` in [target.native.cinterop] (use letters, digits, `_` and `-`)"
-                                        );
-                                    }
-                                    if let Some(pkg) = &c.package
-                                        && (pkg.is_empty() || !pkg.split('.').all(|part| !part.is_empty()))
-                                    {
-                                        bail!("invalid package `{pkg}` in [target.native.cinterop.{name}]");
-                                    }
-                                    Ok(Cinterop {
-                                        name,
-                                        def: c.def,
-                                        package: c.package,
-                                        headers: c.headers,
-                                        compiler_options: c.compiler_options,
-                                        linker_options: c.linker_options,
-                                    })
-                                })
+                                .map(|(name, c)| validate_cinterop(name, c))
                                 .collect::<Result<Vec<_>>>()?;
+                            let platform = platform_tables("target.native", n.platform, RawLinkOptions::into_options)?;
+                            let options = NativeOptions {
+                                compiler_options: Vec::new(),
+                                linker_options: n.linker_options,
+                                static_libraries: n.static_libraries,
+                                library_paths: n.library_paths,
+                                frameworks: n.frameworks,
+                            };
+                            validate_options("target.native", &options, &platform)?;
                             Ok(NativeTarget {
                                 platforms,
                                 kind,
                                 entry_point: n.entry_point,
-                                linker_options: n.linker_options,
+                                options,
+                                platform,
                                 cinterop,
+                                c_sources: n.c_sources.map(validate_c_sources).transpose()?,
+                                bundle_id: n.bundle_id,
+                                export: n.export,
                                 dependencies: deps.parse(&n.dependencies, "target.native.dependencies", false, Some(TargetKind::Native))?,
                             })
                         })

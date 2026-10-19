@@ -424,6 +424,8 @@ pub enum NativeKind {
     Library,
     Shared,
     Static,
+    /// An Apple framework (`-produce framework`) for Swift and Objective-C.
+    Framework,
 }
 
 impl NativeKind {
@@ -434,8 +436,53 @@ impl NativeKind {
             NativeKind::Library => "library",
             NativeKind::Shared => "shared",
             NativeKind::Static => "static",
+            NativeKind::Framework => "framework",
         }
     }
+}
+
+/// Whether `konan_target` builds for an Apple platform (macOS, iOS, tvOS, watchOS).
+pub fn is_apple_target(konan_target: &str) -> bool {
+    ["macos_", "ios_", "tvos_", "watchos_"].iter().any(|p| konan_target.starts_with(p))
+}
+
+/// C compiler and linker options, from `[target.native]`, `[target.native.cinterop.<name>]` and
+/// their `platform.<konan-target>` tables.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NativeOptions {
+    /// Options for clang (`-I`, `-D`, ...); only C bindings have them.
+    pub compiler_options: Vec<String>,
+    pub linker_options: Vec<String>,
+    /// Static libraries (`libfoo.a`) found in `library-paths` and embedded in the output.
+    pub static_libraries: Vec<String>,
+    /// Directories searched for `static-libraries` and passed to the linker as `-L`, relative to the project root.
+    pub library_paths: Vec<PathBuf>,
+    /// Apple frameworks to link (`-framework <name>`), on Apple platforms only.
+    pub frameworks: Vec<String>,
+}
+
+impl NativeOptions {
+    /// These options followed by `more`.
+    pub fn extend(&mut self, more: &NativeOptions) {
+        self.compiler_options.extend(more.compiler_options.iter().cloned());
+        self.linker_options.extend(more.linker_options.iter().cloned());
+        self.static_libraries.extend(more.static_libraries.iter().cloned());
+        self.library_paths.extend(more.library_paths.iter().cloned());
+        self.frameworks.extend(more.frameworks.iter().cloned());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == NativeOptions::default()
+    }
+}
+
+/// The options of a table for `konan_target`: the common ones, then those of `platform.<konan_target>`.
+fn options_for(common: &NativeOptions, platform: &BTreeMap<String, NativeOptions>, konan_target: &str) -> NativeOptions {
+    let mut options = common.clone();
+    if let Some(more) = platform.get(konan_target) {
+        options.extend(more);
+    }
+    options
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,10 +491,53 @@ pub struct NativeTarget {
     pub platforms: Vec<String>,
     pub kind: NativeKind,
     pub entry_point: Option<String>,
-    pub linker_options: Vec<String>,
+    /// Linker options for every platform (`compiler_options` is always empty here).
+    pub options: NativeOptions,
+    /// More options per Konan target, from `[target.native.platform.<konan-target>]`.
+    pub platform: BTreeMap<String, NativeOptions>,
     /// C libraries bound with `cinterop`, from `[target.native.cinterop.<name>]`, by name.
     pub cinterop: Vec<Cinterop>,
+    /// C and C++ sources compiled into a static library and linked in, from `[target.native.c-sources]`.
+    pub c_sources: Option<CSources>,
+    /// `bundle-id` of a framework's `Info.plist`.
+    pub bundle_id: Option<String>,
+    /// Dependencies (`group:artifact`) whose API a framework, shared or static library exports too.
+    pub export: Vec<String>,
     pub dependencies: Vec<Dependency>,
+}
+
+impl NativeTarget {
+    /// The linker options for `konan_target`, with those of its platform table.
+    pub fn options_for(&self, konan_target: &str) -> NativeOptions {
+        options_for(&self.options, &self.platform, konan_target)
+    }
+}
+
+/// How a C library found with `pkg-config` (or listed with `-l`) is linked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkMode {
+    /// The program loads the system's shared library (`-lfoo`).
+    #[default]
+    Dynamic,
+    /// The static library (`libfoo.a`) is embedded, so the program runs without the library installed.
+    Static,
+}
+
+/// The language of the headers a `cinterop` entry binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CLanguage {
+    C,
+    ObjectiveC,
+}
+
+impl CLanguage {
+    /// The value of `language` in a `.def` file.
+    pub fn def_value(self) -> &'static str {
+        match self {
+            CLanguage::C => "C",
+            CLanguage::ObjectiveC => "Objective-C",
+        }
+    }
 }
 
 /// A C library bound to Kotlin with the Kotlin/Native `cinterop` tool.
@@ -460,14 +550,93 @@ pub struct Cinterop {
     pub package: Option<String>,
     /// Extra headers to bind, as named in `#include`.
     pub headers: Vec<String>,
-    pub compiler_options: Vec<String>,
-    pub linker_options: Vec<String>,
+    pub options: NativeOptions,
+    /// More options per Konan target, from `platform.<konan-target>`.
+    pub platform: BTreeMap<String, NativeOptions>,
+    /// `.def` properties written in kargo.toml: `headerFilter`, `excludedFunctions`, `strictEnums`,
+    /// `nonStrictEnums`, `modules` and `language`.
+    pub header_filter: Vec<String>,
+    pub excluded_functions: Vec<String>,
+    pub strict_enums: Vec<String>,
+    pub non_strict_enums: Vec<String>,
+    /// Clang modules (Objective-C frameworks) to bind.
+    pub modules: Vec<String>,
+    pub language: Option<CLanguage>,
+    /// `pkg-config` packages whose compiler and linker flags the bindings use.
+    pub pkg_config: Vec<String>,
+    pub link: LinkMode,
 }
 
 impl Cinterop {
     /// The `.def` file: `def` if set, otherwise `interop/<name>.def`.
     pub fn def_path(&self) -> PathBuf {
         self.def.clone().unwrap_or_else(|| Path::new("interop").join(format!("{}.def", self.name)))
+    }
+
+    /// The options for `konan_target`, with those of its platform table.
+    pub fn options_for(&self, konan_target: &str) -> NativeOptions {
+        options_for(&self.options, &self.platform, konan_target)
+    }
+
+    /// The `.def` properties set in kargo.toml, in the order they are written.
+    pub fn def_properties(&self) -> Vec<(&'static str, String)> {
+        let mut props = Vec::new();
+        let mut list = |key, values: &[String]| {
+            if !values.is_empty() {
+                props.push((key, values.join(" ")));
+            }
+        };
+        list("headerFilter", &self.header_filter);
+        list("excludedFunctions", &self.excluded_functions);
+        list("strictEnums", &self.strict_enums);
+        list("nonStrictEnums", &self.non_strict_enums);
+        list("modules", &self.modules);
+        if let Some(language) = self.language {
+            props.push(("language", language.def_value().to_owned()));
+        }
+        props
+    }
+
+    /// Whether kargo.toml describes the library without a `.def` file: headers or Clang modules to bind.
+    pub fn describes_library(&self) -> bool {
+        !self.headers.is_empty() || !self.modules.is_empty()
+    }
+}
+
+/// `[target.native.c-sources]`: C, C++ and Objective-C files compiled with the clang of the
+/// Kotlin/Native toolchain into a static library that every native binary links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CSources {
+    /// Files, directories (searched recursively) and globs, relative to the project root.
+    pub sources: Vec<String>,
+    /// `-I` directories, relative to the project root; the C bindings get them too.
+    pub include_dirs: Vec<PathBuf>,
+    /// `-D` macros: `NAME` or `NAME=value`.
+    pub defines: Vec<String>,
+    pub compiler_options: Vec<String>,
+    /// More defines and options per Konan target.
+    pub platform: BTreeMap<String, CFlags>,
+}
+
+/// Defines and compiler options of a `[target.native.c-sources.platform.<konan-target>]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CFlags {
+    pub defines: Vec<String>,
+    pub compiler_options: Vec<String>,
+}
+
+impl CSources {
+    /// The directory searched when `sources` is not set, which is also the default include directory.
+    pub const DEFAULT_DIR: &'static str = "c";
+
+    /// The defines and compiler options for `konan_target`, with those of its platform table.
+    pub fn flags_for(&self, konan_target: &str) -> CFlags {
+        let mut flags = CFlags { defines: self.defines.clone(), compiler_options: self.compiler_options.clone() };
+        if let Some(more) = self.platform.get(konan_target) {
+            flags.defines.extend(more.defines.iter().cloned());
+            flags.compiler_options.extend(more.compiler_options.iter().cloned());
+        }
+        flags
     }
 }
 

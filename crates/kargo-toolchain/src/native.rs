@@ -83,6 +83,10 @@ fn cinterop_in(home: &Path) -> PathBuf {
     home.join("bin").join(if cfg!(windows) { "cinterop.bat" } else { "cinterop" })
 }
 
+fn run_konan_in(home: &Path) -> PathBuf {
+    home.join("bin").join(if cfg!(windows) { "run_konan.bat" } else { "run_konan" })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeToolchain {
     pub home: PathBuf,
@@ -107,6 +111,15 @@ impl NativeToolchain {
     pub fn cinterop_command(&self) -> Command {
         let mut cmd = Command::new(cinterop_in(&self.home));
         cmd.env("KONAN_DATA_DIR", &self.data_dir);
+        cmd
+    }
+
+    /// A `run_konan <tool>` command with Kargo's Kotlin/Native data directory. `run_konan clang
+    /// clang <konan-target>` runs the toolchain's clang with the target's sysroot and flags, and
+    /// `run_konan llvm llvm-ar` its archiver. They print the command they run on stdout.
+    pub fn run_konan_command(&self, tool: &str) -> Command {
+        let mut cmd = Command::new(run_konan_in(&self.home));
+        cmd.arg(tool).env("KONAN_DATA_DIR", &self.data_dir);
         cmd
     }
 

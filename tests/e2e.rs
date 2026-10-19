@@ -1340,6 +1340,73 @@ fn native_cinterop_tests() {
     t.kargo("cin").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
 }
 
+/// The Kotlin/Native target of this machine.
+fn host_konan_target() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => "mingw_x64",
+        ("macos", "aarch64") => "macos_arm64",
+        ("macos", _) => "macos_x64",
+        _ => "linux_x64",
+    }
+}
+
+#[test]
+fn native_c_sources_and_platform_options() {
+    require_e2e!();
+    require_native!();
+    let t = E2e::new();
+    t.create(&["csrc", "--target", "native"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("csrc/kargo.toml")).unwrap();
+    let host = host_konan_target();
+    // C sources under `c/`, compiled with the toolchain's clang; their directory is also the bindings' include directory.
+    t.write(
+        "csrc/kargo.toml",
+        &format!(
+            "{manifest}\n[target.native.c-sources]\ndefines = [\"FACTOR=2\"]\n\n[target.native.c-sources.platform.{host}]\n\
+             defines = [\"BONUS=100\"]\n\n[target.native.cinterop.mathx]\nheaders = [\"mathx.h\"]\npackage = \"mathx\"\n\
+             excluded-functions = [\"mathx_hidden\"]\n"
+        ),
+    );
+    t.write("csrc/c/mathx.h", "int mathx_scale(int x);\nint mathx_hidden(void);\n");
+    t.write(
+        "csrc/c/mathx.c",
+        "#include \"mathx.h\"\n#ifndef BONUS\n#define BONUS 0\n#endif\nint mathx_scale(int x) { return x * FACTOR + BONUS; }\nint mathx_hidden(void) { return 0; }\n",
+    );
+    t.write(
+        "csrc/src/Main.kt",
+        "import kotlinx.cinterop.ExperimentalForeignApi\n\n@OptIn(ExperimentalForeignApi::class)\nfun main() = println(\"scaled \" + mathx.mathx_scale(21))\n",
+    );
+    t.write(
+        "csrc/tests/GreetingTest.kt",
+        "import kotlinx.cinterop.ExperimentalForeignApi\nimport kotlin.test.Test\nimport kotlin.test.assertEquals\n\n\
+         @OptIn(ExperimentalForeignApi::class)\nclass ScaleTest {\n    @Test\n    fun scales() = assertEquals(104, mathx.mathx_scale(2))\n}\n",
+    );
+    t.kargo("csrc")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("C sources"))
+        .stdout(predicate::str::contains("scaled 142"));
+    t.kargo("csrc").arg("build").assert().success().stderr(predicate::str::contains("Compiling").not());
+    t.kargo("csrc").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
+    // An excluded function gets no binding.
+    t.write(
+        "csrc/src/Main.kt",
+        "import kotlinx.cinterop.ExperimentalForeignApi\n\n@OptIn(ExperimentalForeignApi::class)\nfun main() = println(mathx.mathx_hidden())\n",
+    );
+    t.kargo("csrc").arg("build").assert().code(101).stderr(predicate::str::contains("mathx_hidden"));
+
+    // A shared library comes with its C header in `include/`.
+    t.write("csrc/src/Main.kt", "fun twice(x: Int): Int = x * 2\n");
+    let shared =
+        std::fs::read_to_string(t.dir.path().join("csrc/kargo.toml")).unwrap().replace("kind = \"executable\"", "kind = \"shared\"");
+    t.write("csrc/kargo.toml", &shared);
+    t.kargo("csrc").arg("build").assert().success();
+    let include = t.dir.path().join(format!("csrc/target/debug/native/{host}/include"));
+    let header = if host == "mingw_x64" { "csrc_api.h" } else { "libcsrc_api.h" };
+    assert!(include.join(header).is_file(), "no {header} in {}", include.display());
+}
+
 #[test]
 fn android_app_with_compose() {
     require_e2e!();

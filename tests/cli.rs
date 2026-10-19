@@ -1155,6 +1155,81 @@ fn missing_cinterop_def_is_reported_before_compiling() {
 }
 
 #[test]
+fn missing_c_libraries_and_sources_are_reported_before_compiling() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    std::fs::create_dir_all(p.path().join("pc")).unwrap();
+    p.file("pc/other.pc", "Libs: -lother\n");
+    p.file(
+        "kargo.toml",
+        &manifest("cdemo", "[target.native.cinterop.zz]\nheaders = [\"zz.h\"]\npkg-config = \"kargo-test-missing-lib\"\n"),
+    );
+    // Kargo reads `.pc` files itself, from PKG_CONFIG_PATH and the usual directories.
+    for cmd in ["build", "check"] {
+        p.kargo()
+            .args([cmd, "--target", "native"])
+            .env("PKG_CONFIG_PATH", p.path().join("pc"))
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains(
+                "C library `kargo-test-missing-lib` of [target.native.cinterop.zz] not found: no pkg-config file `kargo-test-missing-lib.pc` was found",
+            ))
+            .stderr(predicate::str::contains("set PKG_CONFIG_PATH"));
+    }
+    p.file("pc/kargo-test-missing-lib.pc", "Requires: kargo-test-gone\n");
+    p.kargo()
+        .args(["build", "--target", "native"])
+        .env("PKG_CONFIG_PATH", p.path().join("pc"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no pkg-config file `kargo-test-gone.pc` was found"));
+
+    // `[target.native.c-sources]` compiles `c/` unless `sources` says otherwise.
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.c-sources]\n"));
+    p.kargo()
+        .args(["build", "--target", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("compiles the C files under `c/`, which does not exist"));
+    p.file("kargo.toml", &manifest("cdemo", "[target.native.c-sources]\nsources = [\"native/**/*.c\"]\n"));
+    p.kargo()
+        .args(["check", "--target", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no file matches the sources native/**/*.c of [target.native.c-sources]"));
+    p.file("kargo.toml", &manifest("cdemo", "[target.native]\nkind = \"framework\"\nplatforms = [\"linux_x64\"]\n"));
+    p.kargo().args(["build", "--target", "native"]).assert().failure().stderr(predicate::str::contains("builds Apple frameworks"));
+}
+
+#[test]
+fn add_cinterop_scaffolds_the_entry_and_def_file() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("cdemo", ""));
+    p.kargo()
+        .args(["add", "--cinterop", "sqlite"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("add the native target first with `kargo target add native`"));
+    p.file("kargo.toml", &manifest("cdemo", "\n[target.native]\n"));
+    p.kargo()
+        .args(["add", "--cinterop", "sqlite", "--header", "sqlite3.h", "--pkg-config", "sqlite3"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding C library `sqlite` (package `sqlite`, interop/sqlite.def)"));
+    let toml = std::fs::read_to_string(p.path().join("kargo.toml")).unwrap();
+    assert!(toml.ends_with("[target.native.cinterop.sqlite]\npackage = \"sqlite\"\npkg-config = \"sqlite3\"\n"), "{toml}");
+    let def = std::fs::read_to_string(p.path().join("interop/sqlite.def")).unwrap();
+    assert!(def.ends_with("headers = sqlite3.h\n"), "{def}");
+    p.kargo().args(["add", "--cinterop", "sqlite"]).assert().failure().stderr(predicate::str::contains("already exists"));
+    // A def file that exists is kept.
+    p.file("interop/curl.def", "headers = curl/curl.h\n");
+    p.kargo().args(["add", "--cinterop", "curl"]).assert().success().stderr(predicate::str::contains("keeping the existing"));
+    assert_eq!(std::fs::read_to_string(p.path().join("interop/curl.def")).unwrap(), "headers = curl/curl.h\n");
+    p.kargo().args(["add", "--header", "x.h", "g:a"]).assert().failure().stderr(predicate::str::contains("--cinterop"));
+}
+
+#[test]
 fn disabled_target_is_rejected() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("jvmonly", ""));
