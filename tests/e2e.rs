@@ -5,6 +5,7 @@
 //! ```text
 //! KARGO_E2E=1 cargo test --test e2e
 //! KARGO_E2E=1 KARGO_E2E_NATIVE=1 cargo test --test e2e   # also Kotlin/Native (slow)
+//! KARGO_E2E=1 KARGO_E2E_GRAALVM=1 cargo test --test e2e   # also GraalVM native images (downloads GraalVM)
 //! ```
 //!
 //! They share the user's Kargo cache so the compiler is downloaded only once.
@@ -2045,4 +2046,85 @@ fn custom_profiles_have_their_own_output_jvm_args_and_dependencies() {
     t.kargo("app").arg("run").assert().success().stdout(predicate::str::contains("env=dev"));
     t.kargo("app").args(["run", "--profile", "staging"]).assert().success().stdout(predicate::str::contains("env=staging"));
     t.kargo("app").args(["test", "--profile", "staging"]).assert().success();
+}
+
+/// Runs `program` with neither `JAVA_HOME` nor a `java` on `PATH`, as on a machine without Java.
+fn run_without_java(program: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let path = if cfg!(windows) {
+        std::env::var("SystemRoot").map(|root| format!(r"{root}\System32")).unwrap_or_default()
+    } else {
+        "/usr/bin:/bin".to_owned()
+    };
+    StdCommand::new(program).args(args).env_remove("JAVA_HOME").env("PATH", path).output().unwrap()
+}
+
+#[test]
+fn jvm_packages_runtime_images_and_app_images() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write(
+        "app/src/Main.kt",
+        r#"fun main(args: Array<String>) { println(System.getProperty("greeting") + " " + args.joinToString("|")) }"#,
+    );
+    let manifest = std::fs::read_to_string(t.dir.path().join("app/kargo.toml")).unwrap();
+    let extra = "[target.jvm]\njvm-args = [\"-Dgreeting=Hi there\"]\n\n[package.installer]\ntype = \"app-image\"\nconsole = true\n";
+    t.write("app/kargo.toml", &format!("{manifest}\n{extra}"));
+
+    // A runtime image runs on a machine without Java.
+    let image = t.kargo("app").args(["package", "-q", "--format", "jlink"]).assert().success().get_output().stdout.clone();
+    let image = std::path::PathBuf::from(String::from_utf8(image).unwrap().trim());
+    assert_eq!(image.file_name().unwrap(), "app-0.1.0");
+    let launcher = image.join("bin").join(if cfg!(windows) { "app.bat" } else { "app" });
+    let out = run_without_java(&launcher, &["a b", "c"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hi there a b|c");
+    let release = std::fs::read_to_string(image.join("runtime/release")).unwrap();
+    assert!(release.contains("java.base") && !release.contains("java.desktop"), "a trimmed runtime: {release}");
+
+    // So does jpackage's application image.
+    let app = t.kargo("app").args(["package", "-q", "--format", "installer"]).assert().success().get_output().stdout.clone();
+    let app = std::path::PathBuf::from(String::from_utf8(app).unwrap().trim());
+    let launcher = match std::env::consts::OS {
+        "windows" => app.join("app.exe"),
+        "macos" => app.join("Contents/MacOS/app"),
+        _ => app.join("bin/app"),
+    };
+    let out = run_without_java(&launcher, &["x"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hi there x");
+}
+
+#[test]
+fn jvm_builds_a_native_image_with_traced_configuration() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_GRAALVM").is_none() {
+        eprintln!("skipping: set KARGO_E2E_GRAALVM=1 to build GraalVM native images");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["app"]);
+    // Reflection that native-image cannot see without the tracing agent's configuration.
+    t.write(
+        "app/src/Main.kt",
+        r#"package com.example.app
+
+class Greeter { fun greet() = "Hello from reflection" }
+
+fun main() {
+    val name = listOf("com.example.app", "Greeter").joinToString(".")
+    val greeter = Class.forName(name).getDeclaredConstructor().newInstance() as Greeter
+    println(greeter.greet())
+}
+"#,
+    );
+    let manifest = std::fs::read_to_string(t.dir.path().join("app/kargo.toml")).unwrap();
+    t.write("app/kargo.toml", &format!("{manifest}\n[toolchain]\ngraalvm = \"25\"\n"));
+
+    t.kargo("app").args(["run", "--native-agent"]).assert().success().stdout(predicate::str::contains("Hello from reflection"));
+    assert!(t.dir.path().join("app/native-image").read_dir().unwrap().next().is_some(), "the agent wrote configuration");
+    let exe =
+        t.kargo("app").args(["package", "-q", "--release", "--format", "native-image"]).assert().success().get_output().stdout.clone();
+    let exe = std::path::PathBuf::from(String::from_utf8(exe).unwrap().trim());
+    let out = run_without_java(&exe, &[]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello from reflection");
 }

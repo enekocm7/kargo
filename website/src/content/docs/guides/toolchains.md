@@ -1,6 +1,6 @@
 ---
 title: Managing JDKs
-description: Pin a JDK per project and manage installed JDKs, Kotlin/Native and Gradle distributions.
+description: Pin a JDK per project and manage installed JDKs, GraalVMs, Kotlin/Native and Gradle distributions.
 ---
 
 Kargo can use the JDK you already have, or download and manage JDKs for you, per project.
@@ -49,6 +49,7 @@ Everyone on the team, and CI, builds with the same JDK, without anyone having to
 $ kargo toolchain available          # JDK versions you can install (LTS releases are marked)
 $ kargo toolchain install jdk 21     # newest 21
 $ kargo toolchain install jdk 21.0.5+11
+$ kargo toolchain install graalvm 25 # newest GraalVM CE for JDK 25 (or: graalvm oracle-25)
 $ kargo toolchain install native 2.4.21
 $ kargo toolchain install gradle     # the Gradle this Android project needs (or: gradle 9.6.0)
 $ kargo toolchain install            # everything the current project needs
@@ -56,12 +57,28 @@ $ kargo toolchain list               # installed toolchains, disk usage, and wha
 $ kargo toolchain which              # the toolchains this project resolves to
 $ kargo toolchain remove jdk 17      # every JDK 17 release
 $ kargo toolchain remove jdk 17.0.13+11
+$ kargo toolchain remove graalvm 25  # every GraalVM CE 25 release
 $ kargo toolchain remove native 2.4.10
 $ kargo toolchain remove gradle 9.5.0
 $ kargo toolchain install kotlin-lsp # the Kotlin language server `kargo lsp --server kotlin-lsp` runs (or: kls)
 ```
 
 `kargo toolchain ls` and `kargo toolchain rm` are aliases.
+
+## GraalVM
+
+[`kargo package --format native-image`](../distributing/#native-executables) and `kargo run --native-agent` need a [GraalVM](https://www.graalvm.org). Pin one like a JDK:
+
+```toml title="kargo.toml"
+[toolchain]
+graalvm = "25"             # the newest GraalVM Community Edition for JDK 25
+# graalvm = "oracle-25"    # Oracle GraalVM, under the GraalVM Free Terms and Conditions
+# graalvm = "system"       # the default: GRAALVM_HOME, then a JAVA_HOME or PATH with native-image
+```
+
+Kargo looks the release up with the [foojay Disco API](https://api.foojay.io), downloads it the first time it's needed, verifies its SHA-256 and installs it under `~/.kargo/toolchains/graalvm/<distribution>-<version>`. GraalVM only builds native images; `[toolchain] jdk` still compiles, runs and tests the project.
+
+Kargo also downloads the [GraalVM reachability metadata repository](https://github.com/oracle/graalvm-reachability-metadata) (version 1.0.20) into `~/.kargo/toolchains/graalvm-reachability-metadata/` the first time a native image needs it.
 
 ## Kotlin/Native
 

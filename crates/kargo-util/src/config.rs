@@ -71,6 +71,11 @@ impl Config {
         self.toolchains_dir().join("jdk")
     }
 
+    /// Kargo-managed GraalVM distributions, one directory per distribution and version.
+    pub fn graalvm_dir(&self) -> PathBuf {
+        self.toolchains_dir().join("graalvm")
+    }
+
     /// Kotlin/Native distributions, one directory per version.
     pub fn native_dir(&self) -> PathBuf {
         self.toolchains_dir().join("kotlin-native")

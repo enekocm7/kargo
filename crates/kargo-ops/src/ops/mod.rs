@@ -12,6 +12,7 @@ pub mod lint;
 pub mod local;
 pub mod metadata;
 pub mod new;
+pub mod packaging;
 pub mod publish;
 pub mod run;
 pub mod target;
@@ -28,6 +29,7 @@ use anyhow::{Context, Result, bail};
 
 use self::build::{build_jvm, jvm_classpaths, native_platforms, native_resolution, select_targets, wasm_resolution};
 use self::context::BuildContext;
+pub use self::packaging::PackageFormat;
 use crate::env::EnvOptions;
 use crate::workspace::Workspace;
 use kargo_compiler::jar::{JarManifest, write_jar};
@@ -387,8 +389,15 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target, launching
 /// the project's main class or, with `bin`, that `[[bin]]` (`<bin>-<version>-all.jar`).
 /// A library (no main class) gets a jar of its own classes and a sources jar instead,
-/// unless `fat` asks for the self-contained jar.
-pub fn package(ctx: &BuildContext, target: Option<TargetKind>, bin: Option<&str>, fat: bool) -> Result<Vec<PathBuf>> {
+/// unless `fat` asks for the self-contained jar. Other formats build a `jlink` runtime image,
+/// a GraalVM native executable or a `jpackage` installer (see [`packaging`]).
+pub fn package(
+    ctx: &BuildContext,
+    target: Option<TargetKind>,
+    bin: Option<&str>,
+    fat: bool,
+    format: PackageFormat,
+) -> Result<Vec<PathBuf>> {
     let targets = &ctx.ws.manifest().targets;
     let target = match target {
         Some(t) if !targets.is_enabled(t) => bail!("target `{t}` is not enabled in kargo.toml"),
@@ -396,8 +405,16 @@ pub fn package(ctx: &BuildContext, target: Option<TargetKind>, bin: Option<&str>
         None if !targets.is_enabled(TargetKind::Jvm) && targets.is_enabled(TargetKind::Android) => TargetKind::Android,
         None => TargetKind::Jvm,
     };
+    if format != PackageFormat::Jar {
+        if target != TargetKind::Jvm {
+            bail!("`--format {}` packages a JVM application and needs the jvm target, not {target}", format.as_str());
+        }
+        if fat {
+            bail!("`--fat` builds a jar and does not apply to `--format {}`", format.as_str());
+        }
+    }
     match target {
-        TargetKind::Jvm => package_jvm(ctx, bin, fat).map(|jar| vec![jar]),
+        TargetKind::Jvm => package_jvm(ctx, bin, fat, format),
         TargetKind::Android => {
             if bin.is_some() || fat {
                 bail!("`--bin` and `--fat` build JVM jars and do not apply to `kargo package -t android`");
@@ -421,7 +438,7 @@ fn package_android(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathBuf> {
+fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: PackageFormat) -> Result<Vec<PathBuf>> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
         bail!("`kargo package` creates an executable jar and needs the JVM target; use `kargo build` for other targets");
     }
@@ -436,29 +453,44 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool) -> Result<PathB
     let jvm = build_jvm(ctx)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
     let pkg = &ctx.ws.manifest().package;
-    if bin.is_none() && !fat && jvm.main_class.is_none() {
-        let jar = publish::package_library(ctx, &jvm)?;
-        let mut env = env;
-        env.push(("KARGO_PACKAGE".to_owned(), jar.to_string_lossy().into_owned()));
-        crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
-        build::finished(ctx, start);
-        return Ok(jar);
-    }
     let name = bin.unwrap_or(&pkg.name);
+    let app = |bin_main: Option<String>| -> Result<packaging::App> {
+        let Some(main_class) = bin_main.or_else(|| jvm.main_class.clone()) else {
+            bail!(
+                "`--format {}` packages an application, but the package has no main class: {}",
+                format.as_str(),
+                jvm.main_class_error.as_deref().unwrap_or("set [target.jvm] main-class")
+            );
+        };
+        Ok(packaging::App { name, main_class, jvm: &jvm, dir: ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("package") })
+    };
+    let files = match format {
+        PackageFormat::Jar if bin.is_none() && !fat && jvm.main_class.is_none() => vec![publish::package_library(ctx, &jvm)?],
+        PackageFormat::Jar => vec![fat_jar(ctx, &jvm, name, bin_main)?],
+        PackageFormat::Jlink => vec![packaging::jlink_image(ctx, &app(bin_main)?)?],
+        PackageFormat::NativeImage => vec![packaging::native_image(ctx, &app(bin_main)?)?],
+        PackageFormat::Installer => packaging::installer(ctx, &app(bin_main)?)?,
+    };
+    let mut env = env;
+    env.push(("KARGO_PACKAGE".to_owned(), files[0].to_string_lossy().into_owned()));
+    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
+    build::finished(ctx, start);
+    Ok(files)
+}
+
+/// The self-contained `<name>-<version>-all.jar`.
+fn fat_jar(ctx: &BuildContext, jvm: &build::JvmBuild, name: &str, bin_main: Option<String>) -> Result<PathBuf> {
+    let pkg = &ctx.ws.manifest().package;
     let dest = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(format!("{name}-{}-all.jar", pkg.version));
     ctx.shell().status("Packaging", format!("{name} v{} ({})", pkg.version, dest.display()));
     let manifest = JarManifest {
-        main_class: bin_main.or(jvm.main_class),
+        main_class: bin_main.or_else(|| jvm.main_class.clone()),
         class_path: Vec::new(),
         implementation_title: Some(pkg.name.clone()),
         implementation_version: Some(pkg.version.clone()),
     };
     let jars: Vec<PathBuf> = jvm.runtime_classpath.iter().filter(|p| p.extension().is_some_and(|e| e == "jar")).cloned().collect();
     write_jar(&dest, &jvm.classes, &manifest, &jars).context("failed to create the fat jar")?;
-    let mut env = env;
-    env.push(("KARGO_PACKAGE".to_owned(), dest.to_string_lossy().into_owned()));
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
-    build::finished(ctx, start);
     Ok(dest)
 }
 

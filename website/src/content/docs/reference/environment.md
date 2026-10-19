@@ -19,6 +19,7 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `KARGO_NATIVE_CACHE` | `false` (or `0`, `no`, `off`) compiles debug Kotlin/Native builds without the precompiled [standard library cache](../../guides/native/#build-speed) |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
 | `JAVA_HOME` | JDK to use when `[toolchain] jdk` is `system` |
+| `GRAALVM_HOME` | GraalVM to use when `[toolchain] graalvm` is `system` (the default): for `kargo package --format native-image` and `kargo run --native-agent`. Without it, a `JAVA_HOME` or `PATH` that has `native-image` |
 | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android SDK location |
 | `BROWSER` | Browser that `kargo doc --open` and `kargo run --open` start (default: the system's default browser) |
 | `KARGO_BROWSER` | Browser that runs [Wasm browser tests](../../guides/wasm/#testing-in-a-browser): the path of an executable, or a command on `PATH`. Default: Chrome, Chromium, Edge, Brave or Firefox, whichever Kargo finds first |

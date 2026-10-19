@@ -1,21 +1,23 @@
-//! `kargo toolchain`: managing JDKs, Kotlin/Native and Gradle distributions, and the Kotlin
-//! language servers behind `kargo lsp`.
+//! `kargo toolchain`: managing JDKs, GraalVMs, Kotlin/Native and Gradle distributions, and the
+//! Kotlin language servers behind `kargo lsp`.
 
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 
-use kargo_manifest::{JdkRequest, Manifest, TargetKind};
+use kargo_manifest::{GraalvmRequest, JdkRequest, Manifest, TargetKind};
 use kargo_maven::MavenClient;
 use kargo_toolchain::archive::{dir_size, human_size};
 use kargo_toolchain::jdks::{self, ManagedJdk};
-use kargo_toolchain::{GradleDistribution, Jdk, LanguageServer, NativeToolchain, ServerKind, adoptium};
+use kargo_toolchain::{Graalvm, GradleDistribution, Jdk, LanguageServer, NativeToolchain, ServerKind, adoptium, graalvm};
 use kargo_util::config::Config;
 
 /// Kinds of toolchains Kargo manages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolKind {
     Jdk,
+    /// A GraalVM for `kargo package --format native-image`.
+    Graalvm,
     Native,
     Gradle,
     /// A Kotlin language server for `kargo lsp`.
@@ -80,6 +82,41 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
         Err(_) => {
             let _ = writeln!(out, "    system: none found (JAVA_HOME / PATH)");
         }
+    }
+
+    let graalvms = graalvm::installed(config)?;
+    let graalvm_request = project.map(|m| m.toolchain.graalvm.clone());
+    let _ = writeln!(
+        out,
+        "
+GraalVM ({}):",
+        config.graalvm_dir().display()
+    );
+    if graalvms.is_empty() {
+        let _ = writeln!(out, "    (none installed)");
+    }
+    for installed in &graalvms {
+        let used = graalvm_request.as_ref().is_some_and(|r| {
+            graalvm::find_installed(config, r).ok().flatten().is_some_and(|selected| selected.release() == installed.release())
+        });
+        let _ = writeln!(
+            out,
+            "    {:<26} {:>3}  {:>10}{}",
+            installed.release(),
+            installed.major,
+            human_size(dir_size(&installed.dir)),
+            if used { "  (used by this project)" } else { "" }
+        );
+    }
+    if let Ok(system) = Graalvm::detect() {
+        let used = matches!(graalvm_request, Some(GraalvmRequest::System));
+        let _ = writeln!(
+            out,
+            "    system: GraalVM for JDK {} at {}{}",
+            system.version,
+            system.home.display(),
+            if used { "  (used by this project)" } else { "" }
+        );
     }
 
     let natives = NativeToolchain::installed(config)?;
@@ -156,6 +193,15 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
             let jdk = jdks::install(config, &request)?;
             Ok(format!("JDK {} at {}", jdk.release, jdk.home.display()))
         }
+        ToolKind::Graalvm => {
+            let request: GraalvmRequest = match (version, project) {
+                (Some(v), _) => v.parse()?,
+                (None, Some(m)) if m.toolchain.graalvm != GraalvmRequest::System => m.toolchain.graalvm.clone(),
+                (None, _) => bail!("which GraalVM? e.g. `kargo toolchain install graalvm 25` (or set [toolchain] graalvm in kargo.toml)"),
+            };
+            let installed = graalvm::install(config, &request)?;
+            Ok(format!("{} {} at {}", installed.distribution.title(), installed.version, installed.home.display()))
+        }
         ToolKind::Native => {
             let version = match (version, project) {
                 (Some(v), _) => v.to_owned(),
@@ -189,6 +235,9 @@ pub fn install_for_project(config: &Config, manifest: &Manifest) -> Result<Vec<S
     if manifest.toolchain.jdk != JdkRequest::System {
         done.push(install(config, Some(manifest), ToolKind::Jdk, None)?);
     }
+    if manifest.toolchain.graalvm != GraalvmRequest::System {
+        done.push(install(config, Some(manifest), ToolKind::Graalvm, None)?);
+    }
     if manifest.targets.is_enabled(TargetKind::Native) {
         done.push(install(config, Some(manifest), ToolKind::Native, None)?);
     }
@@ -202,6 +251,9 @@ pub fn install_for_project(config: &Config, manifest: &Manifest) -> Result<Vec<S
 pub fn remove(config: &Config, kind: ToolKind, selector: &str) -> Result<Vec<String>> {
     match kind {
         ToolKind::Jdk => Ok(jdks::remove(config, selector)?.into_iter().map(|j| format!("JDK {}", j.release)).collect()),
+        ToolKind::Graalvm => {
+            Ok(graalvm::remove(config, selector)?.into_iter().map(|g| format!("{} {}", g.distribution.title(), g.version)).collect())
+        }
         ToolKind::Native => {
             let removed = NativeToolchain::remove(config, selector)?;
             Ok(vec![format!("Kotlin/Native {}", removed.version)])

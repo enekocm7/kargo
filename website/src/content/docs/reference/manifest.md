@@ -42,6 +42,79 @@ The other keys describe the package when it is [published](../../guides/publishi
 | `repository` | `<scm>` | The source repository, an http(s) URL. The SCM connection is `scm:git:<repository>`. Required by Maven Central |
 | `publish` | | `false` makes `kargo publish` refuse the package (default `true`) |
 
+### `[package.jlink]`
+
+How `kargo package --format jlink` (and `--format installer`) trims the Java runtime. See [Runtime images](../../guides/distributing/#runtime-images).
+
+```toml
+[package.jlink]
+modules = ["java.naming", "jdk.crypto.ec"]
+jdeps = true
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `modules` | `[]` | JDK modules to add to the ones `jdeps` finds, such as modules the program only loads through reflection or a service loader |
+| `jdeps` | `true` | Ask `jdeps` which modules the program and its dependencies use. `false` puts only `modules` in the runtime, so it then needs at least one |
+
+### `[package.native-image]`
+
+Options for `kargo package --format native-image`. See [Native executables](../../guides/distributing/#native-executables).
+
+```toml
+[package.native-image]
+args = ["--enable-url-protocols=https", "-march=native"]
+static = false
+initialize-at-build-time = ["kotlinx.serialization"]
+metadata-repository = true
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `args` | `[]` | Extra `native-image` arguments |
+| `static` | `false` | Link a fully static executable against musl (`--static --libc=musl`). Linux only, and needs musl's `x86_64-linux-musl-gcc` on `PATH` |
+| `initialize-at-build-time` | `[]` | Packages or classes to initialize while the image is built (`--initialize-at-build-time`) |
+| `metadata-repository` | `true` | Use the [GraalVM reachability metadata repository](https://github.com/oracle/graalvm-reachability-metadata) for the dependencies it covers. Downloaded once into `~/.kargo/toolchains` |
+
+### `[package.installer]`
+
+Options for `kargo package --format installer`, which runs `jpackage`. See [Installers](../../guides/distributing/#installers).
+
+```toml
+[package.installer]
+name = "Hello"                       # default: the package name (or --bin)
+vendor = "Example Inc."
+description = "Says hello"           # default: [package] description
+app-version = "1.2.3"                # default: the numbers at the start of [package] version
+type = "msi"                         # default: msi on Windows, dmg on macOS, deb on Linux
+icon = { windows = "packaging/app.ico", macos = "packaging/app.icns", linux = "packaging/app.png" }
+license-file = "LICENSE"
+menu = true
+shortcut = true
+console = false
+upgrade-uuid = "0b5b2d6e-8f5c-4a37-9d1e-3a6c2f4b7e90"
+bundle-id = "com.example.hello"
+signing-identity = "Developer ID Application: Example Inc. (TEAMID)"
+category = "utils"
+```
+
+| Key | OS | Meaning |
+|---|---|---|
+| `name` | all | The application's name, its launcher's and its installer's. Must be usable as a file name |
+| `vendor` | all | The vendor shown by the installer |
+| `description` | all | The description shown by the installer |
+| `app-version` | all | One to three numbers, such as `1.2.3`, which every installer format accepts. Defaults to the numbers at the start of `[package] version` (`1.2.3-SNAPSHOT` gives `1.2.3`) |
+| `type` | all | `msi` or `exe` (Windows), `dmg` or `pkg` (macOS), `deb` or `rpm` (Linux), or `app-image`: the application directory without an installer, on any OS |
+| `icon` | all | One path for every OS, or a table with `windows` (`.ico`), `macos` (`.icns`) and `linux` (`.png`) paths, relative to the project root |
+| `license-file` | all | A license the installer shows |
+| `menu` | Windows, Linux | Add a Start menu (Windows) or desktop menu (Linux) entry |
+| `shortcut` | Windows, Linux | Add a desktop shortcut |
+| `console` | Windows | Make the launcher a console program, so a command-line tool's output shows in the terminal. Without it the launcher opens no console window |
+| `upgrade-uuid` | Windows | The upgrade code that lets a newer `.msi` replace an older one. Keep it the same across releases |
+| `bundle-id` | macOS | The bundle identifier, such as `com.example.hello` |
+| `signing-identity` | macOS | Sign the app with this identity from the keychain |
+| `category` | Linux | The package's section or group (`--linux-app-category`) |
+
 ## `[kotlin]`
 
 ```toml
@@ -71,10 +144,13 @@ In a workspace, `[workspace.kotlin]` sets these for every member: a member's `op
 
 ```toml
 [toolchain]
-jdk = "21"     # "system" (default), a major version, or an exact release like "21.0.5+11"
+jdk = "21"         # "system" (default), a major version, or an exact release like "21.0.5+11"
+graalvm = "25"     # "system" (default), a Java version for GraalVM CE, or "oracle-25" for Oracle GraalVM
 ```
 
-See [Managing JDKs](../../guides/toolchains/).
+`graalvm` is the GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use. `system` looks at `GRAALVM_HOME`, then a `JAVA_HOME` with `native-image`, then `native-image` on `PATH`.
+
+See [Managing JDKs](../../guides/toolchains/) and [GraalVM](../../guides/toolchains/#graalvm).
 
 ## `[doc]`
 

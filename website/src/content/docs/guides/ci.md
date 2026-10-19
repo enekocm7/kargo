@@ -79,6 +79,32 @@ jobs:
     runs-on: ${{ matrix.os }}
 ```
 
+### Native executables and installers
+
+[`kargo package --format jlink`, `native-image` and `installer`](../distributing/) build for the OS they run on, so build each platform's on its own runner:
+
+```yaml
+jobs:
+  release:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # ... cache and install Kargo as above; pin [toolchain] jdk and graalvm in kargo.toml
+      - run: kargo package --release --locked --format native-image
+      - run: kargo package --release --locked --format installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.os }}
+          path: |
+            target/release/jvm/package/*
+            !target/release/jvm/package/*-installer
+```
+
+GitHub's Windows runners come with Visual Studio, which `native-image` needs. `jpackage` needs the [WiX Toolset](https://wixtoolset.org) for `.msi` files: install it in a step if the runner image doesn't list it. The Linux runners have `dpkg-deb` and `fakeroot` for `.deb` files. Add `~/.kargo/toolchains/graalvm` to the cache only if downloading GraalVM on each run is too slow: it is several hundred megabytes.
+
 ### Kotlin/Native cache
 
 Debug builds of a native target link a precompiled [standard library cache](../native/#build-speed) that Kotlin/Native builds on first use, which takes one to two minutes per platform. It lives under `~/.kargo/toolchains/kotlin-native/<version>/klib/cache`, so the `~/.kargo` cache above keeps it between runs. If your CI starts from an empty home every time, building it costs more than it saves; set `KARGO_NATIVE_CACHE=false` for those jobs.

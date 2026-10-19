@@ -89,7 +89,7 @@ impl Jdk {
 }
 
 /// The major version from the `JAVA_VERSION="..."` line of a JDK's `release` file.
-fn parse_release(text: &str) -> Option<u32> {
+pub(crate) fn parse_release(text: &str) -> Option<u32> {
     let line = text.lines().find_map(|l| l.trim().strip_prefix("JAVA_VERSION="))?;
     let v = line.trim().trim_matches('"');
     // Java 8 reports `1.8.0_392`; early-access builds `26-ea`.

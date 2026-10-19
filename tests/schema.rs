@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use kargo_manifest::{Hook, Manifest, PackageManager, TargetKind, TaskShell, WorkspaceManifest};
+use kargo_manifest::{Hook, InstallerType, Manifest, PackageManager, TargetKind, TaskShell, WorkspaceManifest};
 
 fn schema() -> Value {
     let text = include_str!("../website/public/schemas/kargo.json");
@@ -182,6 +182,10 @@ fn schema_enums_match_kargo() {
     assert_eq!(
         enum_values(&props["target"]["properties"]["wasm"]["properties"]["package-manager"]),
         names(PackageManager::ALL.iter().map(|p| p.as_str()).collect())
+    );
+    assert_eq!(
+        enum_values(&props["package"]["properties"]["installer"]["properties"]["type"]),
+        names(InstallerType::ALL.iter().map(|t| t.as_str()).collect())
     );
     let mut targets = property_names(&props["target"]);
     let mut expected: Vec<&str> = TargetKind::ALL.iter().map(|t| t.as_str()).collect();
