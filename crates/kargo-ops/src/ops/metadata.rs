@@ -198,6 +198,16 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             };
             let output = ws.output_dir(&ctx.profile, kind);
             out["resource-roots"] = json!(roots(&[ws.resources()]));
+            // The `Res` class of `composeResources/`, written now so that editors see it before a build.
+            let dir = crate::compose::resources::output_dir(&ws.output_dir(&ctx.profile, kind));
+            out["compose-resources"] = match crate::compose::resources::generate(ws.root(), m, &dir)? {
+                Some(generated) => json!({
+                    "package": crate::compose::resources::package(m),
+                    "source-root": path(generated.source.parent().unwrap_or(&dir)),
+                    "resource-root": path(&generated.resources),
+                }),
+                None => Value::Null,
+            };
             out["test-resource-roots"] = json!(roots(&[ws.test_resources()]));
             out["classes-dir"] = json!(path(&output.join("classes")));
             out["test-classes-dir"] = json!(path(&output.join("test-classes")));

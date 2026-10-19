@@ -98,7 +98,7 @@ A file sees the declarations Kargo compiles it with:
 | `tests-<target>/` | `src/`, `src-<target>/`, `tests/` and `tests-<target>/` |
 | `examples/` | `src/` |
 
-A package also sees the main code of its [path dependencies](../workspaces/), and theirs. Test fixtures count as test code. A Kotlin file outside the source roots, open in the editor, sees the main code of every package.
+A package also sees the main code of its [path dependencies](../workspaces/), and theirs. Test fixtures count as test code. With [Compose resources](../compose/#resources), the generated `Res` class counts as code in `src/`. `kargo metadata` writes it when the server loads the project, and every build updates it. A Kotlin file outside the source roots, open in the editor, sees the main code of every package.
 
 So in a [multiplatform](../multiplatform/) package, common code in `src/` completes and navigates to the `expect` declarations, and `src-jvm/` sees both sides. Code in `src-wasm/` and `src-native/` gets the same completion, navigation and rename as JVM code, against your sources and the standard library.
 

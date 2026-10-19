@@ -284,7 +284,14 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     if !features.is_empty() {
         let _ = writeln!(s, "\n    buildFeatures {{\n{}\n    }}", features.join("\n"));
     }
-    let src_dirs = [root.join("src"), root.join(TargetKind::Android.source_dir_name())];
+    let compose_resources = has_compose_resources(ws).then(|| compose_resources_dir(ws));
+    let mut src_dirs = vec![root.join("src"), root.join(TargetKind::Android.source_dir_name())];
+    // The generated `Res` class of `composeResources/`, and the files it reads as assets.
+    let mut asset_dirs = vec![root.join("android/assets")];
+    if let Some(dir) = &compose_resources {
+        src_dirs.push(dir.join("kotlin"));
+        asset_dirs.push(dir.join("resources"));
+    }
     let test_dirs = [root.join("tests"), root.join("tests-android")];
     let dirs = |ds: &[PathBuf]| ds.iter().map(|d| kts_path(d)).collect::<Vec<_>>().join(", ");
     // AGP's built-in Kotlin does not compile Kotlin files found through the
@@ -300,7 +307,7 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     kotlin_dirs(&mut s, &src_dirs);
     let _ = writeln!(s, "            manifest.srcFile({})", kts_path(&root.join("android/AndroidManifest.xml")));
     let _ = writeln!(s, "            res.setSrcDirs(listOf({}))", kts_path(&root.join("android/res")));
-    let _ = writeln!(s, "            assets.setSrcDirs(listOf({}))", kts_path(&root.join("android/assets")));
+    let _ = writeln!(s, "            assets.setSrcDirs(listOf({}))", dirs(&asset_dirs));
     let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", kts_path(&ws.resources()));
     let _ = writeln!(s, "        }}");
     let _ = writeln!(s, "        getByName(\"test\") {{");
@@ -367,6 +374,10 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
             push(&mut s, &Dependency::new(m.parse()?, None), false);
         }
         push(&mut s, &Dependency::new("androidx.activity:activity-compose".parse()?, Some(ACTIVITY_COMPOSE_VERSION.to_owned())), false);
+        if compose_resources.is_some() {
+            let version = fw.compose.as_ref().and_then(|c| c.version.clone()).unwrap_or_else(|| builtins::COMPOSE_VERSION.to_owned());
+            push(&mut s, &Dependency::new(crate::compose::resources::RUNTIME.parse()?, Some(version)), false);
+        }
     }
     if fw.lombok.is_some() {
         let v = fw.lombok.as_ref().and_then(|l| l.version.clone()).unwrap_or_else(|| builtins::LOMBOK_VERSION.to_owned());
@@ -396,6 +407,16 @@ fn profile_dependency_line(d: &Dependency, profile: &str, build_type: &str) -> R
         );
     }
     Ok(dependency_line_in(d, &format!("{build_type}{}", capitalize(configuration(d.scope, false, d.exported)))))
+}
+
+/// Whether the Android build of `ws` gets a `Res` class: Compose and a `composeResources/` directory.
+fn has_compose_resources(ws: &Workspace) -> bool {
+    ws.manifest().frameworks.compose.is_some() && crate::compose::resources::present(ws.root())
+}
+
+/// Where [`generate`] writes the `Res` class and the assets of `composeResources/` for `ws`.
+fn compose_resources_dir(ws: &Workspace) -> PathBuf {
+    crate::compose::resources::output_dir(&ws.work_dir("android"))
 }
 
 fn has_build_config(cfg: &AndroidConfig) -> bool {
@@ -733,12 +754,14 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
                 subproject_plugins.push(GradlePlugin { applied: false, ..p });
             }
         }
+        crate::compose::resources::generate(pkg.root(), pkg.manifest(), &compose_resources_dir(pkg))?;
         let module = GradleModule { subproject: true, subproject_plugins: Vec::new(), dependencies: lines.clone() };
         write(&format!("modules/{}/build.gradle.kts", pkg.name()), &build_gradle_with(pkg, pkg_android, &module)?)?;
     }
     let names: Vec<(&str, &Manifest)> =
         modules.iter().map(|(i, _)| (ctx.project.package(*i).name(), ctx.project.package(*i).manifest())).collect();
     write("settings.gradle.kts", &settings_gradle_with(ws.manifest(), &names))?;
+    crate::compose::resources::generate(ws.root(), ws.manifest(), &compose_resources_dir(ws))?;
     let root = GradleModule { subproject: false, subproject_plugins, dependencies: root_lines };
     write("build.gradle.kts", &build_gradle_with(ws, android, &root)?)?;
     write("gradle.properties", GRADLE_PROPERTIES)?;
@@ -1221,6 +1244,33 @@ mod tests {
         .unwrap();
         let ws = Workspace::load(&dir.path().join("kargo.toml")).unwrap();
         (dir, ws)
+    }
+
+    #[test]
+    fn compose_resources_on_android() {
+        let (dir, ws) = workspace("[frameworks]\ncompose = true\n");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let without = build_gradle(&ws, &android).unwrap();
+        assert!(!without.contains("components-resources") && !without.contains("compose-resources"));
+
+        std::fs::create_dir_all(dir.path().join("composeResources/values")).unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        let generated = compose_resources_dir(&ws);
+        assert!(
+            text.contains(&format!(
+                "implementation(\"org.jetbrains.compose.components:components-resources:{}\")",
+                builtins::COMPOSE_VERSION
+            ))
+        );
+        assert!(text.contains(&format!("kotlin.directories.add({})", kts_path(&generated.join("kotlin")))), "{text}");
+        assert!(
+            text.contains(&format!(
+                "assets.setSrcDirs(listOf({}, {}))",
+                kts_path(&dir.path().join("android/assets")),
+                kts_path(&generated.join("resources"))
+            )),
+            "{text}"
+        );
     }
 
     #[test]

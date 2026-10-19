@@ -3107,6 +3107,70 @@ fn package_formats_check_their_flags_first() {
 }
 
 #[test]
+fn desktop_packaging_checks_its_flags_first() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", ""));
+    p.kargo().args(["package", "--desktop"]).assert().failure().code(101).stderr(predicate::str::contains(
+        "`--desktop` packages a Compose Desktop application; enable Compose with `[frameworks] compose = true`",
+    ));
+    p.kargo().args(["package", "--platforms", "all"]).assert().failure().stderr(predicate::str::contains("--desktop"));
+
+    p.file("kargo.toml", &manifest("app", "[frameworks]\ncompose = true\n"));
+    p.kargo().args(["package", "--desktop", "--platforms", "all"]).assert().failure().stderr(predicate::str::contains(
+        "`--platforms` builds a jar with the Skiko natives of several platforms and needs `--format jar`",
+    ));
+    p.kargo()
+        .args(["package", "--desktop", "--format", "jar", "--platforms", "windows-x64,beos-x86"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown platform `beos-x86`"));
+    p.kargo()
+        .args(["package", "--desktop", "--fat"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--fat` builds a jar and does not apply to `--format installer`"));
+
+    let other_os = if cfg!(target_os = "macos") { "msi" } else { "dmg" };
+    p.file(
+        "kargo.toml",
+        &manifest("app", &format!("[package.installer]\ntype = [\"{other_os}\"]\nnotarize = {{ keychain-profile = \"p\" }}\n")),
+    );
+    p.kargo().args(["package", "--format", "installer"]).assert().failure().stderr(predicate::str::contains("needs `signing-identity`"));
+}
+
+#[test]
+fn compose_resources_generate_the_res_class() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("notes", "[frameworks]\ncompose = true\n"))
+        .file("src/Main.kt", "fun main() {}\n")
+        .file("composeResources/values/strings.xml", "<resources><string name=\"app_name\">Notes</string></resources>\n")
+        .file("composeResources/drawable/logo.png", "png");
+    let metadata = || -> serde_json::Value {
+        let out = p.kargo().args(["--offline", "metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let jvm = metadata()["packages"][0]["targets"][0].clone();
+    let resources = &jvm["compose-resources"];
+    assert_eq!(resources["package"], "notes.generated.resources", "{jvm}");
+    let source = std::path::PathBuf::from(resources["source-root"].as_str().unwrap()).join("Res.kt");
+    let res = std::fs::read_to_string(&source).unwrap();
+    assert!(res.contains("internal val Res.string.app_name: org.jetbrains.compose.resources.StringResource"), "{res}");
+    assert!(res.contains("internal val Res.drawable.logo"));
+    let files = std::path::PathBuf::from(resources["resource-root"].as_str().unwrap()).join("composeResources/notes.generated.resources");
+    assert_eq!(std::fs::read_to_string(files.join("values/strings.cvr")).unwrap(), "string|app_name|Tm90ZXM=\n");
+
+    // A layout the runtime cannot read is an error that names the directory.
+    p.file("composeResources/images/a.png", "");
+    p.kargo()
+        .args(["--offline", "metadata", "--no-deps"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown Compose resources directory `images`"));
+    std::fs::remove_dir_all(p.path().join("composeResources")).unwrap();
+    assert_eq!(metadata()["packages"][0]["targets"][0]["compose-resources"], serde_json::Value::Null);
+}
+
+#[test]
 fn toolchain_manages_graalvm() {
     let p = Project::new();
     let dir = p.home.path().join("toolchains/graalvm/community-25.0.4");

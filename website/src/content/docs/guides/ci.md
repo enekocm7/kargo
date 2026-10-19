@@ -103,6 +103,17 @@ jobs:
             !target/release/jvm/package/*-installer
 ```
 
+With `type = ["msi", "dmg", "deb"]` in [`[package.installer]`](../../reference/manifest/#packageinstaller), each runner builds its own OS's installer from the same `kargo.toml`. For a [Compose Desktop](../compose/#distributing) application, run `kargo package --release --locked --desktop` instead.
+
+To sign and notarize the macOS installer, import the Developer ID certificate into the runner's keychain in an earlier step and pass the notarization credentials as secrets, under the names `notarize` reads:
+
+```yaml
+      - run: kargo package --release --locked --desktop
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+```
+
 GitHub's Windows runners come with Visual Studio, which `native-image` needs. `jpackage` needs the [WiX Toolset](https://wixtoolset.org) for `.msi` files: install it in a step if the runner image doesn't list it. The Linux runners have `dpkg-deb` and `fakeroot` for `.deb` files. Add `~/.kargo/toolchains/graalvm` to the cache only if downloading GraalVM on each run is too slow: it is several hundred megabytes.
 
 ### Kotlin/Native cache

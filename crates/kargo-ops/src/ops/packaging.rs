@@ -6,9 +6,11 @@
 //!   configuration from `native-image/` (written by `kargo run --native-agent`) and the GraalVM
 //!   reachability metadata repository.
 //! - `installer`: an `.msi`/`.exe`, `.dmg`/`.pkg` or `.deb`/`.rpm` built by `jpackage` around a
-//!   `jlink` runtime.
+//!   `jlink` runtime, with file associations, and on macOS signed and notarized.
 //!
-//! All three build for the host OS and CPU: build each platform's on that platform.
+//! All three build for the host OS and CPU: build each platform's on that platform. With
+//! `[frameworks] compose`, the runtime gets the modules Compose needs and installers carry Skiko's
+//! native library next to the application (see [`crate::compose`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,8 +19,9 @@ use anyhow::{Context, Result, bail};
 
 use super::build::JvmBuild;
 use super::context::BuildContext;
+use crate::compose;
 use kargo_compiler::jar::{JarManifest, write_jar};
-use kargo_manifest::{InstallerSettings, InstallerType, NativeImageSettings};
+use kargo_manifest::{FileAssociation, InstallerSettings, InstallerType, NativeImageSettings, Notarization};
 use kargo_toolchain::Jdk;
 use kargo_util::fs::{join_paths, remove_dir_all_if_exists};
 use kargo_util::process;
@@ -65,11 +68,12 @@ impl App<'_> {
     }
 
     /// Writes the program's own jar (without the `Class-Path` of `kargo build`'s) and copies the
-    /// dependencies next to it in `lib`. Returns the file names in classpath order, the program's first.
-    fn stage_jars(&self, ctx: &BuildContext, lib: &Path) -> Result<Vec<String>> {
+    /// dependencies next to it in `lib`, except those that `skip` matches. Returns the file names in
+    /// classpath order, the program's first.
+    fn stage_jars(&self, ctx: &BuildContext, lib: &Path, skip: impl Fn(&Path) -> bool) -> Result<Vec<String>> {
         std::fs::create_dir_all(lib).with_context(|| format!("failed to create {}", lib.display()))?;
         let pkg = &ctx.ws.manifest().package;
-        let deps = self.dependency_jars();
+        let deps: Vec<PathBuf> = self.dependency_jars().into_iter().filter(|j| !skip(j)).collect();
         let names = jar_names(&format!("{}-{}.jar", pkg.name, pkg.version), &deps);
         let manifest = JarManifest {
             main_class: Some(self.main_class.clone()),
@@ -136,11 +140,16 @@ fn module_list(found: Vec<String>, extra: &[String]) -> Vec<String> {
 }
 
 /// The JDK modules the program needs: what `jdeps` finds in its classes and dependencies, plus
-/// `[package.jlink] modules`.
+/// `[package.jlink] modules` and, for Compose, [`compose::RUNTIME_MODULES`].
 fn runtime_modules(ctx: &BuildContext, app: &App) -> Result<Vec<String>> {
-    let settings = &ctx.ws.manifest().packaging.jlink;
+    let manifest = ctx.ws.manifest();
+    let settings = &manifest.packaging.jlink;
+    let mut extra = settings.modules.clone();
+    if compose::enabled(manifest) {
+        extra.extend(compose::RUNTIME_MODULES.map(str::to_owned));
+    }
     if !settings.jdeps {
-        return Ok(module_list(Vec::new(), &settings.modules));
+        return Ok(module_list(Vec::new(), &extra));
     }
     let jdk = ctx.jdk()?;
     let deps = app.dependency_jars();
@@ -152,7 +161,7 @@ fn runtime_modules(ctx: &BuildContext, app: &App) -> Result<Vec<String>> {
     cmd.arg(&app.jvm.classes).args(&deps);
     let stdout = output(ctx, &mut cmd, "jdeps")
         .context("could not find the JDK modules the program uses; list them in [package.jlink] modules and set `jdeps = false`")?;
-    let modules = module_list(parse_module_deps(&stdout), &settings.modules);
+    let modules = module_list(parse_module_deps(&stdout), &extra);
     ctx.shell().verbose("Modules", modules.join(","));
     Ok(modules)
 }
@@ -239,21 +248,37 @@ pub fn jlink_image(ctx: &BuildContext, app: &App) -> Result<PathBuf> {
     let modules = runtime_modules(ctx, app)?;
     remove_dir_all_if_exists(&image)?;
     jlink(ctx, &modules, &image.join("runtime"))?;
-    let jars = app.stage_jars(ctx, &image.join("lib"))?;
+    let jars = app.stage_jars(ctx, &image.join("lib"), |_| false)?;
     let bin = image.join("bin");
     std::fs::create_dir_all(&bin)?;
     let script = bin.join(app.name);
-    kargo_util::fs::write_string_atomic(&script, &unix_launcher(&app.main_class, &app.jvm.jvm_args, &jars))?;
+    let jvm_args = app_jvm_args(ctx, app, None)?;
+    kargo_util::fs::write_string_atomic(&script, &unix_launcher(&app.main_class, &jvm_args, &jars))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
     }
-    kargo_util::fs::write_string_atomic(
-        &bin.join(format!("{}.bat", app.name)),
-        &windows_launcher(&app.main_class, &app.jvm.jvm_args, &jars),
-    )?;
+    kargo_util::fs::write_string_atomic(&bin.join(format!("{}.bat", app.name)), &windows_launcher(&app.main_class, &jvm_args, &jars))?;
     Ok(image)
+}
+
+/// The JVM options of a packaged application: for Compose, [`compose::SWING_GLOBALS`], native
+/// access for Skiko (JDK 21+, which warns without it) and `-Dskiko.library.path=<skiko_dir>` when
+/// the native library was unpacked; then the `jvm-args` of `[target.jvm]` and the profile.
+fn app_jvm_args(ctx: &BuildContext, app: &App, skiko_dir: Option<&str>) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    if compose::enabled(ctx.ws.manifest()) {
+        args.push(compose::SWING_GLOBALS.to_owned());
+        if ctx.jdk()?.version >= 21 {
+            args.push("--enable-native-access=ALL-UNNAMED".to_owned());
+        }
+        if let Some(dir) = skiko_dir {
+            args.push(format!("-Dskiko.library.path={dir}"));
+        }
+    }
+    args.extend(app.jvm.jvm_args.iter().cloned());
+    Ok(args)
 }
 
 /// The `native-image` arguments before the classpath and the main class. GraalVM 25 removed the
@@ -382,6 +407,8 @@ struct Jpackage<'a> {
     runtime: &'a Path,
     dest: &'a Path,
     root: &'a Path,
+    /// The properties files of `file-associations`.
+    file_associations: &'a [PathBuf],
 }
 
 impl Jpackage<'_> {
@@ -423,6 +450,12 @@ impl Jpackage<'_> {
             args.extend(["--java-options".to_owned(), java_option(arg)]);
         }
         let installer = self.kind != InstallerType::AppImage;
+        // File associations are registered when the application is installed.
+        if installer {
+            for file in self.file_associations {
+                args.extend(["--file-associations".to_owned(), file.to_string_lossy().into_owned()]);
+            }
+        }
         if self.os == "windows" && s.console {
             args.push("--win-console".to_owned());
         }
@@ -491,78 +524,196 @@ fn installer_outputs(dest: &Path, name: &str, kind: InstallerType) -> Vec<PathBu
 }
 
 /// `--format installer`: `jpackage` around a `jlink` runtime, written to `target/<profile>/jvm/package/`.
+/// Builds each `[package.installer] type` that the host OS builds (its default type when none are
+/// listed), then notarizes the macOS ones when `notarize` is set.
 pub fn installer(ctx: &BuildContext, app: &App) -> Result<Vec<PathBuf>> {
     let manifest = ctx.ws.manifest();
     let settings = &manifest.packaging.installer;
     let os = std::env::consts::OS;
-    let kind = settings.kind.unwrap_or_else(|| InstallerType::default_for(os));
-    if let Some(needed) = kind.os().filter(|needed| *needed != os) {
+    let kinds = settings.kinds_for(os);
+    if kinds.is_empty() {
+        let listed: Vec<&str> = settings.kinds.iter().map(|k| k.as_str()).collect();
         bail!(
-            "[package.installer] type = \"{}\" is built on {needed}, not {os}: jpackage builds installers for the OS it runs on",
-            kind.as_str()
+            "[package.installer] type = [\"{}\"] has no type that {os} builds: jpackage builds installers for the OS it runs on, so add \"{}\" or build on another OS",
+            listed.join("\", \""),
+            InstallerType::default_for(os).as_str()
         );
     }
     let jdk = ctx.jdk()?;
     if jdk.version < 16 {
         bail!("installers need jpackage from JDK 16 or newer, but the project uses JDK {}; set [toolchain] jdk = \"21\"", jdk.version);
     }
-    let name = settings.name.as_deref().unwrap_or(app.name);
-    for (key, file) in [("license-file", settings.license_file.as_deref()), ("icon", settings.icon.for_os(os))] {
-        if let Some(file) = file.filter(|f| !ctx.ws.root().join(f).is_file()) {
+    let name = settings.app_name(app.name);
+    let root = ctx.ws.root();
+    let association_icons = settings.file_associations.iter().map(|a| ("file-associations` `icon", a.icon.as_deref()));
+    let files_to_check = [("license-file", settings.license_file.as_deref()), ("icon", settings.icon.for_os(os))];
+    for (key, file) in files_to_check.into_iter().chain(association_icons) {
+        if let Some(file) = file.filter(|f| !root.join(f).is_file()) {
             bail!("[package.installer] `{key}` {} does not exist", file.display());
         }
     }
+    let notarize = settings.notarize.as_ref().filter(|_| os == "macos").map(notary_credentials).transpose()?;
     let version = match &settings.app_version {
         Some(v) => v.clone(),
         None => numeric_version(&manifest.package.version),
     };
-    ctx.shell().status("Packaging", format!("{name} v{version} {} installer ({})", kind.as_str(), app.dir.display()));
+    let types: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+    let what = if let [one] = types[..] { format!("{one} installer") } else { format!("installers ({})", types.join(", ")) };
+    ctx.shell().status("Packaging", format!("{name} v{version} {what} ({})", app.dir.display()));
 
     let work = app.dir.join(format!("{}-installer", app.name));
     remove_dir_all_if_exists(&work)?;
     let runtime = work.join("runtime");
     jlink(ctx, &runtime_modules(ctx, app)?, &runtime)?;
     let input = work.join("input");
-    let jars = app.stage_jars(ctx, &input)?;
-    for old in installer_outputs(&app.dir, name, kind) {
-        if old.is_dir() { remove_dir_all_if_exists(&old)? } else { std::fs::remove_file(&old)? }
-    }
-
-    let job = Jpackage {
-        settings,
-        kind,
-        os,
-        name,
-        version,
-        description: settings.description.as_deref().or(manifest.package.description.as_deref()),
-        main_jar: &jars[0],
-        main_class: &app.main_class,
-        jvm_args: &app.jvm.jvm_args,
-        input: &input,
-        runtime: &runtime,
-        dest: &app.dir,
-        root: ctx.ws.root(),
+    // Skiko's native library goes next to the jars (jpackage's `$APPDIR`), where macOS signs it
+    // with the rest of the application, instead of being unpacked from a jar at startup.
+    let skiko: Vec<PathBuf> = if compose::enabled(manifest) {
+        app.dependency_jars().into_iter().filter(|j| compose::is_skiko_runtime_jar(j)).collect()
+    } else {
+        Vec::new()
     };
-    let mut cmd = Command::new(jdk_tool(jdk, "jpackage"));
-    cmd.args(job.args());
-    let result = output(ctx, &mut cmd, "jpackage");
-    if let Err(err) = result {
-        let hint = match kind {
-            InstallerType::Msi | InstallerType::Exe => {
-                "\njpackage needs the WiX Toolset (https://wixtoolset.org) on PATH to build Windows installers"
-            }
-            InstallerType::Rpm => "\njpackage needs `rpmbuild` to build .rpm packages",
-            InstallerType::Deb => "\njpackage needs `dpkg-deb` and `fakeroot` to build .deb packages",
-            _ => "",
+    for jar in &skiko {
+        let files = compose::unpack_skiko_runtime(jar, &input)?;
+        ctx.shell().verbose("Unpacked", format!("{} from {}", files.join(", "), jar.display()));
+    }
+    let jvm_args = app_jvm_args(ctx, app, (!skiko.is_empty()).then_some("$APPDIR"))?;
+    let jars = app.stage_jars(ctx, &input, |jar| skiko.iter().any(|s| s == jar))?;
+    let associations = write_file_associations(&settings.file_associations, root, &work)?;
+
+    let mut files = Vec::new();
+    for kind in kinds {
+        for old in installer_outputs(&app.dir, name, kind) {
+            if old.is_dir() { remove_dir_all_if_exists(&old)? } else { std::fs::remove_file(&old)? }
+        }
+        let job = Jpackage {
+            settings,
+            kind,
+            os,
+            name,
+            version: version.clone(),
+            description: settings.description.as_deref().or(manifest.package.description.as_deref()),
+            main_jar: &jars[0],
+            main_class: &app.main_class,
+            jvm_args: &jvm_args,
+            input: &input,
+            runtime: &runtime,
+            dest: &app.dir,
+            root,
+            file_associations: &associations,
         };
-        bail!("{err:#}{hint}");
+        let mut cmd = Command::new(jdk_tool(jdk, "jpackage"));
+        cmd.args(job.args());
+        if let Err(err) = output(ctx, &mut cmd, "jpackage") {
+            let hint = match kind {
+                InstallerType::Msi | InstallerType::Exe => {
+                    "\njpackage needs the WiX Toolset (https://wixtoolset.org) on PATH to build Windows installers"
+                }
+                InstallerType::Rpm => "\njpackage needs `rpmbuild` to build .rpm packages",
+                InstallerType::Deb => "\njpackage needs `dpkg-deb` and `fakeroot` to build .deb packages",
+                _ => "",
+            };
+            bail!("{err:#}{hint}");
+        }
+        let outputs = installer_outputs(&app.dir, name, kind);
+        if outputs.is_empty() {
+            bail!("jpackage finished but wrote no {} for `{name}` into {}", kind.as_str(), app.dir.display());
+        }
+        if let Some(credentials) = &notarize {
+            if matches!(kind, InstallerType::Dmg | InstallerType::Pkg) {
+                for file in &outputs {
+                    notarize_file(ctx, file, credentials)?;
+                }
+            } else {
+                ctx.shell().note(format!("`notarize` applies to dmg and pkg installers, so the {} is not notarized", kind.as_str()));
+            }
+        }
+        files.extend(outputs);
     }
     let _ = remove_dir_all_if_exists(&work);
-    let outputs = installer_outputs(&app.dir, name, kind);
-    if outputs.is_empty() {
-        bail!("jpackage finished but wrote no {} for `{name}` into {}", kind.as_str(), app.dir.display());
+    Ok(files)
+}
+
+/// Escapes a value for a Java `.properties` file.
+fn properties_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+/// The properties file `jpackage --file-associations` reads for one file type.
+fn file_association_properties(association: &FileAssociation, root: &Path) -> String {
+    let mut lines = vec![
+        format!("extension={}", properties_value(&association.extension)),
+        format!("mime-type={}", properties_value(&association.mime_type)),
+    ];
+    if let Some(description) = &association.description {
+        lines.push(format!("description={}", properties_value(description)));
     }
-    Ok(outputs)
+    if let Some(icon) = &association.icon {
+        lines.push(format!("icon={}", properties_value(&root.join(icon).to_string_lossy())));
+    }
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
+/// Writes one properties file per file association into `work`; returns their paths.
+fn write_file_associations(associations: &[FileAssociation], root: &Path, work: &Path) -> Result<Vec<PathBuf>> {
+    associations
+        .iter()
+        .map(|association| {
+            let path = work.join(format!("file-association-{}.properties", association.extension));
+            kargo_util::fs::write_string_atomic(&path, &file_association_properties(association, root))?;
+            Ok(path)
+        })
+        .collect()
+}
+
+/// The `xcrun notarytool` options that authenticate: `--keychain-profile`, or the Apple ID,
+/// password and team ID, the first two read from the environment.
+fn notary_credentials(notarize: &Notarization) -> Result<Vec<String>> {
+    Ok(match notarize {
+        Notarization::KeychainProfile(profile) => vec!["--keychain-profile".to_owned(), profile.clone()],
+        Notarization::AppleId { apple_id_env, password_env, team_id } => {
+            let var = |name: &str, what: &str| match std::env::var(name) {
+                Ok(value) if !value.is_empty() => Ok(value),
+                _ => bail!("[package.installer] `notarize` reads the {what} from ${name}, which is not set"),
+            };
+            vec![
+                "--apple-id".to_owned(),
+                var(apple_id_env, "Apple ID")?,
+                "--password".to_owned(),
+                var(password_env, "app-specific password")?,
+                "--team-id".to_owned(),
+                team_id.clone(),
+            ]
+        }
+    })
+}
+
+/// The `xcrun` arguments that submit `file` to the notary service and wait for its verdict.
+fn notarytool_args(file: &Path, credentials: &[String]) -> Vec<String> {
+    let mut args = vec!["notarytool".to_owned(), "submit".to_owned(), file.to_string_lossy().into_owned(), "--wait".to_owned()];
+    args.extend(credentials.iter().cloned());
+    args
+}
+
+/// Sends `file` to Apple's notary service, waits for the verdict and staples the ticket to it.
+fn notarize_file(ctx: &BuildContext, file: &Path, credentials: &[String]) -> Result<()> {
+    ctx.shell().status("Notarizing", format!("{} (this can take a few minutes)", file.display()));
+    let mut cmd = Command::new("xcrun");
+    // The command line holds the password, so unlike other tools it is not shown with `-v`.
+    cmd.args(notarytool_args(file, credentials));
+    let out = cmd.output().context("failed to start `xcrun notarytool`; notarizing needs Xcode or its command line tools")?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() || !text.contains("status: Accepted") {
+        bail!(
+            "Apple did not notarize {} ({}):\n{}\nrun `xcrun notarytool log <submission id>` with the same credentials to see why",
+            file.display(),
+            process::describe_status(out.status),
+            text.trim_end()
+        );
+    }
+    let mut staple = Command::new("xcrun");
+    staple.arg("stapler").arg("staple").arg(file);
+    output(ctx, &mut staple, "xcrun stapler").map(drop)
 }
 
 #[cfg(test)]
@@ -675,8 +826,46 @@ mod tests {
             runtime: Path::new("rt"),
             dest: Path::new("out"),
             root: Path::new("proj"),
+            file_associations: &[PathBuf::from("work/file-association-note.properties")],
         }
         .args()
+    }
+
+    #[test]
+    fn file_associations() {
+        let association = FileAssociation {
+            extension: "note".into(),
+            mime_type: "application/x-note".into(),
+            description: Some("Note".into()),
+            icon: Some("icons/note.ico".into()),
+        };
+        let root = Path::new(r"C:\proj");
+        let text = file_association_properties(&association, root);
+        let icon = root.join("icons/note.ico").to_string_lossy().replace('\\', "\\\\");
+        assert_eq!(text, format!("extension=note\nmime-type=application/x-note\ndescription=Note\nicon={icon}\n"));
+        let plain = FileAssociation { description: None, icon: None, ..association };
+        assert_eq!(file_association_properties(&plain, root), "extension=note\nmime-type=application/x-note\n");
+
+        let msi = jpackage_args(&InstallerSettings::default(), InstallerType::Msi, "windows");
+        assert!(pairs(&msi).contains(&("--file-associations".to_owned(), "work/file-association-note.properties".to_owned())));
+        let image = jpackage_args(&InstallerSettings::default(), InstallerType::AppImage, "windows");
+        assert!(!image.contains(&"--file-associations".to_owned()), "an app image is not installed");
+    }
+
+    #[test]
+    fn notarization() {
+        let profile = notary_credentials(&Notarization::KeychainProfile("kargo".into())).unwrap();
+        assert_eq!(profile, ["--keychain-profile", "kargo"]);
+        assert_eq!(
+            notarytool_args(Path::new("out/Notes-1.0.dmg"), &profile),
+            ["notarytool", "submit", &Path::new("out/Notes-1.0.dmg").to_string_lossy(), "--wait", "--keychain-profile", "kargo"]
+        );
+        let missing = Notarization::AppleId {
+            apple_id_env: "KARGO_TEST_UNSET_APPLE_ID".into(),
+            password_env: "KARGO_TEST_UNSET_PASSWORD".into(),
+            team_id: "ABCDE12345".into(),
+        };
+        assert!(notary_credentials(&missing).unwrap_err().to_string().contains("$KARGO_TEST_UNSET_APPLE_ID, which is not set"));
     }
 
     fn pairs(args: &[String]) -> Vec<(String, String)> {

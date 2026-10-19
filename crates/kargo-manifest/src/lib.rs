@@ -1259,8 +1259,8 @@ pub struct InstallerSettings {
     pub description: Option<String>,
     /// A numeric version such as `1.2.3`; defaults to the numeric start of `[package] version`.
     pub app_version: Option<String>,
-    /// `None` builds the host's default type.
-    pub kind: Option<InstallerType>,
+    /// The types to build; `jpackage` builds the ones for the host OS. Empty builds the host's default type.
+    pub kinds: Vec<InstallerType>,
     pub icon: InstallerIcons,
     pub license_file: Option<PathBuf>,
     /// Add a Start menu entry (Windows) or a menu entry (Linux).
@@ -1277,6 +1277,46 @@ pub struct InstallerSettings {
     pub signing_identity: Option<String>,
     /// Linux: the package's category (`--linux-app-category`).
     pub category: Option<String>,
+    /// File types the installed application opens (`--file-associations`).
+    pub file_associations: Vec<FileAssociation>,
+    /// macOS: send the installer to Apple's notary service and staple the ticket to it.
+    pub notarize: Option<Notarization>,
+}
+
+impl InstallerSettings {
+    /// The types to build on `os` (`std::env::consts::OS`): the listed ones that `os` builds, or its
+    /// default type when none are listed. Empty when every listed type is built on another OS.
+    pub fn kinds_for(&self, os: &str) -> Vec<InstallerType> {
+        if self.kinds.is_empty() {
+            return vec![InstallerType::default_for(os)];
+        }
+        self.kinds.iter().copied().filter(|k| k.os().is_none_or(|needed| needed == os)).collect()
+    }
+
+    /// The application's name: `name`, or `default` (the package's or the `--bin`'s).
+    pub fn app_name<'a>(&'a self, default: &'a str) -> &'a str {
+        self.name.as_deref().unwrap_or(default)
+    }
+}
+
+/// A `[package.installer] file-associations` entry: a file type the application opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileAssociation {
+    /// The file extension, without the dot.
+    pub extension: String,
+    pub mime_type: String,
+    pub description: Option<String>,
+    /// The icon of the file type, relative to the project root.
+    pub icon: Option<PathBuf>,
+}
+
+/// `[package.installer] notarize`: the Apple credentials `xcrun notarytool` uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notarization {
+    /// An Apple ID and app-specific password, read from environment variables, and the team ID.
+    AppleId { apple_id_env: String, password_env: String, team_id: String },
+    /// Credentials that `xcrun notarytool store-credentials` saved in the keychain under this name.
+    KeychainProfile(String),
 }
 
 /// `[doc]`: options for `kargo doc` (Dokka).

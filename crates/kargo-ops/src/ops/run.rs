@@ -262,7 +262,12 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
                 cmd.arg(native_agent_option(&dir));
                 ctx.shell().note(format!("the GraalVM tracing agent writes the program's native-image configuration to {}", rel(&dir)));
             }
-            cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).arg("-cp").arg(join_paths(&classpath)).arg(&main);
+            cmd.args(jdk.default_run_args());
+            let manifest = ctx.ws.manifest();
+            if crate::compose::enabled(manifest) {
+                cmd.args(crate::compose::run_jvm_args(manifest, ctx.ws.root(), &manifest.package.name, std::env::consts::OS));
+            }
+            cmd.args(&jvm.jvm_args).arg("-cp").arg(join_paths(&classpath)).arg(&main);
             label = format!("java {main}");
             cmd
         }
