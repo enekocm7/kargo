@@ -1037,6 +1037,246 @@ impl fmt::Display for JdkRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ToolchainSettings {
     pub jdk: JdkRequest,
+    /// The GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use.
+    pub graalvm: GraalvmRequest,
+}
+
+/// Which GraalVM distribution to download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GraalvmDistribution {
+    /// GraalVM Community Edition (GPLv2 with the Classpath Exception).
+    Community,
+    /// Oracle GraalVM (GraalVM Free Terms and Conditions).
+    Oracle,
+}
+
+impl GraalvmDistribution {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GraalvmDistribution::Community => "community",
+            GraalvmDistribution::Oracle => "oracle",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            GraalvmDistribution::Community => "GraalVM CE",
+            GraalvmDistribution::Oracle => "Oracle GraalVM",
+        }
+    }
+}
+
+/// Which GraalVM builds native images (`[toolchain] graalvm = ...`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum GraalvmRequest {
+    /// `GRAALVM_HOME`, then a `JAVA_HOME` or `PATH` that has `native-image` (the default).
+    #[default]
+    System,
+    /// The newest release of a Java feature version, e.g. `25` or `oracle-25`.
+    Major { distribution: GraalvmDistribution, major: u32 },
+}
+
+impl GraalvmRequest {
+    pub fn major(&self) -> Option<u32> {
+        match self {
+            GraalvmRequest::System => None,
+            GraalvmRequest::Major { major, .. } => Some(*major),
+        }
+    }
+}
+
+impl FromStr for GraalvmRequest {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if s == "system" {
+            return Ok(GraalvmRequest::System);
+        }
+        let (distribution, version) = match s.split_once('-') {
+            Some(("community" | "ce", v)) => (GraalvmDistribution::Community, v),
+            Some(("oracle", v)) => (GraalvmDistribution::Oracle, v),
+            Some(_) => bail!("invalid GraalVM `{s}` (expected `system`, a Java version like `25`, or `oracle-25`)"),
+            None => (GraalvmDistribution::Community, s),
+        };
+        match version.parse::<u32>() {
+            Ok(major) if major >= 17 => Ok(GraalvmRequest::Major { distribution, major }),
+            Ok(major) => bail!("GraalVM for JDK {major} is not supported; use 17 or newer"),
+            Err(_) => bail!("invalid GraalVM `{s}` (expected `system`, a Java version like `25`, or `oracle-25`)"),
+        }
+    }
+}
+
+impl fmt::Display for GraalvmRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GraalvmRequest::System => f.write_str("system"),
+            GraalvmRequest::Major { distribution: GraalvmDistribution::Community, major } => write!(f, "{major}"),
+            GraalvmRequest::Major { distribution, major } => write!(f, "{}-{major}", distribution.as_str()),
+        }
+    }
+}
+
+/// `[package.jlink]`, `[package.native-image]` and `[package.installer]`: how `kargo package
+/// --format` builds runtime images, native executables and installers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PackagingSettings {
+    pub jlink: JlinkSettings,
+    pub native_image: NativeImageSettings,
+    pub installer: InstallerSettings,
+}
+
+/// `[package.jlink]`: the runtime image of `--format jlink` (and of installers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JlinkSettings {
+    /// JDK modules to add to the ones `jdeps` finds, e.g. ones only loaded through reflection.
+    pub modules: Vec<String>,
+    /// Ask `jdeps` which modules the program uses; `false` uses only `modules`.
+    pub jdeps: bool,
+}
+
+impl Default for JlinkSettings {
+    fn default() -> Self {
+        Self { modules: Vec::new(), jdeps: true }
+    }
+}
+
+/// `[package.native-image]`: options for GraalVM's `native-image`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeImageSettings {
+    /// Extra `native-image` arguments.
+    pub args: Vec<String>,
+    /// Link a static executable against musl (Linux only).
+    pub static_link: bool,
+    /// Packages or classes initialized while the image is built.
+    pub initialize_at_build_time: Vec<String>,
+    /// Use the GraalVM reachability metadata repository for the dependencies.
+    pub metadata_repository: bool,
+}
+
+impl Default for NativeImageSettings {
+    fn default() -> Self {
+        Self { args: Vec::new(), static_link: false, initialize_at_build_time: Vec::new(), metadata_repository: true }
+    }
+}
+
+/// What `jpackage` builds (`[package.installer] type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallerType {
+    Msi,
+    Exe,
+    Dmg,
+    Pkg,
+    Deb,
+    Rpm,
+    /// The application directory with its launcher and runtime, without an installer.
+    AppImage,
+}
+
+impl InstallerType {
+    pub const ALL: [InstallerType; 7] = [
+        InstallerType::Msi,
+        InstallerType::Exe,
+        InstallerType::Dmg,
+        InstallerType::Pkg,
+        InstallerType::Deb,
+        InstallerType::Rpm,
+        InstallerType::AppImage,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstallerType::Msi => "msi",
+            InstallerType::Exe => "exe",
+            InstallerType::Dmg => "dmg",
+            InstallerType::Pkg => "pkg",
+            InstallerType::Deb => "deb",
+            InstallerType::Rpm => "rpm",
+            InstallerType::AppImage => "app-image",
+        }
+    }
+
+    /// The OS (`std::env::consts::OS`) that builds this type, or `None` for any.
+    pub fn os(self) -> Option<&'static str> {
+        match self {
+            InstallerType::Msi | InstallerType::Exe => Some("windows"),
+            InstallerType::Dmg | InstallerType::Pkg => Some("macos"),
+            InstallerType::Deb | InstallerType::Rpm => Some("linux"),
+            InstallerType::AppImage => None,
+        }
+    }
+
+    /// The default type on `os`: `.msi` on Windows, `.dmg` on macOS, `.deb` elsewhere.
+    pub fn default_for(os: &str) -> InstallerType {
+        match os {
+            "windows" => InstallerType::Msi,
+            "macos" => InstallerType::Dmg,
+            _ => InstallerType::Deb,
+        }
+    }
+}
+
+impl FromStr for InstallerType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match InstallerType::ALL.into_iter().find(|t| t.as_str() == s) {
+            Some(t) => Ok(t),
+            None => {
+                let names: Vec<&str> = InstallerType::ALL.iter().map(|t| t.as_str()).collect();
+                bail!("unknown installer type `{s}` (expected one of: {})", names.join(", "))
+            }
+        }
+    }
+}
+
+/// The installer's icon on each OS: `.ico` on Windows, `.icns` on macOS, `.png` on Linux.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InstallerIcons {
+    pub windows: Option<PathBuf>,
+    pub macos: Option<PathBuf>,
+    pub linux: Option<PathBuf>,
+}
+
+impl InstallerIcons {
+    /// The icon for `os` (`std::env::consts::OS`).
+    pub fn for_os(&self, os: &str) -> Option<&Path> {
+        match os {
+            "windows" => self.windows.as_deref(),
+            "macos" => self.macos.as_deref(),
+            _ => self.linux.as_deref(),
+        }
+    }
+}
+
+/// `[package.installer]`: options for `jpackage`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InstallerSettings {
+    /// The application name; defaults to the package (or `--bin`) name.
+    pub name: Option<String>,
+    pub vendor: Option<String>,
+    /// Defaults to `[package] description`.
+    pub description: Option<String>,
+    /// A numeric version such as `1.2.3`; defaults to the numeric start of `[package] version`.
+    pub app_version: Option<String>,
+    /// `None` builds the host's default type.
+    pub kind: Option<InstallerType>,
+    pub icon: InstallerIcons,
+    pub license_file: Option<PathBuf>,
+    /// Add a Start menu entry (Windows) or a menu entry (Linux).
+    pub menu: bool,
+    /// Add a desktop shortcut (Windows, Linux).
+    pub shortcut: bool,
+    /// Windows: make the launcher a console program, for command-line tools (`--win-console`).
+    pub console: bool,
+    /// Windows: the upgrade code that lets a newer `.msi` replace an older one.
+    pub upgrade_uuid: Option<String>,
+    /// macOS: the bundle identifier, e.g. `com.example.app`.
+    pub bundle_id: Option<String>,
+    /// macOS: the signing identity (`Developer ID Application: ...`); signs the app when set.
+    pub signing_identity: Option<String>,
+    /// Linux: the package's category (`--linux-app-category`).
+    pub category: Option<String>,
 }
 
 /// `[doc]`: options for `kargo doc` (Dokka).
@@ -1125,6 +1365,8 @@ pub struct Manifest {
     /// Every profile by name: `dev` and `release` (always present) and the custom `[profile.<name>]` tables.
     pub profiles: BTreeMap<String, Profile>,
     pub toolchain: ToolchainSettings,
+    /// `[package.jlink]`, `[package.native-image]` and `[package.installer]`.
+    pub packaging: PackagingSettings,
     pub doc: DocSettings,
     pub fmt: FmtSettings,
     pub lint: LintSettings,

@@ -207,6 +207,7 @@ Build and run the program. Arguments after `--` go to the program.
 | `--port <port>` | Wasm browser apps: the port to serve on (default `8080`; `0` picks a free one) |
 | `--open` | Wasm browser apps: open the served page in your browser |
 | `--debug[=<port>]` | JVM: start the program suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`; `0` lets the JVM pick and print one). See [Debugging](../../guides/editors/#debugging) |
+| `--native-agent` | JVM: run on GraalVM (`[toolchain] graalvm`) with its tracing agent, which records the reflection, resources and proxies the program uses as `native-image` configuration in `native-image/`. Later runs add to it. See [Native executables](../../guides/distributing/#native-executables) |
 | `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `--flavor <name>` | Android: install this [product flavor](../../guides/android/#product-flavors) (repeatable, one per dimension; default: the first flavor of each dimension). Needs `-t android` |
@@ -531,6 +532,17 @@ The entries are the ones the build compiles with, in the same order: path depend
 
 Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). The path of the jar is printed on stdout.
 
+`--format` ships a JVM application another way. Each prints the path of what it built on stdout:
+
+| Format | Builds |
+|---|---|
+| `jar` | The fat jar above (the default) |
+| `jlink` | `target/<profile>/jvm/package/<name>-<version>/`: the jars in `lib/`, a Java runtime with only the JDK modules the program uses in `runtime/`, and `bin/<name>` and `bin/<name>.bat` launchers. Runs on machines without Java |
+| `native-image` | `target/<profile>/jvm/package/<name>` (`<name>.exe` on Windows): a native executable built by GraalVM's `native-image` |
+| `installer` | An installer built by `jpackage` into `target/<profile>/jvm/package/`: `.msi` on Windows, `.dmg` on macOS, `.deb` on Linux, or the [`[package.installer]`](../manifest/#packageinstaller) `type` |
+
+`jlink`, `native-image` and `installer` need a main class and build for the OS and CPU Kargo runs on. See [Distributing applications](../../guides/distributing/).
+
 A library (a project without a `main` function or `main-class`) gets what you would publish instead: `target/<profile>/package/<name>-<version>.jar` with only its own classes (no Kotlin standard library, no `Class-Path`) and `<name>-<version>-sources.jar` next to it. Pass `--fat` for the fat jar anyway. `kargo publish --dry-run` shows everything a [publication](../../guides/publishing/) holds, POM included.
 
 With `-t android` (the default when the JVM target is off and Android is on), it builds the Android App Bundle (`.aab`) and APK of an application, or the AAR of a library, for every [product flavor](../../guides/android/#product-flavors), and copies them to `target/<profile>/android/`. Their paths are printed on stdout, App Bundles first. They are signed when [`[target.android.signing]`](../manifest/#targetandroid) has an entry for the build type; an unsigned release build gets a warning. See [Release builds](../../guides/android/#release-builds).
@@ -543,6 +555,7 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `-p, --package <name>` | The package to build the jar for; required at the root of a workspace with several members |
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
 | `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library (JVM) |
+| `--format <format>` | `jar` (default), `jlink`, `native-image` or `installer` (JVM) |
 
 ## `kargo publish`
 
@@ -665,13 +678,13 @@ kargo android connectedAndroidTest
 
 ## `kargo toolchain`
 
-Manage JDKs, Kotlin/Native and Gradle distributions, and the Kotlin language servers [`kargo lsp`](#kargo-lsp) runs.
+Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, and the Kotlin language servers [`kargo lsp`](#kargo-lsp) runs.
 
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses |
-| `install [jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
-| `remove` (`rm`) `<jdk\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs, a major version removes all its releases |
+| `install [jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `graalvm` takes `25` (GraalVM Community Edition) or `oracle-25` (Oracle GraalVM). `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
+| `remove` (`rm`) `<jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs and GraalVMs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
 

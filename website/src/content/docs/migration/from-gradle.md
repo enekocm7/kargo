@@ -187,6 +187,10 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `io.freefair.lombok` + `kotlin("plugin.lombok")` | `[frameworks] lombok = true` |
 | Other compiler plugins | `[plugins.<name>] maven = "...", id = "..."` |
 | `jvmToolchain(21)` | `[toolchain] jdk = "21"` |
+| `org.beryx.jlink` + `./gradlew jlink` | `kargo package --format jlink`, with `[package.jlink] modules` for extra modules |
+| `org.graalvm.buildtools.native` + `./gradlew nativeCompile` | `kargo package --format native-image`, with `[toolchain] graalvm` and `[package.native-image]` |
+| `-Pagent` / `nativeCompile` with the tracing agent | `kargo run --native-agent` |
+| `org.beryx.jlink`'s `jpackage` task, or Compose's `packageDistributionForCurrentOS` | `kargo package --format installer`, with `[package.installer]` |
 | `jvmTarget = JvmTarget.JVM_17` | `[target.jvm] jvm-target = "17"` |
 | `freeCompilerArgs` | `[kotlin] compiler-args` |
 | `optIn` | `[kotlin] opt-in` |

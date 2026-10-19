@@ -71,6 +71,9 @@ pub struct RunOptions {
     pub open: bool,
     /// Start the JVM suspended, waiting for a JDWP debugger on this port (`--debug`).
     pub debug: Option<u16>,
+    /// Run on GraalVM with its tracing agent, which writes `native-image` configuration into
+    /// `native-image/` (`--native-agent`).
+    pub native_agent: bool,
     /// The Android flavors to install (`--flavor`), at most one per dimension.
     pub flavors: Vec<String>,
     /// The `.env` files the program's environment is read from (`--env-file`, `--no-env-file`).
@@ -81,6 +84,15 @@ pub struct RunOptions {
 /// interface before running anything. Port 0 lets the JVM pick one; it prints the port it uses.
 pub fn jdwp_option(port: u16) -> String {
     format!("-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:{port}")
+}
+
+/// The option that runs GraalVM's tracing agent, which records the reflection, resources and
+/// proxies the program uses as `native-image` configuration in `dir`. A directory that already has
+/// configuration is merged into, so several runs can cover several code paths.
+pub fn native_agent_option(dir: &Path) -> String {
+    let existing = std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some());
+    let mode = if existing { "config-merge-dir" } else { "config-output-dir" };
+    format!("-agentlib:native-image-agent={mode}={}", dir.display())
 }
 
 /// Tells the user how to attach to a JVM started with [`jdwp_option`].
@@ -140,6 +152,9 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
     }
     if opts.debug.is_some() && target != TargetKind::Jvm {
         bail!("`--debug` starts the JVM under a debugger and only works for the jvm target, not {target}");
+    }
+    if opts.native_agent && target != TargetKind::Jvm {
+        bail!("`--native-agent` traces a JVM program for `native-image` and only works for the jvm target, not {target}");
     }
     if *program != Program::Default && !matches!(target, TargetKind::Jvm | TargetKind::Native) {
         bail!("`kargo run {}` only works for the jvm and native targets, not {target}", program.flag());
@@ -231,11 +246,21 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             let jvm = results.jvm.context("JVM build produced no output")?;
             let (main, classpath) = jvm_program(ctx, &jvm, &opts.program)?;
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
-            let jdk = ctx.jdk()?;
+            let jdk = if opts.native_agent {
+                let graalvm = kargo_toolchain::graalvm::resolve(ctx.config, &ctx.ws.manifest().toolchain.graalvm)?;
+                kargo_toolchain::Jdk { home: graalvm.home, version: graalvm.version }
+            } else {
+                ctx.jdk()?.clone()
+            };
             let mut cmd = Command::new(jdk.java());
             if let Some(port) = opts.debug {
                 cmd.arg(jdwp_option(port));
                 note_debugger(ctx.shell(), port, "the program");
+            }
+            if opts.native_agent {
+                let dir = ctx.ws.root().join("native-image");
+                cmd.arg(native_agent_option(&dir));
+                ctx.shell().note(format!("the GraalVM tracing agent writes the program's native-image configuration to {}", rel(&dir)));
             }
             cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).arg("-cp").arg(join_paths(&classpath)).arg(&main);
             label = format!("java {main}");

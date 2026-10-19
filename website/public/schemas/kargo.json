@@ -20,7 +20,62 @@
         "license": { "description": "An SPDX expression such as `MIT` or `MIT OR Apache-2.0`. Required by Maven Central.", "anyOf": [{ "type": "string" }, { "$ref": "#/definitions/inherit" }] },
         "homepage": { "description": "The project's web page, an http(s) URL. Defaults to `repository`.", "anyOf": [{ "type": "string", "format": "uri" }, { "$ref": "#/definitions/inherit" }] },
         "repository": { "description": "The source repository, an http(s) URL. Required by Maven Central.", "anyOf": [{ "type": "string", "format": "uri" }, { "$ref": "#/definitions/inherit" }] },
-        "publish": { "description": "`false` makes `kargo publish` refuse the package.", "type": "boolean", "default": true }
+        "publish": { "description": "`false` makes `kargo publish` refuse the package.", "type": "boolean", "default": true },
+        "jlink": {
+          "description": "The Java runtime of `kargo package --format jlink` and `--format installer`.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "modules": { "description": "JDK modules to add to the ones jdeps finds, such as modules only loaded through reflection.", "type": "array", "items": { "type": "string" }, "examples": [["java.naming", "jdk.crypto.ec"]] },
+            "jdeps": { "description": "Ask jdeps which JDK modules the program uses. `false` uses only `modules`.", "type": "boolean", "default": true }
+          }
+        },
+        "native-image": {
+          "description": "Options for `kargo package --format native-image` (GraalVM).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "args": { "description": "Extra native-image arguments.", "type": "array", "items": { "type": "string" }, "examples": [["--enable-url-protocols=https"]] },
+            "static": { "description": "Link a fully static executable against musl (Linux only).", "type": "boolean", "default": false },
+            "initialize-at-build-time": { "description": "Packages or classes initialized while the image is built.", "type": "array", "items": { "type": "string" } },
+            "metadata-repository": { "description": "Use the GraalVM reachability metadata repository for the dependencies.", "type": "boolean", "default": true }
+          }
+        },
+        "installer": {
+          "description": "Options for `kargo package --format installer` (jpackage).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "description": "The application name. Default: the package name (or `--bin`).", "type": "string", "examples": ["Hello"] },
+            "vendor": { "description": "The vendor shown by the installer.", "type": "string" },
+            "description": { "description": "The description shown by the installer. Default: [package] description.", "type": "string" },
+            "app-version": { "description": "One to three numbers such as \"1.2.3\". Default: the numbers at the start of [package] version.", "type": "string", "pattern": "^[0-9]{1,9}(\\.[0-9]{1,9}){0,2}$", "examples": ["1.2.3"] },
+            "type": { "description": "What jpackage builds. Default: msi on Windows, dmg on macOS, deb on Linux.", "enum": ["msi", "exe", "dmg", "pkg", "deb", "rpm", "app-image"] },
+            "icon": {
+              "description": "The icon: one path for every OS, or one per OS (.ico on Windows, .icns on macOS, .png on Linux).",
+              "anyOf": [
+                { "type": "string", "examples": ["packaging/app.png"] },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "windows": { "description": "A .ico file.", "type": "string" },
+                    "macos": { "description": "A .icns file.", "type": "string" },
+                    "linux": { "description": "A .png file.", "type": "string" }
+                  }
+                }
+              ]
+            },
+            "license-file": { "description": "A license the installer shows.", "type": "string", "examples": ["LICENSE"] },
+            "menu": { "description": "Add a Start menu (Windows) or menu (Linux) entry.", "type": "boolean", "default": false },
+            "shortcut": { "description": "Add a desktop shortcut (Windows, Linux).", "type": "boolean", "default": false },
+            "console": { "description": "Windows: make the launcher a console program, for command-line tools.", "type": "boolean", "default": false },
+            "upgrade-uuid": { "description": "Windows: the upgrade code that lets a newer .msi replace an older one. Keep it across releases.", "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "examples": ["0b5b2d6e-8f5c-4a37-9d1e-3a6c2f4b7e90"] },
+            "bundle-id": { "description": "macOS: the bundle identifier.", "type": "string", "examples": ["com.example.hello"] },
+            "signing-identity": { "description": "macOS: sign the app with this keychain identity.", "type": "string" },
+            "category": { "description": "Linux: the package's section or group.", "type": "string" }
+          }
+        }
       }
     },
     "kotlin": {
@@ -38,7 +93,7 @@
       }
     },
     "toolchain": {
-      "description": "Which JDK builds and runs the project.",
+      "description": "Which JDK builds and runs the project, and which GraalVM builds native images.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -47,6 +102,12 @@
           "type": ["string", "integer"],
           "default": "system",
           "examples": ["system", "21", "25"]
+        },
+        "graalvm": {
+          "description": "The GraalVM of `kargo package --format native-image` and `kargo run --native-agent`: \"system\" (GRAALVM_HOME, then a JAVA_HOME or PATH with native-image), a Java version such as \"25\" for GraalVM Community Edition, or \"oracle-25\" for Oracle GraalVM.",
+          "type": ["string", "integer"],
+          "default": "system",
+          "examples": ["system", "25", "oracle-25"]
         }
       }
     },

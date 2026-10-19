@@ -1392,3 +1392,92 @@ mod script {
         assert!(err.contains("unknown key `flavour`"), "{err}");
     }
 }
+
+#[test]
+fn toolchain_graalvm_requests() {
+    assert_eq!(parse(MINIMAL).toolchain.graalvm, GraalvmRequest::System);
+    let with = |line: &str| format!("{MINIMAL}\n[toolchain]\n{line}\n");
+    let community = |major| GraalvmRequest::Major { distribution: GraalvmDistribution::Community, major };
+    assert_eq!(parse(&with("graalvm = \"25\"")).toolchain.graalvm, community(25));
+    assert_eq!(parse(&with("graalvm = 21")).toolchain.graalvm, community(21));
+    assert_eq!(parse(&with("graalvm = \"community-25\"")).toolchain.graalvm, community(25));
+    let oracle = parse(&with("graalvm = \"oracle-25\"")).toolchain.graalvm;
+    assert_eq!(oracle, GraalvmRequest::Major { distribution: GraalvmDistribution::Oracle, major: 25 });
+    assert_eq!(oracle.to_string(), "oracle-25");
+    assert_eq!(community(25).to_string(), "25");
+    assert_eq!(parse(&with("graalvm = \"system\"")).toolchain.graalvm, GraalvmRequest::System);
+    assert!(parse_err(&with("graalvm = \"11\"")).contains("17 or newer"));
+    assert!(parse_err(&with("graalvm = \"mandrel-25\"")).contains("invalid GraalVM"));
+    assert!(parse_err(&with("graalvm = true")).contains("must be a version"));
+}
+
+#[test]
+fn packaging_tables() {
+    let m = parse(MINIMAL);
+    assert_eq!(m.packaging, PackagingSettings::default());
+    assert!(m.packaging.jlink.jdeps && m.packaging.native_image.metadata_repository);
+
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[package.jlink]
+modules = ["java.naming", "jdk.crypto.ec"]
+
+[package.native-image]
+args = ["--enable-url-protocols=https"]
+static = true
+initialize-at-build-time = ["kotlinx.serialization"]
+metadata-repository = false
+
+[package.installer]
+name = "Hello App"
+vendor = "Example"
+app-version = "1.2.3"
+type = "app-image"
+icon = {{ windows = "icons/app.ico", linux = "icons/app.png" }}
+license-file = "LICENSE"
+menu = true
+shortcut = true
+console = true
+upgrade-uuid = "0b5b2d6e-8f5c-4a37-9d1e-3a6c2f4b7e90"
+bundle-id = "com.example.hello"
+category = "Development"
+"#
+    ));
+    assert_eq!(m.packaging.jlink.modules, ["java.naming", "jdk.crypto.ec"]);
+    let native = &m.packaging.native_image;
+    assert!(native.static_link && !native.metadata_repository);
+    assert_eq!(native.initialize_at_build_time, ["kotlinx.serialization"]);
+    let installer = &m.packaging.installer;
+    assert_eq!(installer.kind, Some(InstallerType::AppImage));
+    assert_eq!(installer.icon.for_os("windows"), Some(Path::new("icons/app.ico")));
+    assert_eq!(installer.icon.for_os("macos"), None);
+    assert_eq!(installer.icon.for_os("linux"), Some(Path::new("icons/app.png")));
+    assert!(installer.menu && installer.shortcut && installer.console);
+    assert_eq!(installer.app_version.as_deref(), Some("1.2.3"));
+
+    let one_icon = parse(&format!("{MINIMAL}\n[package.installer]\nicon = \"app.png\"\n"));
+    assert_eq!(one_icon.packaging.installer.icon.for_os("macos"), Some(Path::new("app.png")));
+
+    let with = |text: &str| format!("{MINIMAL}\n{text}\n");
+    assert!(parse_err(&with("[package.installer]\ntype = \"zip\"")).contains("unknown installer type `zip`"));
+    assert!(parse_err(&with("[package.installer]\napp-version = \"1.0-SNAPSHOT\"")).contains("app-version"));
+    assert!(parse_err(&with("[package.installer]\nupgrade-uuid = \"nope\"")).contains("UUID"));
+    assert!(parse_err(&with("[package.installer]\nicon = { android = \"a.png\" }")).contains("icon"));
+    assert!(parse_err(&with("[package.installer]\nname = \"a/b\"")).contains("file name"));
+    assert!(parse_err(&with("[package.installer]\nbogus = 1")).contains("bogus"));
+    assert!(parse_err(&with("[package.jlink]\nmodules = [\"java naming\"]")).contains("module names"));
+    assert!(parse_err(&with("[package.jlink]\njdeps = false")).contains("needs `modules`"));
+    assert!(parse_err(&with("[package.native-image]\nstatic = \"yes\"")).contains("static"));
+}
+
+#[test]
+fn installer_type_hosts() {
+    assert_eq!(InstallerType::default_for("windows"), InstallerType::Msi);
+    assert_eq!(InstallerType::default_for("macos"), InstallerType::Dmg);
+    assert_eq!(InstallerType::default_for("linux"), InstallerType::Deb);
+    assert_eq!(InstallerType::Pkg.os(), Some("macos"));
+    assert_eq!(InstallerType::AppImage.os(), None);
+    for t in InstallerType::ALL {
+        assert_eq!(t.as_str().parse::<InstallerType>().unwrap(), t);
+    }
+}

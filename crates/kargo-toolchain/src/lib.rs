@@ -1,10 +1,11 @@
-//! External toolchains: JDKs (detected or downloaded Temurin builds), the
+//! External toolchains: JDKs (detected or downloaded Temurin builds), GraalVM, the
 //! Kotlin compiler, Kotlin/Native, Node.js, web browsers, Gradle and Kotlin language servers.
 
 pub mod adoptium;
 pub mod archive;
 pub mod browser;
 pub mod download;
+pub mod graalvm;
 pub mod gradle;
 pub mod jdk;
 pub mod jdks;
@@ -16,6 +17,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+pub use graalvm::Graalvm;
 pub use gradle::GradleDistribution;
 pub use jdk::Jdk;
 pub use kotlin::KotlinCompiler;

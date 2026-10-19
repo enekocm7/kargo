@@ -19,7 +19,7 @@ use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
 use kargo_manifest::{Bin, Cinterop, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
-use kargo_maven::{Platform, Resolution};
+use kargo_maven::{ModuleId, Platform, Resolution};
 use kargo_toolchain::native::resolve_platform;
 use kargo_util::fs::collect_files;
 
@@ -48,6 +48,8 @@ pub struct JvmBuild {
     pub main_class_error: Option<String>,
     /// JVM options for `kargo run`: `[target.jvm] jvm-args`, then the profile's `jvm-args`.
     pub jvm_args: Vec<String>,
+    /// The resolved Maven modules of the runtime classpath and their versions.
+    pub runtime_modules: Vec<(ModuleId, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -444,7 +446,8 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
 
     // The profile's options come after `[target.jvm] jvm-args`, so they override them.
     let jvm_args = jvm.jvm_args.iter().chain(&ctx.ws.profile(&ctx.profile)?.jvm_args).cloned().collect();
-    Ok(JvmBuild { classes, jar, lib_dir, runtime_classpath, main_class, main_class_error, jvm_args })
+    let runtime_modules = classpaths.runtime.nodes.iter().map(|n| (n.module.clone(), n.version.clone())).collect();
+    Ok(JvmBuild { classes, jar, lib_dir, runtime_classpath, main_class, main_class_error, jvm_args, runtime_modules })
 }
 
 /// Copies runtime dependencies into `lib/`, returning their file names in classpath order.

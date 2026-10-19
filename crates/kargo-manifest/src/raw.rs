@@ -64,6 +64,7 @@ struct RawBin {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawToolchain {
     jdk: Option<Value>,
+    graalvm: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,6 +118,60 @@ struct RawPackage {
     homepage: Option<String>,
     repository: Option<String>,
     publish: Option<bool>,
+    #[serde(default)]
+    jlink: RawJlink,
+    #[serde(default)]
+    native_image: RawNativeImage,
+    #[serde(default)]
+    installer: RawInstaller,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawJlink {
+    #[serde(default)]
+    modules: Vec<String>,
+    jdeps: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawNativeImage {
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(rename = "static")]
+    static_link: Option<bool>,
+    #[serde(default)]
+    initialize_at_build_time: Vec<String>,
+    metadata_repository: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawInstaller {
+    name: Option<String>,
+    vendor: Option<String>,
+    description: Option<String>,
+    app_version: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    icon: Option<Value>,
+    license_file: Option<PathBuf>,
+    menu: Option<bool>,
+    shortcut: Option<bool>,
+    console: Option<bool>,
+    upgrade_uuid: Option<String>,
+    bundle_id: Option<String>,
+    signing_identity: Option<String>,
+    category: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallerIcons {
+    windows: Option<PathBuf>,
+    macos: Option<PathBuf>,
+    linux: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1770,6 +1825,17 @@ impl RawManifest {
             }
             Some(_) => bail!("[toolchain] `jdk` must be a version like \"21\" or \"system\""),
         };
+        let graalvm = match self.toolchain.graalvm {
+            None => GraalvmRequest::System,
+            Some(Value::String(s)) => s.parse().context("invalid [toolchain] `graalvm`")?,
+            Some(Value::Integer(i)) => i.to_string().parse().context("invalid [toolchain] `graalvm`")?,
+            Some(_) => bail!("[toolchain] `graalvm` must be a version like \"25\", \"oracle-25\" or \"system\""),
+        };
+        let packaging = PackagingSettings {
+            jlink: self.package.jlink.validate()?,
+            native_image: self.package.native_image.validate(),
+            installer: self.package.installer.validate()?,
+        };
         if let (Some(major), Some(jvm)) = (jdk.major(), &mut targets.jvm) {
             // The default target never exceeds the pinned JDK; an explicit one must not.
             jvm.jvm_target = jvm.target_for(major)?;
@@ -1801,7 +1867,8 @@ impl RawManifest {
 
         Ok(Manifest {
             publish,
-            toolchain: ToolchainSettings { jdk },
+            toolchain: ToolchainSettings { jdk, graalvm },
+            packaging,
             doc,
             fmt,
             lint,
@@ -2076,6 +2143,97 @@ impl RawPublish {
             central_publishing,
         })
     }
+}
+
+impl RawJlink {
+    fn validate(self) -> Result<JlinkSettings> {
+        for module in &self.modules {
+            let valid = !module.is_empty()
+                && module.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_alphanumeric() || c == '_'));
+            if !valid {
+                bail!("[package.jlink] `modules` entries must be JDK module names such as \"java.naming\", got `{module}`");
+            }
+        }
+        let jdeps = self.jdeps.unwrap_or(true);
+        if !jdeps && self.modules.is_empty() {
+            bail!("[package.jlink] `jdeps = false` needs `modules`: the JDK modules to put in the runtime image, e.g. [\"java.base\"]");
+        }
+        Ok(JlinkSettings { modules: self.modules, jdeps })
+    }
+}
+
+impl RawNativeImage {
+    fn validate(self) -> NativeImageSettings {
+        NativeImageSettings {
+            args: self.args,
+            static_link: self.static_link.unwrap_or(false),
+            initialize_at_build_time: self.initialize_at_build_time,
+            metadata_repository: self.metadata_repository.unwrap_or(true),
+        }
+    }
+}
+
+impl RawInstaller {
+    fn validate(self) -> Result<InstallerSettings> {
+        let kind = self.kind.as_deref().map(str::parse).transpose().context("invalid [package.installer] `type`")?;
+        let icon = match self.icon {
+            None => InstallerIcons::default(),
+            Some(Value::String(path)) => {
+                let path = PathBuf::from(path);
+                InstallerIcons { windows: Some(path.clone()), macos: Some(path.clone()), linux: Some(path) }
+            }
+            Some(table @ Value::Table(_)) => {
+                let icons: RawInstallerIcons = table.try_into().context("invalid [package.installer] `icon`")?;
+                InstallerIcons { windows: icons.windows, macos: icons.macos, linux: icons.linux }
+            }
+            Some(_) => bail!(
+                "[package.installer] `icon` must be a path or a table such as {{ windows = \"app.ico\", macos = \"app.icns\", linux = \"app.png\" }}"
+            ),
+        };
+        if let Some(version) = &self.app_version
+            && !is_numeric_version(version)
+        {
+            bail!("[package.installer] `app-version` must be one to three numbers separated by dots, such as \"1.2.3\", got `{version}`");
+        }
+        if let Some(uuid) = &self.upgrade_uuid
+            && !is_uuid(uuid)
+        {
+            bail!("[package.installer] `upgrade-uuid` must be a UUID such as \"0b5b2d6e-8f5c-4a37-9d1e-3a6c2f4b7e90\", got `{uuid}`");
+        }
+        if let Some(name) = &self.name
+            && (name.is_empty() || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']))
+        {
+            bail!("[package.installer] `name` must be usable as a file name, got `{name}`");
+        }
+        Ok(InstallerSettings {
+            name: self.name,
+            vendor: self.vendor,
+            description: self.description,
+            app_version: self.app_version,
+            kind,
+            icon,
+            license_file: self.license_file,
+            menu: self.menu.unwrap_or(false),
+            shortcut: self.shortcut.unwrap_or(false),
+            console: self.console.unwrap_or(false),
+            upgrade_uuid: self.upgrade_uuid,
+            bundle_id: self.bundle_id,
+            signing_identity: self.signing_identity,
+            category: self.category,
+        })
+    }
+}
+
+/// `1`, `1.2` or `1.2.3`: the versions `jpackage` accepts on every OS.
+pub(crate) fn is_numeric_version(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() <= 3 && parts.iter().all(|p| !p.is_empty() && p.len() <= 9 && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` in hexadecimal digits.
+fn is_uuid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5 && groups.iter().zip([8, 4, 4, 4, 12]).all(|(g, len)| g.len() == len && g.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 impl RawFmt {

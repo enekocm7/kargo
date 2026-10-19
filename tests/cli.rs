@@ -3077,3 +3077,62 @@ fn custom_profiles_are_chosen_by_name() {
     assert!(!p.path().join("target/staging").exists());
     assert!(p.path().join("target/release/jvm").is_dir());
 }
+
+#[test]
+fn package_formats_check_their_flags_first() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.wasm]\n"));
+    p.kargo()
+        .args(["package", "--format", "jlink", "--fat"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--fat` builds a jar and does not apply to `--format jlink`"));
+    p.kargo()
+        .args(["package", "--format", "native-image", "--target", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--format native-image` packages a JVM application and needs the jvm target, not wasm"));
+    p.kargo().args(["package", "--format", "zip"]).assert().failure().stderr(predicate::str::contains("invalid value 'zip'"));
+    p.kargo()
+        .args(["run", "--native-agent", "--target", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--native-agent` traces a JVM program"));
+
+    p.file("kargo.toml", &manifest("app", "[package.installer]\ntype = \"zip\"\n"));
+    p.kargo().args(["package"]).assert().failure().stderr(predicate::str::contains("unknown installer type `zip`"));
+    p.file("kargo.toml", &manifest("app", "[toolchain]\ngraalvm = \"mandrel-25\"\n"));
+    p.kargo().args(["package"]).assert().failure().stderr(predicate::str::contains("invalid [toolchain] `graalvm`"));
+}
+
+#[test]
+fn toolchain_manages_graalvm() {
+    let p = Project::new();
+    let dir = p.home.path().join("toolchains/graalvm/community-25.0.4");
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("bin").join(if cfg!(windows) { "native-image.cmd" } else { "native-image" }), "").unwrap();
+    std::fs::write(dir.join("kargo-graalvm.json"), r#"{"distribution": "community", "version": "25.0.4", "major": 25, "home": ""}"#)
+        .unwrap();
+    p.file("kargo.toml", &manifest("tc", "[toolchain]\ngraalvm = 25\n"));
+    p.kargo().args(["toolchain", "list"]).assert().success().stdout(
+        predicate::str::contains("GraalVM (").and(predicate::str::is_match(r"community-25\.0\.4 .*\(used by this project\)").unwrap()),
+    );
+    // Installed already: no download needed, even offline.
+    p.kargo()
+        .args(["toolchain", "install", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed GraalVM CE 25.0.4"));
+    p.kargo()
+        .args(["toolchain", "install", "graalvm", "oracle-25", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("offline"));
+    p.kargo()
+        .args(["toolchain", "remove", "graalvm", "25"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removed GraalVM CE 25.0.4"));
+    p.kargo().args(["toolchain", "remove", "graalvm", "25"]).assert().failure().stderr(predicate::str::contains("no installed GraalVM"));
+}

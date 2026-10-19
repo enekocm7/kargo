@@ -22,7 +22,7 @@ use kargo_ops::ops::run::{Program, RunOptions, Running, Start};
 use kargo_ops::ops::test::{ListFormat, TestOptions};
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
 use kargo_ops::ops::watch::{WatchOptions, WatchSet};
-use kargo_ops::ops::{self, Configuration, new::NewOptions};
+use kargo_ops::ops::{self, Configuration, PackageFormat, new::NewOptions};
 use kargo_ops::warnings;
 use kargo_ops::workspace::{ProfileKind, Project, Selection, Workspace};
 use kargo_toolchain::ServerKind;
@@ -144,10 +144,37 @@ impl From<ScopeArg> for Scope {
     }
 }
 
+/// `kargo package --format`.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum PackageFormatArg {
+    /// A self-contained jar (a library: its jar and sources jar)
+    #[default]
+    Jar,
+    /// The jars, a Java runtime trimmed by jlink and launchers: runs without an installed Java
+    Jlink,
+    /// A native executable built by GraalVM
+    NativeImage,
+    /// An installer built by jpackage: .msi on Windows, .dmg on macOS, .deb on Linux
+    Installer,
+}
+
+impl From<PackageFormatArg> for PackageFormat {
+    fn from(f: PackageFormatArg) -> Self {
+        match f {
+            PackageFormatArg::Jar => PackageFormat::Jar,
+            PackageFormatArg::Jlink => PackageFormat::Jlink,
+            PackageFormatArg::NativeImage => PackageFormat::NativeImage,
+            PackageFormatArg::Installer => PackageFormat::Installer,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ToolArg {
     /// A Temurin JDK
     Jdk,
+    /// A GraalVM (builds native executables)
+    Graalvm,
     /// A Kotlin/Native distribution
     Native,
     /// A Gradle distribution (runs Android builds)
@@ -164,6 +191,7 @@ impl From<ToolArg> for ToolKind {
     fn from(t: ToolArg) -> Self {
         match t {
             ToolArg::Jdk => ToolKind::Jdk,
+            ToolArg::Graalvm => ToolKind::Graalvm,
             ToolArg::Native => ToolKind::Native,
             ToolArg::Gradle => ToolKind::Gradle,
             ToolArg::KotlinLsp => ToolKind::Server(ServerKind::KotlinLsp),
@@ -183,14 +211,14 @@ enum DaemonCommand {
 
 #[derive(Debug, Subcommand)]
 enum ToolchainCommand {
-    /// List installed JDKs, Kotlin/Native and Gradle distributions, Kotlin language servers and the debug adapter
+    /// List installed JDKs, GraalVMs, Kotlin/Native and Gradle distributions, Kotlin language servers and the debug adapter
     #[command(visible_alias = "ls")]
     List,
     /// Install a toolchain (without arguments: everything this project needs)
     Install {
         #[arg(value_enum)]
         kind: Option<ToolArg>,
-        /// JDK: `21` (latest 21) or `21.0.5+11`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's);
+        /// JDK: `21` (latest 21) or `21.0.5+11`; GraalVM: `25` or `oracle-25`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's);
         /// kotlin-lsp, kls, kotlin-debug-adapter: a version (default: the one `kargo lsp` or `kargo dap` uses)
         version: Option<String>,
     },
@@ -521,6 +549,9 @@ enum Command {
         /// Start the JVM suspended, waiting for a debugger on this port (default 5005)
         #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
         debug: Option<u16>,
+        /// Run on GraalVM with its tracing agent, writing native-image configuration to native-image/
+        #[arg(long)]
+        native_agent: bool,
         /// Install this Android product flavor (repeatable, one per dimension; default: the first of each)
         #[arg(long = "flavor", value_name = "NAME")]
         flavors: Vec<String>,
@@ -797,7 +828,20 @@ enum Command {
         #[arg(long, value_name = "NAME", conflicts_with = "release")]
         profile: Option<String>,
     },
-    /// Build a self-contained executable jar, or a library's jar and sources jar (JVM); APKs and App Bundles (Android)
+    /// Build a self-contained executable jar, a runtime image, a native executable or an installer (JVM); APKs and App Bundles (Android)
+    #[command(
+        long_about = "Build a self-contained executable jar, or a library's jar and sources jar (JVM); APKs and App Bundles (Android).
+
+`--format` picks what a JVM application is shipped as:
+  jar           <name>-<version>-all.jar, run with `java -jar` (the default)
+  jlink         package/<name>-<version>/ with the jars, a Java runtime trimmed by jlink and
+                bin/<name> launchers: runs on machines without Java
+  native-image  package/<name>: a native executable built by GraalVM ([toolchain] graalvm)
+  installer     an .msi, .dmg or .deb (see [package.installer] type) built by jpackage
+
+jlink, native-image and installer build for the OS and CPU they run on. Their output goes to
+target/<profile>/jvm/package/."
+    )]
     Package {
         #[arg(short, long, conflicts_with = "profile")]
         release: bool,
@@ -813,6 +857,9 @@ enum Command {
         /// Build the self-contained <name>-<version>-all.jar even for a library (no main function)
         #[arg(long)]
         fat: bool,
+        /// What to build for the JVM: jar, jlink, native-image or installer
+        #[arg(long, value_enum, default_value_t, value_name = "FORMAT")]
+        format: PackageFormatArg,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -1562,6 +1609,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             port,
             open,
             debug,
+            native_agent,
             flavors,
             message_format,
             package,
@@ -1583,8 +1631,18 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (_, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let opts =
-                RunOptions { target: target.map(Into::into), profile, program, args, port, open, debug, flavors, env: env.options() };
+            let opts = RunOptions {
+                target: target.map(Into::into),
+                profile,
+                program,
+                args,
+                port,
+                open,
+                debug,
+                native_agent,
+                flavors,
+                env: env.options(),
+            };
             let Some(watch) = watch else {
                 let code = ops::run::run(&ctx, &opts)?;
                 return Ok(exit_code(code));
@@ -1968,12 +2026,12 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, profile, target, bin, fat, package } => {
+        Command::Package { release, profile, target, bin, fat, format, package } => {
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
             let ctx = context(config, &project, index, global, profile_kind(release, profile.as_deref()))?;
-            for file in ops::package(&ctx, target.map(Into::into), bin.as_deref(), fat)? {
+            for file in ops::package(&ctx, target.map(Into::into), bin.as_deref(), fat, format.into())? {
                 println!("{}", file.display());
             }
             Ok(0)
@@ -2082,7 +2140,9 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
             let what = toolchain_ops::install(config, manifest, kind.into(), version.as_deref())?;
             shell.status("Installed", what);
         }
-        ToolchainCommand::Install { kind: None, version: Some(_) } => bail!("specify what to install: `jdk`, `native` or `gradle`"),
+        ToolchainCommand::Install { kind: None, version: Some(_) } => {
+            bail!("specify what to install: `jdk`, `graalvm`, `native` or `gradle`")
+        }
         ToolchainCommand::Install { kind: None, version: None } => {
             let project = project
                 .as_ref()
@@ -2097,7 +2157,7 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
                 }
             }
             if done.is_empty() {
-                shell.status("Fresh", "this project uses the system JDK and no Kotlin/Native or Android target");
+                shell.status("Fresh", "this project uses the system JDK and GraalVM and no Kotlin/Native or Android target");
             }
             for what in done {
                 shell.status("Installed", what);
@@ -2125,6 +2185,19 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
             }
             if m.targets.is_enabled(TargetKind::Android) {
                 println!("gradle:        {}", kargo_ops::gradle::describe_gradle(ws, config)?);
+            }
+            // Only shown when pinned: most projects never build a native image.
+            if m.toolchain.graalvm != kargo_manifest::GraalvmRequest::System {
+                match kargo_toolchain::graalvm::find_installed(config, &m.toolchain.graalvm)? {
+                    Some(g) => println!(
+                        "graalvm:       {} ({} {} at {})",
+                        m.toolchain.graalvm,
+                        g.distribution.title(),
+                        g.version,
+                        g.home.display()
+                    ),
+                    None => println!("graalvm:       {} (not installed yet; installed on first native image)", m.toolchain.graalvm),
+                }
             }
         }
     }
