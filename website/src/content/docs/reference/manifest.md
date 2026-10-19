@@ -238,9 +238,26 @@ With `optimize = true`, as in the [release profile](#profilename), a Wasm build 
 ```toml
 [target.native]
 platforms = ["host"]               # default ["host"]
-kind = "executable"                # "executable" (default), "library", "shared" or "static"
+kind = "executable"                # "executable" (default), "library", "shared", "static" or "framework"
 entry-point = "com.example.main"
 linker-options = ["-lcurl"]
+library-paths = ["vendor/lib"]     # -L directories, relative to the project root
+static-libraries = ["libextra.a"]  # found in library-paths, linked in
+frameworks = ["Foundation"]        # Apple platforms only
+bundle-id = "com.example.App"      # kind = "framework" only; default <group>.<name>
+export = ["com.example:core"]      # dependencies whose API a framework or C library exports
+
+[target.native.platform.mingw_x64] # more linker options for one platform
+linker-options = ["-lws2_32"]
+
+[target.native.c-sources]          # C/C++ files compiled into a static library and linked in
+sources = ["c"]                    # files, directories and globs; default ["c"]
+include-dirs = ["c"]               # default ["c"]
+defines = ["NDEBUG"]
+compiler-options = ["-Wall"]
+
+[target.native.c-sources.platform.linux_x64]
+defines = ["LINUX"]
 
 [target.native.cinterop.sqlite]    # a C library bound with cinterop; one table per library
 def = "interop/sqlite.def"         # default: interop/<name>.def
@@ -248,19 +265,58 @@ package = "sqlite3"
 headers = ["sqlite3.h"]
 compiler-options = ["-I/usr/include"]
 linker-options = ["-lsqlite3"]
+pkg-config = "sqlite3"
+link = "static"
+
+[target.native.cinterop.sqlite.platform.macos_arm64]
+linker-options = ["-lsqlite3"]
 ```
 
 Valid platforms: `host`, `linux_x64`, `linux_arm64`, `mingw_x64`, `macos_x64`, `macos_arm64`, `ios_arm64`, `ios_x64`, `ios_simulator_arm64`, `watchos_arm64`, `watchos_simulator_arm64`, `tvos_arm64`, `tvos_simulator_arm64`, `android_arm64`, `android_arm32`, `android_x64`. Gradle-style names like `linuxX64` are accepted too.
 
+| `[target.native]` key | Default | Meaning |
+|---|---|---|
+| `platforms` | `["host"]` | The platforms to build for |
+| `kind` | `"executable"` | `"executable"`, `"library"` (a klib), `"shared"` and `"static"` (a C library with its header in `include/`), or `"framework"` (an Apple framework; every platform must be Apple's) |
+| `entry-point` | the single `main` | The entry function of an executable |
+| `linker-options` | `[]` | Options for the linker of the project's binaries |
+| `library-paths` | `[]` | Directories passed as `-L` and searched for `static-libraries` |
+| `static-libraries` | `[]` | Static libraries (`libfoo.a`) from `library-paths`, linked into the binaries |
+| `frameworks` | `[]` | Apple frameworks to link; ignored on other platforms |
+| `bundle-id` | `<group>.<name>` | The `CFBundleIdentifier` of a framework |
+| `export` | `[]` | Dependencies (`group:artifact`) whose API a framework, shared or static library exports too |
+
+`[target.native.platform.<platform>]` takes `linker-options`, `library-paths`, `static-libraries` and `frameworks`, added to the common ones for that platform. The platform must be named (`host` is not allowed).
+
+| `[target.native.c-sources]` key | Default | Meaning |
+|---|---|---|
+| `sources` | `["c"]` | Files, directories (their `.c`, `.cc`, `.cpp`, `.cxx`, `.m` and `.mm` files) and globs, relative to the project root |
+| `include-dirs` | `["c"]` | `-I` directories; every cinterop entry gets them too |
+| `defines` | `[]` | Macros, `NAME` or `NAME=value` |
+| `compiler-options` | `[]` | More clang options |
+
+`[target.native.c-sources.platform.<platform>]` takes `defines` and `compiler-options`. See [Bundled C sources](../../guides/c-interop/#bundled-c-sources).
+
 | `[target.native.cinterop.<name>]` key | Default | Meaning |
 |---|---|---|
-| `def` | `interop/<name>.def` | The `.def` file, relative to the project root. It must exist unless only `headers` are given |
+| `def` | `interop/<name>.def` | The `.def` file, relative to the project root. It must exist unless `headers` or `modules` are given |
 | `package` | the `.def` file's `package` | Kotlin package of the generated bindings |
-| `headers` | `[]` | Extra headers to bind |
+| `headers` | `[]` | Headers to bind |
 | `compiler-options` | `[]` | clang options for reading the headers (`-I`, `-D`, ...) |
 | `linker-options` | `[]` | Linker options recorded in the bindings and used by every program that links them |
+| `library-paths` | `[]` | Directories searched for `static-libraries`, also passed as `-L` |
+| `static-libraries` | `[]` | Static libraries (`libfoo.a`) embedded in the bindings |
+| `frameworks` | `[]` | Apple frameworks to link; ignored on other platforms |
+| `pkg-config` | none | A package name or a list of them; their flags apply on the host platform |
+| `link` | `"dynamic"` | `"static"` embeds the `lib<name>.a` of each `-l` option found in a library directory |
+| `header-filter` | `[]` | The `.def` file's `headerFilter` |
+| `excluded-functions` | `[]` | The `.def` file's `excludedFunctions` |
+| `strict-enums` | `[]` | The `.def` file's `strictEnums` |
+| `non-strict-enums` | `[]` | The `.def` file's `nonStrictEnums` |
+| `modules` | `[]` | The `.def` file's `modules` (Clang modules, such as Objective-C frameworks) |
+| `language` | the `.def` file's | `"C"` or `"Objective-C"` |
 
-The name may contain letters, digits, `_` and `-`. See [Using C libraries](../../guides/native/#using-c-libraries).
+`[target.native.cinterop.<name>.platform.<platform>]` takes `compiler-options`, `linker-options`, `library-paths`, `static-libraries` and `frameworks`. The name may contain letters, digits, `_` and `-`. See [C interop](../../guides/c-interop/).
 
 ### `[target.android]`
 

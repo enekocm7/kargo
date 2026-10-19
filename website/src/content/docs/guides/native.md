@@ -10,7 +10,7 @@ Kotlin/Native compiles Kotlin to machine code. The result is a self-contained ex
 ```toml title="kargo.toml"
 [target.native]
 platforms = ["host"]       # the machine you're building on
-kind = "executable"        # or "library", "shared", "static"
+kind = "executable"        # or "library", "shared", "static", "framework"
 # entry-point = "com.example.app.main"   # defaults to the top-level `fun main`; see also [[bin]]
 # linker-options = ["-lcurl"]
 
@@ -55,8 +55,11 @@ Apple targets can only be built on macOS. `kargo run` runs the build for the hos
 |---|---|
 | `executable` | A program with a `main` function |
 | `library` | A `.klib` that other Kotlin/Native code can depend on |
-| `shared` | A shared C library (`.so`, `.dylib`, `.dll`) plus a C header |
-| `static` | A static C library (`.a`, `.lib`) plus a C header |
+| `shared` | A shared C library (`.so`, `.dylib`, `.dll`) plus a C header in `include/` |
+| `static` | A static C library (`.a`) plus a C header in `include/` |
+| `framework` | An Apple framework for Swift and Objective-C (Apple platforms only); `kargo build --xcframework` combines them |
+
+See [Calling Kotlin from C](../c-interop/#calling-kotlin-from-c) and [from Swift](../c-interop/#calling-kotlin-from-swift-and-objective-c).
 
 ## Several executables
 
@@ -79,19 +82,15 @@ path = "src/tools/Migrate.kt"   # or entry-point = "com.example.tools.main"
 platforms = ["host"]
 
 [target.native.cinterop.sqlite]
-package = "sqlite3"                    # Kotlin package of the bindings
-compiler-options = ["-I/usr/include"]  # passed to clang while reading the headers
-linker-options = ["-lsqlite3"]         # used when linking any program that uses the bindings
-```
-
-```text title="interop/sqlite.def"
-headers = sqlite3.h
+headers = ["sqlite3.h"]     # the headers to bind; no .def file needed
+package = "sqlite3"         # Kotlin package of the bindings
+pkg-config = "sqlite3"      # compiler and linker flags from sqlite3.pc
 ```
 
 ```kotlin title="src/Main.kt"
 import kotlinx.cinterop.ExperimentalForeignApi
-import sqlite3.sqlite3_libversion
 import kotlinx.cinterop.toKString
+import sqlite3.sqlite3_libversion
 
 @OptIn(ExperimentalForeignApi::class)
 fun main() {
@@ -99,64 +98,19 @@ fun main() {
 }
 ```
 
-Each entry takes these keys, all optional:
-
-| Key | Meaning |
-|---|---|
-| `def` | The [definition file](https://kotlinlang.org/docs/native-definition-file.html), relative to the project root. Default: `interop/<name>.def` |
-| `package` | Kotlin package of the bindings. Default: the `package` in the `.def` file |
-| `headers` | Headers to bind, as you would write them in `#include`. With `headers` and no `interop/<name>.def`, no `.def` file is needed |
-| `compiler-options` | Options for clang when it reads the headers, such as `-I` include directories and `-D` defines |
-| `linker-options` | Linker options stored in the bindings and applied to every program that uses them, such as `-L` and `-l` |
-
-A `.def` file can also contain C code after a `---` line. It is compiled into the bindings, which is handy for small helpers:
-
-```toml title="kargo.toml"
-[target.native.cinterop.mathx]
-package = "mathx"
-compiler-options = ["-Iinclude"]
-```
-
-```text title="interop/mathx.def"
-headers = twice.h
----
-static int add(int a, int b) { return a + b; }
-```
-
-```c title="include/twice.h"
-static inline int twice(int x) { return 2 * x; }
-```
-
-```kotlin title="src/Main.kt"
-import kotlinx.cinterop.ExperimentalForeignApi
-
-@OptIn(ExperimentalForeignApi::class)
-fun main() = println("answer " + mathx.twice(mathx.add(20, 1)))
-```
-
-```console
-$ kargo run
-  Generating mathx C bindings (linux_x64)
-   Compiling app v0.1.0 (native, linux_x64)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.68s
-     Running `target/debug/native/linux_x64/app.kexe`
-answer 42
-```
-
-Relative paths in `compiler-options` and `def` resolve against the project root, so `-Iinclude` points at `include/` next to `kargo.toml`. The C bindings are generated once per platform into `target/<profile>/native/<platform>/cinterop/<name>.klib` and regenerated when the `.def` file, the options, the Kotlin version or a file in a project-relative `-I` directory changes. Run `kargo clean` after changing a system header.
-
-The bindings use `kotlinx.cinterop` APIs, which need `@OptIn(ExperimentalForeignApi::class)`, or `opt-in = ["kotlinx.cinterop.ExperimentalForeignApi"]` in `[kotlin]`.
-
-Kotlin/Native libraries from Maven that already contain C bindings (for example okio) need no `cinterop` entry: add them to `[dependencies]`.
+[C interop](../c-interop/) covers the rest: options per platform, `.def` properties in `kargo.toml`, pkg-config, static linking, C sources compiled with your project (`[target.native.c-sources]`), and calling Kotlin from C and Swift.
 
 ### Linker options
 
-`[target.native] linker-options` passes flags to the linker of your program, for libraries that are not bound with `cinterop`:
+`[target.native] linker-options` passes flags to the linker of your program, for libraries that are not bound with `cinterop`. A `[target.native.platform.<platform>]` table adds options for one platform:
 
 ```toml
 [target.native]
-platforms = ["host"]
-linker-options = ["-L/usr/local/lib", "-lsqlite3"]
+platforms = ["linux_x64", "mingw_x64"]
+linker-options = ["-lm"]
+
+[target.native.platform.mingw_x64]
+linker-options = ["-lws2_32"]
 ```
 
 ## Build speed

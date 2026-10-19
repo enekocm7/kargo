@@ -96,9 +96,79 @@
                 "examples": ["host", "linux_x64", "linux_arm64", "mingw_x64", "macos_x64", "macos_arm64", "ios_arm64", "ios_x64", "ios_simulator_arm64", "watchos_arm64", "watchos_simulator_arm64", "tvos_arm64", "tvos_simulator_arm64", "android_arm64", "android_arm32", "android_x64"]
               }
             },
-            "kind": { "description": "What to link.", "enum": ["executable", "program", "library", "klib", "shared", "dynamic", "static"], "default": "executable" },
+            "kind": {
+              "description": "What to link: an executable, a klib, a C shared or static library (with its `_api.h` header in `include/`), or an Apple framework.",
+              "enum": ["executable", "program", "library", "klib", "shared", "dynamic", "static", "framework"],
+              "default": "executable"
+            },
             "entry-point": { "description": "The Kotlin/Native entry function. Default: the single `main` in the sources.", "type": "string", "examples": ["com.example.main"] },
-            "linker-options": { "description": "Options for the native linker.", "type": "array", "items": { "type": "string" } },
+            "linker-options": { "description": "Options for the native linker, on every platform.", "type": "array", "items": { "type": "string" } },
+            "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+            "library-paths": { "$ref": "#/definitions/libraryPaths" },
+            "frameworks": { "$ref": "#/definitions/frameworks" },
+            "platform": {
+              "description": "Linker options for one Kotlin/Native platform, added to the common ones.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "linux_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "linux_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "mingw_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "macos_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "macos_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "ios_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "ios_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "ios_simulator_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "watchos_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "watchos_simulator_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "tvos_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "tvos_simulator_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_arm32": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_x86": { "$ref": "#/definitions/nativeLinkOptions" }
+              }
+            },
+            "bundle-id": { "description": "The bundle identifier of a framework (kind = \"framework\"). Default: `<group>.<name>`.", "type": "string", "examples": ["com.example.Shared"] },
+            "export": {
+              "description": "Dependencies (`group:artifact`) whose API a framework, shared or static library exports too.",
+              "type": "array",
+              "items": { "type": "string", "examples": ["org.jetbrains.kotlinx:kotlinx-datetime"] }
+            },
+            "c-sources": {
+              "description": "C, C++ and Objective-C sources compiled with the Kotlin/Native toolchain's clang into a static library that every native binary links.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "sources": { "description": "Files, directories and globs (gitignore syntax), relative to the project root.", "type": "array", "default": ["c"], "items": { "type": "string" } },
+                "include-dirs": { "description": "Include directories, relative to the project root; the C bindings get them too.", "type": "array", "default": ["c"], "items": { "type": "string" } },
+                "defines": { "$ref": "#/definitions/defines" },
+                "compiler-options": { "description": "More clang options.", "type": "array", "items": { "type": "string" } },
+                "platform": {
+                  "description": "Defines and clang options for one Kotlin/Native platform.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "linux_x64": { "$ref": "#/definitions/cFlags" },
+                    "linux_arm64": { "$ref": "#/definitions/cFlags" },
+                    "mingw_x64": { "$ref": "#/definitions/cFlags" },
+                    "macos_x64": { "$ref": "#/definitions/cFlags" },
+                    "macos_arm64": { "$ref": "#/definitions/cFlags" },
+                    "ios_arm64": { "$ref": "#/definitions/cFlags" },
+                    "ios_x64": { "$ref": "#/definitions/cFlags" },
+                    "ios_simulator_arm64": { "$ref": "#/definitions/cFlags" },
+                    "watchos_arm64": { "$ref": "#/definitions/cFlags" },
+                    "watchos_simulator_arm64": { "$ref": "#/definitions/cFlags" },
+                    "tvos_arm64": { "$ref": "#/definitions/cFlags" },
+                    "tvos_simulator_arm64": { "$ref": "#/definitions/cFlags" },
+                    "android_arm64": { "$ref": "#/definitions/cFlags" },
+                    "android_arm32": { "$ref": "#/definitions/cFlags" },
+                    "android_x64": { "$ref": "#/definitions/cFlags" },
+                    "android_x86": { "$ref": "#/definitions/cFlags" }
+                  }
+                }
+              }
+            },
             "cinterop": {
               "description": "C libraries bound with cinterop, one table per library.",
               "type": "object",
@@ -109,9 +179,46 @@
                 "properties": {
                   "def": { "description": "The .def file, relative to the project root. Default: interop/<name>.def.", "type": "string" },
                   "package": { "description": "Kotlin package of the generated bindings.", "type": "string" },
-                  "headers": { "description": "Extra headers to bind.", "type": "array", "items": { "type": "string" } },
+                  "headers": { "description": "Headers to bind; without a .def file they describe the library.", "type": "array", "items": { "type": "string" } },
                   "compiler-options": { "description": "clang options for reading the headers.", "type": "array", "items": { "type": "string" } },
-                  "linker-options": { "description": "Linker options recorded in the bindings.", "type": "array", "items": { "type": "string" } }
+                  "linker-options": { "description": "Linker options recorded in the bindings.", "type": "array", "items": { "type": "string" } },
+                  "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+                  "library-paths": { "$ref": "#/definitions/libraryPaths" },
+                  "frameworks": { "$ref": "#/definitions/frameworks" },
+                  "pkg-config": {
+                    "description": "pkg-config packages whose compiler and linker flags the bindings use (on the host platform).",
+                    "anyOf": [{ "type": "string", "examples": ["sqlite3"] }, { "type": "array", "items": { "type": "string" } }]
+                  },
+                  "link": { "description": "`static` embeds the static libraries (`lib<name>.a`) of the `-l` options, so programs run without the library installed.", "enum": ["dynamic", "static"], "default": "dynamic" },
+                  "header-filter": { "description": "The .def file's headerFilter: globs of the headers to bind.", "type": "array", "items": { "type": "string" } },
+                  "excluded-functions": { "description": "The .def file's excludedFunctions: functions left out of the bindings.", "type": "array", "items": { "type": "string" } },
+                  "strict-enums": { "description": "The .def file's strictEnums: C enums bound as Kotlin enums.", "type": "array", "items": { "type": "string" } },
+                  "non-strict-enums": { "description": "The .def file's nonStrictEnums: C enums bound as integer constants.", "type": "array", "items": { "type": "string" } },
+                  "modules": { "description": "The .def file's modules: Clang modules (Objective-C frameworks) to bind.", "type": "array", "items": { "type": "string" } },
+                  "language": { "description": "The .def file's language.", "enum": ["C", "Objective-C"] },
+                  "platform": {
+                    "description": "Options of this library for one Kotlin/Native platform, added to the common ones.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "linux_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "linux_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "mingw_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "macos_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "macos_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "ios_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "ios_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "ios_simulator_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "watchos_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "watchos_simulator_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "tvos_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "tvos_simulator_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "android_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "android_arm32": { "$ref": "#/definitions/nativeOptions" },
+                      "android_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "android_x86": { "$ref": "#/definitions/nativeOptions" }
+                    }
+                  }
                 }
               }
             },
@@ -326,6 +433,55 @@
     { "required": ["workspace"], "maxProperties": 1 }
   ],
   "definitions": {
+    "staticLibraries": {
+      "description": "Static libraries (file names such as `libfoo.a`) found in `library-paths` and embedded in the output.",
+      "type": "array",
+      "items": { "type": "string", "examples": ["libsqlite3.a"] }
+    },
+    "libraryPaths": {
+      "description": "Directories searched for `static-libraries` and passed to the linker as `-L`, relative to the project root.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "frameworks": {
+      "description": "Apple frameworks to link (`-framework <name>`); ignored on other platforms.",
+      "type": "array",
+      "items": { "type": "string", "examples": ["Foundation"] }
+    },
+    "defines": {
+      "description": "Preprocessor macros: `NAME` or `NAME=value`.",
+      "type": "array",
+      "items": { "type": "string", "examples": ["NDEBUG"] }
+    },
+    "nativeLinkOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "linker-options": { "description": "Options for the native linker.", "type": "array", "items": { "type": "string" } },
+        "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+        "library-paths": { "$ref": "#/definitions/libraryPaths" },
+        "frameworks": { "$ref": "#/definitions/frameworks" }
+      }
+    },
+    "nativeOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "compiler-options": { "description": "clang options for reading the headers.", "type": "array", "items": { "type": "string" } },
+        "linker-options": { "description": "Linker options recorded in the bindings.", "type": "array", "items": { "type": "string" } },
+        "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+        "library-paths": { "$ref": "#/definitions/libraryPaths" },
+        "frameworks": { "$ref": "#/definitions/frameworks" }
+      }
+    },
+    "cFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defines": { "$ref": "#/definitions/defines" },
+        "compiler-options": { "description": "More clang options.", "type": "array", "items": { "type": "string" } }
+      }
+    },
     "inherit": {
       "description": "Inherit this key from the workspace's kargo.toml.",
       "type": "object",

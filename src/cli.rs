@@ -389,7 +389,7 @@ impl BuildArgs {
         BuildOptions {
             targets: self.targets.iter().map(|t| (*t).into()).collect(),
             profile: profile_kind(self.release, self.profile.as_deref()),
-            keep_going: false,
+            ..Default::default()
         }
     }
 }
@@ -476,6 +476,9 @@ enum Command {
         /// Build every target even if one fails, then report all failures
         #[arg(long)]
         keep_going: bool,
+        /// Also combine the Apple frameworks of `kind = "framework"` into an XCFramework (macOS with Xcode)
+        #[arg(long)]
+        xcframework: bool,
     },
     /// Type-check the project without packaging or linking
     #[command(visible_alias = "c")]
@@ -652,7 +655,7 @@ enum Command {
     /// Add dependencies or built-in frameworks to kargo.toml
     Add {
         /// Coordinates: group:artifact[:version[:classifier]] (latest release if no version)
-        #[arg(required_unless_present_any = ["frameworks", "path"], conflicts_with = "path")]
+        #[arg(required_unless_present_any = ["frameworks", "path", "cinterop"], conflicts_with_all = ["path", "cinterop"])]
         coordinates: Vec<String>,
         /// Depend on the Kargo package in this directory, built from source
         #[arg(long, value_name = "DIR", conflicts_with_all = ["bom", "pre", "no_verify", "frameworks"])]
@@ -684,6 +687,15 @@ enum Command {
             add = ArgValueCandidates::new(complete::frameworks)
         )]
         frameworks: Vec<String>,
+        /// Add the C library NAME: [target.native.cinterop.NAME] and interop/NAME.def
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["path", "frameworks", "dev", "target", "scope", "bom"])]
+        cinterop: Option<String>,
+        /// With --cinterop: a header to bind (repeatable; default NAME.h)
+        #[arg(long, value_name = "FILE")]
+        header: Vec<String>,
+        /// With --cinterop: the pkg-config package that gives the library's compiler and linker flags
+        #[arg(long, value_name = "PACKAGE")]
+        pkg_config: Option<String>,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -1513,10 +1525,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             };
             create_package(shell, &dir, args)
         }
-        Command::Build { build, keep_going } => {
+        Command::Build { build, keep_going, xcframework } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
-            let opts = BuildOptions { keep_going, ..build.options() };
+            let opts = BuildOptions { keep_going, xcframework, ..build.options() };
             let results =
                 build_packages(config, &project, &build.packages.selection(), global, opts.profile.clone(), (build.jobs, false), |ctx| {
                     ops::build::build(ctx, &opts)
@@ -1717,8 +1729,14 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 Ok(FAILURE)
             }
         }
-        Command::Add { coordinates, path, dev, target, scope, bom, pre, no_verify, frameworks, package } => {
+        Command::Add { coordinates, path, dev, target, scope, bom, pre, no_verify, frameworks, cinterop, header, pkg_config, package } => {
+            if cinterop.is_none() && (!header.is_empty() || pkg_config.is_some()) {
+                bail!("`--header` and `--pkg-config` describe a C library; use them with `--cinterop <NAME>`");
+            }
             let ws = load_one(global, &package, "`kargo add`")?;
+            if let Some(name) = cinterop {
+                ops::add::add_cinterop(config, &ws, &name, &header, pkg_config.as_deref())?;
+            }
             if !frameworks.is_empty() {
                 ops::add::add_frameworks(config, &ws, &frameworks)?;
             }
@@ -2511,10 +2529,10 @@ mod tests {
     fn parses_common_invocations() {
         let cli = Cli::try_parse_from(["kargo", "build", "--release", "-t", "jvm", "-t", "native"]).unwrap();
         match cli.command {
-            Command::Build { build, keep_going } => {
+            Command::Build { build, keep_going, xcframework } => {
                 let o = build.options();
                 assert_eq!(o.profile, ProfileKind::Release);
-                assert!(!keep_going);
+                assert!(!keep_going && !xcframework);
                 assert_eq!(o.targets, [TargetKind::Jvm, TargetKind::Native]);
             }
             other => panic!("{other:?}"),
@@ -2560,6 +2578,10 @@ mod tests {
             matches!(cli.command, Command::Check { ref build, tests: true, keep_going: false } if build.release && build.options().targets == [TargetKind::Native])
         );
         assert!(matches!(Cli::try_parse_from(["kargo", "b", "--keep-going"]).unwrap().command, Command::Build { keep_going: true, .. }));
+        assert!(matches!(
+            Cli::try_parse_from(["kargo", "build", "--xcframework"]).unwrap().command,
+            Command::Build { xcframework: true, .. }
+        ));
         assert!(matches!(
             Cli::try_parse_from(["kargo", "check", "--keep-going"]).unwrap().command,
             Command::Check { keep_going: true, .. }

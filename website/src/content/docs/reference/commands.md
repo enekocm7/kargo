@@ -130,6 +130,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | Option | Meaning |
 |---|---|
 | `--keep-going` | Build every target even if one fails, then report each failure and which targets failed and succeeded |
+| `--xcframework` | Also combine the Apple frameworks of `kind = "framework"` into `target/<profile>/native/<name>.xcframework` (macOS with Xcode). See [C interop](../../guides/c-interop/#calling-kotlin-from-swift-and-objective-c) |
 | `--message-format <fmt>` | `human` (default) or `json`: print each compiler diagnostic as a JSON object on stdout. See [Machine-readable output](../machine-readable-output/#compiler-diagnostics) |
 | `-r, --release` | Use the release profile |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
@@ -354,12 +355,13 @@ detekt reads `detekt.yml`; configure the rest with [`[lint]`](../manifest/#lint)
 
 ## `kargo add`
 
-Add dependencies to `kargo.toml`, or enable frameworks.
+Add dependencies to `kargo.toml`, enable frameworks, or add a C library.
 
 ```sh
 kargo add <group:artifact[:version[:classifier]]>... [options]
 kargo add --path <dir> [--dev] [-t <target>] [--scope <scope>]
 kargo add -F <framework,...>
+kargo add --cinterop <name> [--header <file>]... [--pkg-config <package>]
 ```
 
 | Option | Meaning |
@@ -372,6 +374,9 @@ kargo add -F <framework,...>
 | `--pre` | Allow pre-release versions when picking the latest |
 | `--no-verify` | Don't check that the artifact exists |
 | `-F, --framework <list>` | Enable built-in frameworks instead |
+| `--cinterop <name>` | Add the C library `<name>` instead: a `[target.native.cinterop.<name>]` entry (with `package = "<name>"`) and, unless it exists, `interop/<name>.def`. Needs `[target.native]`. See [C interop](../../guides/c-interop/) |
+| `--header <file>` | With `--cinterop`: a header the `.def` file binds (repeatable; default `<name>.h`) |
+| `--pkg-config <package>` | With `--cinterop`: the pkg-config package that gives the library's flags |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 `kargo add --path` refuses a dependency that would form a cycle, reuse another package's name or bring a second Kotlin version, and leaves `kargo.toml` unchanged.

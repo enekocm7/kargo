@@ -260,13 +260,22 @@ impl<W: Write> Drop for Relay<W> {
 /// Runs a compiler process and relays its diagnostics: with `--message-format json`
 /// they become JSON messages, otherwise its stderr is passed on line by line.
 pub fn status(shell: &Shell, cmd: &mut Command, what: &str) -> Result<ExitStatus> {
+    status_observed(shell, cmd, what, &mut |_| {})
+}
+
+/// Like [`status`], and also hands every line the tool reports to `observe`, so the caller can
+/// explain a failure (a missing header, an undefined symbol) after it.
+pub fn status_observed(shell: &Shell, cmd: &mut Command, what: &str, observe: &mut dyn FnMut(&str)) -> Result<ExitStatus> {
     shell.verbose("Running", format!("`{}`", process::describe(cmd)));
     let start_error = |cmd: &Command| format!("failed to start {what} (`{}`)", cmd.get_program().to_string_lossy());
     if is_json() {
         let output = cmd.output().with_context(|| start_error(cmd))?;
         let mut relay = Relay::new();
-        relay.text(&String::from_utf8_lossy(&output.stderr));
-        relay.text(&String::from_utf8_lossy(&output.stdout));
+        for text in [&output.stderr, &output.stdout] {
+            let text = String::from_utf8_lossy(text);
+            text.lines().for_each(&mut *observe);
+            relay.text(&text);
+        }
         relay.flush();
         return Ok(output.status);
     }
@@ -276,7 +285,9 @@ pub fn status(shell: &Shell, cmd: &mut Command, what: &str) -> Result<ExitStatus
     if let Some(stderr) = child.stderr.take() {
         for line in BufReader::new(stderr).split(b'\n') {
             let Ok(line) = line else { break };
-            relay.line(&String::from_utf8_lossy(&line));
+            let line = String::from_utf8_lossy(&line);
+            observe(&line);
+            relay.line(&line);
         }
     }
     relay.flush();

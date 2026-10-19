@@ -256,8 +256,138 @@ headers = [\"curl/curl.h\"]
     let sqlite = &native.cinterop[1];
     assert_eq!(sqlite.def_path(), Path::new("interop").join("sqlite.def"));
     assert_eq!(sqlite.package.as_deref(), Some("sqlite3"));
-    assert_eq!(sqlite.compiler_options, ["-I/usr/include"]);
-    assert_eq!(sqlite.linker_options, ["-lsqlite3"]);
+    assert_eq!(sqlite.options.compiler_options, ["-I/usr/include"]);
+    assert_eq!(sqlite.options.linker_options, ["-lsqlite3"]);
+    assert_eq!(sqlite.link, LinkMode::Dynamic);
+    assert!(sqlite.def_properties().is_empty());
+}
+
+#[test]
+fn native_platform_options() {
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[target.native]
+platforms = ["linux_x64", "macos_arm64", "mingw_x64"]
+linker-options = ["-lm"]
+
+[target.native.platform.macosArm64]
+frameworks = ["Foundation"]
+
+[target.native.platform.mingw_x64]
+library-paths = ["vendor/lib"]
+static-libraries = ["libextra.a"]
+
+[target.native.cinterop.sqlite]
+headers = ["sqlite3.h"]
+package = "sqlite3"
+pkg-config = "sqlite3"
+link = "static"
+header-filter = ["sqlite3*.h"]
+excluded-functions = ["sqlite3_trace"]
+strict-enums = ["Color"]
+language = "C"
+
+[target.native.cinterop.sqlite.platform.mingw_x64]
+compiler-options = ["-Ivendor/sqlite/include"]
+linker-options = ["-Lvendor/sqlite/lib", "-lsqlite3"]
+"#
+    ));
+    let native = m.targets.native.as_ref().unwrap();
+    assert_eq!(native.options_for("linux_x64").linker_options, ["-lm"]);
+    assert_eq!(native.options_for("macos_arm64").frameworks, ["Foundation"]);
+    let mingw = native.options_for("mingw_x64");
+    assert_eq!(mingw.linker_options, ["-lm"]);
+    assert_eq!(mingw.library_paths, [PathBuf::from("vendor/lib")]);
+    assert_eq!(mingw.static_libraries, ["libextra.a"]);
+
+    let sqlite = &native.cinterop[0];
+    assert_eq!(sqlite.pkg_config, ["sqlite3"]);
+    assert_eq!(sqlite.link, LinkMode::Static);
+    assert!(sqlite.describes_library());
+    assert!(sqlite.options_for("linux_x64").is_empty());
+    let windows = sqlite.options_for("mingw_x64");
+    assert_eq!(windows.compiler_options, ["-Ivendor/sqlite/include"]);
+    assert_eq!(windows.linker_options, ["-Lvendor/sqlite/lib", "-lsqlite3"]);
+    assert_eq!(
+        sqlite.def_properties(),
+        [
+            ("headerFilter", "sqlite3*.h".to_owned()),
+            ("excludedFunctions", "sqlite3_trace".to_owned()),
+            ("strictEnums", "Color".to_owned()),
+            ("language", "C".to_owned())
+        ]
+    );
+    let objc = parse(&format!(
+        "{MINIMAL}\n[target.native.cinterop.kit]\nmodules = [\"AppKit\"]\nlanguage = \"Objective-C\"\npkg-config = [\"a\", \"b\"]\n"
+    ));
+    let kit = &objc.targets.native.as_ref().unwrap().cinterop[0];
+    assert!(kit.describes_library());
+    assert_eq!(kit.pkg_config, ["a", "b"]);
+    assert_eq!(kit.def_properties(), [("modules", "AppKit".to_owned()), ("language", "Objective-C".to_owned())]);
+}
+
+#[test]
+fn native_c_sources_and_frameworks() {
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[target.native.c-sources]
+defines = ["NDEBUG", "LEVEL=2"]
+
+[target.native.c-sources.platform.linux_x64]
+defines = ["LINUX"]
+compiler-options = ["-O3"]
+"#
+    ));
+    let c = m.targets.native.as_ref().unwrap().c_sources.as_ref().unwrap();
+    assert_eq!(c.sources, ["c"]);
+    assert_eq!(c.include_dirs, [PathBuf::from("c")]);
+    assert_eq!(c.flags_for("linux_x64").defines, ["NDEBUG", "LEVEL=2", "LINUX"]);
+    assert_eq!(c.flags_for("linux_x64").compiler_options, ["-O3"]);
+    assert_eq!(c.flags_for("mingw_x64").defines, ["NDEBUG", "LEVEL=2"]);
+    let explicit = parse(&format!(
+        "{MINIMAL}\n[target.native.c-sources]\nsources = [\"native/*.c\", \"vendor/lib.c\"]\ninclude-dirs = [\"native/include\"]\n"
+    ));
+    let c = explicit.targets.native.as_ref().unwrap().c_sources.as_ref().unwrap();
+    assert_eq!(c.sources, ["native/*.c", "vendor/lib.c"]);
+    assert_eq!(c.include_dirs, [PathBuf::from("native/include")]);
+
+    let framework = parse(&format!(
+        "{MINIMAL}\n[target.native]\nplatforms = [\"ios_arm64\", \"ios_simulator_arm64\"]\nkind = \"framework\"\nbundle-id = \"com.example.Shared\"\nexport = [\"com.example:core\"]\n"
+    ));
+    let native = framework.targets.native.as_ref().unwrap();
+    assert_eq!(native.kind, NativeKind::Framework);
+    assert_eq!(native.bundle_id.as_deref(), Some("com.example.Shared"));
+    assert_eq!(native.export, ["com.example:core"]);
+    assert!(is_apple_target("ios_simulator_arm64"));
+    assert!(!is_apple_target("linux_x64"));
+}
+
+#[test]
+fn native_interop_errors() {
+    let with = |t: &str| format!("{MINIMAL}\n{t}\n");
+    let err = parse_err(&with("[target.native.platform.host]\nlinker-options = []"));
+    assert!(err.contains("platform.host] is not supported"), "{err}");
+    let err = parse_err(&with("[target.native.platform.plan9]\nlinker-options = []"));
+    assert!(err.contains("invalid table [target.native.platform.plan9]"), "{err}");
+    // [target.native] has no C compiler; options for clang belong to a cinterop entry or c-sources.
+    assert!(parse_err(&with("[target.native.platform.linux_x64]\ncompiler-options = []")).contains("unknown field"));
+    assert!(parse_err(&with("[target.native]\nstatic-libraries = [\"lib/libx.a\"]")).contains("invalid static library"));
+    assert!(parse_err(&with("[target.native]\nframeworks = [\"UIKit.framework\"]")).contains("invalid framework"));
+    let cinterop = |t: &str| parse_err(&with(&format!("[target.native.cinterop.x]\n{t}")));
+    assert!(cinterop("link = \"shared\"").contains("unknown link `shared`"));
+    assert!(cinterop("language = \"Swift\"").contains("unknown language `Swift`"));
+    assert!(cinterop("pkg-config = \"lib sqlite\"").contains("invalid pkg-config package"));
+    assert!(cinterop("header-filter = [\"a b\"]").contains("separated by spaces"));
+    assert!(cinterop("[target.native.cinterop.x.platform.linux_x64]\npkg-config = \"x\"").contains("unknown field"));
+    let c = |t: &str| parse_err(&with(&format!("[target.native.c-sources]\n{t}")));
+    assert!(c("sources = []").contains("`sources` is empty"));
+    assert!(c("sources = [\"../outside.c\"]").contains("invalid source"));
+    assert!(c("defines = [\"-DX\"]").contains("invalid define"));
+    let native = |t: &str| parse_err(&with(&format!("[target.native]\n{t}")));
+    assert!(native("platforms = [\"linux_x64\"]\nkind = \"framework\"").contains("builds Apple frameworks"));
+    assert!(native("bundle-id = \"a.b\"").contains("only applies to kind = \"framework\""));
+    assert!(native("kind = \"shared\"\nexport = [\"a\"]").contains("invalid entry `a`"));
+    assert!(native("export = [\"a:b\"]").contains("`export` only applies"));
 }
 
 #[test]

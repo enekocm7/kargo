@@ -18,8 +18,8 @@ pub struct WatchOptions {
     pub ignore: Vec<String>,
 }
 
-/// The files a watched command depends on: the manifests, sources, tests, examples, resources and `android/` directories of
-/// every package, the `kargo.lock` and the `.env` files at each package's root.
+/// The files a watched command depends on: the manifests, sources, tests, examples, resources, `android/` and `interop/`
+/// directories and C sources of every package, the `kargo.lock` and the `.env` files at each package's root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchSet {
     /// The project root, whose `.gitignore` decides which files are left out.
@@ -49,6 +49,19 @@ impl WatchSet {
             paths.push(package.resources());
             paths.push(package.test_resources());
             paths.push(package.root().join("android"));
+            paths.push(package.root().join("interop"));
+            if let Some(native) = &package.manifest().targets.native {
+                paths.extend(native.cinterop.iter().map(|c| package.root().join(c.def_path())));
+                if let Some(c) = &native.c_sources {
+                    paths.extend(c.include_dirs.iter().map(|d| package.root().join(d)));
+                    // A glob is watched from the directory before its first wildcard.
+                    paths.extend(c.sources.iter().map(|s| {
+                        let literal: PathBuf =
+                            Path::new(s).components().take_while(|c| !c.as_os_str().to_string_lossy().contains(['*', '?', '['])).collect();
+                        package.root().join(literal)
+                    }));
+                }
+            }
             paths.extend(env_files(package.root()));
         }
         paths.sort();

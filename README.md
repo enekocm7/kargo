@@ -27,7 +27,7 @@ $ kargo test
 |---|---|
 | `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace |
 | `kargo init [dir]` | Create a project in an existing directory |
-| `kargo build [--release \| --profile <name>] [-t <target>] [--keep-going] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
+| `kargo build [--release \| --profile <name>] [-t <target>] [--keep-going] [--xcframework] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--xcframework` combines Apple frameworks into an XCFramework; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release \| --profile <name>] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--flavor <name>] [--env-file <path>] [--no-env-file] [--watch [--clear] [--ignore <glob>]] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--flavor` picks the Android product flavor to install; `--watch` rebuilds and restarts the program when its files change (a failed build leaves the running one alone), see [watch mode](https://enekocm7.github.io/kargo/guides/watch/) |
 | `kargo script <file> [args]...` / `kargo script -e <code> [args]...` | Run a single Kotlin file without a project: a `.kts` script with `@file:DependsOn` and other `@file:` annotations, or a `.kt` file with a `/* kargo ... */` front matter; dependencies resolve and cache like a project's, and a second run of an unchanged script starts without compiling; `-e` runs code from the command line; `--` separates arguments that start with `-` |
@@ -39,6 +39,7 @@ $ kargo test
 | `kargo add --path <dir> [--dev] [-t <target>]` | Depend on another Kargo package on disk, built from source |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor\|ksp] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
+| `kargo add --cinterop <name> [--header <file>] [--pkg-config <package>]` | Add a C library: `[target.native.cinterop.<name>]` and `interop/<name>.def` |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
 | `kargo target add\|remove\|list <target>... [--lib\|--app]` | Enable or disable targets in an existing project (keeps `kargo.toml` formatting, scaffolds `src-<target>/` and Android files), or list them |
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
@@ -81,6 +82,7 @@ test-fixtures/       test helpers the tests of dependent packages can use (`test
 resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm browser app
 android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
+c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
 examples/            example programs: kargo run --example <name>
 target/              build output: target/<debug|release|name>/<target>/ (a custom profile's name)
 ```
@@ -127,11 +129,19 @@ environment = "js"          # or "browser" (serves a page, tests in a headless b
 
 [target.native]
 platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...
-kind = "executable"         # library, shared, static
+kind = "executable"         # library, shared, static, framework (Apple; kargo build --xcframework)
+
+[target.native.platform.mingw_x64]  # linker options for one platform
+linker-options = ["-lws2_32"]
+
+[target.native.c-sources]   # compile c/**/*.c with the Kotlin/Native clang and link it in
 
 [target.native.cinterop.sqlite]   # C library bindings; def defaults to interop/sqlite.def
+headers = ["sqlite3.h"]           # no .def file needed
 package = "sqlite3"
-linker-options = ["-lsqlite3"]    # also: def, headers, compiler-options
+pkg-config = "sqlite3"            # flags from sqlite3.pc; link = "static" embeds the library
+# also: def, compiler-options, linker-options, static-libraries, library-paths, frameworks,
+#       header-filter, excluded-functions, strict-enums, modules, and platform.<platform> tables
 
 [target.android]
 namespace = "com.example.app"

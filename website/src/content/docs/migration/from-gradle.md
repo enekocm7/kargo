@@ -146,7 +146,11 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 |---|---|
 | `kotlin("jvm") version "X"` | `[kotlin] version = "X"` and `[target.jvm]` |
 | `kotlin("multiplatform")` with `jvm()`, `wasmJs()`, `linuxX64()` | `[target.jvm]`, `[target.wasm]`, `[target.native] platforms = ["linux_x64"]` |
-| `compilations["main"].cinterops { create("sqlite") { ... } }` | `[target.native.cinterop.sqlite]`, with the `.def` file in `interop/sqlite.def` |
+| `compilations["main"].cinterops { create("sqlite") { ... } }` | `[target.native.cinterop.sqlite]`, with the `.def` file in `interop/sqlite.def` (or `headers` and the other `.def` keys in `kargo.toml`) |
+| `linkerOpts.linux = ...` in a `.def` file, or per-target `cinterops` blocks | `[target.native.cinterop.sqlite.platform.linux_x64]` |
+| `binaries.framework { baseName = "Shared"; export(...) }` | `[target.native] kind = "framework"`, `export = [...]` |
+| `XCFramework()` + `assembleXCFramework` | `kargo build --xcframework` |
+| A CMake or `exec` task that builds bundled C code | `[target.native.c-sources]` |
 | `wasmWasi()` | `[target.wasm] environment = "wasi"` |
 | `com.android.application` + `android { ... }` | `[target.android]` |
 | `signingConfigs { create("release") { ... } }` | `[target.android.signing.release]`, with passwords in `store-password-env` / `key-password-env` |
