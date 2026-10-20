@@ -169,9 +169,7 @@ impl NativeToolchain {
         }
         let toolchain = Self::at(config, version)?;
         let host = Host::current()?;
-        let artifact = Artifact::new(ModuleId::new("org.jetbrains.kotlin", "kotlin-native-prebuilt"), version)
-            .with_classifier(Some(host.classifier.to_owned()))
-            .with_extension(host.extension);
+        let artifact = Self::distribution(version)?;
         let archive_path = client
             .fetch_required(&artifact.repo_path())
             .with_context(|| format!("failed to download Kotlin/Native {version} for {}", host.classifier))?;
@@ -185,6 +183,14 @@ impl NativeToolchain {
             bail!("the Kotlin/Native distribution at {} has no konanc", toolchain.home.display());
         }
         Ok(toolchain)
+    }
+
+    /// The Maven artifact of the distribution of `version` for this host (`kargo vendor --toolchains` copies it).
+    pub fn distribution(version: &str) -> Result<Artifact> {
+        let host = Host::current()?;
+        Ok(Artifact::new(ModuleId::new("org.jetbrains.kotlin", "kotlin-native-prebuilt"), version)
+            .with_classifier(Some(host.classifier.to_owned()))
+            .with_extension(host.extension))
     }
 
     /// Installed Kotlin/Native versions, oldest first.

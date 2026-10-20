@@ -471,7 +471,8 @@ impl<'a> BuildContext<'a> {
             fp.str(&format!("{}:{:?}", b.module, b.version));
         }
         fp.str("--repos");
-        for repo in self.client.repositories() {
+        // The declared repositories, so a mirror or `--vendored` keeps the lock.
+        for repo in self.client.declared_repositories() {
             fp.str(&repo.url);
         }
         fp.finish()

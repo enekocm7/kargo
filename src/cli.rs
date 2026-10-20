@@ -95,6 +95,9 @@ struct GlobalArgs {
     /// Require kargo.lock to be up to date
     #[arg(long, global = true)]
     locked: bool,
+    /// Resolve dependencies only from the repository `kargo vendor` wrote
+    #[arg(long, global = true, env = "KARGO_VENDORED")]
+    vendored: bool,
     /// Ignore cached metadata and kargo.lock, re-checking repositories and re-verifying cached artifacts
     #[arg(long, global = true)]
     refresh: bool,
@@ -869,6 +872,17 @@ enum Command {
         tools: bool,
         #[command(flatten)]
         packages: PackageArgs,
+    },
+    /// Copy every dependency into a directory laid out as a Maven repository, for offline builds
+    Vendor {
+        /// The directory to write, relative to the project root [default: `[source] directory`, else vendor]
+        path: Option<PathBuf>,
+        /// Also copy the Kotlin compiler and the Kotlin/Native distribution
+        #[arg(long)]
+        toolchains: bool,
+        /// Remove the files of the directory that the project no longer needs
+        #[arg(long)]
+        sync: bool,
     },
     /// Re-resolve dependencies and rewrite kargo.lock
     Update {
@@ -1686,6 +1700,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
     let global = cli.global;
     let config =
         Config::from_env(shell.clone())?.with_offline(global.offline).with_refresh(global.refresh).with_system_gradle(global.system_gradle);
+    let config = with_settings(config, &global, &cli.command)?;
 
     // Commands that may change kargo.toml or kargo.lock keep the files for language servers current.
     let refreshes_editor_files = matches!(
@@ -1706,6 +1721,41 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         refresh_editor_files(&config, &global, shell);
     }
     result
+}
+
+/// Applies `~/.kargo/config.toml` and the project's `.kargo/config.toml`, and with `--vendored` (or
+/// `[source] vendored = true`) the vendored repository. `kargo vendor` itself always uses the real
+/// repositories.
+fn with_settings(config: Config, global: &GlobalArgs, command: &Command) -> Result<Config> {
+    let cwd = std::env::current_dir().context("failed to read the current directory")?;
+    let start = match global.manifest_path.as_deref().and_then(Path::parent) {
+        Some(dir) => cwd.join(dir),
+        None => cwd,
+    };
+    let settings = kargo_util::settings::Settings::load(config.home(), Some(&start))?;
+    let config = config.with_settings(settings)?;
+    if !(global.vendored || config.settings().vendored()) || matches!(command, Command::Vendor { .. }) {
+        return Ok(config);
+    }
+    let project = match load_project(global) {
+        Ok(project) => project,
+        // Outside a project there is nothing to resolve; only an explicit flag is worth an error.
+        Err(e) if global.vendored => return Err(e.context("`--vendored` needs a project")),
+        Err(_) => return Ok(config),
+    };
+    let dir = project.root().join(config.settings().vendor_dir());
+    if !dir.is_dir() {
+        bail!("there is no vendored repository at {}; run `kargo vendor` first", dir.display());
+    }
+    Ok(config.with_vendor_dir(Some(dir)))
+}
+
+/// Where Kargo fetches `repo` from: the vendored repository, its mirror, or its own URL.
+fn effective_url(config: &Config, repo: &kargo_maven::Repository) -> String {
+    match config.vendor_dir() {
+        Some(dir) => dir.display().to_string(),
+        None => kargo_maven::repo::effective_repositories(config, std::slice::from_ref(repo)).remove(0).url,
+    }
 }
 
 fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &Shell) -> Result<u8> {
@@ -2177,6 +2227,40 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
+        Command::Vendor { path, toolchains, sync } => {
+            let project = load_project(global)?;
+            let relative = path.unwrap_or_else(|| config.settings().vendor_dir().to_path_buf());
+            let dir = std::path::absolute(project.root().join(&relative))?;
+            // First as `kargo fetch`, which brings kargo.lock up to date (or checks it with --locked).
+            let earlier = {
+                let ctx = context(config, &project, project.members()[0], global, ProfileKind::Dev)?;
+                ops::vendor::fetch(&ctx, toolchains)?;
+                ctx.client.served_files()
+            };
+            // Then at the locked versions, bypassing the lock, so every POM and module file is read again.
+            let refresh = config.clone().with_refresh(true);
+            let mut ctx = BuildContext::new(&refresh, &project, project.members()[0], ProfileKind::Dev)?;
+            ctx.update = Some(kargo_ops::ops::context::UpdatePlan { previous: ctx.lockfile(), modules: Vec::new(), precise: None });
+            ops::vendor::fetch(&ctx, toolchains)?;
+            ops::vendor::fetch_metadata(&ctx)?;
+            let summary = ops::vendor::write(&ctx, &ops::vendor::VendorOptions { dir: dir.clone(), toolchains, sync }, earlier)?;
+            let mut what = format!("{} files into {} ({} copied", summary.files, dir.display(), summary.copied);
+            if sync {
+                what.push_str(&format!(", {} removed", summary.removed));
+            }
+            what.push(')');
+            shell.status("Vendored", what);
+            let directory = if relative == Path::new(kargo_util::settings::DEFAULT_VENDOR_DIR) {
+                String::new()
+            } else {
+                format!("\ndirectory = \"{}\"", relative.display().to_string().replace('\\', "/"))
+            };
+            shell.note(format!(
+                "to build from it, pass `--vendored`, or add this to {}:\n\n[source]\nvendored = true{directory}\n",
+                Path::new(kargo_util::settings::PROJECT_DIR).join(kargo_util::settings::FILE_NAME).display()
+            ));
+            Ok(0)
+        }
         Command::Update { modules, precise, dry_run } => {
             let project = load_project(global)?;
             let config = config.clone().with_refresh(true);
@@ -2325,9 +2409,9 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             // At the root of a workspace, the workspace; elsewhere, the package.
             let package = task_package(&project);
             match (format, package) {
-                (FormatArg::Text, Some(index)) => print_info(&project, project.package(index)),
+                (FormatArg::Text, Some(index)) => print_info(config, &project, project.package(index)),
                 (FormatArg::Text, None) => print_workspace_info(&project),
-                (FormatArg::Json, Some(index)) => println!("{}", serde_json::to_string_pretty(&info_json(project.package(index)))?),
+                (FormatArg::Json, Some(index)) => println!("{}", serde_json::to_string_pretty(&info_json(config, project.package(index)))?),
                 (FormatArg::Json, None) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(&project))?),
             }
             Ok(0)
@@ -2657,7 +2741,7 @@ fn print_workspace_info(project: &Project) {
     }
 }
 
-fn print_info(project: &Project, ws: &Workspace) {
+fn print_info(config: &Config, project: &Project, ws: &Workspace) {
     let m = ws.manifest();
     println!("package:      {} v{}", m.package.name, m.package.version);
     if project.is_workspace() {
@@ -2679,14 +2763,27 @@ fn print_info(project: &Project, ws: &Workspace) {
             ws.path_dependencies().iter().map(|(d, i)| format!("{} ({})", d.name, project.package(*i).root().display())).collect();
         println!("path deps:    {}", paths.join(", "));
     }
-    let repos: Vec<&str> = m.repositories.iter().map(|r| r.name.as_str()).collect();
+    // Where each repository is actually fetched from, after `[mirrors]` and `--vendored`.
+    let repos: Vec<String> = m
+        .repositories
+        .iter()
+        .map(|r| match effective_url(config, r) {
+            url if url == r.url => r.name.clone(),
+            url => format!("{} (via {url})", r.name),
+        })
+        .collect();
     println!("repositories: {}", repos.join(", "));
+    let files = config.settings().files();
+    if !files.is_empty() {
+        let files: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        println!("config:       {}", files.join(", "));
+    }
     println!("root:         {}", ws.root().display());
     println!("target dir:   {}", ws.target_dir().display());
 }
 
 /// `kargo info --format json`.
-fn info_json(ws: &Workspace) -> serde_json::Value {
+fn info_json(config: &Config, ws: &Workspace) -> serde_json::Value {
     let m = ws.manifest();
     let dependencies = |deps: &[kargo_manifest::Dependency]| -> Vec<serde_json::Value> {
         deps.iter()
@@ -2706,7 +2803,11 @@ fn info_json(ws: &Workspace) -> serde_json::Value {
         "frameworks": kargo_ops::builtins::enabled_frameworks(m),
         "dependencies": dependencies(&m.dependencies),
         "dev-dependencies": dependencies(&m.dev_dependencies),
-        "repositories": m.repositories.iter().map(|r| serde_json::json!({ "name": r.name, "url": r.url })).collect::<Vec<_>>(),
+        "repositories": m
+            .repositories
+            .iter()
+            .map(|r| serde_json::json!({ "name": r.name, "url": r.url, "effective-url": effective_url(config, r) }))
+            .collect::<Vec<_>>(),
         "bins": m
             .bins
             .iter()
@@ -2948,6 +3049,12 @@ mod tests {
         assert!(matches!(cli.command, Command::Metadata { no_deps: true, fingerprint: false, .. }));
         assert!(Cli::try_parse_from(["kargo", "metadata", "--format", "text"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "metadata", "--fingerprint", "--no-deps"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "vendor", "third_party", "--toolchains", "--sync"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Vendor { path: Some(ref p), toolchains: true, sync: true } if p == Path::new("third_party"))
+        );
+        let cli = Cli::try_parse_from(["kargo", "build", "--vendored"]).unwrap();
+        assert!(cli.global.vendored);
         let cli = Cli::try_parse_from(["kargo", "fetch", "--sources"]).unwrap();
         assert!(matches!(cli.command, Command::Fetch { sources: true, tools: false, .. }));
         let cli = Cli::try_parse_from(["kargo", "fetch", "--tools"]).unwrap();

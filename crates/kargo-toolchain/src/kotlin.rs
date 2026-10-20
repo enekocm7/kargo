@@ -56,7 +56,10 @@ fn resolve_memoized(client: &MavenClient, version: &str, build_tools: bool) -> R
     let cache = client.cache_dir();
     let name = if build_tools { "kotlin-build-tools-impl" } else { "kotlin-compiler-embeddable" };
     let memo = cache.join(".classpaths").join(format!("{name}-{version}.txt"));
-    if let Ok(text) = std::fs::read_to_string(&memo) {
+    // `--refresh` resolves again, which also serves every file of the compiler (for `kargo vendor`).
+    if let Ok(text) = std::fs::read_to_string(&memo)
+        && !client.refresh()
+    {
         if text.trim() == UNAVAILABLE {
             return Ok(None);
         }

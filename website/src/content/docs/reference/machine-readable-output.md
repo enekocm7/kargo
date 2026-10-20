@@ -278,7 +278,7 @@ $ kargo info --format json
     "version": "0.1.0"
   },
   "repositories": [
-    { "name": "maven-central", "url": "https://repo.maven.apache.org/maven2" }
+    { "name": "maven-central", "url": "https://repo.maven.apache.org/maven2", "effective-url": "https://repo.maven.apache.org/maven2" }
   ],
   "root": "/home/me/app",
   "target-dir": "/home/me/app/target",

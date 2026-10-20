@@ -105,7 +105,7 @@ jvm-target = "17"
 company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
 ```
 
-Credentials that lived in `~/.m2/settings.xml` become environment variables named by `username-env` and `password-env`.
+Credentials that lived in `~/.m2/settings.xml` become environment variables named by `username-env` and `password-env`. The `<mirrors>` and `<proxies>` of `settings.xml` become `[mirrors]` and `[http] proxy` in `~/.kargo/config.toml` (see [Offline and corporate builds](../../guides/offline-and-mirrors/)).
 
 ## Directories
 

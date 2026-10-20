@@ -9,7 +9,7 @@ description: What kargo.lock contains and how it keeps builds reproducible and s
 
 For every resolution (one per target and classpath, such as `jvm/runtime`):
 
-- a fingerprint of the inputs (requested dependencies, BOMs, repositories, and the version of Kargo's resolver),
+- a fingerprint of the inputs (requested dependencies, BOMs, repositories, and the version of Kargo's resolver). The repositories are the ones `kargo.toml` declares, so a [mirror or `--vendored`](../../guides/offline-and-mirrors/) keeps the lock,
 - the root modules, each once,
 - every resolved module with its version and the dependencies it asked for,
 - the repository path and **SHA-256** of every downloaded file.

@@ -1,9 +1,12 @@
 //! Global, per-invocation configuration (home directory, network mode, output).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use crate::http::Network;
+use crate::settings::Settings;
 use crate::shell::Shell;
 
 /// Environment variable overriding the Kargo home directory (default `~/.kargo`).
@@ -16,11 +19,23 @@ pub struct Config {
     refresh: bool,
     system_gradle: bool,
     shell: Shell,
+    settings: Arc<Settings>,
+    network: Arc<Network>,
+    vendor_dir: Option<PathBuf>,
 }
 
 impl Config {
     pub fn new(home: PathBuf, shell: Shell) -> Self {
-        Self { home, offline: false, refresh: false, system_gradle: false, shell }
+        Self {
+            home,
+            offline: false,
+            refresh: false,
+            system_gradle: false,
+            shell,
+            settings: Arc::default(),
+            network: Arc::default(),
+            vendor_dir: None,
+        }
     }
 
     /// Builds a configuration from the environment.
@@ -45,6 +60,35 @@ impl Config {
     pub fn with_system_gradle(mut self, system_gradle: bool) -> Self {
         self.system_gradle = system_gradle;
         self
+    }
+
+    /// Applies the settings of the configuration files (see [`Settings::load`]), checking the
+    /// proxy and certificate bundle they name.
+    pub fn with_settings(mut self, settings: Settings) -> Result<Self> {
+        self.network = Arc::new(Network::from_settings(&settings)?);
+        self.settings = Arc::new(settings);
+        Ok(self)
+    }
+
+    /// Resolves dependencies only from the vendored repository at `dir` (`--vendored`).
+    pub fn with_vendor_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.vendor_dir = dir;
+        self
+    }
+
+    /// The settings of `~/.kargo/config.toml` and the project's `.kargo/config.toml`.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// The proxy and certificates HTTP clients use (see [`crate::http::agent`]).
+    pub fn network(&self) -> &Network {
+        &self.network
+    }
+
+    /// The directory of `kargo vendor`'s repository when dependencies come only from it.
+    pub fn vendor_dir(&self) -> Option<&Path> {
+        self.vendor_dir.as_deref()
     }
 
     pub fn home(&self) -> &Path {

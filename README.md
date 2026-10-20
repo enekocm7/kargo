@@ -51,6 +51,7 @@ $ kargo test
 | `kargo install --path <dir> \| --git <url> [--tag \| --branch \| --rev] \| <group:artifact[:version]> [--bin <name>] [--format jar\|jlink] [--force] [--list]` | Install a Kotlin command-line tool: build a project (release profile), a git repository or download an application from Maven, and put a launcher in `~/.kargo/bin`. A JVM tool runs its fat jar with the JDK it was built with (`--format jlink`: with a trimmed runtime, so no Java is needed); a Native tool is copied as it is. Every entry point is installed, or the `--bin` ones. `kargo install --force <name>` upgrades it from where it came from, `--list` shows what is installed, `--root <dir>` installs elsewhere (see [installing tools](https://enekocm7.github.io/kargo/guides/installing-tools/)) |
 | `kargo uninstall <name>...` | Remove programs installed with `kargo install` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors, `--tools` the Dokka, ktlint and detekt tools |
+| `kargo vendor [path] [--toolchains] [--sync]` | Copy every dependency (and with `--toolchains` the Kotlin compiler and Kotlin/Native) into `vendor/` as a Maven repository; `kargo build --vendored` (or `[source] vendored = true` in `.kargo/config.toml`) then resolves from it alone (see [offline and corporate builds](https://enekocm7.github.io/kargo/guides/offline-and-mirrors/)) |
 | `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
 | `kargo ide [--kls\|--zed]` | Write `workspace.json` (Kotlin LSP) or `kls-classpath` (kotlin-language-server) for editors that run the server themselves, or `.zed/tasks.json` with Kargo tasks for Zed's run buttons; kept current by later commands |
 | `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
@@ -66,7 +67,25 @@ $ kargo test
 | `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 
-Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`, `--manifest-path`.
+Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--vendored`, `--refresh`, `--manifest-path`.
+
+Behind a company firewall, `~/.kargo/config.toml` (or a project's `.kargo/config.toml`) sends downloads through mirrors and a proxy:
+
+```toml
+[mirrors]
+"*" = "https://artifactory.corp/maven-virtual"   # replaces Maven Central, Google and [repositories]
+
+[mirrors.credentials."https://artifactory.corp"]
+username-env = "ART_USER"
+password-env = "ART_TOKEN"
+
+[toolchain-mirrors]                              # JDK, GraalVM and Gradle downloads, by URL prefix
+"https://services.gradle.org/distributions" = "https://artifactory.corp/gradle"
+
+[http]
+proxy = "http://proxy.corp:3128"                 # else HTTPS_PROXY / NO_PROXY
+cainfo = "/etc/ssl/certs/corp-ca.pem"
+```
 
 `kargo --help` lists the common commands, then the project's tasks, and `kargo` alone prints the same help; `kargo --list` lists every built-in command with its description. Commands left out of `--help` still work, and `kargo help <command>` shows each one's options. A mistyped command suggests the closest one (`kargo biuld` → `Did you mean build?`).
 
@@ -369,6 +388,8 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
+| `KARGO_VENDORED` | Same as `--vendored` |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | Proxy for Kargo's downloads (overridden by `[http] proxy` in `config.toml`) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
 | `KARGO_DAEMON` | `false` turns off the compiler daemon |
@@ -391,7 +412,7 @@ Kargo is a Cargo workspace:
 
 | Crate | Responsibility |
 |---|---|
-| `kargo-util` | Terminal output, configuration, filesystem/hash/process helpers |
+| `kargo-util` | Terminal output, configuration (including `config.toml`: mirrors, proxy, CA bundle, vendoring), the HTTP agent, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver, uploads and the Maven Central Portal |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |

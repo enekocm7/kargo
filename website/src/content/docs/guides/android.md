@@ -76,6 +76,8 @@ The generated project compiles Kotlin with the Kotlin Gradle plugin at your `[ko
 
 You don't install Gradle. The first Android build downloads the Gradle version the Android Gradle Plugin (AGP) in use requires from `services.gradle.org`, verifies the SHA-256 Gradle publishes for it, and installs it under `~/.kargo/toolchains/gradle/<version>`. With the default AGP 9.4.1 that is Gradle 9.6.0. Gradle runs on the project's JDK (`[toolchain] jdk`), which must be JDK 17 or newer for AGP 8 and later.
 
+Behind a company mirror, the generated `settings.gradle.kts` uses the [`[mirrors]`](../offline-and-mirrors/#repository-mirrors) of `~/.kargo/config.toml` in place of `google()`, `mavenCentral()`, `gradlePluginPortal()` and your `[repositories]`, and `[toolchain-mirrors]` applies to the Gradle download.
+
 Kargo picks the Gradle that runs the build in this order:
 
 1. A Gradle wrapper (`gradlew`) in the project root, if there is one.

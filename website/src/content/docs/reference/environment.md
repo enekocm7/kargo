@@ -13,6 +13,8 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `KARGO_INSTALL_ROOT` | Same as `--root` of [`kargo install`](../commands/#kargo-install) and `kargo uninstall`: install below `<root>/bin` and `<root>/install` instead of `$KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory (default `target/` next to the project's or workspace's `kargo.toml`) |
 | `KARGO_OFFLINE` | Same as `--offline` |
+| `KARGO_VENDORED` | Same as `--vendored`: resolve dependencies only from the repository [`kargo vendor`](../commands/#kargo-vendor) wrote |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | The proxy for Kargo's downloads, and the hosts that bypass it (lowercase forms too). `[http] proxy` in `config.toml` overrides them; see [Offline and corporate builds](../../guides/offline-and-mirrors/#proxies-and-certificates) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon (or compiler process), e.g. `-Xmx4g` |
 | `KARGO_INCREMENTAL` | `false` (or `0`, `no`, `off`) recompiles whole targets instead of only the files a change affects ([incremental compilation](../../guides/build-performance/#incremental-compilation)) |

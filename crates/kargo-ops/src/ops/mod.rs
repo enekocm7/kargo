@@ -23,6 +23,7 @@ pub mod toolchain;
 pub mod tree;
 pub mod update;
 pub mod upgrade;
+pub mod vendor;
 pub mod watch;
 
 use std::path::PathBuf;
