@@ -141,8 +141,9 @@ $ kargo metadata
         {
           "kind": "jvm",
           "source-roots": ["/home/me/app/src", "/home/me/app/src-jvm"],
-          "test-roots": ["/home/me/app/tests", "/home/me/app/tests-jvm", "/home/me/app/test-fixtures", "/home/me/app/test-fixtures-jvm"],
+          "test-roots": ["/home/me/app/tests", "/home/me/app/tests-jvm", "/home/me/app/test-fixtures", "/home/me/app/test-fixtures-jvm", "/home/me/app/benches", "/home/me/app/benches-jvm"],
           "test-fixture-roots": ["/home/me/app/test-fixtures", "/home/me/app/test-fixtures-jvm"],
+          "bench-roots": ["/home/me/app/benches", "/home/me/app/benches-jvm"],
           "resource-roots": ["/home/me/app/resources"],
           "test-resource-roots": ["/home/me/app/test-resources"],
           "output-dir": "/home/me/app/target/debug/jvm",
@@ -223,8 +224,9 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | Field | Targets | Meaning |
 |---|---|---|
 | `kind` | all | `jvm`, `wasm`, `native` or `android` |
-| `source-roots`, `test-roots` | all | `src/` and `src-<target>/`; `tests/`, `tests-<target>/` and the test fixtures `test-fixtures/` and `test-fixtures-<target>/`, whether they exist or not |
+| `source-roots`, `test-roots` | all | `src/` and `src-<target>/`; `tests/`, `tests-<target>/`, the test fixtures `test-fixtures/` and `test-fixtures-<target>/` and the benchmarks `benches/` and `benches-<target>/`, whether they exist or not |
 | `test-fixture-roots` | all | `test-fixtures/` and `test-fixtures-<target>/` ([test fixtures](../../guides/workspaces/#test-fixtures)), which `test-roots` includes too |
+| `bench-roots` | all | `benches/` and `benches-<target>/` ([benchmarks](../../guides/benchmarking/)), which `test-roots` includes too, so editors compile them like tests |
 | `output-dir` | all | `target/<profile>/<target>` (with the member's name in a workspace) |
 | `compiler-args` | not Android | The Kotlin compiler arguments every compilation of the target gets: `[kotlin]` and profile settings plus the frameworks' flags |
 | `compiler-plugins` | not Android | Each compiler plugin (the frameworks' and [`[plugins]`](../manifest/#pluginsname)): `module`, `version`, `id`, its `-P` `options` and the downloaded `jar` |

@@ -6,7 +6,9 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use kargo_manifest::{Hook, InstallerType, Manifest, PackageManager, TargetKind, TaskShell, WorkspaceManifest};
+use kargo_manifest::{
+    BENCH_TIME_UNITS, BenchMode, Hook, InstallerType, Manifest, PackageManager, TargetKind, TaskShell, WorkspaceManifest,
+};
 
 fn schema() -> Value {
     let text = include_str!("../website/public/schemas/kargo.json");
@@ -207,6 +209,8 @@ fn schema_enums_match_kargo() {
         names(PackageManager::ALL.iter().map(|p| p.as_str()).collect())
     );
     assert_eq!(enum_values(&root["definitions"]["installer-type"]), names(InstallerType::ALL.iter().map(|t| t.as_str()).collect()));
+    assert_eq!(enum_values(&props["bench"]["properties"]["mode"]), names(BenchMode::ALL.iter().map(|m| m.as_str()).collect()));
+    assert_eq!(enum_values(&props["bench"]["properties"]["time-unit"]), names(BENCH_TIME_UNITS.to_vec()));
     let mut targets = property_names(&props["target"]);
     let mut expected: Vec<&str> = TargetKind::ALL.iter().map(|t| t.as_str()).collect();
     targets.sort();
@@ -238,6 +242,7 @@ fn schema_defaults_match_kargo() {
         (framework("ktor"), KTOR_VERSION),
         (framework("lombok"), LOMBOK_VERSION),
         (framework("spring-boot"), SPRING_BOOT_VERSION),
+        (framework("benchmark"), KOTLINX_BENCHMARK_VERSION),
     ];
     for (schema_default, kargo) in cases {
         assert_eq!(schema_default.as_deref(), Some(kargo), "a default version in the schema is out of date");

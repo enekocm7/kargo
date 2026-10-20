@@ -10,6 +10,8 @@
 //! tests/               common tests
 //! tests-<target>/      target-specific tests
 //! test-fixtures/       test code shared with dependent packages (`test-fixtures = true`)
+//! benches/             common benchmarks (`kargo bench`)
+//! benches-<target>/    target-specific benchmarks
 //! examples/            example programs (`kargo run --example <name>`)
 //! resources/           JVM resources
 //! test-resources/      JVM test resources
@@ -248,6 +250,15 @@ impl Workspace {
         self.root.join(format!("tests-{}", target.as_str()))
     }
 
+    /// Common benchmarks, run with `kargo bench`.
+    pub fn common_benches(&self) -> PathBuf {
+        self.root.join("benches")
+    }
+
+    pub fn target_benches(&self, target: TargetKind) -> PathBuf {
+        self.root.join(format!("benches-{}", target.as_str()))
+    }
+
     /// Common test fixtures: code the tests of this package and of the packages that depend on it
     /// with `test-fixtures = true` share.
     pub fn common_test_fixtures(&self) -> PathBuf {
@@ -277,8 +288,8 @@ impl Workspace {
         names
     }
 
-    /// Every existing source, test, test fixture and example directory (`src/`, `src-<target>/`,
-    /// `tests/`, `tests-<target>/`, `test-fixtures/`, `test-fixtures-<target>/`, `examples/`) for any
+    /// Every existing source, test, test fixture, benchmark and example directory (`src/`, `src-<target>/`,
+    /// `tests/`, `tests-<target>/`, `test-fixtures/`, `test-fixtures-<target>/`, `benches/`, `benches-<target>/`, `examples/`) for any
     /// target, enabled or not, relative to the root.
     /// Used by `kargo fmt` and `kargo lint`, which never look inside `target/`.
     pub fn source_roots(&self) -> Vec<PathBuf> {
@@ -288,6 +299,8 @@ impl Workspace {
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("tests-{}", t.as_str()))));
         dirs.push(PathBuf::from("test-fixtures"));
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("test-fixtures-{}", t.as_str()))));
+        dirs.push(PathBuf::from("benches"));
+        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("benches-{}", t.as_str()))));
         dirs.push(PathBuf::from("examples"));
         dirs.into_iter().filter(|d| self.root.join(d).is_dir()).collect()
     }

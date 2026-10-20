@@ -17,6 +17,8 @@ my-app/
 ├── tests/               common tests (kotlin.test)
 ├── tests-jvm/           JVM-only tests (likewise tests-wasm/, tests-native/, tests-android/)
 ├── test-fixtures/       test helpers shared with the tests of packages that depend on this one (JVM)
+├── benches/             common benchmarks, run with kargo bench (JVM)
+├── benches-jvm/         JVM-only benchmarks
 ├── resources/           JVM resources, put on the classpath and in the jar; also the files of a Wasm browser app
 ├── test-resources/      resources for JVM tests
 ├── composeResources/    Compose images, fonts, strings and files, read through the generated Res class
@@ -54,6 +56,10 @@ Subdirectories are fine. You don't need to mirror the package name in the folder
 With `[frameworks] compose`, `composeResources/` holds the images, fonts, strings and files of a Compose application; see [Compose resources](../../guides/compose/#resources).
 
 Kargo compiles `.kt` files (and `.java` files on the JVM). Kotlin scripts (`.kts`) in a project are not compiled or run, and a target with no sources has nothing to build; `kargo build` prints a [warning](../../reference/warnings/) for both instead of staying silent.
+
+## Benchmarks
+
+`benches/` and `benches-jvm/` hold benchmarks, which `kargo bench` compiles against `src/` the way tests are, and runs with JMH. They are not part of `kargo build`, `kargo test`, `kargo package` or `kargo publish`. See [Benchmarking](../../guides/benchmarking/).
 
 ## Several programs
 

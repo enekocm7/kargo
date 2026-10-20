@@ -101,6 +101,7 @@ Kargo uses flat directories:
 | `src/main/resources` | `resources/` |
 | `src/test/kotlin`, `src/test/java` | `tests/` |
 | `src/test/resources` | `test-resources/` |
+| `src/benchmark/kotlin`, `src/jmh/kotlin` | `benches/` |
 
 ```sh
 git mv src/main/kotlin src-tmp && git mv src/test/kotlin tests
@@ -180,6 +181,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `isTransitive = false` | `transitive = false` |
 | `strictly(...)` / `force` | `force = true` |
 | `kotlin("plugin.serialization")` | `[frameworks] serialization = true` |
+| `org.jetbrains.kotlinx.benchmark` with `benchmark { targets { register("main") } }`, `me.champeau.jmh`, then `./gradlew benchmark` or `jmh` | `[frameworks] benchmark = true` and `kargo bench`; the configuration's `iterations`, `warmups`, `iterationTime`, `mode` and `outputTimeUnit` are `[bench] iterations`, `warmup`, `mode` and `time-unit` (see [Benchmarking](../../guides/benchmarking/)) |
 | `kotlin("plugin.spring")`, `org.springframework.boot` | `[frameworks] spring-boot = true` |
 | `kotlin("plugin.jpa")` | `spring-boot = { starters = ["data-jpa"] }` or `jpa = true` |
 | `org.jetbrains.compose` + `kotlin("plugin.compose")` | `[frameworks] compose = true` |

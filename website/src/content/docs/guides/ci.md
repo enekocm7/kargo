@@ -66,6 +66,28 @@ The first build of the job starts a [compiler daemon](../build-performance/#the-
 
 `if: always()` publishes the results when tests fail, which is when you need them. In GitLab, list the same paths under `artifacts: reports: junit:`; in Jenkins, pass them to the `junit` step.
 
+### Benchmarks
+
+`kargo bench --format json` prints JMH's JSON results on stdout, and `--save <name>` / `--baseline <name>` keep and compare results in `target/bench/` (see [Benchmarking](../benchmarking/)). Benchmarks need a quiet machine: run them in a job of their own, not next to tests, and compare only runs from the same kind of runner.
+
+To compare a change with the main branch, save a baseline on `main` and restore it on pull requests, for example with the CI's cache:
+
+```yaml
+      - uses: actions/cache@v4
+        with:
+          path: target/bench
+          key: bench-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: bench-${{ runner.os }}-
+      # On the main branch:
+      - run: kargo bench --locked --save main
+        if: github.ref == 'refs/heads/main'
+      # On pull requests:
+      - run: kargo bench --locked --baseline main --format json > bench.json
+        if: github.event_name == 'pull_request'
+```
+
+`kargo bench` exits with `101` when a benchmark fails or throws, and `0` when one just got slower, so decide from `bench.json` (or the report on stderr) whether a slowdown fails the build.
+
 ### Several operating systems
 
 Kotlin/Native and Compose Desktop produce OS-specific output. Use a matrix:
@@ -164,6 +186,7 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 | `kargo build --keep-going` | Build every target and report all failures, not just the first |
 | `kargo test --report junit` | Write JUnit XML reports for the CI's test summary |
 | `[test] timeout` | Stop a hung test run and fail it, rather than waiting for the CI's own job limit. See [Timeouts](../testing/#timeouts) |
+| `kargo bench --format json` | JMH's results as JSON on stdout, for tracking performance. See [Benchmarks](#benchmarks) |
 | `kargo test --failed` | Rerun only the JVM test classes that failed in the last run, on a retry job |
 | `--message-format json` | Compiler diagnostics as JSON, to annotate them on the changed lines. See [Machine-readable output](../../reference/machine-readable-output/) |
 | `-q`, `--quiet` | Less log noise |

@@ -44,6 +44,50 @@ fn new_creates_a_project() {
 }
 
 #[test]
+fn new_bench_adds_the_framework_and_a_sample_benchmark() {
+    let p = Project::new();
+    p.kargo().args(["new", "fast", "--bench", "--no-vcs"]).assert().success();
+    assert!(p.read("fast/kargo.toml").contains("[frameworks]\nbenchmark = true\n"));
+    let sample = p.read("fast/benches/SampleBench.kt");
+    assert!(sample.contains("package com.example.fast") && sample.contains("@Benchmark"), "{sample}");
+    // The benchmarks are not tests, so the test sources stay as they were.
+    assert!(!p.path().join("fast/tests/SampleBench.kt").exists());
+    p.kargo()
+        .args(["new", "wasm-only", "--bench", "--target", "wasm", "--no-vcs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`benchmark` supports the jvm target"));
+    p.kargo().args(["new", "ws", "--workspace", "--bench"]).assert().failure().code(2);
+}
+
+#[test]
+fn add_framework_benchmark_scaffolds_a_sample_once() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tool", "group = \"org.acme\"\n"));
+    p.kargo()
+        .args(["add", "--framework", "benchmark"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Created benches/SampleBench.kt"));
+    assert!(p.read("kargo.toml").contains("benchmark = true"));
+    assert!(p.read("benches/SampleBench.kt").starts_with("package org.acme.tool\n"));
+
+    // The user's benchmarks are not overwritten, and an enabled framework scaffolds nothing.
+    p.file("benches/SampleBench.kt", "// mine");
+    p.kargo().args(["add", "--framework", "benchmark"]).assert().success();
+    assert_eq!(p.read("benches/SampleBench.kt"), "// mine");
+
+    let wasm = Project::new();
+    wasm.file("kargo.toml", &manifest("w", "[target.wasm]\n"));
+    wasm.kargo()
+        .args(["add", "--framework", "benchmark"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("benchmarks run on the JVM target"));
+    assert!(!wasm.path().join("benches").exists());
+}
+
+#[test]
 fn new_inside_a_git_repository_does_not_nest_one() {
     let Some(git) = common::which("git") else { return };
     let p = Project::new();
@@ -720,6 +764,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "check",
         "run",
         "test",
+        "bench",
         "watch",
         "add",
         "remove",
@@ -790,6 +835,63 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         p.kargo().args(["help", name]).assert().success().stdout(usage);
     }
     p.kargo().args(["--list", "build"]).assert().failure().code(2);
+}
+
+#[test]
+fn bench_checks_its_input_before_building_anything() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tool", ""));
+    // Nothing to run is not an error, and needs no JDK.
+    p.kargo().arg("bench").assert().success().stderr(predicate::str::contains("no benchmarks found for the jvm target"));
+
+    p.kargo()
+        .args(["bench", "-t", "native"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("benchmarks of the native target are not supported yet"));
+    p.kargo()
+        .args(["bench", "--baseline", "main"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no baseline named `main`; save one with `kargo bench --save main`"));
+    for name in ["a/b", "..", ".hidden", "two words"] {
+        p.kargo().args(["bench", "--save", name]).assert().failure().code(101).stderr(predicate::str::contains("invalid baseline name"));
+    }
+    // A baseline that is not valid results is reported as such.
+    p.file("target/bench/broken.json", "not json");
+    p.kargo().args(["bench", "--baseline", "broken"]).assert().failure().stderr(predicate::str::contains("failed to read the baseline"));
+
+    p.kargo().args(["bench", "--warmup", "5"]).assert().failure().code(2).stderr(predicate::str::contains("a count and a duration"));
+    p.kargo().args(["bench", "--mode", "fast"]).assert().failure().code(2);
+    p.kargo().args(["bench", "--time-unit", "years"]).assert().failure().code(2);
+    p.kargo().args(["bench", "--no-run", "--save", "x"]).assert().failure().code(2);
+
+    let wasm = Project::new();
+    wasm.file("kargo.toml", &manifest("w", "[target.wasm]\n"));
+    wasm.kargo().arg("bench").assert().failure().code(101).stderr(predicate::str::contains("which is not enabled"));
+}
+
+#[test]
+fn bench_settings_are_validated_in_the_manifest() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tool", "[bench]\nwarmup = \"soon\"\n"));
+    p.kargo().arg("bench").assert().failure().code(101).stderr(predicate::str::contains("[bench] `warmup` must be a count and a duration"));
+}
+
+#[test]
+fn metadata_lists_the_benchmark_roots() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tool", ""));
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let target = &metadata["packages"][0]["targets"][0];
+    let tail = |roots: &serde_json::Value| -> Vec<String> {
+        roots.as_array().unwrap().iter().map(|r| r.as_str().unwrap().rsplit(['/', '\\']).next().unwrap().to_owned()).collect()
+    };
+    assert_eq!(tail(&target["bench-roots"]), ["benches", "benches-jvm"]);
+    assert!(tail(&target["test-roots"]).contains(&"benches".to_owned()), "editors compile benchmarks like tests");
 }
 
 #[test]

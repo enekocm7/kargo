@@ -93,7 +93,8 @@ kargo new <path> [options]
 |---|---|---|
 | `--lib` | | Library template instead of an application |
 | `-t, --target <list>` | `jvm` | Comma-separated targets to enable |
-| `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot` |
+| `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot`, `benchmark` |
+| `--bench` | | Add the `benchmark` framework and a sample benchmark in `benches/SampleBench.kt`, as `--with benchmark` does. See [Benchmarking](../../guides/benchmarking/) |
 | `--group <group>` | `com.example` | Maven group, also the base Kotlin package |
 | `--name <name>` | directory name | Package name |
 | `--kotlin <version>` | `2.4.21` | Kotlin version |
@@ -286,6 +287,36 @@ kargo test [filter] [options]
 By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
 Wasm tests run on Node.js, or with `environment = "browser"` in a headless browser: Chrome, Edge, Chromium, Brave or Firefox, found on `PATH` or named by `KARGO_BROWSER`. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser).
+
+## `kargo bench`
+
+Build and run the benchmarks of the JVM target with [JMH](https://github.com/openjdk/jmh), and print the results.
+
+```sh
+kargo bench [filter] [options]
+```
+
+| Option | Meaning |
+|---|---|
+| `filter` | Only run benchmarks whose `package.Class.method` name contains this string, for example `ParseBench` or `ParseBench.parse` (`#` also separates the method) |
+| `--no-run` | Compile the benchmarks and generate JMH's harness but don't run them. Conflicts with `--save` and `--baseline` |
+| `--save <name>` | Store the results as the baseline `<name>` in `target/bench/<name>.json` (`target/bench/<member>/` in a workspace), replacing one of that name |
+| `--baseline <name>` | Compare the results with the baseline `<name>`: each benchmark shows its old and new score, the change in percent and whether Welch's t-test finds it significant (`p < 0.05`). The command fails before building when the baseline doesn't exist |
+| `--format <fmt>` | `text` (default) prints the results as a table, or the comparison with `--baseline`. `json` prints JMH's JSON results on stdout and moves the report to stderr |
+| `--warmup <NxT>` | Warmup iterations, such as `3x1s` or `5x500ms`. Overrides [`[bench] warmup`](../manifest/#bench) |
+| `--iterations <NxT>` | Measured iterations, in the same format. Overrides `[bench] iterations` |
+| `--forks <n>` | How many JVMs run each benchmark; `0` runs it in the JVM of the launcher. Overrides `[bench] forks` |
+| `--mode <mode>` | `thrpt`, `avgt`, `sample`, `ss` or `all`. Overrides `[bench] mode` |
+| `--time-unit <unit>` | `ns`, `us`, `ms`, `s`, `m`, `h` or `d`. Overrides `[bench] time-unit` |
+| `--message-format <fmt>` | `human` (default) or `json`: compiler diagnostics as [JSON messages](../machine-readable-output/) on stdout |
+| `-r, --release` | Use the release profile (the default, unless `kargo.toml` defines `[profile.bench]` in every selected package) |
+| `--profile <name>` | Use a custom profile from kargo.toml, such as `bench` (see [Profiles](../manifest/#profilename)) |
+| `-t, --target <target>` | Only this target. Benchmarks run on the JVM only, so any other target is an error |
+| `--env-file <path>`, `--no-env-file` | As for [`kargo test`](#kargo-test-t) |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to benchmark, in dependency order |
+| `-j, --jobs <n>` | How many packages are built at the same time (default 1, so benchmarks don't compete for the machine) |
+
+Benchmarks are kept in `benches/` and `benches-jvm/`, use kotlinx-benchmark's annotations, and are not part of `build`, `test`, `package` or `publish`. A benchmark that can't run (an exception, or a filter that matches nothing) makes `kargo bench` exit with `101`; a benchmark that got slower doesn't. See [Benchmarking](../../guides/benchmarking/).
 
 ## `kargo watch`
 
@@ -619,7 +650,7 @@ kargo uninstall <name>... [--root <dir>]
 
 ## `kargo fetch`
 
-Download all dependencies and toolchains so later builds can run offline. For each enabled target this is the Kotlin compiler, its plugins and the dependencies. The JVM and Wasm targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs, and the Wasm target gets the [npm packages](../../guides/wasm/#npm-packages) of its Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
+Download all dependencies and toolchains so later builds can run offline. For each enabled target this is the Kotlin compiler, its plugins and the dependencies. The JVM and Wasm targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs and, in a package with `benches/`, the libraries and the harness generator of [`kargo bench`](#kargo-bench) (locked as `jvm/bench` and `jvm/bench-tools`), and the Wasm target gets the [npm packages](../../guides/wasm/#npm-packages) of its Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
 
 | Option | Meaning |
 |---|---|

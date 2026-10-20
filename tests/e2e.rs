@@ -129,6 +129,60 @@ fn jvm_target_spellings_and_limits() {
 }
 
 #[test]
+fn jvm_benchmarks() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app", "--bench"]);
+    // Quick settings: this checks the plumbing, not the numbers.
+    let quick = ["--warmup", "1x200ms", "--iterations", "2x200ms", "--forks", "1"];
+
+    t.kargo("app")
+        .arg("bench")
+        .args(quick)
+        .args(["--save", "first"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("com.example.app.SampleBench.sum").and(predicate::str::contains("avgt")))
+        .stderr(predicate::str::contains("Compiling app v0.1.0 (jvm, benches)").and(predicate::str::contains("Saved baseline `first`")))
+        // Benchmarks are measured optimized.
+        .stderr(predicate::str::contains("Finished `release` profile"));
+    assert!(t.dir.path().join("app/target/bench/first.json").is_file());
+
+    // A second run compares with the first, and the unchanged benchmarks are not rebuilt.
+    t.kargo("app")
+        .arg("bench")
+        .args(quick)
+        .args(["sumOfSquares", "--baseline", "first"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("SampleBench.sumOfSquares")
+                .and(predicate::str::contains(" -> "))
+                .and(predicate::str::contains("SampleBench.sum ").not()),
+        )
+        .stderr(predicate::str::contains("Compiling").not());
+
+    let json = t.kargo("app").arg("bench").args(quick).args(["--format", "json", "sum"]).assert().success().get_output().stdout.clone();
+    let results: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert!(results.as_array().unwrap().iter().all(|r| r["benchmark"].as_str().unwrap().contains("SampleBench")));
+
+    t.kargo("app")
+        .arg("bench")
+        .args(quick)
+        .arg("nothing-like-this")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no benchmark matches"));
+    t.kargo("app").args(["bench", "--no-run"]).assert().success();
+
+    // Benchmarks are not part of the program or its tests.
+    t.kargo("app").arg("package").assert().success();
+    let jar = std::fs::read(t.dir.path().join("app/target/release/jvm/app-0.1.0.jar")).unwrap();
+    assert!(!String::from_utf8_lossy(&jar).contains("SampleBench"));
+    t.kargo("app").arg("test").assert().success().stderr(predicate::str::contains("SampleBench").not());
+}
+
+#[test]
 fn jvm_test_failures_and_filters() {
     require_e2e!();
     let t = E2e::new();

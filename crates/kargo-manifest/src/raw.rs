@@ -48,6 +48,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     test: RawTest,
     #[serde(default)]
+    bench: RawBench,
+    #[serde(default)]
     publish: RawPublish,
 }
 
@@ -92,6 +94,18 @@ struct RawTest {
     fail_fast: Option<bool>,
     timeout: Option<String>,
     test_timeout: Option<String>,
+    #[serde(default)]
+    jvm_args: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawBench {
+    warmup: Option<String>,
+    iterations: Option<String>,
+    forks: Option<u32>,
+    mode: Option<String>,
+    time_unit: Option<String>,
     #[serde(default)]
     jvm_args: Vec<String>,
 }
@@ -772,6 +786,7 @@ struct RawFrameworks {
     ktor: Option<Toggle<KtorConfig>>,
     lombok: Option<Toggle<LombokConfig>>,
     spring_boot: Option<Toggle<SpringBootConfig>>,
+    benchmark: Option<Toggle<BenchmarkConfig>>,
 }
 
 /// `feature = true`, `feature = false` or `feature = { ...options }`.
@@ -838,6 +853,13 @@ pub struct LombokConfig {
     pub version: Option<String>,
     /// Path to `lombok.config`, relative to the project root.
     pub config: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct BenchmarkConfig {
+    /// The kotlinx-benchmark version.
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -1146,6 +1168,11 @@ fn parse_run(task: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<S
 /// Parses a `[tasks]` table (or `[workspace.tasks]`) and checks every `depends-on` names a task in it.
 /// Parses a duration such as `500ms`, `30s`, `5m` or `1h` (a whole number and a unit, optionally separated by a space).
 fn parse_duration(key: &str, value: &str) -> Result<Duration> {
+    parse_duration_in("[test]", key, value)
+}
+
+/// A positive duration such as `500ms`, `30s`, `5m` or `1h`; `section` names where it was read, for the error.
+pub(super) fn parse_duration_in(section: &str, key: &str, value: &str) -> Result<Duration> {
     let text = value.trim();
     let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
     let (amount, unit) = text.split_at(digits);
@@ -1158,7 +1185,7 @@ fn parse_duration(key: &str, value: &str) -> Result<Duration> {
     };
     match amount.parse::<u64>() {
         Ok(n) if n > 0 && unit_millis > 0 => Ok(Duration::from_millis(n.saturating_mul(unit_millis))),
-        _ => bail!("[test] `{key}` must be a positive duration such as \"30s\", \"5m\" or \"1h\", not \"{value}\""),
+        _ => bail!("{section} `{key}` must be a positive duration such as \"30s\", \"5m\" or \"1h\", not \"{value}\""),
     }
 }
 
@@ -1779,6 +1806,7 @@ impl RawManifest {
             ktor: self.frameworks.ktor.and_then(Toggle::into_option),
             lombok: self.frameworks.lombok.and_then(Toggle::into_option),
             spring_boot: self.frameworks.spring_boot.and_then(Toggle::into_option),
+            benchmark: self.frameworks.benchmark.and_then(Toggle::into_option),
         };
         if let Some(package) = frameworks.compose.as_ref().and_then(|c| c.resources_package.as_deref())
             && (package.is_empty()
@@ -1912,6 +1940,14 @@ impl RawManifest {
                 timeout: self.test.timeout.as_deref().map(|v| parse_duration("timeout", v)).transpose()?,
                 test_timeout: self.test.test_timeout.as_deref().map(|v| parse_duration("test-timeout", v)).transpose()?,
                 jvm_args: self.test.jvm_args,
+            },
+            bench: BenchSettings {
+                warmup: self.bench.warmup.as_deref().map(|v| BenchRounds::parse("[bench] `warmup`", v)).transpose()?,
+                iterations: self.bench.iterations.as_deref().map(|v| BenchRounds::parse("[bench] `iterations`", v)).transpose()?,
+                forks: self.bench.forks,
+                mode: self.bench.mode.as_deref().map(str::parse).transpose().context("invalid [bench] `mode`")?,
+                time_unit: self.bench.time_unit.as_deref().map(|v| validate_time_unit("[bench] `time-unit`", v)).transpose()?,
+                jvm_args: self.bench.jvm_args,
             },
             package: Package {
                 name: self.package.name,

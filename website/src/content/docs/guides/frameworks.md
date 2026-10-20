@@ -1,6 +1,6 @@
 ---
 title: Built-in frameworks
-description: Enable Compose, Ktor, Spring Boot, kotlinx.serialization, coroutines and Lombok with one line each.
+description: Enable Compose, Ktor, Spring Boot, kotlinx.serialization, coroutines, Lombok and benchmarks with one line each.
 ---
 
 Some libraries need more than a dependency: compiler plugins, extra flags, or a set of matching artifacts. Kargo knows how to set these up. Turn them on in `[frameworks]`:
@@ -28,6 +28,7 @@ Each framework adds what it needs for every target that supports it. Use `kargo 
 | `compose` | desktop | | | Jetpack Compose |
 | `spring-boot` | ✓ | | | |
 | `lombok` | ✓ | | | ✓ |
+| `benchmark` | ✓ | | | |
 
 ## kotlinx.serialization
 
@@ -129,6 +130,17 @@ lombok = { version = "1.18.48", config = "lombok.config" }
 ```
 
 Adds Lombok as a `provided` dependency and annotation processor for main and test Java sources, and the Kotlin Lombok compiler plugin so Kotlin code can see the generated getters, setters and builders. A `lombok.config` in the project root is picked up automatically. JVM and Android only.
+
+## Benchmarks
+
+```toml
+[frameworks]
+benchmark = true
+# or
+benchmark = { version = "0.5.0" }
+```
+
+Adds kotlinx-benchmark's annotations (`@Benchmark`, `@State`, `Blackhole`) and JMH as dev-dependencies of the JVM target, so your editor resolves them in `benches/`. `kargo bench` runs without this framework too, with the same libraries; the framework is for the editor and to pin the version. `kargo new --bench` (or `-w benchmark`) and `kargo add --framework benchmark` also write a sample benchmark in `benches/SampleBench.kt` when there is none. JVM only; see [Benchmarking](../benchmarking/).
 
 ## Combining frameworks
 

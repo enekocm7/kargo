@@ -136,7 +136,7 @@ pub fn scaffold_targets(ws: &Workspace, manifest: &Manifest, targets: &[TargetKi
 }
 
 /// The options `kargo new` would use for this package, for the target defaults and templates.
-fn new_options(manifest: &Manifest, lib: bool) -> NewOptions {
+pub(crate) fn new_options(manifest: &Manifest, lib: bool) -> NewOptions {
     let mut opts = NewOptions::new(manifest.package.name.clone());
     if let Some(group) = &manifest.package.group {
         opts.group = group.clone();
@@ -226,7 +226,7 @@ pub fn remove(shell: &Shell, ws: &Workspace, targets: &[TargetKind]) -> Result<V
     for &target in &removed {
         shell.status("Removing", format!("{target} target"));
         let mut kept: Vec<String> = Vec::new();
-        let mut dirs = vec![ws.target_sources(target), ws.target_tests(target)];
+        let mut dirs = vec![ws.target_sources(target), ws.target_tests(target), ws.target_benches(target)];
         if target == TargetKind::Android {
             dirs.push(ws.root().join("android"));
         }

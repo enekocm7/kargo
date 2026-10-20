@@ -21,6 +21,11 @@ pub const LOGBACK_VERSION: &str = "1.5.32";
 pub const LOMBOK_VERSION: &str = "1.18.48";
 pub const SPRING_BOOT_VERSION: &str = "4.1.1";
 pub const JUNIT_VERSION: &str = "6.1.3";
+/// kotlinx-benchmark's annotations and runtime for `kargo bench` (JVM), unless `[frameworks] benchmark` pins another.
+pub const KOTLINX_BENCHMARK_VERSION: &str = "0.5.0";
+/// The JMH that runs the benchmarks of the JVM target. kotlinx-benchmark's annotations are aliases of
+/// JMH's, and its jar does not bring JMH along.
+pub const JMH_VERSION: &str = "1.37";
 /// The oldest JDK that runs JUnit 6 and its console launcher, which are compiled for Java 17.
 pub const JUNIT_MIN_JDK: u32 = 17;
 /// KSP2 (`com.google.devtools.ksp`), used for `scope = "ksp"` dependencies on the JVM and Android
@@ -79,6 +84,20 @@ fn dep_scoped(coord: &str, version: Option<&str>, scope: Scope) -> Dependency {
     let mut d = dep(coord, version);
     d.scope = scope;
     d
+}
+
+/// The libraries the benchmarks of the JVM target compile and run against: kotlinx-benchmark's
+/// annotations (`@Benchmark`, `@State`, `Blackhole`) and the JMH they stand for.
+pub fn benchmark_dependencies(manifest: &Manifest) -> Vec<Dependency> {
+    let version = manifest.frameworks.benchmark.as_ref().and_then(|b| b.version.as_deref()).unwrap_or(KOTLINX_BENCHMARK_VERSION);
+    vec![dep("org.jetbrains.kotlinx:kotlinx-benchmark-runtime", Some(version)), dep("org.openjdk.jmh:jmh-core", Some(JMH_VERSION))]
+}
+
+/// The compiler plugin that opens the `@State` classes of benchmarks: JMH generates subclasses of them,
+/// and Kotlin classes are final.
+pub fn benchmark_plugin() -> PluginSpec {
+    PluginSpec::kotlin("kotlin-allopen-compiler-plugin-embeddable", "org.jetbrains.kotlin.allopen")
+        .option("annotation", "org.openjdk.jmh.annotations.State")
 }
 
 /// The `os-arch` suffix of Compose Desktop artifacts for this machine.
@@ -232,6 +251,11 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
         c.plugins.push(plugin);
     }
 
+    // The benchmarks of the JVM target (`benches/`) compile against these, like tests do.
+    if fw.benchmark.is_some() && target == TargetKind::Jvm {
+        c.dev_dependencies.extend(benchmark_dependencies(manifest));
+    }
+
     if let Some(spring) = &fw.spring_boot {
         if target != TargetKind::Jvm {
             bail!("Spring Boot is only supported on the JVM target");
@@ -307,7 +331,7 @@ fn merge_plugins(plugins: &mut Vec<PluginSpec>) {
 }
 
 /// Names of the built-in frameworks, for `kargo add --framework` and `kargo new --with`.
-pub const FRAMEWORK_NAMES: &[&str] = &["compose", "serialization", "coroutines", "ktor", "lombok", "spring-boot"];
+pub const FRAMEWORK_NAMES: &[&str] = &["compose", "serialization", "coroutines", "ktor", "lombok", "spring-boot", "benchmark"];
 
 /// The names of the frameworks `[frameworks]` enables, in [`FRAMEWORK_NAMES`] order.
 pub fn enabled_frameworks(manifest: &Manifest) -> Vec<&'static str> {
@@ -319,6 +343,7 @@ pub fn enabled_frameworks(manifest: &Manifest) -> Vec<&'static str> {
         fw.ktor.is_some(),
         fw.lombok.is_some(),
         fw.spring_boot.is_some(),
+        fw.benchmark.is_some(),
     ];
     FRAMEWORK_NAMES.iter().zip(enabled).filter_map(|(name, on)| on.then_some(*name)).collect()
 }
@@ -447,6 +472,35 @@ mod tests {
 
         let missing = manifest("[frameworks]\nlombok = { config = \"nope.config\" }\n");
         assert!(contributions(&missing, TargetKind::Jvm, dir.path()).is_err());
+    }
+
+    #[test]
+    fn benchmark_adds_the_annotations_for_benches_only() {
+        let m = manifest(
+            "[frameworks]
+benchmark = true
+",
+        );
+        let c = contributions(&m, TargetKind::Jvm, Path::new(".")).unwrap();
+        assert_eq!(c.dependencies.len(), 1, "the benchmarks are not part of the program: just the standard library");
+        assert_eq!(
+            coords(&c.dev_dependencies)[2..],
+            ["org.jetbrains.kotlinx:kotlinx-benchmark-runtime", "org.openjdk.jmh:jmh-core"],
+            "after the test framework"
+        );
+        assert!(contributions(&m, TargetKind::Native, Path::new(".")).unwrap().dev_dependencies.is_empty());
+        let pinned = manifest(
+            "[frameworks]
+benchmark = { version = \"0.4.14\" }
+",
+        );
+        let deps = benchmark_dependencies(&pinned);
+        assert_eq!(deps[0].version.as_deref(), Some("0.4.14"));
+        assert_eq!(deps[1].version.as_deref(), Some(JMH_VERSION));
+        assert_eq!(
+            plugin_option_args(&benchmark_plugin()),
+            ["plugin:org.jetbrains.kotlin.allopen:annotation=org.openjdk.jmh.annotations.State"]
+        );
     }
 
     #[test]
