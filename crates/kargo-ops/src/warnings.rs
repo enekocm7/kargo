@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn odd_versions_warn() {
-        for version in ["not.a.version.x", "v1.0", "1.0 beta", "[1.0,2.0)", "latest", "1/2"] {
+        for version in ["not.a.version.x", "v1.0", "latest", "1/2"] {
             let messages = manifest(&package(version, ""), |_| false);
             assert_eq!(messages.len(), 1, "{version}");
             assert!(messages[0].contains(&format!("package version `{version}` does not look like a version")), "{messages:?}");

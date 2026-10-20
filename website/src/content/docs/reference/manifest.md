@@ -28,7 +28,7 @@ publish = true
 
 In a workspace, a member can inherit `version`, `group`, `description`, `authors`, `license`, `homepage` and `repository` from [`[workspace.package]`](#workspace) with `version.workspace = true`.
 
-`version` names the jar and is the version in its Maven coordinates. Any string is accepted, but Kargo [warns](../warnings/#odd-package-versions) about one that doesn't start with a digit or that uses anything besides letters, digits and `.`, `-`, `_`, `+`.
+`version` names the jar and is the version in its Maven coordinates, so it must be one exact version: a Maven range such as `[1.0,2.0)`, a wildcard such as `1.+`, a value with spaces and an empty string are errors (a `+` in the middle, as in `1.0.0+build.5`, is build metadata and fine). Kargo also [warns](../warnings/#odd-package-versions) about one that doesn't start with a digit or that uses anything besides letters, digits and `.`, `-`, `_`, `+`.
 
 The other keys describe the package when it is [published](../../guides/publishing/) and fill in its POM:
 
@@ -134,10 +134,10 @@ warnings-as-errors = false
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.4.21` | Kotlin compiler and standard library version |
+| `version` | `2.4.21` | Kotlin compiler and standard library version. One exact version: ranges such as `[2.0,3.0)` and wildcards such as `2.+` are errors |
 | `language-version` | | `-language-version` |
 | `api-version` | | `-api-version` |
-| `ksp` | `2.3.12` | [KSP](../../guides/dependencies/#kotlin-symbol-processing-ksp) version for `scope = "ksp"` dependencies (the standalone tool on the JVM, the Gradle plugin on Android) |
+| `ksp` | `2.3.12` | [KSP](../../guides/dependencies/#kotlin-symbol-processing-ksp) version for `scope = "ksp"` dependencies (the standalone tool on the JVM, the Gradle plugin on Android). One exact version |
 | `opt-in` | `[]` | Annotations to opt in to everywhere |
 | `compiler-args` | `[]` | Extra arguments for every compilation |
 | `warnings-as-errors` | `false` | Fail on warnings. The compiler's `warnings found and -Werror specified` summary is printed [after the diagnostics](../warnings/#warnings-as-errors) |

@@ -1533,7 +1533,7 @@ pub fn normalize_konan_target(name: &str) -> Result<String> {
 impl RawManifest {
     pub(super) fn validate(self, workspace: Option<&WorkspaceManifest>) -> Result<Manifest> {
         validate_package_name(&self.package.name)?;
-        validate_version_string("package version", &self.package.version)?;
+        validate_exact_version("[package] `version`", "0.1.0", &self.package.version)?;
         if let Some(group) = &self.package.group
             && (group.is_empty()
                 || group.split('.').any(|seg| seg.is_empty() || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')))
@@ -1549,7 +1549,7 @@ impl RawManifest {
             (Some(v), _) | (None, Some(v)) => (v, true),
             (None, None) => (DEFAULT_KOTLIN_VERSION.to_owned(), false),
         };
-        validate_version_string("Kotlin version", &kotlin_version)?;
+        validate_exact_version("[kotlin] `version`", DEFAULT_KOTLIN_VERSION, &kotlin_version)?;
         // `[workspace.kotlin]` is where every member starts: its lists come first, and a member's
         // own keys take precedence over the others.
         let mut kotlin = self.kotlin;
@@ -1567,7 +1567,7 @@ impl RawManifest {
         }
         let shared_jvm_target = workspace.and_then(|w| w.kotlin.jvm_target.clone());
         if let Some(ksp) = &kotlin.ksp {
-            validate_version_string("KSP version", ksp)?;
+            validate_exact_version("[kotlin] `ksp`", "1.2.3", ksp)?;
         }
         let mut deps = DependencyParser { workspace, paths: Vec::new() };
 
@@ -1771,7 +1771,7 @@ impl RawManifest {
                 None | Some(Value::Boolean(false)) => None,
                 Some(Value::Boolean(true)) => Some(CoroutinesConfig { version: None }),
                 Some(Value::String(v)) => {
-                    validate_version_string("coroutines version", &v)?;
+                    validate_exact_version("[frameworks] `coroutines`", "1.2.3", &v)?;
                     Some(CoroutinesConfig { version: Some(v) })
                 }
                 Some(_) => bail!("[frameworks] `coroutines` must be true, false or a version string"),
@@ -1780,6 +1780,17 @@ impl RawManifest {
             lombok: self.frameworks.lombok.and_then(Toggle::into_option),
             spring_boot: self.frameworks.spring_boot.and_then(Toggle::into_option),
         };
+        for (name, version) in [
+            ("compose", frameworks.compose.as_ref().and_then(|c| c.version.as_deref())),
+            ("serialization", frameworks.serialization.as_ref().and_then(|c| c.version.as_deref())),
+            ("ktor", frameworks.ktor.as_ref().and_then(|c| c.version.as_deref())),
+            ("lombok", frameworks.lombok.as_ref().and_then(|c| c.version.as_deref())),
+            ("spring-boot", frameworks.spring_boot.as_ref().and_then(|c| c.version.as_deref())),
+        ] {
+            if let Some(v) = version {
+                validate_exact_version(&format!("[frameworks.{name}] `version`"), "1.2.3", v)?;
+            }
+        }
         if let Some(package) = frameworks.compose.as_ref().and_then(|c| c.resources_package.as_deref())
             && (package.is_empty()
                 || !package.split('.').all(|part| {
@@ -2090,7 +2101,7 @@ impl RawWorkspaceManifest {
         let kotlin = raw.kotlin;
         for (key, value) in [("version", &kotlin.version), ("ksp", &kotlin.ksp)] {
             if let Some(v) = value {
-                validate_version_string(&format!("[workspace.kotlin] {key}"), v)?;
+                validate_exact_version(&format!("[workspace.kotlin] `{key}`"), DEFAULT_KOTLIN_VERSION, v)?;
             }
         }
         let jvm_target =
@@ -2105,7 +2116,7 @@ impl RawWorkspaceManifest {
         }
         let package: RawWorkspacePackage = Value::Table(raw.package.clone()).try_into().context("invalid [workspace.package]")?;
         if let Some(v) = &package.version {
-            validate_version_string("[workspace.package] version", v)?;
+            validate_exact_version("[workspace.package] `version`", "0.1.0", v)?;
         }
         let _: RawFrameworks = Value::Table(raw.frameworks.clone()).try_into().context("invalid [workspace.frameworks]")?;
         for (name, value) in &raw.plugins {
