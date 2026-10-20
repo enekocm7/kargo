@@ -47,6 +47,8 @@ $ kargo test
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
 | `kargo package [--release \| --profile <name>] [-t jvm\|android] [--bin <name>] [--fat] [--format jar\|jlink\|native-image\|installer] [--desktop [--platforms all]]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `--format jlink` builds the jars, a Java runtime trimmed by `jlink` and launchers, which run without an installed Java; `native-image` a GraalVM native executable; `installer` a `jpackage` installer (`.msi`, `.dmg`, `.deb`, ...) for the host OS, all into `target/<profile>/jvm/package/` (see [distributing applications](https://enekocm7.github.io/kargo/guides/distributing/)). `--desktop` packages a [Compose Desktop](https://enekocm7.github.io/kargo/guides/compose/) app: an installer with what Compose needs (signed and notarized on macOS), or with `--format jar --platforms all` a jar that runs on every OS. `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
+| `kargo install --path <dir> \| --git <url> [--tag \| --branch \| --rev] \| <group:artifact[:version]> [--bin <name>] [--format jar\|jlink] [--force] [--list]` | Install a Kotlin command-line tool: build a project (release profile), a git repository or download an application from Maven, and put a launcher in `~/.kargo/bin`. A JVM tool runs its fat jar with the JDK it was built with (`--format jlink`: with a trimmed runtime, so no Java is needed); a Native tool is copied as it is. Every entry point is installed, or the `--bin` ones. `kargo install --force <name>` upgrades it from where it came from, `--list` shows what is installed, `--root <dir>` installs elsewhere (see [installing tools](https://enekocm7.github.io/kargo/guides/installing-tools/)) |
+| `kargo uninstall <name>...` | Remove programs installed with `kargo install` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors, `--tools` the Dokka, ktlint and detekt tools |
 | `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
 | `kargo ide [--kls\|--zed]` | Write `workspace.json` (Kotlin LSP) or `kls-classpath` (kotlin-language-server) for editors that run the server themselves, or `.zed/tasks.json` with Kargo tasks for Zed's run buttons; kept current by later commands |
@@ -67,7 +69,7 @@ Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--refresh`
 
 `kargo --help` lists the common commands, then the project's tasks, and `kargo` alone prints the same help; `kargo --list` lists every built-in command with its description. Commands left out of `--help` still work, and `kargo help <command>` shows each one's options. A mistyped command suggests the closest one (`kargo biuld` → `Did you mean build?`).
 
-In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` and `publish` take `-p <member>` (repeatable), `--workspace` and `--exclude <member>`; `run`, `package`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`. Members build in dependency order, independent ones in parallel, and a JVM member recompiles only when the ABI of a member it uses changes.
+In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` and `publish` take `-p <member>` (repeatable), `--workspace` and `--exclude <member>`; `run`, `package`, `install`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`. Members build in dependency order, independent ones in parallel, and a JVM member recompiles only when the ABI of a member it uses changes.
 
 ## Project layout
 
@@ -353,6 +355,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | Variable | Purpose |
 |---|---|
 | `KARGO_HOME` | Cache and toolchains (default `~/.kargo`) |
+| `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |

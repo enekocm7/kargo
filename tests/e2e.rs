@@ -2341,3 +2341,115 @@ fun main() {
     let out = run_without_java(&exe, &[]);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello from reflection");
 }
+
+/// The launcher `kargo install` wrote for `name` below `root`.
+fn installed_launcher(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let bin = root.join("bin");
+    [format!("{name}.cmd"), name.to_owned(), format!("{name}.exe")]
+        .iter()
+        .map(|f| bin.join(f))
+        .find(|f| f.is_file())
+        .unwrap_or_else(|| panic!("no `{name}` in {}", bin.display()))
+}
+
+#[test]
+fn install_a_jvm_tool() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["tool"]);
+    std::fs::remove_file(t.dir.path().join("tool/tests/GreetingTest.kt")).unwrap();
+    t.write("tool/src/Main.kt", "package m\nfun main(args: Array<String>) = println(\"tool \" + args.joinToString(\"|\"))\n");
+    t.write("tool/src/tools/Seed.kt", "package m.tools\nfun main(args: Array<String>) = println(\"seed \" + args.joinToString(\"|\"))\n");
+    let manifest = std::fs::read_to_string(t.dir.path().join("tool/kargo.toml")).unwrap();
+    t.write(
+        "tool/kargo.toml",
+        &format!("{manifest}\n[target.jvm]\nmain-class = \"m.MainKt\"\n\n[[bin]]\nname = \"seed\"\npath = \"src/tools/Seed.kt\"\n"),
+    );
+    let root = tempfile::tempdir().unwrap();
+
+    // Every entry point is installed: the project's own and the [[bin]].
+    t.kargo("tool")
+        .args(["install", "--path", ".", "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed package `tool v0.1.0` (executables `seed`, `tool`)"));
+    let run = |name: &str, args: &[&str]| {
+        let out = StdCommand::new(installed_launcher(root.path(), name)).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    assert_eq!(run("tool", &["a", "b"]), "tool a|b");
+    assert_eq!(run("seed", &["x"]), "seed x");
+
+    t.kargo("tool")
+        .args(["install", "--list", "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tool v0.1.0 (").and(predicate::str::contains("    seed\n    tool\n")));
+
+    // A second install needs --force; with --bin only that program is installed.
+    t.kargo("tool")
+        .args(["install", "--path", ".", "--root"])
+        .arg(root.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`tool` v0.1.0 is already installed"));
+    t.write("tool/src/Main.kt", "package m\nfun main(args: Array<String>) = println(\"tool 2 \" + args.joinToString(\"|\"))\n");
+    t.kargo("tool")
+        .args(["install", "--path", ".", "--bin", "tool", "--force", "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed package `tool v0.1.0` (executable `tool`)"));
+    assert_eq!(run("tool", &["a"]), "tool 2 a");
+    assert!(!root.path().join("bin/seed").exists() && !root.path().join("bin/seed.cmd").exists(), "seed is not installed any more");
+
+    t.kargo("tool").args(["uninstall", "tool", "--root"]).arg(root.path()).assert().success();
+    assert!(!root.path().join("bin/tool").exists() && !root.path().join("bin/tool.cmd").exists());
+    assert!(!root.path().join("install/tool").exists());
+}
+
+#[test]
+fn install_a_published_application_from_maven() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["greeter"]);
+    std::fs::remove_file(t.dir.path().join("greeter/tests/GreetingTest.kt")).unwrap();
+    t.write("greeter/src/Main.kt", "package g\nfun main(args: Array<String>) = println(\"greeter \" + args.joinToString(\"|\"))\n");
+    let repo = tempfile::tempdir().unwrap();
+    let url = format!("file:///{}", repo.path().display().to_string().replace('\\', "/").trim_start_matches('/'));
+    t.kargo("greeter").args(["publish", "--dry-run", "--repository", "maven-local"]).assert().success();
+    let staged = t.dir.path().join("greeter/target/release/publish/repository");
+    kargo_util::fs::copy_dir(&staged, repo.path()).unwrap();
+
+    let root = tempfile::tempdir().unwrap();
+    t.kargo("greeter")
+        .args(["install", "com.example:greeter:0.1.0", "--repository", &url, "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed package `greeter v0.1.0`"));
+    let out = StdCommand::new(installed_launcher(root.path(), "greeter")).args(["hi", "there"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "greeter hi|there", "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn install_a_native_tool() {
+    require_e2e!();
+    require_native!();
+    let t = E2e::new();
+    t.create(&["nat", "--target", "native"]);
+    let root = tempfile::tempdir().unwrap();
+    t.kargo("nat")
+        .args(["install", "--path", ".", "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed package `nat v0.1.0` (executable `nat`)"));
+    // No JVM involved: the executable is the program.
+    let exe = root.path().join("bin").join(if cfg!(windows) { "nat.exe" } else { "nat" });
+    let out = run_without_java(&exe, &[]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Hello, Kotlin!"), "{}", String::from_utf8_lossy(&out.stderr));
+}

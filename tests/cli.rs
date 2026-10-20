@@ -729,6 +729,8 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "clean",
         "package",
         "publish",
+        "install",
+        "uninstall",
         "fmt",
         "lint",
         "doc",
@@ -3199,4 +3201,234 @@ fn toolchain_manages_graalvm() {
         .success()
         .stderr(predicate::str::contains("Removed GraalVM CE 25.0.4"));
     p.kargo().args(["toolchain", "remove", "graalvm", "25"]).assert().failure().stderr(predicate::str::contains("no installed GraalVM"));
+}
+
+/// Records `name` as installed in the home of `p`, with an executable in its `bin/`.
+fn fake_install(p: &Project, name: &str, version: &str) {
+    let home = p.home.path();
+    let source = p.path().display().to_string().replace('\\', "/");
+    let registry = format!(
+        "[[tool]]\nname = \"{name}\"\nversion = \"{version}\"\ntarget = \"jvm\"\nbinaries = [\"{name}\"]\n\n[tool.source]\ntype = \"path\"\npath = '{source}'\n"
+    );
+    std::fs::create_dir_all(home.join("install").join(name).join(version)).unwrap();
+    std::fs::write(home.join("install").join(".installed.toml"), registry).unwrap();
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::write(home.join("bin").join(name), "launcher").unwrap();
+}
+
+#[test]
+fn install_needs_exactly_one_source() {
+    let p = Project::new();
+    p.kargo().arg("install").assert().failure().code(101).stderr(predicate::str::contains("nothing to install"));
+    p.kargo().args(["install", "--tag", "v1"]).assert().failure().stderr(predicate::str::contains("--git"));
+    p.kargo()
+        .args(["install", "--path", ".", "--git", "https://example.com/x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used"));
+    p.kargo()
+        .args(["install", "--git", "https://example.com/x", "--tag", "v1", "--branch", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used"));
+    p.kargo().args(["install", "g:a", "--path", "."]).assert().failure().stderr(predicate::str::contains("cannot be used"));
+    p.kargo().args(["install", "--list", "--path", "."]).assert().failure().stderr(predicate::str::contains("cannot be used"));
+    // A name without a group is an installed program, which is not there yet.
+    p.kargo().args(["install", "--force", "ghost"]).assert().failure().stderr(predicate::str::contains("`ghost` is not installed"));
+    p.kargo().args(["install", "g:a:1.0:sources", "--offline"]).assert().failure().stderr(predicate::str::contains("classifier"));
+}
+
+#[test]
+fn install_checks_the_project_before_building() {
+    let p = Project::new();
+    let missing = p.path().join("nothing-here");
+    p.kargo()
+        .args(["install", "--path"])
+        .arg(&missing)
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("has no kargo.toml").and(predicate::str::contains("give `--path` the directory of the project")));
+
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.wasm]\n"));
+    p.kargo()
+        .args(["install", "--path", ".", "--target", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("installs programs for the jvm and native targets, not wasm"));
+    p.kargo()
+        .args(["install", "--path", ".", "--target", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target `native` is not enabled in kargo.toml"));
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.native]\n"));
+    p.kargo()
+        .args(["install", "--path", ".", "--target", "native", "--format", "jlink"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--format jlink` packages a JVM program and does not apply to the native target"));
+    p.kargo()
+        .args(["install", "--path", ".", "--format", "zip"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value 'zip'"));
+
+    // A program that is installed already is not built again without --force.
+    fake_install(&p, "app", "0.0.1");
+    p.kargo()
+        .args(["install", "--path", "."])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`app` v0.0.1 is already installed").and(predicate::str::contains("--force")));
+}
+
+#[test]
+fn install_list_and_uninstall() {
+    let p = Project::new();
+    p.kargo().args(["install", "--list"]).assert().success().stdout(predicate::str::is_empty());
+    fake_install(&p, "tool", "1.2.0");
+    let source = p.path().display().to_string().replace('\\', "/");
+    p.kargo()
+        .args(["install", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("tool v1.2.0 ({source}):\n    tool\n")));
+    p.kargo()
+        .args(["uninstall", "tool", "ghost"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`ghost` is not installed"));
+    assert!(p.home.path().join("bin/tool").is_file(), "nothing is removed when one of the names is unknown");
+
+    p.kargo().args(["uninstall", "tool"]).assert().success().stderr(predicate::str::contains("Removed package `tool v1.2.0`"));
+    assert!(!p.home.path().join("bin/tool").exists());
+    assert!(!p.home.path().join("install/tool").exists());
+    p.kargo().args(["install", "--list"]).assert().success().stdout(predicate::str::is_empty());
+    p.kargo().arg("uninstall").assert().failure().stderr(predicate::str::contains("<NAME>"));
+}
+
+#[test]
+fn install_root_keeps_programs_out_of_the_kargo_home() {
+    let p = Project::new();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("install")).unwrap();
+    std::fs::write(
+        root.path().join("install/.installed.toml"),
+        "[[tool]]\nname = \"elsewhere\"\nversion = \"2.0.0\"\ntarget = \"native\"\nbinaries = [\"elsewhere\"]\n\n[tool.source]\ntype = \"git\"\nurl = \"https://example.com/elsewhere\"\n",
+    )
+    .unwrap();
+    p.kargo().args(["install", "--list"]).assert().success().stdout(predicate::str::is_empty());
+    p.kargo()
+        .args(["install", "--list", "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("elsewhere v2.0.0 (https://example.com/elsewhere):\n    elsewhere\n"));
+    p.kargo()
+        .args(["install", "--list"])
+        .env("KARGO_INSTALL_ROOT", root.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("elsewhere"));
+    p.kargo().args(["uninstall", "elsewhere"]).env("KARGO_INSTALL_ROOT", root.path()).assert().success();
+    p.kargo().args(["install", "--list", "--root"]).arg(root.path()).assert().success().stdout(predicate::str::is_empty());
+}
+
+/// A jar whose manifest is `manifest`.
+fn jar_with_manifest(manifest: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut out);
+    zip.start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.write_all(manifest.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    out.into_inner()
+}
+
+#[test]
+fn install_from_maven_needs_a_main_class() {
+    let p = Project::new();
+    let repo = LocalRepo::new();
+    repo.publish("com.example:lib", "1.0.0", &[]);
+    let jar = repo.dir.path().join("com/example/lib/1.0.0/lib-1.0.0.jar");
+    std::fs::write(&jar, jar_with_manifest("Manifest-Version: 1.0\r\n")).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    p.kargo()
+        .args(["install", "com.example:lib", "--offline", "--repository"])
+        .arg(repo.url())
+        .arg("--root")
+        .arg(root.path())
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("does not say which class to run").and(predicate::str::contains("kargo.main-class")));
+    p.kargo()
+        .args(["install", "com.example:lib", "--format", "jlink", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--format jlink` needs a project to build"));
+    p.kargo().args(["install", "com.example:lib", "--path", "."]).assert().failure().stderr(predicate::str::contains("cannot be used"));
+    assert!(!root.path().join("bin").exists());
+}
+
+#[test]
+fn install_from_maven_runs_the_main_class_of_the_jar_or_the_pom() {
+    // The launcher pins the JDK that is found, so this needs one.
+    if which("java").is_none() {
+        return;
+    }
+    let p = Project::new();
+    let repo = LocalRepo::new();
+    repo.publish("com.example:greeter", "1.0.0", &[]).publish("com.example:greeter", "1.1.0", &[]);
+    let dir = repo.dir.path().join("com/example/greeter");
+    // 1.0.0 names its class in the jar manifest, 1.1.0 in the POM that `kargo publish` writes.
+    std::fs::write(dir.join("1.0.0/greeter-1.0.0.jar"), jar_with_manifest("Manifest-Version: 1.0\r\nMain-Class: com.example.Old\r\n"))
+        .unwrap();
+    std::fs::write(dir.join("1.1.0/greeter-1.1.0.jar"), jar_with_manifest("Manifest-Version: 1.0\r\n")).unwrap();
+    std::fs::write(
+        dir.join("1.1.0/greeter-1.1.0.pom"),
+        "<project><groupId>com.example</groupId><artifactId>greeter</artifactId><version>1.1.0</version>\
+         <properties><kargo.main-class>com.example.New</kargo.main-class></properties></project>",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let install = |args: &[&str]| {
+        let mut cmd = p.kargo();
+        cmd.arg("install").args(args).args(["--offline", "--repository"]).arg(repo.url()).arg("--root").arg(root.path());
+        cmd
+    };
+    let launcher = || {
+        let bin = root.path().join("bin");
+        let file = ["greeter", "greeter.cmd"].iter().map(|n| bin.join(n)).find(|f| f.is_file()).expect("a launcher");
+        std::fs::read_to_string(file).unwrap()
+    };
+
+    install(&["com.example:greeter:1.0.0"]).assert().success().stderr(predicate::str::contains("Installed package `greeter v1.0.0`"));
+    let script = launcher();
+    assert!(script.contains("com.example.Old") && script.contains("-cp") && script.contains("java"), "{script}");
+    assert!(root.path().join("install/greeter/1.0.0/lib/greeter-1.0.0.jar").is_file());
+    p.kargo()
+        .args(["install", "--list", "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("greeter v1.0.0 (com.example:greeter):"));
+
+    // Again without --force is refused; the name alone upgrades to the newest version.
+    install(&["com.example:greeter:1.0.0"]).assert().failure().stderr(predicate::str::contains("`greeter` v1.0.0 is already installed"));
+    p.kargo()
+        .args(["install", "--force", "greeter", "--offline", "--root"])
+        .arg(root.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed package `greeter v1.0.0`"));
+    install(&["com.example:greeter", "--force"]).assert().success().stderr(predicate::str::contains("Installed package `greeter v1.1.0`"));
+    assert!(launcher().contains("com.example.New"));
+    assert!(!root.path().join("install/greeter/1.0.0").exists(), "the old version is removed");
+    assert!(root.path().join("install/greeter/1.1.0/lib").is_dir());
+
+    p.kargo().args(["uninstall", "greeter", "--root"]).arg(root.path()).assert().success();
+    assert!(!root.path().join("bin/greeter").exists() && !root.path().join("bin/greeter.cmd").exists());
 }

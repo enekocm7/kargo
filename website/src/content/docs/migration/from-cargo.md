@@ -31,7 +31,9 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo clean` | `kargo clean` | |
 | `cargo package` | `kargo package` | A library gets its own jar and sources jar; an application a runnable fat jar |
 | `cargo publish [--dry-run]` | `kargo publish [--dry-run]` | To Maven Central, a Maven repository or `~/.m2` (`--local`); see [Publishing a library](../../guides/publishing/) |
-| `cargo install` → `cargo foo` | `kargo-foo` on `PATH` → `kargo foo` | Same external subcommand convention |
+| `cargo install --path . / --git <url> / <crate>` | `kargo install --path . / --git <url> / group:artifact` | Launchers go to `~/.kargo/bin`; see [Installing command-line tools](../../guides/installing-tools/) |
+| `cargo install --list`, `cargo uninstall` | `kargo install --list`, `kargo uninstall` | |
+| `cargo foo` | `kargo foo` (runs `kargo-foo` on `PATH`) | Same external subcommand convention |
 | `rustup toolchain install` | `kargo toolchain install` | Manages JDKs and Kotlin/Native |
 | `--locked`, `--offline`, `-v`, `-q`, `--manifest-path` | same | |
 

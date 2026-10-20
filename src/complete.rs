@@ -100,6 +100,16 @@ pub fn bins() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// The programs `kargo install` installed, for `kargo uninstall` and `kargo install --force`.
+pub fn installed_programs() -> Vec<CompletionCandidate> {
+    let Some(config) = config() else { return Vec::new() };
+    kargo_ops::ops::install::installed(&kargo_ops::ops::install::Layout::new(&config, None))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tool| CompletionCandidate::new(&tool.name).help(Some(format!("v{}", tool.version).into())))
+        .collect()
+}
+
 /// The `examples/<name>.kt` programs of the project in the current directory, for `--example`.
 pub fn examples() -> Vec<CompletionCandidate> {
     let Some(ws) = workspace() else { return Vec::new() };

@@ -8,6 +8,7 @@ pub mod context;
 pub mod doc;
 pub mod env;
 pub mod fmt;
+pub mod install;
 pub mod lint;
 pub mod local;
 pub mod metadata;

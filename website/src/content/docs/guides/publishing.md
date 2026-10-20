@@ -111,6 +111,8 @@ repository = "https://github.com/example/mathlib"
 
 `license` is an SPDX expression; each license links to its page on spdx.org. `authors` become developers, and `repository` becomes the source control section (`scm:git:<repository>`).
 
+A package that is a program, with a `main` function or a `main-class`, also gets its main class in the POM as a `kargo.main-class` property. That is how `kargo install com.example:tool` knows what to run when the jar's manifest has no `Main-Class`; see [Installing command-line tools](../installing-tools/#from-maven).
+
 ### Multiplatform libraries
 
 With Wasm or Native targets, or several targets, Kargo publishes the library the way the Kotlin Gradle Plugin does:

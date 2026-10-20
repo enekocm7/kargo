@@ -328,6 +328,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     sources: None,
                     javadoc: None,
                     dependencies,
+                    main_class: jvm.main_class.clone(),
                 });
             }
             TargetKind::Wasm => {
@@ -341,6 +342,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     sources: None,
                     javadoc: None,
                     dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
+                    main_class: None,
                 });
             }
             TargetKind::Native => {
@@ -359,6 +361,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                         sources: None,
                         javadoc: None,
                         dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
+                        main_class: None,
                     });
                 }
             }
