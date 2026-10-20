@@ -154,8 +154,13 @@ pub fn model_from_metadata(meta: &Value) -> Model {
                     model.npm_declarations.push(PathBuf::from(dir));
                 }
             }
+            // The output directories of `[[generate]]` steps are in the lists below too; they have no place in
+            // their pairs of common and target roots, so they are added on their own.
+            let generated: Vec<&Value> = target["generated-roots"].as_array().into_iter().flatten().collect();
+            let is_generated = |root: &str| generated.iter().any(|g| g["dir"].as_str() == Some(root));
             let mut add = |key: &str, set: SetKind| {
-                for (i, root) in target[key].as_array().into_iter().flatten().filter_map(Value::as_str).enumerate() {
+                let roots = target[key].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|root| !is_generated(root));
+                for (i, root) in roots.enumerate() {
                     // Common roots come first (`src/`, `tests/`), the target's after them.
                     let common = i % 2 == 0;
                     let set = SourceSet { package: pi, kind: set, target: (!common).then(|| kind.clone()) };
@@ -167,6 +172,18 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             };
             add("source-roots", SetKind::Main);
             add("test-roots", SetKind::Test);
+            for step in &generated {
+                let set = match step["kind"].as_str() {
+                    Some("sources") => SetKind::Main,
+                    Some("test-sources") => SetKind::Test,
+                    _ => continue,
+                };
+                let (Some(dir), common) = (step["dir"].as_str(), step["common"].as_bool().unwrap_or(true)) else { continue };
+                let set = SourceSet { package: pi, kind: set, target: (!common).then(|| kind.clone()) };
+                if !model.roots.iter().any(|(r, s)| r == Path::new(dir) && *s == set) {
+                    model.roots.push((PathBuf::from(dir), set));
+                }
+            }
             // The generated `Res` class of Compose resources, which code in `src/` uses.
             if let Some(dir) = target["compose-resources"]["source-root"].as_str() {
                 let set = SourceSet { package: pi, kind: SetKind::Main, target: None };
@@ -1176,8 +1193,14 @@ mod tests {
                     "targets": [
                         {
                             "kind": "jvm",
-                            "source-roots": ["/p/src", "/p/src-jvm"],
-                            "test-roots": ["/p/tests", "/p/tests-jvm", "/p/test-fixtures", "/p/test-fixtures-jvm"],
+                            "source-roots": ["/p/src", "/p/src-jvm", "/p/target/generated/debug/protos", "/p/target/generated/debug/config"],
+                            "test-roots": ["/p/tests", "/p/tests-jvm", "/p/test-fixtures", "/p/test-fixtures-jvm", "/p/target/generated/debug/mocks"],
+                            "generated-roots": [
+                                { "name": "protos", "kind": "sources", "dir": "/p/target/generated/debug/protos", "common": false },
+                                { "name": "config", "kind": "sources", "dir": "/p/target/generated/debug/config", "common": true },
+                                { "name": "mocks", "kind": "test-sources", "dir": "/p/target/generated/debug/mocks", "common": true },
+                                { "name": "assets", "kind": "resources", "dir": "/p/target/generated/debug/assets", "common": true },
+                            ],
                             "compose-resources": { "source-root": "/p/target/debug/jvm/generated/compose-resources/kotlin" },
                         },
                         {
@@ -1212,6 +1235,11 @@ mod tests {
         assert_eq!(set("/p/examples/demo.kt"), (0, SetKind::Example, None));
         assert_eq!(set("/p/target/debug/jvm/generated/compose-resources/kotlin/Res.kt"), (0, SetKind::Main, None));
         assert_eq!(set("/p/lib/src-native/N.kt"), (1, SetKind::Main, Some("native".into())));
+        // What `[[generate]]` steps write: shared by every target, or the target's own.
+        assert_eq!(set("/p/target/generated/debug/config/BuildConfig.kt"), (0, SetKind::Main, None));
+        assert_eq!(set("/p/target/generated/debug/protos/Person.kt"), (0, SetKind::Main, Some("jvm".into())));
+        assert_eq!(set("/p/target/generated/debug/mocks/M.kt"), (0, SetKind::Test, None));
+        assert_eq!(model.origin(Path::new("/p/target/generated/debug/assets/a.txt")), Origin::Loose, "resources hold no Kotlin");
         assert_eq!(model.origin(Path::new("/elsewhere/X.kt")), Origin::Loose);
     }
 

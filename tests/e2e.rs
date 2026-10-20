@@ -2804,3 +2804,277 @@ kotlin {{
     t.kargo("kmp").args(["build", "--target", "jvm", "--target", "wasm"]).assert().success();
     t.kargo("kmp").args(["test", "--target", "jvm"]).assert().success();
 }
+
+/// A `[[generate]]` step that writes `class <Name>` for every `messages/<Name>.txt`.
+fn message_step() -> String {
+    let posix = r#"for f in messages/*.txt; do n=$(basename "$f" .txt); echo "class $n" > "$KARGO_GEN_DIR/$n.kt"; done"#;
+    let windows = r#"for %f in (messages\*.txt) do @echo class %~nf> "%KARGO_GEN_DIR%\%~nf.kt""#;
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    format!(
+        "\n[[generate]]\nname = \"msgs\"\ninputs = [\"messages/*.txt\"]\nrun = '{posix}'\nwindows-run = '{windows}'\nshell = \"{shell}\"\n"
+    )
+}
+
+#[test]
+fn generated_sources_are_compiled_and_regenerated_only_when_inputs_change() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["gen"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("gen/kargo.toml")).unwrap();
+    t.write("gen/kargo.toml", &format!("{manifest}{}", message_step()));
+    t.write("gen/messages/Hello.txt", "hello");
+    t.write("gen/messages/Bye.txt", "bye");
+    t.write("gen/src/Main.kt", "fun main() {\n    println(Hello::class.simpleName)\n    println(Bye::class.simpleName)\n}\n");
+    let classes = t.dir.path().join("gen/target/debug/jvm/classes");
+
+    t.kargo("gen")
+        .arg("build")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating `msgs`").and(predicate::str::contains("Compiling gen v0.1.0 (jvm)")));
+    assert!(t.dir.path().join("gen/target/generated/debug/msgs/Hello.kt").is_file());
+    assert!(!t.dir.path().join("gen/src/Hello.kt").exists(), "nothing is written into src/");
+    t.kargo("gen").arg("run").assert().success().stdout(predicate::str::contains("Hello").and(predicate::str::contains("Bye")));
+
+    // Unchanged inputs: no generator, no compiler.
+    t.kargo("gen")
+        .arg("build")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating").not().and(predicate::str::contains("Compiling").not()));
+
+    // An input that changes without changing the output runs the generator but not the compiler.
+    t.write("gen/messages/Hello.txt", "hello again");
+    t.kargo("gen")
+        .arg("build")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating `msgs`").and(predicate::str::contains("Compiling").not()));
+
+    // Deleting an input removes the class it generated.
+    assert!(classes.join("Bye.class").is_file());
+    std::fs::remove_file(t.dir.path().join("gen/messages/Bye.txt")).unwrap();
+    t.write("gen/src/Main.kt", "fun main() {\n    println(Hello::class.simpleName)\n}\n");
+    t.kargo("gen")
+        .arg("build")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating `msgs`").and(predicate::str::contains("Compiling gen v0.1.0 (jvm)")));
+    assert!(!t.dir.path().join("gen/target/generated/debug/msgs/Bye.kt").exists());
+    assert!(!classes.join("Bye.class").exists(), "the class of a deleted message is gone");
+    assert!(classes.join("Hello.class").is_file());
+}
+
+#[test]
+fn build_config_exposes_the_package_to_the_program() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["cfg"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("cfg/kargo.toml")).unwrap();
+    t.write(
+        "cfg/kargo.toml",
+        &format!(
+            "{manifest}\n[[generate]]\nname = \"config\"\nbuiltin = \"build-config\"\npackage = \"cfg.build\"\nfields = {{ API_URL = \"https://api.test\", RETRIES = 3 }}\n"
+        ),
+    );
+    t.write(
+        "cfg/src/Main.kt",
+        "import cfg.build.BuildConfig\n\nfun main() {\n    println(\"${BuildConfig.NAME} ${BuildConfig.VERSION} ${BuildConfig.PROFILE} ${BuildConfig.API_URL} ${BuildConfig.RETRIES} [${BuildConfig.GIT_SHA}]\")\n}\n",
+    );
+    t.kargo("cfg").arg("run").assert().success().stdout(predicate::str::contains("cfg 0.1.0 dev https://api.test 3 ["));
+    t.kargo("cfg").args(["run", "--release"]).assert().success().stdout(predicate::str::contains("cfg 0.1.0 release https://api.test 3"));
+    // The next build does not compile again for a file whose contents did not change.
+    t.kargo("cfg").arg("build").assert().success().stderr(predicate::str::contains("Compiling").not());
+
+    // In a Git repository, GIT_SHA is the commit that HEAD points to.
+    let git = |args: &[&str]| {
+        let out = StdCommand::new("git")
+            .args(["-c", "user.email=kargo@example.com", "-c", "user.name=Kargo"])
+            .args(args)
+            .current_dir(t.dir.path().join("cfg"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    if which("git").is_some() {
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "first"]);
+        let sha = git(&["rev-parse", "HEAD"]);
+        t.kargo("cfg").arg("run").assert().success().stdout(predicate::str::contains(format!("[{sha}]")));
+    }
+}
+
+#[test]
+fn a_tool_from_maven_generates_sources() {
+    require_e2e!();
+    let (Some(javac), Some(jar)) = (which("javac"), which("jar")) else {
+        eprintln!("skipping: javac and jar are needed to build the tool");
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("Gen.java");
+    std::fs::write(
+        &source,
+        "package tool;\n\npublic class Gen {\n    public static void main(String[] args) throws Exception {\n        \
+         java.nio.file.Files.writeString(java.nio.file.Path.of(args[0], \"Answer.kt\"), \"const val ANSWER = \" + args[1] + \"\\n\");\n    }\n}\n",
+    )
+    .unwrap();
+    let classes = work.path().join("classes");
+    std::fs::create_dir_all(&classes).unwrap();
+    assert!(StdCommand::new(javac).arg("-d").arg(&classes).arg(&source).status().unwrap().success());
+    let tool_jar = work.path().join("gen-tool.jar");
+    assert!(
+        StdCommand::new(jar)
+            .arg("--create")
+            .arg("--file")
+            .arg(&tool_jar)
+            .args(["--main-class", "tool.Gen", "-C"])
+            .arg(&classes)
+            .arg(".")
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let repo = common::LocalRepo::new();
+    repo.publish("tools:gen-tool", "1.0", &[]);
+    std::fs::copy(&tool_jar, repo.dir.path().join("tools/gen-tool/1.0/gen-tool-1.0.jar")).unwrap();
+
+    let t = E2e::new();
+    t.create(&["tooled"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("tooled/kargo.toml")).unwrap();
+    t.write(
+        "tooled/kargo.toml",
+        &format!(
+            "{manifest}\n[repositories]\nlocal = \"{}\"\n\n[[generate]]\nname = \"answer\"\ninputs = [\"answer.txt\"]\ntool = \"tools:gen-tool:1.0\"\nargs = [\"$KARGO_GEN_DIR\", \"42\"]\n",
+            repo.url()
+        ),
+    );
+    t.write("tooled/answer.txt", "42");
+    t.write("tooled/src/Main.kt", "fun main() {\n    println(\"answer=$ANSWER\")\n}\n");
+    t.kargo("tooled").arg("run").assert().success().stdout(predicate::str::contains("answer=42"));
+    // The tool is pinned in kargo.lock.
+    let lock = std::fs::read_to_string(t.dir.path().join("tooled/kargo.lock")).unwrap();
+    assert!(lock.contains("generate/answer") && lock.contains("tools:gen-tool"), "{lock}");
+    t.kargo("tooled").args(["build", "--locked"]).assert().success().stderr(predicate::str::contains("Generating").not());
+    // `kargo update` locks the tool again, so a locked build still finds it.
+    t.kargo("tooled").arg("update").assert().success();
+    assert!(std::fs::read_to_string(t.dir.path().join("tooled/kargo.lock")).unwrap().contains("generate/answer"));
+    t.kargo("tooled").args(["build", "--locked"]).assert().success();
+}
+
+const DEMO_PROTO: &str = r#"syntax = "proto3";
+
+package demo;
+
+option java_package = "demo.proto";
+option java_multiple_files = true;
+
+message Person {
+  string name = 1;
+  int32 id = 2;
+  string email = 3;
+}
+
+service Greeter {
+  rpc SayHello (Person) returns (Person);
+}
+"#;
+
+#[test]
+fn protobuf_and_grpc_are_generated_from_proto_files() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["rpc"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("rpc/kargo.toml")).unwrap();
+    t.write(
+        "rpc/kargo.toml",
+        &format!(
+            "{manifest}\n[dependencies]\n\"com.google.protobuf:protobuf-kotlin\" = \"4.31.1\"\n\"io.grpc:grpc-protobuf\" = \"1.73.0\"\n\
+             \"io.grpc:grpc-stub\" = \"1.73.0\"\n\"io.grpc:grpc-kotlin-stub\" = \"1.4.3\"\n\
+             \"org.jetbrains.kotlinx:kotlinx-coroutines-core\" = \"1.10.2\"\n\n\
+             [[generate]]\nname = \"protos\"\nbuiltin = \"protobuf\"\ngrpc = true\n"
+        ),
+    );
+    t.write("rpc/proto/demo.proto", DEMO_PROTO);
+    t.write(
+        "rpc/src/Main.kt",
+        "import demo.proto.GreeterGrpc\nimport demo.proto.GreeterGrpcKt\nimport demo.proto.person\n\n\
+         fun main() {\n    val p = person {\n        name = \"Ada\"\n        id = 7\n    }\n    \
+         println(\"${p.name}#${p.id} ${GreeterGrpc.SERVICE_NAME} ${GreeterGrpcKt.SERVICE_NAME}\")\n}\n",
+    );
+
+    t.kargo("rpc")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating `protos` with protoc"))
+        .stdout(predicate::str::contains("Ada#7 demo.Greeter demo.Greeter"));
+    let generated = t.dir.path().join("rpc/target/generated/debug/protos");
+    assert!(generated.join("demo/proto/Person.java").is_file());
+    assert!(generated.join("demo/proto/PersonKt.kt").is_file());
+    assert!(generated.join("demo/proto/GreeterGrpc.java").is_file());
+    assert!(generated.join("demo/proto/DemoGrpcKt.kt").is_file());
+    assert!(!t.dir.path().join("rpc/src/demo").exists(), "nothing is written into src/");
+
+    // The next build neither runs protoc nor compiles.
+    t.kargo("rpc")
+        .arg("build")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating").not().and(predicate::str::contains("Compiling").not()));
+    t.kargo("rpc").args(["build", "--locked"]).assert().success();
+
+    // A new field regenerates and recompiles; a deleted message removes its generated class.
+    t.write("rpc/proto/demo.proto", &DEMO_PROTO.replace("string email = 3;", "string email = 3;\n  bool admin = 4;"));
+    t.kargo("rpc")
+        .arg("build")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating `protos`").and(predicate::str::contains("Compiling")));
+    t.write("rpc/proto/extra.proto", "syntax = \"proto3\";\npackage demo;\noption java_package = \"demo.proto\";\noption java_multiple_files = true;\nmessage Extra { int32 n = 1; }\n");
+    t.kargo("rpc").arg("build").assert().success();
+    assert!(generated.join("demo/proto/Extra.java").is_file());
+    std::fs::remove_file(t.dir.path().join("rpc/proto/extra.proto")).unwrap();
+    t.kargo("rpc").arg("build").assert().success();
+    assert!(!generated.join("demo/proto/Extra.java").exists());
+    let classes = t.dir.path().join("rpc/target/debug/jvm/classes/demo/proto");
+    assert!(!classes.join("Extra.class").exists(), "the class of a deleted message is gone");
+}
+
+#[test]
+fn an_openapi_client_is_generated_with_the_tool_of_a_step() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["pets"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("pets/kargo.toml")).unwrap();
+    t.write(
+        "pets/kargo.toml",
+        &format!(
+            "{manifest}\n[dependencies]\n\"com.squareup.okhttp3:okhttp\" = \"4.12.0\"\n\"com.squareup.moshi:moshi-kotlin\" = \"1.15.2\"\n\
+             \"com.squareup.moshi:moshi-adapters\" = \"1.15.2\"\n\n[[generate]]\nname = \"api-client\"\ninputs = [\"openapi.yaml\"]\n\
+             tool = \"org.openapitools:openapi-generator-cli:7.16.0\"\n\
+             args = [\"generate\", \"-g\", \"kotlin\", \"-i\", \"openapi.yaml\", \"-o\", \"$KARGO_GEN_DIR\"]\nroots = [\"src/main/kotlin\"]\n"
+        ),
+    );
+    t.write(
+        "pets/openapi.yaml",
+        "openapi: 3.0.3\ninfo:\n  title: Pets\n  version: 1.0.0\npaths:\n  /pets:\n    get:\n      operationId: listPets\n      responses:\n        '200':\n          \
+         description: ok\n          content:\n            application/json:\n              schema:\n                type: array\n                items:\n                  \
+         $ref: '#/components/schemas/Pet'\ncomponents:\n  schemas:\n    Pet:\n      type: object\n      properties:\n        id:\n          type: integer\n          \
+         format: int64\n        name:\n          type: string\n",
+    );
+    t.write("pets/src/Main.kt", "import org.openapitools.client.models.Pet\n\nfun main() {\n    println(Pet(id = 1, name = \"Rex\"))\n}\n");
+    t.kargo("pets").arg("run").assert().success().stdout(predicate::str::contains("Pet(id=1, name=Rex)"));
+    // The whole project the generator writes stays in target/; only its Kotlin sources are compiled, not the test stubs.
+    let generated = t.dir.path().join("pets/target/generated/debug/api-client");
+    assert!(generated.join("src/test/kotlin").is_dir() && generated.join("build.gradle").is_file());
+    assert!(!t.dir.path().join("pets/target/debug/jvm/classes/org/openapitools/client/models/PetTest.class").exists());
+    t.kargo("pets")
+        .arg("build")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating").not().and(predicate::str::contains("Compiling").not()));
+}

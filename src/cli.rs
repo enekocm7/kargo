@@ -928,6 +928,31 @@ enum Command {
         #[command(flatten)]
         packages: PackageArgs,
     },
+    /// Run the `[[generate]]` steps of kargo.toml: protobuf, OpenAPI, BuildConfig and other generated sources
+    #[command(long_about = "Run the `[[generate]]` steps of kargo.toml now, without building.
+
+A step writes into target/generated/<profile>/<name>/ ($KARGO_GEN_DIR), which the build adds to the sources
+of the targets the step names. A step with `inputs` runs only when they, its definition or Kargo changed since
+it last succeeded; pass --force to run it anyway. `kargo build`, `check`, `test` and the other commands that
+compile run the steps they need first, so this command is for editors, CI checks and trying a step out.")]
+    Generate {
+        /// The steps to run, with the steps they wait for [default: every step]
+        names: Vec<String>,
+        /// Generate for the release profile
+        #[arg(short, long, conflicts_with = "profile")]
+        release: bool,
+        /// Generate for a custom profile from kargo.toml
+        #[arg(long, value_name = "NAME", conflicts_with = "release")]
+        profile: Option<String>,
+        /// Only the steps for this target (repeatable)
+        #[arg(short, long = "target", value_enum)]
+        targets: Vec<TargetArg>,
+        /// Run steps whose output is up to date too
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
+    },
     /// Copy every dependency into a directory laid out as a Maven repository, for offline builds
     Vendor {
         /// The directory to write, relative to the project root [default: `[source] directory`, else vendor]
@@ -2257,6 +2282,22 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             if sources {
                 let found: usize = found.iter().sum();
                 shell.status("Fetched", format!("{found} sources jar{}", if found == 1 { "" } else { "s" }));
+            }
+            Ok(0)
+        }
+        Command::Generate { names, release, profile, targets, force, packages } => {
+            let project = load_project(global)?;
+            let opts = kargo_ops::generate::GenerateOptions { names, targets: targets.into_iter().map(Into::into).collect(), force };
+            let profile = profile_kind(release, profile.as_deref());
+            let reports = for_each_package(config, &project, &packages.selection(), global, profile, |ctx| {
+                // In a workspace, a member without steps has nothing to do; alone it is a mistake worth saying.
+                if project.is_workspace() && ctx.ws.manifest().generators.is_empty() {
+                    return Ok(Vec::new());
+                }
+                kargo_ops::generate::generate(ctx, &opts)
+            })?;
+            for report in reports.iter().flatten().filter(|r| !r.ran) {
+                shell.status("Fresh", format!("`{}`: the generated files are up to date", report.name));
             }
             Ok(0)
         }

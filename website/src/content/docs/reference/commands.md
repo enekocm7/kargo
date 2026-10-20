@@ -164,7 +164,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 
 [Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts, and the error names the member and the target, such as ``could not build `core` (jvm)``.
 
-Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
+Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
 For Wasm, a release build removes dead code, runs `wasm-opt` when it is installed and prints the size of the module. A `kind = "library"` project also gets a `package.json` and TypeScript declarations. See [WebAssembly](../../guides/wasm/).
 
@@ -688,6 +688,31 @@ $ kargo fetch --sources
      Fetched 12 sources jars
 ```
 
+## `kargo generate`
+
+Run the [`[[generate]]` steps](../manifest/#generate) of kargo.toml without building: protobuf, OpenAPI, `BuildConfig` and other generated sources. `kargo build`, `check`, `test`, `run` and `package` run the steps they need first, so this command is for CI checks, for trying a step out, and for an editor that wants the generated files before the first build.
+
+```sh
+kargo generate [NAME]... [-t <target>] [--release | --profile <name>] [--force]
+```
+
+| Option | Meaning |
+|---|---|
+| `NAME` | Only these steps, and the steps they wait for (`after`). Default: every step |
+| `-t, --target <target>` | Only the steps that compile for this target (repeatable) |
+| `--force` | Run steps whose output is up to date too |
+| `-r, --release`, `--profile <name>` | Generate the output of this profile (`target/generated/<profile>/`) |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to generate for |
+
+A step with `inputs` runs only when they, its definition or Kargo changed since it last succeeded; one that is up to date is reported as `Fresh`. Without any `[[generate]]` step, the command fails; in a workspace, members without steps are skipped. See [Code generation](../../guides/code-generation/).
+
+```console
+$ kargo generate
+  Generating `protos` with protoc
+$ kargo generate
+       Fresh `protos`: the generated files are up to date
+```
+
 ## `kargo vendor`
 
 Copy every Maven file a build of the project needs into a directory laid out as a Maven repository (`group/artifact/version/...`, with POMs, `.module` files, `maven-metadata.xml` and `.sha1` checksums), so a build with `--vendored` resolves from it alone, for example on a machine without network access. It copies what [`kargo fetch`](#kargo-fetch) downloads for the enabled targets, and every file of `kargo.lock`, checked against its SHA-256. The Android target is skipped, since Gradle resolves its dependencies. See [Offline and corporate builds](../../guides/offline-and-mirrors/).
@@ -737,12 +762,12 @@ In a workspace, or with path dependencies, `kargo update` re-resolves every pack
 
 ## `kargo clean`
 
-Delete everything in `target/` except the build-directory lock, `target/.kargo-lock`. In a workspace, that is the workspace's `target/`.
+Delete everything in `target/` except the build-directory lock, `target/.kargo-lock`, which includes the files of [`[[generate]]` steps](../../guides/code-generation/) in `target/generated/`. In a workspace, that is the workspace's `target/`.
 
 | Option | Meaning |
 |---|---|
-| `-r, --release` | Only delete the release profile's output |
-| `--profile <name>` | Only delete the output of a custom profile (`target/<name>/`), even one that kargo.toml no longer defines |
+| `-r, --release` | Only delete the release profile's output, with its generated files (`target/generated/release/`) |
+| `--profile <name>` | Only delete the output of a custom profile (`target/<name>/`, `target/generated/<name>/`), even one that kargo.toml no longer defines |
 
 ## `kargo env`
 
@@ -848,7 +873,7 @@ Print project information: package, targets, path dependencies, repositories and
 
 ## `kargo metadata`
 
-Print a JSON description of the whole project for editors, language servers and other tools: every package with its source, test and resource roots, output directories, compiler arguments and plugins, entry points, tasks, and the resolved classpath (JVM) or klib path (Wasm, Native) of every target and scope. Resolving may download dependencies and update `kargo.lock`, as `kargo tree` does.
+Print a JSON description of the whole project for editors, language servers and other tools: every package with its source, test and resource roots (the output directories of `[[generate]]` steps included), the steps themselves, output directories, compiler arguments and plugins, entry points, tasks, and the resolved classpath (JVM) or klib path (Wasm, Native) of every target and scope. Resolving may download dependencies and update `kargo.lock`, as `kargo tree` does.
 
 ```sh
 kargo metadata

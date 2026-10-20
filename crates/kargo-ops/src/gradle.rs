@@ -29,7 +29,7 @@ use crate::ops::context::BuildContext;
 use crate::ops::test::{emit_report_event, emit_summary, human_out};
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::testreport::{self, TestSummary};
-use kargo_manifest::{AndroidConfig, AndroidTarget, BuildConfigValue, Dependency, Manifest, Scope, TargetKind};
+use kargo_manifest::{AndroidConfig, AndroidTarget, BuildConfigValue, Dependency, GeneratedKind, Manifest, Scope, TargetKind};
 use kargo_toolchain::gradle::{self as toolchain_gradle, AgpGradle};
 use kargo_toolchain::{GradleDistribution, Jdk};
 use kargo_util::config::Config;
@@ -260,6 +260,27 @@ pub struct GradleModule {
     pub subproject_plugins: Vec<GradlePlugin>,
     /// Lines for the `dependencies` block, such as `implementation(project(":core"))`.
     pub dependencies: Vec<String>,
+    /// The output directories of the package's `[[generate]]` steps, added to its source sets.
+    pub generated: GeneratedDirs,
+}
+
+/// The directories `[[generate]]` steps write for the Android target, by what they hold.
+#[derive(Debug, Clone, Default)]
+pub struct GeneratedDirs {
+    pub sources: Vec<PathBuf>,
+    pub test_sources: Vec<PathBuf>,
+    pub resources: Vec<PathBuf>,
+}
+
+impl GeneratedDirs {
+    fn of(ws: &Workspace, profile: &ProfileKind) -> Self {
+        let dirs = |kind| crate::generate::dirs(ws, profile, TargetKind::Android, kind);
+        Self {
+            sources: dirs(GeneratedKind::Sources),
+            test_sources: dirs(GeneratedKind::TestSources),
+            resources: dirs(GeneratedKind::Resources),
+        }
+    }
 }
 
 /// Renders `build.gradle.kts` for a single-project Android build.
@@ -326,13 +347,17 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     }
     let compose_resources = has_compose_resources(ws).then(|| compose_resources_dir(ws));
     let mut src_dirs = vec![root.join("src"), root.join(TargetKind::Android.source_dir_name())];
+    src_dirs.extend(module.generated.sources.iter().cloned());
     // The generated `Res` class of `composeResources/`, and the files it reads as assets.
     let mut asset_dirs = vec![root.join("android/assets")];
     if let Some(dir) = &compose_resources {
         src_dirs.push(dir.join("kotlin"));
         asset_dirs.push(dir.join("resources"));
     }
-    let test_dirs = [root.join("tests"), root.join("tests-android")];
+    let mut test_dirs = vec![root.join("tests"), root.join("tests-android")];
+    test_dirs.extend(module.generated.test_sources.iter().cloned());
+    let mut resource_dirs = vec![ws.resources()];
+    resource_dirs.extend(module.generated.resources.iter().cloned());
     let dirs = |ds: &[PathBuf]| ds.iter().map(|d| kts_path(d)).collect::<Vec<_>>().join(", ");
     // AGP's built-in Kotlin does not compile Kotlin files found through the
     // Java source directories, so the Kotlin directories are registered too.
@@ -348,7 +373,7 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let _ = writeln!(s, "            manifest.srcFile({})", kts_path(&root.join("android/AndroidManifest.xml")));
     let _ = writeln!(s, "            res.setSrcDirs(listOf({}))", kts_path(&root.join("android/res")));
     let _ = writeln!(s, "            assets.setSrcDirs(listOf({}))", dirs(&asset_dirs));
-    let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", kts_path(&ws.resources()));
+    let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", dirs(&resource_dirs));
     let _ = writeln!(s, "        }}");
     let _ = writeln!(s, "        getByName(\"test\") {{");
     let _ = writeln!(s, "            java.setSrcDirs(listOf({}))", dirs(&test_dirs));
@@ -795,14 +820,22 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
             }
         }
         crate::compose::resources::generate(pkg.root(), pkg.manifest(), &compose_resources_dir(pkg))?;
-        let module = GradleModule { subproject: true, subproject_plugins: Vec::new(), dependencies: lines.clone() };
+        crate::generate::ensure(&ctx.for_package(*index), TargetKind::Android)?;
+        let module = GradleModule {
+            subproject: true,
+            subproject_plugins: Vec::new(),
+            dependencies: lines.clone(),
+            generated: GeneratedDirs::of(pkg, &ctx.profile),
+        };
         write(&format!("modules/{}/build.gradle.kts", pkg.name()), &build_gradle_with(pkg, pkg_android, &module)?)?;
     }
     let names: Vec<(&str, &Manifest)> =
         modules.iter().map(|(i, _)| (ctx.project.package(*i).name(), ctx.project.package(*i).manifest())).collect();
     write("settings.gradle.kts", &settings_gradle_with(ws.manifest(), &names, ctx.config.settings()))?;
     crate::compose::resources::generate(ws.root(), ws.manifest(), &compose_resources_dir(ws))?;
-    let root = GradleModule { subproject: false, subproject_plugins, dependencies: root_lines };
+    crate::generate::ensure(ctx, TargetKind::Android)?;
+    let root =
+        GradleModule { subproject: false, subproject_plugins, dependencies: root_lines, generated: GeneratedDirs::of(ws, &ctx.profile) };
     write("build.gradle.kts", &build_gradle_with(ws, android, &root)?)?;
     write("gradle.properties", GRADLE_PROPERTIES)?;
     if let Some(sdk) = android_sdk() {

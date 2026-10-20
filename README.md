@@ -66,6 +66,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo install --path <dir> \| --git <url> [--tag \| --branch \| --rev] \| <group:artifact[:version]> [--bin <name>] [--format jar\|jlink] [--force] [--list]` | Install a Kotlin command-line tool: build a project (release profile), a git repository or download an application from Maven, and put a launcher in `~/.kargo/bin`. A JVM tool runs its fat jar with the JDK it was built with (`--format jlink`: with a trimmed runtime, so no Java is needed); a Native tool is copied as it is. Every entry point is installed, or the `--bin` ones. `kargo install --force <name>` upgrades it from where it came from, `--list` shows what is installed, `--root <dir>` installs elsewhere (see [installing tools](https://enekocm7.github.io/kargo/guides/installing-tools/)) |
 | `kargo uninstall <name>...` | Remove programs installed with `kargo install` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars for editors, `--tools` the Dokka, ktlint and detekt tools |
+| `kargo generate [name...] [-t <target>] [--release \| --profile <name>] [--force]` | Run the `[[generate]]` steps of `kargo.toml` without building: protobuf and gRPC, OpenAPI clients, a `BuildConfig`, any tool that writes sources. A step writes into `target/generated/<profile>/<name>/` (`$KARGO_GEN_DIR`), which is compiled with the sources, and runs again only when its `inputs` change. `build`, `check`, `test`, `run` and `package` run the steps they need first (see [code generation](https://enekocm7.github.io/kargo/guides/code-generation/)) |
 | `kargo vendor [path] [--toolchains] [--sync]` | Copy every dependency (and with `--toolchains` the Kotlin compiler and Kotlin/Native) into `vendor/` as a Maven repository; `kargo build --vendored` (or `[source] vendored = true` in `.kargo/config.toml`) then resolves from it alone (see [offline and corporate builds](https://enekocm7.github.io/kargo/guides/offline-and-mirrors/)) |
 | `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
 | `kargo ide [--kls\|--zed]` | Write `workspace.json` (Kotlin LSP) or `kls-classpath` (kotlin-language-server) for editors that run the server themselves, or `.zed/tasks.json` with Kargo tasks for Zed's run buttons; kept current by later commands |
@@ -81,7 +82,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo self update [--version <v>] [--check]` | Update Kargo to the latest release (or `--version`), checking the archive's SHA-256 against the release's `SHA256SUMS`; `--check` only says whether a newer one exists. A Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN!, Cargo or a system package manager is not replaced: its update command is printed instead. `KARGO_RELEASES_URL` points at a mirror |
 | `kargo self uninstall [--purge]` | Remove the binary and the `PATH` entries the install scripts added; `--purge` also deletes `~/.kargo` |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
-| `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`), show project information |
+| `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`; `--release` or `--profile` only that profile's output and generated files), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--vendored`, `--refresh`, `--manifest-path`.
@@ -125,7 +126,8 @@ android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
 c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
 examples/            example programs: kargo run --example <name>
-target/              build output: target/<debug|release|name>/<target>/ (a custom profile's name)
+target/              build output: target/<debug|release|name>/<target>/ (a custom profile's name);
+                     target/generated/<profile>/<step>/ holds what [[generate]] steps write
 ```
 
 A workspace is a directory whose `kargo.toml` has a `[workspace]` with `members` (each a package like the one above, or a glob such as `libs/*`). Members share the workspace's `kargo.lock` and `target/`, and build into `target/<profile>/<member>/<target>/`.
@@ -229,6 +231,12 @@ lwjgl-natives = { coords = "org.lwjgl:lwjgl:3.3.6", classifier = "natives-window
 [[bin]]                     # more programs: kargo run --bin migrate, kargo package --bin migrate
 name = "migrate"
 path = "src/tools/Migrate.kt"   # the file with its `main`; or main = "<JVM class>" / entry-point = "<native function>"
+
+[[generate]]                # code written before compiling, from other files (kargo generate); output: target/generated/<profile>/<name>/
+name = "protos"
+builtin = "protobuf"        # downloads protoc; grpc = true adds the gRPC stubs. Or run = "<command>", or tool = "group:artifact:version"
+inputs = ["proto/**/*.proto"]   # the step runs again only when these change (default for protobuf)
+# builtin = "build-config" writes an object with VERSION, GROUP, NAME, GIT_SHA and PROFILE, plus fields = { API_URL = "..." }
 
 [dev-dependencies]          # test-only dependencies
 
@@ -395,7 +403,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
   hooks = ["post-build"]
   ```
   `command` is run directly, not through a shell. On Windows a `.sh` script runs through `sh` (from Git for Windows); anything else must be a real executable (`.exe`, `.bat`, `.cmd`). `windows-command` and `windows-args` replace `command` and `args` on Windows; when they are not set, `command` and `args` are used everywhere.
-  Hooks receive `KARGO_HOOK`, `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PROFILE`, `KARGO_TARGET_DIR`, `KARGO_KOTLIN_VERSION`, `KARGO_WORKSPACE_DIR` (in a workspace) and `KARGO_BUILD_LOCK` (so a `kargo` call inside a hook doesn't wait on the build-directory lock its parent holds). After a JVM build they also get `KARGO_CLASSPATH` and `KARGO_JVM_JAR`, after `kargo package` they get `KARGO_PACKAGE`, and after tests they get `KARGO_TEST_RESULT`.
+  `[[generate]]` steps get the same variables plus `KARGO_GEN_DIR` (their output directory), `KARGO_GEN_ROOT`, `KARGO_GEN_NAME` and `KARGO_GEN_KIND`. Hooks receive `KARGO_HOOK`, `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PROFILE`, `KARGO_TARGET_DIR`, `KARGO_KOTLIN_VERSION`, `KARGO_WORKSPACE_DIR` (in a workspace) and `KARGO_BUILD_LOCK` (so a `kargo` call inside a hook doesn't wait on the build-directory lock its parent holds). After a JVM build they also get `KARGO_CLASSPATH` and `KARGO_JVM_JAR`, after `kargo package` they get `KARGO_PACKAGE`, and after tests they get `KARGO_TEST_RESULT`.
 * **Subcommands**: an executable named `kargo-<name>` in `~/.kargo/bin` or on `PATH` becomes `kargo <name>`, just like Cargo.
 
 ## Environment
@@ -412,6 +420,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | Proxy for Kargo's downloads (overridden by `[http] proxy` in `config.toml`) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
+| `SOURCE_DATE_EPOCH` | The time (seconds since 1970) that a `build-config` generator with `build-time = true` writes as `BUILD_TIME`, instead of the current time |
 | `KARGO_DAEMON` | `false` turns off the compiler daemon |
 | `KARGO_INCREMENTAL` | `false` turns off incremental compilation |
 | `KARGO_NATIVE_CACHE` | `false` turns off the precompiled Kotlin/Native standard library cache for debug builds |
@@ -437,7 +446,7 @@ Kargo is a Cargo workspace:
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
-| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, npm packages and their Kotlin declarations, Compose Desktop and Compose resources, `kargo self` (`ops/self_update.rs`), `kargo import` (`ops/import/`), commands |
+| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, `[[generate]]` steps (`generate.rs`), Android/Gradle, project warnings, publications and signing, npm packages and their Kotlin declarations, Compose Desktop and Compose resources, `kargo self` (`ops/self_update.rs`), `kargo import` (`ops/import/`), commands |
 | `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, Kargo's own Kotlin server (`kotlin/`: lexer, declaration parser, Java declarations and the JDK's sources, libraries without sources from class files, Kotlin metadata and klibs, index, resolver, completion, hover, navigation, rename, formatting, code actions), project import for other Kotlin language servers, runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |
 | `kargo` | The CLI binary |
 

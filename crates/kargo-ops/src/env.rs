@@ -300,7 +300,7 @@ pub fn build_config_source(package: &str, expose: &[String], env: &ProjectEnv) -
 }
 
 /// A Kotlin string literal with `value` as its text.
-fn kotlin_string(value: &str) -> String {
+pub(crate) fn kotlin_string(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
         match c {

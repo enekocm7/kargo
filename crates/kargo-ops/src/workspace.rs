@@ -97,6 +97,9 @@ impl ProfileKind {
     }
 }
 
+/// The directory of `target/` that holds the output of `[[generate]]` steps, by profile.
+pub const GENERATED_DIR: &str = "generated";
+
 /// The build directory: `KARGO_TARGET_DIR`, or `target/` next to the manifest.
 fn target_dir_for(root: &Path) -> PathBuf {
     match std::env::var_os(TARGET_DIR_ENV) {
@@ -221,6 +224,16 @@ impl Workspace {
     /// Output directory for one target and profile, e.g. `target/debug/jvm`.
     pub fn output_dir(&self, profile: &ProfileKind, target: TargetKind) -> PathBuf {
         self.profile_dir(profile).join(target.as_str())
+    }
+
+    /// This package's directory of `[[generate]]` output for one profile: `target/generated/debug`, or
+    /// `target/generated/debug/<member>` in a workspace. Each step has a directory of its own in it.
+    pub fn generated_dir(&self, profile: &ProfileKind) -> PathBuf {
+        let dir = self.target_dir.join(GENERATED_DIR).join(profile.dir_name());
+        match &self.out_prefix {
+            Some(prefix) => dir.join(prefix),
+            None => dir,
+        }
     }
 
     /// A profile-independent working directory such as `target/lint` (`target/lint/<member>` in a workspace).

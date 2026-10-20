@@ -229,8 +229,10 @@ pub fn clean(ws: &Workspace, shell: &Shell, profile: Option<crate::workspace::Pr
         return Ok(dir);
     }
     let lock = ws.lock(shell)?;
-    if profile.is_some() {
+    if let Some(profile) = &profile {
         remove_dir_all_if_exists(&dir)?;
+        // The files `[[generate]]` steps wrote for the profile.
+        remove_dir_all_if_exists(&ws.target_dir().join(crate::workspace::GENERATED_DIR).join(profile.dir_name()))?;
     } else {
         // Everything but the lock this process holds.
         for entry in std::fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
@@ -352,6 +354,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
         Ok(())
     });
     fetched.into_iter().collect::<Result<()>>()?;
+    crate::generate::fetch_tools(ctx, &targets)?;
     if tools {
         fetch_pinned_jdk(ctx)?;
         let (dokka, (ktlint, detekt)) = join(|| doc::fetch_tool(ctx), || join(|| fmt::fetch_tool(ctx), || lint::fetch_tool(ctx)));
@@ -389,6 +392,7 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
             build::jvm_ksp_path(ctx, &setup, true)?;
         }
     }
+    crate::generate::fetch_tools(ctx, &[])?;
     ctx.save_lockfile()
 }
 
@@ -488,6 +492,7 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: Package
     let start = std::time::Instant::now();
     let env = build::hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    build::generate_sources(ctx, &[TargetKind::Jvm])?;
     build::warn_about_sources(ctx, &[TargetKind::Jvm]);
     let jvm = build_jvm(ctx)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;

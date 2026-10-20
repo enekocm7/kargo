@@ -75,7 +75,8 @@ An IDE can only complete and resolve what it knows about. When a folder with a `
 | `tests/`, `tests-<target>/` | Test source roots |
 | `resources/`, `test-resources/` | Resource roots |
 | `examples/` | A test source root, since examples are compiled against the package's sources |
-| `target/` | Excluded from the project |
+| `target/` | Excluded from the project, except the output directories of [`[[generate]]` steps](../code-generation/) in `target/generated/`, which are source (or test source, or resource) roots of their own |
+| `target/generated/<profile>/<name>/` of a [`[[generate]]` step](../code-generation/) | A source root, so generated code, such as classes from `.proto` files, resolves. The directory is filled by `kargo build`, `kargo check` or `kargo generate`; run one before the IDE needs the code |
 | A Maven dependency | A project library named `Kargo: <group>:<artifact>:<version>`, with its sources jar if `kargo fetch --sources` downloaded it |
 | An npm package of a Wasm target (from `[target.wasm.npm-dependencies]`, or one a Wasm library needs) | A project library named `Kargo: npm <name>@<version>`, with the package's directory in `target/<profile>/node_modules`. It is a runtime dependency of the Wasm module, or a test one for a package only the tests need. A package that isn't installed yet is left out until a build or `kargo fetch` installs it |
 | `[dev-dependencies]` and runtime-only dependencies | The same libraries with *Test* and *Runtime* scope |
@@ -1052,6 +1053,8 @@ Actions that need the network or write files are LSP commands, which plugins can
 kargo metadata              # resolves dependencies, like kargo tree
 kargo metadata --no-deps    # roots and settings only; downloads nothing
 ```
+
+The roots include the output directories of [`[[generate]]` steps](../code-generation/) (`target/generated/<profile>/<name>/`), whether or not a build has filled them yet. `kargo metadata` never runs a step itself; `kargo generate` does.
 
 To keep an import current, watch the files listed in `watch` (every `kargo.toml` and `kargo.lock`). When one changes, run `kargo metadata --fingerprint`. If it prints something other than the `fingerprint` you imported, import again.
 

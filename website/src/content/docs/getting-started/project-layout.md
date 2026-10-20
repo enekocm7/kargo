@@ -57,6 +57,8 @@ With `[frameworks] compose`, `composeResources/` holds the images, fonts, string
 
 Kargo compiles `.kt` files (and `.java` files on the JVM). Kotlin scripts (`.kts`) in a project are not compiled or run, and a target with no sources has nothing to build; `kargo build` prints a [warning](../../reference/warnings/) for both instead of staying silent.
 
+Code that a tool writes from other files, such as classes from `.proto` files or a `BuildConfig`, does not belong in `src/`. Declare a [`[[generate]]` step](../../guides/code-generation/) and Kargo writes the code to `target/generated/<profile>/<name>/` and compiles it with your sources.
+
 ## Benchmarks
 
 `benches/` and `benches-jvm/` hold benchmarks, which `kargo bench` compiles against `src/` the way tests are, and runs with JMH. They are not part of `kargo build`, `kargo test`, `kargo package` or `kargo publish`. See [Benchmarking](../../guides/benchmarking/).
@@ -143,6 +145,7 @@ target/
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release
 ├── staging/                      same layout, built with --profile staging (a custom profile)
+├── generated/                    what [[generate]] steps write: generated/<profile>/<name>/ (KARGO_GEN_DIR), one directory per step
 ├── lint/                         Kargo's detekt settings for kargo lint
 ├── android/                      the generated Gradle project
 └── .kargo-lock                   build-directory lock (see below)
