@@ -43,6 +43,15 @@ jdk = "21"
 Everyone on the team, and CI, builds with the same JDK, without anyone having to install it first.
 :::
 
+## Requiring a Kargo version
+
+`[toolchain] kargo` says which Kargo versions the project builds with, a [semver requirement](../../reference/manifest/#toolchain) such as `">=0.3"`. A Kargo outside it stops with `this project needs kargo >=0.3 ... run `kargo self update``, so a CI job or a teammate with an old Kargo gets that message instead of a puzzling error about a new `kargo.toml` key.
+
+```toml title="kargo.toml"
+[toolchain]
+kargo = ">=0.3"
+```
+
 ## The `kargo toolchain` command
 
 ```console

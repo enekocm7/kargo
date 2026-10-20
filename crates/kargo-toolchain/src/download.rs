@@ -78,9 +78,43 @@ fn retrying<T>(config: &Config, url: &str, mut attempt: impl FnMut() -> Result<T
     }
 }
 
+/// The file a `file://` URL names. Lets tests and mirrors serve a release from a directory.
+fn local_path(url: &str) -> Option<std::path::PathBuf> {
+    let path = url.strip_prefix("file://").or_else(|| url.strip_prefix("file:"))?;
+    // `file:///C:/x` -> `/C:/x`: drop the slash before a drive letter.
+    let bytes = path.as_bytes();
+    let path = if bytes.len() > 2 && bytes[0] == b'/' && bytes[2] == b':' { &path[1..] } else { path };
+    Some(std::path::PathBuf::from(path))
+}
+
+/// Fetches a small text resource once, giving up after `timeout`. Unlike [`get_text`] it neither retries nor honors offline
+/// mode, so callers that want a quick best-effort answer (the check for a newer Kargo) decide that themselves.
+pub fn get_text_within(url: &str, timeout: Duration) -> Result<String> {
+    if let Some(path) = local_path(url) {
+        return std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()));
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .user_agent(concat!("kargo/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let response = agent.get(url).call().with_context(|| format!("failed to connect to {url}"))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        bail!("unexpected HTTP {status} from {url}");
+    }
+    let mut body = String::new();
+    response.into_body().into_reader().take(1024 * 1024).read_to_string(&mut body).with_context(|| format!("failed to read {url}"))?;
+    Ok(body)
+}
+
 /// Fetches a small text resource (e.g. an API response).
 pub fn get_text(config: &Config, url: &str) -> Result<String> {
     let url = &mirrored(config, url);
+    if let Some(path) = local_path(url) {
+        return std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()));
+    }
     ensure_online(config, url)?;
     config.shell().verbose("Fetching", url);
     retrying(config, url, || {
@@ -107,10 +141,16 @@ pub fn get_text(config: &Config, url: &str) -> Result<String> {
 /// appears at `dest` once it is complete and verified.
 pub fn download(config: &Config, url: &str, dest: &Path, sha256: Option<&str>) -> Result<()> {
     let url = &mirrored(config, url);
-    ensure_online(config, url)?;
     let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    config.shell().status("Downloading", if config.shell().is_verbose() { url } else { &name });
-    retrying(config, url, || fetch_to(config, url, dest))?;
+    if let Some(source) = local_path(url) {
+        config.shell().status("Copying", &name);
+        kargo_util::fs::write_atomic_if_absent(dest, |f| io::copy(&mut std::fs::File::open(&source)?, f).map(|_| ()))
+            .with_context(|| format!("failed to read {}", source.display()))?;
+    } else {
+        ensure_online(config, url)?;
+        config.shell().status("Downloading", if config.shell().is_verbose() { url } else { &name });
+        retrying(config, url, || fetch_to(config, url, dest))?;
+    }
     if let Some(expected) = sha256 {
         verify(dest, expected).inspect_err(|_| {
             let _ = std::fs::remove_file(dest);
@@ -179,6 +219,22 @@ mod tests {
 
     fn quiet(dir: &Path) -> Config {
         Config::new(dir.to_path_buf(), Shell::new(Verbosity::Quiet))
+    }
+
+    #[test]
+    fn file_urls_name_local_files() {
+        assert_eq!(local_path("file:///tmp/r/x").unwrap(), std::path::PathBuf::from("/tmp/r/x"));
+        assert_eq!(local_path("file:///C:/r/x").unwrap(), std::path::PathBuf::from("C:/r/x"));
+        assert!(local_path("https://example.com/x").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let text = format!("0.2.0{}", char::from(10));
+        std::fs::write(dir.path().join("v.txt"), &text).unwrap();
+        let url = format!("file://{}", dir.path().join("v.txt").display()).replace(char::from(92), "/");
+        assert_eq!(get_text_within(&url, Duration::from_secs(1)).unwrap(), text);
+        assert_eq!(get_text(&quiet(dir.path()).with_offline(true), &url).unwrap(), text);
+        let dest = dir.path().join("copy.txt");
+        download(&quiet(dir.path()), &url, &dest, Some(&kargo_util::hash::sha256_bytes(text.as_bytes()))).unwrap();
+        assert!(download(&quiet(dir.path()), &url, &dir.path().join("bad.txt"), Some("00")).is_err());
     }
 
     #[test]

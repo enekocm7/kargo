@@ -1,0 +1,38 @@
+{
+    "version": "@VERSION@",
+    "description": "Cargo for Kotlin: a build tool and package manager",
+    "homepage": "https://enekocm7.github.io/kargo/",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/enekocm7/kargo/releases/download/v@VERSION@/kargo-@VERSION@-x86_64-pc-windows-msvc.zip",
+            "hash": "@SHA_x86_64_pc_windows_msvc@",
+            "extract_dir": "kargo-@VERSION@-x86_64-pc-windows-msvc"
+        },
+        "arm64": {
+            "url": "https://github.com/enekocm7/kargo/releases/download/v@VERSION@/kargo-@VERSION@-aarch64-pc-windows-msvc.zip",
+            "hash": "@SHA_aarch64_pc_windows_msvc@",
+            "extract_dir": "kargo-@VERSION@-aarch64-pc-windows-msvc"
+        }
+    },
+    "bin": "kargo.exe",
+    "checkver": {
+        "github": "https://github.com/enekocm7/kargo"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/enekocm7/kargo/releases/download/v$version/kargo-$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "kargo-$version-x86_64-pc-windows-msvc"
+            },
+            "arm64": {
+                "url": "https://github.com/enekocm7/kargo/releases/download/v$version/kargo-$version-aarch64-pc-windows-msvc.zip",
+                "extract_dir": "kargo-$version-aarch64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/enekocm7/kargo/releases/download/v$version/SHA256SUMS",
+            "regex": "$sha256\\s+$basename"
+        }
+    }
+}

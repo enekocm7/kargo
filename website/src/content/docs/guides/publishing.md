@@ -241,7 +241,9 @@ jobs:
           distribution: temurin
           java-version: 21
       - name: Install Kargo
-        run: cargo install --locked --git https://github.com/enekocm7/kargo kargo
+        run: |
+          curl -fsSL https://enekocm7.github.io/kargo/install.sh | sh -s -- --no-modify-path
+          echo "$HOME/.kargo/bin" >> "$GITHUB_PATH"
       - run: kargo publish --locked --repository maven-central
         env:
           KARGO_MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}

@@ -36,6 +36,15 @@ test('falls back to ~/.cargo/bin when PATH has no kargo', () => {
     assert.equal(findKargo('', lookup([cargoBin], { directories: [path.join('usr', 'bin')] })), cargoBin);
 });
 
+test('falls back to the directory the installers use, before ~/.cargo/bin', () => {
+    const installed = path.join('home', 'me', '.kargo', 'bin', 'kargo');
+    const cargoBin = path.join('home', 'me', '.cargo', 'bin', 'kargo');
+    assert.equal(findKargo('', lookup([installed, cargoBin])), installed);
+    const custom = path.join('data', 'kargo', 'bin', 'kargo');
+    const withHome: Lookup = { ...lookup([custom, installed]), env: { PATH: '', KARGO_HOME: path.join('data', 'kargo') } };
+    assert.equal(findKargo('', withHome), custom);
+});
+
 test('uses kargo.exe on Windows', () => {
     const bin = 'tools';
     assert.equal(findKargo('', lookup([path.join(bin, 'kargo.exe')], { platform: 'win32', directories: [bin] })), path.join(bin, 'kargo.exe'));

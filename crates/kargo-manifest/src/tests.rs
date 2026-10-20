@@ -1751,3 +1751,27 @@ fn installer_type_hosts() {
         assert_eq!(t.as_str().parse::<InstallerType>().unwrap(), t);
     }
 }
+
+#[test]
+fn toolchain_kargo_requirement() {
+    let with = |line: &str| format!("{MINIMAL}\n[toolchain]\n{line}\n");
+    assert_eq!(parse(MINIMAL).toolchain.kargo, None);
+    assert!(parse(&with("kargo = \">=0.1\"")).toolchain.kargo.is_some());
+    assert!(parse(&with("kargo = \"^0.1.0\"")).toolchain.kargo.is_some());
+    let err = parse_err(&with("kargo = \">=99.0\""));
+    assert!(err.contains("needs kargo >=99.0") && err.contains("kargo self update"), "{err}");
+    assert!(parse_err(&with("kargo = \"newest\"")).contains("invalid [toolchain] `kargo` requirement"));
+}
+
+#[test]
+fn kargo_version_requirements_are_checked_against_the_running_kargo() {
+    let req = |text: &str| semver::VersionReq::parse(text).unwrap();
+    assert!(check_kargo_version(&req(">=0.3"), "0.3.0").is_ok());
+    assert!(check_kargo_version(&req(">=0.3"), "1.0.0").is_ok());
+    assert!(check_kargo_version(&req(">=0.3"), "0.2.9").is_err());
+    assert!(check_kargo_version(&req(">=0.2"), "0.3.0-rc.1").is_ok(), "a release candidate counts as its release");
+    assert!(check_kargo_version(&req(">=0.3"), "0.3.0-rc.1").is_ok());
+    assert!(check_kargo_version(&req(">=0.3"), "0.2.9-rc.1").is_err());
+    assert!(check_kargo_version(&req("^0.3"), "0.4.0").is_err());
+    assert!(check_kargo_version(&req(">=0.3"), "not a version").is_err());
+}

@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: enekocm7.kargo
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: enekocm7
+PublisherUrl: https://github.com/enekocm7
+PackageName: Kargo
+PackageUrl: https://enekocm7.github.io/kargo/
+License: MIT OR Apache-2.0
+ShortDescription: "Cargo for Kotlin: a build tool and package manager."
+Description: Kargo builds Kotlin projects for the JVM, WebAssembly, Kotlin/Native and Android from a single kargo.toml.
+Moniker: kargo
+Tags:
+  - kotlin
+  - build-tool
+  - package-manager
+ReleaseNotesUrl: https://github.com/enekocm7/kargo/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

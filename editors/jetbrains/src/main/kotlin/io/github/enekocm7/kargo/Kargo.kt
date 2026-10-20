@@ -19,13 +19,14 @@ object Kargo {
 
     private val exeName = if (SystemInfo.isWindows) "kargo.exe" else "kargo"
 
-    /** The `kargo` to run: the one in the settings, else the one on `PATH`, else `~/.cargo/bin/kargo`. */
+    /** The `kargo` to run: the one in the settings, else the one on `PATH`, else `~/.kargo/bin/kargo` (the installers), else `~/.cargo/bin/kargo`. */
     fun executable(): File? {
         KargoSettings.getInstance().state.kargoPath?.takeIf { it.isNotBlank() }?.let { configured ->
             return File(configured).takeIf { it.isFile }
         }
         PathEnvironmentVariableUtil.findInPath(exeName)?.let { return it }
-        return File(System.getProperty("user.home"), ".cargo/bin/$exeName").takeIf { it.isFile }
+        val kargoHome = System.getenv("KARGO_HOME")?.takeIf { it.isNotBlank() }?.let(::File) ?: File(System.getProperty("user.home"), ".kargo")
+        return sequenceOf(File(kargoHome, "bin/$exeName"), File(System.getProperty("user.home"), ".cargo/bin/$exeName")).firstOrNull { it.isFile }
     }
 
     /** Whether the project's root holds a `kargo.toml`. */

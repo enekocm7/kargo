@@ -281,7 +281,7 @@
         "kargo.path": {
           "type": "string",
           "default": "",
-          "markdownDescription": "The `kargo` executable to run. Empty: the `kargo` on `PATH`, then `~/.cargo/bin`."
+          "markdownDescription": "The `kargo` executable to run. Empty: the `kargo` on `PATH`, then `~/.kargo/bin` (where the installers put it), then `~/.cargo/bin`."
         },
         "kargo.lsp.server": {
           "type": "string",

@@ -36,6 +36,8 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo install --list`, `cargo uninstall` | `kargo install --list`, `kargo uninstall` | |
 | `cargo foo` | `kargo foo` (runs `kargo-foo` on `PATH`) | Same external subcommand convention |
 | `rustup toolchain install` | `kargo toolchain install` | Manages JDKs and Kotlin/Native |
+| `rustup self update` | `kargo self update` | Replaces the `kargo` binary with the latest release after checking its SHA-256; `kargo self uninstall` removes it |
+| `rust-version = "1.80"` in `Cargo.toml` | `[toolchain] kargo = ">=0.3"` | The Kargo versions a project builds with; an older Kargo stops with a message |
 | `--locked`, `--offline`, `-v`, `-q`, `--manifest-path` | same | |
 
 ## Files

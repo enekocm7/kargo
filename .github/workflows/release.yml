@@ -1,0 +1,163 @@
+name: Release
+
+# Pushing a tag `v<version>` builds Kargo for every platform and publishes a GitHub release with
+#   kargo-<version>-<target>.tar.gz   (.zip on Windows), holding a folder of the same name with the binary
+#   SHA256SUMS                        the SHA-256 of every archive
+#   VERSION                           the version, so `releases/latest/download/VERSION` names the newest release
+# The archives carry GitHub build provenance attestations. `kargo self update`, install.sh, install.ps1 and the
+# templates in packaging/ rely on these names; see crates/kargo-ops/src/ops/self_update.rs.
+#
+# A pull request that changes this file, or a manual run, builds everything and uploads the archives as workflow
+# artifacts without publishing, so the matrix can be checked before a tag.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml", "packaging/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml | head -n1)
+          test -n "$version" || { echo "no version in Cargo.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+            echo "the tag ${GITHUB_REF_NAME} does not match the version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc builds use the oldest runner image, so they run on older distributions too.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          # musl builds are static and run on any distribution.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm, musl: true }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, windows: true }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm, windows: true }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+      - name: Install the musl C toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install clang
+        # ring needs clang to build for Windows on ARM; the runner image may not have it.
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: command -v clang > /dev/null || choco install llvm --no-progress -y
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          # cc picks the musl C compiler for ring by target name; musl-tools installs it as musl-gcc on both architectures.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+      - name: Package
+        id: package
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          WINDOWS: ${{ matrix.windows }}
+        run: |
+          name="kargo-${VERSION}-${TARGET}"
+          exe=kargo
+          [ -n "$WINDOWS" ] && exe=kargo.exe
+          # The binary must run before it ships, and report the version it is released as.
+          "target/${TARGET}/release/${exe}" --version | tee /dev/stderr | grep -qx "kargo ${VERSION}"
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/${exe}" README.md "dist/${name}/"
+          cd dist
+          if [ -n "$WINDOWS" ]; then
+            7z a -tzip "${name}.zip" "${name}" > /dev/null
+            echo "archive=${name}.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "${name}.tar.gz" "${name}"
+            echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+          rm -rf "${name}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kargo-${{ matrix.target }}
+          path: dist/${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kargo-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          test "$(ls kargo-* | wc -l)" -eq 8 || { echo "expected 8 archives" >&2; ls; exit 1; }
+          sha256sum kargo-* > SHA256SUMS
+          echo "$VERSION" > VERSION
+          cat SHA256SUMS
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/kargo-*.tar.gz
+            dist/kargo-*.zip
+      - name: Package manager files
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: packaging/render.sh "$VERSION" dist/SHA256SUMS packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packages
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          prerelease=()
+          case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --title "kargo $VERSION" --generate-notes "${prerelease[@]}"

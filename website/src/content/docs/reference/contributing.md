@@ -16,7 +16,7 @@ Kargo is a Cargo workspace of focused crates:
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, the Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
-| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications (`publication.rs`) and GnuPG signing (`signing.rs`), npm installs (`npm.rs`), Kotlin declarations from TypeScript ones (`dts/`), C interop of the Native target (`native_interop.rs`, `pkg_config.rs`), Compose Desktop and the `Res` class of Compose resources (`compose/`), the benchmark results, their comparison and report (`bench.rs`), commands |
+| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications (`publication.rs`) and GnuPG signing (`signing.rs`), npm installs (`npm.rs`), `kargo self` (`ops/self_update.rs`), Kotlin declarations from TypeScript ones (`dts/`), C interop of the Native target (`native_interop.rs`, `pkg_config.rs`), Compose Desktop and the `Res` class of Compose resources (`compose/`), the benchmark results, their comparison and report (`bench.rs`), commands |
 | `kargo-lsp` | `kargo lsp`: the message loop in front of a Kotlin language server (`server.rs`), Kargo's own Kotlin server (`kotlin/`: the lexer, a parser for declarations and scopes in `syntax.rs`, the indexes in `index.rs`, name resolution and type inference in `resolve.rs`, completion, hover, navigation and rename in `features.rs`, code actions for Kotlin files in `actions.rs`, the standard library and sources jars in `library.rs`, libraries without sources as generated stubs in `compiled.rs`, read from class files in `classfile.rs` and from Kotlin metadata and klibs in `kmetadata.rs`, its message loop in `server.rs`), `kargo.toml` diagnostics, completion and hover (`manifest.rs`, `schema.rs`), Maven coordinate and version completion and newer-version hints (`deps.rs`), code actions and the `kargo/addDependency` / `kargo/addTarget` commands (`actions.rs`), `workspace.json`, `kls-classpath` and runnables from `kargo metadata` (`project.rs`), check on save (`check.rs`), the `kargo dap` debug adapter (`dap.rs`), Zed tasks for `kargo ide --zed` (`zed.rs`) |
 | `kargo` | The CLI binary |
 
@@ -31,6 +31,24 @@ KARGO_E2E=1 KARGO_E2E_NATIVE=1 KARGO_E2E_ANDROID=1 cargo test --test e2e
 ```
 
 Format with `cargo fmt` before committing.
+
+## Releases
+
+Pushing a tag `v<version>` runs `.github/workflows/release.yml`. The version in the tag must equal `version` in the `[workspace.package]` table of `Cargo.toml`, or the workflow stops. It builds Kargo with `cargo build --release --locked` for eight targets (`x86_64` and `aarch64` for Linux with glibc and with musl, macOS and Windows), runs each binary's `--version`, and publishes a GitHub release with:
+
+| File | Contents |
+|---|---|
+| `kargo-<version>-<target>.tar.gz` (`.zip` for Windows targets) | A folder of the same name with `kargo` (`kargo.exe`) and the README |
+| `SHA256SUMS` | The SHA-256 of every archive, sorted by name |
+| `VERSION` | The version; `releases/latest/download/VERSION` is how `kargo self update`, `install.sh` and `install.ps1` find the newest release |
+
+The release notes are generated from the merged pull requests. The archives get GitHub build provenance attestations (`gh attestation verify <archive> --repo enekocm7/kargo`). A version with a hyphen (`0.3.0-rc.1`) is published as a pre-release, which `releases/latest` skips. A pull request that changes the workflow or `packaging/` builds every target and uploads the archives as workflow artifacts without publishing.
+
+These names are used by `crates/kargo-ops/src/ops/self_update.rs` (`archive_name`, unit tested), `website/public/install.sh` and `install.ps1`, the `cargo binstall` metadata in `Cargo.toml`, and the templates in `packaging/`. Change them together.
+
+`packaging/render.sh <version> <SHA256SUMS> <dir>` fills the templates for Homebrew (`kargo.rb`), Scoop (`kargo.json`), winget (three manifests) and the AUR (`PKGBUILD` of `kargo-bin`) from a release's checksums; the workflow uploads the result as the `packages` artifact. Copy the files to the tap, the bucket, a winget-pkgs pull request and the AUR repository by hand. The root `flake.nix` builds Kargo from source for Nix.
+
+Artifacts are not signed with a key of ours: `kargo self update` and the install scripts verify the SHA-256 from the same release, which catches corrupt and swapped files but not a compromised release. For that, verify the attestation.
 
 ## The JetBrains plugin
 

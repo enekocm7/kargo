@@ -31,6 +31,7 @@ ignore = "0.4.33"
 md5 = { package = "md-5", version = "0.11.0" }
 rayon = "1.12.0"
 roxmltree = "0.21.1"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11.0"
@@ -50,6 +51,8 @@ tempfile = "3.27.0"
 [package]
 name = "kargo"
 description = "A Cargo-like build tool and package manager for Kotlin"
+repository = "https://github.com/enekocm7/kargo"
+homepage = "https://enekocm7.github.io/kargo/"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -74,6 +77,27 @@ serde_json.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
+flate2.workspace = true
 predicates.workspace = true
+tar.workspace = true
 tempfile.workspace = true
 zip.workspace = true
+
+# Release binaries are small and fast to start; `cargo build --release` stays quick enough for CI.
+[profile.release]
+strip = true
+lto = "thin"
+
+# `cargo binstall kargo` downloads the archives of the release workflow (.github/workflows/release.yml).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/kargo-{ version }-{ target }.tar.gz"
+bin-dir = "kargo-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/kargo-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/kargo-{ version }-{ target }.zip"
+pkg-fmt = "zip"

@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: enekocm7.kargo
+PackageVersion: @VERSION@
+InstallerType: zip
+NestedInstallerType: portable
+Commands:
+  - kargo
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/enekocm7/kargo/releases/download/v@VERSION@/kargo-@VERSION@-x86_64-pc-windows-msvc.zip
+    InstallerSha256: @SHA_UPPER_x86_64_pc_windows_msvc@
+    NestedInstallerFiles:
+      - RelativeFilePath: kargo-@VERSION@-x86_64-pc-windows-msvc\kargo.exe
+        PortableCommandAlias: kargo
+  - Architecture: arm64
+    InstallerUrl: https://github.com/enekocm7/kargo/releases/download/v@VERSION@/kargo-@VERSION@-aarch64-pc-windows-msvc.zip
+    InstallerSha256: @SHA_UPPER_aarch64_pc_windows_msvc@
+    NestedInstallerFiles:
+      - RelativeFilePath: kargo-@VERSION@-aarch64-pc-windows-msvc\kargo.exe
+        PortableCommandAlias: kargo
+ManifestType: installer
+ManifestVersion: 1.6.0

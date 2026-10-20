@@ -24,7 +24,7 @@ object KargoNotifications {
     fun kargoNotFound(project: Project) {
         group().createNotification(
             "Kargo is not installed",
-            "This is a Kargo project, but no kargo executable was found on PATH or in ~/.cargo/bin. Install Kargo, or set its path in the settings.",
+            "This is a Kargo project, but no kargo executable was found on PATH or in ~/.kargo/bin or ~/.cargo/bin. Install Kargo, or set its path in the settings.",
             NotificationType.WARNING,
         )
             .addAction(NotificationAction.createSimple("Install Kargo") { BrowserUtil.browse(Kargo.INSTALL_URL) })
