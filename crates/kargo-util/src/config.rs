@@ -99,6 +99,11 @@ impl Config {
         self.home.join("bin")
     }
 
+    /// Where `kargo install` keeps the programs it installed, one directory per program and version.
+    pub fn install_dir(&self) -> PathBuf {
+        self.home.join("install")
+    }
+
     pub fn offline(&self) -> bool {
         self.offline
     }

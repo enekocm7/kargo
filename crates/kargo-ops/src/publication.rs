@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use kargo_manifest::Package;
 use kargo_maven::deploy::escape;
-use kargo_maven::pom::GRADLE_METADATA_MARKER;
+use kargo_maven::pom::{GRADLE_METADATA_MARKER, MAIN_CLASS_PROPERTY};
 use kargo_maven::{Artifact, ModuleId};
 use kargo_util::hash;
 
@@ -155,6 +155,9 @@ pub struct PlatformPublication {
     pub sources: Option<PathBuf>,
     pub javadoc: Option<PathBuf>,
     pub dependencies: Vec<PublishedDependency>,
+    /// The main class of a JVM application. Its POM names it in the `kargo.main-class` property, so
+    /// `kargo install group:artifact` knows what to run.
+    pub main_class: Option<String>,
 }
 
 /// Everything published for one package.
@@ -232,7 +235,7 @@ impl Publication<'_> {
                 writer.write(None, "module", &metadata)?;
             }
             let packaging = (platform.kind.extension() != "jar").then_some(platform.kind.extension());
-            let pom = self.pom(&module, packaging, &platform.dependencies, self.multiplatform());
+            let pom = self.pom(&module, packaging, &platform.dependencies, platform.main_class.as_deref(), self.multiplatform());
             writer.write(None, "pom", &pom)?;
             staged.push(writer.finish());
         }
@@ -244,7 +247,7 @@ impl Publication<'_> {
                 writer.copy(Some("javadoc"), "jar", javadoc)?;
             }
             writer.write(None, "module", &self.root_metadata(sources))?;
-            writer.write(None, "pom", &self.pom(&root, Some("pom"), &[], true))?;
+            writer.write(None, "pom", &self.pom(&root, Some("pom"), &[], None, true))?;
             staged.push(writer.finish());
         }
         Ok(staged)
@@ -347,7 +350,14 @@ impl Publication<'_> {
 
     /// The POM of `module`. With `gradle_metadata`, it carries the marker that tells Gradle (and
     /// Kargo) to read the `.module` next to it instead.
-    fn pom(&self, module: &ModuleId, packaging: Option<&str>, dependencies: &[PublishedDependency], gradle_metadata: bool) -> String {
+    fn pom(
+        &self,
+        module: &ModuleId,
+        packaging: Option<&str>,
+        dependencies: &[PublishedDependency],
+        main_class: Option<&str>,
+        gradle_metadata: bool,
+    ) -> String {
         let pkg = self.package;
         let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         x.push_str(
@@ -371,6 +381,11 @@ impl Publication<'_> {
         }
         if let Some(url) = pkg.homepage.as_ref().or(pkg.repository.as_ref()) {
             element(&mut x, 1, "url", url);
+        }
+        if let Some(main_class) = main_class {
+            x.push_str("  <properties>\n");
+            element(&mut x, 2, MAIN_CLASS_PROPERTY, main_class);
+            x.push_str("  </properties>\n");
         }
         let licenses = licenses(pkg.license.as_deref());
         if !licenses.is_empty() {
@@ -685,6 +700,7 @@ mod tests {
                 sources: Some(file(dir.path(), "src.jar")),
                 javadoc: Some(file(dir.path(), "doc.jar")),
                 dependencies: vec![stdlib, logback, bom],
+                main_class: Some("com.acme.MainKt".into()),
             }],
             common_sources: None,
             common_javadoc: None,
@@ -712,6 +728,7 @@ mod tests {
         assert_eq!(parsed.dependencies[1].scope.as_deref(), Some("runtime"));
         assert_eq!(parsed.dependencies[1].exclusions, [("*".to_owned(), "*".to_owned())]);
         assert_eq!(parsed.dependency_management[0].scope.as_deref(), Some("import"));
+        assert_eq!(parsed.properties.get(MAIN_CLASS_PROPERTY).map(String::as_str), Some("com.acme.MainKt"));
     }
 
     #[test]
@@ -736,6 +753,7 @@ mod tests {
                     sources: Some(file(dir.path(), "jvm-src.jar")),
                     javadoc: None,
                     dependencies: vec![coroutines, runtime],
+                    main_class: None,
                 },
                 PlatformPublication {
                     kind: PlatformKind::Native { konan_target: "linux_x64".into() },
@@ -744,6 +762,7 @@ mod tests {
                     sources: None,
                     javadoc: None,
                     dependencies: Vec::new(),
+                    main_class: None,
                 },
             ],
             common_sources: Some(file(dir.path(), "common-src.jar")),

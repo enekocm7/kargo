@@ -54,6 +54,8 @@ const COMMON_COMMANDS: &[&str] = &[
     "clean",
     "package",
     "publish",
+    "install",
+    "uninstall",
     "fmt",
     "lint",
     "doc",
@@ -165,6 +167,25 @@ impl From<PackageFormatArg> for PackageFormat {
             PackageFormatArg::Jlink => PackageFormat::Jlink,
             PackageFormatArg::NativeImage => PackageFormat::NativeImage,
             PackageFormatArg::Installer => PackageFormat::Installer,
+        }
+    }
+}
+
+/// `kargo install --format`.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum InstallFormatArg {
+    /// The self-contained jar, run by the JDK of the build
+    #[default]
+    Jar,
+    /// A Java runtime trimmed by jlink and launchers: runs without an installed Java
+    Jlink,
+}
+
+impl From<InstallFormatArg> for ops::install::Format {
+    fn from(f: InstallFormatArg) -> Self {
+        match f {
+            InstallFormatArg::Jar => ops::install::Format::Jar,
+            InstallFormatArg::Jlink => ops::install::Format::Jlink,
         }
     }
 }
@@ -892,6 +913,72 @@ sources and javadoc jars, checksums and, when signing is on, GnuPG signatures. T
         dry_run: bool,
         #[command(flatten)]
         packages: PackageArgs,
+    },
+    /// Install a Kotlin command-line tool from a project, a git repository or Maven
+    #[command(long_about = "Install a Kotlin command-line tool, so that it runs from any directory.
+
+The tool comes from a project (`--path <dir>`), a git repository (`--git <url>`, at `--tag`, `--branch`
+or `--rev`) or a published application on Maven (`group:artifact[:version]`). Projects are built with
+the release profile. Launchers go to ~/.kargo/bin (put it on your PATH) and the program's files to
+~/.kargo/install/<name>/<version>/.
+
+A JVM program gets a launcher that runs its jar with the JDK it was built with; `--format jlink`
+installs a trimmed Java runtime with it instead. A Native program is copied to ~/.kargo/bin as it is.
+Every entry point of the project is installed, or the ones `--bin` names.
+
+`kargo install --force <name>` installs an installed program again from where it came from (an
+upgrade). `kargo install --list` shows what is installed; `kargo uninstall <name>` removes it.")]
+    Install {
+        /// A published application: `group:artifact[:version]` (the newest version by default); with `--force`, the name of an installed program to install again
+        #[arg(value_name = "SPEC", conflicts_with_all = ["path", "git", "list"])]
+        spec: Option<String>,
+        /// Install the project in this directory (`.` for the current one)
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["git", "list"])]
+        path: Option<PathBuf>,
+        /// Install the project in this git repository
+        #[arg(long, value_name = "URL", conflicts_with = "list")]
+        git: Option<String>,
+        /// With `--git`: the tag to install
+        #[arg(long, value_name = "TAG", requires = "git", conflicts_with_all = ["branch", "rev"])]
+        tag: Option<String>,
+        /// With `--git`: the branch to install
+        #[arg(long, value_name = "BRANCH", requires = "git", conflicts_with_all = ["tag", "rev"])]
+        branch: Option<String>,
+        /// With `--git`: the commit to install
+        #[arg(long, value_name = "SHA", requires = "git", conflicts_with_all = ["tag", "branch"])]
+        rev: Option<String>,
+        /// Install only this program (repeatable); every entry point by default
+        #[arg(long = "bin", value_name = "NAME", add = ArgValueCandidates::new(complete::bins))]
+        bins: Vec<String>,
+        /// Target to install: jvm (default when enabled) or native
+        #[arg(short, long, value_enum)]
+        target: Option<TargetArg>,
+        /// What to install for the JVM: the jar (default) or a jlink runtime image
+        #[arg(long, value_enum, default_value_t)]
+        format: InstallFormatArg,
+        /// A Maven repository to look the application up in before Maven Central (repeatable)
+        #[arg(long, value_name = "URL", requires = "spec")]
+        repository: Vec<String>,
+        /// Replace a program that is installed already
+        #[arg(short, long)]
+        force: bool,
+        /// List the installed programs
+        #[arg(long, conflicts_with_all = ["bins", "target", "force", "repository"])]
+        list: bool,
+        /// Install below this directory (`bin/` and `install/`) instead of the Kargo home
+        #[arg(long, value_name = "DIR", env = "KARGO_INSTALL_ROOT")]
+        root: Option<PathBuf>,
+        #[command(flatten)]
+        package: OnePackageArg,
+    },
+    /// Remove programs installed with `kargo install`
+    Uninstall {
+        /// Remove from this directory instead of the Kargo home (see `kargo install --root`)
+        #[arg(long, value_name = "DIR", env = "KARGO_INSTALL_ROOT")]
+        root: Option<PathBuf>,
+        /// The programs to remove
+        #[arg(required = true, value_name = "NAME", add = ArgValueCandidates::new(complete::installed_programs))]
+        names: Vec<String>,
     },
     /// Run a task from [tasks], or list tasks
     Task {
@@ -2071,6 +2158,56 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 warn_manifest(shell, &project, project.package(index));
                 ops::publish::publish(&ctx.for_package(index), &opts)?;
             }
+            Ok(0)
+        }
+        Command::Install { spec, path, git, tag, branch, rev, bins, target, format, repository, force, list, root, package } => {
+            let layout = ops::install::Layout::new(config, root.as_deref());
+            if list {
+                for tool in ops::install::installed(&layout)? {
+                    println!("{}:", tool.describe());
+                    for binary in &tool.binaries {
+                        println!("    {binary}");
+                    }
+                }
+                return Ok(0);
+            }
+            let locked = global.locked;
+            let options = |source| ops::install::InstallOptions {
+                source,
+                package: package.package.clone(),
+                bins: bins.clone(),
+                target: target.map(Into::into),
+                format: format.into(),
+                force,
+                locked,
+                root: root.clone(),
+            };
+            let opts = match (spec, path, git) {
+                (_, Some(path), _) => options(ops::install::Source::Path { path }),
+                (_, _, Some(url)) => options(ops::install::Source::Git { url, tag, branch, rev }),
+                (Some(spec), _, _) if spec.contains(':') => {
+                    let coordinate: kargo_maven::CoordSpec = spec.parse()?;
+                    if coordinate.classifier.is_some() || coordinate.extension.is_some() {
+                        bail!("`{spec}` names a classifier or an extension; install `group:artifact[:version]`");
+                    }
+                    options(ops::install::Source::Maven {
+                        module: coordinate.module.to_string(),
+                        version: coordinate.version,
+                        repositories: repository,
+                    })
+                }
+                // The name of an installed program: install it again from where it came from.
+                (Some(name), _, _) => ops::install::recorded(&layout, &name)?.options(locked, root),
+                (None, None, None) => bail!(
+                    "nothing to install; give `--path <dir>` (`.` for this project), `--git <url>` or a `group:artifact` from Maven, \
+                     or see what is installed with `kargo install --list`"
+                ),
+            };
+            ops::install::install(config, &opts)?;
+            Ok(0)
+        }
+        Command::Uninstall { root, names } => {
+            ops::install::uninstall(config, &ops::install::Layout::new(config, root.as_deref()), &names)?;
             Ok(0)
         }
         Command::Task { env, name, list: _, args } => {

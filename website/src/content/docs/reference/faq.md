@@ -25,6 +25,10 @@ IntelliJ IDEA and Android Studio are the best supported editors for Kotlin. Thei
 
 Yes, on the JVM and Android. `.java` files next to your Kotlin files are compiled together with them, and Kotlin and Java can call each other. Java isn't compiled for Wasm or Native. See [Java interop](../../getting-started/project-layout/#java-interop).
 
+### How do I install a Kotlin tool I wrote, so it runs from anywhere?
+
+`kargo install --path .` in the project builds it and puts a launcher in `~/.kargo/bin`. Add that directory to your `PATH` once. `kargo install --git <url>` and `kargo install group:artifact` install tools from git and Maven. See [Installing command-line tools](../../guides/installing-tools/).
+
 ### Are multi-module projects supported?
 
 Yes. A package can depend on another package on disk with `{ path = "../lib" }`, and a `[workspace]` builds several packages with one `kargo.lock` and one `target/`. See [Workspaces and path dependencies](../../guides/workspaces/). Path dependencies don't work for the Android target yet.

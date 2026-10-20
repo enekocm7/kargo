@@ -63,13 +63,13 @@ In a [workspace](../../guides/workspaces/), commands apply to the default member
 | `-p, --package <name>` | `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `publish` | Only this package (repeatable) |
 | `--workspace` | the same | Every member of the workspace |
 | `--exclude <name>` | the same | Leave this member out (repeatable), with `--workspace` or at the workspace root |
-| `-p, --package <name>` | `run`, `package`, `add`, `remove`, `outdated`, `upgrade` | The one package to work on; required at the root of a workspace with several default members |
+| `-p, --package <name>` | `run`, `package`, `install`, `add`, `remove`, `outdated`, `upgrade` | The one package to work on; required at the root of a workspace with several default members |
 
 `-p` takes any package of the project, including a path dependency that is not a member. Outside a workspace there is one package, so you never need these options.
 
 ### Concurrent commands
 
-Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `classpath`, `fetch`, `metadata`, `ide`, `package`, `publish`, `update`, `clean`, `android`, `toolchain which`, and `lsp` while it imports the project) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
+Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`, `fmt`, `lint`, `tree`, `classpath`, `fetch`, `metadata`, `ide`, `package`, `publish`, `install --path`/`--git`, `update`, `clean`, `android`, `toolchain which`, and `lsp` while it imports the project) take an exclusive lock on `target/.kargo-lock` first. That lock guards both `target/` and `kargo.lock`. If another Kargo process (a second terminal, an IDE or a file watcher) holds the lock, the command waits for it to finish:
 
 ```console
 $ kargo build
@@ -577,6 +577,45 @@ Every target except Android is published: a JVM-only library as one Maven module
 | `-p, --package <name>`, `--workspace` | Which packages to publish. Path dependencies are published before the packages that use them; members with `publish = false` are skipped when the whole workspace is published |
 
 The package needs a `group` in `[package]`. Maven Central also needs `description`, `license`, `authors` and `repository`, a release (non-SNAPSHOT) version, and signatures; Kargo checks them before building.
+
+A package with a main class also gets a `kargo.main-class` property in the POM of its JVM module, which `kargo install group:artifact` reads to know what to run.
+
+## `kargo install`
+
+Build or download a Kotlin command-line tool and put it on your `PATH`. See [Installing command-line tools](../../guides/installing-tools/).
+
+```sh
+kargo install --path <dir>
+kargo install --git <url> [--tag <tag> | --branch <branch> | --rev <sha>]
+kargo install <group:artifact[:version]> [--repository <url>]...
+kargo install --force <name>
+kargo install --list
+```
+
+| Option | Meaning |
+|---|---|
+| `--path <dir>` | Install the project in `<dir>` (`.` for the current directory) |
+| `--git <url>` | Install the project at the root of a git repository. `--tag`, `--branch` and `--rev` pick what to check out; without them, the default branch |
+| `<group:artifact[:version]>` | Install an application published to Maven: its jars and runtime dependencies, run by its main class. The newest release when there is no version |
+| `<name>` | With `--force`: install an installed program again from where it came from |
+| `--repository <url>` | With a Maven coordinate: a repository to look in before Maven Central (repeatable) |
+| `--bin <name>` | Install only this program (repeatable). By default every entry point is installed: the project's own and each `[[bin]]` |
+| `-t, --target <target>` | `jvm` (the default when enabled) or `native` |
+| `--format <fmt>` | `jar` (default) runs the fat jar with the JDK of the build; `jlink` installs a trimmed Java runtime with the program, so no Java is needed |
+| `-f, --force` | Replace a program that is installed already, or a launcher in `bin/` that Kargo did not write |
+| `--list` | List the installed programs with their version, source and launchers |
+| `--root <dir>` | Install in `<dir>/bin` and `<dir>/install` instead of the Kargo home. Also read from [`KARGO_INSTALL_ROOT`](../environment/) |
+| `-p, --package <name>` | The workspace member to install |
+
+Projects are built with the `release` profile and honor `--locked`, `--offline` and `--refresh`. Launchers go to `~/.kargo/bin`, the program's files to `~/.kargo/install/<name>/<version>/`, and `~/.kargo/install/.installed.toml` records them. A JVM launcher runs the jar with the JDK the build used, by its path; a Native program is copied to `bin/` as it is.
+
+## `kargo uninstall`
+
+Remove programs installed with `kargo install`: their launchers, files and entries in `.installed.toml`. Nothing is removed if one of the names is not installed.
+
+```sh
+kargo uninstall <name>... [--root <dir>]
+```
 
 ## `kargo fetch`
 

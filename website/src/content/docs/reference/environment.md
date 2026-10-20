@@ -10,6 +10,7 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | Variable | Purpose |
 |---|---|
 | `KARGO_HOME` | Where Kargo keeps its cache, toolchains and `bin/` (default `~/.kargo`) |
+| `KARGO_INSTALL_ROOT` | Same as `--root` of [`kargo install`](../commands/#kargo-install) and `kargo uninstall`: install below `<root>/bin` and `<root>/install` instead of `$KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory (default `target/` next to the project's or workspace's `kargo.toml`) |
 | `KARGO_OFFLINE` | Same as `--offline` |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |

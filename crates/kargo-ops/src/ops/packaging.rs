@@ -91,7 +91,7 @@ impl App<'_> {
 
 /// File names for the program's jar and the dependency jars, unique within one directory: a
 /// second `core-1.0.jar` from another group becomes `core-1.0-2.jar`.
-fn jar_names(app: &str, deps: &[PathBuf]) -> Vec<String> {
+pub(super) fn jar_names(app: &str, deps: &[PathBuf]) -> Vec<String> {
     let mut names = vec![app.to_owned()];
     for jar in deps {
         let file = jar.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dependency.jar".to_owned());
@@ -185,7 +185,7 @@ fn jlink(ctx: &BuildContext, modules: &[String], dest: &Path) -> Result<()> {
 }
 
 /// Quotes `arg` for a POSIX shell: as is when it is plain, else in single quotes.
-fn sh_quote(arg: &str) -> String {
+pub(super) fn sh_quote(arg: &str) -> String {
     if !arg.is_empty() && arg.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c)) {
         return arg.to_owned();
     }
@@ -193,7 +193,7 @@ fn sh_quote(arg: &str) -> String {
 }
 
 /// Quotes `arg` for a `.bat` file: `%` doubled, and in double quotes when it has spaces or metacharacters.
-fn bat_quote(arg: &str) -> String {
+pub(super) fn bat_quote(arg: &str) -> String {
     let arg = arg.replace('%', "%%");
     if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || "&|<>^\"()".contains(c)) {
         return arg;
@@ -266,7 +266,7 @@ pub fn jlink_image(ctx: &BuildContext, app: &App) -> Result<PathBuf> {
 /// The JVM options of a packaged application: for Compose, [`compose::SWING_GLOBALS`], native
 /// access for Skiko (JDK 21+, which warns without it) and `-Dskiko.library.path=<skiko_dir>` when
 /// the native library was unpacked; then the `jvm-args` of `[target.jvm]` and the profile.
-fn app_jvm_args(ctx: &BuildContext, app: &App, skiko_dir: Option<&str>) -> Result<Vec<String>> {
+pub(super) fn app_jvm_args(ctx: &BuildContext, app: &App, skiko_dir: Option<&str>) -> Result<Vec<String>> {
     let mut args = Vec::new();
     if compose::enabled(ctx.ws.manifest()) {
         args.push(compose::SWING_GLOBALS.to_owned());

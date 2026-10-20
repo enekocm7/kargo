@@ -49,6 +49,7 @@ export default defineConfig({
 						{ label: 'Formatting and linting', slug: 'guides/formatting-and-linting' },
 						{ label: 'Publishing a library', slug: 'guides/publishing' },
 						{ label: 'Distributing applications', slug: 'guides/distributing' },
+						{ label: 'Installing tools', slug: 'guides/installing-tools' },
 						{ label: 'Multiplatform projects', slug: 'guides/multiplatform' },
 						{ label: 'WebAssembly', slug: 'guides/wasm' },
 						{ label: 'Kotlin/Native', slug: 'guides/native' },

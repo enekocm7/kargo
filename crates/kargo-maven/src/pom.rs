@@ -10,6 +10,10 @@ use super::coord::ModuleId;
 /// Gradle writes this marker into POMs that have richer `.module` metadata.
 pub const GRADLE_METADATA_MARKER: &str = "do_not_remove: published-with-gradle-metadata";
 
+/// The POM property that names the main class of a published application. `kargo publish` writes it
+/// for a package with a main class, and `kargo install group:artifact` runs that class.
+pub const MAIN_CLASS_PROPERTY: &str = "kargo.main-class";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParentRef {
     pub group: String,

@@ -12,7 +12,7 @@ $ kargo package --release --format native-image   # a GraalVM native executable
 $ kargo package --release --format installer      # .msi on Windows, .dmg on macOS, .deb on Linux
 ```
 
-Each prints the path of what it built on stdout, so a script can pick it up. They all need a main class (the project's, or `--bin <name>` for a [`[[bin]]`](../multiple-programs/)), and they all go to `target/<profile>/jvm/package/`.
+To install a tool on your own machine instead, use [`kargo install`](../installing-tools/), which builds it and puts a launcher on your `PATH`. Each `kargo package` command prints the path of what it built on stdout, so a script can pick it up. They all need a main class (the project's, or `--bin <name>` for a [`[[bin]]`](../multiple-programs/)), and they all go to `target/<profile>/jvm/package/`.
 
 | Format | Size | Starts in | Needs on the build machine |
 |---|---|---|---|
