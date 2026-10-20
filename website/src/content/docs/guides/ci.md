@@ -51,6 +51,8 @@ jobs:
 
 `--locked` makes the build fail if `kargo.lock` is out of date, so nobody forgets to commit it. A Kargo upgrade that changes how dependencies resolve also counts as out of date: build once locally without `--locked` and commit the new lockfile (see [`kargo.lock`](../../reference/lockfile/)). `kargo fmt --check` and `kargo lint` fail the job on unformatted code and detekt issues; see [Formatting and linting](../formatting-and-linting/).
 
+If the project has [`[[generate]]` steps](../code-generation/), `kargo build` and the other commands run them first, on the CI machine's own `target/`. Run `kargo generate` on its own to find a broken generator before anything compiles.
+
 The first build of the job starts a [compiler daemon](../build-performance/#the-compiler-daemon) that the later steps reuse, so `check`, `build`, `test` and `package` each skip JVM startup. Leave `~/.kargo/daemon` out of the cache: it only holds that run's daemon state and large class-data archives. Set `KARGO_DAEMON=false` if your CI doesn't allow background processes.
 
 ### Test results

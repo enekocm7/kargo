@@ -84,6 +84,7 @@ fn resolve_package(ctx: &BuildContext) -> Result<()> {
             }
         }
     }
+    crate::generate::fetch_tools(ctx, &[])?;
     Ok(())
 }
 

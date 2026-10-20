@@ -55,7 +55,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `[profile.release]` | `[profile.release]` |
 | `rust-toolchain.toml` | `[toolchain] jdk = "21"` and `[kotlin] version` |
 | `[features]` | no equivalent; `[frameworks]` are the closest thing |
-| `build.rs` | a task with `hooks = ["pre-build"]` |
+| `build.rs` | a task with `hooks = ["pre-build"]`, or a [`[[generate]]` step](../../guides/code-generation/) when it writes sources |
 | `crates.io` | Maven Central |
 
 ## Concepts that differ

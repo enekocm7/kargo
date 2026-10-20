@@ -7,7 +7,8 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use kargo_manifest::{
-    BENCH_TIME_UNITS, BenchMode, Hook, InstallerType, Manifest, PackageManager, TargetKind, TaskShell, WorkspaceManifest,
+    BENCH_TIME_UNITS, BUILTIN_GENERATORS, BenchMode, GeneratedKind, Hook, InstallerType, Manifest, PackageManager, TargetKind, TaskShell,
+    WorkspaceManifest,
 };
 
 fn schema() -> Value {
@@ -211,6 +212,11 @@ fn schema_enums_match_kargo() {
     assert_eq!(enum_values(&root["definitions"]["installer-type"]), names(InstallerType::ALL.iter().map(|t| t.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["mode"]), names(BenchMode::ALL.iter().map(|m| m.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["time-unit"]), names(BENCH_TIME_UNITS.to_vec()));
+    let generate = &props["generate"]["items"]["properties"];
+    assert_eq!(enum_values(&generate["kind"]), names(GeneratedKind::ALL.iter().map(|k| k.as_str()).collect()));
+    assert_eq!(enum_values(&generate["builtin"]), names(BUILTIN_GENERATORS.to_vec()));
+    assert_eq!(enum_values(&generate["shell"]), names(TaskShell::ALL.iter().map(|s| s.as_str()).collect()));
+    assert_eq!(enum_values(&generate["targets"]["items"]), names(TargetKind::ALL.iter().map(|t| t.as_str()).collect()));
     let mut targets = property_names(&props["target"]);
     let mut expected: Vec<&str> = TargetKind::ALL.iter().map(|t| t.as_str()).collect();
     targets.sort();
@@ -243,6 +249,9 @@ fn schema_defaults_match_kargo() {
         (framework("lombok"), LOMBOK_VERSION),
         (framework("spring-boot"), SPRING_BOOT_VERSION),
         (framework("benchmark"), KOTLINX_BENCHMARK_VERSION),
+        (default(&props["generate"]["items"]["properties"]["version"]), kargo_ops::generate::PROTOC_VERSION),
+        (default(&props["generate"]["items"]["properties"]["grpc-java-version"]), kargo_ops::generate::GRPC_JAVA_VERSION),
+        (default(&props["generate"]["items"]["properties"]["grpc-kotlin-version"]), kargo_ops::generate::GRPC_KOTLIN_VERSION),
     ];
     for (schema_default, kargo) in cases {
         assert_eq!(schema_default.as_deref(), Some(kargo), "a default version in the schema is out of date");

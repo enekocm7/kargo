@@ -11,14 +11,14 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::build::{ALL_SCOPES, native_entry_point, native_platforms, sources, wasm_resolution};
+use super::build::{ALL_SCOPES, existing_sources, native_entry_point, native_platforms, wasm_resolution};
 use super::context::{BuildContext, TargetSetup};
 use crate::builtins;
 use crate::npm;
 use crate::workspace::{Project, Workspace};
 use kargo_compiler::common_kotlin_args;
 use kargo_compiler::mainclass::find_jvm_main_class;
-use kargo_manifest::{Scope, TargetKind};
+use kargo_manifest::{GeneratedKind, GeneratorAction, Scope, TargetKind};
 use kargo_maven::{Platform, Resolution};
 use kargo_util::hash::Fingerprint;
 
@@ -161,27 +161,68 @@ fn package(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
             .map(|b| json!({ "name": b.name, "main": b.main, "entry-point": b.entry_point, "path": b.path.as_ref().map(|p| path(&ws.root().join(p))) }))
             .collect::<Vec<_>>(),
         "examples": examples,
+        "generators": m.generators.iter().map(|g| generator(ctx, g)).collect::<Vec<_>>(),
         "tasks": tasks,
         "targets": targets,
     }))
+}
+
+/// A `[[generate]]` step: what it is, what it reads and where it writes.
+fn generator(ctx: &BuildContext, g: &kargo_manifest::Generator) -> Value {
+    let (how, detail) = match &g.action {
+        GeneratorAction::Run { run, windows_run, .. } => ("run", json!(windows_run.as_ref().filter(|_| cfg!(windows)).unwrap_or(run))),
+        GeneratorAction::Tool { module, version, .. } => ("tool", json!(format!("{module}:{version}"))),
+        GeneratorAction::BuildConfig(_) => ("builtin", json!("build-config")),
+        GeneratorAction::Protobuf(_) => ("builtin", json!("protobuf")),
+    };
+    json!({
+        "name": g.name,
+        "kind": g.kind.as_str(),
+        "targets": g.targets.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+        "inputs": g.inputs,
+        "after": g.after,
+        "roots": crate::generate::roots(ctx.ws, &ctx.profile, g).iter().map(|d| path(d)).collect::<Vec<_>>(),
+        how: detail,
+        "output-dir": path(&crate::generate::output_dir(ctx.ws, &ctx.profile, &g.name)),
+    })
 }
 
 fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Result<Value> {
     let ws = ctx.ws;
     let m = ws.manifest();
     let roots = |dirs: &[PathBuf]| dirs.iter().map(|d| path(d)).collect::<Vec<_>>();
+    // What `[[generate]]` steps write, listed whether or not a build has run them yet.
+    let with_generated = |mut dirs: Vec<PathBuf>, generated: GeneratedKind| {
+        dirs.extend(crate::generate::dirs(ws, &ctx.profile, kind, generated));
+        dirs
+    };
     let mut out = json!({
         "kind": kind.as_str(),
-        "source-roots": roots(&[ws.common_sources(), ws.target_sources(kind)]),
+        "source-roots": roots(&with_generated(vec![ws.common_sources(), ws.target_sources(kind)], GeneratedKind::Sources)),
         // Test fixtures and benchmarks compile like tests, so editors treat them as test sources too.
-        "test-roots": roots(&[
-            ws.common_tests(),
-            ws.target_tests(kind),
-            ws.common_test_fixtures(),
-            ws.target_test_fixtures(kind),
-            ws.common_benches(),
-            ws.target_benches(kind),
-        ]),
+        "test-roots": roots(&with_generated(
+            vec![
+                ws.common_tests(),
+                ws.target_tests(kind),
+                ws.common_test_fixtures(),
+                ws.target_test_fixtures(kind),
+                ws.common_benches(),
+                ws.target_benches(kind),
+            ],
+            GeneratedKind::TestSources,
+        )),
+        // The output directories of the `[[generate]]` steps this target uses, by what they hold.
+        "generated-roots": GeneratedKind::ALL
+            .iter()
+            .flat_map(|&k| m.generators.iter().filter(move |g| g.kind == k && g.applies_to(kind)).map(move |g| (k, g)))
+            .flat_map(|(k, g)| {
+                // Whether every target of the package gets the same files, so that they are shared code.
+                let common = m.targets.enabled().iter().all(|t| g.applies_to(*t));
+                crate::generate::roots(ws, &ctx.profile, g)
+                    .into_iter()
+                    .map(move |dir| json!({ "name": g.name, "kind": k.as_str(), "dir": path(&dir), "common": common }))
+            })
+            .collect::<Vec<_>>(),
         "test-fixture-roots": roots(&[ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
         "bench-roots": roots(&[ws.common_benches(), ws.target_benches(kind)]),
         "output-dir": path(&ws.output_dir(&ctx.profile, kind)),
@@ -202,10 +243,10 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             let jvm_target = jdk.and_then(|jdk| jvm.target_for(jdk.version).ok()).unwrap_or_else(|| jvm.jvm_target.clone());
             let main_class = match &jvm.main_class {
                 Some(main) => Some(main.clone()),
-                None => find_jvm_main_class(&sources(ctx, kind, false, &["kt", "java"])?.kotlin_files(), "").ok(),
+                None => find_jvm_main_class(&existing_sources(ctx, kind, false, &["kt", "java"])?.kotlin_files(), "").ok(),
             };
             let output = ws.output_dir(&ctx.profile, kind);
-            out["resource-roots"] = json!(roots(&[ws.resources()]));
+            out["resource-roots"] = json!(roots(&with_generated(vec![ws.resources()], GeneratedKind::Resources)));
             // The `Res` class of `composeResources/`, written now so that editors see it before a build.
             let dir = crate::compose::resources::output_dir(&ws.output_dir(&ctx.profile, kind));
             out["compose-resources"] = match crate::compose::resources::generate(ws.root(), m, &dir)? {
@@ -236,7 +277,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         }
         TargetKind::Native => {
             let native = m.targets.native.as_ref().expect("the Native target is enabled");
-            let entry_point = native_entry_point(native, &sources(ctx, kind, false, &["kt"])?).ok().flatten();
+            let entry_point = native_entry_point(native, &existing_sources(ctx, kind, false, &["kt"])?).ok().flatten();
             out["native-kind"] = json!(native.kind.as_str());
             out["platforms"] = json!(native_platforms(ctx)?);
             out["entry-point"] = json!(entry_point);

@@ -128,13 +128,23 @@ object KargoImportPlanner {
         private val root = norm(pkg.root)
         private val excluded = listOf("$root/target")
 
+        /**
+         * The content entries of a module: the roots in the package directory, and each root inside `target/` (the
+         * output of `[[generate]]` steps) as an entry of its own, since a root inside the excluded `target/` would be
+         * left out of the index.
+         */
+        private fun contents(roots: List<RootSpec>): List<ContentSpec> {
+            val (generated, own) = roots.partition { it.path.startsWith("$root/target/") }
+            return listOf(ContentSpec(root, own, excluded)) + generated.map { ContentSpec(it.path, listOf(it), emptyList()) }
+        }
+
         fun single(target: KargoTarget): ModuleSpec {
             val roots = target.sourceRoots.map { RootSpec(norm(it), RootKind.SOURCE) } +
                 target.testRoots.map { RootSpec(norm(it), RootKind.TEST) } +
                 target.resourceRoots.map { RootSpec(norm(it), RootKind.RESOURCE) } +
                 target.testResourceRoots.map { RootSpec(norm(it), RootKind.TEST_RESOURCE) } +
                 examples()
-            return module(pkg.name, listOf(ContentSpec(root, roots, excluded)), target, dependsOn = emptyList(), target = target.kind)
+            return module(pkg.name, contents(roots), target, dependsOn = emptyList(), target = target.kind)
         }
 
         /** The shared module: `src/` and `tests/`, analyzed like the first target (JVM, else Native, else Wasm). */
@@ -142,7 +152,7 @@ object KargoImportPlanner {
             val first = targets.first()
             val shared = sharedRoots(targets)
             val roots = shared.sources.map { RootSpec(it, RootKind.SOURCE) } + shared.tests.map { RootSpec(it, RootKind.TEST) } + examples()
-            return module("${pkg.name}.common", listOf(ContentSpec(root, roots, excluded)), first, dependsOn = emptyList(), target = null)
+            return module("${pkg.name}.common", contents(roots), first, dependsOn = emptyList(), target = null)
         }
 
         fun targetModule(target: KargoTarget): ModuleSpec {
@@ -150,7 +160,8 @@ object KargoImportPlanner {
             val contents = ArrayList<ContentSpec>()
             fun add(paths: List<String>, kind: RootKind, sharedPaths: List<String>) {
                 for (path in paths.map(::norm).filter { it !in sharedPaths }) {
-                    if (files.exists(path)) contents += ContentSpec(path, listOf(RootSpec(path, kind)), emptyList())
+                    // The output of `[[generate]]` steps is in `target/`, and only exists once a build or `kargo generate` ran.
+                    if (files.exists(path) || path.startsWith("$root/target/")) contents += ContentSpec(path, listOf(RootSpec(path, kind)), emptyList())
                 }
             }
             add(target.sourceRoots, RootKind.SOURCE, shared.sources)

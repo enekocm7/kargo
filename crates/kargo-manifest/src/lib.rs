@@ -1518,6 +1518,141 @@ pub struct Bin {
     pub path: Option<PathBuf>,
 }
 
+/// What a `[[generate]]` step writes, and so where Kargo adds its output directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GeneratedKind {
+    /// Kotlin and Java sources of the main code (the default).
+    #[default]
+    Sources,
+    /// Resources packed with the main code.
+    Resources,
+    /// Kotlin and Java sources of the tests.
+    TestSources,
+}
+
+impl GeneratedKind {
+    pub const ALL: [GeneratedKind; 3] = [GeneratedKind::Sources, GeneratedKind::Resources, GeneratedKind::TestSources];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GeneratedKind::Sources => "sources",
+            GeneratedKind::Resources => "resources",
+            GeneratedKind::TestSources => "test-sources",
+        }
+    }
+}
+
+impl fmt::Display for GeneratedKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GeneratedKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        GeneratedKind::ALL
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .with_context(|| format!("unknown kind `{s}` (expected one of: {})", GeneratedKind::ALL.map(GeneratedKind::as_str).join(", ")))
+    }
+}
+
+/// The built-in generators a `[[generate]]` step can name with `builtin`.
+pub const BUILTIN_GENERATORS: [&str; 2] = ["build-config", "protobuf"];
+
+/// `builtin = "build-config"`: a Kotlin `object` with the package's version and Git commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildConfigGenerator {
+    /// The Kotlin package; the default follows the package's group and name, as for `[env] expose`.
+    pub package: Option<String>,
+    /// The name of the object (`BuildConfig`).
+    pub object: String,
+    /// Constants of your own.
+    pub fields: BTreeMap<String, BuildConfigValue>,
+    /// Variables of the project environment (`[env]`, `.env` files) to expose, as `[env] expose` does.
+    pub expose: Vec<String>,
+    /// Also write `BUILD_TIME`. It changes on every build unless `SOURCE_DATE_EPOCH` is set.
+    pub build_time: bool,
+}
+
+/// `builtin = "protobuf"`: `protoc` and, for gRPC, its plugins, downloaded from Maven Central.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtobufGenerator {
+    /// The `protoc` version; the default is Kargo's own.
+    pub version: Option<String>,
+    /// Directories searched for imports (`-I`), relative to the project root.
+    pub proto_path: Vec<String>,
+    /// Generate Java classes (`--java_out`).
+    pub java: bool,
+    /// Generate the Kotlin DSL (`--kotlin_out`).
+    pub kotlin: bool,
+    /// Also generate gRPC stubs: Java ones, and Kotlin ones with `kotlin`.
+    pub grpc: bool,
+    pub grpc_java_version: Option<String>,
+    pub grpc_kotlin_version: Option<String>,
+    /// More arguments for `protoc`.
+    pub args: Vec<String>,
+}
+
+/// How a `[[generate]]` step produces its output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratorAction {
+    /// `run`: shell commands, as a task has.
+    Run {
+        run: Vec<String>,
+        windows_run: Option<Vec<String>>,
+        shell: Option<TaskShell>,
+    },
+    /// `tool`: the main class of a Maven artifact, run on the project's JDK.
+    Tool {
+        module: ModuleId,
+        version: String,
+        main_class: Option<String>,
+        args: Vec<String>,
+    },
+    BuildConfig(BuildConfigGenerator),
+    Protobuf(ProtobufGenerator),
+}
+
+/// A step from `[[generate]]` that writes sources or resources before they are compiled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generator {
+    pub name: String,
+    /// Globs of the files the output comes from, relative to the project root. Without any, the
+    /// step runs on every build.
+    pub inputs: Vec<String>,
+    pub action: GeneratorAction,
+    /// The targets whose build uses the output.
+    pub targets: Vec<TargetKind>,
+    pub kind: GeneratedKind,
+    /// The directories of the output, relative to it, that are the roots of the sources or resources. Empty
+    /// means the whole output directory. A tool that writes a whole project (`src/main/kotlin`, `src/test/kotlin`,
+    /// docs) names the directory to compile.
+    pub roots: Vec<String>,
+    /// Steps that run before this one.
+    pub after: Vec<String>,
+    /// Extra environment variables of the step.
+    pub env: BTreeMap<String, String>,
+}
+
+impl Generator {
+    /// Whether the output goes to `target`.
+    pub fn applies_to(&self, target: TargetKind) -> bool {
+        self.targets.contains(&target)
+    }
+
+    /// The `builtin` name of the step, if it is a built-in one.
+    pub fn builtin(&self) -> Option<&'static str> {
+        match self.action {
+            GeneratorAction::BuildConfig(_) => Some("build-config"),
+            GeneratorAction::Protobuf(_) => Some("protobuf"),
+            _ => None,
+        }
+    }
+}
+
 /// A fully validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -1526,6 +1661,8 @@ pub struct Manifest {
     pub targets: Targets,
     /// Extra programs from `[[bin]]`, in declaration order.
     pub bins: Vec<Bin>,
+    /// The `[[generate]]` steps, in declaration order.
+    pub generators: Vec<Generator>,
     pub dependencies: Vec<Dependency>,
     pub dev_dependencies: Vec<Dependency>,
     /// `path` dependencies from every dependency table.
@@ -1579,6 +1716,11 @@ impl Manifest {
     /// The `[[bin]]` named `name`.
     pub fn bin(&self, name: &str) -> Option<&Bin> {
         self.bins.iter().find(|b| b.name == name)
+    }
+
+    /// The `[[generate]]` step named `name`.
+    pub fn generator(&self, name: &str) -> Option<&Generator> {
+        self.generators.iter().find(|g| g.name == name)
     }
 
     /// Dependencies for `target`, including the common ones.

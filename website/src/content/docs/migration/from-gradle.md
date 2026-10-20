@@ -6,7 +6,7 @@ description: Translate build.gradle.kts into kargo.toml, step by step.
 This guide moves a Gradle project, JVM or Kotlin Multiplatform, to Kargo. Most single-module projects take about fifteen minutes.
 
 :::caution[Before you start]
-Kargo builds **one package per `kargo.toml`**. In a multi-module build, convert each module with the steps below, list the modules as `members` of a [workspace](../../guides/workspaces/) (the equivalent of `settings.gradle.kts`), and turn `implementation(project(":core"))` into `core = { path = "../core" }`. Android modules can't use path dependencies yet. Gradle plugins with no Kargo equivalent (for example, code generators) can usually be replaced with a [task on a `pre-build` hook](../../guides/tasks-and-plugins/).
+Kargo builds **one package per `kargo.toml`**. In a multi-module build, convert each module with the steps below, list the modules as `members` of a [workspace](../../guides/workspaces/) (the equivalent of `settings.gradle.kts`), and turn `implementation(project(":core"))` into `core = { path = "../core" }`. Android modules can't use path dependencies yet. Gradle plugins that generate code (protobuf, OpenAPI generator) become [`[[generate]]` steps](../../guides/code-generation/); other plugins with no Kargo equivalent can usually be replaced with a [task on a `pre-build` hook](../../guides/tasks-and-plugins/).
 :::
 
 ## Step 1: Create `kargo.toml`
@@ -207,6 +207,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `mavenLocal()` | `[repositories] local = "maven-local"` |
 | `tasks.register("x") { exec ... }` | `[tasks] x = "..."` |
 | `tasks.compileKotlin { dependsOn(gen) }` | `gen = { run = "...", hooks = ["pre-build"] }` |
+| `com.google.protobuf` plugin, `sourceSets { main { kotlin.srcDir("build/generated/...") } }` | a [`[[generate]]` step](../../guides/code-generation/) such as `builtin = "protobuf"`; its output directory is a source root |
 | `./gradlew run --args="a b"` | `kargo run -- a b` |
 | extra `JavaExec` tasks for other mains | `[[bin]]` and `kargo run --bin <name>`, or `kargo run --main <class>` |
 | `./gradlew test --tests "*Foo*"` | `kargo test Foo` |

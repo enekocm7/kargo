@@ -76,7 +76,7 @@ If the project really has several programs, keep them all: run one with `kargo r
 
 ### `no Kotlin or Java sources found in src/ ...`
 
-`kargo build` has nothing to compile for that target, so it succeeds without doing anything; `kargo run` then fails later with `could not determine the main class`. Put your code in `src/` (or `src-<target>/` for one target) and make sure the files end in `.kt` (or `.java` on the JVM). If a [`pre-build` hook](../../guides/tasks-and-plugins/#hooks) generates the sources, the warning goes away once the hook has run. See [Warnings](../warnings/#no-sources).
+`kargo build` has nothing to compile for that target, so it succeeds without doing anything; `kargo run` then fails later with `could not determine the main class`. Put your code in `src/` (or `src-<target>/` for one target) and make sure the files end in `.kt` (or `.java` on the JVM). If a [`pre-build` hook](../../guides/tasks-and-plugins/#hooks) or a [`[[generate]]` step](../../guides/code-generation/) generates the sources, the warning goes away once it has run. See [Warnings](../warnings/#no-sources).
 
 ### A `.kts` script does nothing, or a task named `build` doesn't run
 

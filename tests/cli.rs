@@ -787,6 +787,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "outdated",
         "upgrade",
         "vendor",
+        "generate",
         "target",
         "info",
         "plugins",
@@ -3657,4 +3658,166 @@ fn mirrors_replace_the_declared_repositories() {
     p.kargo().args(["tree", "--offline"]).assert().failure().stderr(predicate::str::contains("must be an http(s):// or file: URL"));
     p.file(".kargo/config.toml", "[http]\ncainfo = \"missing.pem\"\n");
     p.kargo().args(["tree", "--offline"]).assert().failure().stderr(predicate::str::contains("cainfo"));
+}
+
+/// A `[[generate]]` step that copies `in.txt` to `Out.kt` in `$KARGO_GEN_DIR` and counts its runs in `runs.txt`.
+fn copy_step(extra: &str) -> String {
+    let posix = "echo run >> \"$KARGO_MANIFEST_DIR/runs.txt\"; cat \"$KARGO_MANIFEST_DIR/in.txt\" > \"$KARGO_GEN_DIR/Out.kt\"";
+    let windows = r#"echo run >> "%KARGO_MANIFEST_DIR%\runs.txt" & type "%KARGO_MANIFEST_DIR%\in.txt" > "%KARGO_GEN_DIR%\Out.kt""#;
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    format!(
+        "[[generate]]\nname = \"copy\"\ninputs = [\"in.txt\"]\nrun = '{posix}'\nwindows-run = '{windows}'\nshell = \"{shell}\"\n{extra}"
+    )
+}
+
+#[test]
+fn generate_runs_steps_and_skips_them_until_their_inputs_change() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("gen", &copy_step(""))).file("in.txt", "one");
+    let out = || p.read("target/generated/debug/copy/Out.kt");
+    let runs = || std::fs::read_to_string(p.path().join("runs.txt")).map(|t| t.lines().count()).unwrap_or(0);
+
+    p.kargo().arg("generate").assert().success().stderr(predicate::str::contains("Generating `copy`"));
+    assert_eq!((out().trim(), runs()), ("one", 1));
+
+    p.kargo()
+        .arg("generate")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fresh `copy`").and(predicate::str::contains("Generating").not()));
+    assert_eq!(runs(), 1, "nothing changed");
+
+    p.file("in.txt", "two");
+    p.kargo().arg("generate").assert().success().stderr(predicate::str::contains("Generating `copy`"));
+    assert_eq!((out().trim(), runs()), ("two", 2));
+
+    p.kargo().args(["generate", "--force"]).assert().success();
+    assert_eq!(runs(), 3);
+
+    // Another profile has output of its own.
+    p.kargo().args(["generate", "--release", "copy"]).assert().success();
+    assert_eq!(p.read("target/generated/release/copy/Out.kt").trim(), "two");
+
+    // `kargo clean` takes the generated files with the rest of target/.
+    p.kargo().args(["clean", "--release"]).assert().success();
+    assert!(!p.path().join("target/generated/release").exists());
+    assert!(p.path().join("target/generated/debug/copy/Out.kt").is_file());
+    p.kargo().arg("clean").assert().success();
+    assert!(!p.path().join("target/generated").exists());
+}
+
+#[test]
+fn a_failing_step_names_itself_and_shows_its_output() {
+    let p = Project::new();
+    let (run, windows) = ("echo no protoc here >&2; exit 3", "echo no protoc here 1>&2 & exit /b 3");
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "gen",
+            &format!(
+                "[[generate]]\nname = \"protos\"\nrun = '{run}'\nwindows-run = '{windows}'\nshell = \"{}\"\n",
+                if cfg!(windows) { "cmd" } else { "sh" }
+            ),
+        ),
+    );
+    p.kargo().arg("generate").assert().failure().code(101).stderr(
+        predicate::str::contains("generator `protos` failed")
+            .and(predicate::str::contains("no protoc here"))
+            .and(predicate::str::contains("exit code 3").or(predicate::str::contains("exit status: 3"))),
+    );
+    p.kargo()
+        .args(["generate", "nope"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no [[generate]] step named `nope`; the steps are: protos"));
+    let bare = Project::new();
+    bare.file("kargo.toml", &manifest("gen", ""));
+    bare.kargo().arg("generate").assert().failure().stderr(predicate::str::contains("declares no [[generate]] steps"));
+}
+
+#[test]
+fn generate_steps_run_after_the_steps_they_wait_for() {
+    let p = Project::new();
+    let step = |name: &str, after: &str| {
+        let (posix, windows) =
+            (format!("echo {name} >> \"$KARGO_MANIFEST_DIR/order.txt\""), format!(r#"echo {name} >> "%KARGO_MANIFEST_DIR%\order.txt""#));
+        let shell = if cfg!(windows) { "cmd" } else { "sh" };
+        format!("[[generate]]\nname = \"{name}\"\nrun = '{posix}'\nwindows-run = '{windows}'\nshell = \"{shell}\"\n{after}\n")
+    };
+    p.file(
+        "kargo.toml",
+        &manifest("gen", &(step("last", "after = [\"middle\"]") + &step("middle", "after = [\"first\"]") + &step("first", ""))),
+    );
+    p.kargo().arg("generate").assert().success();
+    let order: Vec<String> = p.read("order.txt").lines().map(|l| l.trim().to_owned()).collect();
+    assert_eq!(order, ["first", "middle", "last"]);
+    // A named step brings the ones it waits for.
+    std::fs::remove_file(p.path().join("order.txt")).unwrap();
+    p.kargo().args(["generate", "middle"]).assert().success();
+    assert_eq!(p.read("order.txt").lines().map(|l| l.trim().to_owned()).collect::<Vec<_>>(), ["first", "middle"]);
+}
+
+#[test]
+fn metadata_lists_the_generated_roots_without_running_the_steps() {
+    let p = Project::new();
+    let extra = "[[generate]]\nname = \"protos\"\nrun = 'false'\ntargets = [\"jvm\"]\n\
+                 [[generate]]\nname = \"fixtures\"\nrun = 'false'\nkind = \"test-sources\"\n\
+                 [[generate]]\nname = \"assets\"\nrun = 'false'\nkind = \"resources\"\ninputs = [\"assets/**\"]\n";
+    p.file("kargo.toml", &manifest("gen", &format!("[target.jvm]\n[target.wasm]\n{extra}")));
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let package = &metadata["packages"][0];
+    let slash = |v: &serde_json::Value| v.as_str().unwrap().replace(r"\", "/");
+    let tails = |roots: &serde_json::Value| -> Vec<String> {
+        roots.as_array().unwrap().iter().map(|r| slash(r).split("/target/").last().unwrap().to_owned()).collect()
+    };
+    let jvm = package["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "jvm").unwrap();
+    let wasm = package["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "wasm").unwrap();
+    assert!(tails(&jvm["source-roots"]).contains(&"generated/debug/protos".to_owned()), "{jvm}");
+    assert!(tails(&jvm["test-roots"]).contains(&"generated/debug/fixtures".to_owned()), "{jvm}");
+    assert!(tails(&jvm["resource-roots"]).contains(&"generated/debug/assets".to_owned()), "{jvm}");
+    assert!(!tails(&wasm["source-roots"]).contains(&"generated/debug/protos".to_owned()), "a JVM-only step stays out of the Wasm target");
+    assert!(tails(&wasm["source-roots"]).iter().all(|r| r.starts_with("generated") || !r.contains("protos")));
+    assert_eq!(jvm["generated-roots"].as_array().unwrap().len(), 3);
+    let steps = package["generators"].as_array().unwrap();
+    assert_eq!(steps.iter().map(|s| s["name"].as_str().unwrap()).collect::<Vec<_>>(), ["protos", "fixtures", "assets"]);
+    assert_eq!(steps[2]["inputs"][0], "assets/**");
+    assert_eq!(steps[1]["kind"], "test-sources");
+    // Reading the project's layout never starts a generator.
+    assert!(!p.path().join("target").join("generated").exists());
+}
+
+#[test]
+fn generate_arguments_are_checked() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("gen", "[[generate]]\nname = \"a\"\nrun = 'x'\nafter = [\"b\"]\n"));
+    p.kargo().arg("generate").assert().failure().stderr(predicate::str::contains("`b`, which no [[generate]] declares"));
+    p.file("kargo.toml", &manifest("gen", "[[generate]]\nname = \"a\"\nrun = 'x'\n"));
+    p.kargo().args(["generate", "--release", "--profile", "staging"]).assert().failure();
+}
+
+#[test]
+fn update_locks_the_tools_of_generate_steps() {
+    let repo = LocalRepo::new();
+    repo.publish("tools:codegen", "1.0", &[("tools:runtime", "1.0")])
+        .publish("tools:runtime", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let p = Project::new();
+    let step = "[[generate]]\nname = \"api\"\ninputs = [\"api.yaml\"]\ntool = \"tools:codegen:1.0\"\nargs = [\"$KARGO_GEN_DIR\"]\n\
+                [[generate]]\nname = \"shell\"\nrun = \"true\"\n";
+    p.file("kargo.toml", &manifest("app", &format!("[kotlin]\nversion = \"2.4.21\"\n[repositories]\nlocal = \"{}\"\n{step}", repo.url())));
+    let modules = |p: &Project, key: &str| -> Vec<String> {
+        let lock = kargo_ops::lockfile::Lockfile::load(&p.path().join("kargo.lock")).unwrap();
+        lock.resolutions[key].packages.iter().map(|p| p.module.clone()).collect()
+    };
+    // `update` re-resolves everything, and the tool of the step with it; a step that runs a command has nothing to lock.
+    p.kargo().args(["update", "--offline"]).assert().success();
+    assert_eq!(modules(&p, "generate/api"), ["tools:codegen", "tools:runtime"]);
+    assert!(!p.read("kargo.lock").contains("generate/shell"));
+    // Another update starts from a lockfile without it and puts it back.
+    p.kargo().args(["update", "--offline"]).assert().success();
+    assert_eq!(modules(&p, "generate/api"), ["tools:codegen", "tools:runtime"]);
 }

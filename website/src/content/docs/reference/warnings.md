@@ -23,6 +23,7 @@ Warnings never change the exit code, and `-q` hides them. In a [workspace](../..
 | [Tasks hidden by built-in commands](#tasks-hidden-by-built-in-commands) | every command that works on a package: `build`, `check`, `run`, `test`, `package`, `doc`, `fmt`, `lint`, `fetch`, `tree` |
 | [Odd package versions](#odd-package-versions) | the same commands |
 | [`.env` file tracked by git](#env-file-tracked-by-git) | `run`, `test`, `task`, `env` |
+| [Generator inputs that match nothing](#generator-inputs-that-match-nothing) | `build`, `check`, `run`, `test`, `package`, `generate` |
 
 ## No sources
 
@@ -73,6 +74,14 @@ warning: `.env` is tracked by git but sets API_TOKEN; keep secrets in a git-igno
 ```
 
 A `.env` file that git tracks is shared with everyone who clones the repository. Kargo warns when such a file sets a variable whose name looks like a secret (it contains `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or `CREDENTIAL`, or it is `KEY` or ends in `_KEY`) with a value. Move the secret into `.env.local` or `.env.<profile>.local`, which `kargo new` git-ignores, or into your shell, and remove the file from git with `git rm --cached .env`. Empty values don't count. Without git, or for files git doesn't track, there is no warning.
+
+## Generator inputs that match nothing
+
+```text
+warning: no file matches the `inputs` of [[generate]] `protos`: proto/**/*.proto
+```
+
+A [`[[generate]]` step](../../guides/code-generation/) with `inputs` runs when those files change, and none of the globs matches a file. Usually the glob has a typo or the files are somewhere else. Globs are relative to the project root, use gitignore syntax, and never match inside `target/` or a directory whose name starts with a dot. A `protobuf` step with no `.proto` file generates nothing; any other step still runs.
 
 ## Odd package versions
 

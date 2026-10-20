@@ -537,6 +537,66 @@ entry-point = "com.example.report.main"  # Kotlin/Native entry function
 
 Set `path`, or `main` and/or `entry-point`, but not both. The sources stay in `src/`. An executable Native target links one extra executable per bin with a native entry point, into `target/<profile>/native/<platform>/bin/`. See [Several programs in one project](../../guides/multiple-programs/).
 
+## `[[generate]]`
+
+Steps that write sources or resources before they are compiled. Repeat the table for each step. See [Code generation](../../guides/code-generation/).
+
+```toml
+[[generate]]
+name = "protos"
+inputs = ["proto/**/*.proto"]
+run = "protoc -Iproto --java_out=$KARGO_GEN_DIR proto/*.proto"
+targets = ["jvm", "android"]
+
+[[generate]]
+name = "api-client"
+inputs = ["openapi.yaml"]
+tool = "org.openapitools:openapi-generator-cli:7.16.0"
+args = ["generate", "-g", "kotlin", "-i", "openapi.yaml", "-o", "$KARGO_GEN_DIR"]
+roots = ["src/main/kotlin"]       # the tool writes a whole project; compile only this directory
+
+[[generate]]
+name = "config"
+builtin = "build-config"
+fields = { API_URL = "https://api.example.com" }
+```
+
+A step does exactly one of `run`, `tool` and `builtin`.
+
+| Key | Meaning |
+|---|---|
+| `name` | Required. Letters, digits, `-` and `_`, starting with a letter; unique. Names the output directory, `target/generated/<profile>/<name>/` (`$KARGO_GEN_DIR`) |
+| `inputs` | Globs (gitignore syntax, relative to the project root) of the files the output comes from. The step runs only when their contents, its definition or Kargo changed. Without `inputs`, it runs on every build. Default for `protobuf`: `proto/**/*.proto` |
+| `run` | A shell command or a list of them, run at the project root. As for [tasks](#tasks), `windows-run` replaces it on Windows and `shell` picks the shell |
+| `windows-run`, `shell` | Only with `run` |
+| `tool` | A Maven artifact, `group:artifact:version`. Kargo resolves it with its dependencies (locked in `kargo.lock` as `generate/<name>`) and runs its main class on the project's JDK |
+| `main-class` | The class `tool` runs. Default: the `Main-Class` of the jar's manifest |
+| `args` | The arguments of `tool` (or more arguments for `protoc`). `$NAME` and `${NAME}` are replaced with the step's variables, such as `$KARGO_GEN_DIR` |
+| `builtin` | `build-config` or `protobuf` |
+| `targets` | The targets that compile the output: `jvm`, `wasm`, `native`, `android`. Default: all of them; for `protobuf`, `jvm` and `android` |
+| `kind` | `sources` (default), `test-sources` or `resources`. `resources` needs the `jvm` or `android` target |
+| `roots` | The directories of the output, relative to it, that hold the sources or resources, such as `src/main/kotlin` for a tool that writes a whole Gradle project. Default: the whole output directory |
+| `after` | Names of steps that run before this one. Steps without such a link run at the same time |
+| `env` | Extra environment variables of the step |
+
+The keys of the built-in generators:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `package` | the group and name of the package | `build-config`: the Kotlin package of the object |
+| `object` | `BuildConfig` | `build-config`: the name of the object |
+| `fields` | none | `build-config`: constants of your own; a string, integer or boolean |
+| `expose` | none | `build-config`: variables of the project [environment](#env) to write as constants |
+| `build-time` | `false` | `build-config`: also write `BUILD_TIME`, which changes on every build unless `SOURCE_DATE_EPOCH` is set |
+| `version` | `4.31.1` | `protobuf`: the `protoc` version |
+| `proto-path` | `["proto"]` | `protobuf`: the directories searched for imports (`-I`) |
+| `java`, `kotlin` | `true` | `protobuf`: generate the Java classes and the Kotlin DSL (which needs `java`) |
+| `grpc` | `false` | `protobuf`: also generate gRPC stubs |
+| `grpc-java-version` | `1.73.0` | `protobuf`: the version of `protoc-gen-grpc-java` |
+| `grpc-kotlin-version` | `1.4.3` | `protobuf`: the version of `protoc-gen-grpc-kotlin` |
+
+`kargo generate` runs the steps on their own, and every command that compiles runs the ones it needs first. The output directory is empty when a step starts. A step may only use the keys of its kind: `package` with `run` is an error, for instance.
+
 ## `[dependencies]` and `[dev-dependencies]`
 
 ```toml

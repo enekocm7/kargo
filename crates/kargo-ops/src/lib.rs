@@ -7,6 +7,7 @@ pub mod builtins;
 pub mod compose;
 pub mod dts;
 pub mod env;
+pub mod generate;
 pub mod gradle;
 pub mod lockfile;
 pub mod native_interop;

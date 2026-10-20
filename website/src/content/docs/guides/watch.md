@@ -74,7 +74,8 @@ For every package of the project, members and path dependencies included, Kargo 
 - its source and test directories: `src/`, `src-<target>/`, `tests/`, `tests-<target>/`, `test-fixtures/`, `test-fixtures-<target>/` and `examples/`;
 - `resources/`, `test-resources/` and `android/`;
 - `interop/`, the `.def` files of `[target.native.cinterop]` and the C sources and include directories of `[target.native.c-sources]`;
-- its `.env` files: `.env`, `.env.<profile>` and their `.local` variants.
+- its `.env` files: `.env`, `.env.<profile>` and their `.local` variants;
+- the files that the `inputs` of its [`[[generate]]` steps](../code-generation/) match, so a change to a `.proto` file generates the code again.
 
 Directories that do not exist yet are watched too, so the first file added to one is seen. Other files are not watched. A change to a file outside these places does not start a run.
 

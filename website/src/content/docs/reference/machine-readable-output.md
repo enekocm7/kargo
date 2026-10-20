@@ -217,6 +217,7 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `bins` | The [`[[bin]]`](../manifest/#bin) tables, with `path` made absolute |
 | `examples` | The `examples/<name>.kt` programs, with their `name` and `path` |
 | `tasks` | Each [task](../../guides/tasks-and-plugins/): `name`, `description`, the commands it runs on this platform (`run`) and `depends-on` |
+| `generators` | Each [`[[generate]]` step](../../guides/code-generation/): `name`, `kind`, `targets`, `inputs`, `after`, how it works (`run` with its commands, `tool` with the coordinates, or `builtin` with `build-config` or `protobuf`) its `output-dir`, `target/generated/<profile>/<name>`, and the `roots` in it that hold the sources or resources |
 | `targets` | One entry per enabled target |
 
 ### Targets
@@ -224,13 +225,14 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | Field | Targets | Meaning |
 |---|---|---|
 | `kind` | all | `jvm`, `wasm`, `native` or `android` |
-| `source-roots`, `test-roots` | all | `src/` and `src-<target>/`; `tests/`, `tests-<target>/`, the test fixtures `test-fixtures/` and `test-fixtures-<target>/` and the benchmarks `benches/` and `benches-<target>/`, whether they exist or not |
+| `source-roots`, `test-roots` | all | `src/` and `src-<target>/`, then the output of `kind = "sources"` steps; `tests/`, `tests-<target>/`, the test fixtures `test-fixtures/` and `test-fixtures-<target>/` and the benchmarks `benches/` and `benches-<target>/`, then the output of `kind = "test-sources"` steps, whether they exist or not |
+| `generated-roots` | all | The output directories of the `[[generate]]` steps the target compiles, each with its `name`, `kind` (`sources`, `test-sources` or `resources`), `dir` and whether the files are `common` to every target. They are in `source-roots`, `test-roots` and `resource-roots` too, so an editor that reads those lists sees generated code. They exist after a build or `kargo generate`; `kargo metadata` runs no step |
 | `test-fixture-roots` | all | `test-fixtures/` and `test-fixtures-<target>/` ([test fixtures](../../guides/workspaces/#test-fixtures)), which `test-roots` includes too |
 | `bench-roots` | all | `benches/` and `benches-<target>/` ([benchmarks](../../guides/benchmarking/)), which `test-roots` includes too, so editors compile them like tests |
 | `output-dir` | all | `target/<profile>/<target>` (with the member's name in a workspace) |
 | `compiler-args` | not Android | The Kotlin compiler arguments every compilation of the target gets: `[kotlin]` and profile settings plus the frameworks' flags |
 | `compiler-plugins` | not Android | Each compiler plugin (the frameworks' and [`[plugins]`](../manifest/#pluginsname)): `module`, `version`, `id`, its `-P` `options` and the downloaded `jar` |
-| `resource-roots`, `test-resource-roots`, `classes-dir`, `test-classes-dir` | JVM | Resource directories and where classes are compiled to |
+| `resource-roots`, `test-resource-roots`, `classes-dir`, `test-classes-dir` | JVM | Resource directories (`resources/`, then the output of `kind = "resources"` steps) and where classes are compiled to |
 | `compose-resources` | JVM | With `[frameworks] compose` and a `composeResources/` directory: the `package` of the generated `Res` class, the `source-root` that holds `Res.kt` and the `resource-root` put on the classpath. `kargo metadata` writes them, so editors resolve `Res` before a build. `null` otherwise |
 | `jvm-target`, `main-class`, `jvm-args`, `javac-args` | JVM | The bytecode version the build uses, the main class (`[target.jvm] main-class`, or the single `main` in the sources, else `null`), and the extra JVM and javac options |
 | `environment`, `wasm-kind`, `module-name` | Wasm | `[target.wasm]` settings |

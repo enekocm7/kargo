@@ -22,6 +22,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     bin: Vec<RawBin>,
     #[serde(default)]
+    generate: Vec<RawGenerate>,
+    #[serde(default)]
     dependencies: toml::Table,
     #[serde(default)]
     dev_dependencies: toml::Table,
@@ -1149,7 +1151,7 @@ struct RawTask {
 }
 
 /// Parses a task's `run` or `windows-run`: a string or an array of strings.
-fn parse_run(task: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<String>>> {
+fn parse_run(what: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<String>>> {
     Ok(match value {
         None => None,
         Some(Value::String(s)) => Some(vec![s]),
@@ -1158,11 +1160,11 @@ fn parse_run(task: &str, key: &str, value: Option<Value>) -> Result<Option<Vec<S
                 .into_iter()
                 .map(|v| match v {
                     Value::String(s) => Ok(s),
-                    _ => bail!("task `{task}`: `{key}` entries must be strings"),
+                    _ => bail!("{what}: `{key}` entries must be strings"),
                 })
                 .collect::<Result<_>>()?,
         ),
-        Some(_) => bail!("task `{task}`: `{key}` must be a string or an array of strings"),
+        Some(_) => bail!("{what}: `{key}` must be a string or an array of strings"),
     })
 }
 
@@ -1201,8 +1203,9 @@ fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
             Value::Table(_) => value.clone().try_into().with_context(|| format!("invalid task `{name}`"))?,
             _ => bail!("invalid task `{name}`: expected a command string or a table"),
         };
-        let run = parse_run(name, "run", raw.run)?.unwrap_or_default();
-        let windows_run = parse_run(name, "windows-run", raw.windows_run)?;
+        let what = format!("task `{name}`");
+        let run = parse_run(&what, "run", raw.run)?.unwrap_or_default();
+        let windows_run = parse_run(&what, "windows-run", raw.windows_run)?;
         if windows_run.is_some() && run.is_empty() {
             bail!("task `{name}`: `windows-run` needs a `run` to use on other platforms");
         }
@@ -1937,6 +1940,7 @@ impl RawManifest {
         }
 
         let bins = validate_bins(self.bin)?;
+        let generators = validate_generators(self.generate)?;
         let doc = self.doc.validate()?;
         let fmt = self.fmt.validate()?;
         let lint = self.lint.validate()?;
@@ -1994,6 +1998,7 @@ impl RawManifest {
             },
             targets,
             bins,
+            generators,
             dependencies,
             dev_dependencies,
             path_dependencies,
@@ -2047,6 +2052,297 @@ fn validate_bins(raw: Vec<RawBin>) -> Result<Vec<Bin>> {
         bins.push(Bin { name, main: b.main, entry_point: b.entry_point, path: b.path });
     }
     Ok(bins)
+}
+
+/// One `[[generate]]` step as written.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawGenerate {
+    name: String,
+    #[serde(default)]
+    inputs: Vec<String>,
+    run: Option<Value>,
+    windows_run: Option<Value>,
+    shell: Option<String>,
+    tool: Option<String>,
+    main_class: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    builtin: Option<String>,
+    targets: Option<Vec<String>>,
+    kind: Option<String>,
+    #[serde(default)]
+    roots: Vec<String>,
+    #[serde(default)]
+    after: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    // builtin = "build-config"
+    package: Option<String>,
+    object: Option<String>,
+    #[serde(default)]
+    fields: BTreeMap<String, BuildConfigValue>,
+    #[serde(default)]
+    expose: Vec<String>,
+    build_time: Option<bool>,
+    // builtin = "protobuf"
+    version: Option<String>,
+    proto_path: Option<Vec<String>>,
+    java: Option<bool>,
+    kotlin: Option<bool>,
+    grpc: Option<bool>,
+    grpc_java_version: Option<String>,
+    grpc_kotlin_version: Option<String>,
+}
+
+impl RawGenerate {
+    /// The keys that only some `builtin` generators read, with the ones they belong to.
+    fn builtin_keys(&self) -> [(&'static str, bool, &'static str); 12] {
+        let build_config = "build-config";
+        let protobuf = "protobuf";
+        [
+            ("package", self.package.is_some(), build_config),
+            ("object", self.object.is_some(), build_config),
+            ("fields", !self.fields.is_empty(), build_config),
+            ("expose", !self.expose.is_empty(), build_config),
+            ("build-time", self.build_time.is_some(), build_config),
+            ("version", self.version.is_some(), protobuf),
+            ("proto-path", self.proto_path.is_some(), protobuf),
+            ("java", self.java.is_some(), protobuf),
+            ("kotlin", self.kotlin.is_some(), protobuf),
+            ("grpc", self.grpc.is_some(), protobuf),
+            ("grpc-java-version", self.grpc_java_version.is_some(), protobuf),
+            ("grpc-kotlin-version", self.grpc_kotlin_version.is_some(), protobuf),
+        ]
+    }
+}
+
+/// Validates `[[generate]]`: unique names, exactly one of `run`, `tool` and `builtin`, known targets,
+/// `after` naming other steps without cycles, and keys that fit the way the step works.
+fn validate_generators(raw: Vec<RawGenerate>) -> Result<Vec<Generator>> {
+    let mut generators: Vec<Generator> = Vec::new();
+    for g in raw {
+        let name = g.name.clone();
+        if name.is_empty()
+            || !name.starts_with(|c: char| c.is_ascii_alphabetic())
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            bail!("invalid [[generate]] name `{name}` (start with a letter; use letters, digits, `-` and `_`)");
+        }
+        if generators.iter().any(|other| other.name == name) {
+            bail!("[[generate]] `{name}` is declared more than once");
+        }
+        let what = format!("[[generate]] `{name}`");
+        let run = parse_run(&what, "run", g.run.clone())?;
+        let windows_run = parse_run(&what, "windows-run", g.windows_run.clone())?;
+        let ways = [run.is_some(), g.tool.is_some(), g.builtin.is_some()].into_iter().filter(|set| *set).count();
+        if ways != 1 {
+            bail!(
+                "{what}: set exactly one of `run` (a shell command), `tool` (a Maven artifact to run) and `builtin` ({})",
+                BUILTIN_GENERATORS.join(", ")
+            );
+        }
+        if run.as_ref().is_some_and(Vec::is_empty) {
+            bail!("{what}: `run` has no command");
+        }
+        if run.is_none() && (windows_run.is_some() || g.shell.is_some()) {
+            bail!("{what}: `{}` goes with `run`", if windows_run.is_some() { "windows-run" } else { "shell" });
+        }
+        if g.tool.is_none() && g.main_class.is_some() {
+            bail!("{what}: `main-class` goes with `tool`");
+        }
+        if let Some(class) = &g.main_class
+            && (class.is_empty() || !class.split('.').all(|seg| !seg.is_empty() && !seg.contains(char::is_whitespace)))
+        {
+            bail!("{what}: invalid `main-class` `{class}` (expected a qualified name such as `org.example.Main`)");
+        }
+        if !g.args.is_empty() && g.tool.is_none() && g.builtin.as_deref() != Some("protobuf") {
+            bail!("{what}: `args` goes with `tool` or `builtin = \"protobuf\"`; put the arguments of a `run` command in the command");
+        }
+        let shell = match g.shell.as_deref() {
+            None => None,
+            Some(s) => Some(TaskShell::parse(s).with_context(|| {
+                let known: Vec<_> = TaskShell::ALL.iter().map(|s| s.as_str()).collect();
+                format!("{what}: unknown shell `{s}`; expected one of {}", known.join(", "))
+            })?),
+        };
+        if let Some(builtin) = &g.builtin {
+            if !BUILTIN_GENERATORS.contains(&builtin.as_str()) {
+                bail!("{what}: unknown builtin `{builtin}` (expected one of: {})", BUILTIN_GENERATORS.join(", "));
+            }
+            if let Some((key, _, owner)) = g.builtin_keys().into_iter().find(|(_, set, owner)| *set && owner != builtin) {
+                bail!("{what}: `{key}` goes with `builtin = \"{owner}\"`");
+            }
+        } else if let Some((key, _, owner)) = g.builtin_keys().into_iter().find(|(_, set, _)| *set) {
+            bail!("{what}: `{key}` goes with `builtin = \"{owner}\"`");
+        }
+        let is_class = |s: &str| !s.is_empty() && s.split('.').all(is_java_identifier);
+        let action = match (run, &g.tool, g.builtin.as_deref()) {
+            (Some(run), _, _) => GeneratorAction::Run { run, windows_run, shell },
+            (_, Some(tool), _) => {
+                let parts: Vec<&str> = tool.split(':').collect();
+                let [group, artifact, version] = parts.as_slice() else {
+                    bail!("{what}: `tool` must be `group:artifact:version`, got `{tool}`");
+                };
+                if [group, artifact, version].iter().any(|p| p.is_empty() || p.contains(char::is_whitespace)) {
+                    bail!("{what}: `tool` must be `group:artifact:version`, got `{tool}`");
+                }
+                GeneratorAction::Tool {
+                    module: ModuleId::new(*group, *artifact),
+                    version: (*version).to_owned(),
+                    main_class: g.main_class.clone(),
+                    args: g.args.clone(),
+                }
+            }
+            (_, _, Some("build-config")) => {
+                if !g.inputs.is_empty() {
+                    bail!("{what}: `inputs` does not apply to `builtin = \"build-config\"`; it is written from kargo.toml and Git");
+                }
+                if let Some(package) = &g.package
+                    && !is_class(package)
+                {
+                    bail!("{what}: invalid `package` `{package}` (expected a Kotlin package such as `com.example.app`)");
+                }
+                let object = g.object.clone().unwrap_or_else(|| "BuildConfig".to_owned());
+                if !is_java_identifier(&object) || object.contains('$') {
+                    bail!("{what}: `object` must be a Kotlin name such as `BuildConfig`, got `{object}`");
+                }
+                for field in g.fields.keys().chain(&g.expose) {
+                    if !is_java_identifier(field) || field.contains('$') {
+                        bail!("{what}: `{field}` is not a valid constant name");
+                    }
+                }
+                const FIXED: [&str; 6] = ["VERSION", "GROUP", "NAME", "GIT_SHA", "BUILD_TIME", "PROFILE"];
+                if let Some(field) = g.fields.keys().chain(&g.expose).find(|f| FIXED.contains(&f.as_str())) {
+                    bail!("{what}: `{field}` is one of the constants Kargo writes; pick another name");
+                }
+                GeneratorAction::BuildConfig(BuildConfigGenerator {
+                    package: g.package.clone(),
+                    object,
+                    fields: g.fields.clone(),
+                    expose: g.expose.clone(),
+                    build_time: g.build_time.unwrap_or(false),
+                })
+            }
+            (_, _, Some("protobuf")) => {
+                let (java, kotlin, grpc) = (g.java.unwrap_or(true), g.kotlin.unwrap_or(true), g.grpc.unwrap_or(false));
+                if !java && !kotlin {
+                    bail!("{what}: `java` and `kotlin` are both off, so there is nothing to generate");
+                }
+                if kotlin && !java {
+                    bail!("{what}: the Kotlin DSL wraps the Java classes; turn `java` on or `kotlin` off");
+                }
+                for (key, version) in
+                    [("version", &g.version), ("grpc-java-version", &g.grpc_java_version), ("grpc-kotlin-version", &g.grpc_kotlin_version)]
+                {
+                    if let Some(v) = version
+                        && (v.is_empty() || v.contains(|c: char| c.is_whitespace() || "[](),".contains(c)))
+                    {
+                        bail!("{what}: `{key}` must be one exact version, got `{v}`");
+                    }
+                }
+                if !grpc && (g.grpc_java_version.is_some() || g.grpc_kotlin_version.is_some()) {
+                    bail!("{what}: the gRPC plugin versions go with `grpc = true`");
+                }
+                if !(grpc && kotlin) && g.grpc_kotlin_version.is_some() {
+                    bail!("{what}: `grpc-kotlin-version` goes with `grpc = true` and `kotlin = true`");
+                }
+                GeneratorAction::Protobuf(ProtobufGenerator {
+                    version: g.version.clone(),
+                    proto_path: g.proto_path.clone().unwrap_or_else(|| vec!["proto".to_owned()]),
+                    java,
+                    kotlin,
+                    grpc,
+                    grpc_java_version: g.grpc_java_version.clone(),
+                    grpc_kotlin_version: g.grpc_kotlin_version.clone(),
+                    args: g.args.clone(),
+                })
+            }
+            _ => unreachable!("exactly one way was checked above"),
+        };
+
+        let is_protobuf = matches!(action, GeneratorAction::Protobuf(_));
+        let targets = match &g.targets {
+            Some(names) => {
+                let mut targets: Vec<TargetKind> = Vec::new();
+                for t in names {
+                    let target: TargetKind = t.parse().with_context(|| format!("{what}: invalid `targets`"))?;
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+                if targets.is_empty() {
+                    bail!("{what}: `targets` is empty; leave it out to generate for every target");
+                }
+                targets
+            }
+            // Protobuf's Java and Kotlin classes only exist on the JVM.
+            None if is_protobuf => vec![TargetKind::Jvm, TargetKind::Android],
+            None => TargetKind::ALL.to_vec(),
+        };
+        let kind: GeneratedKind = match &g.kind {
+            Some(k) => k.parse().with_context(|| what.clone())?,
+            None => GeneratedKind::default(),
+        };
+        if kind == GeneratedKind::Resources && !targets.iter().any(|t| matches!(t, TargetKind::Jvm | TargetKind::Android)) {
+            bail!("{what}: resources only exist on the jvm and android targets; add one to `targets`");
+        }
+        let mut inputs = g.inputs.clone();
+        if inputs.is_empty() && is_protobuf {
+            inputs.push("proto/**/*.proto".to_owned());
+        }
+        let mut roots = Vec::new();
+        for root in &g.roots {
+            let slashed = root.replace(r"\", "/");
+            let normalized = slashed.trim_end_matches('/');
+            if slashed.starts_with('/')
+                || normalized.is_empty()
+                || normalized.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+                || normalized.contains(':')
+            {
+                bail!("{what}: `roots` entry `{root}` must be a directory inside the output, such as `src/main/kotlin`");
+            }
+            if !roots.iter().any(|r| r == normalized) {
+                roots.push(normalized.to_owned());
+            }
+        }
+        generators.push(Generator { name, inputs, action, targets, kind, roots, after: g.after, env: g.env });
+    }
+    for g in &generators {
+        for dep in &g.after {
+            if dep == &g.name {
+                bail!("[[generate]] `{}` runs after itself", g.name);
+            }
+            if !generators.iter().any(|other| &other.name == dep) {
+                bail!("[[generate]] `{}` runs after `{dep}`, which no [[generate]] declares", g.name);
+            }
+        }
+    }
+    // Follow `after` from every step to find a cycle.
+    fn visit<'a>(generators: &'a [Generator], name: &'a str, path: &mut Vec<&'a str>, done: &mut Vec<&'a str>) -> Result<()> {
+        if done.contains(&name) {
+            return Ok(());
+        }
+        if let Some(pos) = path.iter().position(|n| *n == name) {
+            let mut cycle: Vec<&str> = path[pos..].to_vec();
+            cycle.push(name);
+            bail!("[[generate]] steps wait for each other: {}", cycle.join(" -> "));
+        }
+        path.push(name);
+        if let Some(g) = generators.iter().find(|g| g.name == name) {
+            for dep in &g.after {
+                visit(generators, dep, path, done)?;
+            }
+        }
+        path.pop();
+        done.push(name);
+        Ok(())
+    }
+    let mut done = Vec::new();
+    for g in &generators {
+        visit(&generators, &g.name, &mut Vec::new(), &mut done)?;
+    }
+    Ok(generators)
 }
 
 /// Fails unless `version` (a tool version from `[section] key`) is one exact version.
