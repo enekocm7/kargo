@@ -786,6 +786,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "script",
         "outdated",
         "upgrade",
+        "vendor",
         "target",
         "info",
         "plugins",
@@ -3533,4 +3534,122 @@ fn install_from_maven_runs_the_main_class_of_the_jar_or_the_pom() {
 
     p.kargo().args(["uninstall", "greeter", "--root"]).arg(root.path()).assert().success();
     assert!(!root.path().join("bin/greeter").exists() && !root.path().join("bin/greeter.cmd").exists());
+}
+
+/// A repository with what `kargo fetch` needs for a JVM project offline: its dependencies (one
+/// through a version range), the standard library, JUnit, a stand-in Kotlin compiler and the
+/// JUnit console launcher.
+fn vendor_repo() -> LocalRepo {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[("g:util", "[1.0,2.0)")])
+        .publish("g:util", "1.0", &[])
+        .publish("g:other", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-compiler-embeddable", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[])
+        .publish("org.junit.platform:junit-platform-console-standalone", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    repo
+}
+
+#[test]
+fn vendors_dependencies_and_builds_from_them_alone() {
+    let repo = vendor_repo();
+    let p = Project::new();
+    let deps = "\"g:lib\" = \"1.0\"\n\"g:other\" = \"1.0\"\n";
+    let toml = |deps: &str| {
+        manifest("app", &format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n{deps}[repositories]\nlocal = \"{}\"\n", repo.url()))
+    };
+    p.file("kargo.toml", &toml(deps));
+
+    p.kargo()
+        .args(["vendor", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Vendored"))
+        .stderr(predicate::str::contains("vendored = true"));
+    for rel in ["g/lib/1.0/lib-1.0.jar", "g/lib/1.0/lib-1.0.pom", "g/lib/1.0/lib-1.0.jar.sha1", "g/util/maven-metadata.xml"] {
+        assert!(p.path().join("vendor").join(rel).is_file(), "{rel}");
+    }
+    let sha1 = p.read("vendor/g/lib/1.0/lib-1.0.jar.sha1");
+    assert_eq!(sha1.trim(), kargo_util::hash::sha1_file(&p.path().join("vendor/g/lib/1.0/lib-1.0.jar")).unwrap());
+    let compiler = p.path().join("vendor/org/jetbrains/kotlin/kotlin-compiler-embeddable");
+    assert!(!compiler.exists(), "the compiler is a toolchain");
+    let lock = p.read("kargo.lock");
+
+    p.kargo().args(["vendor", "--toolchains", "--offline"]).assert().success();
+    assert!(compiler.join("2.4.21/kotlin-compiler-embeddable-2.4.21.jar").is_file());
+    assert_eq!(p.read("kargo.lock"), lock, "vendoring leaves kargo.lock alone");
+
+    // A dependency that is gone leaves its files until `--sync`.
+    p.file("kargo.toml", &toml("\"g:lib\" = \"1.0\"\n"));
+    p.kargo().args(["vendor", "--toolchains", "--offline"]).assert().success();
+    assert!(p.path().join("vendor/g/other").is_dir());
+    p.kargo().args(["vendor", "--toolchains", "--sync", "--offline"]).assert().success().stderr(predicate::str::contains(" removed)"));
+    assert!(!p.path().join("vendor/g/other").exists());
+    assert!(p.path().join("vendor/g/lib/1.0/lib-1.0.jar").is_file());
+    let lock = p.read("kargo.lock");
+
+    // On a machine without the repository and with an empty cache, only the vendored repository is left.
+    drop(repo);
+    std::fs::remove_dir_all(p.home.path()).unwrap();
+    p.kargo().args(["tree", "--offline"]).assert().failure();
+    p.kargo().args(["tree", "--vendored", "--locked"]).assert().success().stdout(predicate::str::contains("g:util:1.0"));
+    p.kargo()
+        .args(["info", "--vendored"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("local (via ").and(predicate::str::contains("vendor")));
+    // Resolving again, version range included, needs only the vendored POMs and metadata.
+    p.kargo().args(["update", "--vendored"]).assert().success();
+    assert_eq!(p.read("kargo.lock"), lock);
+
+    // `[source] vendored` in the project's configuration does the same.
+    p.file(".kargo/config.toml", "[source]\nvendored = true\n");
+    p.kargo().args(["tree", "--locked"]).assert().success().stdout(predicate::str::contains("g:util:1.0"));
+    p.file(".kargo/config.toml", "[source]\nvendored = true\ndirectory = \"elsewhere\"\n");
+    p.kargo().args(["tree"]).assert().failure().stderr(predicate::str::contains("run `kargo vendor` first"));
+}
+
+#[test]
+fn mirrors_replace_the_declared_repositories() {
+    let repo = vendor_repo();
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n[repositories]\ncorp = \"https://corp.invalid/maven\"\n",
+        ),
+    );
+    // Without a mirror, nothing is found.
+    p.kargo().args(["tree", "--offline"]).assert().failure();
+
+    // A mirror in the user's configuration replaces Maven Central and `corp`.
+    std::fs::write(p.home.path().join("config.toml"), format!("[mirrors]\n\"*\" = \"{}\"\n", repo.url())).unwrap();
+    p.kargo().args(["tree", "--offline"]).assert().success().stdout(predicate::str::contains("g:util:1.0"));
+    p.kargo()
+        .arg("info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("maven-central (via file:"))
+        .stdout(predicate::str::contains("corp (via file:"))
+        .stdout(predicate::str::contains("config.toml"));
+    let info = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let info: serde_json::Value = serde_json::from_slice(&info).unwrap();
+    assert_eq!(info["repositories"][0]["url"], "https://repo.maven.apache.org/maven2");
+    assert!(info["repositories"][0]["effective-url"].as_str().unwrap().starts_with("file:"));
+
+    // kargo.lock fingerprints the declared repositories, so it holds without the mirror too.
+    std::fs::remove_file(p.home.path().join("config.toml")).unwrap();
+    p.kargo().args(["tree", "--offline", "--locked"]).assert().success();
+
+    // A project's own configuration wins over the user's, and bad settings are errors.
+    std::fs::write(p.home.path().join("config.toml"), "[mirrors]\n\"*\" = \"https://unused.invalid\"\n").unwrap();
+    p.file(".kargo/config.toml", &format!("[mirrors]\n\"*\" = \"{}\"\n", repo.url()));
+    p.kargo().args(["tree", "--offline", "--refresh"]).assert().success();
+    p.file(".kargo/config.toml", "[mirrors]\n\"*\" = \"nexus\"\n");
+    p.kargo().args(["tree", "--offline"]).assert().failure().stderr(predicate::str::contains("must be an http(s):// or file: URL"));
+    p.file(".kargo/config.toml", "[http]\ncainfo = \"missing.pem\"\n");
+    p.kargo().args(["tree", "--offline"]).assert().failure().stderr(predicate::str::contains("cainfo"));
 }

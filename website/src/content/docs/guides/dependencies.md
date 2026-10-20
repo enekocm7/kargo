@@ -312,6 +312,8 @@ local = "maven-local"
 
 Credentials are never written in `kargo.toml`; Kargo reads them from the named environment variables.
 
+To send every repository through a company mirror, or build from a copy of the dependencies kept in the project, see [Offline and corporate builds](../offline-and-mirrors/).
+
 `maven-local` holds what `kargo publish --local`, `mvn install` and Gradle's `publishToMavenLocal` install, so a library you publish locally can be used by your other projects right away. See [Publishing a library](../publishing/).
 
 ## SNAPSHOT versions

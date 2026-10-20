@@ -64,6 +64,7 @@ export default defineConfig({
 						{ label: 'Environment variables', slug: 'guides/environment' },
 						{ label: 'Managing JDKs', slug: 'guides/toolchains' },
 						{ label: 'Continuous integration', slug: 'guides/ci' },
+						{ label: 'Offline and corporate builds', slug: 'guides/offline-and-mirrors' },
 						{ label: 'Build performance', slug: 'guides/build-performance' },
 						{ label: 'Editor integration', slug: 'guides/editors' },
 						{ label: "Kargo's Kotlin server", slug: 'guides/kotlin-server' },

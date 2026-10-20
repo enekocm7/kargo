@@ -643,13 +643,17 @@ dependencies = [
  "anstream",
  "anstyle",
  "anyhow",
+ "base64",
  "dirs",
  "hex",
  "ignore",
  "md-5",
+ "serde",
  "sha1",
  "sha2",
  "tempfile",
+ "toml",
+ "ureq",
  "walkdir",
 ]
 

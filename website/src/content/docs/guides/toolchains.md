@@ -122,4 +122,6 @@ COPY . .
 RUN kargo build --release --offline
 ```
 
+To build without network access at all, [`kargo vendor --toolchains`](../offline-and-mirrors/#vendoring-dependencies) copies the dependencies, the Kotlin compiler and Kotlin/Native into the project. On a corporate network, `[toolchain-mirrors]` in `~/.kargo/config.toml` sends the JDK, GraalVM and Gradle downloads to your own server (see [Toolchain mirrors](../offline-and-mirrors/#toolchain-mirrors)).
+
 `kargo fetch` also downloads the JDK that `[toolchain] jdk` pins, the JUnit launcher for `kargo test`, the JMH libraries for `kargo bench` in a package with benchmarks, and the npm packages of Wasm dependencies. Add `--tools` to fetch the documentation and formatting tools too (see [`kargo fetch`](../../reference/commands/#kargo-fetch)).

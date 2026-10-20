@@ -1,6 +1,6 @@
 //! Remote Maven repositories and the local download cache.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -89,6 +89,40 @@ fn basic_auth(creds: &Credentials) -> String {
     format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", creds.username, creds.password)))
 }
 
+/// The repository `kargo vendor` wrote at `dir`, the only one used by a `--vendored` build.
+pub fn vendor_repository(dir: &Path) -> Repository {
+    Repository::new("vendor", dir.to_string_lossy().into_owned())
+}
+
+/// The repositories Kargo actually contacts for `declared`: only the vendored one in a `--vendored`
+/// build, else each remote repository replaced by its mirror from `[mirrors]` (with the mirror's
+/// credentials), and repositories that end up at the same URL merged. Repositories on disk are kept.
+pub fn effective_repositories(config: &Config, declared: &[Repository]) -> Vec<Repository> {
+    if let Some(dir) = config.vendor_dir() {
+        return vec![vendor_repository(dir)];
+    }
+    let settings = config.settings();
+    let mut out: Vec<Repository> = Vec::new();
+    for repo in declared {
+        let mut repo = repo.clone();
+        if !repo.is_local() {
+            if let Some(mirror) = settings.repository_mirror(&repo.name, &repo.url) {
+                repo.url = mirror.trim_end_matches('/').to_owned();
+                repo.credentials = None;
+            }
+            if repo.credentials.is_none()
+                && let Some((username, password)) = settings.credentials(&repo.url)
+            {
+                repo.credentials = Some(Credentials { username, password });
+            }
+        }
+        if !out.iter().any(|r| r.url == repo.url) {
+            out.push(repo);
+        }
+    }
+    out
+}
+
 /// Outcome of looking for a single remote file.
 enum Fetch {
     Found,
@@ -98,6 +132,8 @@ enum Fetch {
 /// Downloads artifacts from an ordered list of repositories into a shared cache.
 pub struct MavenClient {
     repos: Vec<Repository>,
+    /// The repositories as the project declares them, before mirrors and vendoring.
+    declared: Vec<Repository>,
     cache: PathBuf,
     offline: bool,
     refresh: bool,
@@ -113,19 +149,18 @@ pub struct MavenClient {
     rechecked: Mutex<HashSet<String>>,
     /// SNAPSHOTs fixed at a build (`1.0-20240101.120000-1`) instead of the newest one.
     snapshot_builds: Mutex<HashMap<(ModuleId, String), String>>,
+    /// Every file this client served during this run, by repository-relative path (see [`MavenClient::served_files`]).
+    served: Mutex<BTreeMap<String, PathBuf>>,
 }
 
 impl MavenClient {
+    /// A client for the `repos` a project declares; it contacts their mirrors, or only the vendored
+    /// repository, as the configuration says (see [`effective_repositories`]).
     pub fn new(config: &Config, repos: Vec<Repository>) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(600)))
-            .http_status_as_error(false)
-            .user_agent(concat!("kargo/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
+        let agent = kargo_util::http::agent(config, Duration::from_secs(600));
         Self {
-            repos,
+            repos: effective_repositories(config, &repos),
+            declared: repos,
             cache: config.maven_cache(),
             offline: config.offline(),
             refresh: config.refresh(),
@@ -136,6 +171,7 @@ impl MavenClient {
             snapshots: Mutex::new(HashMap::new()),
             rechecked: Mutex::new(HashSet::new()),
             snapshot_builds: Mutex::new(HashMap::new()),
+            served: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -143,8 +179,26 @@ impl MavenClient {
         &self.shell
     }
 
+    /// The repositories this client contacts, after mirrors and vendoring.
     pub fn repositories(&self) -> &[Repository] {
         &self.repos
+    }
+
+    /// The repositories as the project declares them. `kargo.lock` fingerprints these, so moving
+    /// to a mirror or to `vendor/` keeps the lock.
+    pub fn declared_repositories(&self) -> &[Repository] {
+        &self.declared
+    }
+
+    /// Every file this client served during this run (from the cache or a repository), by
+    /// repository-relative path, with its cached copy. `maven-metadata.xml` files are listed under
+    /// that name. `kargo vendor` copies these.
+    pub fn served_files(&self) -> BTreeMap<String, PathBuf> {
+        self.served.lock().expect("lock poisoned").clone()
+    }
+
+    fn serve(&self, rel: &str, cached: &Path) {
+        self.served.lock().expect("lock poisoned").entry(rel.to_owned()).or_insert_with(|| cached.to_path_buf());
     }
 
     pub fn cache_dir(&self) -> &Path {
@@ -164,6 +218,7 @@ impl MavenClient {
             self.recheck_plain_snapshot(rel, &cached);
         }
         if cached.is_file() {
+            self.serve(rel, &cached);
             return Ok(Some(cached));
         }
         if self.missing.lock().expect("lock poisoned").contains(rel) {
@@ -171,7 +226,10 @@ impl MavenClient {
         }
         for repo in &self.repos {
             match self.fetch_from(repo, rel, &cached)? {
-                Fetch::Found => return Ok(Some(cached)),
+                Fetch::Found => {
+                    self.serve(rel, &cached);
+                    return Ok(Some(cached));
+                }
                 Fetch::Missing => continue,
             }
         }
@@ -295,7 +353,7 @@ impl MavenClient {
         let Some(response) = self.get(repo, &url)? else { return Ok(Fetch::Missing) };
         let file_name = rel.rsplit('/').next().unwrap_or(rel);
         if !rel.ends_with(".sha1") && !rel.ends_with("maven-metadata.xml") {
-            self.shell.status("Downloading", file_name);
+            self.shell.status("Downloading", if self.shell.is_verbose() { &url } else { file_name });
         }
         let mut reader = response.into_body().into_reader();
         kfs::write_atomic_if_absent(dest, |f| io::copy(&mut reader, f).map(|_| ())).with_context(|| format!("failed to download {url}"))?;
@@ -479,6 +537,11 @@ impl MavenClient {
         self.offline
     }
 
+    /// Whether cached metadata is ignored (`--refresh`).
+    pub fn refresh(&self) -> bool {
+        self.refresh
+    }
+
     /// Lists all versions of a module known to any repository (`maven-metadata.xml`).
     pub fn versions(&self, module: &ModuleId) -> Result<Vec<Version>> {
         let mut versions: Vec<Version> = Vec::new();
@@ -522,7 +585,9 @@ impl MavenClient {
                 }
             }
         }
-        std::fs::read_to_string(cached).ok()
+        let text = std::fs::read_to_string(cached).ok()?;
+        self.serve(rel, cached);
+        Some(text)
     }
 
     /// The repository-relative path of `artifact`. A SNAPSHOT is deployed as timestamped builds
