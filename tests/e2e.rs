@@ -310,6 +310,38 @@ fn jvm_tests_are_listed_and_reported_as_json() {
 }
 
 #[test]
+fn thin_jar_follows_main_class_and_runtime_classpath() {
+    require_e2e!();
+    let t = E2e::new();
+    let package = "[package]\nname = \"stale\"\nversion = \"0.1.0\"\n";
+    t.write("stale/kargo.toml", &format!("{package}\n[target.jvm]\nmain-class = \"MainKt\"\n"));
+    t.write("stale/src/Main.kt", "fun main() = println(\"main\")\n");
+    t.write("stale/src/Other.kt", "object Other { @JvmStatic fun main(args: Array<String>) = println(\"other\") }\n");
+    t.kargo("stale").arg("build").assert().success();
+
+    // Neither change recompiles anything, but both must reach the jar's manifest.
+    let repo = common::LocalRepo::new();
+    repo.publish("com.acme:lib", "1.0", &[]);
+    t.write(
+        "stale/kargo.toml",
+        &format!(
+            "{package}\n[target.jvm]\nmain-class = \"Other\"\n\n[repositories]\nlocal = \"{}\"\n\n\
+             [dependencies]\n\"com.acme:lib\" = {{ version = \"1.0\", scope = \"runtime\" }}\n",
+            repo.url()
+        ),
+    );
+    t.kargo("stale").arg("build").assert().success().stderr(predicate::str::contains("Compiling").not());
+
+    let jar = t.dir.path().join("stale/target/debug/jvm/stale-0.1.0.jar");
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut archive.by_name("META-INF/MANIFEST.MF").unwrap(), &mut text).unwrap();
+    let text = text.replace("\r\n ", "");
+    assert!(text.contains("Main-Class: Other\r\n"), "{text}");
+    assert!(text.contains("lib/lib-1.0.jar"), "{text}");
+}
+
+#[test]
 fn main_class_detection() {
     require_e2e!();
     let t = E2e::new();
