@@ -25,13 +25,14 @@ $ kargo test
 
 | Command | Description |
 |---|---|
-| `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace |
+| `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...] [--bench] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace |
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo build [--release \| --profile <name>] [-t <target>] [--keep-going] [--xcframework] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target and reports each failure; `--xcframework` combines Apple frameworks into an XCFramework; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release \| --profile <name>] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
 | `kargo run [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--native-agent] [--flavor <name>] [--env-file <path>] [--no-env-file] [--watch [--clear] [--ignore <glob>]] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--native-agent` runs it on GraalVM with the tracing agent, recording ``kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`` configuration in `native-image/`; `--flavor` picks the Android product flavor to install; `--watch` rebuilds and restarts the program when its files change (a failed build leaves the running one alone), see [watch mode](https://enekocm7.github.io/kargo/guides/watch/) |
 | `kargo script <file> [args]...` / `kargo script -e <code> [args]...` | Run a single Kotlin file without a project: a `.kts` script with `@file:DependsOn` and other `@file:` annotations, or a `.kt` file with a `/* kargo ... */` front matter; dependencies resolve and cache like a project's, and a second run of an unchanged script starts without compiling; `-e` runs code from the command line; `--` separates arguments that start with `-` |
 | `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [--env-file <path>] [--no-env-file] [-t <target>] [--watch [--clear] [--ignore <glob>]]` | Compile and run tests; `--watch` runs them again on every change; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
+| `kargo bench [filter] [--no-run] [--save <name>] [--baseline <name>] [--format json] [--warmup <NxT>] [--iterations <NxT>] [--forks <n>] [--mode <mode>] [--time-unit <unit>] [--env-file <path>] [--no-env-file] [--profile <name>]` | Run the JVM benchmarks in `benches/` with JMH (kotlinx-benchmark annotations), always optimized (the `release` profile, or `[profile.bench]`); `--save` stores the results as a baseline in `target/bench/`, `--baseline` compares with one (`1.20 ms -> 1.05 ms (-12.5%, p < 0.05)`); `--format json` prints JMH's JSON results |
 | `kargo watch [-x <command>]... [command] [--clear] [--ignore <glob>]` | Run a kargo command again whenever the project's files change, such as `kargo watch check` or `kargo watch -x "test -t jvm" -x run`; the commands run in order, and `--ignore` takes gitignore-style patterns |
 | `kargo doc [--open] [-t <target>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo fmt [--check]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
@@ -81,6 +82,7 @@ src-jvm/             target-specific sources: src-wasm/, src-native/, src-androi
 tests/               common tests (kotlin.test)
 tests-jvm/ ...       target-specific tests
 test-fixtures/       test helpers the tests of dependent packages can use (`test-fixtures = true`)
+benches/             common benchmarks for kargo bench (JVM); benches-jvm/ for JVM-only ones
 resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm browser app
 composeResources/    Compose images, fonts, strings and files, read through the generated Res class
 android/             AndroidManifest.xml, res/, assets/
@@ -215,7 +217,7 @@ compiler-args = []          # also: debug, optimize
 
 [profile.staging]           # kargo build --profile staging
 inherits = "release"        # the profile it starts from (default "dev")
-jvm-args = ["-Xmx1g"]       # for kargo run and kargo test; also: dependencies, env
+jvm-args = ["-Xmx1g"]       # for kargo run, test and bench; also: dependencies, env
 
 [doc]                       # kargo doc (Dokka); every key is optional
 includes = ["docs/module.md"]
@@ -234,6 +236,14 @@ fail-fast = false           # test every target even if one fails (default: true
 timeout = "10m"             # stop the whole test run after this long (optional)
 test-timeout = "30s"        # fail a JVM test that runs longer than this (optional)
 jvm-args = ["-Xmx1g"]       # extra JVM arguments for the test process
+
+[bench]                     # kargo bench (JMH); every key is optional
+warmup = "5x1s"             # warmup iterations: a count and how long each lasts (default 3x1s)
+iterations = "5x1s"         # measured iterations (default 5x1s)
+forks = 2                   # JVMs per benchmark (default 2; 0 runs in the launcher's JVM)
+mode = "avgt"               # thrpt, avgt, sample, ss or all (default avgt)
+time-unit = "us"            # ns, us, ms, s, m, h or d (default: whichever reads best)
+jvm-args = ["-Xmx2g"]       # extra JVM arguments for the benchmark JVMs
 ```
 
 Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekocm7.github.io/kargo/schemas/kargo.json`: put `#:schema <url>` on the first line for Taplo-based editors (Even Better TOML, Zed, Helix), or map the URL to `kargo.toml` in your editor. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/).
@@ -310,6 +320,7 @@ compose = true              # Compose Multiplatform (desktop JVM) / Jetpack Comp
 ktor = { server = "netty", client = "cio", server-plugins = ["cors"], client-plugins = ["logging"] }
 lombok = true               # Lombok for Java sources + the Kotlin Lombok plugin
 spring-boot = { starters = ["web", "data-jpa"] }   # BOM, starters, allopen/noarg presets, -Xjsr305=strict
+benchmark = true            # kotlinx-benchmark annotations and JMH for the benchmarks in benches/ (kargo bench)
 ```
 
 Each framework adds its libraries, compiler plugin and compiler flags for every target that supports it.

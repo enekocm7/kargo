@@ -1,6 +1,7 @@
 //! High-level operations behind each CLI command.
 
 pub mod add;
+pub mod bench;
 pub mod build;
 pub mod check;
 pub mod classpath;
@@ -286,7 +287,7 @@ pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Con
 }
 
 /// `kargo fetch`: downloads what later builds need so they can run offline: the compiler and
-/// dependencies, the JDK that `[toolchain] jdk` pins, the JUnit launcher (JVM), the npm packages
+/// dependencies, the JDK that `[toolchain] jdk` pins, the JUnit launcher and the libraries of `benches/` (JVM), the npm packages
 /// (Wasm, when npm, pnpm or bun is on `PATH`) and, with `tools`, the Dokka, ktlint and detekt
 /// jars that `kargo doc`, `fmt` and `lint` run.
 pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<()> {
@@ -314,6 +315,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 if !build::jvm_ksp_path(ctx, &setup, true)?.is_empty() {
                     ctx.ksp_tool()?;
                 }
+                bench::fetch(ctx)?;
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;

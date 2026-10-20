@@ -45,6 +45,8 @@ impl WatchSet {
             paths.extend(TargetKind::ALL.iter().map(|t| package.target_tests(*t)));
             paths.push(package.common_test_fixtures());
             paths.extend(TargetKind::ALL.iter().map(|t| package.target_test_fixtures(*t)));
+            paths.push(package.common_benches());
+            paths.extend(TargetKind::ALL.iter().map(|t| package.target_benches(*t)));
             paths.push(package.examples_dir());
             paths.push(package.resources());
             paths.push(package.root().join(crate::compose::resources::DIR));

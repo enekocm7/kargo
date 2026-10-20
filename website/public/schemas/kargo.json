@@ -476,6 +476,19 @@
         "jvm-args": { "description": "JVM arguments for the test process, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } }
       }
     },
+    "bench": {
+      "description": "Options for `kargo bench`. A setting left out is taken from the benchmarks' JMH annotations, then from Kargo's defaults.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "warmup": { "description": "Warmup iterations as a count and how long each lasts, such as \"5x1s\" or \"3x500ms\". Kargo's default is \"3x1s\".", "type": "string", "examples": ["5x1s"] },
+        "iterations": { "description": "Measured iterations as a count and how long each lasts, such as \"5x1s\". Kargo's default is \"5x1s\".", "type": "string", "examples": ["5x1s"] },
+        "forks": { "description": "How many JVMs run each benchmark one after the other; 0 runs it in the JVM of the launcher. Kargo's default is 2.", "type": "integer", "minimum": 0 },
+        "mode": { "description": "What to measure: thrpt (operations per time), avgt (time per operation), sample (time per operation, sampled), ss (a single operation) or all. Kargo's default is avgt.", "enum": ["thrpt", "avgt", "sample", "ss", "all"] },
+        "time-unit": { "description": "The unit results are reported in. Without one, each result is shown in whichever unit reads best.", "enum": ["ns", "us", "ms", "s", "m", "h", "d"] },
+        "jvm-args": { "description": "JVM arguments for the benchmark JVMs, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } }
+      }
+    },
     "publish": {
       "description": "Options for `kargo publish`.",
       "type": "object",
@@ -681,6 +694,20 @@
                 "version": { "type": "string", "default": "4.1.1" },
                 "starters": { "description": "Starters without the `spring-boot-starter-` prefix.", "type": "array", "items": { "type": "string" }, "default": ["web"] },
                 "jpa": { "description": "Apply the JPA no-arg preset (default: when `data-jpa` is a starter).", "type": "boolean" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "benchmark": {
+          "description": "kotlinx-benchmark's annotations and JMH, for the benchmarks in benches/ that `kargo bench` runs on the JVM.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "description": "The kotlinx-benchmark version.", "type": "string", "default": "0.5.0" }
               }
             },
             { "$ref": "#/definitions/inherit" }

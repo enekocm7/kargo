@@ -1173,6 +1173,128 @@ fn test_section() {
 }
 
 #[test]
+fn bench_section() {
+    assert_eq!(parse(MINIMAL).bench, BenchSettings::default(), "nothing is set by default");
+    let bench = parse(&format!(
+        "{MINIMAL}
+[bench]
+warmup = \"3x500ms\"
+iterations = \"5x2s\"
+forks = 2
+mode = \"avgt\"
+time-unit = \"us\"
+jvm-args = [\"-Xmx1g\"]
+"
+    ))
+    .bench;
+    assert_eq!(bench.warmup, Some(BenchRounds { count: 3, time: Duration::from_millis(500) }));
+    assert_eq!(bench.iterations, Some(BenchRounds { count: 5, time: Duration::from_secs(2) }));
+    assert_eq!(bench.forks, Some(2));
+    assert_eq!(bench.mode, Some(BenchMode::AverageTime));
+    assert_eq!(bench.time_unit.as_deref(), Some("us"));
+    assert_eq!(bench.jvm_args, ["-Xmx1g"]);
+    assert_eq!(
+        parse(&format!(
+            "{MINIMAL}
+[bench]
+forks = 0
+"
+        ))
+        .bench
+        .forks,
+        Some(0),
+        "no forks runs in the launcher's JVM"
+    );
+
+    for bad in ["5", "x1s", "0x1s", "5x", "5x0s", "five x 1s", "5x1 parsec", ""] {
+        let err = parse_err(&format!(
+            "{MINIMAL}
+[bench]
+warmup = \"{bad}\"
+"
+        ));
+        assert!(err.contains("[bench] `warmup` must be a count and a duration"), "{bad}: {err}");
+    }
+    assert!(
+        parse_err(&format!(
+            "{MINIMAL}
+[bench]
+iterations = \"soon\"
+"
+        ))
+        .contains("`iterations`")
+    );
+    assert!(
+        parse_err(&format!(
+            "{MINIMAL}
+[bench]
+mode = \"fast\"
+"
+        ))
+        .contains("unknown benchmark mode `fast`")
+    );
+    assert!(
+        parse_err(&format!(
+            "{MINIMAL}
+[bench]
+time-unit = \"years\"
+"
+        ))
+        .contains("[bench] `time-unit` must be one of")
+    );
+    assert!(
+        parse_err(&format!(
+            "{MINIMAL}
+[bench]
+forks = -1
+"
+        ))
+        .contains("forks")
+    );
+    assert!(
+        parse_err(&format!(
+            "{MINIMAL}
+[bench]
+threads = 2
+"
+        ))
+        .contains("threads")
+    );
+
+    for mode in BenchMode::ALL {
+        assert_eq!(mode.as_str().parse::<BenchMode>().unwrap(), mode);
+    }
+    assert_eq!(BenchRounds { count: 5, time: Duration::from_secs(60) }.to_string(), "5x1m");
+    assert_eq!(BenchRounds { count: 2, time: Duration::from_millis(1500) }.to_string(), "2x1500ms");
+}
+
+#[test]
+fn benchmark_framework() {
+    assert!(parse(MINIMAL).frameworks.benchmark.is_none());
+    assert_eq!(
+        parse(&format!(
+            "{MINIMAL}
+[frameworks]
+benchmark = true
+"
+        ))
+        .frameworks
+        .benchmark,
+        Some(BenchmarkConfig::default())
+    );
+    let pinned = parse(&format!(
+        "{MINIMAL}
+[frameworks]
+benchmark = {{ version = \"0.4.14\" }}
+"
+    ))
+    .frameworks
+    .benchmark
+    .unwrap();
+    assert_eq!(pinned.version.as_deref(), Some("0.4.14"));
+}
+
+#[test]
 fn bin_sections() {
     assert!(parse(MINIMAL).bins.is_empty());
     let m = parse(&format!(

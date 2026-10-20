@@ -14,6 +14,8 @@ For every resolution (one per target and classpath, such as `jvm/runtime`):
 - every resolved module with its version and the dependencies it asked for,
 - the repository path and **SHA-256** of every downloaded file.
 
+`kargo bench` pins the libraries of the benchmarks under `jvm/bench` (the dependencies, dev-dependencies, kotlinx-benchmark and JMH) and JMH's harness generator under `jvm/bench-tools`.
+
 A [profile](../manifest/#profilename) with dependencies of its own has resolutions of its own, named after it: `jvm/runtime@staging` is the runtime classpath of the `staging` profile. The profiles without such dependencies all share `jvm/runtime`.
 
 ```toml title="kargo.lock"

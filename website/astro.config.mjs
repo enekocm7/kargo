@@ -42,6 +42,7 @@ export default defineConfig({
 						{ label: 'Managing dependencies', slug: 'guides/dependencies' },
 						{ label: 'Workspaces', slug: 'guides/workspaces' },
 						{ label: 'Testing', slug: 'guides/testing' },
+						{ label: 'Benchmarking', slug: 'guides/benchmarking' },
 						{ label: 'Watch mode', slug: 'guides/watch' },
 						{ label: 'Several programs', slug: 'guides/multiple-programs' },
 						{ label: 'Kotlin scripts', slug: 'guides/scripts' },

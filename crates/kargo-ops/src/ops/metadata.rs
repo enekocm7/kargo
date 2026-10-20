@@ -173,9 +173,17 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
     let mut out = json!({
         "kind": kind.as_str(),
         "source-roots": roots(&[ws.common_sources(), ws.target_sources(kind)]),
-        // Test fixtures compile like tests, so editors treat them as test sources too.
-        "test-roots": roots(&[ws.common_tests(), ws.target_tests(kind), ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
+        // Test fixtures and benchmarks compile like tests, so editors treat them as test sources too.
+        "test-roots": roots(&[
+            ws.common_tests(),
+            ws.target_tests(kind),
+            ws.common_test_fixtures(),
+            ws.target_test_fixtures(kind),
+            ws.common_benches(),
+            ws.target_benches(kind),
+        ]),
         "test-fixture-roots": roots(&[ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
+        "bench-roots": roots(&[ws.common_benches(), ws.target_benches(kind)]),
         "output-dir": path(&ws.output_dir(&ctx.profile, kind)),
     });
     if kind == TargetKind::Android {

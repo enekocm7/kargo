@@ -35,8 +35,8 @@ use kargo_maven::repo::Credentials;
 use kargo_maven::{CoordSpec, ModuleId, Repository, VersionReq};
 
 pub use raw::{
-    AndroidConfig, AndroidFlavor, AndroidSigning, BuildConfigValue, ComposeConfig, KtorConfig, LombokConfig, SerializationConfig,
-    SpringBootConfig,
+    AndroidConfig, AndroidFlavor, AndroidSigning, BenchmarkConfig, BuildConfigValue, ComposeConfig, KtorConfig, LombokConfig,
+    SerializationConfig, SpringBootConfig,
 };
 
 pub const MANIFEST_NAME: &str = "kargo.toml";
@@ -697,6 +697,7 @@ pub struct Frameworks {
     pub ktor: Option<KtorConfig>,
     pub lombok: Option<LombokConfig>,
     pub spring_boot: Option<SpringBootConfig>,
+    pub benchmark: Option<BenchmarkConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1371,6 +1372,119 @@ impl Default for TestSettings {
     }
 }
 
+/// How JMH measures a benchmark (`[bench] mode`, `kargo bench --mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchMode {
+    /// Operations per unit of time (`thrpt`).
+    Throughput,
+    /// Time per operation (`avgt`).
+    AverageTime,
+    /// Time per operation, sampled, with percentiles (`sample`).
+    SampleTime,
+    /// Time of a single operation (`ss`).
+    SingleShot,
+    /// Every mode (`all`).
+    All,
+}
+
+impl BenchMode {
+    pub const ALL: [BenchMode; 5] =
+        [BenchMode::Throughput, BenchMode::AverageTime, BenchMode::SampleTime, BenchMode::SingleShot, BenchMode::All];
+
+    /// The mode's name in `kargo.toml` and on JMH's command line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BenchMode::Throughput => "thrpt",
+            BenchMode::AverageTime => "avgt",
+            BenchMode::SampleTime => "sample",
+            BenchMode::SingleShot => "ss",
+            BenchMode::All => "all",
+        }
+    }
+}
+
+impl fmt::Display for BenchMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BenchMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        BenchMode::ALL.into_iter().find(|m| m.as_str() == s).with_context(|| {
+            format!("unknown benchmark mode `{s}` (expected one of: {})", BenchMode::ALL.map(BenchMode::as_str).join(", "))
+        })
+    }
+}
+
+/// How many times JMH measures (or warms up) and for how long each time: `5x1s`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BenchRounds {
+    pub count: u32,
+    pub time: Duration,
+}
+
+impl BenchRounds {
+    /// Reads `<count>x<duration>`, such as `5x1s` or `3x500ms`. `what` names the setting, for the error.
+    pub fn parse(what: &str, value: &str) -> Result<Self> {
+        let invalid = || anyhow::anyhow!("{what} must be a count and a duration such as \"5x1s\" or \"3x500ms\", not \"{value}\"");
+        let (count, time) = value.split_once('x').ok_or_else(invalid)?;
+        let count = count.trim().parse::<u32>().ok().filter(|count| *count > 0).ok_or_else(invalid)?;
+        let time = raw::parse_duration_in(what, "duration", time).map_err(|_| invalid())?;
+        Ok(Self { count, time })
+    }
+
+    /// The duration in JMH's spelling: `500ms`, or whole seconds, minutes and hours.
+    pub fn jmh_time(&self) -> String {
+        let ms = self.time.as_millis();
+        if !ms.is_multiple_of(1000) {
+            format!("{ms}ms")
+        } else if !ms.is_multiple_of(60_000) {
+            format!("{}s", ms / 1000)
+        } else if !ms.is_multiple_of(3_600_000) {
+            format!("{}m", ms / 60_000)
+        } else {
+            format!("{}h", ms / 3_600_000)
+        }
+    }
+}
+
+impl fmt::Display for BenchRounds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}x{}", self.count, self.jmh_time())
+    }
+}
+
+/// The units JMH reports times in (`[bench] time-unit`).
+pub const BENCH_TIME_UNITS: [&str; 7] = ["ns", "us", "ms", "s", "m", "h", "d"];
+
+/// Checks a benchmark time unit; `what` names the setting, for the error.
+pub fn validate_time_unit(what: &str, value: &str) -> Result<String> {
+    if BENCH_TIME_UNITS.contains(&value) {
+        return Ok(value.to_owned());
+    }
+    bail!("{what} must be one of {}, not \"{value}\"", BENCH_TIME_UNITS.join(", "))
+}
+
+/// `[bench]`: options for `kargo bench`. Unset keys fall back to the benchmarks' own JMH
+/// annotations, then to Kargo's defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BenchSettings {
+    /// Warmup iterations (`warmup = "5x1s"`).
+    pub warmup: Option<BenchRounds>,
+    /// Measured iterations (`iterations = "5x1s"`).
+    pub iterations: Option<BenchRounds>,
+    /// How many JVMs run each benchmark one after the other; `0` runs it in the JVM of the launcher.
+    pub forks: Option<u32>,
+    pub mode: Option<BenchMode>,
+    /// The unit results are reported in (`ns`, `us`, `ms`, `s`, `m`, `h` or `d`).
+    pub time_unit: Option<String>,
+    /// JVM arguments for the benchmark JVMs, after `[target.jvm] jvm-args`.
+    pub jvm_args: Vec<String>,
+}
+
 /// A named program from `[[bin]]`, run with `kargo run --bin <name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bin {
@@ -1411,6 +1525,7 @@ pub struct Manifest {
     pub fmt: FmtSettings,
     pub lint: LintSettings,
     pub test: TestSettings,
+    pub bench: BenchSettings,
     pub publish: PublishSettings,
 }
 

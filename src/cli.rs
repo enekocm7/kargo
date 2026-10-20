@@ -8,8 +8,9 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, SubcommandCandidates};
 
 use kargo_manifest::edit::DependencySection;
-use kargo_manifest::{Scope, TargetKind};
+use kargo_manifest::{BenchMode, BenchRounds, Scope, TargetKind};
 use kargo_ops::env::EnvOptions;
+use kargo_ops::ops::bench::{BenchOptions, BenchOverrides};
 use kargo_ops::ops::build::BuildOptions;
 use kargo_ops::ops::check::CheckOptions;
 use kargo_ops::ops::classpath::ClasspathScope;
@@ -45,6 +46,7 @@ const COMMON_COMMANDS: &[&str] = &[
     "check",
     "run",
     "test",
+    "bench",
     "watch",
     "add",
     "remove",
@@ -481,9 +483,12 @@ struct NewArgs {
     /// Targets to enable (comma-separated)
     #[arg(short, long = "target", value_enum, value_delimiter = ',', default_value = "jvm")]
     targets: Vec<TargetArg>,
-    /// Built-in frameworks to enable: compose, serialization, coroutines, ktor, lombok, spring-boot
+    /// Built-in frameworks to enable: compose, serialization, coroutines, ktor, lombok, spring-boot, benchmark
     #[arg(short = 'w', long = "with", value_delimiter = ',', add = ArgValueCandidates::new(complete::frameworks))]
     frameworks: Vec<String>,
+    /// Add a sample benchmark in benches/ (the same as `--with benchmark`)
+    #[arg(long)]
+    bench: bool,
     /// Maven group / base package
     #[arg(long, default_value = "com.example")]
     group: String,
@@ -497,7 +502,7 @@ struct NewArgs {
     #[arg(long)]
     no_vcs: bool,
     /// Create an empty workspace (a kargo.toml with [workspace]) instead of a package
-    #[arg(long, conflicts_with_all = ["lib", "targets", "frameworks", "name"])]
+    #[arg(long, conflicts_with_all = ["lib", "targets", "frameworks", "bench", "name"])]
     workspace: bool,
 }
 
@@ -643,6 +648,42 @@ enum Command {
         watch: bool,
         #[command(flatten)]
         watch_args: WatchArgs,
+        #[command(flatten)]
+        env: EnvArgs,
+    },
+    /// Compile and run benchmarks (JMH)
+    Bench {
+        #[command(flatten)]
+        build: BuildArgs,
+        /// Only run benchmarks whose `package.Class.method` name contains this string
+        filter: Option<String>,
+        /// Compile the benchmarks but do not run them
+        #[arg(long, conflicts_with_all = ["save", "baseline"])]
+        no_run: bool,
+        /// Store the results as the baseline NAME in target/bench/
+        #[arg(long, value_name = "NAME")]
+        save: Option<String>,
+        /// Compare the results with the baseline NAME, saved earlier with --save
+        #[arg(long, value_name = "NAME")]
+        baseline: Option<String>,
+        /// Output format; `json` prints JMH's JSON results on stdout and the report on stderr
+        #[arg(long, value_enum, default_value_t, value_name = "FMT")]
+        format: FormatArg,
+        /// Warmup iterations, as a count and a duration such as 3x1s (overrides [bench] warmup)
+        #[arg(long, value_name = "NxTIME", value_parser = parse_rounds)]
+        warmup: Option<BenchRounds>,
+        /// Measured iterations, as a count and a duration such as 5x1s (overrides [bench] iterations)
+        #[arg(long, value_name = "NxTIME", value_parser = parse_rounds)]
+        iterations: Option<BenchRounds>,
+        /// How many JVMs run each benchmark; 0 runs it in the JVM of the launcher (overrides [bench] forks)
+        #[arg(long, value_name = "N")]
+        forks: Option<u32>,
+        /// What to measure: thrpt (operations per time), avgt (time per operation), sample, ss or all (overrides [bench] mode)
+        #[arg(long, value_name = "MODE", value_parser = ["thrpt", "avgt", "sample", "ss", "all"])]
+        mode: Option<String>,
+        /// The unit results are reported in (overrides [bench] time-unit)
+        #[arg(long, value_name = "UNIT", value_parser = kargo_manifest::BENCH_TIME_UNITS)]
+        time_unit: Option<String>,
         #[command(flatten)]
         env: EnvArgs,
     },
@@ -1562,6 +1603,22 @@ fn run_commands(shell: &Shell, exe: &Path, forwarded: &[String], commands: &[Vec
 }
 
 /// The profile a command works with: `--release`, `--profile <name>`, or `dev` by default.
+/// The profile `kargo bench` builds with: the one asked for, else `[profile.bench]` when every selected package
+/// defines it, else `release`. Measuring unoptimized code tells little.
+fn bench_profile(project: &Project, build: &BuildArgs) -> Result<ProfileKind> {
+    if build.release || build.profile.is_some() {
+        return Ok(profile_kind(build.release, build.profile.as_deref()));
+    }
+    let selected = project.select(&build.packages.selection())?;
+    let defined = selected.iter().all(|&index| project.package(index).manifest().profile("bench").is_some());
+    Ok(if defined { ProfileKind::from_name("bench") } else { ProfileKind::Release })
+}
+
+/// Reads `--warmup` and `--iterations`.
+fn parse_rounds(text: &str) -> std::result::Result<BenchRounds, String> {
+    BenchRounds::parse("the value", text).map_err(|e| format!("{e:#}"))
+}
+
 fn profile_kind(release: bool, name: Option<&str>) -> ProfileKind {
     match (release, name) {
         (true, _) => ProfileKind::Release,
@@ -1593,15 +1650,11 @@ fn new_options(dir: &Path, args: NewArgs) -> Result<NewOptions> {
             targets.push(t);
         }
     }
-    Ok(NewOptions {
-        name,
-        group: args.group,
-        lib: args.lib,
-        targets,
-        frameworks: args.frameworks,
-        kotlin_version: args.kotlin,
-        vcs: !args.no_vcs,
-    })
+    let mut frameworks = args.frameworks;
+    if args.bench && !frameworks.iter().any(|f| f == "benchmark") {
+        frameworks.push("benchmark".to_owned());
+    }
+    Ok(NewOptions { name, group: args.group, lib: args.lib, targets, frameworks, kotlin_version: args.kotlin, vcs: !args.no_vcs })
 }
 
 /// `kargo new` and `kargo init`: a package in `dir` (added to the members of the workspace it is
@@ -1640,6 +1693,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
         Command::Build { .. }
             | Command::Check { .. }
             | Command::Test { .. }
+            | Command::Bench { .. }
             | Command::Fetch { .. }
             | Command::Add { .. }
             | Command::Remove { .. }
@@ -1821,6 +1875,36 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 }
                 Some(set)
             })?;
+            Ok(0)
+        }
+        Command::Bench { build, filter, no_run, save, baseline, format, warmup, iterations, forks, mode, time_unit, env } => {
+            set_message_format(build.message_format);
+            let project = load_project(global)?;
+            let opts = BenchOptions {
+                build: BuildOptions { profile: bench_profile(&project, &build)?, ..build.options() },
+                env: env.options(),
+                filter,
+                no_run,
+                save,
+                baseline,
+                json: format == FormatArg::Json,
+                overrides: BenchOverrides {
+                    warmup,
+                    iterations,
+                    forks,
+                    mode: mode.as_deref().map(str::parse::<BenchMode>).transpose()?,
+                    time_unit,
+                },
+            };
+            build_packages(
+                config,
+                &project,
+                &build.packages.selection(),
+                global,
+                opts.build.profile.clone(),
+                (build.jobs.or(Some(1)), true),
+                |ctx| ops::bench::bench(ctx, &opts),
+            )?;
             Ok(0)
         }
         Command::Watch { exec, command, watch_args } => {

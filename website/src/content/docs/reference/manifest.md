@@ -232,6 +232,33 @@ jvm-args = ["-Xmx1g"]
 
 See [Testing every target](../../guides/testing/#testing-every-target) and [Timeouts](../../guides/testing/#timeouts).
 
+## `[bench]`
+
+Options for `kargo bench`. Every key is optional.
+
+```toml
+[bench]
+warmup = "5x1s"
+iterations = "5x1s"
+forks = 2
+mode = "avgt"
+time-unit = "us"
+jvm-args = ["-Xmx2g"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `warmup` | `"3x1s"` | Warmup iterations: a count, `x`, and how long each lasts (`ms`, `s`, `m` or `h`), such as `"5x1s"` or `"3x500ms"` |
+| `iterations` | `"5x1s"` | Measured iterations, in the same format |
+| `forks` | `2` | How many JVMs run each benchmark, one after the other. `0` runs it in the JVM of the launcher, which is faster and less reliable |
+| `mode` | `"avgt"` | What to measure: `thrpt` (operations per time unit), `avgt` (time per operation), `sample` (time per operation, sampled, with percentiles), `ss` (one operation, cold) or `all` |
+| `time-unit` | best fit | The unit results are reported in: `ns`, `us`, `ms`, `s`, `m`, `h` or `d`. Without one, each score is shown in whichever unit reads best |
+| `jvm-args` | `[]` | JVM arguments for the benchmark JVMs, after `[target.jvm] jvm-args` and the profile's [`jvm-args`](#profilename) |
+
+A key you leave out is taken from the JMH annotation on the benchmark (`@Warmup`, `@Measurement`, `@Fork`, `@BenchmarkMode`, `@OutputTimeUnit`) when the sources of `benches/` use it, and otherwise has the default above. The `kargo bench` flags of the same names win over `[bench]`.
+
+See [Benchmarking](../../guides/benchmarking/#settings).
+
 ## `[publish]`
 
 Options for `kargo publish`. Every key is optional.
@@ -569,9 +596,10 @@ compose = true            # or { version, material3 = true, resources-package, p
 ktor = { server = "netty", client = "cio", server-plugins = [], client-plugins = [], json = true, version = "3.6.0" }
 spring-boot = true        # or { version, starters = ["web"], jpa = false }
 lombok = true             # or { version, config = "lombok.config" }
+benchmark = true          # or { version = "0.5.0" }
 ```
 
-Each can also be `false`. Default versions: serialization 1.11.0, coroutines 1.11.0, Compose 1.12.1 (Material 3 1.9.0), Ktor 3.6.0, Spring Boot 4.1.1, Lombok 1.18.48.
+Each can also be `false`. Default versions: serialization 1.11.0, coroutines 1.11.0, Compose 1.12.1 (Material 3 1.9.0), Ktor 3.6.0, Spring Boot 4.1.1, Lombok 1.18.48, kotlinx-benchmark 0.5.0 (with JMH 1.37).
 
 For Compose, `resources-package` is the package of the `Res` class generated from `composeResources/` (default `<group>.<name>.generated.resources`, in lower case), and `public-resources = true` makes `Res` and its accessors `public` instead of `internal`. See [Compose resources](../../guides/compose/#resources).
 
@@ -742,7 +770,7 @@ $ kargo run --profile staging
 | `debug` | `true` | `false` | inherited | Include debug information |
 | `optimize` | `false` | `true` | inherited | Optimize (mainly affects Native and Wasm; for Wasm it removes dead code, see [Release builds](../../guides/wasm/#release-builds)) |
 | `compiler-args` | `[]` | `[]` | inherited | Extra compiler arguments for this profile |
-| `jvm-args` | `[]` | `[]` | inherited | JVM options for `kargo run` and `kargo test`, after `[target.jvm] jvm-args` (`kargo test` puts `[test] jvm-args` last) |
+| `jvm-args` | `[]` | `[]` | inherited | JVM options for `kargo run`, `kargo test` and `kargo bench`, after `[target.jvm] jvm-args` (`kargo test` puts `[test] jvm-args` last, `kargo bench` puts `[bench] jvm-args` last) |
 | `env` | `{}` | `{}` | inherited | `[profile.<name>.env]`: variables that replace the inherited ones of the same name, and an `env-files` list added to the inherited list. Same format as `[env]`, but without `expose` |
 | `dependencies` | `{}` | `{}` | inherited | `[profile.<name>.dependencies]`: dependencies only this profile's builds have, in the format of [`[dependencies]`](#dependencies-and-dev-dependencies). One with the same artifact as an inherited one replaces it |
 

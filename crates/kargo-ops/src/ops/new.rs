@@ -74,6 +74,9 @@ impl NewOptions {
         if self.has("spring-boot") && self.lib {
             bail!("`spring-boot` projects are applications; drop --lib");
         }
+        if self.has("benchmark") && !self.targets.contains(&TargetKind::Jvm) {
+            bail!("`benchmark` supports the jvm target; benchmarks of other targets are not available yet");
+        }
         Ok(())
     }
 }
@@ -356,6 +359,36 @@ fun main() =
     format!("package {pkg}\n\n{imports}fun greeting(name: String): String = \"Hello, $name!\"\n\nfun main() {{\n{body}}}\n")
 }
 
+/// The sample benchmark of `kargo new --bench` and `kargo add --framework benchmark`, in `benches/SampleBench.kt`.
+/// It uses nothing of the project, so it works in any package.
+pub(crate) fn bench_source(pkg: &str) -> String {
+    format!(
+        r#"package {pkg}
+
+import kotlinx.benchmark.Benchmark
+import kotlinx.benchmark.Blackhole
+import kotlinx.benchmark.Scope
+import kotlinx.benchmark.State
+
+// Run it with `kargo bench`. JMH runs each @Benchmark function over and over,
+// so measure the work in the function, not the setup in the fields.
+@State(Scope.Benchmark)
+class SampleBench {{
+    private val numbers = List(1_000) {{ it }}
+
+    @Benchmark
+    fun sum(): Int = numbers.sum()
+
+    // Consuming a result in a Blackhole keeps the JIT compiler from removing the work.
+    @Benchmark
+    fun sumOfSquares(blackhole: Blackhole) {{
+        for (n in numbers) blackhole.consume(n * n)
+    }}
+}}
+"#
+    )
+}
+
 fn test_source(opts: &NewOptions) -> String {
     let pkg = opts.package();
     format!(
@@ -470,6 +503,9 @@ pub fn template(opts: &NewOptions) -> Result<Vec<TemplateFile>> {
     files.push(file("tests/GreetingTest.kt", test_source(opts)));
     if opts.has("ktor") {
         files.push(file("resources/logback.xml", LOGBACK_CONFIG));
+    }
+    if opts.has("benchmark") {
+        files.push(file("benches/SampleBench.kt", bench_source(&opts.package())));
     }
     if opts.targets.contains(&TargetKind::Android) {
         files.extend(android_files(opts, true));
@@ -646,6 +682,31 @@ mod tests {
             let m = Manifest::parse(&files[0].contents).unwrap_or_else(|e| panic!("{targets:?} {frameworks:?}: {e:#}"));
             assert_eq!(m.targets.enabled(), *targets);
         }
+    }
+
+    #[test]
+    fn benchmark_template_has_a_sample_bench() {
+        let files = template(&NewOptions { frameworks: vec!["benchmark".into()], ..opts("bench-demo") }).unwrap();
+        let manifest = &files.iter().find(|f| f.path == Path::new(MANIFEST_NAME)).unwrap().contents;
+        assert!(Manifest::parse(manifest).unwrap().frameworks.benchmark.is_some(), "{manifest}");
+        let sample = &files.iter().find(|f| f.path == Path::new("benches/SampleBench.kt")).unwrap().contents;
+        assert!(
+            sample.starts_with(
+                "package com.example.bench_demo
+"
+            ),
+            "{sample}"
+        );
+        assert!(
+            sample.contains(
+                "@State(Scope.Benchmark)
+class SampleBench"
+            ),
+            "{sample}"
+        );
+        assert!(!template(&opts("plain")).unwrap().iter().any(|f| f.path.starts_with("benches")));
+        let wasm = NewOptions { frameworks: vec!["benchmark".into()], targets: vec![TargetKind::Wasm], ..opts("w") };
+        assert!(template(&wasm).is_err(), "benchmarks run on the JVM");
     }
 
     #[test]

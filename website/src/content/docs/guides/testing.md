@@ -3,7 +3,7 @@ title: Testing
 description: Write and run tests with kotlin.test on every target.
 ---
 
-Tests live in `tests/` (common to all targets) and `tests-<target>/` (one target only). They can use everything in `src/`, including `internal` declarations.
+Tests live in `tests/` (common to all targets) and `tests-<target>/` (one target only). They can use everything in `src/`, including `internal` declarations. To measure how fast code is rather than whether it is right, write a [benchmark](../benchmarking/) instead.
 
 ## Writing tests
 

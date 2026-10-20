@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::workspace::{Project, Workspace, dunce_canonicalize};
 use kargo_manifest::edit::{DependencySection, ManifestEditor, NewDependency};
-use kargo_manifest::{MANIFEST_NAME, Scope};
+use kargo_manifest::{MANIFEST_NAME, Manifest, Scope, TargetKind};
 use kargo_maven::{Artifact, CoordSpec, MavenClient, Repository, VersionReq, select_latest};
 use kargo_util::config::Config;
 
@@ -168,8 +168,30 @@ pub fn add_frameworks(config: &Config, ws: &Workspace, names: &[String]) -> Resu
             config.shell().note(format!("framework `{name}` is already enabled"));
         }
     }
-    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
-    editor.save()
+    let manifest = ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    editor.save()?;
+    if names.iter().any(|name| name == "benchmark") {
+        scaffold_bench(config, ws, &manifest)?;
+    }
+    Ok(())
+}
+
+/// Writes `benches/SampleBench.kt` for a package that has no benchmarks yet.
+fn scaffold_bench(config: &Config, ws: &Workspace, manifest: &Manifest) -> Result<()> {
+    if !manifest.targets.is_enabled(TargetKind::Jvm) {
+        config.shell().note("benchmarks run on the JVM target; add it with `kargo target add jvm`");
+        return Ok(());
+    }
+    let benches = [ws.common_benches(), ws.target_benches(TargetKind::Jvm)];
+    if benches.iter().any(|dir| !kargo_util::fs::collect_files(dir, &["kt", "java"]).is_empty()) {
+        return Ok(());
+    }
+    let package = super::target::new_options(manifest, false).package();
+    let path = ws.common_benches().join("SampleBench.kt");
+    std::fs::create_dir_all(ws.common_benches()).with_context(|| format!("failed to create {}", ws.common_benches().display()))?;
+    std::fs::write(&path, super::new::bench_source(&package)).with_context(|| format!("failed to write {}", path.display()))?;
+    config.shell().status("Created", "benches/SampleBench.kt");
+    Ok(())
 }
 
 /// `kargo add --cinterop <name>`: adds `[target.native.cinterop.<name>]` and, unless it exists,
