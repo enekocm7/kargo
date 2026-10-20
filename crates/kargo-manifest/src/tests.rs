@@ -652,9 +652,34 @@ fn task_errors() {
 
 #[test]
 fn version_validation() {
-    assert!(parse_err("[package]\nname = \"a\"\nversion = \"\"\n").contains("version"));
-    assert!(parse_err("[package]\nname = \"a\"\nversion = \"1\"\ngroup = \"com..x\"\n").contains("group"));
-    assert!(parse_err(&format!("{MINIMAL}\n[kotlin]\nversion = \"(\"\n")).contains("Kotlin version"));
+    assert!(
+        parse_err(
+            "[package]
+name = \"a\"
+version = \"\"
+"
+        )
+        .contains("[package] `version`")
+    );
+    assert!(
+        parse_err(
+            "[package]
+name = \"a\"
+version = \"1\"
+group = \"com..x\"
+"
+        )
+        .contains("group")
+    );
+    assert!(
+        parse_err(&format!(
+            "{MINIMAL}
+[kotlin]
+version = \"(\"
+"
+        ))
+        .contains("[kotlin] `version`")
+    );
     assert!(
         parse_err(&format!(
             "{MINIMAL}
@@ -662,8 +687,63 @@ fn version_validation() {
 ksp = \"(\"
 "
         ))
-        .contains("KSP version")
+        .contains("[kotlin] `ksp`")
     );
+}
+
+#[test]
+fn versions_of_the_project_must_be_exact() {
+    for bad in ["[1.0,2.0)", "2.+", "1.0 ", "", "(1.0,)", "1.*"] {
+        let package = parse_err(&format!(
+            "[package]
+name = \"a\"
+version = \"{bad}\"
+"
+        ));
+        assert!(package.contains("[package] `version` must be one exact version"), "{bad}: {package}");
+        let kotlin = parse_err(&format!(
+            "{MINIMAL}
+[kotlin]
+version = \"{bad}\"
+"
+        ));
+        assert!(kotlin.contains("[kotlin] `version` must be one exact version"), "{bad}: {kotlin}");
+        let ksp = parse_err(&format!(
+            "{MINIMAL}
+[kotlin]
+ksp = \"{bad}\"
+"
+        ));
+        assert!(ksp.contains("[kotlin] `ksp` must be one exact version"), "{bad}: {ksp}");
+        let coroutines = parse_err(&format!(
+            "{MINIMAL}
+[frameworks]
+coroutines = \"{bad}\"
+"
+        ));
+        assert!(coroutines.contains("[frameworks] `coroutines` must be one exact version"), "{bad}: {coroutines}");
+        let ktor = parse_err(&format!(
+            "{MINIMAL}
+[frameworks.ktor]
+version = \"{bad}\"
+"
+        ));
+        assert!(ktor.contains("[frameworks.ktor] `version` must be one exact version"), "{bad}: {ktor}");
+    }
+    let build = parse(
+        "[package]
+name = \"a\"
+version = \"1.0.0+build.5\"
+",
+    );
+    assert_eq!(build.package.version, "1.0.0+build.5");
+    let err = parse_err(&format!(
+        "{MINIMAL}
+[kotlin]
+version = \"[2.0,3.0)\"
+"
+    ));
+    assert!(err.contains("such as \"") && err.contains("got `[2.0,3.0)`"), "{err}");
 }
 
 #[test]

@@ -1683,6 +1683,17 @@ fn validate_version_string(what: &str, version: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fails unless `version` (the value of `what`, such as `[kotlin] version`) is one concrete version.
+/// Unlike [`validate_version_string`], it rejects Maven ranges (`[1.0,2.0)`), wildcards (`2.+`,
+/// `1.*`) and anything with whitespace, so the value can name a jar, a POM or a compiler download.
+/// A `+` inside a version stays valid: it is SemVer build metadata (`1.0.0+build.5`).
+fn validate_exact_version(what: &str, example: &str, version: &str) -> Result<()> {
+    if version.is_empty() || version.ends_with('+') || version.contains(|c: char| c.is_whitespace() || "[](),*".contains(c)) {
+        bail!("{what} must be one exact version such as \"{example}\", got `{version}`");
+    }
+    Ok(())
+}
+
 /// Reads repository credentials from the named environment variables. Unset
 /// variables yield no credentials (the repository then answers 401 with a
 /// helpful message) so that unrelated commands keep working.

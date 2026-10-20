@@ -80,7 +80,7 @@ A `.env` file that git tracks is shared with everyone who clones the repository.
 warning: package version `not.a.version.x` does not look like a version (expected something like `1.0.0`); it becomes part of the jar's file name and of its Maven coordinates
 ```
 
-[`[package] version`](../manifest/#package) names the jar (`app-1.0.0.jar`) and is the version in its Maven coordinates. Maven accepts any string, so Kargo does too, but a version that doesn't start with a digit, or uses anything but letters, digits and `.`, `-`, `_` and `+`, is rarely intended. `0.1.0`, `1.0-SNAPSHOT`, `2.1.0-rc.1` and `2024.03` are fine; `v1.0`, `latest` and `1.0 beta` are not.
+[`[package] version`](../manifest/#package) names the jar (`app-1.0.0.jar`) and is the version in its Maven coordinates. Maven accepts almost any string, so Kargo does too, apart from [ranges, wildcards and spaces](../manifest/#package), which are errors. But a version that doesn't start with a digit, or uses anything but letters, digits and `.`, `-`, `_` and `+`, is rarely intended. `0.1.0`, `1.0-SNAPSHOT`, `2.1.0-rc.1` and `2024.03` are fine; `v1.0`, `latest` and `1/2` are not.
 
 ## Warnings as errors
 
