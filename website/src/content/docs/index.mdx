@@ -14,7 +14,22 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, TabItem, Tabs } from '@astrojs/starlight/components';
+
+<Tabs syncKey="install-os">
+	<TabItem label="Linux and macOS">
+		```sh
+		curl -fsSL https://enekocm7.github.io/kargo/install.sh | sh
+		```
+	</TabItem>
+	<TabItem label="Windows">
+		```powershell
+		irm https://enekocm7.github.io/kargo/install.ps1 | iex
+		```
+	</TabItem>
+</Tabs>
+
+The script downloads a prebuilt binary and checks its SHA-256. Other ways to install, such as `cargo binstall` or a downloaded archive, are on the [installation page](getting-started/installation/).
 
 ```console
 $ kargo new hello && cd hello
