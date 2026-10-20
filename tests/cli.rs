@@ -3061,7 +3061,11 @@ fn env_files_and_expose_reach_the_environment_and_build_config() {
 #[test]
 fn env_file_applies_to_tasks_before_or_after_the_name() {
     let p = Project::new();
-    p.file("kargo.toml", &manifest("tasky", "[env]\nNAME = \"manifest\"\n\n[tasks]\nshow = \"echo $NAME\"\n"));
+    // `windows-run` because cmd.exe expands `%NAME%`, not `$NAME`.
+    p.file(
+        "kargo.toml",
+        &manifest("tasky", "[env]\nNAME = \"manifest\"\n\n[tasks]\nshow = { run = \"echo $NAME\", windows-run = \"echo %NAME%\" }\n"),
+    );
     p.file("staging.env", "NAME=staging\n");
     p.kargo().args(["task", "--env-file", "staging.env", "show"]).assert().success().stdout(predicates::str::contains("staging"));
     p.kargo().args(["show", "--env-file=staging.env"]).assert().success().stdout(predicates::str::contains("staging"));
