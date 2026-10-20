@@ -885,6 +885,120 @@ fn doc_multiplatform() {
     assert!(index.contains("Documented on every platform."));
 }
 
+/// Applies the `TextEdit`s of an LSP reply to ASCII `text`.
+fn apply_edits(text: &str, edits: &[serde_json::Value]) -> String {
+    let offset = |position: &serde_json::Value| {
+        let line = position["line"].as_u64().unwrap() as usize;
+        let character = position["character"].as_u64().unwrap() as usize;
+        text.split_inclusive('\n').take(line).map(str::len).sum::<usize>() + character
+    };
+    let mut out = text.to_owned();
+    let mut edits: Vec<_> =
+        edits.iter().map(|e| (offset(&e["range"]["start"]), offset(&e["range"]["end"]), e["newText"].as_str().unwrap())).collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    for (start, end, new) in edits {
+        out.replace_range(start..end, new);
+    }
+    out
+}
+
+#[test]
+fn lsp_formats_kotlin_with_ktlint() {
+    require_e2e!();
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+
+    let t = E2e::new();
+    t.create(&["style"]);
+    let root = t.dir.path().join("style");
+    let manifest = root.join("kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text}\n[fmt]\nexclude = [\"src/gen/**\"]\n")).unwrap();
+    // The project's own style: ktlint reads it from here, as `kargo fmt` does.
+    t.write("style/.editorconfig", "root = true\n\n[*.{kt,kts}]\nindent_size = 2\n");
+    let messy = "package com.example.style\n\nfun   messy( ): Int {\n        val n =  listOf(1,2).size\n        return n\n}\n";
+    t.write("style/src/Messy.kt", messy);
+    t.write("style/src/gen/Generated.kt", messy);
+
+    let uri = |rel: &str| {
+        let text = root.join(rel).display().to_string().replace('\\', "/");
+        if text.starts_with('/') { format!("file://{text}") } else { format!("file:///{text}") }
+    };
+    let mut child = StdCommand::new(Command::cargo_bin("kargo").unwrap().get_program())
+        .arg("lsp")
+        .current_dir(&root)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |message: serde_json::Value| {
+        let body = serde_json::to_vec(&message).unwrap();
+        write!(input, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+        input.write_all(&body).unwrap();
+        input.flush().unwrap();
+    };
+    let mut reply = |id: i64| -> serde_json::Value {
+        loop {
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(output.read_line(&mut line).unwrap() > 0, "kargo lsp ended before answering {id}");
+                match line.trim().strip_prefix("Content-Length: ") {
+                    Some(n) => length = n.parse().unwrap(),
+                    None if line.trim().is_empty() => break,
+                    None => {}
+                }
+            }
+            let mut body = vec![0; length];
+            output.read_exact(&mut body).unwrap();
+            let message: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if message["id"] == id && message.get("method").is_none() {
+                return message;
+            }
+        }
+    };
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": uri(""), "capabilities": {} } }));
+    let init = reply(1);
+    assert_eq!(init["result"]["capabilities"]["documentFormattingProvider"], true, "{init}");
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    for rel in ["src/Messy.kt", "src/gen/Generated.kt"] {
+        let document = serde_json::json!({ "uri": uri(rel), "languageId": "kotlin", "version": 1, "text": messy });
+        send(serde_json::json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": document } }));
+    }
+
+    let params = |rel: &str| serde_json::json!({ "textDocument": { "uri": uri(rel) }, "options": { "tabSize": 4, "insertSpaces": true } });
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/formatting", "params": params("src/Messy.kt") }));
+    let formatted = reply(2);
+    let edits = formatted["result"].as_array().unwrap_or_else(|| panic!("{formatted}"));
+    assert_eq!(edits.len(), 1, "one minimal edit: {formatted}");
+    assert_eq!(
+        apply_edits(messy, edits),
+        "package com.example.style\n\nfun messy(): Int {\n  val n = listOf(1, 2).size\n  return n\n}\n",
+        "ktlint with the project's .editorconfig"
+    );
+    // `[fmt] exclude` applies as it does to `kargo fmt`.
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "textDocument/formatting", "params": params("src/gen/Generated.kt") }));
+    assert_eq!(reply(3)["result"], serde_json::json!([]));
+    // A syntax error is an error, not an empty file.
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": { "textDocument": { "uri": uri("src/Messy.kt"), "version": 2 }, "contentChanges": [{ "text": "fun broken( {\n" }] }
+    }));
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": "textDocument/formatting", "params": params("src/Messy.kt") }));
+    let failed = reply(4);
+    assert!(failed["error"]["message"].as_str().is_some_and(|m| m.contains("Not a valid Kotlin file")), "{failed}");
+
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 5, "method": "shutdown" }));
+    reply(5);
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
+    drop(send);
+    child.wait().unwrap();
+}
+
 #[test]
 fn fmt_with_ktlint() {
     require_e2e!();

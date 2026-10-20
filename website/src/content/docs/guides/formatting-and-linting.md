@@ -68,6 +68,21 @@ ktlint = "1.8.0"
 | `exclude` | `[]` | Globs, relative to the project root, of files ktlint skips |
 | `ktlint` | `1.8.0` | Exact ktlint version |
 
+### Formatting from your editor
+
+[Kargo's Kotlin server](../kotlin-server/#formatting), the default behind `kargo lsp`, formats the open file with this same ktlint: *Format Document* in your editor gives what `kargo fmt` would write, with your `.editorconfig` and `[fmt]` settings, even for text you haven't saved. A file that `[fmt] exclude` leaves out is left alone. IntelliJ IDEA keeps its own formatter, and `--server kotlin-lsp` and `--server kls` format with their own.
+
+Format on save is your editor's setting; turn it on and the editor asks the server on each save:
+
+| Editor | Setting |
+|---|---|
+| Neovim | `vim.lsp.buf.format({ async = false })` from a `BufWritePre` autocommand |
+| VS Code | `"[kotlin]": { "editor.formatOnSave": true }` |
+| Zed | `"languages": { "Kotlin": { "format_on_save": "on" } }` |
+| Helix | `auto-format = true` for `kotlin` in `languages.toml` |
+
+ktlint is a JVM program, so a format takes about a second. It runs on its own thread: the editor stays responsive, and text you changed in the meantime is not overwritten. The first format downloads ktlint (and a JDK, if `[toolchain]` asks for one you haven't installed); `kargo fetch --tools` downloads ktlint ahead of time. Only whole files are formatted, and `.kts` scripts are not.
+
 ## Linting with `kargo lint`
 
 `kargo lint` runs detekt's default rule set: complexity, naming, potential bugs, style and more. It exits with code 101 if detekt reports issues:
