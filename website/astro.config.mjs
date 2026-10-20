@@ -73,6 +73,7 @@ export default defineConfig({
 				{
 					label: 'Migration',
 					items: [
+						{ label: 'Importing a project', slug: 'guides/importing' },
 						{ label: 'From Gradle', slug: 'migration/from-gradle' },
 						{ label: 'From Maven', slug: 'migration/from-maven' },
 						{ label: 'For Rust developers', slug: 'migration/from-cargo' },

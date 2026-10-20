@@ -172,18 +172,9 @@ pub trait PomSource {
 const MAX_PARENT_DEPTH: usize = 32;
 const MAX_IMPORT_DEPTH: usize = 16;
 
-/// Builds the effective POM for `module:version`.
-pub fn effective_pom(source: &dyn PomSource, module: &ModuleId, version: &str) -> Result<EffectivePom> {
-    effective_pom_inner(source, module, version, 0)
-}
-
-fn effective_pom_inner(source: &dyn PomSource, module: &ModuleId, version: &str, import_depth: usize) -> Result<EffectivePom> {
-    if import_depth > MAX_IMPORT_DEPTH {
-        bail!("BOM import chain too deep while processing {module}:{version}");
-    }
+/// The POM of `module:version` followed by its parents, nearest first.
+pub fn pom_chain(source: &dyn PomSource, module: &ModuleId, version: &str) -> Result<Vec<Pom>> {
     let leaf = source.pom(module, version).with_context(|| format!("failed to load POM for {module}:{version}"))?;
-
-    // Collect the inheritance chain, leaf first.
     let mut chain = vec![leaf];
     while let Some(parent) = chain.last().and_then(|p| p.parent.clone()) {
         if chain.len() > MAX_PARENT_DEPTH {
@@ -195,7 +186,12 @@ fn effective_pom_inner(source: &dyn PomSource, module: &ModuleId, version: &str,
             .with_context(|| format!("failed to load parent POM {parent_id}:{} of {module}:{version}", parent.version))?;
         chain.push(parent_pom);
     }
+    Ok(chain)
+}
 
+/// The group, version and properties of the first POM of `chain`: the properties of every POM in it
+/// (children override parents) plus the `project.*` ones Maven defines.
+fn chain_properties(chain: &[Pom], module: &ModuleId, version: &str) -> (String, String, BTreeMap<String, String>) {
     let leaf = &chain[0];
     let group = leaf.effective_group().unwrap_or(&module.group).to_owned();
     let pom_version = leaf.effective_version().unwrap_or(version).to_owned();
@@ -224,6 +220,40 @@ fn effective_pom_inner(source: &dyn PomSource, module: &ModuleId, version: &str,
         props.insert("project.parent.groupId".into(), parent.group.clone());
         props.insert("parent.version".into(), parent.version.clone());
     }
+    (group, pom_version, props)
+}
+
+/// The properties `${...}` placeholders in the POM of `module:version` resolve to: its own and its
+/// parents' (children win), plus `project.groupId`, `project.version` and the other built-in ones.
+pub fn effective_properties(source: &dyn PomSource, module: &ModuleId, version: &str) -> Result<BTreeMap<String, String>> {
+    let chain = pom_chain(source, module, version)?;
+    Ok(chain_properties(&chain, module, version).2)
+}
+
+/// Builds the effective POM for `module:version`.
+pub fn effective_pom(source: &dyn PomSource, module: &ModuleId, version: &str) -> Result<EffectivePom> {
+    effective_pom_inner(source, module, version, 0, true)
+}
+
+/// Like [`effective_pom`], but without reading the BOMs the POM imports: the versions they manage stay
+/// out of the result. For callers that only want the inherited dependencies and the POM's own management.
+pub fn effective_pom_without_imports(source: &dyn PomSource, module: &ModuleId, version: &str) -> Result<EffectivePom> {
+    effective_pom_inner(source, module, version, 0, false)
+}
+
+fn effective_pom_inner(
+    source: &dyn PomSource,
+    module: &ModuleId,
+    version: &str,
+    import_depth: usize,
+    follow_imports: bool,
+) -> Result<EffectivePom> {
+    if import_depth > MAX_IMPORT_DEPTH {
+        bail!("BOM import chain too deep while processing {module}:{version}");
+    }
+    let chain = pom_chain(source, module, version)?;
+    let leaf = &chain[0];
+    let (group, pom_version, props) = chain_properties(&chain, module, version);
 
     let interp = |s: &str| interpolate(s, &props);
     let interp_dep = |d: &PomDependency| PomDependency {
@@ -249,9 +279,9 @@ fn effective_pom_inner(source: &dyn PomSource, module: &ModuleId, version: &str,
             }
         }
     }
-    for import in imports {
+    for import in imports.into_iter().filter(|_| follow_imports) {
         let Some(import_version) = import.version.clone() else { continue };
-        let bom = effective_pom_inner(source, &import.module(), &import_version, import_depth + 1)?;
+        let bom = effective_pom_inner(source, &import.module(), &import_version, import_depth + 1, follow_imports)?;
         for dep in bom.dependency_management {
             if !management.iter().any(|m| m.management_key() == dep.management_key()) {
                 management.push(dep);
@@ -472,6 +502,18 @@ mod tests {
         assert_eq!(find("sibling").scope.as_deref(), Some("test"));
         assert_eq!(find("uses-prop").version.as_deref(), Some("child-value"), "child property overrides parent");
         assert_eq!(find("inherited").version.as_deref(), Some("1.1"), "dependencies inherited from parent");
+    }
+
+    #[test]
+    fn effective_pom_without_imports_leaves_the_boms_unread() {
+        // `from-bom` is managed only by the imported BOM, and the BOM is not even available.
+        let mut sources = source();
+        sources.0.remove("com.acme:bom:3.0");
+        let eff = effective_pom_without_imports(&sources, &ModuleId::new("com.acme", "child"), "1.0").unwrap();
+        let find = |a: &str| eff.dependencies.iter().find(|d| d.artifact == a).unwrap();
+        assert_eq!(find("lib").version.as_deref(), Some("2.0"));
+        assert_eq!(find("from-bom").version, None);
+        assert!(effective_pom(&sources, &ModuleId::new("com.acme", "child"), "1.0").is_err());
     }
 
     #[test]

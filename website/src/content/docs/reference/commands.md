@@ -125,6 +125,28 @@ Same as `kargo new`, but in an existing directory (the current one by default). 
 kargo init [path] [options]
 ```
 
+## `kargo import`
+
+Convert a Maven or Gradle project into a Kargo project: write the `kargo.toml` (a [workspace](../../guides/workspaces/) for a multi-module build), move the sources into [Kargo's layout](../../getting-started/project-layout/) with `git mv` inside a git repository, print a report and build the result. The Maven or Gradle files stay.
+
+```sh
+kargo import [path] [options]
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--dry-run` | | Print every `kargo.toml` and file move on stdout, and change nothing |
+| `--no-build` | | Don't run `kargo build` when the import is done |
+| `--from <maven\|gradle>` | the build tool whose files are there | Which build tool to read when the directory has a `pom.xml` and Gradle files |
+
+```sh
+kargo import --dry-run
+kargo import
+kargo import ../legacy-service --no-build
+```
+
+The command refuses a directory that already has a `kargo.toml`, plans every move before making one, and fails without changing anything when two files would land on the same path. A Maven project is translated exactly. A Gradle project is read without running Gradle, so what the scripts compute in code is listed in the report instead. If the final build fails, the project is imported anyway and the command exits with code 101. See [Importing a Maven or Gradle project](../../guides/importing/).
+
 ## `kargo build` (`b`)
 
 Compile all enabled targets, or the ones you name. Targets build at the same time; if one fails, the command reports that failure and exits with code 101.
