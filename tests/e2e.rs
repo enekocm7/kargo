@@ -2540,6 +2540,271 @@ fn install_a_native_tool() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("Hello, Kotlin!"), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
+// `kargo import`: a Maven or Gradle project becomes a Kargo project that builds and passes its tests.
+
+#[test]
+fn import_spring_boot_maven_project() {
+    require_e2e!();
+    let t = E2e::new();
+    let kotlin = kargo_manifest::DEFAULT_KOTLIN_VERSION;
+    t.write(
+        "sb/pom.xml",
+        &format!(
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.5</version>
+    <relativePath/>
+  </parent>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <properties>
+    <java.version>21</java.version>
+    <kotlin.version>{kotlin}</kotlin.version>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+    <dependency><groupId>com.fasterxml.jackson.module</groupId><artifactId>jackson-module-kotlin</artifactId></dependency>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-reflect</artifactId></dependency>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-test-junit5</artifactId><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <sourceDirectory>${{project.basedir}}/src/main/kotlin</sourceDirectory>
+    <testSourceDirectory>${{project.basedir}}/src/test/kotlin</testSourceDirectory>
+    <plugins>
+      <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin>
+      <plugin>
+        <groupId>org.jetbrains.kotlin</groupId>
+        <artifactId>kotlin-maven-plugin</artifactId>
+        <configuration>
+          <args><arg>-Xjsr305=strict</arg></args>
+          <compilerPlugins><plugin>spring</plugin></compilerPlugins>
+        </configuration>
+        <dependencies>
+          <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-allopen</artifactId><version>${{kotlin.version}}</version></dependency>
+        </dependencies>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#
+        ),
+    );
+    t.write(
+        "sb/src/main/kotlin/com/example/demo/DemoApplication.kt",
+        r#"package com.example.demo
+
+import org.springframework.boot.autoconfigure.SpringBootApplication
+import org.springframework.boot.runApplication
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RestController
+
+@SpringBootApplication
+class DemoApplication
+
+@RestController
+class Hello {
+    @GetMapping("/")
+    fun hello() = "hello"
+}
+
+fun main(args: Array<String>) {
+    runApplication<DemoApplication>(*args)
+}
+"#,
+    );
+    t.write(
+        "sb/src/test/kotlin/com/example/demo/DemoApplicationTests.kt",
+        r#"package com.example.demo
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class DemoApplicationTests {
+    @Test
+    fun hello() = assertEquals("hello", Hello().hello())
+}
+"#,
+    );
+    // `kargo import` builds the project at the end, and fails when it does not compile.
+    t.kargo("sb").arg("import").assert().success().stderr(predicate::str::contains("[frameworks] spring-boot"));
+    let manifest = std::fs::read_to_string(t.dir.path().join("sb/kargo.toml")).unwrap();
+    assert!(manifest.contains("spring-boot = { version = \"3.3.5\", starters = [\"web\"] }"), "{manifest}");
+    assert!(t.dir.path().join("sb/src/com/example/demo/DemoApplication.kt").is_file());
+    t.kargo("sb").arg("test").assert().success();
+}
+
+#[test]
+fn import_ktor_gradle_project() {
+    require_e2e!();
+    let t = E2e::new();
+    let kotlin = kargo_manifest::DEFAULT_KOTLIN_VERSION;
+    t.write("kt/settings.gradle.kts", "rootProject.name = \"ktor-sample\"\n");
+    t.write("kt/gradle.properties", &format!("kotlin.code.style=official\nkotlin_version={kotlin}\nlogback_version=1.4.14\n"));
+    t.write(
+        "kt/build.gradle.kts",
+        &format!(
+            r#"val kotlin_version: String by project
+val logback_version: String by project
+
+plugins {{
+    kotlin("jvm") version "{kotlin}"
+    id("io.ktor.plugin") version "3.0.0"
+    id("org.jetbrains.kotlin.plugin.serialization") version "{kotlin}"
+}}
+
+group = "com.example"
+version = "0.0.1"
+
+application {{
+    mainClass.set("io.ktor.server.netty.EngineMain")
+}}
+
+repositories {{
+    mavenCentral()
+}}
+
+dependencies {{
+    implementation("io.ktor:ktor-server-core-jvm")
+    implementation("io.ktor:ktor-server-content-negotiation-jvm")
+    implementation("io.ktor:ktor-serialization-kotlinx-json-jvm")
+    implementation("io.ktor:ktor-server-netty-jvm")
+    implementation("ch.qos.logback:logback-classic:$logback_version")
+    implementation("io.ktor:ktor-server-config-yaml")
+    testImplementation("io.ktor:ktor-server-test-host-jvm")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:$kotlin_version")
+}}
+"#
+        ),
+    );
+    t.write(
+        "kt/src/main/kotlin/Application.kt",
+        r#"package com.example
+
+import io.ktor.http.ContentType
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.Application
+import io.ktor.server.application.install
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.get
+import io.ktor.server.routing.routing
+
+fun main(args: Array<String>) {
+    io.ktor.server.netty.EngineMain.main(args)
+}
+
+fun Application.module() {
+    install(ContentNegotiation) { json() }
+    routing {
+        get("/") { call.respondText("Hello World!", ContentType.Text.Plain) }
+    }
+}
+"#,
+    );
+    t.write(
+        "kt/src/main/resources/application.yaml",
+        "ktor:\n    application:\n        modules:\n            - com.example.ApplicationKt.module\n    deployment:\n        port: 8080\n",
+    );
+    t.write(
+        "kt/src/test/kotlin/ApplicationTest.kt",
+        r#"package com.example
+
+import io.ktor.client.request.get
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.testing.testApplication
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class ApplicationTest {
+    @Test
+    fun testRoot() = testApplication {
+        application { module() }
+        val response = client.get("/")
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("Hello World!", response.bodyAsText())
+    }
+}
+"#,
+    );
+    t.kargo("kt").arg("import").assert().success().stderr(predicate::str::contains("[frameworks] ktor"));
+    t.kargo("kt").arg("test").assert().success();
+}
+
+#[test]
+fn import_multiplatform_gradle_project() {
+    require_e2e!();
+    let t = E2e::new();
+    let kotlin = kargo_manifest::DEFAULT_KOTLIN_VERSION;
+    t.write("kmp/settings.gradle.kts", "rootProject.name = \"shared\"\n");
+    t.write(
+        "kmp/build.gradle.kts",
+        &format!(
+            r#"plugins {{
+    kotlin("multiplatform") version "{kotlin}"
+}}
+
+group = "org.example"
+version = "1.0"
+
+kotlin {{
+    jvm()
+    wasmJs {{
+        nodejs()
+        binaries.executable()
+    }}
+    linuxX64 {{
+        binaries {{
+            executable {{
+                entryPoint = "main"
+            }}
+        }}
+    }}
+
+    sourceSets {{
+        commonMain.dependencies {{
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+        }}
+        commonTest.dependencies {{
+            implementation(kotlin("test"))
+        }}
+    }}
+}}
+"#
+        ),
+    );
+    t.write(
+        "kmp/src/commonMain/kotlin/Greeting.kt",
+        "fun greeting(name: String): String = \"Hello, $name!\"\n\nfun main() {\n    println(greeting(\"KMP\"))\n}\n",
+    );
+    t.write(
+        "kmp/src/commonTest/kotlin/GreetingTest.kt",
+        "import kotlin.test.Test\nimport kotlin.test.assertEquals\n\nclass GreetingTest {\n    @Test\n    fun greets() = assertEquals(\"Hello, Kargo!\", greeting(\"Kargo\"))\n}\n",
+    );
+    t.write("kmp/src/jvmMain/kotlin/Jvm.kt", "fun jvmOnly() = 1\n");
+    // Linking Kotlin/Native is slow, so the import does not build it; the JVM and Wasm targets are built here.
+    t.kargo("kmp").args(["import", "--no-build"]).assert().success();
+    let manifest = std::fs::read_to_string(t.dir.path().join("kmp/kargo.toml")).unwrap();
+    for table in [
+        "[target.jvm]",
+        "[target.wasm]\nenvironment = \"js\"",
+        "[target.native]\nplatforms = [\"linuxX64\"]\nkind = \"executable\"\nentry-point = \"main\"",
+    ] {
+        assert!(manifest.contains(table), "{table} in {manifest}");
+    }
+    for file in ["src/Greeting.kt", "tests/GreetingTest.kt", "src-jvm/Jvm.kt"] {
+        assert!(t.dir.path().join("kmp").join(file).is_file(), "{file}");
+    }
+    t.kargo("kmp").args(["build", "--target", "jvm", "--target", "wasm"]).assert().success();
+    t.kargo("kmp").args(["test", "--target", "jvm"]).assert().success();
+}
+
 /// A `[[generate]]` step that writes `class <Name>` for every `messages/<Name>.txt`.
 fn message_step() -> String {
     let posix = r#"for f in messages/*.txt; do n=$(basename "$f" .txt); echo "class $n" > "$KARGO_GEN_DIR/$n.kt"; done"#;

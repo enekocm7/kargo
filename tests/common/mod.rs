@@ -54,7 +54,7 @@ impl LocalRepo {
         format!("file:///{}", self.dir.path().display().to_string().replace('\\', "/").trim_start_matches('/'))
     }
 
-    fn write(&self, rel: &str, contents: &str) {
+    pub fn write(&self, rel: &str, contents: &str) {
         let p = self.dir.path().join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, contents).unwrap();

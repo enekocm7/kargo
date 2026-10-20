@@ -5,6 +5,10 @@ description: Translate build.gradle.kts into kargo.toml, step by step.
 
 This guide moves a Gradle project, JVM or Kotlin Multiplatform, to Kargo. Most single-module projects take about fifteen minutes.
 
+:::tip
+`kargo import` writes most of this `kargo.toml` for you and moves the sources: it reads the plugins, dependencies, version catalogs, targets and source sets of your build scripts and lists what it could not translate. See [Importing a Maven or Gradle project](../../guides/importing/), then use this guide for the parts the report points at.
+:::
+
 :::caution[Before you start]
 Kargo builds **one package per `kargo.toml`**. In a multi-module build, convert each module with the steps below, list the modules as `members` of a [workspace](../../guides/workspaces/) (the equivalent of `settings.gradle.kts`), and turn `implementation(project(":core"))` into `core = { path = "../core" }`. Android modules can't use path dependencies yet. Gradle plugins that generate code (protobuf, OpenAPI generator) become [`[[generate]]` steps](../../guides/code-generation/); other plugins with no Kargo equivalent can usually be replaced with a [task on a `pre-build` hook](../../guides/tasks-and-plugins/).
 :::

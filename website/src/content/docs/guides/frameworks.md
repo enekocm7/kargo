@@ -99,7 +99,7 @@ spring-boot = true
 spring-boot = { version = "4.1.1", starters = ["web", "data-jpa", "actuator"] }
 ```
 
-Imports the Spring Boot BOM, adds `spring-boot-starter-<name>` for each starter (default `["web"]`), `kotlin-reflect`, Jackson's Kotlin module for web starters and `spring-boot-starter-test` for tests. It also configures the `allopen` compiler plugin with the Spring preset, the `noarg` plugin for JPA entities (when `data-jpa` is used, or `jpa = true`), and the `-Xjsr305=strict` and `-java-parameters` flags. JVM only.
+Imports the Spring Boot BOM, adds `spring-boot-starter-<name>` for each starter (default `["web"]`), `kotlin-reflect`, Jackson's Kotlin module for web starters (`com.fasterxml.jackson.module` for Spring Boot 3, `tools.jackson.module` for Spring Boot 4 and newer, which use Jackson 3) and `spring-boot-starter-test` for tests. It also configures the `allopen` compiler plugin with the Spring preset, the `noarg` plugin for JPA entities (when `data-jpa` is used, or `jpa = true`), and the `-Xjsr305=strict` and `-java-parameters` flags. JVM only.
 
 See the [Spring Boot guide](../spring-boot/).
 

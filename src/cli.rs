@@ -42,6 +42,7 @@ const AFTER_HELP: &str = "See all commands with `kargo --list`.\nSee `kargo help
 const COMMON_COMMANDS: &[&str] = &[
     "new",
     "init",
+    "import",
     "build",
     "check",
     "run",
@@ -107,6 +108,22 @@ struct GlobalArgs {
     /// Path to kargo.toml
     #[arg(long, global = true, value_name = "PATH")]
     manifest_path: Option<PathBuf>,
+}
+
+/// The build tool `kargo import` reads.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ImportSource {
+    Maven,
+    Gradle,
+}
+
+impl From<ImportSource> for ops::import::Build {
+    fn from(source: ImportSource) -> Self {
+        match source {
+            ImportSource::Maven => ops::import::Build::Maven,
+            ImportSource::Gradle => ops::import::Build::Gradle,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -548,6 +565,20 @@ enum Command {
         path: Option<PathBuf>,
         #[command(flatten)]
         args: NewArgs,
+    },
+    /// Convert a Maven or Gradle project to a Kargo project
+    Import {
+        /// The project directory (defaults to the current one)
+        path: Option<PathBuf>,
+        /// Print the kargo.toml files and the planned file moves, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not build the project when it is imported
+        #[arg(long)]
+        no_build: bool,
+        /// The build tool to read, when the directory has the files of both
+        #[arg(long, value_enum)]
+        from: Option<ImportSource>,
     },
     /// Compile the project
     #[command(visible_alias = "b")]
@@ -1788,6 +1819,45 @@ fn create_package(shell: &Shell, dir: &Path, args: NewArgs) -> Result<u8> {
     Ok(0)
 }
 
+/// `kargo import`: converts the Maven or Gradle project in `path` and, unless `no_build`, builds it.
+fn import_project(
+    config: &Config,
+    global: &GlobalArgs,
+    path: Option<PathBuf>,
+    dry_run: bool,
+    no_build: bool,
+    from: Option<ImportSource>,
+) -> Result<u8> {
+    let shell = config.shell();
+    let cwd = std::env::current_dir().context("failed to read the current directory")?;
+    let root = match path {
+        Some(path) => std::path::absolute(cwd.join(path))?,
+        None => cwd,
+    };
+    let plan = ops::import::plan(config, &root, &ops::import::ImportOptions { from: from.map(Into::into) })?;
+    if dry_run {
+        print!("{}", plan.describe());
+        shell.status("Dry run", format!("{} project not changed; run `kargo import` to apply the plan above", plan.build.name()));
+        ops::import::report(shell, &plan);
+        return Ok(0);
+    }
+    ops::import::apply(shell, &root, &plan)?;
+    let packages = match plan.packages.as_slice() {
+        [one] => format!("package `{one}`"),
+        many => format!("{} packages ({})", many.len(), many.join(", ")),
+    };
+    shell.status("Imported", format!("{} project as {packages}", plan.build.name()));
+    ops::import::report(shell, &plan);
+    if no_build {
+        return Ok(0);
+    }
+    let project = Project::discover(&root, None)?;
+    let opts = BuildOptions::default();
+    build_packages(config, &project, &Selection::default(), global, ProfileKind::Dev, (None, false), |ctx| ops::build::build(ctx, &opts))
+        .context("the project was imported, but `kargo build` failed; fix what it reports, or see the items above that need manual work")?;
+    Ok(0)
+}
+
 fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
     let global = cli.global;
     let config =
@@ -1865,6 +1935,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             };
             create_package(shell, &dir, args)
         }
+        Command::Import { path, dry_run, no_build, from } => import_project(config, global, path, dry_run, no_build, from),
         Command::Build { build, keep_going, xcframework } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;

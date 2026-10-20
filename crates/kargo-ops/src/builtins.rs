@@ -113,6 +113,15 @@ pub fn compose_desktop_classifier() -> Result<&'static str> {
     })
 }
 
+/// The group of Jackson's Kotlin module in the Spring Boot BOM of version `spring`: Spring Boot 4
+/// moved to Jackson 3 (`tools.jackson`), earlier versions manage the `com.fasterxml.jackson` one.
+pub fn spring_jackson_group(spring: &str) -> &'static str {
+    match spring.split('.').next().and_then(|major| major.parse::<u32>().ok()) {
+        Some(major) if major < 4 => "com.fasterxml.jackson.module",
+        _ => "tools.jackson.module",
+    }
+}
+
 /// Computes contributions for `target`. Android is handled by the Gradle
 /// generator, which maps frameworks to Gradle plugins instead.
 pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path) -> Result<Contributions> {
@@ -274,7 +283,7 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
         }
         c.dependencies.push(dep("org.jetbrains.kotlin:kotlin-reflect", Some(kotlin)));
         if starters.iter().any(|s| matches!(s.as_str(), "web" | "webmvc" | "webflux" | "json" | "jackson")) {
-            c.dependencies.push(dep("tools.jackson.module:jackson-module-kotlin", None));
+            c.dependencies.push(dep(&format!("{}:jackson-module-kotlin", spring_jackson_group(v)), None));
         }
         c.dev_dependencies.push(dep("org.springframework.boot:spring-boot-starter-test", None));
         c.plugins.push(
@@ -518,6 +527,22 @@ benchmark = { version = \"0.4.14\" }
         assert!(c.plugins.iter().any(|p| p.artifact.contains("noarg")));
         assert_eq!(plugin_option_args(allopen[0])[0], "plugin:org.jetbrains.kotlin.allopen:preset=spring");
         assert_eq!(describe_options(allopen[0])["annotation"].len(), 3);
+    }
+
+    #[test]
+    fn spring_boot_3_manages_the_fasterxml_jackson_module() {
+        let jackson = |version: &str| {
+            let m = manifest(&format!(
+                "[frameworks]
+spring-boot = {{ version = \"{version}\" }}
+"
+            ));
+            let c = contributions(&m, TargetKind::Jvm, Path::new(".")).unwrap();
+            c.dependencies.iter().find(|d| d.module.artifact == "jackson-module-kotlin").map(|d| d.module.group.clone()).unwrap()
+        };
+        assert_eq!(jackson("3.3.1"), "com.fasterxml.jackson.module");
+        assert_eq!(jackson("4.0.0"), "tools.jackson.module");
+        assert_eq!(jackson(SPRING_BOOT_VERSION), "tools.jackson.module");
     }
 
     #[test]

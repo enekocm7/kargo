@@ -9,6 +9,7 @@ pub mod context;
 pub mod doc;
 pub mod env;
 pub mod fmt;
+pub mod import;
 pub mod install;
 pub mod lint;
 pub mod local;

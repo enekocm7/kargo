@@ -760,6 +760,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
     const COMMON: &[&str] = &[
         "new",
         "init",
+        "import",
         "build",
         "check",
         "run",
@@ -3658,6 +3659,366 @@ fn mirrors_replace_the_declared_repositories() {
     p.kargo().args(["tree", "--offline"]).assert().failure().stderr(predicate::str::contains("must be an http(s):// or file: URL"));
     p.file(".kargo/config.toml", "[http]\ncainfo = \"missing.pem\"\n");
     p.kargo().args(["tree", "--offline"]).assert().failure().stderr(predicate::str::contains("cainfo"));
+}
+
+// `kargo import`
+
+/// Every file below `dir` with its contents, to compare a directory before and after a command.
+fn snapshot(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.insert(format!("{}/", path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/")), Vec::new());
+                walk(root, &path, out);
+            } else {
+                out.insert(path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// A repository with the Spring Boot parent and BOM POMs a Boot project inherits from.
+fn spring_boot_repo() -> LocalRepo {
+    let repo = LocalRepo::new();
+    repo.write(
+        "org/springframework/boot/spring-boot-dependencies/3.3.1/spring-boot-dependencies-3.3.1.pom",
+        r#"<project>
+  <groupId>org.springframework.boot</groupId><artifactId>spring-boot-dependencies</artifactId><version>3.3.1</version><packaging>pom</packaging>
+  <properties><jackson.version>2.17.1</jackson.version><postgresql.version>42.7.3</postgresql.version></properties>
+  <dependencyManagement><dependencies>
+    <dependency><groupId>com.fasterxml.jackson.module</groupId><artifactId>jackson-module-kotlin</artifactId><version>${jackson.version}</version></dependency>
+    <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
+  </dependencies></dependencyManagement>
+</project>"#,
+    );
+    repo.write(
+        "org/springframework/boot/spring-boot-starter-parent/3.3.1/spring-boot-starter-parent-3.3.1.pom",
+        r#"<project>
+  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-dependencies</artifactId><version>3.3.1</version></parent>
+  <artifactId>spring-boot-starter-parent</artifactId><packaging>pom</packaging>
+  <properties><java.version>17</java.version><kotlin.version>1.9.24</kotlin.version></properties>
+</project>"#,
+    );
+    repo
+}
+
+const SPRING_POM: &str = r#"<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.1</version>
+    <relativePath/>
+  </parent>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <properties><java.version>21</java.version></properties>
+  <dependencies>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+    <dependency><groupId>com.fasterxml.jackson.module</groupId><artifactId>jackson-module-kotlin</artifactId></dependency>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-reflect</artifactId></dependency>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId></dependency>
+    <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><scope>runtime</scope></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <sourceDirectory>${project.basedir}/src/main/kotlin</sourceDirectory>
+    <testSourceDirectory>${project.basedir}/src/test/kotlin</testSourceDirectory>
+    <plugins>
+      <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin>
+      <plugin>
+        <groupId>org.jetbrains.kotlin</groupId>
+        <artifactId>kotlin-maven-plugin</artifactId>
+        <configuration>
+          <args><arg>-Xjsr305=strict</arg></args>
+          <compilerPlugins><plugin>spring</plugin></compilerPlugins>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>"#;
+
+fn spring_project() -> (Project, LocalRepo) {
+    let p = Project::new();
+    p.file("pom.xml", SPRING_POM)
+        .file("src/main/kotlin/com/example/demo/DemoApplication.kt", "package com.example.demo\n\nfun main() {}\n")
+        .file("src/main/kotlin/com/example/demo/Greeter.kt", "package com.example.demo\n")
+        .file("src/main/resources/application.properties", "server.port=8081\n")
+        .file("src/test/kotlin/com/example/demo/DemoApplicationTests.kt", "package com.example.demo\n");
+    let repo = spring_boot_repo();
+    std::fs::write(p.home.path().join("config.toml"), format!("[mirrors]\n\"*\" = \"{}\"\n", repo.url())).unwrap();
+    (p, repo)
+}
+
+#[test]
+fn import_converts_a_spring_boot_maven_project() {
+    let (p, _repo) = spring_project();
+    p.kargo()
+        .args(["import", "--no-build"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Created kargo.toml"))
+        .stderr(predicate::str::contains("Moved 4 source files"))
+        .stderr(predicate::str::contains("Imported Maven project as package `demo`"));
+    let manifest = p.read("kargo.toml");
+    assert!(manifest.contains("name = \"demo\"\nversion = \"0.0.1-SNAPSHOT\"\ngroup = \"com.example\""), "{manifest}");
+    assert!(manifest.contains("version = \"1.9.24\""), "the Kotlin version comes from the parent: {manifest}");
+    assert!(manifest.contains("spring-boot = { version = \"3.3.1\", starters = [\"web\"] }"), "{manifest}");
+    assert!(manifest.contains("jvm-target = \"21\""), "{manifest}");
+    assert!(!manifest.contains("jackson-module-kotlin"), "the web starter brings Jackson's Kotlin module: {manifest}");
+    assert!(manifest.contains("\"org.postgresql:postgresql\" = { version = \"42.7.3\", scope = \"runtime\" }"), "{manifest}");
+    for built_in in ["kotlin-reflect", "kotlin-stdlib", "spring-boot-starter", "-Xjsr305"] {
+        assert!(!manifest.contains(built_in), "{built_in} is built in: {manifest}");
+    }
+
+    // The sources are where Kargo looks for them, and the Maven files stay.
+    assert!(p.path().join("src/com/example/demo/DemoApplication.kt").is_file());
+    assert!(p.path().join("tests/com/example/demo/DemoApplicationTests.kt").is_file());
+    assert!(p.path().join("resources/application.properties").is_file());
+    assert!(!p.path().join("src/main").exists() && !p.path().join("src/test").exists());
+    assert!(p.path().join("pom.xml").is_file());
+    p.kargo().arg("info").assert().success();
+    // A second import has nothing to do.
+    p.kargo().args(["import", "--no-build"]).assert().failure().stderr(predicate::str::contains("already has a kargo.toml"));
+}
+
+#[test]
+fn import_dry_run_prints_the_plan_and_changes_nothing() {
+    let (p, _repo) = spring_project();
+    let before = snapshot(p.path());
+    let out = p.kargo().args(["import", "--dry-run"]).assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("# kargo.toml\n[package]\nname = \"demo\""), "{stdout}");
+    assert!(stdout.contains("src/main/kotlin/com/example/demo/DemoApplication.kt -> src/com/example/demo/DemoApplication.kt"), "{stdout}");
+    assert!(stdout.contains("src/main/resources/application.properties -> resources/application.properties"), "{stdout}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Dry run"));
+    assert_eq!(snapshot(p.path()), before, "--dry-run must not change a thing");
+}
+
+#[test]
+fn import_turns_maven_modules_into_a_workspace() {
+    let p = Project::new();
+    p.file(
+        "pom.xml",
+        r#"<project>
+  <groupId>com.acme</groupId><artifactId>shop</artifactId><version>1.0</version><packaging>pom</packaging>
+  <modules><module>core</module><module>app</module></modules>
+  <properties><kotlin.version>2.4.21</kotlin.version></properties>
+  <build><plugins><plugin><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version></plugin></plugins></build>
+</project>"#,
+    )
+    .file(
+        "core/pom.xml",
+        r#"<project><parent><groupId>com.acme</groupId><artifactId>shop</artifactId><version>1.0</version></parent><artifactId>core</artifactId>
+  <dependencies><dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.13</version></dependency></dependencies></project>"#,
+    )
+    .file(
+        "app/pom.xml",
+        r#"<project><parent><groupId>com.acme</groupId><artifactId>shop</artifactId><version>1.0</version></parent><artifactId>app</artifactId>
+  <dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>${project.version}</version></dependency></dependencies></project>"#,
+    )
+    .file("core/src/main/kotlin/Core.kt", "package core\n")
+    .file("app/src/main/kotlin/App.kt", "package app\n")
+    .file("app/src/test/kotlin/AppTest.kt", "package app\n");
+    p.kargo().args(["import", "--no-build"]).assert().success().stderr(predicate::str::contains("2 packages (core, app)"));
+    let root = p.read("kargo.toml");
+    assert!(root.contains("[workspace]\nmembers = [\"core\", \"app\"]"), "{root}");
+    assert!(root.contains("[workspace.kotlin]\nversion = \"2.4.21\""), "{root}");
+    let app = p.read("app/kargo.toml");
+    assert!(app.contains("core = { path = \"../core\" }"), "{app}");
+    let core = p.read("core/kargo.toml");
+    assert!(core.contains("\"org.slf4j:slf4j-api\" = { version = \"2.0.13\", exported = true }"), "api of a module others use: {core}");
+    assert!(
+        p.path().join("app/src/App.kt").is_file()
+            && p.path().join("app/tests/AppTest.kt").is_file()
+            && p.path().join("core/src/Core.kt").is_file()
+    );
+    p.kargo().arg("info").assert().success();
+}
+
+#[test]
+fn import_explains_what_it_cannot_do() {
+    let p = Project::new();
+    p.kargo().arg("import").assert().failure().stderr(predicate::str::contains("no pom.xml, build.gradle.kts or build.gradle"));
+    p.file("pom.xml", "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version></project>").file("build.gradle.kts", "");
+    p.kargo().arg("import").assert().failure().stderr(predicate::str::contains("--from maven"));
+    p.kargo().args(["import", "--from", "maven", "--dry-run"]).assert().success();
+    // Two sources that map to one file are reported before anything moves.
+    p.file("src/main/kotlin/A.kt", "").file("src/main/java/A.kt", "");
+    let before = snapshot(p.path());
+    p.kargo().args(["import", "--from", "maven"]).assert().failure().stderr(predicate::str::contains("would both become"));
+    assert_eq!(snapshot(p.path()), before);
+}
+
+#[test]
+fn import_converts_a_ktor_gradle_project() {
+    let p = Project::new();
+    p.file("settings.gradle.kts", "rootProject.name = \"ktor-sample\"\n")
+        .file("gradle.properties", "ktor_version=3.0.0\nlogback_version=1.4.14\n")
+        .file(
+            "build.gradle.kts",
+            r#"val logback_version: String by project
+
+plugins {
+    kotlin("jvm") version "2.0.20"
+    id("io.ktor.plugin") version "3.0.0"
+}
+
+group = "com.example"
+version = "0.0.1"
+
+application {
+    mainClass.set("io.ktor.server.netty.EngineMain")
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("io.ktor:ktor-server-core-jvm")
+    implementation("io.ktor:ktor-server-netty-jvm")
+    implementation("ch.qos.logback:logback-classic:$logback_version")
+    testImplementation("io.ktor:ktor-server-test-host-jvm")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.0.20")
+}
+"#,
+        )
+        .file("src/main/kotlin/Application.kt", "package com.example\n")
+        .file("src/main/resources/application.yaml", "ktor: {}\n")
+        .file("src/test/kotlin/ApplicationTest.kt", "package com.example\n")
+        .file(".gitignore", "build/\n");
+    p.kargo()
+        .args(["import", "--no-build"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Imported Gradle project as package `ktor-sample`"))
+        .stderr(predicate::str::contains("Ktor 3.0.0 -> [frameworks] ktor"))
+        .stderr(predicate::str::contains("Updated .gitignore"));
+    let manifest = p.read("kargo.toml");
+    assert!(manifest.contains("ktor = { version = \"3.0.0\", server = \"netty\", json = false }"), "{manifest}");
+    assert!(manifest.contains("\"ch.qos.logback:logback-classic\" = \"1.4.14\""), "{manifest}");
+    assert!(manifest.contains("main-class = \"io.ktor.server.netty.EngineMain\""), "{manifest}");
+    assert!(manifest.contains("[kotlin]\nversion = \"2.0.20\""), "{manifest}");
+    assert!(!manifest.contains("dev-dependencies"), "kotlin-test and the Ktor test host are built in: {manifest}");
+    assert!(p.path().join("src/Application.kt").is_file() && p.path().join("tests/ApplicationTest.kt").is_file());
+    assert!(p.path().join("resources/application.yaml").is_file());
+    assert!(p.path().join("build.gradle.kts").is_file(), "the Gradle files stay");
+    assert_eq!(p.read(".gitignore"), "build/\n/target\n");
+    p.kargo().arg("info").assert().success();
+}
+
+#[test]
+fn import_converts_a_multiplatform_gradle_project() {
+    let p = Project::new();
+    p.file("settings.gradle.kts", "rootProject.name = \"shared\"\n")
+        .file(
+            "build.gradle.kts",
+            r#"plugins {
+    kotlin("multiplatform") version "2.4.21"
+}
+
+group = "org.example"
+version = "1.0"
+
+kotlin {
+    jvm()
+    wasmJs {
+        browser()
+        binaries.executable()
+    }
+    linuxX64 {
+        binaries { executable { entryPoint = "main" } }
+    }
+    macosArm64()
+
+    sourceSets {
+        commonMain.dependencies {
+            implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.6.1")
+        }
+        val jvmMain by getting {
+            dependencies { implementation("com.squareup.okhttp3:okhttp:4.12.0") }
+        }
+    }
+}
+"#,
+        )
+        .file("src/commonMain/kotlin/Greeting.kt", "")
+        .file("src/commonTest/kotlin/GreetingTest.kt", "")
+        .file("src/jvmMain/kotlin/Jvm.kt", "")
+        .file("src/wasmJsMain/kotlin/Wasm.kt", "")
+        .file("src/linuxX64Main/kotlin/Linux.kt", "")
+        .file("src/commonMain/resources/data.txt", "");
+    p.kargo().args(["import", "--no-build"]).assert().success();
+    let manifest = p.read("kargo.toml");
+    assert!(manifest.contains("[target.jvm]\n"), "{manifest}");
+    assert!(manifest.contains("[target.wasm]\nenvironment = \"browser\"\n"), "{manifest}");
+    assert!(
+        manifest.contains("[target.native]\nplatforms = [\"linuxX64\", \"macosArm64\"]\nkind = \"executable\"\nentry-point = \"main\"\n"),
+        "{manifest}"
+    );
+    assert!(manifest.contains("\"org.jetbrains.kotlinx:kotlinx-datetime\" = \"0.6.1\""), "{manifest}");
+    assert!(manifest.contains("[target.jvm.dependencies]\n\"com.squareup.okhttp3:okhttp\" = \"4.12.0\""), "{manifest}");
+    for moved in
+        ["src/Greeting.kt", "tests/GreetingTest.kt", "src-jvm/Jvm.kt", "src-wasm/Wasm.kt", "src-native/Linux.kt", "resources/data.txt"]
+    {
+        assert!(p.path().join(moved).is_file(), "{moved}");
+    }
+    assert!(!p.path().join("src/commonMain").exists());
+    p.kargo().arg("info").assert().success();
+}
+
+#[test]
+fn import_takes_the_directory_to_import() {
+    let p = Project::new();
+    p.file("app/pom.xml", "<project><groupId>g</groupId><artifactId>app</artifactId><version>1</version></project>")
+        .file("app/src/main/kotlin/A.kt", "");
+    p.kargo().args(["import", "app", "--no-build"]).assert().success();
+    assert!(p.path().join("app/kargo.toml").is_file() && p.path().join("app/src/A.kt").is_file());
+    assert!(!p.path().join("kargo.toml").exists());
+}
+
+#[test]
+fn import_reports_a_failing_build_after_importing() {
+    let p = Project::new();
+    p.file("pom.xml", "<project><groupId>g</groupId><artifactId>app</artifactId><version>1</version></project>")
+        .file("src/main/kotlin/A.kt", "this does not compile\n");
+    // No repository can be reached, so the build fails; the import has happened all the same.
+    p.kargo()
+        .args(["import", "--offline"])
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("Imported Maven project as package `app`"))
+        .stderr(predicate::str::contains("the project was imported, but `kargo build` failed"));
+    assert!(p.path().join("kargo.toml").is_file() && p.path().join("src/A.kt").is_file());
+}
+
+#[test]
+fn import_gives_the_modules_of_a_workspace_one_kotlin_version() {
+    let p = Project::new();
+    let module = |name: &str, kotlin: &str| {
+        format!(
+            "<project><groupId>g</groupId><artifactId>{name}</artifactId><version>1</version><build><plugins><plugin><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>{kotlin}</version></plugin></plugins></build></project>"
+        )
+    };
+    p.file(
+        "pom.xml",
+        "<project><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>a</module><module>b</module></modules></project>",
+    )
+    .file("a/pom.xml", &module("a", "2.4.20"))
+    .file("b/pom.xml", &module("b", "2.4.21"));
+    p.kargo()
+        .args(["import", "--no-build"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("the modules use the Kotlin versions 2.4.20, 2.4.21"));
+    assert!(p.read("kargo.toml").contains("[workspace.kotlin]\nversion = \"2.4.21\""));
+    // The members load together, which is where one Kotlin version is required.
+    p.kargo().args(["metadata", "--no-deps"]).assert().success();
 }
 
 /// A `[[generate]]` step that copies `in.txt` to `Out.kt` in `$KARGO_GEN_DIR` and counts its runs in `runs.txt`.
