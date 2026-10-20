@@ -1775,3 +1775,122 @@ fn kargo_version_requirements_are_checked_against_the_running_kargo() {
     assert!(check_kargo_version(&req("^0.3"), "0.4.0").is_err());
     assert!(check_kargo_version(&req(">=0.3"), "not a version").is_err());
 }
+
+#[test]
+fn generate_steps_run_commands_tools_and_builtins() {
+    assert!(parse(MINIMAL).generators.is_empty());
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[[generate]]
+name = "protos"
+inputs = ["proto/**/*.proto"]
+run = "protoc --kotlin_out=$KARGO_GEN_DIR proto/*.proto"
+windows-run = ["protoc.exe --kotlin_out=%KARGO_GEN_DIR% proto/a.proto"]
+targets = ["jvm", "android"]
+kind = "test-sources"
+env = {{ A = "b" }}
+
+[[generate]]
+name = "api-client"
+inputs = ["openapi.yaml"]
+tool = "org.openapitools:openapi-generator-cli:7.16.0"
+args = ["generate", "-o", "$KARGO_GEN_DIR"]
+after = ["protos"]
+
+[[generate]]
+name = "config"
+builtin = "build-config"
+fields = {{ API_URL = "https://example.com", RETRIES = 3, DEBUG = true }}
+expose = ["TOKEN"]
+build-time = true
+roots = ["src\\main/kotlin/", "gen", "gen"]
+
+[[generate]]
+name = "grpc"
+builtin = "protobuf"
+grpc = true
+"#
+    ));
+    assert_eq!(m.generators.len(), 4);
+    let protos = m.generator("protos").unwrap();
+    assert_eq!(protos.inputs, ["proto/**/*.proto"]);
+    assert_eq!(protos.targets, [TargetKind::Jvm, TargetKind::Android]);
+    assert_eq!(protos.kind, GeneratedKind::TestSources);
+    assert_eq!(protos.env["A"], "b");
+    assert!(protos.applies_to(TargetKind::Android) && !protos.applies_to(TargetKind::Wasm));
+    let GeneratorAction::Run { run, windows_run, shell } = &protos.action else { panic!("{:?}", protos.action) };
+    assert_eq!((run.len(), windows_run.as_ref().map(Vec::len), *shell), (1, Some(1), None));
+
+    let api = m.generator("api-client").unwrap();
+    assert!(api.roots.is_empty(), "the whole output directory by default");
+    assert_eq!(m.generator("config").unwrap().roots, ["src/main/kotlin", "gen"], "separators and duplicates are tidied");
+    assert_eq!(api.targets, TargetKind::ALL, "every target by default");
+    assert_eq!(api.kind, GeneratedKind::Sources);
+    assert_eq!(api.after, ["protos"]);
+    let GeneratorAction::Tool { module, version, main_class, args } = &api.action else { panic!("{:?}", api.action) };
+    assert_eq!(
+        (module.to_string().as_str(), version.as_str(), main_class.as_deref(), args.len()),
+        ("org.openapitools:openapi-generator-cli", "7.16.0", None, 3)
+    );
+
+    let config = m.generator("config").unwrap();
+    assert_eq!(config.builtin(), Some("build-config"));
+    assert!(config.inputs.is_empty());
+    let GeneratorAction::BuildConfig(c) = &config.action else { panic!("{:?}", config.action) };
+    assert_eq!((c.object.as_str(), c.package.as_deref(), c.build_time), ("BuildConfig", None, true));
+    assert_eq!(c.fields["RETRIES"], BuildConfigValue::Int(3));
+    assert_eq!(c.expose, ["TOKEN"]);
+
+    let grpc = m.generator("grpc").unwrap();
+    assert_eq!(grpc.targets, [TargetKind::Jvm, TargetKind::Android], "protobuf's classes are JVM ones");
+    assert_eq!(grpc.inputs, ["proto/**/*.proto"]);
+    let GeneratorAction::Protobuf(p) = &grpc.action else { panic!("{:?}", grpc.action) };
+    assert_eq!((p.proto_path.as_slice(), p.java, p.kotlin, p.grpc), (["proto".to_owned()].as_slice(), true, true, true));
+}
+
+#[test]
+fn generate_steps_are_validated() {
+    let generate = |body: &str| format!("{MINIMAL}\n[[generate]]\nname = \"g\"\n{body}\n");
+    let err = |body: &str| parse_err(&generate(body));
+    assert!(err("").contains("set exactly one of `run`"));
+    assert!(err("run = \"x\"\ntool = \"a:b:1\"").contains("set exactly one of `run`"));
+    assert!(err("run = []").contains("`run` has no command"));
+    assert!(err("run = 3").contains("`run` must be a string or an array of strings"));
+    assert!(err("tool = \"a:b\"").contains("`group:artifact:version`"));
+    assert!(err("tool = \"a:b:1\"\nwindows-run = \"x\"").contains("goes with `run`"));
+    assert!(err("tool = \"a:b:1\"\nshell = \"sh\"").contains("goes with `run`"));
+    assert!(err("run = \"x\"\nmain-class = \"a.B\"").contains("`main-class` goes with `tool`"));
+    assert!(err("tool = \"a:b:1\"\nmain-class = \"a..B\"").contains("invalid `main-class`"));
+    assert!(err("run = \"x\"\nargs = [\"y\"]").contains("`args` goes with `tool`"));
+    assert!(err("run = \"x\"\nshell = \"fish\"").contains("unknown shell `fish`"));
+    assert!(err("run = \"x\"\ntargets = [\"ios\"]").contains("invalid `targets`"));
+    assert!(err("run = \"x\"\ntargets = []").contains("`targets` is empty"));
+    assert!(err("run = \"x\"\nkind = \"docs\"").contains("unknown kind `docs`"));
+    assert!(err("run = \"x\"\nkind = \"resources\"\ntargets = [\"wasm\", \"native\"]").contains("resources only exist"));
+    assert!(err("run = \"x\"\nroots = [\"../up\"]").contains("`roots` entry `../up` must be a directory inside the output"));
+    assert!(err("run = \"x\"\nroots = [\"/abs\"]").contains("`roots` entry"));
+    assert!(err("run = \"x\"\nroots = [\"a//b\"]").contains("`roots` entry"));
+    assert!(err("run = \"x\"\nafter = [\"nope\"]").contains("`nope`, which no [[generate]] declares"));
+    assert!(err("run = \"x\"\nafter = [\"g\"]").contains("runs after itself"));
+    assert!(err("run = \"x\"\nbogus = 1").contains("unknown field"));
+    assert!(parse_err(&format!("{MINIMAL}\n[[generate]]\nname = \"1g\"\nrun = \"x\"\n")).contains("invalid [[generate]] name"));
+    let twice = format!("{}[[generate]]\nname = \"g\"\nrun = \"y\"\n", generate("run = \"x\""));
+    assert!(parse_err(&twice).contains("declared more than once"));
+    let cycle = format!(
+        "{MINIMAL}\n[[generate]]\nname = \"a\"\nrun = \"x\"\nafter = [\"b\"]\n[[generate]]\nname = \"b\"\nrun = \"y\"\nafter = [\"a\"]\n"
+    );
+    assert!(parse_err(&cycle).contains("a -> b -> a"));
+
+    assert!(err("builtin = \"gradle\"").contains("unknown builtin `gradle`"));
+    assert!(err("run = \"x\"\npackage = \"a.b\"").contains("`package` goes with `builtin = \"build-config\"`"));
+    assert!(err("builtin = \"build-config\"\ngrpc = true").contains("`grpc` goes with `builtin = \"protobuf\"`"));
+    assert!(err("builtin = \"build-config\"\ninputs = [\"a\"]").contains("`inputs` does not apply"));
+    assert!(err("builtin = \"build-config\"\npackage = \"a..b\"").contains("invalid `package`"));
+    assert!(err("builtin = \"build-config\"\nobject = \"Build Config\"").contains("`object` must be a Kotlin name"));
+    assert!(err("builtin = \"build-config\"\nfields = { VERSION = \"1\" }").contains("one of the constants Kargo writes"));
+    assert!(err("builtin = \"build-config\"\nfields = { \"A-B\" = 1 }").contains("not a valid constant name"));
+    assert!(err("builtin = \"protobuf\"\njava = false\nkotlin = false").contains("nothing to generate"));
+    assert!(err("builtin = \"protobuf\"\njava = false").contains("wraps the Java classes"));
+    assert!(err("builtin = \"protobuf\"\nversion = \"[1,2)\"").contains("one exact version"));
+    assert!(err("builtin = \"protobuf\"\ngrpc-java-version = \"1.0\"").contains("go with `grpc = true`"));
+}

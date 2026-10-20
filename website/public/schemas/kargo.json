@@ -403,6 +403,59 @@
         }
       }
     },
+    "generate": {
+      "description": "Steps that write sources or resources before they are compiled: protobuf, OpenAPI, BuildConfig. Each writes into `$KARGO_GEN_DIR`, `target/generated/<profile>/<name>/`.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "description": "Letters, digits, `-` and `_`, starting with a letter; unique. Names the output directory.", "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+          "inputs": {
+            "description": "Globs (gitignore syntax, relative to the project root) of the files the output comes from. The step runs only when they, its definition or Kargo changed. Without inputs, it runs on every build.",
+            "type": "array",
+            "items": { "type": "string", "examples": ["proto/**/*.proto"] }
+          },
+          "run": { "$ref": "#/definitions/commands", "description": "Shell commands that write into `$KARGO_GEN_DIR`, run at the project root." },
+          "windows-run": { "$ref": "#/definitions/commands", "description": "Replaces `run` on Windows." },
+          "shell": { "description": "The shell of `run` (default: sh on Unix, cmd on Windows).", "type": "string", "enum": ["sh", "bash", "cmd", "powershell", "pwsh"] },
+          "tool": { "description": "A Maven artifact `group:artifact:version` whose main class Kargo runs on the project's JDK. It is resolved and pinned in kargo.lock.", "type": "string", "examples": ["org.openapitools:openapi-generator-cli:7.16.0"] },
+          "main-class": { "description": "The class `tool` runs; by default the Main-Class of the jar's manifest.", "type": "string" },
+          "args": { "description": "Arguments of `tool`, or more arguments of `protoc`. `$NAME` and `${NAME}` become the variable's value (`$KARGO_GEN_DIR`).", "type": "array", "items": { "type": "string" } },
+          "builtin": { "description": "One of Kargo's own generators.", "type": "string", "enum": ["build-config", "protobuf"] },
+          "targets": {
+            "description": "The targets that compile the output. Default: every target (for protobuf, jvm and android).",
+            "type": "array",
+            "items": { "type": "string", "enum": ["jvm", "wasm", "native", "android"] }
+          },
+          "kind": { "description": "What the step writes: main `sources` (the default), `resources` or `test-sources`.", "type": "string", "enum": ["sources", "resources", "test-sources"], "default": "sources" },
+          "roots": {
+            "description": "Directories of the output, relative to it, that hold the sources or resources, such as `src/main/kotlin` for a tool that writes a whole project. Default: the whole output directory.",
+            "type": "array",
+            "items": { "type": "string", "examples": ["src/main/kotlin"] }
+          },
+          "after": { "description": "Steps that run before this one.", "type": "array", "items": { "type": "string" } },
+          "env": { "description": "Environment variables of the step, on top of the `KARGO_*` ones.", "type": "object", "additionalProperties": { "type": "string" } },
+          "package": { "description": "build-config: the Kotlin package of the object. Default: the package's group and name.", "type": "string" },
+          "object": { "description": "build-config: the name of the object.", "type": "string", "default": "BuildConfig" },
+          "fields": {
+            "description": "build-config: constants of your own. A string, integer or boolean becomes a `const val` of that type.",
+            "type": "object",
+            "additionalProperties": { "type": ["string", "integer", "boolean"] }
+          },
+          "expose": { "description": "build-config: variables of the project environment (`[env]`, `.env` files) to write as constants, as `[env] expose` does.", "type": "array", "items": { "type": "string" } },
+          "build-time": { "description": "build-config: also write `BUILD_TIME`. It changes on every build, and so recompiles, unless SOURCE_DATE_EPOCH is set.", "type": "boolean", "default": false },
+          "version": { "description": "protobuf: the protoc version.", "type": "string", "default": "4.31.1" },
+          "proto-path": { "description": "protobuf: directories searched for imports (`-I`), relative to the project root.", "type": "array", "items": { "type": "string" }, "default": ["proto"] },
+          "java": { "description": "protobuf: generate Java classes.", "type": "boolean", "default": true },
+          "kotlin": { "description": "protobuf: generate the Kotlin DSL (needs `java`).", "type": "boolean", "default": true },
+          "grpc": { "description": "protobuf: also generate gRPC stubs, Java ones and, with `kotlin`, Kotlin ones.", "type": "boolean", "default": false },
+          "grpc-java-version": { "description": "protobuf: the version of protoc-gen-grpc-java.", "type": "string", "default": "1.73.0" },
+          "grpc-kotlin-version": { "description": "protobuf: the version of protoc-gen-grpc-kotlin.", "type": "string", "default": "1.4.3" }
+        }
+      }
+    },
     "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of every target." },
     "dev-dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies used only to compile and run tests." },
     "repositories": {

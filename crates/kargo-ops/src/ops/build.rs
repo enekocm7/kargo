@@ -18,7 +18,7 @@ use kargo_compiler::mainclass::{find_entry_point_in, find_jvm_main_class, find_s
 use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
-use kargo_manifest::{Bin, Cinterop, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
+use kargo_manifest::{Bin, Cinterop, GeneratedKind, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
 use kargo_maven::{ModuleId, Platform, Resolution};
 use kargo_toolchain::native::resolve_platform;
 use kargo_util::fs::collect_files;
@@ -99,16 +99,32 @@ pub fn select_targets(ctx: &BuildContext, requested: &[TargetKind]) -> Result<Ve
     Ok(requested.to_vec())
 }
 
+/// The sources of `target` (the tests' with `tests`), after the `[[generate]]` steps it uses ran.
 pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: &[&str]) -> Result<SourceSet> {
+    crate::generate::ensure(ctx, target)?;
+    existing_sources(ctx, target, tests, extensions)
+}
+
+/// Like [`sources`], but runs no `[[generate]]` step: the generated files are whatever the last build wrote.
+/// `kargo metadata` reads the sources this way.
+pub fn existing_sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: &[&str]) -> Result<SourceSet> {
     let ws = ctx.ws;
     let (common, platform) =
         if tests { (ws.common_tests(), ws.target_tests(target)) } else { (ws.common_sources(), ws.target_sources(target)) };
     let mut set = SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str());
+    add_generated_sources(&mut set, crate::generate::sources(ws, &ctx.profile, target, tests, extensions));
     if !tests {
         add_build_config(ctx, target, &mut set)?;
         add_compose_resources(ctx, target, &mut set)?;
     }
     Ok(set)
+}
+
+/// Adds the files of `[[generate]]` steps; see [`add_generated_source`].
+fn add_generated_sources(sources: &mut SourceSet, paths: Vec<PathBuf>) {
+    for path in paths {
+        add_generated_source(sources, path);
+    }
 }
 
 /// Adds a generated source file to the platform fragment, unless that would make a `src/`-only
@@ -144,7 +160,9 @@ pub fn compose_resources_dir(ctx: &BuildContext) -> PathBuf {
 /// The file is rewritten only when its contents change, so unchanged builds stay incremental.
 fn add_build_config(ctx: &BuildContext, target: TargetKind, sources: &mut SourceSet) -> Result<()> {
     let manifest = ctx.ws.manifest();
-    if manifest.env.expose.is_empty() || !ctx.program_env_applies(target) {
+    // A `builtin = "build-config"` step writes the object itself, with these variables in it.
+    if manifest.env.expose.is_empty() || !ctx.program_env_applies(target) || crate::generate::build_config_owner(manifest, target).is_some()
+    {
         return Ok(());
     }
     let env = ctx.resolve_env(&EnvOptions::default())?;
@@ -161,10 +179,19 @@ fn add_build_config(ctx: &BuildContext, target: TargetKind, sources: &mut Source
     Ok(())
 }
 
+/// Runs the `[[generate]]` steps `targets` use, if they are out of date. Call it after the pre-build
+/// hooks, which may write their inputs, and before [`warn_about_sources`].
+pub fn generate_sources(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
+    crate::generate::ensure_all(ctx, targets)
+}
+
 /// Warns about sources that are missing for `targets` or that Kargo ignores. Call it after the
-/// pre-build hooks, which may generate sources.
+/// pre-build hooks, which may generate sources, and after [`generate_sources`].
 pub fn warn_about_sources(ctx: &BuildContext, targets: &[TargetKind]) {
-    let mut messages = warnings::missing_sources(ctx.ws, targets);
+    // A target that only has generated sources has some.
+    let bare: Vec<TargetKind> =
+        targets.iter().copied().filter(|&t| crate::generate::sources(ctx.ws, &ctx.profile, t, false, &["kt", "java"]).is_empty()).collect();
+    let mut messages = warnings::missing_sources(ctx.ws, &bare);
     messages.extend(warnings::ignored_files(ctx.ws));
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, messages);
 }
@@ -174,6 +201,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let targets = select_targets(ctx, &opts.targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    generate_sources(ctx, &targets)?;
     warn_about_sources(ctx, &targets);
 
     let mut results = BuildResults::default();
@@ -331,11 +359,14 @@ pub(crate) fn run_jvm_ksp(
     let kotlin = &ws.manifest().kotlin;
     let language_version = kotlin.language_version.clone().unwrap_or_else(|| kargo_compiler::ksp::language_version(&kotlin.version));
     let api_version = kotlin.api_version.clone().unwrap_or_else(|| language_version.clone());
-    let (source_roots, dir, what) = if unit.test {
+    let (mut source_roots, dir, what) = if unit.test {
         (vec![ws.common_tests(), ws.target_tests(TargetKind::Jvm)], "test", ", tests, ksp")
     } else {
         (vec![ws.common_sources(), ws.target_sources(TargetKind::Jvm)], "main", ", ksp")
     };
+    // The processors see what `[[generate]]` steps wrote too, as classes in `src/` may use it.
+    let generated = if unit.test { GeneratedKind::TestSources } else { GeneratedKind::Sources };
+    source_roots.extend(crate::generate::dirs(ws, &ctx.profile, TargetKind::Jvm, generated));
     let tool_classpath = ctx.ksp_tool()?;
     let run = KspRun {
         name: unit.name,
@@ -406,6 +437,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let jvm_target = jvm.target_for(jdk.version)?;
     let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"])?;
     let mut resources = vec![ctx.ws.resources()];
+    resources.extend(crate::generate::resource_dirs(ctx.ws, &ctx.profile, TargetKind::Jvm));
     let compose_resources = compose_resources_dir(ctx);
     if compose_resources.is_dir() {
         resources.push(compose_resources);

@@ -23,7 +23,7 @@ use crate::publication::{
 use crate::signing::Signer;
 use crate::workspace::{Project, Workspace};
 use kargo_compiler::jar::{JarManifest, write_jar};
-use kargo_manifest::{CentralPublishing, Hook, Javadoc, MAVEN_CENTRAL_DESTINATION, Manifest, Scope, TargetKind};
+use kargo_manifest::{CentralPublishing, GeneratedKind, Hook, Javadoc, MAVEN_CENTRAL_DESTINATION, Manifest, Scope, TargetKind};
 use kargo_maven::central::{self, Portal, PublishingType};
 use kargo_maven::deploy::{DeployFile, Deployer};
 use kargo_maven::repo::MAVEN_LOCAL;
@@ -148,6 +148,7 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
 
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ws, Hook::PreBuild, &env)?;
+    super::build::generate_sources(ctx, &targets)?;
     warn_about_sources(ctx, &targets);
     let work = ws.profile_dir(&ctx.profile).join("publish");
     remove_dir_all_if_exists(&work)?;
@@ -180,11 +181,14 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     for (platform, target) in platforms.into_iter().zip(targets_per_platform(&targets, &kinds)) {
         let mut platform = platform;
         if sources {
-            let dirs = if multiplatform {
+            let mut dirs = if multiplatform {
                 vec![("commonMain", ws.common_sources()), (platform_source_root(&platform.kind), ws.target_sources(target))]
             } else {
                 vec![("", ws.common_sources()), ("", ws.target_sources(target))]
             };
+            // What `[[generate]]` steps wrote is part of the library's code too.
+            let generated = if multiplatform { platform_source_root(&platform.kind) } else { "" };
+            dirs.extend(crate::generate::dirs(ws, &ctx.profile, target, GeneratedKind::Sources).into_iter().map(|dir| (generated, dir)));
             platform.sources = Some(sources_jar(&jars, &platform.kind.module_suffix(), &dirs)?);
         }
         platform.javadoc = javadoc.clone();
@@ -592,7 +596,9 @@ pub fn package_library(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Resu
     };
     write_jar(&jar, &jvm.classes, &manifest, &[])?;
     let work = ws.profile_dir(&ctx.profile).join("package-work");
-    let sources = sources_jar(&work, "jvm", &[("", ws.common_sources()), ("", ws.target_sources(TargetKind::Jvm))])?;
+    let mut dirs = vec![("", ws.common_sources()), ("", ws.target_sources(TargetKind::Jvm))];
+    dirs.extend(crate::generate::dirs(ws, &ctx.profile, TargetKind::Jvm, GeneratedKind::Sources).into_iter().map(|dir| ("", dir)));
+    let sources = sources_jar(&work, "jvm", &dirs)?;
     let dest = dir.join(format!("{}-{}-sources.jar", pkg.name, pkg.version));
     std::fs::copy(&sources, &dest).with_context(|| format!("failed to write {}", dest.display()))?;
     remove_dir_all_if_exists(&work)?;

@@ -98,6 +98,8 @@ notify.workspace = true
 
 At the workspace root, `kargo <name>` runs the workspace's task, or else the task of every member that defines one, in dependency order. Inside a member it runs the member's task, or else the workspace's. Tasks and hooks of a member also get `KARGO_WORKSPACE_DIR`, the workspace root.
 
+Code that a tool generates from other files (protobuf classes, an OpenAPI client, a `BuildConfig`) is better declared with a [`[[generate]]` step](../code-generation/) than with a `pre-build` task. A step writes outside `src/`, skips itself while its inputs are unchanged, and tells the editors where its output is.
+
 ## Hooks
 
 Hooks are lifecycle points: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run` and `post-package`. `kargo check` runs `pre-build` hooks too, so generated sources get checked, but not `post-build`. Attach tasks with `hooks = [...]` (see above), or attach any executable as a **hook plugin**:

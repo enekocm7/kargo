@@ -57,13 +57,12 @@ impl WatchSet {
                 paths.extend(native.cinterop.iter().map(|c| package.root().join(c.def_path())));
                 if let Some(c) = &native.c_sources {
                     paths.extend(c.include_dirs.iter().map(|d| package.root().join(d)));
-                    // A glob is watched from the directory before its first wildcard.
-                    paths.extend(c.sources.iter().map(|s| {
-                        let literal: PathBuf =
-                            Path::new(s).components().take_while(|c| !c.as_os_str().to_string_lossy().contains(['*', '?', '['])).collect();
-                        package.root().join(literal)
-                    }));
+                    paths.extend(c.sources.iter().map(|s| package.root().join(literal_prefix(s))));
                 }
+            }
+            // What the `[[generate]]` steps read: a change makes the next run generate again.
+            for generator in &package.manifest().generators {
+                paths.extend(generator.inputs.iter().map(|input| package.root().join(literal_prefix(input))));
             }
             paths.extend(env_files(package.root()));
         }
@@ -71,6 +70,14 @@ impl WatchSet {
         paths.dedup();
         Self { root, paths, lockfile }
     }
+}
+
+/// A glob is watched from the directory before its first wildcard.
+fn literal_prefix(glob: &str) -> PathBuf {
+    Path::new(glob.trim_start_matches("./"))
+        .components()
+        .take_while(|c| !c.as_os_str().to_string_lossy().contains(['*', '?', '[']))
+        .collect()
 }
 
 /// The `.env` files a package's programs read their environment from: `.env`, `.env.<profile>` and their `.local` variants.
@@ -139,6 +146,14 @@ mod tests {
         assert_eq!(describe(root, &[file("Main.kt")]), Path::new("src").join("Main.kt").display().to_string());
         let changed = [file("A.kt"), file("B.kt"), root.join("kargo.toml")];
         assert_eq!(describe(root, &changed), format!("{} and 2 more", Path::new("src").join("A.kt").display()));
+    }
+
+    #[test]
+    fn globs_are_watched_from_their_literal_directory() {
+        assert_eq!(literal_prefix("proto/**/*.proto"), Path::new("proto"));
+        assert_eq!(literal_prefix("./openapi.yaml"), Path::new("openapi.yaml"));
+        assert_eq!(literal_prefix("api/v1/*.yaml"), Path::new("api").join("v1"));
+        assert_eq!(literal_prefix("**/*.proto"), Path::new(""));
     }
 
     #[test]

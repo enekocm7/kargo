@@ -199,6 +199,8 @@ fun main() {
 
 A variable that is set becomes a `const val` with its value, and one that is not set becomes a nullable `val` with `null`, so a build doesn't fail for a variable only some machines have. The file is written to `target/<profile>/<target>/generated/env/BuildConfig.kt`, and it is rewritten only when its contents change.
 
+A [`build-config` generator](../code-generation/#buildconfig) can also write the package's version and Git commit. When a project has one, the `expose` variables go into its object instead of a second `BuildConfig`.
+
 `expose` applies to the JVM, Native and Wasm (Node.js) targets. It is not generated for Android, which has its own `build-config` in [`[target.android]`](../android/), nor for Wasm browser apps.
 
 ## Where the variables go

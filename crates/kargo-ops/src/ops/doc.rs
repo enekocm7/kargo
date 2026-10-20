@@ -20,7 +20,7 @@ use super::build::{
     finished, jvm_classpaths, jvm_compile_classpath, native_cinterop, native_libraries, native_platforms, select_targets, wasm_libraries,
 };
 use super::context::BuildContext;
-use kargo_manifest::{DocSettings, TargetKind};
+use kargo_manifest::{DocSettings, GeneratedKind, TargetKind};
 use kargo_maven::{DependencyRequest, ModuleId, Platform, Resolver};
 use kargo_util::fs::{collect_files, remove_dir_all_if_exists, write_string_atomic};
 use kargo_util::process;
@@ -74,8 +74,11 @@ pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
     let ws = ctx.ws;
     let manifest = ws.manifest();
 
+    // What `[[generate]]` steps write is documented with the rest of the code.
+    super::build::generate_sources(ctx, targets)?;
     let mut dirs = vec![ws.common_sources()];
     dirs.extend(targets.iter().map(|t| ws.target_sources(*t)));
+    dirs.extend(targets.iter().flat_map(|t| crate::generate::dirs(ws, &ctx.profile, *t, GeneratedKind::Sources)));
     if dirs.iter().all(|d| collect_files(d, &["kt", "java"]).is_empty()) {
         bail!("no Kotlin or Java sources to document; add them under `src/` or `src-<target>/`");
     }
@@ -146,6 +149,7 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
     }
     for &target in targets {
         let mut roots = vec![ws.target_sources(target)];
+        roots.extend(crate::generate::dirs(ws, &ctx.profile, target, GeneratedKind::Sources));
         if single {
             roots.insert(0, common.clone());
         }

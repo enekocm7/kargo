@@ -56,6 +56,21 @@ class KargoImportPlanTest {
     }
 
     @Test
+    fun `generated roots inside target are content entries of their own`() {
+        val json = javaClass.getResource("/metadata/jvm.json")!!.readText().replace(
+            "\"source-roots\": [\"/p/app/src\", \"/p/app/src-jvm\"]",
+            "\"source-roots\": [\"/p/app/src\", \"/p/app/src-jvm\", \"/p/app/target/generated/debug/protos\"]",
+        )
+        val module = KargoImportPlanner.plan(KargoMetadata.parse(json), Files).modules.single()
+        // A root inside the excluded `target/` would not be indexed, so it is not one of the package's roots.
+        assertEquals(listOf("/p/app", "/p/app/target/generated/debug/protos"), module.contents.map { it.root })
+        assertEquals(listOf("/p/app/target"), module.contents.first().excluded)
+        assertTrue(module.contents.first().roots.none { "/target/" in it.path })
+        assertEquals(listOf("SOURCE /p/app/target/generated/debug/protos"), module.contents.last().roots.map { it.toString() })
+        assertTrue(module.contents.last().excluded.isEmpty())
+    }
+
+    @Test
     fun `libraries are shared by module and version with their sources`() {
         val plan = plan("jvm")
         val stdlib = plan.libraries.single { it.name == "Kargo: org.jetbrains.kotlin:kotlin-stdlib:2.4.21" }

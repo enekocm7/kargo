@@ -18,6 +18,7 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `KARGO_VENDORED` | Same as `--vendored`: resolve dependencies only from the repository [`kargo vendor`](../commands/#kargo-vendor) wrote |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | The proxy for Kargo's downloads, and the hosts that bypass it (lowercase forms too). `[http] proxy` in `config.toml` overrides them; see [Offline and corporate builds](../../guides/offline-and-mirrors/#proxies-and-certificates) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
+| `SOURCE_DATE_EPOCH` | The time in seconds since 1970 that the [`build-config`](../../guides/code-generation/#buildconfig) generator writes as `BUILD_TIME` when `build-time = true`, instead of the current time, so that builds can be reproducible |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon (or compiler process), e.g. `-Xmx4g` |
 | `KARGO_INCREMENTAL` | `false` (or `0`, `no`, `off`) recompiles whole targets instead of only the files a change affects ([incremental compilation](../../guides/build-performance/#incremental-compilation)) |
 | `KARGO_DAEMON` | `false` (or `0`, `no`, `off`) runs the Kotlin compiler as a separate process on every build instead of in the [compiler daemon](../../guides/build-performance/#the-compiler-daemon) |
@@ -54,6 +55,8 @@ For tasks, hook plugins and `kargo-*` subcommands:
 | `KARGO_TARGET_DIR` | The output directory |
 | `KARGO_KOTLIN_VERSION` | From `[kotlin]` |
 | `KARGO_TASK` | The running task's name (tasks only) |
+| `KARGO_GEN_DIR` | The output directory of a [`[[generate]]` step](../../guides/code-generation/), `target/generated/<profile>/<name>/` (generator steps only) |
+| `KARGO_GEN_ROOT`, `KARGO_GEN_NAME`, `KARGO_GEN_KIND` | The directory that holds the output of every step, the step's name, and its `kind`: `sources`, `test-sources` or `resources` (generator steps only) |
 | `KARGO_HOOK` | The hook being run (hooks only) |
 | `KARGO_BUILD_LOCK` | The build-directory lock this Kargo process holds (hooks only); a `kargo` command the hook runs on the same project uses that lock instead of waiting for it |
 | `KARGO_CLASSPATH`, `KARGO_JVM_JAR` | After a JVM build |
