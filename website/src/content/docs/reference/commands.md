@@ -44,6 +44,7 @@ These work with every command.
 | `-q`, `--quiet` | Don't print Kargo's status messages |
 | `--offline` | Never use the network (also `KARGO_OFFLINE=1`) |
 | `--locked` | Fail if `kargo.lock` would need to change, and hash every cached artifact instead of trusting its `.stamp` |
+| `--vendored` | Resolve dependencies only from the repository [`kargo vendor`](#kargo-vendor) wrote (also `KARGO_VENDORED=1`, or `[source] vendored = true` in `.kargo/config.toml`) |
 | `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
 | `--system-gradle` | Run Android builds with the `gradle` on `PATH` instead of a Kargo-managed Gradle (also `KARGO_SYSTEM_GRADLE=1`). A project `gradlew` still wins |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
@@ -665,6 +666,29 @@ $ kargo fetch --sources
      Fetched 12 sources jars
 ```
 
+## `kargo vendor`
+
+Copy every Maven file a build of the project needs into a directory laid out as a Maven repository (`group/artifact/version/...`, with POMs, `.module` files, `maven-metadata.xml` and `.sha1` checksums), so a build with `--vendored` resolves from it alone, for example on a machine without network access. It copies what [`kargo fetch`](#kargo-fetch) downloads for the enabled targets, and every file of `kargo.lock`, checked against its SHA-256. The Android target is skipped, since Gradle resolves its dependencies. See [Offline and corporate builds](../../guides/offline-and-mirrors/).
+
+```sh
+kargo vendor [path] [--toolchains] [--sync]
+```
+
+| Option | Meaning |
+|---|---|
+| `path` | The directory to write, relative to the project root (default: `[source] directory` of `.kargo/config.toml`, else `vendor`) |
+| `--toolchains` | Also copy the Kotlin compiler and the Kotlin/Native distribution for this host |
+| `--sync` | Remove the files of the directory that the project no longer needs |
+
+```console
+$ kargo vendor
+    Vendored 214 files into /home/me/app/vendor (214 copied)
+note: to build from it, pass `--vendored`, or add this to .kargo/config.toml:
+
+[source]
+vendored = true
+```
+
 ## `kargo update`
 
 Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges and new builds of [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) are picked up.
@@ -794,11 +818,11 @@ Show or stop the background compiler daemons that keep the Kotlin compiler warm 
 
 ## `kargo info`
 
-Print project information: package, targets, path dependencies and paths. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.
+Print project information: package, targets, path dependencies, repositories and paths. A repository that a [mirror](../../guides/offline-and-mirrors/#repository-mirrors) or `--vendored` replaces shows where it is fetched from (`maven-central (via https://nexus.corp/central)`), and a `config:` line lists the [configuration files](../../guides/offline-and-mirrors/#configuration-files) Kargo read. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--format <fmt>` | `text` | `text` or `json`. `json` also lists every dependency and repository. See [Machine-readable output](../machine-readable-output/#kargo-info---format-json) |
+| `--format <fmt>` | `text` | `text` or `json`. `json` also lists every dependency and repository, with the `effective-url` it is fetched from. See [Machine-readable output](../machine-readable-output/#kargo-info---format-json) |
 
 ## `kargo metadata`
 

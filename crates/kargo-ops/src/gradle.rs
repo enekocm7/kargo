@@ -34,6 +34,7 @@ use kargo_toolchain::gradle::{self as toolchain_gradle, AgpGradle};
 use kargo_toolchain::{GradleDistribution, Jdk};
 use kargo_util::config::Config;
 use kargo_util::process;
+use kargo_util::settings::Settings;
 
 pub const AGP_VERSION: &str = "9.4.1";
 pub const COMPOSE_BOM_VERSION: &str = "2026.09.00";
@@ -115,30 +116,74 @@ fn dependency_line_in(d: &Dependency, conf: &str) -> String {
     line
 }
 
+/// The Gradle Plugin Portal, which `pluginManagement` searches after Google and Maven Central.
+const GRADLE_PLUGIN_PORTAL: &str = "https://plugins.gradle.org/m2";
+
 /// Renders `settings.gradle.kts` for a single-project build.
-pub fn settings_gradle(manifest: &Manifest) -> String {
-    settings_gradle_with(manifest, &[])
+pub fn settings_gradle(manifest: &Manifest, settings: &Settings) -> String {
+    settings_gradle_with(manifest, &[], settings)
+}
+
+/// One repository of `settings.gradle.kts` (`name` and `url`): its mirror from `[mirrors]` when there
+/// is one (with the environment variables of `[mirrors.credentials]`), else `builtin` (such as
+/// `google()`) for a repository Gradle knows, or a `maven` block with the repository's own credentials.
+fn gradle_repository(
+    out: &mut String,
+    seen: &mut Vec<String>,
+    settings: &Settings,
+    repo: (&str, &str),
+    builtin: Option<&str>,
+    has_credentials: bool,
+) {
+    let (name, url) = repo;
+    let mirror = if url.contains("://") && !url.starts_with("file:") { settings.repository_mirror(name, url) } else { None };
+    let url = mirror.unwrap_or(url);
+    if seen.iter().any(|u| u == url) {
+        return;
+    }
+    seen.push(url.to_owned());
+    if let (None, Some(builtin)) = (mirror, builtin) {
+        let _ = writeln!(out, "        {builtin}");
+        return;
+    }
+    let _ = write!(out, "        maven {{\n            url = uri({})\n", kts_string(url));
+    let env = |user: &str, password: &str| {
+        format!(
+            "            credentials {{\n                username = providers.environmentVariable({}).orNull\n                password = providers.environmentVariable({}).orNull\n            }}\n",
+            kts_string(user),
+            kts_string(password)
+        )
+    };
+    if has_credentials && mirror.is_none() {
+        let suffix = name.to_uppercase().replace('-', "_");
+        out.push_str(&env(&format!("KARGO_REPO_USER_{suffix}"), &format!("KARGO_REPO_PASSWORD_{suffix}")));
+    } else if let Some(creds) = settings.credentials_env(url) {
+        out.push_str(&env(&creds.username_env, &creds.password_env));
+    }
+    out.push_str("        }\n");
 }
 
 /// Renders `settings.gradle.kts`: the root project named after `manifest`'s package, and the
-/// `modules` (name and manifest) as subprojects in `modules/<name>`. The repositories of all of them apply.
-pub fn settings_gradle_with(manifest: &Manifest, modules: &[(&str, &Manifest)]) -> String {
+/// `modules` (name and manifest) as subprojects in `modules/<name>`. The repositories of all of them
+/// apply, each replaced by its mirror from `settings`.
+pub fn settings_gradle_with(manifest: &Manifest, modules: &[(&str, &Manifest)], settings: &Settings) -> String {
+    let google = ("google", kargo_maven::repo::GOOGLE);
+    let central = ("maven-central", kargo_maven::repo::MAVEN_CENTRAL);
+    let portal = ("gradle-plugin-portal", GRADLE_PLUGIN_PORTAL);
+    let mut plugin_repos = String::new();
+    let mut seen = Vec::new();
+    gradle_repository(&mut plugin_repos, &mut seen, settings, google, Some("google()"), false);
+    gradle_repository(&mut plugin_repos, &mut seen, settings, central, Some("mavenCentral()"), false);
+    gradle_repository(&mut plugin_repos, &mut seen, settings, portal, Some("gradlePluginPortal()"), false);
     let mut repos = String::new();
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen = Vec::new();
+    gradle_repository(&mut repos, &mut seen, settings, google, Some("google()"), false);
+    gradle_repository(&mut repos, &mut seen, settings, central, Some("mavenCentral()"), false);
     for repo in manifest.repositories.iter().chain(modules.iter().flat_map(|(_, m)| &m.repositories)) {
-        if repo.url == kargo_maven::repo::MAVEN_CENTRAL || repo.url == kargo_maven::repo::GOOGLE || seen.contains(&repo.url.as_str()) {
+        if repo.url == kargo_maven::repo::MAVEN_CENTRAL || repo.url == kargo_maven::repo::GOOGLE {
             continue;
         }
-        seen.push(&repo.url);
-        let _ = write!(repos, "        maven {{\n            url = uri({})\n", kts_string(&repo.url));
-        if repo.credentials.is_some() {
-            let _ = writeln!(
-                repos,
-                "            credentials {{\n                username = providers.environmentVariable(\"KARGO_REPO_USER_{0}\").orNull\n                password = providers.environmentVariable(\"KARGO_REPO_PASSWORD_{0}\").orNull\n            }}",
-                repo.name.to_uppercase().replace('-', "_")
-            );
-        }
-        repos.push_str("        }\n");
+        gradle_repository(&mut repos, &mut seen, settings, (&repo.name, &repo.url), None, repo.credentials.is_some());
     }
     let mut includes = String::new();
     for (name, _) in modules {
@@ -157,17 +202,12 @@ pub fn settings_gradle_with(manifest: &Manifest, modules: &[(&str, &Manifest)]) 
         r#"// Generated by Kargo from kargo.toml. Do not edit: changes are overwritten.
 pluginManagement {{
     repositories {{
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }}
+{plugin_repos}    }}
 }}
 
 dependencyResolutionManagement {{
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {{
-        google()
-        mavenCentral()
 {repos}    }}
 }}
 
@@ -760,7 +800,7 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
     }
     let names: Vec<(&str, &Manifest)> =
         modules.iter().map(|(i, _)| (ctx.project.package(*i).name(), ctx.project.package(*i).manifest())).collect();
-    write("settings.gradle.kts", &settings_gradle_with(ws.manifest(), &names))?;
+    write("settings.gradle.kts", &settings_gradle_with(ws.manifest(), &names, ctx.config.settings()))?;
     crate::compose::resources::generate(ws.root(), ws.manifest(), &compose_resources_dir(ws))?;
     let root = GradleModule { subproject: false, subproject_plugins, dependencies: root_lines };
     write("build.gradle.kts", &build_gradle_with(ws, android, &root)?)?;
@@ -1449,10 +1489,35 @@ mod tests {
         let text = build_gradle(&ws, &android).unwrap();
         assert!(text.contains("com.android.library"));
         assert!(!text.contains("applicationId"));
-        let settings = settings_gradle(ws.manifest());
+        let settings = settings_gradle(ws.manifest(), &Settings::default());
         assert!(settings.contains("rootProject.name = \"droid\""));
         assert!(settings.contains("url = uri(\"https://jitpack.io\")"));
         assert!(!settings.contains("dl.google.com"), "google() covers it");
+        assert!(settings.contains("        google()\n        mavenCentral()\n        gradlePluginPortal()\n"), "{settings}");
+    }
+
+    #[test]
+    fn settings_use_the_mirrors() {
+        let (_d, ws) = workspace("kind = \"library\"\n[repositories]\njitpack = \"https://jitpack.io\"\n");
+        let mut mirrors = Settings::default();
+        mirrors
+            .merge_str(
+                "[mirrors]\n\"*\" = \"https://art.corp/maven\"\n[mirrors.credentials.\"https://art.corp\"]\nusername-env = \"ART_USER\"\npassword-env = \"ART_TOKEN\"\n",
+                Path::new("/"),
+            )
+            .unwrap();
+        let settings = settings_gradle(ws.manifest(), &mirrors);
+        for public in ["google()", "mavenCentral()", "gradlePluginPortal()", "jitpack.io"] {
+            assert!(!settings.contains(public), "{public} in {settings}");
+        }
+        assert_eq!(settings.matches("url = uri(\"https://art.corp/maven\")").count(), 2, "{settings}");
+        assert!(settings.contains("providers.environmentVariable(\"ART_USER\")"), "{settings}");
+
+        let mut google_only = Settings::default();
+        google_only.merge_str("[mirrors]\ngoogle = \"https://nexus/google\"\n", Path::new("/")).unwrap();
+        let settings = settings_gradle(ws.manifest(), &google_only);
+        assert!(settings.contains("url = uri(\"https://nexus/google\")") && settings.contains("mavenCentral()"), "{settings}");
+        assert!(!settings.contains("google()"), "{settings}");
     }
 
     #[test]
@@ -1594,7 +1659,7 @@ mod tests {
             assert!(!text.contains("version"), "the root declares the versions: {text}");
             assert!(text.contains(&ui[0]));
 
-            let settings = settings_gradle_with(ctx.ws.manifest(), &[("ui", ui_ws.manifest())]);
+            let settings = settings_gradle_with(ctx.ws.manifest(), &[("ui", ui_ws.manifest())], &Settings::default());
             assert!(settings.contains("include(\":ui\")\nproject(\":ui\").projectDir = file(\"modules/ui\")"), "{settings}");
             let root = GradleModule {
                 subproject_plugins: plugins(ui_ws.manifest(), ui_ws.manifest().targets.android.as_ref().unwrap()),

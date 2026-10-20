@@ -138,6 +138,14 @@ Kargo downloads Gradle for Android builds on first use. Run `kargo fetch` (or `k
 
 `--offline` (or `KARGO_OFFLINE`) allows only what is already downloaded. Run `kargo fetch` once while online: it downloads the dependencies, compilers and test tools the project needs, so the offline build works. Add `--tools` for the doc, fmt and lint tools.
 
+### `there is no vendored repository at ...`
+
+`--vendored` (or `[source] vendored = true` in `.kargo/config.toml`) builds from the repository [`kargo vendor`](../../guides/offline-and-mirrors/#vendoring-dependencies) writes, and it is missing. Run `kargo vendor` (commit `vendor/` if other machines build from it), or check `[source] directory`.
+
+### Downloads fail behind a company proxy or firewall
+
+Set `HTTPS_PROXY` (and `NO_PROXY` for internal hosts), or `[http] proxy` in `~/.kargo/config.toml`. If the proxy inspects TLS and downloads fail with a certificate error, point `[http] cainfo` at a PEM bundle with your company's certificate authority. If Maven Central is blocked, use your Artifactory or Nexus with `[mirrors] "*" = "https://..."`. See [Offline and corporate builds](../../guides/offline-and-mirrors/).
+
 ### `kargo.lock needs to be updated ... but --locked was passed`
 
 You changed `kargo.toml` without committing the updated lockfile. Run `kargo build` locally and commit `kargo.lock`.

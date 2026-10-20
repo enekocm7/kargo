@@ -80,6 +80,18 @@ fn is_signature(name: &str) -> bool {
         && (upper.ends_with(".SF") || upper.ends_with(".DSA") || upper.ends_with(".RSA") || upper.ends_with(".EC"))
 }
 
+/// Whether the jar at `jar` exists and its `META-INF/MANIFEST.MF` is exactly what `manifest` renders.
+pub fn manifest_matches(jar: &Path, manifest: &JarManifest) -> bool {
+    let read = || -> Option<String> {
+        let mut archive = zip::ZipArchive::new(File::open(jar).ok()?).ok()?;
+        let mut entry = archive.by_name("META-INF/MANIFEST.MF").ok()?;
+        let mut text = String::new();
+        entry.read_to_string(&mut text).ok()?;
+        Some(text)
+    };
+    read().is_some_and(|text| text == manifest.render())
+}
+
 /// Writes a jar from `classes_dir`, optionally merging dependency jars (`fat`).
 pub fn write_jar(dest: &Path, classes_dir: &Path, manifest: &JarManifest, merge: &[PathBuf]) -> Result<()> {
     kargo_util::fs::write_atomic(dest, |file| {
@@ -236,6 +248,24 @@ mod tests {
         assert!(read_entry(&fat, "META-INF/SIGNER.SF").is_none(), "signatures are stripped");
         assert_eq!(read_entry(&fat, "META-INF/services/a.Spi").unwrap(), "impl.One\nimpl.Two\n");
         assert!(read_entry(&fat, "META-INF/MANIFEST.MF").unwrap().contains("Main-Class"));
+    }
+
+    #[test]
+    fn manifest_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        let classes = dir.path().join("classes");
+        std::fs::create_dir_all(&classes).unwrap();
+        let jar = dir.path().join("app.jar");
+        let manifest =
+            JarManifest { main_class: Some("MainKt".into()), class_path: vec!["lib/kotlin-stdlib.jar".into()], ..Default::default() };
+        assert!(!manifest_matches(&jar, &manifest), "a missing jar never matches");
+        write_jar(&jar, &classes, &manifest, &[]).unwrap();
+        assert!(manifest_matches(&jar, &manifest));
+
+        let other_main = JarManifest { main_class: Some("OtherKt".into()), ..manifest.clone() };
+        assert!(!manifest_matches(&jar, &other_main));
+        let more_deps = JarManifest { class_path: vec!["lib/kotlin-stdlib.jar".into(), "lib/lib-1.0.jar".into()], ..manifest };
+        assert!(!manifest_matches(&jar, &more_deps));
     }
 
     #[test]

@@ -25,6 +25,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo remove` | `kargo remove` / `kargo rm` | |
 | `cargo tree [-d]` | `kargo tree [--duplicates]` | |
 | `cargo fetch` | `kargo fetch` | |
+| `cargo vendor`, `[source]` replacement in `.cargo/config.toml` | `kargo vendor`, `--vendored` or `[source] vendored = true` in `.kargo/config.toml` | `vendor/` is a Maven repository. Mirrors are `[mirrors]` in `~/.kargo/config.toml`; see [Offline and corporate builds](../../guides/offline-and-mirrors/) |
 | `cargo update [-p foo] [--precise v] [--dry-run]` | `kargo update [group:artifact] [--precise v] [--dry-run]` | |
 | `cargo outdated` (plugin) | `kargo outdated` | Built in |
 | `cargo upgrade [--incompatible]` (cargo-edit) | `kargo upgrade [--incompatible]` | Built in; "compatible" means the same major version (minor for `0.x`) |

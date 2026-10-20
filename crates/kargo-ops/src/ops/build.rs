@@ -11,7 +11,7 @@ use crate::env::{EnvOptions, build_config_package, build_config_source};
 use crate::native_interop;
 use crate::warnings;
 use crate::workspace::ProfileKind;
-use kargo_compiler::jar::{JarManifest, write_jar};
+use kargo_compiler::jar::{JarManifest, manifest_matches, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::ksp::KspRun;
 use kargo_compiler::mainclass::{find_entry_point_in, find_jvm_main_class, find_single_entry_point};
@@ -458,13 +458,15 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
     let lib_dir = out.join("lib");
     let lib_names = sync_lib_dir(&lib_dir, &runtime_classpath)?;
     let jar = out.join(format!("{}-{}.jar", manifest.package.name, manifest.package.version));
-    if changed || !jar.is_file() {
-        let jar_manifest = JarManifest {
-            main_class: main_class.clone(),
-            class_path: lib_names.iter().map(|n| format!("lib/{n}")).collect(),
-            implementation_title: Some(manifest.package.name.clone()),
-            implementation_version: Some(manifest.package.version.clone()),
-        };
+    let jar_manifest = JarManifest {
+        main_class: main_class.clone(),
+        class_path: lib_names.iter().map(|n| format!("lib/{n}")).collect(),
+        implementation_title: Some(manifest.package.name.clone()),
+        implementation_version: Some(manifest.package.version.clone()),
+    };
+    // The compile fingerprint doesn't cover the main class or the runtime classpath, so a change to
+    // either alone shows up only in the manifest.
+    if changed || !manifest_matches(&jar, &jar_manifest) {
         write_jar(&jar, &classes, &jar_manifest, &[])?;
         kargo_compiler::abi::update_stamp(&jar)?;
     } else if !kargo_compiler::abi::stamp_path(&jar).is_file() {

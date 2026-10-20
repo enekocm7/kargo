@@ -2,6 +2,9 @@
 //!
 //! A transient failure (a dropped connection, HTTP 429, a 5xx) is retried with the same policy
 //! as dependency downloads, so a 200 MB JDK doesn't fail on the first hiccup.
+//!
+//! Every URL first goes through `[toolchain-mirrors]` (see [`kargo_util::settings`]), and a
+//! request to a URL that `[mirrors.credentials]` covers carries those credentials.
 
 use std::io::{self, Read};
 use std::path::Path;
@@ -13,14 +16,13 @@ use kargo_util::config::Config;
 use kargo_util::hash;
 use kargo_util::retry;
 
-fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_body(Some(Duration::from_secs(1800)))
-        .http_status_as_error(false)
-        .user_agent(concat!("kargo/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+fn agent(config: &Config) -> ureq::Agent {
+    kargo_util::http::agent(config, Duration::from_secs(1800))
+}
+
+/// Where Kargo actually downloads `url` from: its toolchain mirror, if one is configured.
+pub fn mirrored(config: &Config, url: &str) -> String {
+    config.settings().toolchain_url(url)
 }
 
 fn ensure_online(config: &Config, url: &str) -> Result<()> {
@@ -40,8 +42,12 @@ enum Failure {
 
 /// Sends a GET for `url`. A transient status is a [`Failure::Transient`]; any other response,
 /// including a 404, is returned for the caller to judge.
-fn send(url: &str) -> Result<ureq::http::Response<ureq::Body>, Failure> {
-    match agent().get(url).call() {
+fn send(config: &Config, url: &str) -> Result<ureq::http::Response<ureq::Body>, Failure> {
+    let mut request = agent(config).get(url);
+    if let Some((username, password)) = config.settings().credentials(url) {
+        request = request.header("Authorization", kargo_util::http::basic_auth(&username, &password));
+    }
+    match request.call() {
         Ok(response) => {
             let status = response.status().as_u16();
             if retry::is_transient_status(status) {
@@ -105,12 +111,14 @@ pub fn get_text_within(url: &str, timeout: Duration) -> Result<String> {
 
 /// Fetches a small text resource (e.g. an API response).
 pub fn get_text(config: &Config, url: &str) -> Result<String> {
+    let url = &mirrored(config, url);
     if let Some(path) = local_path(url) {
         return std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()));
     }
     ensure_online(config, url)?;
+    config.shell().verbose("Fetching", url);
     retrying(config, url, || {
-        let response = send(url)?;
+        let response = send(config, url)?;
         let status = response.status().as_u16();
         if status == 404 {
             return Err(Failure::Permanent(anyhow!("not found: {url}")));
@@ -132,6 +140,7 @@ pub fn get_text(config: &Config, url: &str) -> Result<String> {
 /// Downloads `url` to `dest`, verifying `sha256` when given. The file only
 /// appears at `dest` once it is complete and verified.
 pub fn download(config: &Config, url: &str, dest: &Path, sha256: Option<&str>) -> Result<()> {
+    let url = &mirrored(config, url);
     let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if let Some(source) = local_path(url) {
         config.shell().status("Copying", &name);
@@ -139,8 +148,8 @@ pub fn download(config: &Config, url: &str, dest: &Path, sha256: Option<&str>) -
             .with_context(|| format!("failed to read {}", source.display()))?;
     } else {
         ensure_online(config, url)?;
-        config.shell().status("Downloading", &name);
-        retrying(config, url, || fetch_to(url, dest))?;
+        config.shell().status("Downloading", if config.shell().is_verbose() { url } else { &name });
+        retrying(config, url, || fetch_to(config, url, dest))?;
     }
     if let Some(expected) = sha256 {
         verify(dest, expected).inspect_err(|_| {
@@ -151,8 +160,8 @@ pub fn download(config: &Config, url: &str, dest: &Path, sha256: Option<&str>) -
 }
 
 /// One attempt at downloading `url` to `dest`.
-fn fetch_to(url: &str, dest: &Path) -> Result<(), Failure> {
-    let response = send(url)?;
+fn fetch_to(config: &Config, url: &str, dest: &Path) -> Result<(), Failure> {
+    let response = send(config, url)?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         return Err(Failure::Permanent(anyhow!("unexpected HTTP {status} downloading {url}")));
@@ -260,6 +269,28 @@ mod tests {
         let url = serve(vec![(404, ""), (200, "ok")]);
         let err = get_text(&quiet(dir.path()), &url).unwrap_err().to_string();
         assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn downloads_from_a_toolchain_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = serve(vec![(200, "from the mirror")]);
+        let mut settings = kargo_util::settings::Settings::default();
+        settings
+            .merge_str(
+                &format!(
+                    "[toolchain-mirrors]
+\"https://services.gradle.org\" = \"{mirror}/gradle\"
+"
+                ),
+                dir.path(),
+            )
+            .unwrap();
+        let config = quiet(dir.path()).with_settings(settings).unwrap();
+        assert_eq!(mirrored(&config, "https://services.gradle.org/distributions/g.zip"), format!("{mirror}/gradle/distributions/g.zip"));
+        let dest = dir.path().join("g.zip");
+        download(&config, "https://services.gradle.org/distributions/g.zip", &dest, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "from the mirror");
     }
 
     #[test]
