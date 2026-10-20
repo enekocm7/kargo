@@ -1,6 +1,6 @@
 ---
 title: Editor integration
-description: Pick an editor for Kargo projects. IntelliJ IDEA and Android Studio with the Kargo plugin are the best supported; VS Code and Zed have Kargo extensions, and other editors run kargo lsp, kargo dap and kargo ide.
+description: Pick an editor for Kargo projects. IntelliJ IDEA and Android Studio with the Kargo plugin are the best supported; VS Code and Zed have Kargo extensions, Neovim and Emacs have Kargo plugins, and other editors run kargo lsp, kargo dap and kargo ide.
 ---
 
 Kargo gives editors what they need to understand a project without reading `kargo.toml` themselves: a language server, a JSON Schema for `kargo.toml`, a JSON description of the project, library sources, machine-readable compiler errors, test discovery and per-test results, and a debugger port.
@@ -16,7 +16,8 @@ Kargo gives editors what they need to understand a project without reading `karg
 | Zed | The [Kargo extension](#zed) | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Run buttons from `kargo ide --zed`, debugging through `kargo dap`, and test results in the terminal |
 | Neovim | The [Neovim plugin](#neovim) in `editors/neovim` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | `:Kargo` commands with errors in the quickfix list, runnables, a neotest adapter for tests, and debugging with nvim-dap |
 | Helix | `kargo lsp` in the editor's configuration | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Debugging through `kargo dap` with a DAP client, and tests in the terminal |
-| Emacs and other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
+| Emacs | The [Emacs package](#emacs) in `editors/emacs` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/), through Eglot or lsp-mode | Commands through `compile` with errors you can jump to, test and class runs with a results buffer, build errors in Flymake, and debugging with Dape |
+| Other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
 
 Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with each target's standard library, the JDK's sources, your `.java` files and your dependencies: from their sources jars once you fetch them, else from their compiled classes and klibs (see [Libraries](../kotlin-server/#libraries)). The npm packages of a Wasm target come from the [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) Kargo generates for them. Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
 
@@ -564,9 +565,205 @@ It adds three configurations for Kotlin buffers: `kargo run` and `kargo test`, w
 - There is no command to switch the active target. Pass `-t <target>` to a command, such as `:Kargo build -t wasm`.
 - The plugin isn't in the Mason registry yet. Install `kargo` yourself, as described in [Installation](../../getting-started/installation/).
 
+## Emacs
+
+Kargo's Emacs package, in the `editors/emacs` directory of the repository, runs [`kargo lsp`](#language-server) from Eglot or lsp-mode for Kotlin and `kargo.toml`, and runs the Kargo commands from Emacs through `compile`, so `next-error` jumps to compiler errors and to the line of a failed test. It lists the result of each test, shows build errors in Flymake, debugs programs and tests with [Dape](https://github.com/svaante/dape) through [`kargo dap`](#debug-adapter), and has a Transient menu of all commands. It needs Emacs 29.1 or newer and `kargo` on your `exec-path`, see [Installation](../../getting-started/installation/).
+
+### Install the Emacs package
+
+The package isn't on MELPA yet. Install it from the repository; Emacs 29 and newer can do that with `package-vc`:
+
+```elisp title="init.el"
+(package-vc-install '(kargo :url "https://github.com/enekocm7/kargo" :lisp-dir "editors/emacs"))
+```
+
+Or clone Kargo and add the directory to your `load-path`:
+
+```elisp title="init.el"
+(add-to-list 'load-path "~/src/kargo/editors/emacs")
+(require 'kargo)
+```
+
+Turn on `kargo-mode`, which binds the commands under `C-c k` in Kotlin and `kargo.toml` buffers of a Kargo project:
+
+```elisp title="init.el"
+(global-kargo-mode 1)
+;; or, for the Kotlin modes only:
+(add-hook 'kotlin-mode-hook #'kargo-mode)
+(add-hook 'kotlin-ts-mode-hook #'kargo-mode)
+```
+
+The package works with `kotlin-mode` (MELPA) and `kotlin-ts-mode`, and with `conf-toml-mode`, `toml-mode` and `toml-ts-mode` for `kargo.toml`. If Emacs is started from the Dock or a launcher and can't find `kargo` (it isn't in `exec-path`), give its path in `kargo-executable`, or set up `exec-path` from your shell with [exec-path-from-shell](https://github.com/purcell/exec-path-from-shell):
+
+```elisp title="init.el"
+(setq kargo-executable (expand-file-name "~/.cargo/bin/kargo"))
+```
+
+A command that can't find the executable stops with a message that says so and names `kargo-executable`.
+
+### Language server in Emacs
+
+With **Eglot**, which ships with Emacs, register `kargo lsp` once:
+
+```elisp title="init.el"
+(setq kargo-eglot-auto-start t)   ; optional: start Eglot in Kotlin files and kargo.toml of a Kargo project
+(with-eval-after-load 'eglot
+  (require 'kargo-eglot)
+  (kargo-eglot-setup))
+```
+
+`kargo-eglot-setup` adds an `eglot-server-programs` entry for `kotlin-mode`, `kotlin-ts-mode` and the TOML modes that runs `kargo lsp`, and adds `kargo.toml` to `project-vc-extra-root-markers`, so `project.el` (and so Eglot) takes the directory of a `kargo.toml` as the project root, also in a workspace member and without version control. Without `kargo-eglot-auto-start`, run `M-x eglot` in a buffer. `kargo lsp` gives features for `kargo.toml` alone, so other TOML files are unaffected. To leave TOML to another server, such as Taplo, drop the TOML modes before calling `kargo-eglot-setup`:
+
+```elisp title="init.el"
+(setq kargo-eglot-modes '(kotlin-mode kotlin-ts-mode))
+```
+
+With **lsp-mode**, load the client and start lsp-mode in the buffers you want:
+
+```elisp title="init.el"
+(with-eval-after-load 'lsp-mode
+  (require 'lsp-kargo))
+(add-hook 'kotlin-mode-hook #'lsp-deferred)
+(add-hook 'kotlin-ts-mode-hook #'lsp-deferred)
+(add-hook 'conf-toml-mode-hook #'lsp-deferred)
+```
+
+`lsp-kargo` registers the server `kargo`. It is active only where a `kargo.toml` is above the file, and then it outranks other Kotlin clients; it serves TOML files named `kargo.toml` only, so lsp-mode's TOML client keeps the others.
+
+Both clients start `kargo lsp` with these options:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `kargo-executable` | `"kargo"` | The `kargo` executable, for the language server and for every command |
+| `kargo-lsp-server` | `nil` | The Kotlin server behind `kargo lsp`: `nil` for [Kargo's own](../kotlin-server/), `"kotlin-lsp"` for JetBrains' Kotlin LSP (`--server kotlin-lsp`), `"kls"`, or `"none"`. See [Choosing the Kotlin server](#choosing-the-kotlin-server) |
+| `kargo-lsp-server-path` | `nil` | A server executable to run instead of the one Kargo downloads (`--server-path`) |
+| `kargo-lsp-klib-targets` | `nil` | Also describe Wasm and Native code to the Kotlin LSP (`--klib-targets`) |
+| `kargo-lsp-check-on-save` | `default` | `t` or `nil` turn [check on save](#check-on-save) on or off; `default` leaves it to the server (on with Kargo's own Kotlin server) |
+| `kargo-lsp-check-targets` | `nil` | The targets check on save compiles, such as `("wasm" "native")`; `nil` is every enabled target |
+
+```elisp title="init.el"
+(setq kargo-lsp-server "kotlin-lsp")
+```
+
+A change applies when the server starts, so restart it with `M-x eglot-reconnect` or `M-x lsp-workspace-restart`.
+
+What the server gives Kotlin and `kargo.toml` is described in [Language server](#language-server); in Emacs it is the usual commands of the client:
+
+| You want | Eglot | lsp-mode |
+|---|---|---|
+| Completion, with imports added | `completion-at-point` | `completion-at-point` |
+| Go to definition, also into library sources, and find usages | `xref-find-definitions`, `xref-find-references` (`M-.`, `M-?`) | the same |
+| Hover documentation | Eldoc | Eldoc or `lsp-ui-doc` |
+| Rename | `eglot-rename` | `lsp-rename` |
+| Quick fixes and import actions | `eglot-code-actions` | `lsp-execute-code-action` |
+| Errors and warnings | Flymake | Flycheck or Flymake |
+
+Errors and warnings from [check on save](#check-on-save) appear in the same list as the server's own, with the ranges the compiler reported. Saving `kargo.toml` or `kargo.lock` imports the project again. Run `M-x kargo-fetch` with a prefix argument (`C-u C-c k g`) once to download the sources of your dependencies, as described in [Library sources](#library-sources). Kargo's own Kotlin server has no formatting and no signature help yet ([its limits](../kotlin-server/#limits)): format with `M-x kargo-command RET fmt`.
+
+### Commands
+
+Every command runs in a `compilation-mode` buffer named `*kargo <command>: <project>*`, in the directory of the nearest `kargo.toml` above the current buffer. `g` runs the command again there. A prefix argument asks for extra arguments, so `C-u M-x kargo-run` can pass `--bin server`.
+
+| Command | Key | Does |
+|---|---|---|
+| `kargo-build` | `C-c k b` | `kargo build` |
+| `kargo-check` | `C-c k c` | `kargo check`, with `--tests` while `kargo-check-tests` is `t` (the default) |
+| `kargo-run` | `C-c k r` | `kargo run`. Its output is shown in the buffer; the program can't read from the keyboard |
+| `kargo-clean` | `C-c k C` | `kargo clean` |
+| `kargo-add` | `C-c k a` | `kargo add` for the coordinates you type (`group:artifact[:version]`, several separated by spaces); with a prefix argument it adds to `[dev-dependencies]` |
+| `kargo-remove` | `C-c k d` | `kargo remove`, completing the dependencies of `kargo.toml` |
+| `kargo-update`, `kargo-fetch`, `kargo-tree` | `C-c k u`, `g`, `e` | `kargo update`, `fetch` (with a prefix argument `--sources`) and `tree` |
+| `kargo-task` | `C-c k j` | Runs a task of `kargo.toml`, completing their names |
+| `kargo-runnables` | `C-c k l` | Picks one of the programs, tests and tasks of the package and runs it. It asks the language server for [`kargo/runnables`](#runnables) when it is running, else reads `kargo metadata` |
+| `kargo-set-target` | `C-c k T` | Chooses the target (`jvm`, `wasm`, `native`, `android`) that `build`, `check`, `run` and `test` pass as `-t`, or `all`. The mode line shows it |
+| `kargo-toggle-release` | `C-c k R` | Switches between the dev and the release profile |
+| `kargo-target-add` | | `kargo target add` |
+| `kargo-command` | `C-c k x` | Any `kargo` command, such as `fmt --check` or `lint` |
+| `kargo-menu` | `C-c k m` | A [Transient](https://github.com/magit/transient) menu of all of them |
+
+After `add`, `remove`, `update`, `fetch` or `target add`, Emacs reloads the `kargo.toml` and `kargo.lock` buffers that have no unsaved changes, and the language server imports the project again.
+
+`C-c k` is the default prefix. To change it, set `kargo-keymap-prefix` before `kargo` loads, for example `(setq kargo-keymap-prefix (kbd "C-c C-k"))`.
+
+The package also makes Kargo known to `project.el` and Projectile: `(kargo-setup-project)` makes `project.el` use the directory of a `kargo.toml` as a project root (`kargo-eglot-setup` does it), and Projectile gets a `kargo` project type, with `kargo build`, `kargo test` and `kargo run` as its compile, test and run commands, when it loads.
+
+### Compiler errors in Emacs
+
+`kargo-build`, `check`, `run` and `test` ask Kargo for [JSON messages](../../reference/machine-readable-output/#compiler-diagnostics) and show each compiler error as `file:line:column: error: message` with the absolute path, followed by the source line and a caret. `next-error` and `previous-error` (`M-g n`, `M-g p`) and a click or `RET` on a line open the file at the line and column the compiler gave. Warnings are warnings and notes are notes, so `next-error` skips the notes by default (`compilation-skip-threshold`).
+
+To see the errors of the last command in the buffers of their files, turn on Flymake with the Kargo backend:
+
+```elisp title="init.el"
+(add-hook 'kotlin-mode-hook #'kargo-flymake-setup)
+(add-hook 'kotlin-ts-mode-hook #'kargo-flymake-setup)
+```
+
+When `kargo-build`, `check`, `run` or `test` ends, Flymake shows its errors in each file, `M-x flymake-show-project-diagnostics` lists them, and the next command replaces them. With `(setq kargo-flymake-check-on-save t)`, saving a file also runs `kargo check` in the background. The language server does that already with Kargo's own Kotlin server, so use either the backend's check on save or the server's, for example with `(setq kargo-lsp-check-on-save nil)`.
+
+### Tests in Emacs
+
+`kargo-test` runs `kargo test`; the others run one test, a class or a file by its qualified name, which is how `kargo test` filters:
+
+| Command | Key | Runs |
+|---|---|---|
+| `kargo-test` | `C-c k t` | Every test of the package |
+| `kargo-test-at-point` | `C-c k .` | The test function at or above point |
+| `kargo-test-class` | `C-c k k` | The tests of the class at or above point |
+| `kargo-test-file` | `C-c k f` | The tests of every class in the file |
+| `kargo-test-pick` | `C-c k p` | A test picked from [`kargo test --list`](#test-explorer), which compiles the tests, so it takes a moment |
+| `kargo-test-rerun-failed` | `C-c k F` | The tests that failed in the last run, each in its own `kargo test` |
+| `kargo-test-results` | `C-c k v` | Shows the results of the last run again |
+
+The first three find the test by reading the Kotlin source: a `fun` below a `@Test`, `@ParameterizedTest` or `@RepeatedTest` annotation, in the class declared above it. It doesn't compile the file, so a test in a nested class gets its inner class's name without the outer one, which `kargo test` doesn't match, and tests that a build plugin generates aren't found. `kargo-test-pick` shows what Kargo actually runs.
+
+When the tests end, a `*kargo tests: <project>*` buffer lists every test with `pass`, `FAIL` or `skip` and its time. In it, `RET` opens the test's source, `d` shows the failure message and stack trace, `r` runs that test again and `R` runs all failed tests again. In the compilation buffer, the frames of a failure's stack trace that are in your sources are links, and `next-error` goes to the first one, usually the failed assertion. `kargo-test-display-results` says when the results buffer opens: always (the default), only when a test failed (`failures`) or never (`nil`).
+
+### Debugging with Dape
+
+[Dape](https://github.com/svaante/dape) is the debug adapter client that works with `kargo dap`, which builds and starts the program with `--debug`, shows its output in the debug console and attaches once the JVM is ready, so a breakpoint on the first line of `main` is hit. Register the configurations once Dape has loaded:
+
+```elisp title="init.el"
+(with-eval-after-load 'dape
+  (require 'kargo-dape)
+  (kargo-dape-setup))
+```
+
+That adds `kargo` (the program), `kargo-test` (the tests) and `kargo-attach` (a JVM started with `kargo run --debug`, on `kargo-dape-attach-port`, 5005 by default) to `dape-configs`, so `M-x dape` offers them. These commands start them directly:
+
+| Command | Debugs |
+|---|---|
+| `kargo-dape-run` | The program. A prefix argument asks for arguments, such as `--bin server` |
+| `kargo-dape-test-at-point` | The test at point, or every test when point is not in one |
+| `kargo-dape-attach` | A program you started with `kargo run --debug` |
+
+Breakpoints, stepping and variables work as described in [Debugging](#debugging) and [Debug adapter](#debug-adapter): for JVM programs and tests, with the project of the buffer as the working directory. dap-mode can't launch `kargo dap`: it connects to debug adapters over a TCP port, and `kargo dap` speaks over stdin and stdout.
+
+### `kargo.toml` in Emacs
+
+`kargo lsp` checks `kargo.toml` against the [JSON Schema](#completion-and-validation-in-kargotoml) as you type, completes keys and values, shows documentation on hover, completes Maven coordinates and versions and hints at newer versions; see [Language server](#language-server). When Taplo is your TOML server instead (leave the TOML modes out of `kargo-eglot-modes`, see above), put the schema comment on the first line of `kargo.toml` so that Taplo validates against it:
+
+```toml title="kargo.toml"
+#:schema https://enekocm7.github.io/kargo/schemas/kargo.json
+```
+
+and register Taplo for your TOML mode:
+
+```elisp title="init.el"
+(with-eval-after-load 'eglot
+  (add-to-list 'eglot-server-programs '(toml-ts-mode . ("taplo" "lsp" "stdio"))))
+```
+
+### Limitations of Emacs
+
+- The package isn't on MELPA yet, so install it from the repository as described above.
+- There are no gutter icons next to tests. Use `kargo-test-at-point`, or the results buffer.
+- Debugging needs Dape; dap-mode can't launch `kargo dap`. A JVM that waits for a debugger (`kargo run --debug`) can still be attached with any JDWP client.
+- `kargo-run` shows the program's output in a read-only buffer, so a program that reads from the keyboard has no input. Run it in a terminal (`M-x term` or `M-x shell`) when it needs input.
+- Android sources are built through Gradle, whose errors are not converted into links.
+
 ## Other editors
 
-Any editor with an LSP client can run `kargo lsp`. These are the setups we document, next to [Neovim](#neovim) above:
+Any editor with an LSP client can run `kargo lsp`. These are the setups we document, next to [Neovim](#neovim) and [Emacs](#emacs) above:
 
 **Helix**:
 
@@ -582,14 +779,6 @@ language-servers = ["kargo"]
 [[language]]
 name = "toml"
 language-servers = ["kargo", "taplo"]
-```
-
-**Emacs** with Eglot:
-
-```elisp title="init.el"
-(with-eval-after-load 'eglot
-  (add-to-list 'eglot-server-programs
-               '((kotlin-mode kotlin-ts-mode conf-toml-mode toml-ts-mode) . ("kargo" "lsp"))))
 ```
 
 Any other editor with a generic LSP client works the same way: run `kargo lsp` for Kotlin and TOML files. Kargo answers for every TOML file it is sent but only gives `kargo.toml` features, so other TOML files are unaffected.
@@ -991,6 +1180,8 @@ Tests are debugged the same way, with `["test", "com.example.app.MathTest.adds"]
 kotlin-debug-adapter expects Gradle's directory layout to find classes and source files. Kargo makes your layout fit: it rewrites the source paths between the editor and the adapter, so breakpoints in `src/`, `src-jvm/` and `tests/` resolve, and stack frames open your files. A breakpoint resolves in the top-level functions of its file, in the classes, objects and interfaces the file declares at the top level, and in the class an `@file:JvmName` names.
 
 **Neovim** with [nvim-dap](https://github.com/mfussenegger/nvim-dap) is set up by the [Neovim plugin](#debugging-with-nvim-dap), or by hand with the same `kargo dap` adapter.
+
+**Emacs** with [Dape](https://github.com/svaante/dape) is set up by the [Emacs package](#debugging-with-dape).
 
 **Helix**:
 

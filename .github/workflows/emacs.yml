@@ -1,0 +1,44 @@
+name: Emacs package
+
+on:
+  push:
+    branches: [master]
+    paths: ["editors/emacs/**", ".github/workflows/emacs.yml"]
+  pull_request:
+    paths: ["editors/emacs/**", ".github/workflows/emacs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/emacs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Emacs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox
+          emacs --version | head -1
+      - name: Install lsp-mode and Dape
+        run: |
+          emacs -Q --batch --eval '(progn
+            (require (quote package))
+            (add-to-list (quote package-archives) (quote ("melpa" . "https://melpa.org/packages/")))
+            (package-initialize)
+            (package-refresh-contents)
+            (package-install (quote lsp-mode))
+            (package-install (quote dape)))'
+      - name: Byte-compile
+        run: |
+          emacs -Q --batch --eval '(package-initialize)' -L . -f batch-byte-compile \
+            kargo-messages.el kargo.el kargo-test.el kargo-flymake.el kargo-eglot.el \
+            kargo-transient.el lsp-kargo.el kargo-dape.el
+      - name: Test
+        run: |
+          emacs -Q --batch --eval '(package-initialize)' -L . -l test/kargo-tests.el \
+            -f ert-run-tests-batch-and-exit
