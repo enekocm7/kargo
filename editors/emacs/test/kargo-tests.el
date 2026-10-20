@@ -155,11 +155,11 @@ FILES is a list of (RELATIVE-NAME . CONTENTS)."
   (with-temp-buffer
     (let ((first (substring kargo-tests--error-line 0 40))
           (rest (substring kargo-tests--error-line 40)))
-      (setq-local compilation-filter-start (copy-marker (point-min)))
+      (setq-local compilation-filter-start (point-min))
       (insert "   Compiling x\n" first)
       (kargo--filter)
       (should (equal (concat "   Compiling x\n" first) (buffer-string)))
-      (set-marker compilation-filter-start (point-max))
+      (setq compilation-filter-start (point-max))
       (insert rest "\n{\"reason\":\"build-finished\",\"success\":false}\n")
       (kargo--filter)
       (should (string-prefix-p (concat "   Compiling x\n" (expand-file-name "/p/src/Main.kt") ":2:16: error: type mismatch\n")

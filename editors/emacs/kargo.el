@@ -311,12 +311,16 @@ ROOT is the project, which stack frames are looked up in."
     ("test-summary" (kargo-messages-format-summary message))
     (_ nil)))
 
+(defun kargo--position (position)
+  "POSITION, which is a number or a marker, as a number."
+  (if (markerp position) (marker-position position) position))
+
 (defun kargo--filter ()
   "Replace the JSON lines Kargo printed since the last call with compiler-style lines.
 Lines that are not messages, such as status lines, stay as they are.  A line
 that is not complete yet waits for the next call."
   (let* ((inhibit-read-only t)
-         (begin (min (or kargo--filter-pos (marker-position compilation-filter-start)) (point)))
+         (begin (min (or kargo--filter-pos (kargo--position compilation-filter-start)) (point)))
          (start begin)
          (end (copy-marker (point) t))
          (root default-directory))
@@ -332,8 +336,9 @@ that is not complete yet waits for the next call."
     (goto-char end)
     (setq kargo--filter-pos start)
     ;; Compilation mode looks for errors from here, which must include the new text.
-    (when (markerp compilation-filter-start)
-      (set-marker compilation-filter-start begin))
+    (if (markerp compilation-filter-start)
+        (set-marker compilation-filter-start begin)
+      (setq compilation-filter-start begin))
     (set-marker end nil)))
 
 (defun kargo--revert-files (root)
