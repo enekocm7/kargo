@@ -1,0 +1,22 @@
+# Maintainer: enekocm7
+pkgname=kargo-bin
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='Cargo for Kotlin: a build tool and package manager (prebuilt binary)'
+arch=('x86_64' 'aarch64')
+url='https://enekocm7.github.io/kargo/'
+license=('MIT' 'Apache-2.0')
+provides=('kargo')
+conflicts=('kargo')
+options=('!strip')
+source_x86_64=("https://github.com/enekocm7/kargo/releases/download/v@VERSION@/kargo-@VERSION@-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("https://github.com/enekocm7/kargo/releases/download/v@VERSION@/kargo-@VERSION@-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('@SHA_x86_64_unknown_linux_gnu@')
+sha256sums_aarch64=('@SHA_aarch64_unknown_linux_gnu@')
+
+package() {
+  install -Dm755 "kargo-@VERSION@-${CARCH}-unknown-linux-gnu/kargo" "$pkgdir/usr/bin/kargo"
+  "$pkgdir/usr/bin/kargo" completions bash | install -Dm644 /dev/stdin "$pkgdir/usr/share/bash-completion/completions/kargo"
+  "$pkgdir/usr/bin/kargo" completions zsh | install -Dm644 /dev/stdin "$pkgdir/usr/share/zsh/site-functions/_kargo"
+  "$pkgdir/usr/bin/kargo" completions fish | install -Dm644 /dev/stdin "$pkgdir/usr/share/fish/vendor_completions.d/kargo.fish"
+}

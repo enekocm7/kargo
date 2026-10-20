@@ -1040,6 +1040,27 @@ pub struct ToolchainSettings {
     pub jdk: JdkRequest,
     /// The GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use.
     pub graalvm: GraalvmRequest,
+    /// The Kargo versions the project builds with (`kargo = ">=0.3"`). Already checked against the running Kargo when the
+    /// manifest was read.
+    pub kargo: Option<semver::VersionReq>,
+}
+
+/// The version of the running Kargo.
+pub const KARGO_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Fails when `current` does not satisfy the `[toolchain] kargo` requirement `req`.
+pub fn check_kargo_version(req: &semver::VersionReq, current: &str) -> anyhow::Result<()> {
+    let version =
+        semver::Version::parse(current).map_err(|e| anyhow::anyhow!("cannot read the version of this Kargo (`{current}`): {e}"))?;
+    // semver never matches a pre-release (0.3.0-rc.1) against a plain requirement (>=0.2), but a release candidate of
+    // 0.3.0 is as new as 0.3.0 for this purpose.
+    let release = semver::Version { pre: semver::Prerelease::EMPTY, build: semver::BuildMetadata::EMPTY, ..version.clone() };
+    if req.matches(&version) || req.matches(&release) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "this project needs kargo {req} (`[toolchain] kargo` in kargo.toml), but this is kargo {current}: run `kargo self update` to get a newer Kargo"
+    )
 }
 
 /// Which GraalVM distribution to download.

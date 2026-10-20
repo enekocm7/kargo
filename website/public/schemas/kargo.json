@@ -137,7 +137,7 @@
       }
     },
     "toolchain": {
-      "description": "Which JDK builds and runs the project, and which GraalVM builds native images.",
+      "description": "Which JDK builds and runs the project, which GraalVM builds native images, and which Kargo versions the project needs.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -152,6 +152,11 @@
           "type": ["string", "integer"],
           "default": "system",
           "examples": ["system", "25", "oracle-25"]
+        },
+        "kargo": {
+          "description": "The Kargo versions this project builds with, a semver requirement such as \">=0.3\". An older Kargo stops with a message that points to `kargo self update`.",
+          "type": "string",
+          "examples": [">=0.3", "^0.3.1"]
         }
       }
     },

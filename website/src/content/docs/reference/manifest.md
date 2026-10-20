@@ -150,9 +150,19 @@ In a workspace, `[workspace.kotlin]` sets these for every member: a member's `op
 [toolchain]
 jdk = "21"         # "system" (default), a major version, or an exact release like "21.0.5+11"
 graalvm = "25"     # "system" (default), a Java version for GraalVM CE, or "oracle-25" for Oracle GraalVM
+kargo = ">=0.3"    # the Kargo versions this project builds with (default: any)
 ```
 
 `graalvm` is the GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use. `system` looks at `GRAALVM_HOME`, then a `JAVA_HOME` with `native-image`, then `native-image` on `PATH`.
+
+`kargo` is a [semver requirement](https://docs.rs/semver/latest/semver/enum.Op.html) such as `">=0.3"`, `"^0.3.1"` or `">=0.3, <0.5"`. A Kargo that does not satisfy it stops before doing anything else with the project, and says how to get a newer one:
+
+```console
+$ kargo build
+error: this project needs kargo >=0.3 (`[toolchain] kargo` in kargo.toml), but this is kargo 0.1.0: run `kargo self update` to get a newer Kargo
+```
+
+[`kargo self`](../commands/#kargo-self) ignores it, so an old Kargo can always update itself. A Kargo older than this key rejects it as an unknown key, so it protects against old versions only from the release that introduced it on.
 
 See [Managing JDKs](../../guides/toolchains/) and [GraalVM](../../guides/toolchains/#graalvm).
 

@@ -26,14 +26,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/kargo
             ~/.kargo
             !~/.kargo/daemon
           key: kargo-${{ runner.os }}-${{ hashFiles('kargo.lock', 'kargo.toml') }}
           restore-keys: kargo-${{ runner.os }}-
 
       - name: Install Kargo
-        run: command -v kargo || cargo install --locked --git https://github.com/enekocm7/kargo kargo
+        run: |
+          curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.0 sh -s -- --no-modify-path
+          echo "$HOME/.kargo/bin" >> "$GITHUB_PATH"
 
       - run: kargo fmt --check
       - run: kargo lint
@@ -168,7 +169,7 @@ For release builds, Binaryen's `wasm-opt` makes the Wasm module much smaller; `n
 
 The steps are the same everywhere:
 
-1. Install Rust, then `cargo install --locked --git https://github.com/enekocm7/kargo kargo`.
+1. Install Kargo: `curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=<version> sh -s -- --no-modify-path`, then put `~/.kargo/bin` on `PATH` (on Windows, `$env:KARGO_VERSION = '<version>'; irm https://enekocm7.github.io/kargo/install.ps1 | iex`). Pin the version so a new release cannot change your build, and set `[toolchain] kargo = ">=<version>"` in `kargo.toml` so a developer's older Kargo says so.
 2. Provide a JDK, or pin one with `[toolchain] jdk`.
 3. Cache `~/.kargo` (or `$KARGO_HOME`), except its `daemon/` directory.
 4. Run `kargo test --locked`, adding `--report junit` if the CI shows JUnit XML results.

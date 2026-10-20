@@ -13,6 +13,20 @@ Hello, Kotlin!
 $ kargo test
 ```
 
+## Install
+
+Prebuilt binaries need no Rust toolchain:
+
+```sh
+curl -fsSL https://enekocm7.github.io/kargo/install.sh | sh        # Linux and macOS
+```
+
+```powershell
+irm https://enekocm7.github.io/kargo/install.ps1 | iex             # Windows
+```
+
+The scripts download the archive for your platform from the [GitHub release](https://github.com/enekocm7/kargo/releases), check its SHA-256, put `kargo` in `~/.kargo/bin` and offer to add that directory to your `PATH` (`KARGO_VERSION` picks a version, `--no-modify-path` leaves `PATH` alone). Releases have builds for Linux, macOS and Windows on x86_64 and aarch64, with `SHA256SUMS` and build provenance attestations. `nix run github:enekocm7/kargo` and `cargo binstall --git https://github.com/enekocm7/kargo kargo` work too; manifests for Homebrew, Scoop, winget and the AUR are built with each release but not yet listed in those registries. From source: `cargo install --locked --git https://github.com/enekocm7/kargo kargo` (Rust 1.89 or newer). Update with `kargo self update`, remove with `kargo self uninstall`. See the [installation guide](https://enekocm7.github.io/kargo/getting-started/installation/).
+
 ## How it works
 
 * **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`).
@@ -62,6 +76,8 @@ $ kargo test
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Kotlin language servers behind `kargo lsp` and the debug adapter behind `kargo dap` |
+| `kargo self update [--version <v>] [--check]` | Update Kargo to the latest release (or `--version`), checking the archive's SHA-256 against the release's `SHA256SUMS`; `--check` only says whether a newer one exists. A Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN!, Cargo or a system package manager is not replaced: its update command is printed instead. `KARGO_RELEASES_URL` points at a mirror |
+| `kargo self uninstall [--purge]` | Remove the binary and the `PATH` entries the install scripts added; `--purge` also deletes `~/.kargo` |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
 | `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
@@ -288,6 +304,7 @@ A path dependency is built for the consumer's target: a jar for the JVM, a klib 
 [toolchain]
 jdk = "21"            # newest Temurin 21; or an exact release like "21.0.5+11"; default "system"
 graalvm = "25"        # GraalVM CE for native images (or "oracle-25"); default "system" (GRAALVM_HOME, then PATH)
+kargo = ">=0.3"       # the Kargo versions the project builds with; an older Kargo stops and points to `kargo self update`
 ```
 
 With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`. Any other value makes Kargo download that Temurin JDK from Adoptium on first use. The download is verified against the published SHA-256 and installed under `~/.kargo/toolchains/jdk/<release>`; it is then used for compiling, running and testing, and passed to Gradle for Android builds. A major version picks the newest installed release of it. Kargo also checks that `jvm-target` is not newer than the JDK that builds the project (pinned or system), and that the Kotlin compiler can run on it: compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer, so pin `jdk = "21"` or upgrade Kotlin.
@@ -366,6 +383,8 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | Variable | Purpose |
 |---|---|
 | `KARGO_HOME` | Cache and toolchains (default `~/.kargo`) |
+| `KARGO_RELEASES_URL` | Where `kargo self update`, `install.sh` and `install.ps1` look for releases (default `https://github.com/enekocm7/kargo/releases`; a mirror, or a directory with `file://`) |
+| `KARGO_NO_UPDATE_CHECK` | Any non-empty value stops `kargo --version` from mentioning newer releases (it checks at most once a day, never offline or in CI) |
 | `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
@@ -396,7 +415,7 @@ Kargo is a Cargo workspace:
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
-| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, npm packages and their Kotlin declarations, Compose Desktop and Compose resources, commands |
+| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, Android/Gradle, project warnings, publications and signing, npm packages and their Kotlin declarations, Compose Desktop and Compose resources, `kargo self` (`ops/self_update.rs`), commands |
 | `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, Kargo's own Kotlin server (`kotlin/`: lexer, declaration parser, Java declarations and the JDK's sources, libraries without sources from class files, Kotlin metadata and klibs, index, resolver, completion, hover, navigation, rename, formatting, code actions), project import for other Kotlin language servers, runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |
 | `kargo` | The CLI binary |
 
@@ -405,6 +424,8 @@ cargo test --workspace                       # unit + CLI integration tests (off
 KARGO_E2E=1 cargo test --test e2e            # end-to-end: JVM, Wasm, Spring, Ktor, Compose, pinned JDK
 KARGO_E2E=1 KARGO_E2E_NATIVE=1 KARGO_E2E_ANDROID=1 cargo test --test e2e
 ```
+
+Pushing a tag `v<version>` (equal to the version in `Cargo.toml`) runs `.github/workflows/release.yml`: it builds eight targets, publishes the archives, `SHA256SUMS` and `VERSION` with generated release notes and build provenance attestations, and renders the Homebrew, Scoop, winget and AUR files with `packaging/render.sh`. `website/public/install.sh` and `install.ps1` are the install scripts (try them against a local release directory with `KARGO_RELEASES_URL=file:///...`), and `flake.nix` builds Kargo for Nix. See [Releases](https://enekocm7.github.io/kargo/reference/contributing/#releases).
 
 The JetBrains plugin in `editors/jetbrains` is a Gradle project written in Kotlin, built on [LSP4IJ](https://github.com/redhat-developer/lsp4ij):
 

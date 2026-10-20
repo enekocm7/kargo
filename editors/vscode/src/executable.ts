@@ -1,5 +1,5 @@
 //! Finding the `kargo` executable: the `kargo.path` setting, else the `kargo` on `PATH`, else
-//! `~/.cargo/bin`, where `rustup` installs it. Pure, so the lookup is unit tested without a disk.
+//! `~/.kargo/bin` (`$KARGO_HOME/bin`), where the installers put it, else `~/.cargo/bin`, where `cargo install` does. Pure, so the lookup is unit tested without a disk.
 
 import * as path from 'node:path';
 
@@ -23,7 +23,12 @@ export function findKargo(configured: string, lookup: Lookup): string | undefine
         if (path.basename(explicit) !== explicit) return explicit;
         return searchPath(explicit, lookup);
     }
-    return searchPath(name, lookup) ?? searchDirectory(path.join(lookup.home, '.cargo', 'bin'), name, lookup);
+    const kargoHome = lookup.env.KARGO_HOME?.trim() || path.join(lookup.home, '.kargo');
+    return (
+        searchPath(name, lookup) ??
+        searchDirectory(path.join(kargoHome, 'bin'), name, lookup) ??
+        searchDirectory(path.join(lookup.home, '.cargo', 'bin'), name, lookup)
+    );
 }
 
 function searchPath(name: string, lookup: Lookup): string | undefined {

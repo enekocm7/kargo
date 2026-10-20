@@ -17,6 +17,7 @@ pub mod new;
 pub mod packaging;
 pub mod publish;
 pub mod run;
+pub mod self_update;
 pub mod target;
 pub mod test;
 pub mod toolchain;

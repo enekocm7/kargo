@@ -797,6 +797,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "ide",
         "lsp",
         "dap",
+        "self",
         "completions",
     ];
     let p = Project::new();

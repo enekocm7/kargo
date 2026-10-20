@@ -21,7 +21,7 @@ Built-in commands:
     completions  Print a shell completion script
 ```
 
-The commands the short help leaves out (`outdated`, `upgrade`, `target`, `info`, `plugins`, `android`, `daemon`, `metadata`, `classpath`, `ide`, `lsp`, `dap` and `completions`) work as usual, and `kargo help <command>` shows each one's options. Shell completions offer them too.
+The commands the short help leaves out (`outdated`, `upgrade`, `target`, `info`, `plugins`, `android`, `daemon`, `metadata`, `classpath`, `ide`, `lsp`, `dap`, `self` and `completions`) work as usual, and `kargo help <command>` shows each one's options. Shell completions offer them too.
 
 A command that doesn't exist suggests the closest built-in command, task or `kargo-*` plugin, as Cargo does:
 
@@ -47,7 +47,7 @@ These work with every command.
 | `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
 | `--system-gradle` | Run Android builds with the `gradle` on `PATH` instead of a Kargo-managed Gradle (also `KARGO_SYSTEM_GRADLE=1`). A project `gradlew` still wins |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
-| `-V`, `--version` | Print the version |
+| `-V`, `--version` | Print the version. With `-v` (`kargo -vV`) also the release and the target it was built for (`host: x86_64-unknown-linux-gnu`). When a newer release exists, a note on stderr says so, at most once a day (see [`kargo self`](#kargo-self)) |
 | `-h`, `--help` | Print help |
 
 **Exit codes:** `0` on success, `101` when a build or test fails or Kargo reports an error (as in Cargo). `kargo run` exits with your program's exit code.
@@ -759,6 +759,29 @@ Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, and the Kotlin la
 | `remove` (`rm`) `<jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs and GraalVMs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
+
+## `kargo self`
+
+Update or remove Kargo itself. These commands never read a `kargo.toml`, so they work anywhere, even in a project whose [`[toolchain] kargo`](../manifest/#toolchain) asks for a newer Kargo than the one you have. See [Installation](../../getting-started/installation/).
+
+```sh
+kargo self update [--version <version>] [--check]
+kargo self uninstall [--purge]
+```
+
+| Subcommand | Meaning |
+|---|---|
+| `update` | Download the latest release for this platform, check the archive's SHA-256 against the release's `SHA256SUMS`, and replace the running binary. Nothing is replaced when the checksum does not match. On Windows the running `kargo.exe` is renamed to `kargo.exe.old` first and deleted by the next `kargo` |
+| `update --version <version>` | Install that version instead of the latest. An older one downgrades |
+| `update --check` | Only say whether a newer release exists |
+| `uninstall` | Remove the binary and the `PATH` entries the install scripts added (the marked block in shell startup files, or the entry in the user `PATH` on Windows). `~/.kargo` stays |
+| `uninstall --purge` | Also delete `~/.kargo` (`KARGO_HOME`): toolchains, the Maven cache, installed tools. Stops the compiler daemons first |
+
+`kargo self` refuses to change a Kargo that a package manager installed, and prints that manager's command instead: `brew upgrade kargo`, `scoop update kargo`, `winget upgrade kargo`, `sdk upgrade kargo`, `nix profile upgrade kargo`, `cargo install --locked --force --git ...` for a Kargo in `~/.cargo/bin` (or `$CARGO_HOME/bin`), and your distribution's package manager for `/usr/bin/kargo`. It decides by where the binary is. `update --check` always works.
+
+Releases come from `https://github.com/enekocm7/kargo/releases`. `KARGO_RELEASES_URL` points Kargo at a mirror, or at a directory with `file://`, which must be laid out like the release downloads: `latest/download/VERSION`, `download/v<version>/SHA256SUMS` and `download/v<version>/kargo-<version>-<target>.tar.gz` (`.zip` on Windows). `--offline` makes `kargo self update` fail, except for a `file://` mirror.
+
+**The update notice.** `kargo --version` looks the newest version up at most once a day (with a two-second timeout; the answer is remembered in `~/.kargo/update-check.json`) and, when it is newer than the running one, prints a note on stderr: ``note: update available: kargo 0.3.0 (this is kargo 0.2.0); run `kargo self update` ``, also at most once a day. Nothing is printed or fetched with `--offline`, with `-q`, when `KARGO_NO_UPDATE_CHECK` is set, in CI (`CI` is set) or when stderr is not a terminal. No other command checks.
 
 ## `kargo daemon`
 

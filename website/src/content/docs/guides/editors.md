@@ -44,7 +44,7 @@ cd editors/jetbrains
 
 Then, in the IDE, open *Settings → Plugins → ⚙ → Install Plugin from Disk…* and pick `editors/jetbrains/build/distributions/kargo-jetbrains-<version>.zip`. Every build on `master` also attaches the zip as an artifact of the *JetBrains plugin* workflow on GitHub Actions.
 
-The plugin looks for `kargo` on your `PATH`, then in `~/.cargo/bin`. If Kargo is somewhere else, set *Kargo executable* in *Settings → Languages & Frameworks → Kargo*. If it can't find Kargo when a Kargo project opens, it says so and links to the installation guide.
+The plugin looks for `kargo` on your `PATH`, then in `~/.kargo/bin` (where the [install script](../../getting-started/installation/) puts it), then in `~/.cargo/bin`. If Kargo is somewhere else, set *Kargo executable* in *Settings → Languages & Frameworks → Kargo*. If it can't find Kargo when a Kargo project opens, it says so and links to the installation guide.
 
 ### Create a project
 
@@ -164,7 +164,7 @@ Compiler errors and file locations in the output are links to the source.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Kargo executable | empty | The `kargo` to run; empty: the one on `PATH`, then `~/.cargo/bin` |
+| Kargo executable | empty | The `kargo` to run; empty: the one on `PATH`, then `~/.kargo/bin`, then `~/.cargo/bin` |
 | Import the project model from Kargo | on | Describe the modules, source roots and libraries to the IDE ([Project import](#project-import)). Turn it off if you manage the project model yourself; modules already imported stay |
 | Run kargo lsp | on | Run the language server for `kargo.toml` |
 
@@ -206,7 +206,7 @@ npm run package
 
 `npm run package` writes `kargo-vscode.vsix`. Install it with *Extensions → ⋯ → Install from VSIX…*. Every build on `master` also attaches the package as an artifact of the *VS Code extension* workflow on GitHub Actions.
 
-The extension looks for `kargo` in the `kargo.path` setting, then on `PATH`, then in `~/.cargo/bin`. If Kargo is somewhere else, set its path:
+The extension looks for `kargo` in the `kargo.path` setting, then on `PATH`, then in `~/.kargo/bin` (`$KARGO_HOME/bin`, where the [install script](../../getting-started/installation/) puts it), then in `~/.cargo/bin`. If Kargo is somewhere else, set its path:
 
 ```json title="settings.json"
 {
@@ -226,7 +226,7 @@ For each folder with a `kargo.toml` at its root, the extension starts `kargo lsp
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `kargo.path` | empty | The `kargo` to run. Empty: the one on `PATH`, then `~/.cargo/bin` |
+| `kargo.path` | empty | The `kargo` to run. Empty: the one on `PATH`, then `~/.kargo/bin`, then `~/.cargo/bin` |
 | `kargo.lsp.server` | `kargo` | The Kotlin server `kargo lsp` runs: `kargo` (Kargo's own), `kotlin-lsp` (JetBrains'), `kls` (fwcd's) or `none`. See [Choosing the Kotlin server](#choosing-the-kotlin-server) |
 | `kargo.lsp.checkOnSave` | `true` | Run `kargo check` when a Kotlin or Java file is saved |
 | `kargo.lsp.checkTargets` | empty | The targets that check on save compiles. Empty: every enabled target |

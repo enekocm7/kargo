@@ -8,7 +8,7 @@ import { NOT_INSTALLED, findKargo } from './executable';
 import { Metadata, parseMetadata } from './metadata';
 import { runProcess } from './process';
 
-/** The `kargo` to run: the `kargo.path` setting, else the one on `PATH`, else `~/.cargo/bin`. Throws when there is none. */
+/** The `kargo` to run: the `kargo.path` setting, else the one on `PATH`, else `~/.kargo/bin`, else `~/.cargo/bin`. Throws when there is none. */
 export function kargoBinary(): string {
     const configured = vscode.workspace.getConfiguration('kargo').get<string>('path', '');
     const found = findKargo(configured, { env: process.env, platform: process.platform, home: os.homedir(), isFile });

@@ -67,6 +67,7 @@ struct RawBin {
 struct RawToolchain {
     jdk: Option<Value>,
     graalvm: Option<Value>,
+    kargo: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1905,6 +1906,16 @@ impl RawManifest {
             Some(Value::Integer(i)) => i.to_string().parse().context("invalid [toolchain] `graalvm`")?,
             Some(_) => bail!("[toolchain] `graalvm` must be a version like \"25\", \"oracle-25\" or \"system\""),
         };
+        let kargo = match self.toolchain.kargo {
+            None => None,
+            Some(text) => {
+                let req = semver::VersionReq::parse(text.trim()).with_context(|| {
+                    format!("invalid [toolchain] `kargo` requirement `{text}`: use a requirement like \">=0.3\" or \"^0.3.1\"")
+                })?;
+                check_kargo_version(&req, KARGO_VERSION)?;
+                Some(req)
+            }
+        };
         let packaging = PackagingSettings {
             jlink: self.package.jlink.validate()?,
             native_image: self.package.native_image.validate(),
@@ -1941,7 +1952,7 @@ impl RawManifest {
 
         Ok(Manifest {
             publish,
-            toolchain: ToolchainSettings { jdk, graalvm },
+            toolchain: ToolchainSettings { jdk, graalvm, kargo },
             packaging,
             doc,
             fmt,

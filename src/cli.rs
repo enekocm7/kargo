@@ -261,6 +261,30 @@ enum ToolchainCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum SelfCommand {
+    /// Update Kargo to the latest release (or to --version), verifying the archive's SHA-256
+    #[command(long_about = "Download the latest Kargo release for this platform, verify its SHA-256 against the release's SHA256SUMS and
+replace the running binary with it. Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN!, Cargo or a system
+package manager is not replaced: the command prints that manager's update command instead.
+
+KARGO_RELEASES_URL points Kargo at another place that publishes releases (a mirror, or a directory with file://).")]
+    Update {
+        /// Install this version (such as 0.3.0) instead of the latest; an older one downgrades
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
+    },
+    /// Remove the kargo binary and the PATH entries the installers added
+    Uninstall {
+        /// Also delete ~/.kargo: downloaded toolchains, the Maven cache and installed tools
+        #[arg(long)]
+        purge: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum TargetCommand {
     /// Enable targets: add [target.<name>] to kargo.toml and scaffold the files they need
     Add {
@@ -1048,6 +1072,12 @@ upgrade). `kargo install --list` shows what is installed; `kargo uninstall <name
         #[command(subcommand)]
         command: ToolchainCommand,
     },
+    /// Update or uninstall Kargo itself
+    #[command(name = "self")]
+    SelfManage {
+        #[command(subcommand)]
+        command: SelfCommand,
+    },
     /// Show or stop the background compiler daemons that keep the Kotlin compiler warm
     Daemon {
         #[command(subcommand)]
@@ -1192,6 +1222,7 @@ pub fn main() -> ExitCode {
 
 fn run() -> ExitCode {
     complete::complete_if_requested();
+    ops::self_update::remove_stale_binary();
     let cli = parse();
     let verbosity = if cli.global.verbose {
         Verbosity::Verbose
@@ -1216,6 +1247,10 @@ fn parse() -> Cli {
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if wants_builtin_list(&args) {
         print_builtin_commands();
+        std::process::exit(0);
+    }
+    if wants_version(&args) {
+        print_version(&args);
         std::process::exit(0);
     }
     if !has_command(&args) {
@@ -1252,6 +1287,38 @@ fn has_command(args: &[std::ffi::OsString]) -> bool {
 fn wants_builtin_list(args: &[std::ffi::OsString]) -> bool {
     let words: Vec<&str> = args.iter().skip(1).filter_map(|a| a.to_str()).collect();
     words.contains(&"--list") && words.iter().all(|w| w.starts_with('-'))
+}
+
+/// `kargo --version` or `kargo -V`, possibly with other global flags. With a command after it, clap reports the flag as unexpected.
+fn wants_version(args: &[std::ffi::OsString]) -> bool {
+    let words: Vec<&str> = args.iter().skip(1).filter_map(|a| a.to_str()).collect();
+    words.iter().any(|w| matches!(*w, "--version" | "-V" | "-vV")) && words.iter().all(|w| w.starts_with('-'))
+}
+
+/// `kargo --version`: the version on stdout like clap prints it, then, on stderr, a note when a newer release exists (at most
+/// once a day; see `KARGO_NO_UPDATE_CHECK`).
+fn print_version(args: &[std::ffi::OsString]) {
+    println!("kargo {}", env!("CARGO_PKG_VERSION"));
+    if args.iter().any(|a| a == "-vV" || a == "-v" || a == "--verbose") {
+        println!(
+            "release: {}
+host: {}",
+            env!("CARGO_PKG_VERSION"),
+            ops::self_update::TARGET
+        );
+    }
+    let offline =
+        args.iter().any(|a| a == "--offline") || std::env::var("KARGO_OFFLINE").is_ok_and(|v| !v.is_empty() && v != "0" && v != "false");
+    let verbosity = if args.iter().any(|a| a == "-q" || a == "--quiet") { Verbosity::Quiet } else { Verbosity::Normal };
+    let shell = Shell::new(verbosity);
+    if verbosity == Verbosity::Quiet {
+        return;
+    }
+    if let Ok(config) = Config::from_env(shell.clone()).map(|c| c.with_offline(offline))
+        && let Some(note) = ops::self_update::update_notice(&config)
+    {
+        shell.note(note);
+    }
 }
 
 /// `kargo --list`: every built-in command with its one-line description, laid out like `cargo --list`.
@@ -2337,6 +2404,15 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             Ok(0)
         }
         Command::Toolchain { command } => toolchain(config, global, command),
+        Command::SelfManage { command } => {
+            match command {
+                SelfCommand::Update { version, check } => {
+                    ops::self_update::update(config, &ops::self_update::UpdateOptions { version, check })?
+                }
+                SelfCommand::Uninstall { purge } => ops::self_update::uninstall(config, purge)?,
+            }
+            Ok(0)
+        }
         Command::Daemon { command } => {
             match command {
                 DaemonCommand::Status => {

@@ -29,6 +29,14 @@ Yes, on the JVM and Android. `.java` files next to your Kotlin files are compile
 
 `kargo install --path .` in the project builds it and puts a launcher in `~/.kargo/bin`. Add that directory to your `PATH` once. `kargo install --git <url>` and `kargo install group:artifact` install tools from git and Maven. See [Installing command-line tools](../../guides/installing-tools/).
 
+### How do I update Kargo, and how do I make sure my team has a new enough one?
+
+`kargo self update` replaces the binary with the latest release, after checking its SHA-256 (see [Installation](../../getting-started/installation/#updating)). Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN! or a Linux distribution is updated by that package manager, and `kargo self update` prints its command. To require a minimum version, put `kargo = ">=0.3"` in [`[toolchain]`](../manifest/#toolchain): an older Kargo then stops with a message that points to `kargo self update`.
+
+### `kargo self update` says a package manager installed this kargo
+
+Kargo decides from where the binary is (a `Cellar` folder, `scooppps`, `/nix/store`, `~/.cargo/bin`, `/usr/bin`, ...) and will not replace a file another tool owns. Update with the command it prints. To get a Kargo that updates itself, install it with the [install script](../../getting-started/installation/#the-install-script) instead.
+
 ### Are multi-module projects supported?
 
 Yes. A package can depend on another package on disk with `{ path = "../lib" }`, and a `[workspace]` builds several packages with one `kargo.lock` and one `target/`. See [Workspaces and path dependencies](../../guides/workspaces/). Path dependencies don't work for the Android target yet.
