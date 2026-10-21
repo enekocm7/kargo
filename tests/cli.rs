@@ -508,12 +508,19 @@ fn classifier_dependencies_keep_both_jars() {
     let locked: Vec<_> = lock.resolutions["jvm/runtime"].packages.iter().filter(|pkg| pkg.module == "g:lib").collect();
     assert_eq!(locked.len(), 1, "{lock:?}");
     let paths: Vec<&str> = locked[0].files.iter().map(|f| f.path.as_str()).collect();
-    assert_eq!(paths, ["g/lib/1.0/lib-1.0.jar", "g/lib/1.0/lib-1.0-natives-windows.jar"]);
+    assert_eq!(paths, ["g/lib/1.0/lib-1.0.jar", "g/lib/1.0/lib-1.0-natives-windows.jar"], "the lock does not name the repository");
     assert!(locked[0].files.iter().all(|f| !f.sha256.is_empty()));
 
     // The lockfile restores to the same classpath.
     p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
     assert_eq!(files_of(&tree(&[]), "g:lib"), ["lib-1.0-natives-windows.jar", "lib-1.0.jar"]);
+}
+
+/// Where Kargo caches `rel` from the repository `local` of `repo`: the files of repositories other than Maven Central are kept
+/// in a directory of their own.
+fn repo_cache(p: &Project, repo: &LocalRepo, rel: &str) -> std::path::PathBuf {
+    let scope = kargo_maven::repo::Repository::new("local", repo.url()).cache_dir_name();
+    p.home.path().join("cache/maven").join(scope).join(rel)
 }
 
 #[test]
@@ -528,7 +535,7 @@ fn corrupt_cached_artifact_is_redownloaded_before_locking() {
             &format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url()),
         ),
     );
-    let cached = p.home.path().join("cache/maven/g/lib/1.0/lib-1.0.jar");
+    let cached = repo_cache(&p, &repo, "g/lib/1.0/lib-1.0.jar");
     let corrupt = || {
         std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
         std::fs::write(&cached, "truncated garbage").unwrap();
@@ -564,7 +571,7 @@ fn tampered_cached_artifact_fails_the_build_instead_of_being_used() {
             &format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url()),
         ),
     );
-    let cached = p.home.path().join("cache/maven/g/lib/1.0/lib-1.0.jar");
+    let cached = repo_cache(&p, &repo, "g/lib/1.0/lib-1.0.jar");
     p.kargo().args(["tree", "--offline"]).assert().success();
     let lock = p.read("kargo.lock");
 
@@ -608,7 +615,7 @@ fn timestamped_snapshots_resolve_through_maven_metadata() {
         .success()
         .stdout(predicate::str::contains("com.acme:lib:1.0-SNAPSHOT"))
         .stdout(predicate::str::contains("com.acme:util:2.0-SNAPSHOT"));
-    let cached = |rel: &str| p.home.path().join("cache/maven").join(rel);
+    let cached = |rel: &str| repo_cache(&p, &repo, rel);
     assert_eq!(
         std::fs::read_to_string(cached("com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar")).unwrap(),
         "jar com.acme:lib 1.0-20240101.120000-1"
