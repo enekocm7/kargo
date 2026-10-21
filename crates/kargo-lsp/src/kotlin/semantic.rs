@@ -10,6 +10,7 @@ use super::index::UnitId;
 use super::lexer::Tok;
 use super::resolve::Analyzer;
 use super::syntax::{Decl, File, Kind};
+use crate::text;
 
 /// The token types of the legend, in the order the editor is told about them.
 pub const TYPES: &[&str] = &[
@@ -146,7 +147,8 @@ pub fn classify(an: &Analyzer, u: UnitId) -> Vec<Classified> {
 pub fn encode(text: &str, tokens: &[Classified], range: Option<Range<usize>>) -> Value {
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
-    let column = |offset: usize, line: usize| -> usize { text[starts[line]..offset].chars().map(char::len_utf16).sum() };
+    let encoding = text::encoding();
+    let column = |offset: usize, line: usize| -> usize { text[starts[line]..offset].chars().map(|c| encoding.len(c)).sum() };
     let (mut data, mut prev_line, mut prev_col) = (Vec::new(), 0, 0);
     for t in tokens {
         if range.as_ref().is_some_and(|r| t.span.end <= r.start || t.span.start >= r.end) {
@@ -154,7 +156,7 @@ pub fn encode(text: &str, tokens: &[Classified], range: Option<Range<usize>>) ->
         }
         let line = starts.partition_point(|&s| s <= t.span.start) - 1;
         let col = column(t.span.start, line);
-        let len: usize = text[t.span.clone()].chars().map(char::len_utf16).sum();
+        let len: usize = text[t.span.clone()].chars().map(|c| encoding.len(c)).sum();
         data.extend([line - prev_line, if line == prev_line { col - prev_col } else { col }, len, t.kind as usize, t.modifiers as usize]);
         (prev_line, prev_col) = (line, col);
     }

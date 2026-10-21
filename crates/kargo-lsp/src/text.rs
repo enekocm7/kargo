@@ -1,11 +1,90 @@
-//! Open documents and LSP positions (zero-based lines, UTF-16 columns) over byte offsets.
+//! Open documents and LSP positions (zero-based lines, columns in the negotiated encoding, UTF-16
+//! by default) over byte offsets.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde_json::{Value, json};
 
+/// How a `Position`'s `character` counts a line's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    Utf8,
+    Utf16,
+    Utf32,
+}
+
+impl Encoding {
+    /// The `positionEncoding` name of the LSP.
+    pub fn name(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "utf-8",
+            Encoding::Utf16 => "utf-16",
+            Encoding::Utf32 => "utf-32",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "utf-8" => Some(Encoding::Utf8),
+            "utf-16" => Some(Encoding::Utf16),
+            "utf-32" => Some(Encoding::Utf32),
+            _ => None,
+        }
+    }
+
+    /// How many units `c` takes in this encoding.
+    pub fn len(self, c: char) -> usize {
+        match self {
+            Encoding::Utf8 => c.len_utf8(),
+            Encoding::Utf16 => c.len_utf16(),
+            Encoding::Utf32 => 1,
+        }
+    }
+
+    /// The encoding to use among the `general.positionEncodings` an editor offers: UTF-8, which
+    /// needs no conversion, when it is there, else UTF-16, which every editor takes.
+    pub fn negotiate(offered: &Value) -> Self {
+        let offered: Vec<Encoding> = offered.as_array().into_iter().flatten().filter_map(Value::as_str).filter_map(Self::parse).collect();
+        if offered.contains(&Encoding::Utf8) { Encoding::Utf8 } else { Encoding::Utf16 }
+    }
+
+    /// The encoding a server's `positionEncoding` capability names (UTF-16 when it names none).
+    pub fn of_capability(name: &Value) -> Self {
+        name.as_str().and_then(Self::parse).unwrap_or(Encoding::Utf16)
+    }
+}
+
+static ENCODING: AtomicU8 = AtomicU8::new(1);
+
+/// The encoding the editor's positions use; UTF-16 until [`set_encoding`] says otherwise.
+pub fn encoding() -> Encoding {
+    match ENCODING.load(Ordering::Relaxed) {
+        0 => Encoding::Utf8,
+        2 => Encoding::Utf32,
+        _ => Encoding::Utf16,
+    }
+}
+
+/// Sets the encoding of the positions this process reads and writes.
+pub fn set_encoding(encoding: Encoding) {
+    ENCODING.store(
+        match encoding {
+            Encoding::Utf8 => 0,
+            Encoding::Utf16 => 1,
+            Encoding::Utf32 => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
 /// The byte offset of an LSP `Position` in `text`, clamped to the text.
 pub fn offset(text: &str, position: &Value) -> usize {
+    offset_in(text, position, encoding())
+}
+
+/// [`offset`] with the columns counted in `encoding`.
+pub fn offset_in(text: &str, position: &Value, encoding: Encoding) -> usize {
     let line = position["line"].as_u64().unwrap_or(0) as usize;
     let character = position["character"].as_u64().unwrap_or(0) as usize;
     let mut start = 0;
@@ -21,18 +100,23 @@ pub fn offset(text: &str, position: &Value) -> usize {
         if units >= character {
             return start + i;
         }
-        units += c.len_utf16();
+        units += encoding.len(c);
     }
     end
 }
 
 /// The LSP `Position` of a byte offset in `text`.
 pub fn position(text: &str, offset: usize) -> Value {
+    position_in(text, offset, encoding())
+}
+
+/// [`position`] with the column counted in `encoding`.
+pub fn position_in(text: &str, offset: usize, encoding: Encoding) -> Value {
     let offset = floor_char_boundary(text, offset.min(text.len()));
     let before = &text[..offset];
     let line = before.matches('\n').count();
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    let character: usize = before[line_start..].chars().map(char::len_utf16).sum();
+    let character: usize = before[line_start..].chars().map(|c| encoding.len(c)).sum();
     json!({ "line": line, "character": character })
 }
 
@@ -137,6 +221,23 @@ pub fn file_name(uri: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_columns_in_the_negotiated_encoding() {
+        let text = "b = \"é𝄞x\"
+";
+        let x = text.find('x').unwrap();
+        // é is 2 UTF-8 bytes, 1 UTF-16 unit; 𝄞 is 4 bytes, 2 units, one scalar.
+        for (encoding, character) in [(Encoding::Utf8, 11), (Encoding::Utf16, 8), (Encoding::Utf32, 7)] {
+            let at = json!({ "line": 0, "character": character });
+            assert_eq!(offset_in(text, &at, encoding), x, "{encoding:?}");
+            assert_eq!(position_in(text, x, encoding), at, "{encoding:?}");
+        }
+        assert_eq!(Encoding::negotiate(&json!(["utf-16", "utf-8"])), Encoding::Utf8);
+        assert_eq!(Encoding::negotiate(&json!(["utf-32", "utf-16"])), Encoding::Utf16);
+        assert_eq!(Encoding::negotiate(&Value::Null), Encoding::Utf16);
+        assert_eq!(Encoding::of_capability(&json!("utf-8")), Encoding::Utf8);
+    }
 
     #[test]
     fn converts_positions() {

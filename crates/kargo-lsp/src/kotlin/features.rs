@@ -2514,29 +2514,54 @@ pub fn document_symbols(an: &Analyzer, u: UnitId) -> Value {
 }
 
 /// Declarations of the project whose names match `query`.
-pub fn workspace_symbols(an: &Analyzer, query: &str) -> Value {
+pub fn workspace_symbols(an: &Analyzer, query: &str, resolve: bool, control: &Control) -> Option<Value> {
+    let lower = query.to_lowercase();
     let mut out = Vec::new();
-    for (name, s) in &an.proj.names {
-        if !query.is_empty() && !matches_prefix(name, query) && !name.to_lowercase().contains(&query.to_lowercase()) {
-            continue;
-        }
-        let unit = an.unit(s.unit_id());
-        let d = an.decl(*s);
-        let file = &unit.file;
-        let owner = file.owner_class(s.decl_id());
-        let container = match owner {
-            Some(c) => file.fq_name(c),
-            None => file.package.clone(),
-        };
-        out.push(json!({
-            "name": name,
-            "kind": symbol_kind(d, owner.is_some()),
-            "location": { "uri": text::path_to_uri(&unit.path), "range": text::range(&unit.text, d.name_span.clone()) },
-            "containerName": container,
-        }));
-        if out.len() >= 500 {
-            break;
+    // The libraries have far more names: they are searched once the query narrows them down.
+    let indexes = [an.proj, an.lib].into_iter().take(if query.chars().count() >= LIBRARY_QUERY { 2 } else { 1 });
+    'search: for index in indexes {
+        for (n, (name, s)) in index.names.iter().enumerate() {
+            if n % 1024 == 0 && control.cancelled.is_some_and(|c| c()) {
+                return None;
+            }
+            if !query.is_empty() && !matches_prefix(name, query) && !name.to_lowercase().contains(&lower) {
+                continue;
+            }
+            let unit = an.unit(s.unit_id());
+            let d = an.decl(*s);
+            let file = &unit.file;
+            let owner = file.owner_class(s.decl_id());
+            let container = match owner {
+                Some(c) => file.fq_name(c),
+                None => file.package.clone(),
+            };
+            let uri = text::path_to_uri(&unit.path);
+            let mut symbol = json!({ "name": name, "kind": symbol_kind(d, owner.is_some()), "containerName": container });
+            if resolve {
+                // The range costs a scan of the file; `workspaceSymbol/resolve` gives it.
+                symbol["location"] = json!({ "uri": uri });
+                symbol["data"] = json!({ "lib": s.unit_id().lib, "unit": s.unit_id().unit, "decl": s.decl_id() });
+            } else {
+                symbol["location"] = json!({ "uri": uri, "range": text::range(&unit.text, d.name_span.clone()) });
+            }
+            out.push(symbol);
+            if out.len() >= 500 {
+                break 'search;
+            }
         }
     }
-    json!(out)
+    Some(json!(out))
+}
+
+/// The shortest query that searches the libraries' symbols too.
+const LIBRARY_QUERY: usize = 3;
+
+/// `workspaceSymbol/resolve`: the symbol with the range of its name.
+pub fn resolve_symbol(an: &Analyzer, mut symbol: Value) -> Value {
+    let data = &symbol["data"];
+    let (Some(lib), Some(unit), Some(decl)) = (data["lib"].as_bool(), data["unit"].as_u64(), data["decl"].as_u64()) else { return symbol };
+    let id = UnitId { lib, unit: unit as u32 }.sym(decl as usize);
+    let (unit, d) = (an.unit(id.unit_id()), an.decl(id));
+    symbol["location"]["range"] = text::range(&unit.text, d.name_span.clone());
+    symbol
 }
