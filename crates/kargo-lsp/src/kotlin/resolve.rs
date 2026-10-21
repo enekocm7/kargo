@@ -2281,7 +2281,7 @@ impl<'a> Analyzer<'a> {
 
     /// How well a value of type `arg` fits a parameter of type `param`: `None` when it cannot be
     /// passed, more for an exact type than for a distant supertype.
-    fn type_fit(&self, arg: &Ty, param: &Ty) -> Option<i32> {
+    pub fn type_fit(&self, arg: &Ty, param: &Ty) -> Option<i32> {
         match (arg, param) {
             (Ty::Func { params: a, .. }, Ty::Func { params: b, .. }) => (a.len() == b.len()).then_some(8),
             (Ty::Class { .. }, Ty::Func { .. }) => None,
