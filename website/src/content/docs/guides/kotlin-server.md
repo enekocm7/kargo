@@ -23,12 +23,34 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Rename | Every reference in the project, and what must change with it: `expect` and `actual` declarations, overrides, named arguments, KDoc links and tags, labels, the file named after a class, packages and the entry points in `kargo.toml` |
 | Outline | Document symbols for the file, workspace symbols for the project, and for its libraries once the query has three characters. See [Protocol details](#protocol-details) |
 | Semantic highlighting | Every identifier classified by what it resolves to: class, interface, enum, enum member, type parameter, function, method, property, parameter, local variable or package. The modifiers `declaration`, `readonly` (`val`, parameters), `static` (members of objects and companions), `deprecated` and `defaultLibrary` (the standard library and other libraries) come with it. Whole file and range requests; the result is kept until the next change |
+| Inlay hints | The inferred type after `val`, `var`, `for` and lambda parameter names (`val names`: `: List<String>`), left out when the initializer shows it (a literal or a constructor call) or the type is not fully known; the parameter name before literal arguments (`greet(name: "a", loud: true)`); and the implicit `it: T` and `this: T` at the start of a lambda. See [Inlay hints](#inlay-hints) |
 | Folding | Bodies, lambdas and multi-line argument lists, raw strings, the import block, KDoc and block comments, and runs of `//` comments |
 | Selection | Expand the selection from an identifier to its dotted call chain, the brackets around it, the statement, the declarations around it (function, class) and the file |
 | Formatting | The whole file, formatted by ktlint with the project's `.editorconfig` and `[fmt]` settings, as `kargo fmt` does. See [Formatting](#formatting) |
 | Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
 | Diagnostics as you type | Unclosed or unmatched brackets, unterminated strings and comments, a `class`, `interface` or `typealias` without a name (errors), unused imports and local variables that are never used (warnings, shown greyed out). Decided from the file alone, so they appear between saves |
 | Errors | From [check on save](../editors/#check-on-save), which is on with this server: `kargo check` runs when you save a file and its errors for every target appear in the editor |
+
+### Inlay hints
+
+```kotlin title="src/Main.kt"
+fun main() {
+    val names = listOf("Ada", "Grace")      // names: List<String>
+    greet("Ada", true)                      // greet(name: "Ada", loud: true)
+    names.forEach { println(it) }           // { it: String -> ... }
+}
+```
+
+Every kind can be switched off with `initializationOptions`, either nested (`{ "inlayHints": { "types": false } }`) or flat (`{ "inlayHints.types": false }`). All are on by default.
+
+| Option | Shows |
+|---|---|
+| `inlayHints.types` | The type of `val`/`var`, `for` variables and lambda parameters without a declared type |
+| `inlayHints.parameterNames` | The parameter name before a literal argument (number, character, string without templates, `true`, `false`, `null`) that is passed by position |
+| `inlayHints.implicitIt` | `it: T` after the `{` of a lambda that declares no parameters |
+| `inlayHints.implicitReceivers` | `this: T` after the `{` of a lambda with a receiver, such as `buildString { }` |
+
+Only fully known types are shown, and a type is left out when the initializer already says it, as IntelliJ does.
 
 ### Completion
 

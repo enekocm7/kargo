@@ -33,7 +33,7 @@ use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
 use super::library::{self, CompiledLibrary, SourcesJar, UnitCache};
 use super::resolve::{Analyzer, Packages};
-use super::{hierarchy, ranges, rename, semantic};
+use super::{hierarchy, inlay, ranges, rename, semantic};
 use crate::jsonrpc::{self, Kind};
 use crate::{check, text};
 
@@ -1092,6 +1092,8 @@ struct State {
     /// renamed package.
     rename_option: bool,
     move_option: bool,
+    /// `initializationOptions`: the kinds of inlay hints shown.
+    inlay_options: inlay::Options,
     /// The version of each open document, as the editor sent it.
     versions: HashMap<PathBuf, i64>,
     /// Whether the editor shows `$/progress`.
@@ -1158,6 +1160,7 @@ impl State {
             rename_files: false,
             rename_option: true,
             move_option: true,
+            inlay_options: inlay::Options::default(),
             versions: HashMap::new(),
             work_done_progress: false,
             load_options: LoadOptions { dependencies, fetch_sources: true, tried: Arc::default() },
@@ -1802,6 +1805,13 @@ impl State {
                     .then(|| text::offset(text, &params["range"]["start"])..text::offset(text, &params["range"]["end"]));
                 Ok(semantic::encode(text, &tokens, range))
             }
+            "textDocument/inlayHint" => {
+                let Some(unit) = unit else { return Ok(json!([])) };
+                let text = &an.unit(unit).text;
+                let range = (!params["range"].is_null())
+                    .then(|| text::offset(text, &params["range"]["start"])..text::offset(text, &params["range"]["end"]));
+                Ok(inlay::hints(&an, unit, range, self.inlay_options))
+            }
             "textDocument/foldingRange" => {
                 let Some(unit) = unit else { return Ok(json!([])) };
                 Ok(ranges::folding_ranges(an.file(unit), &an.unit(unit).text))
@@ -1832,6 +1842,7 @@ impl State {
         self.rename_files = workspace_edit["resourceOperations"].as_array().is_some_and(|ops| ops.iter().any(|o| o == "rename"));
         self.rename_option = params["initializationOptions"]["renameFiles"] != false;
         self.move_option = params["initializationOptions"]["movePackageDirectories"] != false;
+        self.inlay_options = inlay::Options::from_json(&params["initializationOptions"]);
         self.load_options.fetch_sources = params["initializationOptions"]["fetchSources"] != false;
         self.root = params["rootUri"]
             .as_str()
@@ -1858,6 +1869,7 @@ impl State {
                 "documentSymbolProvider": true,
                 "semanticTokensProvider": semantic::legend(),
                 "foldingRangeProvider": true,
+                "inlayHintProvider": true,
                 "selectionRangeProvider": true,
                 "documentFormattingProvider": true,
                 "workspaceSymbolProvider": { "resolveProvider": true },

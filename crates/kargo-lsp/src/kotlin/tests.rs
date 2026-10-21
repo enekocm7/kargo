@@ -2828,3 +2828,52 @@ fn completes_java_lambda_parameters_in_the_real_jdk() {
     let labels = f.labels();
     assert!(has(&labels, "length") && has(&labels, "uppercase"), "{labels:?}");
 }
+
+/// The inlay hints of `src` as `(line, column, label)`.
+fn inlays(src: &str, options: super::inlay::Options) -> Vec<(u64, u64, String)> {
+    let f = fixture(&[("src/Main.kt", src)]);
+    let u = UnitId { lib: false, unit: 0 };
+    super::inlay::hints(&f.an(), u, None, options)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            (h["position"]["line"].as_u64().unwrap(), h["position"]["character"].as_u64().unwrap(), h["label"].as_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn shows_inferred_types_but_not_obvious_ones() {
+    let src = "class Box\nfun names(): List<String> = emptyList()\nfun main() {\n    val a = names()\n    val b = 1\n    val c = Box()\n    val d: Int = 2\n    val e = \"x\"\n}\n";
+    let got = inlays(src, Default::default());
+    assert_eq!(got, vec![(3, 9, ": List<String>".to_owned())], "{got:?}");
+}
+
+#[test]
+fn shows_lambda_parameters_it_and_receivers() {
+    let src =
+        "fun main() {\n    val xs = listOf(\"a\")\n    xs.let { it.length }\n    buildString { append(\"x\") }\n    xs.let { s -> s }\n}\n";
+    let got = inlays(src, Default::default());
+    assert!(got.contains(&(2, 12, "it: List<String>".to_owned())), "{got:?}");
+    assert!(got.contains(&(3, 17, "this: StringBuilder".to_owned())), "{got:?}");
+    assert!(got.contains(&(4, 14, ": List<String>".to_owned())), "{got:?}");
+}
+
+#[test]
+fn shows_parameter_names_of_literal_arguments() {
+    let src = "fun greet(name: String, loud: Boolean, times: Int = 1) {}\nfun main() {\n    val n = \"a\"\n    greet(\"a\", true)\n    greet(n, false, times = 2)\n    greet(\"b\", loud = true)\n}\n";
+    let got = inlays(src, Default::default());
+    let names: Vec<_> = got.iter().map(|h| (h.0, h.1, h.2.as_str())).collect();
+    assert_eq!(names, vec![(3, 10, "name:"), (3, 15, "loud:"), (4, 13, "loud:"), (5, 10, "name:")], "{got:?}");
+}
+
+#[test]
+fn inlay_hints_can_be_switched_off() {
+    let src = "fun f(a: Int) {}\nfun g(): List<String> = emptyList()\nfun main() {\n    val x = g()\n    f(1)\n    g().let { it }\n}\n";
+    let off = |o: &str| super::inlay::Options::from_json(&serde_json::from_str(o).unwrap());
+    assert_eq!(inlays(src, Default::default()).len(), 3);
+    assert_eq!(inlays(src, off(r#"{"inlayHints":{"types":false}}"#)).len(), 2);
+    assert_eq!(inlays(src, off(r#"{"inlayHints.parameterNames":false}"#)).len(), 2);
+    assert_eq!(inlays(src, off(r#"{"inlayHints":{"implicitIt":false}}"#)).len(), 2);
+}
