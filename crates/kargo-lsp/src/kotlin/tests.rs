@@ -2780,3 +2780,51 @@ fn scripts_have_args_and_top_level_statements() {
     assert_eq!(file.jvm_name.as_deref(), Some("Helpers"));
     assert!(file.jvm_multifile);
 }
+
+const STREAM_JDK: &[(&str, &str)] = &[
+    (
+        "java.base/module-info.java",
+        "module java.base {\n    exports java.lang;\n    exports java.util;\n    exports java.util.function;\n    exports java.util.stream;\n}\n",
+    ),
+    (
+        "java.base/java/lang/String.java",
+        "package java.lang;\n\npublic final class String implements CharSequence {\n    public int length() {\n        return 0;\n    }\n}\n",
+    ),
+    ("java.base/java/lang/CharSequence.java", "package java.lang;\n\npublic interface CharSequence {\n    int length();\n}\n"),
+    (
+        "java.base/java/util/function/Predicate.java",
+        "package java.util.function;\n\npublic interface Predicate<T> {\n    boolean test(T t);\n\n    default Predicate<T> negate() {\n        return null;\n    }\n\n    static <T> Predicate<T> not(Predicate<? super T> target) {\n        return null;\n    }\n}\n",
+    ),
+    (
+        "java.base/java/util/function/Consumer.java",
+        "package java.util.function;\n\npublic interface Consumer<T> {\n    void accept(T t);\n}\n",
+    ),
+    (
+        "java.base/java/util/stream/Stream.java",
+        "package java.util.stream;\n\nimport java.util.function.Consumer;\nimport java.util.function.Predicate;\n\npublic interface Stream<T> {\n    Stream<T> filter(Predicate<? super T> predicate);\n\n    void forEach(Consumer<? super T> action);\n}\n",
+    ),
+    ("java.base/java/util/List.java", "package java.util;\n\npublic interface List<E> {\n    java.util.stream.Stream<E> stream();\n}\n"),
+];
+
+#[test]
+fn lambda_of_a_java_functional_interface_gets_its_parameter_types() {
+    let src = "import java.util.List\n\nfun f(list: List<String>) {\n    list.stream().filter {\n        it.$0\n    }\n}\n";
+    let f = fixture_with_jdk(&[("src/Main.kt", src)], STREAM_JDK);
+    assert!(f.labels().contains(&"length".to_owned()), "{:?}", f.labels());
+    let src = "import java.util.List\n\nfun f(list: List<String>) {\n    list.stream().forEach { s ->\n        s.$0\n    }\n}\n";
+    let f = fixture_with_jdk(&[("src/Main.kt", src)], STREAM_JDK);
+    assert!(f.labels().contains(&"length".to_owned()), "{:?}", f.labels());
+}
+
+/// `it` in the lambda of `stream().filter { }` against the JDK on this machine (`JAVA_HOME`).
+#[test]
+#[ignore]
+fn completes_java_lambda_parameters_in_the_real_jdk() {
+    let home = PathBuf::from(std::env::var("JAVA_HOME").expect("JAVA_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    let jdk = super::jdk::Jdk::open(&home, &dir.path().join("cache"), "JDK").expect("a JDK with sources");
+    let src = "fun main() {\n    val list = mutableListOf<String>(\"Hello\", \"Olneta jai\")\n    list.stream().filter {\n        it.$0 >= 5\n    }.forEach(System.out::println)\n}\n";
+    let f = fixture_on(&[("src/Main.kt", src)], Some(Arc::new(jdk)), Some(dir), Vec::new());
+    let labels = f.labels();
+    assert!(has(&labels, "length") && has(&labels, "uppercase"), "{labels:?}");
+}
