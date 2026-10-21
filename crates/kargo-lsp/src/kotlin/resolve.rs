@@ -2143,12 +2143,139 @@ impl<'a> Analyzer<'a> {
     /// What a call of one of `found` returns, choosing the overload by the number of arguments.
     fn call_found(&self, u: UnitId, found: &[Found], args: &[Arg], targs: Vec<Option<Ty>>) -> Option<Ty> {
         let members: Vec<&Member> = found.iter().filter_map(|f| if let Found::Sym(m) = f { Some(m) } else { None }).collect();
-        let m = self.pick_overload(&members, args.len())?;
+        let m = self.pick_overload(u, &members, args)?;
         self.call_ret(u, m, args, &targs)
     }
 
-    /// Among candidates for a call with `argc` arguments, the best match.
-    pub fn pick_overload<'m>(&self, members: &[&'m Member], argc: usize) -> Option<&'m Member> {
+    /// The types of a call's arguments; unknown for lambdas and for what cannot be inferred.
+    pub fn arg_types(&self, u: UnitId, args: &[Arg]) -> Vec<Option<Ty>> {
+        args.iter().map(|a| if a.lambda { None } else { self.infer(u, a.start, a.end) }).collect()
+    }
+
+    /// How well the call `args` fits the function or class `m`, or `None` when it cannot be called
+    /// that way: too few or too many arguments, an unknown name, a lambda with the wrong number of
+    /// parameters, or an argument whose type is no subtype of the parameter's. Arguments of
+    /// unknown type fit anything; closer subtypes and exact matches score higher.
+    pub fn call_fit(&self, m: &Member, args: &[Arg], arg_types: &[Option<Ty>], u: UnitId) -> Option<i32> {
+        let d = self.decl(m.sym);
+        if d.kind != Kind::Function && d.kind != Kind::Constructor && !d.kind.is_class() {
+            return Some(0);
+        }
+        let decls = &self.file(m.sym.unit_id()).decls;
+        let ctx = Ctx { unit: m.sym.unit_id(), decl: Some(m.sym.decl_id()) };
+        let params = &d.params;
+        let mut used = vec![false; params.len()];
+        let mut index = 0;
+        let mut score = 0;
+        for (arg, ty) in args.iter().zip(arg_types) {
+            let pi = if let Some(n) = &arg.name {
+                params.iter().position(|&p| decls[p].name == *n)?
+            } else if arg.trailing {
+                params.len().checked_sub(1)?
+            } else if index < params.len() {
+                let i = index;
+                if !decls[params[i]].vararg {
+                    index += 1;
+                }
+                i
+            } else {
+                return None;
+            };
+            let param = &decls[params[pi]];
+            if std::mem::replace(&mut used[pi], true) && !param.vararg {
+                return None;
+            }
+            let Some(pty) = param.ty.as_ref().and_then(|t| self.ty_of_ref(t, ctx, &m.subst)) else { continue };
+            if arg.lambda {
+                match &pty {
+                    Ty::Func { params: fp, .. } => {
+                        match self.lambda_arity(u, arg.start) {
+                            Some(n) if n != fp.len() => return None,
+                            None if fp.len() > 1 => return None,
+                            _ => {}
+                        }
+                        score += 4;
+                    }
+                    // A SAM interface, as far as we can tell.
+                    Ty::Class { .. } => {}
+                    _ => {}
+                }
+            } else if let Some(at) = ty {
+                score += self.type_fit(at, &pty)?;
+            }
+        }
+        for (i, &p) in params.iter().enumerate() {
+            if !used[i] && !decls[p].has_default && !decls[p].vararg {
+                return None;
+            }
+        }
+        Some(score)
+    }
+
+    /// The number of parameters a lambda declares, or `None` when it has the implicit `it`.
+    fn lambda_arity(&self, u: UnitId, brace: usize) -> Option<usize> {
+        let lx = &self.file(u).lexed;
+        let close = lx.matching.get(brace).copied().flatten().filter(|&c| c > brace)?;
+        let arrow = (brace + 1..close).find(|&i| lx.kind(i) == Some(Tok::Arrow) && depth_between(lx, brace + 1, i) == 0)?;
+        if arrow == brace + 1 {
+            return Some(0);
+        }
+        let commas = (brace + 1..arrow).filter(|&i| lx.kind(i) == Some(Tok::Comma) && depth_between(lx, brace + 1, i) == 0).count();
+        Some(commas + 1)
+    }
+
+    /// How well a value of type `arg` fits a parameter of type `param`: `None` when it cannot be
+    /// passed, more for an exact type than for a distant supertype.
+    fn type_fit(&self, arg: &Ty, param: &Ty) -> Option<i32> {
+        match (arg, param) {
+            (Ty::Func { params: a, .. }, Ty::Func { params: b, .. }) => (a.len() == b.len()).then_some(8),
+            (Ty::Class { .. }, Ty::Func { .. }) => None,
+            (Ty::Func { .. } | Ty::Class { .. }, Ty::Class { sym: p, nullable: pn, .. }) => {
+                if let Ty::Class { nullable: true, .. } = arg
+                    && !pn
+                {
+                    return None;
+                }
+                let want = self.fq(*p);
+                if let Ty::Class { sym: a, .. } = arg
+                    && self.fq(*a) == want
+                {
+                    return Some(10);
+                }
+                if let Some(i) = self.closure(arg).iter().position(|(s, _)| self.fq(*s) == want) {
+                    return Some(9 - i.min(8) as i32);
+                }
+                // Integer literals convert to the other numeric types.
+                const NUMERIC: [&str; 6] = ["Int", "Long", "Short", "Byte", "Double", "Float"];
+                let simple = |s: &str| s.rsplit('.').next().unwrap_or_default().to_owned();
+                let numeric = |t: &Ty| matches!(t, Ty::Class { sym, .. } if self.fq(*sym).starts_with("kotlin.") && NUMERIC.contains(&simple(&self.fq(*sym)).as_str()));
+                (numeric(arg) && numeric(param)).then_some(1)
+            }
+            _ => Some(0),
+        }
+    }
+
+    /// Among candidates for a call, the one that fits its arguments best; the first of equally
+    /// good ones.
+    pub fn pick_overload<'m>(&self, u: UnitId, members: &[&'m Member], args: &[Arg]) -> Option<&'m Member> {
+        let argc = args.len();
+        if members.iter().filter(|m| self.decl(m.sym).kind == Kind::Function).count() > 1 {
+            let types = self.arg_types(u, args);
+            let mut best: Option<(i32, &'m Member)> = None;
+            for &m in members {
+                if self.decl(m.sym).kind != Kind::Function {
+                    continue;
+                }
+                if let Some(s) = self.call_fit(m, args, &types, u)
+                    && best.is_none_or(|(b, _)| s > b)
+                {
+                    best = Some((s, m));
+                }
+            }
+            if let Some((_, m)) = best {
+                return Some(m);
+            }
+        }
         let callable = |m: &Member| {
             let d = self.decl(m.sym);
             d.kind == Kind::Function || d.kind.is_class() || d.kind == Kind::Constructor || d.kind.is_value()
@@ -2237,7 +2364,7 @@ impl<'a> Analyzer<'a> {
         if is_call {
             let (args, next) = self.call_args(u, j, b);
             let refs: Vec<&Member> = members.iter().collect();
-            let m = self.pick_overload(&refs, args.len())?;
+            let m = self.pick_overload(u, &refs, &args)?;
             let ty = self.call_ret(u, m, &args, &targs.map(|t| t.0).unwrap_or_default())?;
             return Some((ty, next));
         }

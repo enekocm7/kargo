@@ -266,37 +266,21 @@ fn rank(an: &Analyzer, u: UnitId, mut members: Vec<Member>, args: Option<Vec<Arg
         members.sort_by_key(|m| an.decl(m.sym).kind == Kind::Function);
         return members;
     };
-    let arg_types: Vec<Option<Ty>> = args.iter().map(|a| if a.lambda { None } else { an.infer(u, a.start, a.end) }).collect();
-    let score = |m: &Member| -> i32 {
+    let arg_types = an.arg_types(u, &args);
+    // The applicable candidates, the best fit first. Equally good ones all stay: the call is
+    // ambiguous as far as the argument types are known.
+    let fits: Vec<Option<i32>> = members.iter().map(|m| an.call_fit(m, &args, &arg_types, u)).collect();
+    let best = fits.iter().flatten().max().copied();
+    let tiebreak = |m: &Member| -> i32 {
         let d = an.decl(m.sym);
-        let decls = &an.file(m.sym.unit_id()).decls;
-        let params: Vec<&Decl> = d.params.iter().map(|&p| &decls[p]).collect();
-        let required = params.iter().filter(|p| !p.has_default && !p.vararg).count();
-        let vararg = params.iter().any(|p| p.vararg);
-        let mut s = 0;
-        if d.kind == Kind::Function || d.kind.is_class() {
-            s += 1;
-        }
-        if args.len() >= required && (vararg || args.len() <= params.len()) {
-            s += 10;
-        }
-        for (i, t) in arg_types.iter().enumerate() {
-            let (Some(Ty::Class { sym, .. }), Some(p)) = (t, params.get(i)) else { continue };
-            let Some(pt) = &p.ty else { continue };
-            let arg_name = &an.decl(*sym).name;
-            if pt.simple_name() == arg_name {
-                s += 3;
-            } else if d.type_params.iter().any(|t| t.name == pt.name) || pt.simple_name() == "Any" {
-                s += 1;
-            }
-        }
-        if d.doc.is_some() {
-            s += 1;
-        }
-        s
+        i32::from(d.kind == Kind::Function || d.kind.is_class()) + i32::from(d.doc.is_some())
     };
-    members.sort_by_key(|m| std::cmp::Reverse(score(m)));
-    members
+    let mut ranked: Vec<(Option<i32>, Member)> = fits.into_iter().zip(members).collect();
+    if best.is_some() {
+        ranked.retain(|(f, _)| *f == best);
+    }
+    ranked.sort_by_key(|(f, m)| (std::cmp::Reverse(*f), std::cmp::Reverse(tiebreak(m))));
+    ranked.into_iter().map(|(_, m)| m).collect()
 }
 
 /// The location of a target's declaration.
@@ -1399,6 +1383,20 @@ fn same_shape(an: &Analyzer, a: SymId, b: SymId) -> bool {
     da.kind.is_class() == db.kind.is_class()
         && (da.kind == Kind::Function) == (db.kind == Kind::Function)
         && da.params.len() == db.params.len()
+        && (da.kind != Kind::Function || same_parameter_types(an, a, b))
+}
+
+/// Whether two functions take the same parameter types, as written: an `expect` function and its
+/// `actual`s do, overloads don't.
+fn same_parameter_types(an: &Analyzer, a: SymId, b: SymId) -> bool {
+    let types = |s: SymId| -> Vec<String> {
+        let (file, src) = (an.file(s.unit_id()), &an.unit(s.unit_id()).text);
+        let d = an.decl(s);
+        let mut out: Vec<String> = d.receiver.iter().map(|r| r.display(src)).collect();
+        out.extend(d.params.iter().map(|&p| file.decls[p].ty.as_ref().map(|t| t.display(src)).unwrap_or_default()));
+        out
+    };
+    types(a) == types(b)
 }
 
 /// Every place in the project that refers to one of `group`, as (unit, byte range).
