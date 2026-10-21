@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -58,11 +59,42 @@ fn pipe() -> (io::PipeReader, io::PipeWriter) {
 /// `id` for the document `uri`, which had the text `original` when it was asked.
 enum Event {
     Client(Option<Value>),
-    Project { generation: u64, model: Box<Model>, units: Vec<Arc<Unit>> },
-    Libraries { generation: u64, units: Vec<Arc<Unit>>, jdk: Option<Arc<Jdk>> },
-    Fetching { generation: u64, modules: usize },
-    Fetched { generation: u64, found: usize },
-    Formatted { id: Value, uri: String, original: String, outcome: anyhow::Result<Option<String>> },
+    Project {
+        generation: u64,
+        model: Box<Model>,
+        units: Vec<Arc<Unit>>,
+    },
+    Libraries {
+        generation: u64,
+        units: Vec<Arc<Unit>>,
+        jdk: Option<Arc<Jdk>>,
+    },
+    Fetching {
+        generation: u64,
+        modules: usize,
+    },
+    Fetched {
+        generation: u64,
+        found: usize,
+    },
+    Formatted {
+        id: Value,
+        uri: String,
+        original: String,
+        outcome: anyhow::Result<Option<String>>,
+    },
+    /// How far a search for references or a rename has come, for the editor's `$/progress`.
+    Searching {
+        token: Value,
+        percentage: u32,
+    },
+    /// The answer to a references or rename request, which a worker thread computed.
+    Searched {
+        id: Value,
+        generation: u64,
+        token: Option<Value>,
+        outcome: Result<Value, Failure>,
+    },
 }
 
 /// Formats the text of a Kotlin file; `None` when the file is not to be formatted.
@@ -87,6 +119,8 @@ pub(crate) fn ktlint_formatter() -> Formatter {
 const CONTENT_MODIFIED: i64 = -32801;
 /// The error code of a request that could not be carried out.
 const REQUEST_FAILED: i64 = -32803;
+/// The error code of a request the editor cancelled.
+const REQUEST_CANCELLED: i64 = -32800;
 
 /// The `$/progress` of downloading sources jars, once the editor accepted its token.
 struct Progress {
@@ -646,7 +680,7 @@ struct State {
     /// Open documents: URI to path.
     open: HashMap<String, PathBuf>,
     lib: Arc<Index>,
-    proj: Option<(Arc<Index>, HashMap<PathBuf, u32>)>,
+    proj: Option<Snapshot>,
     /// The classified identifiers of each file (see [`semantic`]) at the generation they were computed.
     classified: HashMap<PathBuf, (u64, Arc<Vec<semantic::Classified>>)>,
     /// Which load of the project is current.
@@ -670,7 +704,12 @@ struct State {
     /// Editor messages that arrived while waiting for a load.
     queued: VecDeque<Option<Value>>,
     formatter: Formatter,
+    /// The searches running on worker threads, by request id, and whether the editor cancelled them.
+    searches: HashMap<String, Arc<AtomicBool>>,
 }
+
+/// The project index and the unit number of each file in it.
+type Snapshot = (Arc<Index>, Arc<HashMap<PathBuf, u32>>);
 
 impl State {
     fn new(config: Config, out: Box<dyn Write + Send>, tx: Sender<Event>, dependencies: bool, formatter: Formatter) -> Self {
@@ -700,6 +739,7 @@ impl State {
             libraries_loaded: false,
             queued: VecDeque::new(),
             formatter,
+            searches: HashMap::new(),
         }
     }
 
@@ -785,6 +825,30 @@ impl State {
                 };
                 let _ = self.send(&reply);
             }
+            Event::Searching { token, percentage } => {
+                let value = json!({ "kind": "report", "percentage": percentage });
+                let _ = self.send(&jsonrpc::notification("$/progress", json!({ "token": token, "value": value })));
+            }
+            Event::Searched { id, generation, token, outcome } => {
+                let cancelled = self.searches.remove(&id.to_string()).is_some_and(|c| c.load(Ordering::Relaxed));
+                if let Some(token) = token {
+                    let value = json!({ "kind": "end" });
+                    let _ = self.send(&jsonrpc::notification("$/progress", json!({ "token": token, "value": value })));
+                }
+                let reply = if cancelled {
+                    jsonrpc::error(&id, REQUEST_CANCELLED, "the request was cancelled")
+                } else if generation != self.generation {
+                    // Positions in the answer would not match the text that is there now.
+                    jsonrpc::error(&id, CONTENT_MODIFIED, "the project changed while it was being searched")
+                } else {
+                    match outcome {
+                        Ok(result) => jsonrpc::response(&id, result),
+                        Err(Failure::NotFound) => jsonrpc::error(&id, jsonrpc::METHOD_NOT_FOUND, "this request is not supported"),
+                        Err(Failure::Invalid(text)) => jsonrpc::error(&id, -32602, text),
+                    }
+                };
+                let _ = self.send(&reply);
+            }
             _ => {}
         }
     }
@@ -845,6 +909,11 @@ impl State {
             Kind::Notification => match method.as_str() {
                 "exit" => return Ok(false),
                 "initialized" => self.register_watchers()?,
+                "$/cancelRequest" => {
+                    if let Some(cancel) = self.searches.get(&params["id"].to_string()) {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                }
                 "textDocument/didOpen" => {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
                     if let Some(path) = file_path(uri).filter(|_| uri.ends_with(".kt")) {
@@ -907,6 +976,10 @@ impl State {
                     self.format(id, params)?;
                     return Ok(true);
                 }
+                if method == "textDocument/references" || method == "textDocument/rename" {
+                    self.search(id, &method, params)?;
+                    return Ok(true);
+                }
                 let reply = match self.request(&method, params) {
                     Ok(result) => jsonrpc::response(&id, result),
                     Err(Failure::NotFound) => jsonrpc::error(&id, jsonrpc::METHOD_NOT_FOUND, format!("`{method}` is not supported")),
@@ -932,6 +1005,39 @@ impl State {
         Ok(())
     }
 
+    /// Answers a references or rename request on a worker thread: the search resolves every
+    /// same-named identifier of the project, which takes a while in a large one, and the other
+    /// requests must not wait for it. The editor can cancel it with `$/cancelRequest`, and sees
+    /// `$/progress` when it sent a `workDoneToken`.
+    fn search(&mut self, id: Value, method: &str, params: &Value) -> anyhow::Result<()> {
+        let (proj, ids) = self.snapshot();
+        let (lib, packages, tx, generation) = (Arc::clone(&self.lib), self.model.packages.clone(), self.tx.clone(), self.generation);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.searches.insert(id.to_string(), Arc::clone(&cancel));
+        let token = Some(params["workDoneToken"].clone()).filter(|t| !t.is_null());
+        if let Some(token) = &token {
+            let title = if method == "textDocument/rename" { "Renaming" } else { "Searching for references" };
+            let value = json!({ "kind": "begin", "title": title, "cancellable": true, "percentage": 0 });
+            self.send(&jsonrpc::notification("$/progress", json!({ "token": token, "value": value })))?;
+        }
+        let (method, params) = (method.to_owned(), params.clone());
+        thread::spawn(move || {
+            let last = std::cell::Cell::new(u32::MAX);
+            let report = |done: usize, total: usize| {
+                let Some(token) = &token else { return };
+                let percentage = (done * 100 / total.max(1)) as u32;
+                if last.replace(percentage) != percentage {
+                    let _ = tx.send(Event::Searching { token: token.clone(), percentage });
+                }
+            };
+            let cancelled = || cancel.load(Ordering::Relaxed);
+            let control = features::Control { cancelled: Some(&cancelled), progress: Some(&report) };
+            let outcome = run_search(&method, &params, &lib, &proj, &ids, &packages, &control);
+            let _ = tx.send(Event::Searched { id, generation, token, outcome });
+        });
+        Ok(())
+    }
+
     /// Pushes the diagnostics that need no resolution ([`diagnostics`]) for the open document `uri`;
     /// `kargo lsp` merges them with the check's.
     fn publish_diagnostics(&mut self, uri: &str) -> anyhow::Result<()> {
@@ -942,8 +1048,22 @@ impl State {
 
     fn set_file(&mut self, path: PathBuf, text: String) {
         let origin = self.model.origin(&path);
-        self.files.insert(path.clone(), Arc::new(Unit::new(path, text, origin)));
-        self.changed();
+        let unit = Arc::new(Unit::new(path.clone(), text, origin));
+        let replaced = self.files.insert(path.clone(), Arc::clone(&unit)).is_some();
+        // A changed file updates its own entries; a new one shifts the unit numbers.
+        let patched = replaced
+            && self.proj.as_mut().is_some_and(|(index, ids)| {
+                let slot = ids.get(&path).copied();
+                match (slot, Arc::get_mut(index)) {
+                    (Some(slot), Some(index)) => index.replace_unit(slot, unit),
+                    _ => false,
+                }
+            });
+        if patched {
+            self.generation += 1;
+        } else {
+            self.changed();
+        }
     }
 
     fn register_watchers(&mut self) -> anyhow::Result<()> {
@@ -963,15 +1083,15 @@ impl State {
     }
 
     /// The project index, rebuilt after changes.
-    fn snapshot(&mut self) -> (Arc<Index>, HashMap<PathBuf, u32>) {
+    fn snapshot(&mut self) -> Snapshot {
         if let Some((index, ids)) = &self.proj {
-            return (Arc::clone(index), ids.clone());
+            return (Arc::clone(index), Arc::clone(ids));
         }
         let mut units: Vec<Arc<Unit>> = self.files.values().cloned().collect();
         units.sort_by(|a, b| a.path.cmp(&b.path));
-        let ids: HashMap<PathBuf, u32> = units.iter().enumerate().map(|(i, u)| (u.path.clone(), i as u32)).collect();
+        let ids: Arc<HashMap<PathBuf, u32>> = Arc::new(units.iter().enumerate().map(|(i, u)| (u.path.clone(), i as u32)).collect());
         let index = Arc::new(Index::new(false, units));
-        self.proj = Some((Arc::clone(&index), ids.clone()));
+        self.proj = Some((Arc::clone(&index), Arc::clone(&ids)));
         (index, ids)
     }
 
@@ -1060,14 +1180,6 @@ impl State {
             "callHierarchy/outgoingCalls" => Ok(hierarchy::outgoing(&an, &params["item"])),
             "typeHierarchy/supertypes" => Ok(hierarchy::supertypes(&an, &params["item"])),
             "typeHierarchy/subtypes" => Ok(hierarchy::direct_subtypes(&an, &params["item"])),
-            "textDocument/references" => {
-                let Some(unit) = unit else { return Ok(Value::Null) };
-                let (_, tok) = at(unit);
-                let Some(group) = tok.and_then(|t| group_at(&an, unit, t)) else { return Ok(json!([])) };
-                let include = params["context"]["includeDeclaration"] != false;
-                let refs = features::references(&an, &group, include);
-                Ok(json!(refs.iter().map(|(u, r)| location(&an, *u, r.clone())).collect::<Vec<_>>()))
-            }
             "textDocument/documentHighlight" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
                 let (_, tok) = at(unit);
@@ -1089,25 +1201,6 @@ impl State {
                 let u = an.unit(unit);
                 let span = u.file.lexed.tokens[tok].span();
                 Ok(json!({ "range": text::range(&u.text, span), "placeholder": u.file.lexed.text(&u.text, tok) }))
-            }
-            "textDocument/rename" => {
-                let Some(unit) = unit else { return Ok(Value::Null) };
-                let (_, tok) = at(unit);
-                let Some(tok) = tok else { return Err(Failure::Invalid("there is nothing to rename here".into())) };
-                let new_name = params["newName"].as_str().unwrap_or_default();
-                let Some(new_text) = features::new_name_text(new_name) else {
-                    return Err(Failure::Invalid(format!("`{new_name}` is not a valid Kotlin name")));
-                };
-                let group = rename_target(&an, unit, tok)?;
-                let mut changes: HashMap<String, Vec<Value>> = HashMap::new();
-                for (u, range) in features::references(&an, &group, true) {
-                    let unit = an.unit(u);
-                    changes
-                        .entry(text::path_to_uri(&unit.path))
-                        .or_default()
-                        .push(json!({ "range": text::range(&unit.text, range), "newText": new_text }));
-                }
-                Ok(json!({ "changes": changes }))
             }
             "textDocument/documentSymbol" => {
                 let Some(unit) = unit else { return Ok(json!([])) };
@@ -1207,6 +1300,50 @@ impl State {
 enum Failure {
     NotFound,
     Invalid(String),
+}
+
+/// The references or the rename of the identifier at the request's position.
+fn run_search(
+    method: &str,
+    params: &Value,
+    lib: &Index,
+    proj: &Index,
+    ids: &HashMap<PathBuf, u32>,
+    packages: &Packages,
+    control: &features::Control,
+) -> Result<Value, Failure> {
+    let an = Analyzer::new(lib, proj, packages);
+    let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+    let unit = file_path(uri)
+        .and_then(|p| ids.get(&p).copied())
+        .filter(|&u| !proj.units[u as usize].is_java())
+        .map(|u| UnitId { lib: false, unit: u });
+    let Some(unit) = unit else { return Ok(Value::Null) };
+    let u = an.unit(unit);
+    let tok = u.file.lexed.ident_at(text::offset(&u.text, &params["position"]));
+    // The answer to a cancelled search is replaced by the cancellation error.
+    let cancelled = || Failure::Invalid("the request was cancelled".into());
+    if method == "textDocument/references" {
+        let Some(group) = tok.and_then(|t| group_at(&an, unit, t)) else { return Ok(json!([])) };
+        let include = params["context"]["includeDeclaration"] != false;
+        let refs = features::search(&an, &group, include, control).ok_or_else(cancelled)?;
+        return Ok(json!(refs.iter().map(|(u, r)| location(&an, *u, r.clone())).collect::<Vec<_>>()));
+    }
+    let Some(tok) = tok else { return Err(Failure::Invalid("there is nothing to rename here".into())) };
+    let new_name = params["newName"].as_str().unwrap_or_default();
+    let Some(new_text) = features::new_name_text(new_name) else {
+        return Err(Failure::Invalid(format!("`{new_name}` is not a valid Kotlin name")));
+    };
+    let group = rename_target(&an, unit, tok)?;
+    let mut changes: HashMap<String, Vec<Value>> = HashMap::new();
+    for (u, range) in features::search(&an, &group, true, control).ok_or_else(cancelled)? {
+        let unit = an.unit(u);
+        changes
+            .entry(text::path_to_uri(&unit.path))
+            .or_default()
+            .push(json!({ "range": text::range(&unit.text, range), "newText": new_text }));
+    }
+    Ok(json!({ "changes": changes }))
 }
 
 fn location(an: &Analyzer, u: UnitId, range: std::ops::Range<usize>) -> Value {
@@ -1695,6 +1832,41 @@ local = \"{url}\"
             self.send(jsonrpc::notification("exit", Value::Null));
             self.server.take().unwrap().join().unwrap().unwrap();
         }
+    }
+
+    #[test]
+    fn finds_references_on_a_worker_thread_with_progress() {
+        let mut editor = Editor::start(Arc::new(|_, _, _| Ok(None)));
+        let (a, b) = ("file:///p/src/A.kt", "file:///p/src/B.kt");
+        editor.open(a, "package p\n\nfun greet() = 1\n");
+        editor.open(b, "package p\n\nfun main() { greet() }\n");
+        let params = json!({
+            "textDocument": { "uri": a },
+            "position": { "line": 2, "character": 5 },
+            "context": { "includeDeclaration": true },
+            "workDoneToken": "refs",
+        });
+        editor.send(jsonrpc::request("1", "textDocument/references", params));
+        let begin = editor.notification("$/progress");
+        assert_eq!(begin["params"]["value"]["kind"], "begin", "{begin}");
+        assert_eq!(begin["params"]["value"]["cancellable"], true);
+        let reply = editor.reply("1");
+        assert_eq!(reply["result"][0]["uri"], a, "{reply}");
+        editor.finish();
+    }
+
+    #[test]
+    fn a_cancelled_search_gives_up() {
+        let unit = Arc::new(Unit::new(PathBuf::from("/p/src/A.kt"), "fun f() = 1\nfun g() = f()\n".to_owned(), Origin::Loose));
+        let lib = Index::new(true, Vec::new());
+        let proj = Index::new(false, vec![unit]);
+        let packages = Packages { visible: Vec::new(), platforms: Vec::new() };
+        let an = Analyzer::new(&lib, &proj, &packages);
+        let group = features::rename_group(&an, UnitId { lib: false, unit: 0 }.sym(0));
+        assert_eq!(features::search(&an, &group, true, &features::Control::default()).map(|r| r.len()), Some(2));
+        let cancelled = || true;
+        let control = features::Control { cancelled: Some(&cancelled), progress: None };
+        assert!(features::search(&an, &group, true, &control).is_none());
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //! visible in. Expressions are left as tokens; [`super::resolve`] reads them on demand. It never
 //! fails, so it works on code that is being typed.
 
+use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use super::lexer::{self, Lexed, Tok};
 
@@ -310,11 +312,53 @@ pub struct File {
     pub import_offset: usize,
     /// Whether an import inserted there needs a blank line before it (right after the package).
     pub import_after_package: bool,
+    /// The scopes ordered by start, built on the first lookup (see [`File::scope_at`]).
+    pub(super) scope_order: OnceLock<Vec<ScopeId>>,
+    /// The declarations by the span of their name, built on the first lookup (see [`File::decls_named_at`]).
+    pub(super) decl_spans: OnceLock<HashMap<(usize, usize), Vec<DeclId>>>,
 }
 
 impl File {
-    /// The innermost scope containing `offset`.
+    /// The innermost scope containing `offset`: the last scope that starts before it, or the
+    /// nearest of its parents that still reaches it. Scopes nest, so this is a binary search.
     pub fn scope_at(&self, offset: usize) -> ScopeId {
+        let order = self.scope_order.get_or_init(|| {
+            let mut order: Vec<ScopeId> = (0..self.scopes.len()).collect();
+            order.sort_by_key(|&i| self.scopes[i].range.start);
+            order
+        });
+        let after = order.partition_point(|&i| self.scopes[i].range.start < offset);
+        let mut best = 0;
+        // Among the scopes that start at the same place the later (deeper) one wins.
+        if let Some(&last) = after.checked_sub(1).and_then(|p| order.get(p)) {
+            let mut s = Some(last);
+            while let Some(id) = s {
+                if id != 0 && offset <= self.scopes[id].range.end {
+                    best = id;
+                    break;
+                }
+                s = self.scopes[id].parent;
+            }
+        }
+        #[cfg(test)]
+        assert_eq!(best, self.scope_at_linear(offset), "scope at {offset}");
+        best
+    }
+
+    /// The declarations whose name occupies `span`, in order.
+    pub fn decls_named_at(&self, span: &Range<usize>) -> &[DeclId] {
+        let map = self.decl_spans.get_or_init(|| {
+            let mut map: HashMap<(usize, usize), Vec<DeclId>> = HashMap::new();
+            for (i, d) in self.decls.iter().enumerate() {
+                map.entry((d.name_span.start, d.name_span.end)).or_default().push(i);
+            }
+            map
+        });
+        map.get(&(span.start, span.end)).map_or(&[], Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    fn scope_at_linear(&self, offset: usize) -> ScopeId {
         let mut best = 0;
         for (i, s) in self.scopes.iter().enumerate().skip(1) {
             if s.range.start < offset && offset <= s.range.end {
@@ -485,7 +529,7 @@ pub fn parse(src: &str) -> File {
     p.statements(i, n, file_scope, Owner::Top);
     p.synthesize();
     let (decls, scopes, top) = (p.decls, p.scopes, p.top);
-    File { lexed, package, package_tokens, imports, decls, top, scopes, import_offset, import_after_package }
+    File { lexed, package, package_tokens, imports, decls, top, scopes, import_offset, import_after_package, ..File::default() }
 }
 
 struct Parser<'a> {

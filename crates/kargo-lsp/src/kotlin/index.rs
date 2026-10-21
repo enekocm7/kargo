@@ -7,10 +7,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::java;
 use super::jdk::Jdk;
+use super::lexer::Tok;
 use super::syntax::{self, Decl, DeclId, File, Kind};
 
 /// The units of the JDK's sources are numbered from here, so that they never clash with the
@@ -100,6 +101,8 @@ pub struct Unit {
     pub text: String,
     pub file: File,
     pub origin: Origin,
+    /// The identifier tokens by name, built on the first lookup (see [`Unit::ident_tokens`]).
+    idents: OnceLock<HashMap<String, Vec<usize>>>,
 }
 
 impl Unit {
@@ -115,7 +118,22 @@ impl Unit {
         } else {
             syntax::parse(&text)
         };
-        Self { path, text, file, origin }
+        Self { path, text, file, origin, idents: OnceLock::new() }
+    }
+
+    /// The tokens of the identifier `name`, in order: the places to look at when searching for it.
+    pub fn ident_tokens(&self, name: &str) -> &[usize] {
+        let map = self.idents.get_or_init(|| {
+            let lx = &self.file.lexed;
+            let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+            for (i, t) in lx.tokens.iter().enumerate() {
+                if t.kind == Tok::Ident {
+                    map.entry(lx.text(&self.text, i).to_owned()).or_default().push(i);
+                }
+            }
+            map
+        });
+        map.get(name).map_or(&[], Vec::as_slice)
     }
 
     pub fn is_library(&self) -> bool {
@@ -161,6 +179,14 @@ impl UnitId {
     pub fn sym(self, decl: DeclId) -> SymId {
         SymId { lib: self.lib, unit: self.unit, decl: decl as u32 }
     }
+}
+
+/// Which map of an [`Index`] an entry is in.
+enum Key {
+    Extension(String),
+    Package(String),
+    Name(String),
+    Fq(String),
 }
 
 /// The files of the libraries or of the project, with their declarations by name.
@@ -215,6 +241,107 @@ impl Index {
         }
         self.jdk = jdk;
         self
+    }
+
+    /// Swaps the file `unit` for `new` without rebuilding the rest. Returns false, leaving the
+    /// index unchanged, when the package changed: the package set would need a recount, so the
+    /// caller builds a new index.
+    pub fn replace_unit(&mut self, unit: u32, new: Arc<Unit>) -> bool {
+        let id = UnitId { lib: self.lib, unit };
+        let old = Arc::clone(&self.units[unit as usize]);
+        if old.file.package != new.file.package {
+            return false;
+        }
+        for &d in &old.file.top {
+            self.remove_top(&old.file, id, d);
+        }
+        // `names` is in unit order.
+        let from = self.names.partition_point(|(_, s)| s.unit < unit);
+        let to = self.names.partition_point(|(_, s)| s.unit <= unit);
+        self.names.drain(from..to);
+        self.units[unit as usize] = Arc::clone(&new);
+        let tail = self.names.split_off(from);
+        for &d in &new.file.top {
+            self.add_top(&new.file, id, d);
+        }
+        self.names.extend(tail);
+        // Keep each list in unit order, as a full build has it.
+        for &d in &new.file.top {
+            let decl = &new.file.decls[d];
+            if decl.name.is_empty() {
+                continue;
+            }
+            for key in self.keys(&new.file, d) {
+                if let Some(list) = self.list_mut(&key) {
+                    list.sort_by_key(|s| s.unit);
+                }
+            }
+        }
+        true
+    }
+
+    /// The map entries a top-level declaration and its nested classes live under.
+    fn keys(&self, file: &File, d: DeclId) -> Vec<Key> {
+        let decl = &file.decls[d];
+        let mut keys = Vec::new();
+        if decl.name.is_empty() {
+            return keys;
+        }
+        match &decl.receiver {
+            Some(receiver) => {
+                let key = if decl.type_params.iter().any(|t| t.name == receiver.name) || receiver.func.is_some() {
+                    "*".to_owned()
+                } else {
+                    receiver.simple_name().to_owned()
+                };
+                keys.push(Key::Extension(key));
+            }
+            None => {
+                keys.push(Key::Package(file.package.clone()));
+                keys.push(Key::Name(decl.name.clone()));
+                keys.push(Key::Fq(file.fq_name(d)));
+            }
+        }
+        if decl.kind.is_class() {
+            self.nested_keys(file, d, &mut keys);
+        }
+        keys
+    }
+
+    fn nested_keys(&self, file: &File, class: DeclId, keys: &mut Vec<Key>) {
+        for &m in &file.decls[class].members {
+            let decl = &file.decls[m];
+            if decl.kind.is_class() && !decl.name.is_empty() {
+                keys.push(Key::Fq(file.fq_name(m)));
+                self.nested_keys(file, m, keys);
+            }
+        }
+    }
+
+    fn list_mut(&mut self, key: &Key) -> Option<&mut Vec<SymId>> {
+        match key {
+            Key::Extension(k) => self.extensions.get_mut(k),
+            Key::Package(k) => self.by_package.get_mut(k),
+            Key::Name(k) => self.by_name.get_mut(k),
+            Key::Fq(k) => self.by_fq.get_mut(k),
+        }
+    }
+
+    fn remove_top(&mut self, file: &File, unit: UnitId, d: DeclId) {
+        for key in self.keys(file, d) {
+            let empty = self.list_mut(&key).is_some_and(|list| {
+                list.retain(|s| s.unit != unit.unit);
+                list.is_empty()
+            });
+            if empty {
+                match &key {
+                    Key::Extension(k) => self.extensions.remove(k),
+                    Key::Package(k) => self.by_package.remove(k),
+                    Key::Name(k) => self.by_name.remove(k),
+                    Key::Fq(k) => self.by_fq.remove(k),
+                };
+            }
+        }
     }
 
     fn add_top(&mut self, file: &File, unit: UnitId, d: DeclId) {

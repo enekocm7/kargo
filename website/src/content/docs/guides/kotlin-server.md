@@ -67,6 +67,8 @@ Rename works on declarations of your project: classes, functions, properties, pa
 
 Declarations of the standard library and of other libraries can't be renamed; the editor says so before you type a name.
 
+Finding references and renaming search the whole project on a worker thread, so other requests keep answering while they run. An editor that shows `$/progress` gets a cancellable progress bar, and `$/cancelRequest` stops the search. If you edit a file while a search runs, the request fails with `ContentModified` and the editor asks again.
+
 ### Formatting
 
 *Format Document* (and format on save, where your editor has it) formats the open file with the same ktlint that [`kargo fmt`](../formatting-and-linting/) runs, so the editor and the command never disagree. The text of the editor goes through ktlint, so it formats what you see, saved or not, and ktlint reads the rules from the `.editorconfig` files above the file and the [`[fmt]`](../../reference/manifest/#fmt) settings of the package it belongs to. A file that `[fmt] exclude` leaves out is not changed.
@@ -127,6 +129,8 @@ A package also sees the main code of its [path dependencies](../workspaces/), an
 So in a [multiplatform](../multiplatform/) package, common code in `src/` completes and navigates to the `expect` declarations, and `src-jvm/` sees both sides. Code in `src-wasm/` and `src-native/` gets the same completion, navigation and rename as JVM code, against your sources and the standard library.
 
 The server notices new, changed and deleted `.kt` files, from the editor and on disk. When `kargo.toml` or `kargo.lock` change, it reads the project's layout again.
+
+An edit updates only the index entries of the edited file, so typing stays fast in projects with thousands of files. Adding or deleting a file, or changing a file's `package`, rebuilds the project index. Looking up the scope or the declaration at a position is a binary search or a hash lookup, so large generated files resolve in linear time.
 
 ## Libraries
 
