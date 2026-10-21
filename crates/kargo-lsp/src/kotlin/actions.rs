@@ -714,7 +714,7 @@ pub fn missing_members(an: &Analyzer, class: SymId) -> Vec<(SymId, Subst)> {
 }
 
 /// Whether the member `m` of the class or interface `class` is abstract.
-fn is_abstract(an: &Analyzer, class: SymId, m: SymId) -> bool {
+pub(super) fn is_abstract(an: &Analyzer, class: SymId, m: SymId) -> bool {
     let (cd, md) = (an.decl(class), an.decl(m));
     let unit = an.unit(m.unit_id());
     if md.has("abstract") {

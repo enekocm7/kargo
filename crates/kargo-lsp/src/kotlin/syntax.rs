@@ -89,7 +89,28 @@ impl TypeRef {
 
     /// The type as source text on one line.
     pub fn display(&self, src: &str) -> String {
+        if self.span.is_empty() {
+            return self.render();
+        }
         normalize(src.get(self.span.clone()).unwrap_or_default())
+    }
+
+    /// A type that is not written in the source (a generated member's) as text.
+    fn render(&self) -> String {
+        let mut out = self.name.clone();
+        if !self.args.is_empty() {
+            let args: Vec<String> = self.args.iter().map(TypeRef::render).collect();
+            out.push_str(&format!("<{}>", args.join(", ")));
+        }
+        if self.nullable {
+            out.push('?');
+        }
+        out
+    }
+
+    /// A type named `name` that is not in the source.
+    pub fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
+        TypeRef { name: name.to_owned(), args, ..TypeRef::default() }
     }
 }
 
@@ -156,6 +177,11 @@ pub struct Decl {
     pub doc: Option<Range<usize>>,
     /// The scope of a function's body (with its parameters), a class's body or a lambda's.
     pub body: Option<ScopeId>,
+    /// Members the compiler generates for a class (a data class's `copy`, an enum's `values`),
+    /// which are not in `members`. They are declarations of `generated` set.
+    pub synthetic: Vec<DeclId>,
+    /// Not written in the source: generated for a class, whose name it takes as its own.
+    pub generated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -202,6 +228,8 @@ impl Decl {
             vararg: false,
             doc: None,
             body: None,
+            synthetic: Vec::new(),
+            generated: false,
         }
     }
 
@@ -455,6 +483,7 @@ pub fn parse(src: &str) -> File {
         imports.push(import);
     }
     p.statements(i, n, file_scope, Owner::Top);
+    p.synthesize();
     let (decls, scopes, top) = (p.decls, p.scopes, p.top);
     File { lexed, package, package_tokens, imports, decls, top, scopes, import_offset, import_after_package }
 }
@@ -906,6 +935,87 @@ impl Parser<'_> {
             self.decls[id].span.end = header_end;
             j
         }
+    }
+
+    /// Adds the members the compiler generates: `copy`, `componentN`, `toString`, `equals` and
+    /// `hashCode` of data classes, `toString`, `equals` and `hashCode` of value classes, and
+    /// `entries`, `values`, `valueOf`, `name` and `ordinal` of enum classes. They take the class's
+    /// name span, so that go to definition goes to the class.
+    fn synthesize(&mut self) {
+        for class in 0..self.decls.len() {
+            let c = &self.decls[class];
+            if c.name.is_empty() || c.generated {
+                continue;
+            }
+            let owner = TypeRef::named(&c.name, c.type_params.iter().map(|t| TypeRef::named(&t.name, Vec::new())).collect());
+            let data = c.kind == Kind::Class && c.has("data");
+            let value = c.kind == Kind::Class && (c.has("value") || c.has("@JvmInline"));
+            let enumeration = c.kind == Kind::Enum;
+            if !(data || value || enumeration) {
+                continue;
+            }
+            let props: Vec<(String, Option<TypeRef>)> = c
+                .params
+                .iter()
+                .map(|&p| &self.decls[p])
+                .filter(|p| p.kind == Kind::Property)
+                .map(|p| (p.name.clone(), p.ty.clone()))
+                .collect();
+            let any = |nullable| TypeRef { nullable, ..TypeRef::named("Any", Vec::new()) };
+            if data {
+                let params = props.iter().map(|(n, t)| (n.clone(), t.clone(), true)).collect();
+                self.generate(class, Kind::Function, "copy", &[], Some(owner.clone()), params);
+                for (n, (_, ty)) in props.iter().enumerate() {
+                    self.generate(class, Kind::Function, &format!("component{}", n + 1), &["operator"], ty.clone(), Vec::new());
+                }
+            }
+            if data || value {
+                self.generate(class, Kind::Function, "toString", &["override"], Some(TypeRef::named("String", Vec::new())), Vec::new());
+                let other = vec![("other".to_owned(), Some(any(true)), false)];
+                self.generate(class, Kind::Function, "equals", &["override"], Some(TypeRef::named("Boolean", Vec::new())), other);
+                self.generate(class, Kind::Function, "hashCode", &["override"], Some(TypeRef::named("Int", Vec::new())), Vec::new());
+            }
+            if enumeration {
+                let entries = TypeRef::named("kotlin.enums.EnumEntries", vec![owner.clone()]);
+                self.generate(class, Kind::Property, "entries", &["static"], Some(entries), Vec::new());
+                let array = TypeRef::named("Array", vec![owner.clone()]);
+                self.generate(class, Kind::Function, "values", &["static"], Some(array), Vec::new());
+                let name = vec![("value".to_owned(), Some(TypeRef::named("String", Vec::new())), false)];
+                self.generate(class, Kind::Function, "valueOf", &["static"], Some(owner), name);
+                self.generate(class, Kind::Property, "name", &[], Some(TypeRef::named("String", Vec::new())), Vec::new());
+                self.generate(class, Kind::Property, "ordinal", &[], Some(TypeRef::named("Int", Vec::new())), Vec::new());
+            }
+        }
+    }
+
+    /// One generated member of `class`.
+    fn generate(
+        &mut self,
+        class: DeclId,
+        kind: Kind,
+        name: &str,
+        mods: &[&str],
+        ty: Option<TypeRef>,
+        params: Vec<(String, Option<TypeRef>, bool)>,
+    ) {
+        let span = self.decls[class].name_span.clone();
+        let id = self.decls.len();
+        let mut d = Decl::new(kind, name.to_owned(), span.clone(), span.start);
+        d.modifiers = mods.iter().map(|m| (*m).to_owned()).collect();
+        d.ty = ty;
+        d.parent = Some(class);
+        d.generated = true;
+        d.params = (id + 1..id + 1 + params.len()).collect();
+        self.decls.push(d);
+        for (pname, pty, has_default) in params {
+            let mut p = Decl::new(Kind::Parameter, pname, span.clone(), span.start);
+            p.ty = pty;
+            p.has_default = has_default;
+            p.parent = Some(id);
+            p.generated = true;
+            self.decls.push(p);
+        }
+        self.decls[class].synthetic.push(id);
     }
 
     fn skip_where(&self, mut j: usize) -> usize {
