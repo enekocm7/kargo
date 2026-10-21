@@ -120,7 +120,7 @@ impl Unit {
 
     /// Parses `text` as `new` does.
     pub fn parse(path: &std::path::Path, text: &str, origin: &Origin) -> File {
-        let file = if path.extension().is_some_and(|e| e == "java") {
+        if path.extension().is_some_and(|e| e == "java") {
             let mut file = java::parse(text);
             if matches!(origin, Origin::Library { .. }) {
                 java::hide_non_public(&mut file);
@@ -128,8 +128,7 @@ impl Unit {
             file
         } else {
             syntax::parse(text)
-        };
-        file
+        }
     }
 
     /// The tokens of the identifier `name`, in order: the places to look at when searching for it.
