@@ -129,6 +129,11 @@ impl Fixture {
         features::hover(&self.an(), u, tok).map(|h| h["contents"]["value"].as_str().unwrap().to_owned()).unwrap_or_default()
     }
 
+    fn signature_help(&self) -> Option<Value> {
+        let (u, offset) = self.cursor();
+        features::signature_help(&self.an(), u, offset)
+    }
+
     /// Where the identifier at the cursor is declared: file name and the declaration's line.
     fn definition(&self) -> Option<(String, String)> {
         let (u, tok) = self.token();
@@ -322,6 +327,57 @@ fn completion_inserts_scaffolds_for_keywords_with_a_condition() {
     let f = fixture(&[("src/Main.kt", "fun main() {\n    whi$0(true)\n}\n")]);
     let items = f.items();
     assert_eq!(keyword(&items, "while")["textEdit"]["newText"], "while");
+}
+
+/// The label of parameter `k` of signature `s`, read through its offsets.
+fn parameter_label(help: &Value, s: usize, k: usize) -> String {
+    let sig = &help["signatures"][s];
+    let range = &sig["parameters"][k]["label"];
+    let (a, b) = (range[0].as_u64().unwrap() as usize, range[1].as_u64().unwrap() as usize);
+    let units: Vec<u16> = sig["label"].as_str().unwrap().encode_utf16().collect();
+    String::from_utf16(&units[a..b]).unwrap()
+}
+
+#[test]
+fn signature_help_follows_the_active_parameter() {
+    let src = "/** Adds.\n * @param a the first */\nfun add(a: Int, b: Int = 0) = a + b\nfun main() {\n    add(1, $0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let help = f.signature_help().expect("help inside the call");
+    assert_eq!(help["signatures"].as_array().unwrap().len(), 1);
+    assert_eq!(help["signatures"][0]["label"], "fun add(a: Int, b: Int = …): Int");
+    assert_eq!(help["activeParameter"], 1);
+    assert_eq!(parameter_label(&help, 0, 0), "a: Int");
+    assert_eq!(parameter_label(&help, 0, 1), "b: Int = …");
+    assert_eq!(help["signatures"][0]["parameters"][0]["documentation"]["value"], "the first");
+
+    let f = fixture(&[("src/Main.kt", "fun add(a: Int, b: Int = 0) = a + b\nfun main() {\n    add($0\n}\n")]);
+    assert_eq!(f.signature_help().unwrap()["activeParameter"], 0);
+
+    // Commas inside nested calls and a named argument.
+    let f = fixture(&[("src/Main.kt", "fun add(a: Int, b: Int = 0) = a + b\nfun main() {\n    add(add(1, 2), $0)\n}\n")]);
+    assert_eq!(f.signature_help().unwrap()["activeParameter"], 1);
+    let f = fixture(&[("src/Main.kt", "fun add(a: Int, b: Int = 0) = a + b\nfun main() {\n    add(b = $0)\n}\n")]);
+    assert_eq!(f.signature_help().unwrap()["activeParameter"], 1);
+
+    // Outside any call there is no help.
+    let f = fixture(&[("src/Main.kt", "fun add(a: Int) = a\nfun main() {\n    add(1)$0\n}\n")]);
+    assert!(f.signature_help().is_none());
+}
+
+#[test]
+fn signature_help_lists_overloads_best_fit_first() {
+    let src = "fun show(a: Int) = a\nfun show(a: String, b: Int) = b\nfun main() {\n    show(\"x\", $0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let help = f.signature_help().unwrap();
+    let sigs = help["signatures"].as_array().unwrap();
+    assert_eq!(sigs.len(), 2, "{help}");
+    assert!(sigs[0]["label"].as_str().unwrap().contains("a: String, b: Int"), "{help}");
+    assert_eq!(help["activeSignature"], 0);
+    assert_eq!(help["activeParameter"], 1);
+
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    listOf($0\n}\n")]);
+    let help = f.signature_help().unwrap();
+    assert!(help["signatures"].as_array().unwrap().len() >= 1, "{help}");
 }
 
 #[test]

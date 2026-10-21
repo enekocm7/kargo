@@ -16,6 +16,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Feature | What you get |
 |---|---|
 | Completion | Members after `.`, `?.` and `::`, extension functions included; everything in scope otherwise; `import` paths. Declarations that need an import come with it. Annotation classes after `@`, and the arguments of an annotation inside its parentheses |
+| Signature help | Typing `(` or `,` in a call shows every overload of the function or constructor, the one that fits the arguments first, with the parameter you are at highlighted and its `@param` text. Named arguments (`f(b = `) pick their parameter, and a `vararg` stays active |
 | Hover | The declaration's signature, its package or class, and its KDoc as Markdown. Inferred types of variables, such as `val names: List<String>`. The same for annotations and their arguments |
 | Go to definition | Into your project, a path dependency, the sources of the standard library, the JDK and libraries, or stubs of libraries without sources. Go to declaration and go to type definition too |
 | Find references, highlights | Every use in the project, with the declaration |
@@ -171,6 +172,6 @@ The server reads declarations and infers types as far as completion and navigati
 - Smart casts of parameters and `val`s are followed: inside `if (x is Foo)` (and after `&&`), in the branch of `when (x) { is Foo -> }` or `when { x is Foo -> }`, and after `if (x !is Foo) return`, `x as Foo` or `require(x is Foo)`. Null checks narrow the same way (`x != null`, `if (x == null) return`, `x!!`, `x ?: return`). Smart casts of `var`s and properties are not followed.
 - Nullability is tracked: `x.` on a nullable value offers only the extensions of nullable types (`isNullOrEmpty`, `let`, ...), `x?.` offers the members of the unwrapped type, and the result of a safe call is nullable again. Types from Java count as non-null.
 - Overloads are chosen by the arguments' types (subtypes, nullability, named and default arguments, and the parameter count of lambdas); when an argument's type is unknown and several overloads fit, go to definition lists them all. A type argument is not inferred from the expected type of a call (`foo(emptyList())`), so completion may miss members of such expressions. A `when` or `try` whose branches have nothing in common but `Any` completes as `Any`.
-- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings, and no signature help, inlay hints or semantic highlighting. [Formatting](#formatting) is ktlint's: whole files only.
+- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings, and no inlay hints or semantic highlighting. [Formatting](#formatting) is ktlint's: whole files only.
 
 For the full analysis of the Kotlin compiler, use IntelliJ IDEA with the Kargo plugin, or run JetBrains' Kotlin LSP behind `kargo lsp` with `--server kotlin-lsp`. See [Choosing the Kotlin server](../editors/#choosing-the-kotlin-server).
