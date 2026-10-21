@@ -2041,7 +2041,7 @@ pub fn expr_end(src: &str, lx: &Lexed, s: usize, end: usize) -> usize {
 }
 
 /// Whether the expression goes on over the line break before token `k`.
-fn continues(src: &str, lx: &Lexed, k: usize) -> bool {
+pub fn continues(src: &str, lx: &Lexed, k: usize) -> bool {
     let t = lx.tokens[k];
     let text = &src[t.span()];
     if matches!(t.kind, Tok::Dot | Tok::SafeDot | Tok::ColonColon)

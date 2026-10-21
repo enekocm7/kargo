@@ -461,7 +461,7 @@ impl<'a> Analyzer<'a> {
         self.best_type(self.by_fq(fq).into_iter())
     }
 
-    fn std_ty(&self, fq: &str) -> Option<Ty> {
+    pub(super) fn std_ty(&self, fq: &str) -> Option<Ty> {
         self.std_class(fq).map(|s| Ty::Class { sym: s, args: Vec::new(), nullable: false })
     }
 
@@ -826,7 +826,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// The end of the iterated expression of a `for` loop starting at `start`: its `)`.
-    fn iterated_end(&self, u: UnitId, start: usize) -> usize {
+    pub(super) fn iterated_end(&self, u: UnitId, start: usize) -> usize {
         let lx = &self.file(u).lexed;
         let mut i = start;
         while i < lx.tokens.len() {
@@ -860,7 +860,7 @@ impl<'a> Analyzer<'a> {
         self.call_member(&iterator, "next", from)
     }
 
-    fn call_member(&self, ty: &Ty, name: &str, from: UnitId) -> Option<Ty> {
+    pub(super) fn call_member(&self, ty: &Ty, name: &str, from: UnitId) -> Option<Ty> {
         let m = self.members_named(ty, name, from).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function)?;
         self.value_ty(m.sym, &m.subst)
     }
@@ -1302,7 +1302,7 @@ impl<'a> Analyzer<'a> {
         {
             i = gt + 1;
         }
-        if lx.kind(i) == Some(Tok::LParen) {
+        if matches!(lx.kind(i), Some(Tok::LParen | Tok::LBracket)) {
             let close = lx.matching[i].filter(|&c| c > i).unwrap_or(limit.min(lx.tokens.len()));
             let mut start = i + 1;
             let mut k = i + 1;
@@ -1463,6 +1463,7 @@ impl<'a> Analyzer<'a> {
                     ops.push((k, "<"));
                 }
                 Tok::Gt if k > a => ops.push((k, ">")),
+                Tok::Op if k > a && matches!(&src[t.span()], "++" | "--") && k + 1 >= b => {}
                 Tok::Op if k > a => ops.push((k, &src[t.span()])),
                 Tok::Ident if k > a && is_operand_end(src, lx, k - 1) && k + 1 < b => {
                     let word = &src[t.span()];
@@ -1530,12 +1531,25 @@ impl<'a> Analyzer<'a> {
         // Prefix operators.
         if lx.kind(a) == Some(Tok::Op) {
             return match &src[lx.tokens[a].span()] {
-                "!" => boolean(),
-                op @ ("-" | "+") => {
+                "!" => {
+                    // `operator fun not()` of a custom type; Boolean's own gives Boolean.
+                    let operand = self.infer(u, a + 1, b);
+                    match operand {
+                        Some(ty) if self.class_fq(&ty).is_some_and(|fq| fq != "kotlin.Boolean") => {
+                            self.operator_ret(u, &ty, "not", Vec::new()).or_else(boolean)
+                        }
+                        _ => boolean(),
+                    }
+                }
+                op @ ("-" | "+" | "++" | "--") => {
                     let operand = self.infer(u, a + 1, b)?;
-                    let name = if op == "-" { "unaryMinus" } else { "unaryPlus" };
-                    let m = self.members_named(&operand, name, u).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function);
-                    Some(m.and_then(|m| self.value_ty(m.sym, &m.subst)).unwrap_or(operand))
+                    let name = match op {
+                        "-" => "unaryMinus",
+                        "+" => "unaryPlus",
+                        "++" => "inc",
+                        _ => "dec",
+                    };
+                    Some(self.operator_ret(u, &operand, name, Vec::new()).unwrap_or(operand))
                 }
                 _ => self.infer(u, a + 1, b),
             };
@@ -1547,30 +1561,11 @@ impl<'a> Analyzer<'a> {
     /// ...) of `left`, choosing the overload that takes the right operand's type. `right` is the
     /// expression in tokens `from..to`.
     fn operator_ty(&self, u: UnitId, left: &Ty, op: &str, from: usize, to: usize) -> Option<Ty> {
-        let name = match op {
-            "+" => "plus",
-            "-" => "minus",
-            "*" => "times",
-            "/" => "div",
-            "%" => "rem",
-            ".." => "rangeTo",
-            "..<" => "rangeUntil",
-            _ => return None,
-        };
-        let candidates: Vec<Member> =
-            self.members_named(left, name, u).into_iter().filter(|m| self.decl(m.sym).kind == Kind::Function).collect();
-        let right = self.infer(u, from, to);
-        let takes = |m: &Member, right: &Ty| {
-            let d = self.decl(m.sym);
-            let ctx = Ctx { unit: m.sym.unit_id(), decl: Some(m.sym.decl_id()) };
-            let param = d.params.first().and_then(|&p| self.file(m.sym.unit_id()).decls[p].ty.as_ref());
-            let ty = param.and_then(|t| self.ty_of_ref(t, ctx, &m.subst));
-            matches!((ty.as_ref().and_then(|t| self.class_fq(t)), self.class_fq(right)), (Some(p), Some(r)) if p == r)
-        };
-        let chosen = right.as_ref().and_then(|r| candidates.iter().find(|m| takes(m, r))).or(candidates.first())?;
-        let mut subst = chosen.subst.clone();
-        self.bind_args(chosen, &mut subst, u, &[Arg { start: from, end: to, name: None, lambda: false, trailing: false }], false);
-        self.value_ty(chosen.sym, &subst)
+        let name = super::operators::binary_name(op)?;
+        let args = vec![Arg { start: from, end: to, name: None, lambda: false, trailing: false }];
+        let found = self.operator_ret(u, left, name, args.clone());
+        // The deprecated `mod` stands in for `rem`.
+        found.or_else(|| if name == "rem" { self.operator_ret(u, left, "mod", args) } else { None })
     }
 
     /// The type that values of all of `tys` have in common: the class itself when they agree,
@@ -1695,6 +1690,8 @@ impl<'a> Analyzer<'a> {
                     cur = strip_nullable(cur);
                     i += 1;
                 }
+                // `a++` has the type of `a`.
+                Tok::Op if i + 1 >= b && matches!(&src[lx.tokens[i].span()], "++" | "--") => i += 1,
                 Tok::ColonColon => {
                     // `String::length` leaves the receiver open; `value::method` binds it.
                     if lx.kind(i + 1) != Some(Tok::Ident) || i + 1 >= b || lx.is(src, i + 1, "class") {
@@ -1713,15 +1710,21 @@ impl<'a> Analyzer<'a> {
                     let next = lx.matching[i].filter(|&c| c > i).map_or(b, |c| c + 1);
                     cur = match cur {
                         Ty::Func { ret, .. } => *ret?,
-                        other => self.call_member(&other, "invoke", u)?,
+                        other => self.operator_ret(u, &other, "invoke", self.call_args(u, i, b).0)?,
                     };
                     i = next;
                 }
                 Tok::LBracket => {
                     let next = lx.matching[i].filter(|&c| c > i).map_or(b, |c| c + 1);
-                    let m = self.members_named(&cur, "get", u).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function)?;
-                    cur = self.value_ty(m.sym, &m.subst)?;
+                    let args = self.call_args(u, i, b).0.into_iter().filter(|a| !a.trailing).collect();
+                    cur = self.operator_ret(u, &cur, "get", args)?;
                     i = next;
+                }
+                // `a { ... }` calls `invoke` with a trailing lambda.
+                Tok::LBrace if !lx.tokens[i].nl && matches!(&cur, Ty::Class { .. }) => {
+                    let (args, next) = self.call_args(u, i, b);
+                    cur = self.operator_ret(u, &cur, "invoke", args)?;
+                    i = next.max(i + 1);
                 }
                 _ => return None,
             }
@@ -2499,7 +2502,7 @@ pub fn strip_nullable(ty: Ty) -> Ty {
 }
 
 /// Whether token `k` can end an operand (for spotting infix calls and binary operators).
-fn is_operand_end(src: &str, lx: &Lexed, k: usize) -> bool {
+pub(super) fn is_operand_end(src: &str, lx: &Lexed, k: usize) -> bool {
     match lx.tokens[k].kind {
         Tok::Ident => {
             !HARD_KEYWORDS.contains(&&src[lx.tokens[k].span()]) || matches!(&src[lx.tokens[k].span()], "this" | "true" | "false" | "null")

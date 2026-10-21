@@ -120,7 +120,7 @@ impl Fixture {
     /// The token at the cursor.
     fn token(&self) -> (UnitId, usize) {
         let (u, offset) = self.cursor();
-        let tok = self.proj.units[u.unit as usize].file.lexed.ident_at(offset).expect("an identifier at the cursor");
+        let tok = features::token_at(&self.an(), u, offset).expect("a token at the cursor");
         (u, tok)
     }
 
@@ -2876,4 +2876,290 @@ fn inlay_hints_can_be_switched_off() {
     assert_eq!(inlays(src, off(r#"{"inlayHints":{"types":false}}"#)).len(), 2);
     assert_eq!(inlays(src, off(r#"{"inlayHints.parameterNames":false}"#)).len(), 2);
     assert_eq!(inlays(src, off(r#"{"inlayHints":{"implicitIt":false}}"#)).len(), 2);
+}
+
+// ----- operator conventions -----
+
+const OPERATORS: &str = "class Money(val cents: Int) {
+    operator fun plus(o: Money): Money = this
+    operator fun plus(n: Int): Receipt = Receipt()
+    operator fun minus(o: Money): Money = this
+    operator fun unaryMinus(): Debt = Debt()
+    operator fun not(): Flag = Flag()
+    operator fun inc(): Money = this
+    operator fun dec(): Money = this
+    operator fun compareTo(o: Money): Int = 0
+    operator fun contains(c: Coin): Boolean = true
+    operator fun get(i: Int): Coin = Coin()
+    operator fun get(name: String): Receipt = Receipt()
+    operator fun set(i: Int, c: Coin) {}
+    operator fun invoke(n: Int): Receipt = Receipt()
+    operator fun plusAssign(c: Coin) {}
+    operator fun iterator(): CoinIterator = CoinIterator()
+    operator fun component1(): Coin = Coin()
+    operator fun component2(): Receipt = Receipt()
+}
+class Coin { val metal = 1 }
+class Receipt { val lines = 1 }
+class Debt { val owed = 1 }
+class Flag { val raised = 1 }
+class CoinIterator {
+    operator fun hasNext(): Boolean = false
+    operator fun next(): Coin = Coin()
+}
+operator fun Money.times(k: Int): Receipt = Receipt()
+operator fun Money.div(k: Int): Debt = Debt()
+";
+
+fn with_operators(code: &str) -> Fixture {
+    fixture(&[("src/Main.kt", &format!("{OPERATORS}fun f(a: Money, b: Money, c: Coin) {{\n{code}\n}}\n"))])
+}
+
+#[test]
+fn infers_the_result_of_every_operator_function() {
+    let sees = |code: &str, name: &str| offers(&format!("{OPERATORS}fun f(a: Money, b: Money, c: Coin) {{\n{code}\n}}\n"), name);
+    // The overload follows the right operand.
+    assert!(sees("(a + b).$0", "cents"));
+    assert!(sees("(a + 1).$0", "lines"));
+    assert!(sees("val t = a - b\nt.$0", "cents"));
+    // Extensions, unary, prefix and postfix operators.
+    assert!(sees("(a * 2).$0", "lines"));
+    assert!(sees("(a / 2).$0", "owed"));
+    assert!(sees("(-a).$0", "owed"));
+    assert!(sees("(!a).$0", "raised"));
+    assert!(sees("var m = a\nval t = m++\nt.$0", "cents"));
+    assert!(sees("var m = a\nval t = ++m\nt.$0", "cents"));
+    // Indexing picks `get` by the index's type; invoke by call.
+    assert!(sees("a[0].$0", "metal"));
+    assert!(sees("a[\"k\"].$0", "lines"));
+    assert!(sees("a(3).$0", "lines"));
+    // Containment and comparison are Boolean.
+    assert!(sees("(c in a).$0", "not"));
+    assert!(sees("(a < b).$0", "not"));
+    assert!(sees("(a == b).$0", "not"));
+    // `for` takes the element type from `next`, destructuring from `componentN`.
+    assert!(sees("for (x in a) {\n x.$0\n}", "metal"));
+    assert!(sees("val (p, q) = a\nq.$0", "lines"));
+    assert!(sees("val (p, q) = a\np.$0", "metal"));
+    // The standard library's.
+    assert!(sees("val t = \"a\" + 1\nt.$0", "length"));
+    assert!(sees("val xs = listOf(\"a\")\nxs[0].$0", "length"));
+    assert!(sees("for (e in 1..10) {\n e.$0\n}", "shl"));
+}
+
+#[test]
+fn infers_operators_through_properties_and_delegates() {
+    let code = "class Counter { operator fun invoke(n: Int): Receipt = Receipt() }
+class Cell { operator fun getValue(r: Any?, p: kotlin.reflect.KProperty<*>): Coin = Coin() }
+class Receipt { val lines = 1 }
+class Coin { val metal = 1 }
+class Holder(val count: Counter) {
+    val cell by Cell()
+    fun f() {
+        count(1).$0
+    }
+}
+";
+    assert!(offers(code, "lines"));
+    assert!(offers(&code.replace("count(1).$0", "cell.$0"), "metal"));
+}
+
+#[test]
+fn goes_to_the_operator_function_of_an_operator() {
+    let go = |code: &str| with_operators(code).definition().map(|d| d.1);
+    // The overload that the right operand fits.
+    assert_eq!(go("a $0+ b"), Some("operator fun plus(o: Money): Money = this".into()));
+    assert_eq!(go("a $0+ 1"), Some("operator fun plus(n: Int): Receipt = Receipt()".into()));
+    assert_eq!(go("a $0- b"), Some("operator fun minus(o: Money): Money = this".into()));
+    // A longer expression ends the operand at the operator of lower precedence.
+    assert_eq!(go("val t = a + b $0* 2"), Some("operator fun Money.times(k: Int): Receipt = Receipt()".into()));
+    assert_eq!(go("val t = a $0+ b * 2"), Some("operator fun plus(o: Money): Money = this".into()));
+    assert_eq!(go("val t = $0-a"), Some("operator fun unaryMinus(): Debt = Debt()".into()));
+    assert_eq!(go("val t = $0!a"), Some("operator fun not(): Flag = Flag()".into()));
+    assert_eq!(go("var m = a\n m+$0+"), Some("operator fun inc(): Money = this".into()));
+    assert_eq!(go("a $0< b"), Some("operator fun compareTo(o: Money): Int = 0".into()));
+    assert_eq!(go("c $0in a"), Some("operator fun contains(c: Coin): Boolean = true".into()));
+    assert_eq!(go("a[\"k\"$0]"), Some("operator fun get(name: String): Receipt = Receipt()".into()));
+    assert_eq!(go("a[0$0]"), Some("operator fun get(i: Int): Coin = Coin()".into()));
+    assert_eq!(go("a[0$0] = c"), Some("operator fun set(i: Int, c: Coin) {}".into()));
+    assert_eq!(go("var m = a\n m $0+= c"), Some("operator fun plusAssign(c: Coin) {}".into()));
+    assert_eq!(go("for (x $0in a) {}"), Some("operator fun iterator(): CoinIterator = CoinIterator()".into()));
+    // `+=` without `plusAssign` is `a = a + b`.
+    assert_eq!(go("var m = a\n m $0+= b"), Some("operator fun plus(o: Money): Money = this".into()));
+    assert_eq!(go("val v = a $0(2)"), Some("operator fun invoke(n: Int): Receipt = Receipt()".into()));
+    // A call of a function is no invoke.
+    assert_eq!(
+        fixture(&[(
+            "src/Main.kt",
+            "fun g(n: Int) = n
+fun f() {
+    g $0(2)
+}
+"
+        )])
+        .definition()
+        .map(|d| d.1),
+        None
+    );
+}
+
+#[test]
+fn goes_to_the_operator_functions_of_the_standard_library() {
+    let go = |code: &str| fixture(&[("src/Main.kt", code)]).definition();
+    assert!(go("fun f() {\n    val s = \"a\" $0+ 1\n}\n").is_some());
+    assert!(go("fun f(l: List<String>) {\n    val s = l $0[0]\n}\n").is_some_and(|d| d.1.contains("operator fun get(index: Int): E")));
+    assert!(go("fun f(m: MutableList<String>) {\n    m $0[0] = \"a\"\n}\n").is_some_and(|d| d.1.contains("operator fun set(index: Int")));
+    assert!(go("fun f() {\n    for (e $0in 1..3) {}\n}\n").is_some());
+    assert!(go("fun f(x: Int) {\n    val b = x $0in 1..3\n}\n").is_some());
+}
+
+#[test]
+fn hovers_an_operator_with_its_function() {
+    let f = with_operators("val t = a $0+ 1");
+    assert!(f.hover().contains("fun plus(n: Int): Receipt"), "{}", f.hover());
+}
+
+/// The source text of the places that call the operator function `name` as syntax.
+fn operator_uses(code: &str, name: &str) -> Vec<String> {
+    let f = with_operators(code);
+    let an = f.an();
+    let u = UnitId { lib: false, unit: 0 };
+    let (file, text) = (an.file(u), &an.unit(u).text);
+    let tok = (0..file.lexed.tokens.len())
+        .find(|&i| file.lexed.text(text, i) == name && !file.decls_named_at(&file.lexed.tokens[i].span()).is_empty())
+        .expect("the declaration");
+    let sym = features::targets_at(&an, u, tok).into_iter().find_map(|t| t.sym()).unwrap();
+    let group = features::rename_group(&an, sym);
+    let found = super::operators::operator_uses(&an, &group, &features::Control::default()).unwrap();
+    found.iter().map(|(_, r)| text[r.clone()].to_owned()).collect()
+}
+
+#[test]
+fn finds_the_uses_of_an_operator_function() {
+    let code = "val x = a + b\nval y = a + 2\nvar m = a\nm += b\nm += c\nm++";
+    // `plus(Money)`: the first `+`, and `+=` with a Money (no `plusAssign` takes one).
+    assert_eq!(operator_uses(code, "plus"), vec!["+".to_owned(), "+=".to_owned()]);
+    assert_eq!(operator_uses(code, "plusAssign"), vec!["+=".to_owned()]);
+    assert_eq!(operator_uses(code, "inc"), vec!["++".to_owned()]);
+    assert_eq!(operator_uses("val p = a[0]\na[1] = c\nval q = a[\"k\"]", "get").len(), 1);
+    assert_eq!(operator_uses("val p = a[0]\na[1] = c", "set"), vec!["[".to_owned()]);
+    assert_eq!(operator_uses("for (x in a) {}\nval r = c in a", "iterator"), vec!["in".to_owned()]);
+    assert_eq!(operator_uses("for (x in a) {}\nval r = c in a", "contains"), vec!["in".to_owned()]);
+    assert_eq!(operator_uses("val (p, q) = a", "component1"), vec!["p".to_owned()]);
+    assert_eq!(operator_uses("val r = a(1)\nval s = b(2)", "invoke").len(), 2);
+}
+
+#[test]
+fn refuses_to_rename_an_operator_function_that_syntax_calls() {
+    let f = with_operators("val t = a + b");
+    let an = f.an();
+    let u = UnitId { lib: false, unit: 0 };
+    let text = &an.unit(u).text;
+    let at = text.find("fun plus(o").unwrap() + "fun p".len();
+    let found = super::rename::subject(&an, u, at).expect("a subject");
+    let error =
+        super::rename::rename(&an, &super::rename::Env::default(), &found, "add", &features::Control::default()).expect_err("a refusal");
+    assert!(error.contains("operator function") && error.contains("`+`"), "{error}");
+}
+
+#[test]
+fn completes_operator_names_after_operator_fun() {
+    let f = fixture(&[("src/Main.kt", "class V {\n    operator fun pl$0\n}\n")]);
+    let items = f.items();
+    let plus = items.iter().find(|i| i["label"] == "plus").expect("plus");
+    assert_eq!(plus["detail"], "operator fun plus(other: T): T");
+    assert!(plus["textEdit"]["newText"].as_str().unwrap().starts_with("plus(${1:other}: ${2:T}): T"), "{plus}");
+    assert!(items.iter().any(|i| i["label"] == "plusAssign"));
+    // Not after plain `fun`.
+    let f = fixture(&[("src/Main.kt", "class V {\n    fun pl$0\n}\n")]);
+    assert!(!has(&f.labels(), "plusAssign"));
+}
+
+/// The operator problems of the file `code`.
+fn operator_problems(code: &str) -> Vec<String> {
+    let f = fixture(&[("src/Main.kt", code)]);
+    let an = f.an();
+    super::operators::problems(&an, UnitId { lib: false, unit: 0 }).into_iter().map(|p| p.message).collect()
+}
+
+#[test]
+fn reports_operators_that_cannot_work() {
+    let decls = "class Money(val c: Int) {\n    fun plus(o: Money): Money = this\n    operator fun minus(o: Money): Money = this\n}\n";
+    let body = |code: &str| format!("{decls}fun f(a: Money, b: Money) {{\n{code}\n}}\n");
+    let problems = operator_problems(&body("val x = a + b"));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("`operator` modifier is required on `plus`"), "{problems:?}");
+    assert!(operator_problems(&body("val x = a - b")).is_empty());
+    let problems = operator_problems(&body("val x = a * b"));
+    assert!(problems.iter().any(|m| m.contains("no operator function `times`")), "{problems:?}");
+    let problems = operator_problems(&body("val x = a - 1"));
+    assert!(problems.iter().any(|m| m.contains("`minus` that takes `Int`")), "{problems:?}");
+    let problems = operator_problems(&body("val x = a[0]"));
+    assert!(problems.iter().any(|m| m.contains("no operator function `get`")), "{problems:?}");
+    // Standard types and classes with supertypes the server does not know stay quiet.
+    assert!(operator_problems("fun f() {\n    val x = 1 + 2L\n    val s = \"a\" + 1\n}\n").is_empty());
+    assert!(operator_problems("class A : Unknown()\nfun f(a: A) {\n    val x = a + a\n}\n").is_empty());
+    // A comparison needs `compareTo`, which `Comparable` brings.
+    assert!(
+        operator_problems(
+            "class V : Comparable<V> {\n    override fun compareTo(other: V): Int = 0\n}\nfun f(a: V, b: V) {\n    val x = a < b\n}\n"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn prefers_the_operator_when_a_name_ends_at_it() {
+    let f = with_operators("val x = a$0[0]");
+    let (u, offset) = f.cursor();
+    let an = f.an();
+    let tok = features::token_at(&an, u, offset).unwrap();
+    assert_eq!(an.file(u).lexed.kind(tok), Some(super::lexer::Tok::LBracket));
+    // A name followed by the parenthesis of a call stays the name.
+    let f = fixture(&[("src/Main.kt", "fun g(n: Int) = n\nfun f() {\n    g$0(2)\n}\n")]);
+    let (u, offset) = f.cursor();
+    let an = f.an();
+    let tok = features::token_at(&an, u, offset).unwrap();
+    assert_eq!(an.file(u).lexed.kind(tok), Some(super::lexer::Tok::Ident));
+}
+
+#[test]
+fn shows_the_operator_functions_in_inlay_hints() {
+    let f = with_operators("val x = a + b\nval y = a + 1\nval z = 1 + 2");
+    let an = f.an();
+    let on = super::inlay::Options { operators: true, ..super::inlay::Options::default() };
+    let labels = |options| {
+        super::inlay::hints(&an, UnitId { lib: false, unit: 0 }, None, options)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["label"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let shown = labels(on);
+    assert!(shown.iter().any(|l| l == "plus(o: Money)"), "{shown:?}");
+    assert!(shown.iter().any(|l| l == "plus(n: Int)"), "{shown:?}");
+    assert_eq!(shown.iter().filter(|l| l.starts_with("plus")).count(), 2, "{shown:?}");
+    // Off unless asked for.
+    assert!(!labels(super::inlay::Options::default()).iter().any(|l| l.starts_with("plus")));
+}
+
+#[test]
+fn completes_operator_names_for_extensions_and_every_convention() {
+    let f = fixture(&[("src/Main.kt", "class V\noperator fun V.pl$0\n")]);
+    assert!(has(&f.labels(), "plus"));
+    let f = fixture(&[("src/Main.kt", "class V\noperator fun <T> List<T>.$0\n")]);
+    let labels = f.labels();
+    for name in ["plus", "get", "set", "invoke", "compareTo", "iterator", "component3", "provideDelegate", "rangeUntil", "unaryMinus"] {
+        assert!(has(&labels, name), "{name} in {labels:?}");
+    }
+    // Plain extensions get no operator names.
+    let f = fixture(&[("src/Main.kt", "class V\nfun V.$0\n")]);
+    assert!(!has(&f.labels(), "plusAssign"));
+}
+
+#[test]
+fn mod_stands_in_for_rem() {
+    let f = fixture(&[("src/Main.kt", "class N {\n    operator fun mod(k: Int): String = \"\"\n}\nfun f(n: N) {\n    (n $0% 2).\n}\n")]);
+    assert!(f.definition().is_some_and(|d| d.1.contains("operator fun mod")));
 }

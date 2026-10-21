@@ -34,6 +34,20 @@ impl Target {
 }
 
 /// What the identifier token `tok` of `u` refers to, best candidate first.
+/// The token a position in `u` points at: the identifier or operator there. An operator that
+/// calls an `operator fun` wins where an identifier ends exactly at it (`a|[0]`, `a|+ b`), since
+/// that is where a pointer on the operator's first character lands.
+pub fn token_at(an: &Analyzer, u: UnitId, offset: usize) -> Option<usize> {
+    let lx = &an.file(u).lexed;
+    let ident = lx.ident_at(offset);
+    let op = lx.operator_at(offset);
+    match (ident, op) {
+        (Some(i), Some(o)) if lx.tokens[i].end == offset && !an.operator_targets(u, o).is_empty() => Some(o),
+        (Some(i), _) => Some(i),
+        (None, o) => o,
+    }
+}
+
 pub fn targets_at(an: &Analyzer, u: UnitId, tok: usize) -> Vec<Target> {
     targets(an, u, tok, false)
 }
@@ -45,8 +59,9 @@ fn targets(an: &Analyzer, u: UnitId, tok: usize, keep_all: bool) -> Vec<Target> 
     let lx = &file.lexed;
     let src = &an.unit(u).text;
     let Some(t) = lx.tokens.get(tok).copied() else { return Vec::new() };
-    if t.kind != Tok::Ident {
-        return Vec::new();
+    // An operator stands for the `operator fun` it calls.
+    if t.kind != Tok::Ident || matches!(lx.text(src, tok), "in" | "by") {
+        return an.operator_targets(u, tok).into_iter().map(Target::Sym).collect();
     }
     let name = lx.text(src, tok);
     let plain = |s: SymId| Target::Sym(Member { sym: s, subst: Subst::new() });
@@ -1358,6 +1373,27 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
             call_argument_completion(&mut c, open, prev + 1);
         }
     }
+    // `operator fun ` and `operator fun Type.` offer the names the language calls for syntax.
+    if let Some(p) = prev {
+        let fun = if lx.is(src, p, "fun") {
+            Some(p)
+        } else if prev_kind == Some(Tok::Dot) {
+            receiver_fun(lx, src, p)
+        } else {
+            None
+        };
+        if fun.is_some_and(|f| {
+            (0..f)
+                .rev()
+                .take_while(|&k| lx.kind(k) == Some(Tok::Ident) && MODIFIERS.contains(&lx.text(src, k)))
+                .any(|k| lx.is(src, k, "operator"))
+        }) {
+            operator_name_completion(&mut c);
+            if prev_kind == Some(Tok::Dot) {
+                return finish(c);
+            }
+        }
+    }
     match prev_kind {
         Some(Tok::Dot | Tok::SafeDot) => {
             let dot = prev.unwrap_or_default();
@@ -1398,6 +1434,62 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
     }
     scope_completion(&mut c, p);
     finish(c)
+}
+
+/// The `fun` of the extension function whose receiver type ends with the `.` at `dot`:
+/// `fun <T> Box<T>.`.
+fn receiver_fun(lx: &lexer::Lexed, src: &str, dot: usize) -> Option<usize> {
+    let mut k = dot;
+    while k > 0 {
+        k -= 1;
+        match lx.kind(k)? {
+            Tok::Ident if lx.is(src, k, "fun") => return Some(k),
+            Tok::Ident | Tok::Dot | Tok::Lt | Tok::Gt | Tok::Comma | Tok::Question | Tok::Colon | Tok::Op => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The operator functions of the language, with the signature a new one gets.
+fn operator_name_completion(c: &mut Collector) {
+    for &(name, params, ret) in super::operators::CONVENTIONS {
+        if !matches_prefix(name, &c.prefix) || !c.seen.insert(format!("operator|{name}")) {
+            continue;
+        }
+        let detail = format!("operator fun {name}({params}): {ret}");
+        let (text, format) = if c.opts.snippets && !c.paren_follows {
+            let mut n = 0;
+            let params: Vec<String> = params
+                .split(", ")
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let (pname, pty) = p.split_once(": ").unwrap_or((p, ""));
+                    n += 2;
+                    format!("${{{}:{pname}}}: ${{{}:{pty}}}", n - 1, n)
+                })
+                .collect();
+            (
+                format!(
+                    "{name}({}): {ret} {{
+	$0
+}}",
+                    params.join(", ")
+                ),
+                2,
+            )
+        } else {
+            (name.to_owned(), 1)
+        };
+        c.items.push(json!({
+            "label": name,
+            "kind": 2,
+            "detail": detail,
+            "sortText": format!("{}{}", Group::Keyword as u8, name),
+            "textEdit": { "range": c.range, "newText": text },
+            "insertTextFormat": format,
+        }));
+    }
 }
 
 // ----- context-aware keywords -----

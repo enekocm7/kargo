@@ -20,11 +20,13 @@ pub struct Options {
     pub parameter_names: bool,
     pub implicit_it: bool,
     pub implicit_receivers: bool,
+    /// The `operator fun` of the project that an operator calls; off by default.
+    pub operators: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { types: true, parameter_names: true, implicit_it: true, implicit_receivers: true }
+        Options { types: true, parameter_names: true, implicit_it: true, implicit_receivers: true, operators: false }
     }
 }
 
@@ -38,6 +40,7 @@ impl Options {
             parameter_names: get("parameterNames"),
             implicit_it: get("implicitIt"),
             implicit_receivers: get("implicitReceivers"),
+            operators: init["inlayHints"]["operators"] == true || init["inlayHints.operators"] == true,
         }
     }
 }
@@ -65,6 +68,9 @@ pub fn hints(an: &Analyzer, u: UnitId, range: Option<Range<usize>>, options: Opt
     }
     if options.parameter_names {
         parameter_hints(an, u, &mut found);
+    }
+    if options.operators {
+        operator_hints(an, u, &mut found);
     }
     let text = &an.unit(u).text;
     found.retain(|h| range.as_ref().is_none_or(|r| r.start <= h.offset && h.offset <= r.end));
@@ -237,5 +243,30 @@ fn parameter_hints(an: &Analyzer, u: UnitId, out: &mut Vec<Hint>) {
                 padding_right: true,
             });
         }
+    }
+}
+
+/// The function that an operator of the project calls, after the operator: `a + b` shows
+/// `plus(o: Money)`. Operators of libraries are left out, since their functions are well known.
+fn operator_hints(an: &Analyzer, u: UnitId, out: &mut Vec<Hint>) {
+    let lx = &an.file(u).lexed;
+    let src = &an.unit(u).text;
+    for (i, t) in lx.tokens.iter().enumerate() {
+        let word = &src[t.span()];
+        let candidate = match t.kind {
+            Tok::Op => !matches!(word, "==" | "!=" | "===" | "!==" | "&&" | "||" | "?:" | "!!"),
+            Tok::Lt | Tok::Gt | Tok::LBracket => true,
+            Tok::Ident => word == "in",
+            _ => false,
+        };
+        if !candidate {
+            continue;
+        }
+        let Some(m) = an.operator_targets(u, i).into_iter().find(|m| !m.sym.lib && !an.unit(m.sym.unit_id()).is_java()) else { continue };
+        let signature = features::signature(an, &m);
+        let rest = signature.split_once("fun ").map_or(signature.as_str(), |(_, r)| r);
+        let label = rest.rfind("): ").map_or(rest, |k| &rest[..=k]).to_owned();
+        let offset = if t.kind == Tok::LBracket { lx.matching[i].map_or(t.end, |c| lx.tokens[c].end) } else { t.end };
+        out.push(Hint { offset, label, kind: PARAMETER, padding_left: true, padding_right: false });
     }
 }
