@@ -516,7 +516,10 @@ impl<'a> BuildContext<'a> {
             resolver.import_bom(&bom.module, version)?;
         }
         let resolution = resolver.resolve(roots).with_context(|| format!("failed to resolve dependencies for `{key}`"))?;
-        self.shared.lock.lock().expect("lock poisoned").record(key, &inputs, &resolution, &self.client)?;
+        // Verifying the artifacts takes network requests and hashing, so the lockfile is not held meanwhile.
+        let previous = self.shared.lock.lock().expect("lock poisoned").resolutions.get(key).cloned();
+        let locked = Lockfile::lock_resolution(previous.as_ref(), &inputs, &resolution, &self.client)?;
+        self.shared.lock.lock().expect("lock poisoned").resolutions.insert(key.to_owned(), locked);
         self.shared.lock_dirty.store(true, Ordering::SeqCst);
         Ok(resolution)
     }
