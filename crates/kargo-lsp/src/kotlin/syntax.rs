@@ -670,6 +670,22 @@ impl Parser<'_> {
         (j, name, hidden)
     }
 
+    /// Skips an annotation of a type at `i` (`@`). In `@Composable (Int) -> Unit` the parentheses
+    /// are the function type's parameters, not the annotation's arguments.
+    fn skip_type_annotation(&self, i: usize) -> usize {
+        let next = self.skip_annotation(i).0;
+        if self.kind(next) == Some(Tok::Arrow) && next > 0 && self.kind(next - 1) == Some(Tok::RParen) {
+            let mut j = i + 1;
+            while j < next && self.kind(j) != Some(Tok::LParen) {
+                j += 1;
+            }
+            if self.close(j) == Some(next - 1) {
+                return j;
+            }
+        }
+        next
+    }
+
     /// Whether a declaration starts at `i`: its modifiers and the index of its keyword.
     fn decl_start(&self, i: usize, owner: Owner) -> Option<(Vec<String>, bool, usize)> {
         if i > 0 && matches!(self.kind(i - 1), Some(Tok::Dot | Tok::SafeDot | Tok::ColonColon)) {
@@ -995,7 +1011,10 @@ impl Parser<'_> {
             let data = c.kind == Kind::Class && c.has("data");
             let value = c.kind == Kind::Class && (c.has("value") || c.has("@JvmInline"));
             let enumeration = c.kind == Kind::Enum;
-            if !(data || value || enumeration) {
+            // `@Serializable` (kotlinx.serialization's compiler plugin, which `[frameworks] serialization` enables)
+            // adds `serializer()` to the class's companion, which `Foo.serializer()` reaches.
+            let serializable = c.has("@Serializable") && matches!(c.kind, Kind::Class | Kind::Object | Kind::Enum | Kind::Interface);
+            if !(data || value || enumeration || serializable) {
                 continue;
             }
             let props: Vec<(String, Option<TypeRef>)> = c
@@ -1006,6 +1025,16 @@ impl Parser<'_> {
                 .map(|p| (p.name.clone(), p.ty.clone()))
                 .collect();
             let any = |nullable| TypeRef { nullable, ..TypeRef::named("Any", Vec::new()) };
+            if serializable {
+                let serializer = |ty: TypeRef| TypeRef::named("kotlinx.serialization.KSerializer", vec![ty]);
+                let params = c
+                    .type_params
+                    .iter()
+                    .enumerate()
+                    .map(|(n, t)| (format!("typeSerial{n}"), Some(serializer(TypeRef::named(&t.name, Vec::new()))), false))
+                    .collect();
+                self.generate(class, Kind::Function, "serializer", &["static"], Some(serializer(owner.clone())), params);
+            }
             if data {
                 let params = props.iter().map(|(n, t)| (n.clone(), t.clone(), true)).collect();
                 self.generate(class, Kind::Function, "copy", &[], Some(owner.clone()), params);
@@ -1602,7 +1631,7 @@ impl Parser<'_> {
     /// A type at `j`, the tokens of its name's segments, and the token after it.
     fn parse_type_segments(&self, mut j: usize) -> Option<(TypeRef, Vec<usize>, usize)> {
         while self.kind(j) == Some(Tok::At) {
-            j = self.skip_annotation(j).0;
+            j = self.skip_type_annotation(j);
         }
         if self.is(j, "suspend") && matches!(self.kind(j + 1), Some(Tok::LParen | Tok::Ident)) {
             j += 1;

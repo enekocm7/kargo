@@ -187,6 +187,7 @@ pub fn parse(src: &str) -> File {
             _ => p.member(i, None),
         };
     }
+    p.lombok(&file.package);
     file.decls = p.decls;
     file.top = p.top;
     file
@@ -254,17 +255,23 @@ impl Parser<'_> {
     /// The index after the annotations at `i`.
     fn skip_annotations(&self, mut i: usize) -> usize {
         while self.kind(i) == Some(Tok::At) && !self.is(i + 1, "interface") {
-            i += 1;
-            if self.kind(i) != Some(Tok::Ident) {
-                break;
-            }
-            i += 1;
-            while self.kind(i) == Some(Tok::Dot) && self.kind(i + 1) == Some(Tok::Ident) {
-                i += 2;
-            }
-            if self.kind(i) == Some(Tok::LParen) {
-                i = self.after_group(i);
-            }
+            i = self.skip_annotation(i);
+        }
+        i
+    }
+
+    /// The index after the annotation at `i` (`@`).
+    fn skip_annotation(&self, mut i: usize) -> usize {
+        i += 1;
+        if self.kind(i) != Some(Tok::Ident) {
+            return i;
+        }
+        i += 1;
+        while self.kind(i) == Some(Tok::Dot) && self.kind(i + 1) == Some(Tok::Ident) {
+            i += 2;
+        }
+        if self.kind(i) == Some(Tok::LParen) {
+            i = self.after_group(i);
         }
         i
     }
@@ -273,7 +280,14 @@ impl Parser<'_> {
     fn modifiers(&self, mut i: usize) -> (usize, Vec<String>) {
         let mut mods = Vec::new();
         loop {
-            i = self.skip_annotations(i);
+            // Annotations are kept as `@Name`, which Lombok's are read from.
+            while self.kind(i) == Some(Tok::At) && !self.is(i + 1, "interface") {
+                let next = self.skip_annotation(i);
+                if let Some(name) = (i + 1..next).find(|&k| self.kind(k) == Some(Tok::Ident) && self.kind(k + 1) != Some(Tok::Dot)) {
+                    mods.push(format!("@{}", self.text(name)));
+                }
+                i = next;
+            }
             if self.kind(i) != Some(Tok::Ident) {
                 return (i, mods);
             }
@@ -797,6 +811,124 @@ impl Parser<'_> {
         self.push(d)
     }
 
+    /// Adds the members Lombok generates for the classes annotated `@Getter`, `@Setter`, `@Data`,
+    /// `@Value`, `@Builder` and the constructor annotations, and for fields annotated `@Getter` or
+    /// `@Setter`. They take the span of their field (the class's name for constructors and the builder).
+    fn lombok(&mut self, package: &str) {
+        let lombok = |d: &Decl| d.modifiers.iter().any(|m| m.starts_with('@'));
+        for class in 0..self.decls.len() {
+            let c = &self.decls[class];
+            if c.kind != Kind::Class || !(lombok(c) || c.members.iter().any(|&m| lombok(&self.decls[m]))) {
+                continue;
+            }
+            let has = |a: &str| c.has(a);
+            let (data, value) = (has("@Data"), has("@Value"));
+            let (get_all, set_all) = (has("@Getter") || data || value, has("@Setter") || data);
+            let fields: Vec<DeclId> =
+                c.members.iter().copied().filter(|&m| self.decls[m].kind == Kind::Property && !self.decls[m].has("static")).collect();
+            let taken: Vec<String> = c.members.iter().map(|&m| self.decls[m].name.clone()).collect();
+            let class_name = c.name.clone();
+            let class_span = c.name_span.clone();
+            let explicit_ctor = c.members.iter().any(|&m| self.decls[m].kind == Kind::Constructor);
+            let all_args = has("@AllArgsConstructor") || value;
+            let (no_args, required) = (has("@NoArgsConstructor"), has("@RequiredArgsConstructor") || data);
+            let builder = has("@Builder");
+            let owner_ty = TypeRef::named(&class_name, c.type_params.iter().map(|t| TypeRef::named(&t.name, Vec::new())).collect());
+            let qualified = if package.is_empty() { class_name.clone() } else { format!("{package}.{class_name}") };
+            for &f in &fields {
+                let fd = &self.decls[f];
+                let (name, span, ty, mutable) = (fd.name.clone(), fd.name_span.clone(), fd.ty.clone(), fd.mutable);
+                let boolean = ty.as_ref().is_some_and(|t| t.name == "kotlin.Boolean");
+                let bare = match name.strip_prefix("is") {
+                    Some(rest) if boolean && rest.chars().next().is_some_and(char::is_uppercase) => rest.to_owned(),
+                    _ => capitalized(&name),
+                };
+                let get = get_all || self.decls[f].has("@Getter");
+                let set = (set_all || self.decls[f].has("@Setter")) && mutable;
+                let getter = if boolean { format!("is{bare}") } else { format!("get{bare}") };
+                if get && !taken.contains(&getter) {
+                    let g = self.generated(class, Kind::Function, &getter, span.clone(), &["public"], ty.clone(), Vec::new());
+                    self.decls[class].synthetic.push(g);
+                }
+                let setter = format!("set{bare}");
+                if set && !taken.contains(&setter) {
+                    let params = vec![(name.clone(), ty.clone().unwrap_or_default())];
+                    let unit = Some(TypeRef::named("kotlin.Unit", Vec::new()));
+                    let g = self.generated(class, Kind::Function, &setter, span, &["public"], unit, params);
+                    self.decls[class].synthetic.push(g);
+                }
+            }
+            let param = |this: &Self, f: DeclId| (this.decls[f].name.clone(), this.decls[f].ty.clone().unwrap_or_default());
+            let mut shapes: Vec<Vec<DeclId>> = Vec::new();
+            if !explicit_ctor {
+                if all_args {
+                    shapes.push(fields.clone());
+                } else if required {
+                    shapes.push(fields.iter().copied().filter(|&f| !self.decls[f].mutable).collect());
+                }
+            }
+            if no_args {
+                shapes.push(Vec::new());
+            }
+            let mut seen: Vec<Vec<DeclId>> = Vec::new();
+            for shape in shapes {
+                if seen.contains(&shape) {
+                    continue;
+                }
+                let params = shape.iter().map(|&f| param(self, f)).collect();
+                let g = self.generated(class, Kind::Constructor, &class_name, class_span.clone(), &["public"], None, params);
+                self.decls[class].members.push(g);
+                seen.push(shape);
+            }
+            if builder {
+                let builder_name = format!("{class_name}Builder");
+                let builder_ty = TypeRef::named(&format!("{qualified}.{builder_name}"), Vec::new());
+                let b = self.generated(class, Kind::Class, &builder_name, class_span.clone(), &["public", "static"], None, Vec::new());
+                self.decls[class].members.push(b);
+                for &f in &fields {
+                    let (name, ty) = param(self, f);
+                    let span = self.decls[f].name_span.clone();
+                    let m = self.generated(b, Kind::Function, &name, span, &["public"], Some(builder_ty.clone()), vec![(name.clone(), ty)]);
+                    self.decls[b].members.push(m);
+                }
+                let m = self.generated(b, Kind::Function, "build", class_span.clone(), &["public"], Some(owner_ty), Vec::new());
+                self.decls[b].members.push(m);
+                let g = self.generated(class, Kind::Function, "builder", class_span, &["public", "static"], Some(builder_ty), Vec::new());
+                self.decls[class].synthetic.push(g);
+            }
+        }
+    }
+
+    /// One member Lombok generates for `parent`, with its parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn generated(
+        &mut self,
+        parent: DeclId,
+        kind: Kind,
+        name: &str,
+        span: Range<usize>,
+        mods: &[&str],
+        ty: Option<TypeRef>,
+        params: Vec<(String, TypeRef)>,
+    ) -> DeclId {
+        let id = self.decls.len();
+        let mut d = Decl::new(kind, name.to_owned(), span.clone(), span.start);
+        d.modifiers = mods.iter().map(|m| (*m).to_owned()).collect();
+        d.ty = ty;
+        d.parent = Some(parent);
+        d.generated = true;
+        d.params = (id + 1..id + 1 + params.len()).collect();
+        self.decls.push(d);
+        for (pname, pty) in params {
+            let mut p = Decl::new(Kind::Parameter, pname, span.clone(), span.start);
+            p.ty = Some(pty);
+            p.parent = Some(id);
+            p.generated = true;
+            self.decls.push(p);
+        }
+        id
+    }
+
     fn push(&mut self, decl: Decl) -> DeclId {
         self.decls.push(decl);
         self.decls.len() - 1
@@ -808,6 +940,11 @@ impl Parser<'_> {
             None => self.top.push(id),
         }
     }
+}
+
+fn capitalized(name: &str) -> String {
+    let mut chars = name.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 /// The array type of `ty`: a primitive array when `ty` is a primitive, else `kotlin.Array<ty>`.
