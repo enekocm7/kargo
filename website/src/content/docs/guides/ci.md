@@ -207,6 +207,8 @@ The steps are the same everywhere:
 
 Kargo exits with status `101` on build and test failures, like Cargo.
 
+`kargo run` (and `kargo script` and `kargo-<name>` plugins) pass the program's exit code through unchanged, as a full 32-bit value on Windows, so `System.exit(1000)` or a crash status such as `0xC0000005` survives. On Linux and macOS a program killed by a signal exits with `128 + n`, as in a shell (`139` for SIGSEGV, `137` for SIGKILL), and Kargo prints `process terminated by signal 11 (SIGSEGV)`. Because `101` is also what Kargo itself uses for build and test failures, a wrapper that must tell "the program returned 101" from "the build failed" should run `kargo build` first and then `kargo run`.
+
 ## Useful flags
 
 | Flag | Why in CI |

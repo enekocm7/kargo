@@ -130,8 +130,50 @@ mod windows {
 pub fn describe_status(status: ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exit code {code}"),
-        None => "terminated by signal".to_owned(),
+        None => match signal_of(status) {
+            Some(signal) => format!("terminated by signal {}", describe_signal(signal)),
+            None => "terminated by signal".to_owned(),
+        },
     }
+}
+
+/// The exit code Kargo passes on for a program's status: its own code, or `128 + n` for a program killed by signal `n`,
+/// the way shells report it.
+pub fn exit_code_of(status: ExitStatus) -> i32 {
+    match status.code() {
+        Some(code) => code,
+        None => signal_of(status).map_or(1, |signal| 128 + signal),
+    }
+}
+
+#[cfg(unix)]
+fn signal_of(status: ExitStatus) -> Option<i32> {
+    std::os::unix::process::ExitStatusExt::signal(&status)
+}
+
+#[cfg(not(unix))]
+fn signal_of(_status: ExitStatus) -> Option<i32> {
+    None
+}
+
+/// `11 (SIGSEGV)` for the signals programs commonly die of, or just the number.
+pub fn describe_signal(signal: i32) -> String {
+    let name = match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return signal.to_string(),
+    };
+    format!("{signal} ({name})")
 }
 
 /// Quotes an argument for a Kotlin/javac `@argfile`. Backslashes and quotes
@@ -237,6 +279,22 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signals_are_named() {
+        assert_eq!(describe_signal(11), "11 (SIGSEGV)");
+        assert_eq!(describe_signal(40), "40");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_program_exits_with_128_plus_the_signal() {
+        let status = Command::new("sh").args(["-c", "kill -SEGV $$"]).status().unwrap();
+        assert_eq!(exit_code_of(status), 139);
+        assert_eq!(describe_status(status), "terminated by signal 11 (SIGSEGV)");
+        let status = Command::new("sh").args(["-c", "exit 7"]).status().unwrap();
+        assert_eq!(exit_code_of(status), 7);
+    }
 
     #[test]
     fn classpath_in_an_argfile_uses_forward_slashes() {
