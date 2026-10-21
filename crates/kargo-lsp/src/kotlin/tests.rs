@@ -2598,3 +2598,168 @@ fn completes_kdoc_tags_names_and_links() {
     let f = fixture(&[("src/F.kt", "// @$0\nfun f() = 1\n")]);
     assert!(f.labels().is_empty());
 }
+
+/// The names completed at the cursor of a single-file project.
+fn completes(src: &str) -> Vec<String> {
+    fixture(&[("src/Main.kt", src)]).labels()
+}
+
+#[test]
+fn context_parameters_and_receivers_are_in_scope() {
+    let logger = "class Logger { fun log(s: String) {} }\nclass Scope { fun launch() {} }\n";
+    let labels = completes(&format!("{logger}context(logger: Logger) fun f() {{\n    logger.$0\n}}\n"));
+    assert!(has(&labels, "log"), "a context parameter: {labels:?}");
+    let labels = completes(&format!("{logger}context(logger: Logger, scope: Scope) fun f() {{\n    $0\n}}\n"));
+    assert!(has(&labels, "logger") && has(&labels, "scope"), "{labels:?}");
+
+    // A context receiver is an implicit receiver: its members are in scope, and `this@Scope` is it.
+    let labels = completes(&format!("{logger}context(Scope) fun g() {{\n    lau$0\n}}\n"));
+    assert!(has(&labels, "launch"), "{labels:?}");
+    let labels = completes(&format!("{logger}context(Logger, Scope) fun g() {{\n    this@Scope.$0\n}}\n"));
+    assert!(has(&labels, "launch") && !has(&labels, "log"), "{labels:?}");
+    let labels = completes(&format!("{logger}context(Logger) fun Scope.g() {{\n    $0\n}}\n"));
+    assert!(has(&labels, "launch") && has(&labels, "log"), "an extension receiver and a context receiver: {labels:?}");
+
+    // Hover and go to definition on a use of a context parameter.
+    let f = fixture(&[("src/Main.kt", &format!("{logger}context(logger: Logger) fun f() {{\n    logg$0er.log(\"x\")\n}}\n"))]);
+    assert!(f.hover().contains("logger: Logger"), "{}", f.hover());
+}
+
+#[test]
+fn lambdas_destructure_with_types_and_underscores() {
+    let labels = completes("fun main() {\n    mapOf(\"a\" to 1).forEach { (_, value) -> value.$0 }\n}\n");
+    assert!(has(&labels, "shl"), "{labels:?}");
+    let labels = completes("fun main() {\n    mapOf(\"a\" to 1).forEach { (key, _) -> key.$0 }\n}\n");
+    assert!(has(&labels, "uppercase"), "{labels:?}");
+    // The written type gives the components their types.
+    let decl = "fun call(block: (Any) -> Unit) {}\n";
+    let labels = completes(&format!("{decl}fun main() {{\n    call {{ (a, b): Pair<String, Int> -> a.$0 }}\n}}\n"));
+    assert!(has(&labels, "uppercase"), "{labels:?}");
+    let labels = completes(&format!("{decl}fun main() {{\n    call {{ (a, b): Pair<String, Int> -> b.$0 }}\n}}\n"));
+    assert!(has(&labels, "shl"), "{labels:?}");
+    let labels = completes(&format!("{decl}fun main() {{\n    call {{ (_, b): Pair<String, Int> -> b.$0 }}\n}}\n"));
+    assert!(has(&labels, "shl") && !has(&labels, "_"), "{labels:?}");
+    // `_` for an unused parameter does not shift the others.
+    let decl = "fun call(block: (Int, String) -> Unit) {}\n";
+    let labels = completes(&format!("{decl}fun main() {{\n    call {{ _, s -> s.$0 }}\n}}\n"));
+    assert!(has(&labels, "uppercase") && !has(&labels, "_"), "{labels:?}");
+    // A destructured parameter counts as one when the overload is picked.
+    let decl = "fun call(block: (Pair<String, Int>) -> Unit) {}\nfun call(block: (Int, Int) -> Unit) {}\n";
+    let labels = completes(&format!("{decl}fun main() {{\n    call {{ (a, b) -> a.$0 }}\n}}\n"));
+    assert!(has(&labels, "uppercase"), "{labels:?}");
+    // Typed components of a `for` loop.
+    let labels = completes("fun main() {\n    for ((k: String, v) in mapOf(\"a\" to 1)) {\n        k.$0\n    }\n}\n");
+    assert!(has(&labels, "uppercase"), "{labels:?}");
+}
+
+#[test]
+fn lambdas_in_defaults_supertypes_and_delegation_have_scopes() {
+    let labels = completes("class A(val n: String, val f: () -> Int = { n.$0 })\n");
+    assert!(has(&labels, "length"), "a primary constructor's default: {labels:?}");
+    let labels = completes("fun g(a: String, b: () -> Int = { a.$0 }) {}\n");
+    assert!(has(&labels, "length"), "a function's default: {labels:?}");
+    let labels = completes("fun g(a: String, b: (String) -> Int = { it.$0 }) {}\n");
+    assert!(has(&labels, "length"), "`it` in a default: {labels:?}");
+    let labels = completes("open class B(val f: (String) -> Unit)\nclass A(val name: String) : B({ it.$0 })\n");
+    assert!(has(&labels, "length"), "a supertype's constructor argument: {labels:?}");
+    let labels = completes("open class B(val f: () -> Unit)\nclass A(val name: String) : B({ name.$0 })\n");
+    assert!(has(&labels, "length"), "the constructor's parameters in a supertype argument: {labels:?}");
+    let labels = completes("class A(val name: String) : Runnable by lazy { name.$0 }\n");
+    assert!(has(&labels, "length"), "a delegate's lambda: {labels:?}");
+    let labels = completes("class A(val name: String) : Runnable by lazy { name.length }\n{\n    val x = nam$0\n}\n");
+    assert!(has(&labels, "name"), "the body after the delegate: {labels:?}");
+    let labels = completes("enum class E(val f: () -> String) { P({ \"x\".$0 }) }\n");
+    assert!(has(&labels, "length"), "an enum entry's argument: {labels:?}");
+    // Go to definition from inside.
+    let f = fixture(&[("src/Main.kt", "class A(val name: String, val f: () -> Int = { nam$0e.length })\n")]);
+    assert_eq!(f.definition().map(|d| d.1), Some("class A(val name: String, val f: () -> Int = { name.length })".into()));
+}
+
+#[test]
+fn types_properties_by_their_accessors_and_knows_field() {
+    let labels = completes("class A {\n    val x get() { return \"s\" }\n}\nfun main() {\n    A().x.$0\n}\n");
+    assert!(has(&labels, "length"), "a getter with a body: {labels:?}");
+    let labels = completes(
+        "class A {\n    val x get() {\n        if (true) return \"s\"\n        return \"t\"\n    }\n}\nfun main() {\n    A().x.$0\n}\n",
+    );
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("class A {\n    val x get() = 1\n    val y get(): String { return \"\" }\n}\nfun main() {\n    A().y.$0\n}\n");
+    assert!(has(&labels, "length"), "a getter with a declared type: {labels:?}");
+    let labels = completes("var name: String = \"\"\n    get() = field.$0\n");
+    assert!(has(&labels, "length"), "`field` has the property's type: {labels:?}");
+    let labels =
+        completes("class A {\n    var count = 1\n        set(value) {\n            field = value\n            value.$0\n        }\n}\n");
+    assert!(has(&labels, "shl"), "`value` of a setter: {labels:?}");
+    let labels = completes("class A {\n    var count = 1\n        set(value) {\n            fie$0\n        }\n}\n");
+    assert!(has(&labels, "field"), "{labels:?}");
+    let labels = completes("class A {\n    var count = 1\n        get() = fie$0\n}\n");
+    assert!(has(&labels, "field"), "{labels:?}");
+    // `field` is not a name outside accessors.
+    let labels = completes("class A {\n    var count = 1\n    fun f() { fie$0 }\n}\n");
+    assert!(!has(&labels, "field"), "{labels:?}");
+    // A `return` in a lambda is not the getter's.
+    let labels = completes(
+        "class A {\n    val x get() {\n        listOf(1).forEach { return@forEach }\n        return \"s\"\n    }\n}\nfun main() {\n    A().x.$0\n}\n",
+    );
+    assert!(has(&labels, "length"), "{labels:?}");
+}
+
+#[test]
+fn where_clauses_and_definitely_non_nullable_types_bound_type_parameters() {
+    let labels = completes("fun <T> f(x: T): Int\n    where T : CharSequence {\n    x.$0\n    return 1\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("fun <T, U> f(x: T, y: U)\n    where\n        T : CharSequence,\n        U : Number {\n    y.$0\n}\n");
+    assert!(has(&labels, "toInt"), "a clause over several lines: {labels:?}");
+    let labels = completes("class Box<T>(val t: T)\n    where T : CharSequence {\n    fun f() = t.$0\n}\n");
+    assert!(has(&labels, "length"), "a class's: {labels:?}");
+    let labels = completes("fun <T : CharSequence?> f(x: T & Any) {\n    x.$0\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("fun <T : CharSequence> f(x: List<T & Any>) {\n    x.first().$0\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+}
+
+#[test]
+fn reads_annotated_and_suspend_function_types_for_lambdas() {
+    let labels = completes("fun call(block: @Composable (String) -> Unit) {}\nfun main() {\n    call { it.$0 }\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("fun call(block: (@Composable (String) -> Unit)?) {}\nfun main() {\n    call { it.$0 }\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("fun call(block: suspend (String) -> Unit) {}\nfun main() {\n    call { it.$0 }\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("fun call(block: suspend String.() -> Unit) {}\nfun main() {\n    call { len$0 }\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+}
+
+#[test]
+fn secondary_constructors_and_init_blocks_see_the_parameters() {
+    let labels = completes("class A(val a: String) {\n    constructor(x: String, y: Int) : this(x.$0)\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("class A(val a: String) {\n    constructor(x: String) : this(x.length.toString()) {\n        x.$0\n    }\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("class A(val name: String, count: Int) {\n    init { name.$0 }\n    init { println(count) }\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes("class A(val name: String, count: Int) {\n    init { println(name) }\n    init { count.$0 }\n}\n");
+    assert!(has(&labels, "shl"), "a second init block: {labels:?}");
+    let labels = completes("open class P(val s: String)\nclass A : P {\n    constructor(x: String) : super(x.$0)\n}\n");
+    assert!(has(&labels, "length"), "{labels:?}");
+    let f = fixture(&[("src/Main.kt", "class A(val name: String, count: Int) {\n    init { println(cou$0nt) }\n}\n")]);
+    assert_eq!(f.definition().map(|d| d.1), Some("class A(val name: String, count: Int) {".into()));
+}
+
+#[test]
+fn scripts_have_args_and_top_level_statements() {
+    let f = fixture(&[("src/run.kts", "val n = 1\nargs.$0\n")]);
+    assert!(has(&f.labels(), "size"), "{:?}", f.labels());
+    let f = fixture(&[("src/run.kts", "fun helper() = \"s\"\nval n = helper()\nlistOf(n).forEach { it.$0 }\n")]);
+    assert!(has(&f.labels(), "length"), "{:?}", f.labels());
+    let f = fixture(&[("src/run.kts", "@file:DependsOn(\"g:a:1\")\nval n = 1\nn.$0\n")]);
+    assert!(has(&f.labels(), "shl"), "{:?}", f.labels());
+    // A Kotlin file has no `args`.
+    let f = fixture(&[("src/Main.kt", "val n = ar$0\n")]);
+    assert!(!has(&f.labels(), "args"), "{:?}", f.labels());
+    // The class of the facade of a file.
+    let f = fixture(&[("src/Util.kt", "@file:JvmName(\"Helpers\")\n@file:JvmMultifileClass\npackage app\n\nfun f() = 1\n")]);
+    let file = &f.proj.units[0].file;
+    assert_eq!(file.jvm_name.as_deref(), Some("Helpers"));
+    assert!(file.jvm_multifile);
+}

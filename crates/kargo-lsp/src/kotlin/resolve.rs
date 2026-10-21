@@ -263,7 +263,7 @@ impl<'a> Analyzer<'a> {
         }
         let out = self.ty_of_ref_inner(tr, ctx, subst);
         self.leave();
-        out
+        if tr.non_null { out.map(strip_nullable) } else { out }
     }
 
     fn ty_of_ref_inner(&self, tr: &TypeRef, ctx: Ctx, subst: &Subst) -> Option<Ty> {
@@ -814,7 +814,10 @@ impl<'a> Analyzer<'a> {
                     }
                     InitKind::LambdaParam(n) => self.lambda_ctx(u, d.init?)?.params.get(n).cloned().flatten(),
                     InitKind::LambdaComponent(n, m) => {
-                        let param = self.lambda_ctx(u, d.init?)?.params.get(n).cloned().flatten()?;
+                        let param = match &d.container {
+                            Some(t) => self.ty_of_ref(t, ctx, subst)?,
+                            None => self.lambda_ctx(u, d.init?)?.params.get(n).cloned().flatten()?,
+                        };
                         self.component_ty(&param, m, u)
                     }
                 }
@@ -910,11 +913,17 @@ impl<'a> Analyzer<'a> {
                 found.truncate(1);
                 return found;
             }
-            let receiver = match scope.kind {
+            // The implicit receivers of the scope: a function's extension receiver, then its context receivers.
+            let receivers: Vec<Ty> = match scope.kind {
                 ScopeKind::Function(fd) => {
-                    file.decls[fd].receiver.as_ref().and_then(|r| self.ty_of_ref(r, Ctx { unit: u, decl: Some(fd) }, &Subst::new()))
+                    let d = &file.decls[fd];
+                    d.receiver
+                        .iter()
+                        .chain(&d.context)
+                        .filter_map(|r| self.ty_of_ref(r, Ctx { unit: u, decl: Some(fd) }, &Subst::new()))
+                        .collect()
                 }
-                ScopeKind::Lambda { brace, .. } => self.lambda_ctx(u, brace).and_then(|c| c.receiver),
+                ScopeKind::Lambda { brace, .. } => self.lambda_ctx(u, brace).and_then(|c| c.receiver).into_iter().collect(),
                 ScopeKind::Class(cd) => {
                     let decl = &file.decls[cd];
                     let in_function = chain[..ci].iter().any(|&s| matches!(file.scopes[s].kind, ScopeKind::Function(_)));
@@ -932,17 +941,17 @@ impl<'a> Analyzer<'a> {
                     }
                     if decl.kind == Kind::EnumEntry {
                         // An enum entry's body sees the enum's members.
-                        file.owner_class(cd).map(|c| self.instance(u.sym(c)))
+                        file.owner_class(cd).map(|c| self.instance(u.sym(c))).into_iter().collect()
                     } else {
-                        Some(self.instance(u.sym(cd)))
+                        vec![self.instance(u.sym(cd))]
                     }
                 }
                 ScopeKind::File => {
                     return self.global_names(u, name);
                 }
-                ScopeKind::Block => None,
+                ScopeKind::Block => Vec::new(),
             };
-            if let Some(receiver) = receiver {
+            for receiver in receivers {
                 let mut found: Vec<Found> = self.members_named(&receiver, name, u).into_iter().map(Found::Sym).collect();
                 if let (ScopeKind::Class(cd), Ty::Class { sym, .. }) = (scope.kind, &receiver) {
                     let class = if file.decls[cd].kind == Kind::EnumEntry { *sym } else { u.sym(cd) };
@@ -1037,6 +1046,12 @@ impl<'a> Analyzer<'a> {
                     {
                         return self.ty_of_ref(r, Ctx { unit: u, decl: Some(fd) }, &Subst::new());
                     }
+                    // `this@Scope` names a context receiver by its type.
+                    if let Some(label) = label
+                        && let Some(r) = d.context.iter().find(|r| r.simple_name() == label)
+                    {
+                        return self.ty_of_ref(r, Ctx { unit: u, decl: Some(fd) }, &Subst::new());
+                    }
                 }
                 ScopeKind::Class(cd) => {
                     let d = &file.decls[cd];
@@ -1080,6 +1095,22 @@ impl<'a> Analyzer<'a> {
         if p > 0 && lx.kind(p - 1) == Some(Tok::Label) {
             p -= 1;
         }
+        // The value of a parameter, property or variable of a function type: `b: (Int) -> Int = { it }`.
+        if let Some((id, d)) = file.decls.iter().enumerate().find(|(_, d)| {
+            d.init == Some(p)
+                && d.init_kind == InitKind::Value
+                && d.ty.is_some()
+                && matches!(d.kind, Kind::Parameter | Kind::Property | Kind::Variable)
+        }) && let Some(ty) = &d.ty
+        {
+            let ctx = Ctx { unit: u, decl: Some(id) };
+            let (func, ctx, subst) = self.func_of(ty, ctx, &Subst::new())?;
+            return Some(LambdaCtx {
+                receiver: func.receiver.as_ref().and_then(|r| self.ty_of_ref(r, ctx, &subst)),
+                params: func.params.iter().map(|t| self.ty_of_ref(t, ctx, &subst)).collect(),
+                callee: None,
+            });
+        }
         // Where the call's callee ends, and which argument the lambda is.
         enum Position {
             Trailing,
@@ -1104,14 +1135,24 @@ impl<'a> Analyzer<'a> {
         let (callee, members) = self.callee(u, callee_end)?;
         let call_args = self.call_args(u, callee_end, lx.tokens.len()).0;
         let lambda_params = file.scopes.iter().find(|s| matches!(s.kind, ScopeKind::Lambda { brace: b, .. } if b == brace));
-        let explicit =
-            lambda_params.map_or(0, |s| s.decls.iter().filter(|&&d| matches!(file.decls[d].init_kind, InitKind::LambdaParam(_))).count());
+        // A destructured parameter counts once: `{ (a, b), c -> }` has two.
+        let explicit = lambda_params.map_or(0, |s| {
+            s.decls
+                .iter()
+                .filter_map(|&d| match file.decls[d].init_kind {
+                    InitKind::LambdaParam(n) | InitKind::LambdaComponent(n, _) => Some(n + 1),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0)
+        });
         let has_it = lambda_params.is_some_and(|s| matches!(s.kind, ScopeKind::Lambda { it: true, .. }));
         let mut best: Option<(Member, &TypeRef, i32)> = None;
         let no_subst = Subst::new();
         for m in members.iter().cloned() {
             let d = self.decl(m.sym);
-            if d.kind != Kind::Function {
+            // A class stands for its primary constructor, whose parameters are the class's.
+            if !matches!(d.kind, Kind::Function | Kind::Class | Kind::Constructor) {
                 continue;
             }
             let fparams = &self.file(m.sym.unit_id()).decls;
@@ -1214,6 +1255,7 @@ impl<'a> Analyzer<'a> {
             params: method.params.iter().map(|&p| file.decls[p].ty.clone().unwrap_or_default()).collect(),
             names: method.params.iter().map(|&p| file.decls[p].name.clone()).collect(),
             ret: method.ty.clone().unwrap_or_else(|| TypeRef::named("Unit", Vec::new())),
+            suspend: method.has("suspend"),
         })
     }
 

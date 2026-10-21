@@ -2181,17 +2181,22 @@ fn scope_completion(c: &mut Collector, offset: usize) {
             if scope.kind == ScopeKind::File {
                 break;
             }
-            if decl.name.is_empty() || !(decl.kind == Kind::Parameter || decl.name_span.end <= offset || decl.kind.is_class()) {
+            if decl.name.is_empty()
+                || decl.name == "_"
+                || !(decl.kind == Kind::Parameter || decl.name_span.end <= offset || decl.kind.is_class())
+            {
                 continue;
             }
             c.add(&Member { sym: u.sym(d), subst: Subst::new() }, Group::Local, None);
         }
-        let receiver = match scope.kind {
+        let receivers: Vec<Ty> = match scope.kind {
             ScopeKind::Function(fd) => file.decls[fd]
                 .receiver
-                .as_ref()
-                .and_then(|r| an.ty_of_ref(r, super::resolve::Ctx { unit: u, decl: Some(fd) }, &Subst::new())),
-            ScopeKind::Lambda { brace, .. } => an.lambda_ctx(u, brace).and_then(|c| c.receiver),
+                .iter()
+                .chain(&file.decls[fd].context)
+                .filter_map(|r| an.ty_of_ref(r, super::resolve::Ctx { unit: u, decl: Some(fd) }, &Subst::new()))
+                .collect(),
+            ScopeKind::Lambda { brace, .. } => an.lambda_ctx(u, brace).and_then(|c| c.receiver).into_iter().collect(),
             ScopeKind::Class(cd) => {
                 let in_function = chain[..ci].iter().any(|&s| matches!(file.scopes[s].kind, ScopeKind::Function(_)));
                 if !in_function {
@@ -2207,11 +2212,11 @@ fn scope_completion(c: &mut Collector, offset: usize) {
                         c.add(&m, Group::Member, None);
                     }
                 }
-                an.this_ty(u, scope.range.start + 1, None).or_else(|| Some(an.instance(u.sym(class))))
+                an.this_ty(u, scope.range.start + 1, None).or_else(|| Some(an.instance(u.sym(class)))).into_iter().collect()
             }
-            _ => None,
+            _ => Vec::new(),
         };
-        if let Some(receiver) = receiver {
+        for receiver in receivers {
             for m in an.members(&receiver, u, false) {
                 let group = if an.decl(m.sym).receiver.is_some() { Group::Extension } else { Group::Member };
                 c.add(&m, group, None);

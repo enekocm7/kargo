@@ -314,7 +314,8 @@ impl Lexer<'_> {
                 while i < self.bytes.len() && self.bytes[i] != b'\'' && self.bytes[i] != b'\n' {
                     i += if self.bytes[i] == b'\\' { 2 } else { 1 };
                 }
-                let end = (i + 1).min(self.bytes.len());
+                // An unterminated literal ends at the line break, which stays a line break.
+                let end = if self.bytes.get(i) == Some(&b'\'') { i + 1 } else { i.min(self.bytes.len()) };
                 self.push(Tok::Char, start, end);
                 self.pos = end;
             }
@@ -506,7 +507,8 @@ impl Lexer<'_> {
                     self.pos = i;
                     return StrEvent::Close;
                 }
-                b'\\' if !raw => i += 2,
+                // A backslash before the line break does not escape it: the string ends there.
+                b'\\' if !raw => i += if b.get(i + 1) == Some(&b'\n') { 1 } else { 2 },
                 b'$' if b.get(i + 1) == Some(&b'{') => {
                     self.flush_str(start, i);
                     self.push(Tok::TemplateOpen, i, i + 2);
@@ -637,6 +639,56 @@ mod tests {
         assert!(toks.contains(&(Tok::SafeDot, "?.")));
         assert!(toks.contains(&(Tok::BangBang, "!!")));
         assert!(!toks.iter().any(|(_, s)| *s == "b"), "nested comments are skipped: {toks:?}");
+    }
+
+    fn idents<'a>(toks: &[(Tok, &'a str)]) -> Vec<&'a str> {
+        toks.iter().filter(|(k, _)| *k == Tok::Ident).map(|(_, s)| *s).collect()
+    }
+
+    #[test]
+    fn lexes_dollars_and_templates_in_edge_cases() {
+        // A `$` that starts no template, and a template that holds one.
+        for src in [r#""$""#, r#""$$""#, r#""cost: $ 5""#, r#""${'$'}""#, r#""""$""""#] {
+            let toks = kinds(src);
+            assert_eq!(toks.first().map(|t| t.0), Some(Tok::StrOpen), "{src}: {toks:?}");
+            assert_eq!(toks.last().map(|t| t.0), Some(Tok::StrClose), "{src}: {toks:?}");
+            assert!(idents(&toks).is_empty(), "{src}: {toks:?}");
+        }
+        let kinds_of = |src| kinds(src).into_iter().map(|t| t.0).collect::<Vec<_>>();
+        assert_eq!(kinds_of(r#""${'$'}""#), [Tok::StrOpen, Tok::TemplateOpen, Tok::Char, Tok::RBrace, Tok::StrClose]);
+        // An escaped `$` is text, `\\$name` a template again.
+        assert!(idents(&kinds(r#""\$name""#)).is_empty());
+        assert_eq!(idents(&kinds(r#""\\$name""#)), ["name"]);
+        // A raw string with templates over several lines, and strings inside a template.
+        let src = "val s = \"\"\"\nline ${a +\n b}\n$c \"quoted\" ${\"in ${d}\"}\n\"\"\"\nval t = 1";
+        let toks = kinds(src);
+        assert_eq!(idents(&toks), ["val", "s", "a", "b", "c", "d", "val", "t"], "{toks:?}");
+        assert_eq!(toks.last(), Some(&(Tok::Int, "1")));
+        let lexed = lex(src);
+        for (i, t) in lexed.tokens.iter().enumerate() {
+            if matches!(t.kind, Tok::StrOpen | Tok::TemplateOpen) {
+                assert!(lexed.matching[i].is_some(), "{i}");
+            }
+        }
+    }
+
+    #[test]
+    fn lexes_nested_comments_and_unterminated_literals() {
+        let src = "/* a /* b /* c */ d */ e */ val x = 1 /* open /* nested */";
+        let lexed = lex(src);
+        assert_eq!(lexed.tokens.len(), 4);
+        assert_eq!(lexed.unterminated_comments.len(), 1);
+        // A backslash at the end of a line does not carry a string over to the next line.
+        let toks = kinds("val a = \"x\\\nval b = 2");
+        assert_eq!(idents(&toks), ["val", "a", "val", "b"], "{toks:?}");
+        assert!(toks.contains(&(Tok::Int, "2")));
+        // An unterminated character literal leaves the line break after it.
+        let src = "val c = 'x\nval d = 3";
+        let lexed = lex(src);
+        assert!(lexed.tokens.iter().any(|t| t.nl && &src[t.span()] == "val"));
+        for src in ["'", "'\\", "\"", "\"\\", "\"\"\"", "\"${", "/*", "/* /*", "`", "$", "\"$", "#!", "\"\\é\"", "'é"] {
+            let _ = lex(src);
+        }
     }
 
     #[test]

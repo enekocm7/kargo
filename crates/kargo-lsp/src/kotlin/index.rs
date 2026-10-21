@@ -126,6 +126,8 @@ impl Unit {
                 java::hide_non_public(&mut file);
             }
             file
+        } else if path.extension().is_some_and(|e| e == "kts") {
+            syntax::parse_script(text)
         } else {
             syntax::parse(text)
         }
