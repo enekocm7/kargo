@@ -59,6 +59,10 @@ fn pipe() -> (io::PipeReader, io::PipeWriter) {
 /// `id` for the document `uri`, which had the text `original` when it was asked.
 enum Event {
     Client(Option<Value>),
+    /// An event of the project served by state number `0`, from its workers.
+    For(usize, Box<Event>),
+    /// A message the project served by state number `0` sends to the editor.
+    Out(usize, Value),
     Project {
         generation: u64,
         model: Box<Model>,
@@ -106,6 +110,24 @@ enum Event {
         token: Option<Value>,
         outcome: Result<Value, Failure>,
     },
+}
+
+/// How one project's state talks to the loop: its events carry its number, and what it says to the
+/// editor goes through the loop, which merges the answers of several projects.
+#[derive(Clone)]
+struct Tx {
+    index: usize,
+    tx: Sender<Event>,
+}
+
+impl Tx {
+    fn send(&self, event: Event) -> Result<(), ()> {
+        self.tx.send(Event::For(self.index, Box::new(event))).map_err(|_| ())
+    }
+
+    fn out(&self, message: Value) {
+        let _ = self.tx.send(Event::Out(self.index, message));
+    }
 }
 
 /// Formats the text of a Kotlin file; `None` when the file is not to be formatted.
@@ -536,12 +558,12 @@ struct LoadOptions {
 /// Loads the project at `root` and its libraries, sending each as it is ready. Dependencies
 /// without a sources jar in the cache are read from their compiled jars first; then their
 /// sources jars are downloaded (as `kargo fetch --sources` does) and the libraries load again.
-fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache: UnitCache, options: LoadOptions) {
+fn load(config: Config, root: PathBuf, generation: u64, tx: Tx, cache: UnitCache, options: LoadOptions) {
     load_parts(config, root, generation, &tx, cache, options);
     let _ = tx.send(Event::Loaded { generation });
 }
 
-fn load_parts(config: Config, root: PathBuf, generation: u64, tx: &Sender<Event>, cache: UnitCache, options: LoadOptions) {
+fn load_parts(config: Config, root: PathBuf, generation: u64, tx: &Tx, cache: UnitCache, options: LoadOptions) {
     let model = match crate::project::metadata(&config, &root, true) {
         Ok(meta) => model_from_metadata(&meta),
         Err(_) => fallback_model(&root),
@@ -667,22 +689,364 @@ pub(crate) fn serve_with(
             }
         }
     });
-    let mut state = State::new(config, Box::new(output), tx, dependencies, formatter);
+    let mut hub = Hub {
+        config,
+        tx,
+        rx,
+        out: Box::new(output),
+        dependencies,
+        formatter,
+        states: Vec::new(),
+        init: Value::Null,
+        queued: VecDeque::new(),
+        parents: HashMap::new(),
+        subs: HashMap::new(),
+        last_completion: 0,
+    };
     loop {
-        state.poll_due();
-        let event = match state.queued.pop_front() {
+        hub.poll_due();
+        let event = match hub.queued.pop_front() {
             Some(message) => Event::Client(message),
-            None => match rx.recv_timeout(state.poll_wait()) {
+            None => match hub.rx.recv_timeout(hub.poll_wait()) {
                 Ok(event) => event,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
         };
-        if !state.handle(event, &rx)? {
+        if !hub.handle(event)? {
             break;
         }
     }
     Ok(())
+}
+
+/// A `workspace/symbol` request asked of every project, until all have answered.
+struct FanOut {
+    id: Value,
+    remaining: usize,
+    symbols: Vec<Value>,
+    failure: Option<Value>,
+    /// The ids the projects were asked with.
+    subs: Vec<Value>,
+}
+
+/// The server: one [`State`] per project of the editor's workspace folders. Messages about a file
+/// go to the project it is in; the editor's other messages go to the first one or to all of them.
+struct Hub {
+    config: Config,
+    tx: Sender<Event>,
+    rx: Receiver<Event>,
+    out: Box<dyn Write + Send>,
+    dependencies: bool,
+    formatter: Formatter,
+    /// The projects, by number; a closed folder leaves its slot empty, so the numbers in ids hold.
+    states: Vec<Option<State>>,
+    /// The parameters of `initialize`, for the folders that open later.
+    init: Value,
+    /// Editor messages that arrived while waiting for a load.
+    queued: VecDeque<Option<Value>>,
+    /// The symbol searches in flight, by the editor's request id.
+    parents: HashMap<String, FanOut>,
+    /// The project and parent of each request a symbol search sent, by its id.
+    subs: HashMap<String, (String, usize)>,
+    /// The project that answered the last completion, which resolves its items.
+    last_completion: usize,
+}
+
+impl Hub {
+    fn handle(&mut self, event: Event) -> anyhow::Result<bool> {
+        match event {
+            Event::Client(None) => return Ok(false),
+            Event::Client(Some(message)) => return self.client(message),
+            Event::For(index, event) => {
+                if let Some(state) = self.state(index) {
+                    state.loaded(*event);
+                }
+            }
+            Event::Out(index, message) => self.out_message(index, message)?,
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    fn state(&mut self, index: usize) -> Option<&mut State> {
+        self.states.get_mut(index).and_then(Option::as_mut)
+    }
+
+    fn live(&self) -> Vec<usize> {
+        self.states.iter().enumerate().filter(|(_, s)| s.is_some()).map(|(i, _)| i).collect()
+    }
+
+    fn write(&mut self, message: &Value) -> anyhow::Result<()> {
+        jsonrpc::write(&mut self.out, message).map_err(Into::into)
+    }
+
+    fn poll_due(&mut self) {
+        for state in self.states.iter_mut().flatten() {
+            state.poll_due();
+        }
+    }
+
+    fn poll_wait(&self) -> Duration {
+        self.states.iter().flatten().map(State::poll_wait).min().unwrap_or(Duration::from_secs(3600))
+    }
+
+    /// The project a file belongs to: the one whose root is the deepest above it, else the first.
+    fn route(&self, uri: &str) -> usize {
+        let path = file_path(uri);
+        let deepest = self.states.iter().enumerate().filter_map(|(i, state)| {
+            let root = state.as_ref()?.root.as_ref()?;
+            path.as_ref().filter(|p| p.starts_with(root)).map(|_| (root.components().count(), i))
+        });
+        deepest.max().map(|(_, i)| i).or_else(|| self.live().first().copied()).unwrap_or(0)
+    }
+
+    /// Waits a while for the project and the standard library, the first time they load, so
+    /// the first requests see them. Editor messages that arrive meanwhile are queued.
+    fn wait_for_load(&mut self, index: usize) {
+        let start = Instant::now();
+        loop {
+            let Some(state) = self.state(index) else { return };
+            if state.root.is_none() || (state.project_loaded && state.libraries_loaded) {
+                return;
+            }
+            let limit = if state.project_loaded { LIBRARY_WAIT } else { PROJECT_WAIT };
+            let Some(remaining) = limit.checked_sub(start.elapsed()) else { return };
+            match self.rx.recv_timeout(remaining) {
+                Ok(Event::Client(message)) => self.queued.push_back(message),
+                Ok(other) => {
+                    let _ = self.handle(other);
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Writes what a project said to the editor, or takes it in when it answers a symbol search.
+    fn out_message(&mut self, index: usize, mut message: Value) -> anyhow::Result<()> {
+        if jsonrpc::kind(&message) != Kind::Response {
+            return self.write(&message);
+        }
+        let Some((parent_key, _)) = self.subs.remove(&message["id"].to_string()) else { return self.write(&message) };
+        let Some(parent) = self.parents.get_mut(&parent_key) else { return Ok(()) };
+        match message["result"].as_array_mut() {
+            Some(symbols) => {
+                for symbol in symbols.iter_mut() {
+                    if symbol["data"].is_object() {
+                        symbol["data"]["project"] = json!(index);
+                    }
+                }
+                parent.symbols.append(symbols);
+            }
+            None => parent.failure = Some(message),
+        }
+        parent.remaining -= 1;
+        if parent.remaining > 0 {
+            return Ok(());
+        }
+        let parent = self.parents.remove(&parent_key).expect("a symbol search");
+        let reply = match parent.failure {
+            Some(mut failure) if parent.symbols.is_empty() => {
+                failure["id"] = parent.id;
+                failure
+            }
+            _ => jsonrpc::response(&parent.id, json!(parent.symbols.into_iter().take(500).collect::<Vec<_>>())),
+        };
+        self.write(&reply)
+    }
+
+    fn client(&mut self, message: Value) -> anyhow::Result<bool> {
+        let method = jsonrpc::method(&message).to_owned();
+        match jsonrpc::kind(&message) {
+            Kind::Response => {
+                // The editor answers the requests of project `n` under the id `kotlin/n/...`.
+                let index = message["id"].as_str().and_then(|id| id.split('/').nth(1)).and_then(|n| n.parse::<usize>().ok());
+                if let Some(state) = index.and_then(|i| self.state(i)) {
+                    state.message(message)?;
+                }
+            }
+            Kind::Request => match method.as_str() {
+                "initialize" => self.initialize(&message)?,
+                "shutdown" => self.write(&jsonrpc::response(&message["id"], Value::Null))?,
+                _ => self.request(message)?,
+            },
+            Kind::Notification => return self.notification(&method, message),
+        }
+        Ok(true)
+    }
+
+    /// Opens a project for each workspace folder (or the one root), and answers with the
+    /// capabilities of the first.
+    fn initialize(&mut self, message: &Value) -> anyhow::Result<()> {
+        let params = message["params"].clone();
+        self.init = params.clone();
+        let folders = folder_roots(&params["workspaceFolders"]);
+        let mut result = if folders.len() > 1 {
+            let mut first = None;
+            for root in &folders {
+                let result = self.open_folder(root);
+                first.get_or_insert(result);
+            }
+            first.unwrap_or(Value::Null)
+        } else {
+            self.add_state(&params)
+        };
+        result["capabilities"]["workspace"]["workspaceFolders"] = json!({ "supported": true, "changeNotifications": true });
+        self.write(&jsonrpc::response(&message["id"], result))
+    }
+
+    /// Starts the state of the project at `root`; returns its `initialize` result.
+    fn open_folder(&mut self, root: &Path) -> Value {
+        let uri = text::path_to_uri(root);
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut params = self.init.clone();
+        params["rootUri"] = json!(uri);
+        params["rootPath"] = Value::Null;
+        params["workspaceFolders"] = json!([{ "uri": uri, "name": name }]);
+        self.add_state(&params)
+    }
+
+    fn add_state(&mut self, params: &Value) -> Value {
+        let index = self.states.len();
+        let tx = Tx { index, tx: self.tx.clone() };
+        let mut state = State::new(self.config.clone(), tx, index, self.dependencies, Arc::clone(&self.formatter));
+        let result = state.initialize(params);
+        self.states.push(Some(state));
+        result
+    }
+
+    /// The editor opened or closed workspace folders.
+    fn folders_changed(&mut self, params: &Value) -> anyhow::Result<()> {
+        for root in folder_roots(&params["event"]["removed"]) {
+            let found = self.states.iter().position(|s| s.as_ref().is_some_and(|s| s.root.as_deref() == Some(root.as_path())));
+            if let Some(state) = found.and_then(|i| self.states[i].take()) {
+                for uri in state.open.keys() {
+                    self.write(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] })))?;
+                }
+            }
+        }
+        for root in folder_roots(&params["event"]["added"]) {
+            if !self.states.iter().flatten().any(|s| s.root.as_deref() == Some(root.as_path())) {
+                self.open_folder(&root);
+            }
+        }
+        Ok(())
+    }
+
+    fn request(&mut self, message: Value) -> anyhow::Result<()> {
+        let method = jsonrpc::method(&message).to_owned();
+        let params = &message["params"];
+        if method == "workspace/symbol" && self.live().len() > 1 {
+            return self.search_symbols(message);
+        }
+        let uri = [&params["textDocument"]["uri"], &params["item"]["uri"], &params["files"][0]["oldUri"]]
+            .into_iter()
+            .find_map(Value::as_str)
+            .map(str::to_owned);
+        let first = self.live().first().copied().unwrap_or(0);
+        let index = match method.as_str() {
+            "completionItem/resolve" => self.last_completion,
+            "workspaceSymbol/resolve" => params["data"]["project"].as_u64().map_or(first, |n| n as usize),
+            _ => uri.map_or(first, |uri| self.route(&uri)),
+        };
+        if method == "textDocument/completion" {
+            self.last_completion = index;
+        }
+        self.wait_for_load(index);
+        match self.state(index) {
+            Some(state) => {
+                state.message(message)?;
+                Ok(())
+            }
+            None => self.write(&jsonrpc::response(&message["id"], Value::Null)),
+        }
+    }
+
+    /// Asks every project for its symbols; the answers are merged as they arrive.
+    fn search_symbols(&mut self, message: Value) -> anyhow::Result<()> {
+        let key = message["id"].to_string();
+        let live = self.live();
+        let parent = FanOut { id: message["id"].clone(), remaining: live.len(), symbols: Vec::new(), failure: None, subs: Vec::new() };
+        self.parents.insert(key.clone(), parent);
+        for index in live {
+            self.wait_for_load(index);
+            let sub = json!(format!("{key}#{index}"));
+            self.subs.insert(sub.to_string(), (key.clone(), index));
+            if let Some(parent) = self.parents.get_mut(&key) {
+                parent.subs.push(sub.clone());
+            }
+            let mut message = message.clone();
+            message["id"] = sub;
+            // One bar for every project would be confusing.
+            if let Some(params) = message["params"].as_object_mut() {
+                params.remove("workDoneToken");
+            }
+            if let Some(state) = self.state(index) {
+                state.message(message)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn notification(&mut self, method: &str, message: Value) -> anyhow::Result<bool> {
+        let params = &message["params"];
+        match method {
+            "exit" => return Ok(false),
+            "initialized" => {
+                // One registration of the watchers serves every project.
+                let first = self.live().first().copied();
+                if let Some(state) = first.and_then(|i| self.state(i)) {
+                    state.message(message)?;
+                }
+            }
+            "$/cancelRequest" => {
+                let subs = self.parents.get(&params["id"].to_string()).map(|p| p.subs.clone()).unwrap_or_default();
+                for state in self.states.iter_mut().flatten() {
+                    state.message(message.clone())?;
+                }
+                for sub in subs {
+                    let cancel = jsonrpc::notification("$/cancelRequest", json!({ "id": sub }));
+                    for state in self.states.iter_mut().flatten() {
+                        state.message(cancel.clone())?;
+                    }
+                }
+            }
+            "workspace/didChangeWorkspaceFolders" => self.folders_changed(params)?,
+            "workspace/didChangeWatchedFiles" => {
+                let mut by_project: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
+                for change in params["changes"].as_array().into_iter().flatten() {
+                    let index = self.route(change["uri"].as_str().unwrap_or_default());
+                    by_project.entry(index).or_default().push(change.clone());
+                }
+                for (index, changes) in by_project {
+                    if let Some(state) = self.state(index) {
+                        state.message(jsonrpc::notification(method, json!({ "changes": changes })))?;
+                    }
+                }
+            }
+            _ => {
+                if let Some(uri) = params["textDocument"]["uri"].as_str() {
+                    let index = self.route(uri);
+                    if let Some(state) = self.state(index) {
+                        state.message(message)?;
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// The project roots of workspace `folders` (`{ uri, name }`), each at the root of its Kargo project.
+fn folder_roots(folders: &Value) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for dir in folders.as_array().into_iter().flatten().filter_map(|f| f["uri"].as_str()).filter_map(file_path) {
+        let root = crate::project::project_root(&dir).unwrap_or(dir);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 /// How long the first requests wait for the project's files and for the standard library.
@@ -694,8 +1058,9 @@ const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 
 struct State {
     config: Config,
-    out: Box<dyn Write + Send>,
-    tx: Sender<Event>,
+    tx: Tx,
+    /// The number of this project among the server's, in the ids of its requests.
+    index: usize,
     root: Option<PathBuf>,
     model: Model,
     /// Every project file, by path; open documents hold the editor's text.
@@ -740,8 +1105,6 @@ struct State {
     /// Whether the current load delivered the project's files, and the libraries.
     project_loaded: bool,
     libraries_loaded: bool,
-    /// Editor messages that arrived while waiting for a load.
-    queued: VecDeque<Option<Value>>,
     formatter: Formatter,
     /// The searches running on worker threads, by request id, and whether the editor cancelled them.
     searches: HashMap<String, Arc<AtomicBool>>,
@@ -771,11 +1134,11 @@ const RECENT_NAMES: usize = 256;
 type Snapshot = (Arc<Index>, Arc<HashMap<PathBuf, u32>>);
 
 impl State {
-    fn new(config: Config, out: Box<dyn Write + Send>, tx: Sender<Event>, dependencies: bool, formatter: Formatter) -> Self {
+    fn new(config: Config, tx: Tx, index: usize, dependencies: bool, formatter: Formatter) -> Self {
         Self {
             config,
-            out,
             tx,
+            index,
             root: None,
             model: Model::default(),
             files: HashMap::new(),
@@ -804,7 +1167,6 @@ impl State {
             next_id: 0,
             project_loaded: false,
             libraries_loaded: false,
-            queued: VecDeque::new(),
             formatter,
             searches: HashMap::new(),
             symbol_resolve: false,
@@ -815,37 +1177,8 @@ impl State {
     }
 
     fn send(&mut self, message: &Value) -> anyhow::Result<()> {
-        jsonrpc::write(&mut self.out, message).map_err(Into::into)
-    }
-
-    /// Handles one event; `false` when the server should stop.
-    fn handle(&mut self, event: Event, rx: &Receiver<Event>) -> anyhow::Result<bool> {
-        match event {
-            Event::Client(None) => return Ok(false),
-            Event::Client(Some(message)) => {
-                if jsonrpc::kind(&message) == Kind::Request && !matches!(jsonrpc::method(&message), "initialize" | "shutdown") {
-                    self.wait_for_load(rx);
-                }
-                return self.message(message);
-            }
-            other => self.loaded(other),
-        }
-        Ok(true)
-    }
-
-    /// Waits a while for the project and the standard library, the first time they load, so
-    /// the first requests see them. Editor messages that arrive meanwhile are queued.
-    fn wait_for_load(&mut self, rx: &Receiver<Event>) {
-        let start = Instant::now();
-        while self.root.is_some() && !(self.project_loaded && self.libraries_loaded) {
-            let limit = if self.project_loaded { LIBRARY_WAIT } else { PROJECT_WAIT };
-            let Some(remaining) = limit.checked_sub(start.elapsed()) else { break };
-            match rx.recv_timeout(remaining) {
-                Ok(Event::Client(message)) => self.queued.push_back(message),
-                Ok(other) => self.loaded(other),
-                Err(_) => break,
-            }
-        }
+        self.tx.out(message.clone());
+        Ok(())
     }
 
     fn loaded(&mut self, event: Event) {
@@ -935,7 +1268,7 @@ impl State {
             return None;
         }
         self.next_id += 1;
-        let create_id = format!("kotlin/{}", self.next_id);
+        let create_id = format!("kotlin/{}/{}", self.index, self.next_id);
         let token = format!("{create_id}/{kind}");
         let _ = self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })));
         Some(Progress { generation, token, create_id, title, message, begun: false })
@@ -1293,7 +1626,7 @@ impl State {
             return Ok(());
         }
         self.next_id += 1;
-        let id = format!("kotlin/{}", self.next_id);
+        let id = format!("kotlin/{}/{}", self.index, self.next_id);
         let watchers = json!([
             { "globPattern": "**/*.kt" },
             { "globPattern": "**/*.java" },
@@ -2168,6 +2501,52 @@ local = \"{url}\"
         }
         assert_eq!(found, ["zzbeta"]);
         assert!(names(&mut editor, "last", "zzalpha").is_empty());
+        editor.finish();
+    }
+
+    #[test]
+    fn serves_every_workspace_folder_as_its_own_project() {
+        let home = tempfile::tempdir().unwrap();
+        let project = |name: &str, function: &str| {
+            let dir = home.path().join(name);
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("kargo.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n")).unwrap();
+            std::fs::write(dir.join("src/Main.kt"), format!("package p\n\nfun {function}() = 1\n")).unwrap();
+            dir
+        };
+        let (one, two, three) = (project("one", "zzalpha"), project("two", "zzbeta"), project("three", "zzgamma"));
+        let config = Config::new(home.path().join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (server_in, input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, Arc::new(|_, _, _| Ok(None))));
+        let mut editor = Editor { input, output: BufReader::new(output), server: Some(server) };
+        let folder = |dir: &Path| json!({ "uri": text::path_to_uri(dir), "name": "x" });
+        let folders = json!([folder(&one), folder(&two)]);
+        editor.send(jsonrpc::request("0", "initialize", json!({ "workspaceFolders": folders, "capabilities": {} })));
+        let init = editor.reply("0");
+        assert_eq!(init["result"]["capabilities"]["workspace"]["workspaceFolders"]["supported"], true, "{init}");
+        editor.send(jsonrpc::notification("initialized", json!({})));
+
+        let symbols = |editor: &mut Editor, id: &str| -> Vec<String> {
+            editor.send(jsonrpc::request(id, "workspace/symbol", json!({ "query": "zz" })));
+            let reply = editor.reply(id);
+            let mut names: Vec<String> =
+                reply["result"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap().to_owned()).collect();
+            names.sort();
+            names
+        };
+        // Both projects answer one search.
+        assert_eq!(symbols(&mut editor, "1"), ["zzalpha", "zzbeta"]);
+
+        // A file's requests go to its own project.
+        let main_two = text::path_to_uri(&two.join("src/Main.kt"));
+        editor.send(jsonrpc::request("2", "textDocument/documentSymbol", json!({ "textDocument": { "uri": main_two } })));
+        assert_eq!(editor.reply("2")["result"][0]["name"], "zzbeta");
+
+        // A folder the editor opens later is served too, and a closed one is dropped.
+        let added = json!({ "event": { "added": [folder(&three)], "removed": [folder(&one)] } });
+        editor.send(jsonrpc::notification("workspace/didChangeWorkspaceFolders", added));
+        assert_eq!(symbols(&mut editor, "3"), ["zzbeta", "zzgamma"]);
         editor.finish();
     }
 

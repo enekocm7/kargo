@@ -120,7 +120,7 @@ Finding references and renaming search the whole project on a worker thread, so 
 - **Workspace symbols.** The project's symbols come first, then those of the libraries when the query has at least three characters, 500 at most. An editor that supports `workspaceSymbol/resolve` (it lists `location.range` in `workspace.symbol.resolveSupport`) gets symbols without a range and asks for it when you pick one.
 - **Position encoding.** When the editor lists `utf-8` in `general.positionEncodings`, columns count bytes, which needs no conversion; otherwise they count UTF-16 units, as the protocol's default.
 - **Editors that don't watch files.** Without dynamic registration of `workspace/didChangeWatchedFiles` (some Emacs and Helix versions), the server looks for new, changed and deleted source files itself: on every save, and every five seconds. A saved `kargo.toml` reloads the project layout the same way.
-- **One project per server.** A server loads the project that contains the editor's first workspace folder. To work on several Kargo projects, open each in its own window, or let your editor start one server per folder.
+- **Several projects in one window.** Every workspace folder gets its own project, found at the folder's Kargo project root. A request about a file goes to the project that contains it, and workspace symbols search all of them. Folders added or removed with `workspace/didChangeWorkspaceFolders` are loaded or dropped without a restart. Files outside every folder are served by the first project.
 
 ### Formatting
 

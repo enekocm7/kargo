@@ -745,8 +745,10 @@ impl Server {
                 }
                 // The editor may have opened a workspace member; the server reads the
                 // description at the project root.
+                // (With several workspace folders, the backend finds each one's root itself.)
                 if let Some(root) = &self.root
                     && dir.as_deref() != Some(root.as_path())
+                    && params.get("workspaceFolders").and_then(Value::as_array).is_none_or(|folders| folders.len() <= 1)
                 {
                     let uri = text::path_to_uri(root);
                     let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
