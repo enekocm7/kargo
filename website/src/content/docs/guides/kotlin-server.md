@@ -57,7 +57,12 @@ Completion also looks at where you are typing:
 - **Named arguments.** Inside the parentheses of a call you are offered `name = ` for the parameters that no argument gives yet. Once an argument is positional, the parameters before it are left out.
 - **Overrides.** In a class body, typing the start of a member's name or `override ` offers the open and abstract members of the supertypes that the class doesn't override yet, and inserts a stub with the full signature: `override fun area(scale: Double): Double { TODO("Not yet implemented") }` for an abstract member, a call of `super` for an open one. Type arguments of the supertype are filled in.
 - **Keywords.** Only the keywords that are valid at the cursor are offered: declaration keywords in a class body and at the top of a file, `if`, `return` and the other expression keywords after `=`, `else` after an `if` that has none, `is` and `in` in `when` branches, and `as`, `is` and `in` after an expression.
-- **Trailing lambdas.** A function whose last parameter is a function type is inserted with its lambda, with names for the lambda's parameters taken from their types: `repeatIt(${1:times}) { $0 }`, or `eachIndexed { ${1:int}, ${2:t} -> $0 }`.
+- **Trailing lambdas.** A function whose last parameter is a function type is inserted with its lambda, with the names the function type gives its parameters (`(index: Int, value: String) -> Unit` inserts `{ index, value -> $0 }`), or names made from their types when it gives none: `repeatIt(${1:times}) { $0 }`.
+
+- **Recently used.** A name you inserted in one edit lately (a completion you accepted, a paste) comes first among the items of its group.
+- **Postfix templates.** After `expr.`, with an editor that supports snippets: `val`, `var`, `return`, `println`, `null` and `nn` (an `if` on null or not null) at the start of a statement, and `not`, `if` and `while` after a `Boolean`. They replace `expr.` and what you typed with the template.
+
+The same request for the same position in an unchanged project is answered from the last result, so an editor that asks again on every keystroke of a prefix it already has costs nothing. The list is marked incomplete while the prefix is empty, since declarations that need an import are offered only once you have typed a letter.
 
 Declarations marked `@PublishedApi` and the library package `kotlin.internal` are left out of every list.
 

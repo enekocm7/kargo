@@ -1212,6 +1212,7 @@ impl<'a> Analyzer<'a> {
         Some(syntax::FuncType {
             receiver: None,
             params: method.params.iter().map(|&p| file.decls[p].ty.clone().unwrap_or_default()).collect(),
+            names: method.params.iter().map(|&p| file.decls[p].name.clone()).collect(),
             ret: method.ty.clone().unwrap_or_else(|| TypeRef::named("Unit", Vec::new())),
         })
     }

@@ -192,7 +192,8 @@ fn completes_members_of_strings_and_collections() {
         assert!(has(&labels, name), "{name} in {labels:?}");
     }
     assert!(!has(&labels, "forEach"), "{labels:?}");
-    assert!(!has(&labels, "println"), "{labels:?}");
+    // Only the postfix template, not the global function.
+    assert!(!f.items().iter().any(|i| i["label"] == "println" && i["kind"] != 15), "{labels:?}");
 
     let f = fixture(&[("src/Main.kt", "fun main() {\n    listOf(1, 2).$0\n}\n")]);
     let labels = f.labels();
@@ -2233,4 +2234,41 @@ fn completion_inserts_trailing_lambdas() {
     let f = fixture(&[("src/Main.kt", &src.replace("eachI$0", "repeatI$0"))]);
     let items = f.items();
     assert_eq!(item(&items, "repeatIt")["textEdit"]["newText"], "repeatIt(${1:times}) { $0 }");
+}
+
+#[test]
+fn completion_names_lambda_parameters_as_written() {
+    let src = "fun eachIndexed(action: (index: Int, value: String) -> Unit) {}\nfun main() {\n    eachI$0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    assert_eq!(item(&items, "eachIndexed")["textEdit"]["newText"], "eachIndexed { ${1:index}, ${2:value} -> $0 }");
+}
+
+#[test]
+fn completion_puts_recently_inserted_names_first() {
+    let src = "fun main() {\n    val alpha = 1\n    val beta = 2\n    $0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let (u, offset) = f.cursor();
+    let mut list = features::completion(&f.an(), u, offset, CompletionOptions { snippets: true }, 0);
+    assert_eq!(first_labels(list["items"].as_array().unwrap(), 2), vec!["alpha", "beta"]);
+    let recent = std::collections::HashMap::from([("beta".to_owned(), 1u64)]);
+    features::rank_recent(&mut list, &recent);
+    assert_eq!(first_labels(list["items"].as_array().unwrap(), 1), vec!["beta"]);
+    assert_eq!(features::words("val x = fooBar(a, 1)").collect::<Vec<_>>(), vec!["val", "fooBar"]);
+}
+
+#[test]
+fn completion_offers_postfix_templates() {
+    let src = "fun main() {\n    val ready = true\n    ready.$0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    let val = item(&items, "val");
+    assert_eq!(val["textEdit"]["newText"], "val ${1:name} = ready");
+    assert_eq!(val["filterText"], "ready.val");
+    assert_eq!(items.iter().find(|i| i["label"] == "not" && i["kind"] == 15).unwrap()["textEdit"]["newText"], "!ready");
+    assert!(item(&items, "if")["textEdit"]["newText"].as_str().unwrap().starts_with("if (ready) {"));
+    // Not inside an expression.
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    val ready = true\n    val x = ready.$0\n}\n")]);
+    let items = f.items();
+    assert!(!items.iter().any(|i| i["label"] == "val") && items.iter().any(|i| i["label"] == "not" && i["kind"] == 15));
 }

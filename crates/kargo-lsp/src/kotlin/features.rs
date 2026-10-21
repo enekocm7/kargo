@@ -1219,7 +1219,11 @@ impl Collector<'_, '_> {
 /// `int`, a type parameter `T` is `t`, and repeated names are numbered.
 fn lambda_parameter_names(func: &super::syntax::FuncType) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for p in &func.params {
+    for (i, p) in func.params.iter().enumerate() {
+        if let Some(written) = func.names.get(i).filter(|n| !n.is_empty()) {
+            names.push(written.clone());
+            continue;
+        }
         let simple = p.simple_name();
         let mut base = if simple.chars().count() == 1 || simple.is_empty() || simple == "*" {
             simple.to_lowercase()
@@ -1239,6 +1243,27 @@ fn lambda_parameter_names(func: &super::syntax::FuncType) -> Vec<String> {
         names.push(name);
     }
     names
+}
+
+/// The identifiers of at least two characters in `text`.
+pub fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !lexer::is_ident_char(c)).filter(|w| w.chars().count() >= 2 && w.chars().next().is_some_and(lexer::is_ident_start))
+}
+
+/// Puts the items of `list` named like something in `recent` before the others of their group.
+pub fn rank_recent(list: &mut Value, recent: &HashMap<String, u64>) {
+    if recent.is_empty() {
+        return;
+    }
+    let Some(items) = list["items"].as_array_mut() else { return };
+    for item in items {
+        let Some(sort) = item["sortText"].as_str() else { continue };
+        // The tier and the group come first.
+        let Some((at, _)) = sort.char_indices().nth(2) else { continue };
+        let mark = if item["label"].as_str().is_some_and(|l| recent.contains_key(l)) { '0' } else { '1' };
+        let ranked = format!("{}{mark}{}", &sort[..at], &sort[at..]);
+        item["sortText"] = json!(ranked);
+    }
 }
 
 /// A name as Kotlin source: backquoted when it is a keyword or not a plain identifier.
@@ -1338,6 +1363,9 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
                 if let Some(receiver) = an.infer(u, start, dot) {
                     let receiver = if prev_kind == Some(Tok::SafeDot) { strip_nullable(receiver) } else { receiver };
                     member_completion(&mut c, &receiver);
+                    if prev_kind == Some(Tok::Dot) && !c.annotations_only {
+                        postfix_completion(&mut c, start, dot, p, &receiver);
+                    }
                 }
                 return finish(c);
             }
@@ -2002,6 +2030,52 @@ fn member_completion(c: &mut Collector, receiver: &Ty) {
         };
         let import = (group == Group::NotImported).then(|| an.fq(m.sym));
         c.add(&m, group, import);
+    }
+}
+
+/// Postfix templates: `expr.val` becomes `val name = expr`. Only for editors that take snippets.
+fn postfix_completion(c: &mut Collector, start: usize, dot: usize, prefix_start: usize, receiver: &Ty) {
+    if !c.opts.snippets || !matches!(receiver, Ty::Class { .. }) {
+        return;
+    }
+    let an = c.an;
+    let src = &an.unit(c.u).text;
+    let lx = &an.file(c.u).lexed;
+    let expr_start = lx.tokens[start].start;
+    let expr = &src[expr_start..lx.tokens[dot].start];
+    let line_start = src[..expr_start].rfind('\n').map_or(0, |i| i + 1);
+    let statement = src[line_start..expr_start].trim().is_empty();
+    let boolean = matches!(receiver, Ty::Class { sym, nullable: false, .. } if an.fq(*sym) == "kotlin.Boolean");
+    let range = text::range(src, expr_start..prefix_start);
+    let mut templates: Vec<(&str, String)> = Vec::new();
+    if statement {
+        templates.push(("val", format!("val ${{1:name}} = {expr}")));
+        templates.push(("var", format!("var ${{1:name}} = {expr}")));
+        templates.push(("return", format!("return {expr}")));
+        templates.push(("println", format!("println({expr})")));
+        templates.push(("null", format!("if ({expr} == null) {{\n    $0\n}}")));
+        templates.push(("nn", format!("if ({expr} != null) {{\n    $0\n}}")));
+        if boolean {
+            templates.push(("if", format!("if ({expr}) {{\n    $0\n}}")));
+            templates.push(("while", format!("while ({expr}) {{\n    $0\n}}")));
+        }
+    }
+    if boolean {
+        templates.push(("not", format!("!{expr}")));
+    }
+    for (label, body) in templates {
+        if !matches_prefix(label, &c.prefix) || !c.seen.insert(format!("postfix|{label}")) {
+            continue;
+        }
+        c.items.push(json!({
+            "label": label,
+            "kind": 15,
+            "detail": format!("postfix: {}", body.replace("${1:name}", "name").replace("$0", "")),
+            "sortText": format!("{}{label}", Group::Keyword as u8),
+            "filterText": format!("{expr}.{label}"),
+            "textEdit": { "range": range, "newText": body },
+            "insertTextFormat": 2,
+        }));
     }
 }
 

@@ -17,7 +17,7 @@ use super::lexer::{Lexed, Tok, Token};
 use super::syntax::{Decl, File, FuncType, Import, InitKind, Kind, Scope, ScopeKind, TypeParam, TypeRef};
 
 /// Bump when the syntax tree or its parser changes in a way the version of Kargo does not show.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 const MAGIC: &[u8; 4] = b"KPF\0";
 /// The name of the blob in a directory of library sources.
 const FILE_NAME: &str = ".kargo-parsed";
@@ -136,9 +136,10 @@ impl Writer {
         self.list(args, Self::type_ref);
         self.b(*nullable);
         self.opt(func, |w, f| {
-            let FuncType { receiver, params, ret } = &**f;
+            let FuncType { receiver, params, names, ret } = &**f;
             w.opt(receiver, Self::type_ref);
             w.list(params, Self::type_ref);
+            w.strings(names);
             w.type_ref(ret);
         });
         self.range(span);
@@ -358,7 +359,12 @@ impl Reader<'_> {
             args: self.list(Self::type_ref)?,
             nullable: self.b()?,
             func: self.opt(|r| {
-                Some(Box::new(FuncType { receiver: r.opt(Self::type_ref)?, params: r.list(Self::type_ref)?, ret: r.type_ref()? }))
+                Some(Box::new(FuncType {
+                    receiver: r.opt(Self::type_ref)?,
+                    params: r.list(Self::type_ref)?,
+                    names: r.strings()?,
+                    ret: r.type_ref()?,
+                }))
             })?,
             span: self.range()?,
         })
