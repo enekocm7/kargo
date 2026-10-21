@@ -192,7 +192,8 @@ fn completes_members_of_strings_and_collections() {
         assert!(has(&labels, name), "{name} in {labels:?}");
     }
     assert!(!has(&labels, "forEach"), "{labels:?}");
-    assert!(!has(&labels, "println"), "{labels:?}");
+    // Only the postfix template, not the global function.
+    assert!(!f.items().iter().any(|i| i["label"] == "println" && i["kind"] != 15), "{labels:?}");
 
     let f = fixture(&[("src/Main.kt", "fun main() {\n    listOf(1, 2).$0\n}\n")]);
     let labels = f.labels();
@@ -261,7 +262,7 @@ class Greeter(private val name: String) {
     assert!(has(&labels, "Greeter"), "{labels:?}");
     let f = fixture(&[("src/Greeter.kt", &src.replace("gr$0", "$0"))]);
     let labels = f.labels();
-    for name in ["count", "name", "prefix", "greet", "other", "println", "listOf", "Greeter", "String", "return", "val"] {
+    for name in ["count", "name", "prefix", "greet", "other", "println", "listOf", "Greeter", "String", "return", "if"] {
         assert!(has(&labels, name), "{name} in {labels:?}");
     }
     // Locals come first.
@@ -2131,4 +2132,143 @@ fn spring_classes_are_marked_open() {
     assert!(f.hover().contains("Open for Spring"), "{}", f.hover());
     let f = fixture(&[("src/Main.kt", "class Plain\nfun main() {\n    Pla$0in()\n}\n")]);
     assert!(!f.hover().contains("Open for Spring"), "{}", f.hover());
+}
+
+fn item<'a>(items: &'a [Value], label: &str) -> &'a Value {
+    items
+        .iter()
+        .find(|i| i["label"] == label)
+        .unwrap_or_else(|| panic!("{label} in {:?}", items.iter().map(|i| &i["label"]).collect::<Vec<_>>()))
+}
+
+fn first_labels(items: &[Value], n: usize) -> Vec<String> {
+    let mut sorted: Vec<&Value> = items.iter().collect();
+    sorted.sort_by(|a, b| a["sortText"].as_str().cmp(&b["sortText"].as_str()));
+    sorted.iter().take(n).map(|i| i["label"].as_str().unwrap().to_owned()).collect()
+}
+
+#[test]
+fn completion_ranks_values_of_the_expected_type_first() {
+    let src = "fun main() {\n    val count = 1\n    val name = \"a\"\n    val x: String = $0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    assert_eq!(first_labels(&items, 1), vec!["name"], "{:?}", first_labels(&items, 5));
+
+    let src = "fun take(n: Int) {}\nfun main() {\n    val count = 1\n    val name = \"a\"\n    take($0)\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    assert_eq!(first_labels(&f.items(), 1), vec!["count"]);
+
+    let src = "fun f(): String {\n    val count = 1\n    val name = \"a\"\n    return $0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    assert_eq!(first_labels(&f.items(), 1), vec!["name"]);
+}
+
+#[test]
+fn completion_offers_named_arguments() {
+    let src = "fun greet(name: String, times: Int = 1) {}\nfun main() {\n    greet($0)\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    let arg = item(&items, "name =");
+    assert_eq!(arg["textEdit"]["newText"], "name = ");
+    item(&items, "times =");
+
+    let src = "fun greet(name: String, times: Int = 1) {}\nfun main() {\n    greet(\"a\", $0)\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    item(&items, "times =");
+    assert!(!items.iter().any(|i| i["label"] == "name ="));
+}
+
+#[test]
+fn completion_stubs_overrides() {
+    let src = "interface Shape {\n    val sides: Int\n    fun area(scale: Double): Double\n    fun describe(): String = \"shape\"\n}\nclass Square : Shape {\n    ar$0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    let area = item(&items, "area");
+    assert_eq!(area["textEdit"]["newText"], "override fun area(scale: Double): Double {\n        TODO(\"Not yet implemented\")\n    }");
+
+    let src = src.replace("ar$0", "override $0");
+    let f = fixture(&[("src/Main.kt", &src)]);
+    let items = f.items();
+    assert!(item(&items, "sides")["textEdit"]["newText"].as_str().unwrap().starts_with("val sides: Int"));
+    let describe = item(&items, "describe")["textEdit"]["newText"].as_str().unwrap().to_owned();
+    assert!(describe.contains("return super.describe()"), "{describe}");
+    // Not a stub for a member that is already overridden.
+    let src = src.replace("override $0", "override fun area(scale: Double) = 1.0\n    override $0");
+    let f = fixture(&[("src/Main.kt", &src)]);
+    assert!(!f.items().iter().any(|i| i["label"] == "area"));
+}
+
+#[test]
+fn completion_offers_only_the_keywords_that_fit() {
+    let kw = |src: &str| -> Vec<String> {
+        let f = fixture(&[("src/Main.kt", src)]);
+        f.items().iter().filter(|i| i["kind"] == 14).map(|i| i["label"].as_str().unwrap().to_owned()).collect()
+    };
+    // In an expression: no declarations.
+    let k = kw("fun main() {\n    val x = $0\n}\n");
+    assert!(k.contains(&"if".to_owned()) && !k.contains(&"class".to_owned()) && !k.contains(&"val".to_owned()), "{k:?}");
+    // `else` only after an `if`.
+    let k = kw("fun main(a: Boolean) {\n    if (a) {\n    } $0\n}\n");
+    assert!(k.contains(&"else".to_owned()), "{k:?}");
+    let k = kw("fun main() {\n    val x = 1\n    $0\n}\n");
+    assert!(!k.contains(&"else".to_owned()), "{k:?}");
+    // In a class body: declarations, not statements.
+    let k = kw("class A {\n    $0\n}\n");
+    assert!(k.contains(&"fun".to_owned()) && k.contains(&"override".to_owned()) && !k.contains(&"while".to_owned()), "{k:?}");
+    // `is` in a `when` branch.
+    let k = kw("fun f(x: Any) = when (x) {\n    $0\n}\n");
+    assert!(k.contains(&"is".to_owned()) && k.contains(&"else".to_owned()), "{k:?}");
+    let k = kw("fun main() {\n    val x = 1\n    $0\n}\n");
+    assert!(!k.contains(&"is".to_owned()), "{k:?}");
+}
+
+#[test]
+fn completion_inserts_trailing_lambdas() {
+    let src =
+        "fun <T> eachIndexed(action: (Int, T) -> Unit) {}\nfun repeatIt(times: Int, body: () -> Unit) {}\nfun main() {\n    eachI$0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    assert_eq!(item(&items, "eachIndexed")["textEdit"]["newText"], "eachIndexed { ${1:int}, ${2:t} -> $0 }");
+
+    let f = fixture(&[("src/Main.kt", &src.replace("eachI$0", "repeatI$0"))]);
+    let items = f.items();
+    assert_eq!(item(&items, "repeatIt")["textEdit"]["newText"], "repeatIt(${1:times}) { $0 }");
+}
+
+#[test]
+fn completion_names_lambda_parameters_as_written() {
+    let src = "fun eachIndexed(action: (index: Int, value: String) -> Unit) {}\nfun main() {\n    eachI$0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    assert_eq!(item(&items, "eachIndexed")["textEdit"]["newText"], "eachIndexed { ${1:index}, ${2:value} -> $0 }");
+}
+
+#[test]
+fn completion_puts_recently_inserted_names_first() {
+    let src = "fun main() {\n    val alpha = 1\n    val beta = 2\n    $0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let (u, offset) = f.cursor();
+    let mut list = features::completion(&f.an(), u, offset, CompletionOptions { snippets: true }, 0);
+    assert_eq!(first_labels(list["items"].as_array().unwrap(), 2), vec!["alpha", "beta"]);
+    let recent = std::collections::HashMap::from([("beta".to_owned(), 1u64)]);
+    features::rank_recent(&mut list, &recent);
+    assert_eq!(first_labels(list["items"].as_array().unwrap(), 1), vec!["beta"]);
+    assert_eq!(features::words("val x = fooBar(a, 1)").collect::<Vec<_>>(), vec!["val", "fooBar"]);
+}
+
+#[test]
+fn completion_offers_postfix_templates() {
+    let src = "fun main() {\n    val ready = true\n    ready.$0\n}\n";
+    let f = fixture(&[("src/Main.kt", src)]);
+    let items = f.items();
+    let val = item(&items, "val");
+    assert_eq!(val["textEdit"]["newText"], "val ${1:name} = ready");
+    assert_eq!(val["filterText"], "ready.val");
+    assert_eq!(items.iter().find(|i| i["label"] == "not" && i["kind"] == 15).unwrap()["textEdit"]["newText"], "!ready");
+    assert!(item(&items, "if")["textEdit"]["newText"].as_str().unwrap().starts_with("if (ready) {"));
+    // Not inside an expression.
+    let f = fixture(&[("src/Main.kt", "fun main() {\n    val ready = true\n    val x = ready.$0\n}\n")]);
+    let items = f.items();
+    assert!(!items.iter().any(|i| i["label"] == "val") && items.iter().any(|i| i["label"] == "not" && i["kind"] == 15));
 }

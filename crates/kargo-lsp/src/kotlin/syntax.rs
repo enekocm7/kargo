@@ -80,6 +80,8 @@ pub struct TypeRef {
 pub struct FuncType {
     pub receiver: Option<TypeRef>,
     pub params: Vec<TypeRef>,
+    /// The names the parameters are written with, `(index: Int, T)`; empty where unnamed.
+    pub names: Vec<String>,
     pub ret: TypeRef,
 }
 
@@ -1641,9 +1643,9 @@ impl Parser<'_> {
             Tok::LParen => {
                 let close = self.close(j)?;
                 if self.kind(close + 1) == Some(Tok::Arrow) {
-                    let params = self.func_params(j + 1, close);
+                    let (params, names) = self.func_params(j + 1, close);
                     let (ret, k) = self.parse_type(close + 2)?;
-                    let func = FuncType { receiver: None, params, ret };
+                    let func = FuncType { receiver: None, params, names, ret };
                     let ty = TypeRef { func: Some(Box::new(func)), span: self.start(start)..self.end_before(k), ..TypeRef::default() };
                     return Some((ty, Vec::new(), k));
                 }
@@ -1692,8 +1694,8 @@ impl Parser<'_> {
             && self.kind(close + 1) == Some(Tok::Arrow)
             && let Some((ret, e)) = self.parse_type(close + 2)
         {
-            let params = self.func_params(k + 2, close);
-            let func = FuncType { receiver: Some(ty), params, ret };
+            let (params, names) = self.func_params(k + 2, close);
+            let func = FuncType { receiver: Some(ty), params, names, ret };
             let ty = TypeRef { func: Some(Box::new(func)), span: self.start(start)..self.end_before(e), ..TypeRef::default() };
             return Some((ty, Vec::new(), e));
         }
@@ -1701,16 +1703,20 @@ impl Parser<'_> {
     }
 
     /// The parameter types of a function type between `from` and `close`: `(Int, name: String)`.
-    fn func_params(&self, from: usize, close: usize) -> Vec<TypeRef> {
+    fn func_params(&self, from: usize, close: usize) -> (Vec<TypeRef>, Vec<String>) {
         let mut out = Vec::new();
+        let mut names = Vec::new();
         let mut j = from;
         while j < close {
+            let mut name = String::new();
             if self.is_name(j) && self.kind(j + 1) == Some(Tok::Colon) {
+                name = self.text(j).to_owned();
                 j += 2;
             }
             match self.parse_type(j) {
                 Some((ty, k)) if k > j => {
                     out.push(ty);
+                    names.push(name);
                     j = k;
                 }
                 _ => j += 1,
@@ -1719,7 +1725,7 @@ impl Parser<'_> {
                 j += 1;
             }
         }
-        out
+        (out, names)
     }
 }
 

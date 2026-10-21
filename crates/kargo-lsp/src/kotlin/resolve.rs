@@ -1212,6 +1212,7 @@ impl<'a> Analyzer<'a> {
         Some(syntax::FuncType {
             receiver: None,
             params: method.params.iter().map(|&p| file.decls[p].ty.clone().unwrap_or_default()).collect(),
+            names: method.params.iter().map(|&p| file.decls[p].name.clone()).collect(),
             ret: method.ty.clone().unwrap_or_else(|| TypeRef::named("Unit", Vec::new())),
         })
     }
@@ -2281,7 +2282,7 @@ impl<'a> Analyzer<'a> {
 
     /// How well a value of type `arg` fits a parameter of type `param`: `None` when it cannot be
     /// passed, more for an exact type than for a distant supertype.
-    fn type_fit(&self, arg: &Ty, param: &Ty) -> Option<i32> {
+    pub fn type_fit(&self, arg: &Ty, param: &Ty) -> Option<i32> {
         match (arg, param) {
             (Ty::Func { params: a, .. }, Ty::Func { params: b, .. }) => (a.len() == b.len()).then_some(8),
             (Ty::Class { .. }, Ty::Func { .. }) => None,

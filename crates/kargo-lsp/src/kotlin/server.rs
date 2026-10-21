@@ -688,6 +688,12 @@ struct State {
     /// Bumped on every change, so stale completion items are not resolved.
     generation: u64,
     snippets: bool,
+    /// Names the editor inserted in one edit lately (a chosen completion, a paste), by when, so
+    /// completion offers them first.
+    recent: HashMap<String, u64>,
+    clock: u64,
+    /// The last completion answered, to give it again for the same request.
+    completions: Option<(CompletionKey, Value)>,
     watch: bool,
     /// Whether the editor takes `documentChanges` in workspace edits, and can create files there.
     document_changes: bool,
@@ -708,6 +714,20 @@ struct State {
     searches: HashMap<String, Arc<AtomicBool>>,
 }
 
+/// What a completion answer depends on: the document, the position, what triggered it and the
+/// state of the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionKey {
+    uri: String,
+    offset: usize,
+    trigger: Option<String>,
+    generation: u64,
+    snippets: bool,
+}
+
+/// The most names remembered as recently used.
+const RECENT_NAMES: usize = 256;
+
 /// The project index and the unit number of each file in it.
 type Snapshot = (Arc<Index>, Arc<HashMap<PathBuf, u32>>);
 
@@ -727,6 +747,9 @@ impl State {
             load_generation: 0,
             generation: 0,
             snippets: false,
+            recent: HashMap::new(),
+            clock: 0,
+            completions: None,
             watch: false,
             document_changes: false,
             create_files: false,
@@ -927,7 +950,13 @@ impl State {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
                     if let Some(path) = self.open.get(uri).cloned() {
                         let mut text = self.files.get(&path).map(|u| u.text.clone()).unwrap_or_default();
-                        text::apply_changes(&mut text, params["contentChanges"].as_array().map(Vec::as_slice).unwrap_or_default());
+                        let changes = params["contentChanges"].as_array().map(Vec::as_slice).unwrap_or_default();
+                        for change in changes.iter().filter(|c| c.get("range").is_some()) {
+                            for word in features::words(change["text"].as_str().unwrap_or_default()) {
+                                self.note_used(word);
+                            }
+                        }
+                        text::apply_changes(&mut text, changes);
                         self.set_file(path, text);
                         self.publish_diagnostics(uri)?;
                     }
@@ -1046,6 +1075,16 @@ impl State {
         self.send(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics })))
     }
 
+    /// Remembers that `word` was inserted, forgetting the oldest names past [`RECENT_NAMES`].
+    fn note_used(&mut self, word: &str) {
+        self.clock += 1;
+        self.recent.insert(word.to_owned(), self.clock);
+        if self.recent.len() > RECENT_NAMES {
+            let cutoff = self.clock.saturating_sub(RECENT_NAMES as u64);
+            self.recent.retain(|_, &mut at| at > cutoff);
+        }
+    }
+
     fn set_file(&mut self, path: PathBuf, text: String) {
         let origin = self.model.origin(&path);
         let unit = Arc::new(Unit::new(path.clone(), text, origin));
@@ -1125,7 +1164,17 @@ impl State {
                     return Ok(json!({ "isIncomplete": true, "items": [] }));
                 }
                 let (offset, _) = at(unit);
-                Ok(features::completion(&an, unit, offset, CompletionOptions { snippets: self.snippets }, generation))
+                let key =
+                    CompletionKey { uri: uri.to_owned(), offset, trigger: trigger.map(str::to_owned), generation, snippets: self.snippets };
+                if let Some((cached, list)) = &self.completions
+                    && *cached == key
+                {
+                    return Ok(list.clone());
+                }
+                let mut list = features::completion(&an, unit, offset, CompletionOptions { snippets: self.snippets }, generation);
+                features::rank_recent(&mut list, &self.recent);
+                self.completions = Some((key, list.clone()));
+                Ok(list)
             }
             "completionItem/resolve" => {
                 if params["data"]["generation"].as_u64() != Some(generation) {
