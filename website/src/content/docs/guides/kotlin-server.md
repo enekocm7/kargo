@@ -70,6 +70,20 @@ Annotations complete on their own. After `@` you get annotation classes only: th
 
 To know the receiver's type, the server infers the types completion needs: literals, calls of generic functions (`listOf("a")` is a `List<String>`), lambda parameters from the function the lambda is passed to (`it` in `forEach`, `map` or `let`), lambda results (`map { it.length }` is a `List<Int>`), `for` loop variables, destructuring (`for ((key, value) in map)`), delegated properties (`by lazy { }`, `by map`, `Delegates.observable(...)`, or any delegate with a `getValue`), `if`, `when` and `try` expressions (the type their branches share), the operators (`+`, `-`, `*`, `/`, `%`, `..` and unary `-` through the `operator fun` of the left operand's type), function references and lambdas as values (`String::length`, `::foo`, `val f = { x: Int -> x }`), function-type aliases as lambda parameter types, the upper bounds of type parameters (`fun <T : CharSequence> f(x: T)`), and `object : Foo { ... }` expressions with their own members.
 
+### Newer and rarer syntax
+
+The names in these places resolve, complete and navigate like the ones in an ordinary function:
+
+- **Context parameters and receivers.** `context(logger: Logger) fun f()` puts `logger` in scope in the body, and `context(Scope) fun g()` makes the members of `Scope` available without a receiver, as an extension receiver does; `this@Scope` is that receiver.
+- **Destructuring in lambdas.** `{ (a, _): Pair<A, B> -> }` types `a` from the written type (without one, from the function the lambda is passed to), and `_` for an unused parameter or component doesn't shift the others.
+- **Lambdas outside function bodies.** Lambdas in the default value of a parameter (`block: (Int) -> Int = { it + n }`), in the constructor arguments of a supertype (`: Base({ name.length })`), in a delegate (`: Runnable by lazy { name }`) and in the arguments of an enum entry have their own scopes: they see the primary constructor's parameters and the parameters before them, and `it` gets its type from the declared function type or the supertype's constructor.
+- **Accessors.** A getter with a body (`val x get() { return "s" }`) gives the property its type from the first `return` that is the getter's own, and so does the type written after `get()`. Inside `get` and `set`, `field` has the property's type, and the setter's parameter does too.
+- **Types.** A `where` clause over several lines bounds the type parameters of functions, properties and classes, definitely non-nullable types (`T & Any`, also as `List<T & Any>` or `(T & Any)?`) are not nullable whatever `T`'s bound, and annotated or `suspend` function types (`@Composable () -> Unit`, `suspend String.() -> Unit`, `(suspend () -> Unit).run()`) work as lambda parameter types and receivers.
+- **Constructors.** The arguments of `: this(...)` and `: super(...)` and every `init` block see the constructor's parameters.
+- **Scripts and file annotations.** A `.kts` file has top-level statements and the `args` array. `@file:JvmName("Name")` and `@file:JvmMultifileClass` are read, so the name of the class a file's top-level declarations are in is known.
+
+Strings and comments that are hard to read are handled as the compiler does: `"$"` and `"${'$'}"`, raw strings with templates over several lines, a backslash at the end of a line, and nested block comments. Whatever you type, the parser finishes: a test edits real sources at random and checks that it never panics or hangs.
+
 ### Implementations and hierarchies
 
 Go to implementation goes from an interface, abstract class or `open` class to the classes of your project that extend it, from a member to its overrides in them, and from an `expect` declaration to its `actual` declarations.
@@ -214,7 +228,7 @@ The server reads declarations and infers types as far as completion and navigati
 
 - It reports only syntax problems and unused code of its own (see the table above). It doesn't report unresolved references or type errors. Those come from `kargo check` on save, which compiles the code for real. Turn it off with `{ "checkOnSave": false }` in the editor's `initializationOptions`; see [Check on save](../editors/#check-on-save).
 - It reads Java but doesn't edit it. Java files get no completion, hover, rename or references of their own, and a Java declaration can't be renamed from Kotlin: the server refuses, because the Java code that uses it wouldn't change. References to a Kotlin declaration from Java code aren't searched.
-- Libraries without sources have no documentation in hover, and a type parameter with several bounds keeps only the first.
+- Libraries without sources have no documentation in hover, and a type parameter with several bounds (`<T> ... where T : A, T : B`) keeps only the first. The compiler's context-sensitive features are not all followed: a property's accessors don't see its `context(...)`, and name-based destructuring (`(val a, val b)`) is read as positional.
 - Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native, plus the Native-only declarations from the distribution's klib, which have no documentation in hover.
 - Smart casts of parameters and `val`s are followed: inside `if (x is Foo)` (and after `&&`), in the branch of `when (x) { is Foo -> }` or `when { x is Foo -> }`, and after `if (x !is Foo) return`, `x as Foo` or `require(x is Foo)`. Null checks narrow the same way (`x != null`, `if (x == null) return`, `x!!`, `x ?: return`). Smart casts of `var`s and properties are not followed.
 - Nullability is tracked: `x.` on a nullable value offers only the extensions of nullable types (`isNullOrEmpty`, `let`, ...), `x?.` offers the members of the unwrapped type, and the result of a safe call is nullable again. Types from Java count as non-null.

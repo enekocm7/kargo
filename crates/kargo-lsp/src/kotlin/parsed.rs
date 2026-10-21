@@ -17,7 +17,7 @@ use super::lexer::{Lexed, Tok, Token};
 use super::syntax::{Decl, File, FuncType, Import, InitKind, Kind, Scope, ScopeKind, TypeParam, TypeRef};
 
 /// Bump when the syntax tree or its parser changes in a way the version of Kargo does not show.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const MAGIC: &[u8; 4] = b"KPF\0";
 /// The name of the blob in a directory of library sources.
 const FILE_NAME: &str = ".kargo-parsed";
@@ -131,16 +131,18 @@ impl Writer {
     }
 
     fn type_ref(&mut self, t: &TypeRef) {
-        let TypeRef { name, args, nullable, func, span } = t;
+        let TypeRef { name, args, nullable, non_null, func, span } = t;
         self.s(name);
         self.list(args, Self::type_ref);
         self.b(*nullable);
+        self.b(*non_null);
         self.opt(func, |w, f| {
-            let FuncType { receiver, params, names, ret } = &**f;
+            let FuncType { receiver, params, names, ret, suspend } = &**f;
             w.opt(receiver, Self::type_ref);
             w.list(params, Self::type_ref);
             w.strings(names);
             w.type_ref(ret);
+            w.b(*suspend);
         });
         self.range(span);
     }
@@ -170,6 +172,8 @@ impl Writer {
             body,
             synthetic,
             generated,
+            context,
+            container,
         } = d;
         self.out.push(KINDS.iter().position(|k| k == kind).expect("a known kind") as u8);
         self.s(name);
@@ -220,12 +224,27 @@ impl Writer {
         self.opt(body, |w, n| w.u(*n));
         self.usizes(synthetic);
         self.b(*generated);
+        self.list(context, Self::type_ref);
+        self.opt(container, Self::type_ref);
     }
 }
 
 /// The bytes of `file`.
 pub fn encode(file: &File) -> Vec<u8> {
-    let File { lexed, package, package_tokens, imports, decls, top, scopes, import_offset, import_after_package, .. } = file;
+    let File {
+        lexed,
+        package,
+        package_tokens,
+        imports,
+        decls,
+        top,
+        scopes,
+        import_offset,
+        import_after_package,
+        jvm_name,
+        jvm_multifile,
+        ..
+    } = file;
     let mut w = Writer::default();
     let Lexed { tokens, matching, docs, comments, unterminated_comments } = lexed;
     w.list(tokens, |w, t| {
@@ -280,6 +299,8 @@ pub fn encode(file: &File) -> Vec<u8> {
     });
     w.u(*import_offset);
     w.b(*import_after_package);
+    w.opt(jvm_name, |w, s| w.s(s));
+    w.b(*jvm_multifile);
     w.out
 }
 
@@ -358,12 +379,14 @@ impl Reader<'_> {
             name: self.s()?,
             args: self.list(Self::type_ref)?,
             nullable: self.b()?,
+            non_null: self.b()?,
             func: self.opt(|r| {
                 Some(Box::new(FuncType {
                     receiver: r.opt(Self::type_ref)?,
                     params: r.list(Self::type_ref)?,
                     names: r.strings()?,
                     ret: r.type_ref()?,
+                    suspend: r.b()?,
                 }))
             })?,
             span: self.range()?,
@@ -417,6 +440,8 @@ impl Reader<'_> {
             body: self.opt(Self::u)?,
             synthetic: self.usizes()?,
             generated: self.b()?,
+            context: self.list(Self::type_ref)?,
+            container: self.opt(Self::type_ref)?,
         })
     }
 }
@@ -451,6 +476,8 @@ pub fn decode(bytes: &[u8]) -> Option<File> {
     })?;
     let import_offset = r.u()?;
     let import_after_package = r.b()?;
+    let jvm_name = r.opt(Reader::s)?;
+    let jvm_multifile = r.b()?;
     (r.at == bytes.len()).then_some(File {
         lexed: Lexed { tokens, matching, docs, comments, unterminated_comments },
         package,
@@ -461,6 +488,8 @@ pub fn decode(bytes: &[u8]) -> Option<File> {
         scopes,
         import_offset,
         import_after_package,
+        jvm_name,
+        jvm_multifile,
         ..File::default()
     })
 }
