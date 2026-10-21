@@ -497,7 +497,9 @@ impl<'a> BuildContext<'a> {
             }
         }
         if self.locked {
-            bail!("kargo.lock needs to be updated for `{key}` but --locked was passed");
+            bail!(
+                "kargo.lock needs to be updated for `{key}` but --locked was passed; run `kargo update` (or `kargo fetch`) without --locked and commit kargo.lock"
+            );
         }
         self.shell().verbose("Resolving", key);
         let mut resolver = Resolver::new(&self.client, platform);

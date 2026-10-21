@@ -148,7 +148,7 @@ Set `HTTPS_PROXY` (and `NO_PROXY` for internal hosts), or `[http] proxy` in `~/.
 
 ### `kargo.lock needs to be updated ... but --locked was passed`
 
-You changed `kargo.toml` without committing the updated lockfile. Run `kargo build` locally and commit `kargo.lock`.
+Either you changed `kargo.toml` without committing the updated lockfile, or the lockfile has no resolution for what this command needs. Kargo writes a resolution only for the configurations a command uses, so `kargo build` records `jvm/compile` and `jvm/runtime` but not `jvm/test`. Run `kargo update` (it resolves every configuration of every enabled target) or `kargo fetch` locally and commit `kargo.lock`.
 
 ### `the native target has no build for this host`
 
