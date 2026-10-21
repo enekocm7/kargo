@@ -100,50 +100,67 @@ impl Lockfile {
         Ok(true)
     }
 
-    /// Records a fresh resolution, hashing each artifact. Artifacts that were already cached are
-    /// first checked against their repository's checksum (and re-downloaded if corrupt), so a bad
-    /// cached file is never pinned.
+    /// Records a fresh resolution, hashing each artifact. See [`Lockfile::lock_resolution`].
     pub fn record(&mut self, key: &str, inputs: &str, resolution: &Resolution, client: &MavenClient) -> Result<()> {
+        let locked = Self::lock_resolution(self.resolutions.get(key), inputs, resolution, client)?;
+        self.resolutions.insert(key.to_owned(), locked);
+        Ok(())
+    }
+
+    /// Builds the lock entry of a fresh resolution, hashing each artifact on the download pool. It needs no
+    /// lockfile, so a caller can run it without holding the lock that guards the shared one. Artifacts that were
+    /// already cached are first checked against their repository's checksum (and re-downloaded if corrupt), so a
+    /// bad cached file is never pinned. A file whose SHA-256 equals the entry for the same path in `previous` was
+    /// checked when it was locked and is not checked again.
+    pub fn lock_resolution(
+        previous: Option<&LockedResolution>,
+        inputs: &str,
+        resolution: &Resolution,
+        client: &MavenClient,
+    ) -> Result<LockedResolution> {
         let cache_dir = client.cache_dir();
+        let before: std::collections::HashMap<&str, &str> =
+            previous.into_iter().flat_map(|r| &r.packages).flat_map(|p| &p.files).map(|f| (f.path.as_str(), f.sha256.as_str())).collect();
+        let files: Vec<&PathBuf> = resolution.nodes.iter().flat_map(|n| &n.files).collect();
+        let locked = kargo_maven::par_map_io(&files, |file| -> Result<LockedFile> {
+            let rel = file
+                .strip_prefix(cache_dir)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .with_context(|| format!("{} is outside the Kargo cache", file.display()))?;
+            // The repository a file came from is a property of this machine's cache, not of the lock.
+            let path = kargo_maven::repo::plain_rel(&rel).to_owned();
+            if let Some(&known) = before.get(path.as_str())
+                && file.is_file()
+                && cached_sha256(file, true).is_ok_and(|actual| actual == known)
+            {
+                return Ok(LockedFile { path, sha256: known.to_owned() });
+            }
+            let file = client.fetch_verified(&rel)?;
+            let sha256 = cached_sha256(&file, false)?;
+            Ok(LockedFile { path, sha256 })
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        let mut locked = locked.into_iter();
         let packages = resolution
             .nodes
             .iter()
-            .map(|node| {
-                let files = node
-                    .files
+            .map(|node| LockedPackage {
+                module: node.module.to_string(),
+                version: node.version.clone(),
+                // `group:artifact[:requested-version]`
+                dependencies: node
+                    .dependencies
                     .iter()
-                    .map(|file| {
-                        let rel = file
-                            .strip_prefix(cache_dir)
-                            .map(|p| p.to_string_lossy().replace('\\', "/"))
-                            .with_context(|| format!("{} is outside the Kargo cache", file.display()))?;
-                        let file = client.fetch_verified(&rel)?;
-                        let sha256 = cached_sha256(&file, false)?;
-                        // The repository a file came from is a property of this machine's cache, not of the lock.
-                        Ok(LockedFile { path: kargo_maven::repo::plain_rel(&rel).to_owned(), sha256 })
+                    .map(|(m, req)| match req {
+                        Some(v) => format!("{m}:{v}"),
+                        None => m.to_string(),
                     })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(LockedPackage {
-                    module: node.module.to_string(),
-                    version: node.version.clone(),
-                    // `group:artifact[:requested-version]`
-                    dependencies: node
-                        .dependencies
-                        .iter()
-                        .map(|(m, req)| match req {
-                            Some(v) => format!("{m}:{v}"),
-                            None => m.to_string(),
-                        })
-                        .collect(),
-                    files,
-                })
+                    .collect(),
+                files: locked.by_ref().take(node.files.len()).collect(),
             })
-            .collect::<Result<Vec<_>>>()?;
-        self.resolutions.insert(
-            key.to_owned(),
-            LockedResolution { inputs: inputs.to_owned(), roots: resolution.roots.iter().map(ToString::to_string).collect(), packages },
-        );
-        Ok(())
+            .collect();
+        Ok(LockedResolution { inputs: inputs.to_owned(), roots: resolution.roots.iter().map(ToString::to_string).collect(), packages })
     }
 
     /// Reuses a locked resolution if its inputs match, checking every artifact against its locked SHA-256.

@@ -165,6 +165,20 @@ enum Fetch {
     Missing,
 }
 
+/// The file that records the size and modification time a cached file had when it last matched its repository's checksum.
+fn verified_stamp(cached: &Path) -> PathBuf {
+    let mut name = cached.as_os_str().to_owned();
+    name.push(".verified");
+    PathBuf::from(name)
+}
+
+/// The size and modification time of a file, which tell whether it changed since it was checked.
+fn file_fingerprint(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some(format!("{} {}", meta.len(), modified.as_nanos()))
+}
+
 /// Downloads artifacts from an ordered list of repositories into a shared cache.
 pub struct MavenClient {
     repos: Vec<Repository>,
@@ -191,6 +205,8 @@ pub struct MavenClient {
     shared: HashSet<String>,
     /// Every file this client served during this run, by repository-relative path (see [`MavenClient::served_files`]).
     served: Mutex<BTreeMap<String, PathBuf>>,
+    /// Held while a corrupt cached file is replaced (see [`MavenClient::fetch_verified`]).
+    repairing: Mutex<()>,
     /// Hosts that could not be reached during this run; requests to them fail at once.
     unreachable: Mutex<HashSet<String>>,
 }
@@ -221,6 +237,7 @@ impl MavenClient {
             rechecked: Mutex::new(HashSet::new()),
             snapshot_builds: Mutex::new(HashMap::new()),
             served: Mutex::new(BTreeMap::new()),
+            repairing: Mutex::new(()),
             unreachable: Mutex::new(HashSet::new()),
         }
     }
@@ -373,10 +390,30 @@ impl MavenClient {
             if !cached.is_file() || self.is_verified(&key) {
                 continue;
             }
+            // A file that is unchanged since an earlier run checked it need not be checked again.
+            let fingerprint = file_fingerprint(&cached);
+            if fingerprint.as_deref().is_some_and(|f| std::fs::read_to_string(verified_stamp(&cached)).is_ok_and(|s| s == f)) {
+                self.mark_verified(&key);
+                continue;
+            }
             match self.check_cached(repo, plain_rel(rel), &cached)? {
-                CacheCheck::Matches => self.mark_verified(&key),
+                CacheCheck::Matches => {
+                    self.mark_verified(&key);
+                    if let Some(fingerprint) = fingerprint {
+                        // A stamp only saves time, so one that cannot be written is not an error.
+                        let _ = kfs::write_string_atomic(&verified_stamp(&cached), &fingerprint);
+                    }
+                }
                 CacheCheck::Unknown => self.shell.verbose("Unverified", format!("{rel} (no checksum published)")),
                 CacheCheck::Mismatch { expected, actual } => {
+                    // Resolutions are locked in parallel and can share a file: one thread replaces it, the others use that copy.
+                    let _repairing = self.repairing.lock().expect("lock poisoned");
+                    if !cached.is_file()
+                        || self.is_verified(&key)
+                        || !matches!(self.check_cached(repo, plain_rel(rel), &cached)?, CacheCheck::Mismatch { .. })
+                    {
+                        continue;
+                    }
                     self.shell.warn(format!(
                         "cached {rel} does not match the checksum published by `{}` (expected sha1 {expected}, got {actual}); downloading it again",
                         repo.name
@@ -1050,6 +1087,30 @@ mod tests {
         std::fs::write(repo.path().join(rel), "changed upstream").unwrap();
         assert_eq!(std::fs::read_to_string(fresh.fetch_verified(rel).unwrap()).unwrap(), "good");
         assert!(fresh.is_verified(rel));
+    }
+
+    #[test]
+    fn fetch_verified_remembers_a_check_across_runs() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let rel = "com/acme/lib/1.0/lib-1.0.jar";
+        std::fs::create_dir_all(repo.path().join("com/acme/lib/1.0")).unwrap();
+        std::fs::write(repo.path().join(rel), "good").unwrap();
+
+        let first = local_client(repo.path(), home.path());
+        let cached = first.fetch_verified(rel).unwrap();
+        first.verified.lock().unwrap().clear();
+        assert!(!first.is_verified(rel));
+        // The repository now disagrees, but the unchanged cached file is not asked about again.
+        std::fs::write(repo.path().join(rel), "changed upstream").unwrap();
+        let second = local_client(repo.path(), home.path());
+        assert_eq!(second.fetch_verified(rel).unwrap(), cached);
+        assert!(second.is_verified(rel));
+
+        // A cached file that changed is checked again.
+        std::fs::write(&cached, "garbage!").unwrap();
+        let third = local_client(repo.path(), home.path());
+        assert_eq!(std::fs::read_to_string(third.fetch_verified(rel).unwrap()).unwrap(), "changed upstream");
     }
 
     #[test]
