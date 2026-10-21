@@ -35,6 +35,12 @@ impl Target {
 
 /// What the identifier token `tok` of `u` refers to, best candidate first.
 pub fn targets_at(an: &Analyzer, u: UnitId, tok: usize) -> Vec<Target> {
+    targets(an, u, tok, false)
+}
+
+/// [`targets_at`]; with `keep_all`, the overloads that do not fit the call's arguments stay,
+/// after the ones that do.
+fn targets(an: &Analyzer, u: UnitId, tok: usize, keep_all: bool) -> Vec<Target> {
     let file = an.file(u);
     let lx = &file.lexed;
     let src = &an.unit(u).text;
@@ -102,7 +108,7 @@ pub fn targets_at(an: &Analyzer, u: UnitId, tok: usize) -> Vec<Target> {
             return if an.has_package(&fq) { vec![Target::Package(fq)] } else { Vec::new() };
         }
         let members = an.members_named(&receiver, name, u);
-        return rank(an, u, members, call_args(tok + 1)).into_iter().map(Target::Sym).collect();
+        return rank(an, u, members, call_args(tok + 1), keep_all).into_iter().map(Target::Sym).collect();
     }
     // `Type::member`, `::function`
     if prev == Some(Tok::ColonColon) {
@@ -133,11 +139,109 @@ pub fn targets_at(an: &Analyzer, u: UnitId, tok: usize) -> Vec<Target> {
             Found::It { unit, brace } => out.push(Target::It { unit, brace }),
         }
     }
-    out.extend(rank(an, u, members, call_args(tok + 1)).into_iter().map(Target::Sym));
+    out.extend(rank(an, u, members, call_args(tok + 1), keep_all).into_iter().map(Target::Sym));
     if out.is_empty() && an.has_package(name) {
         out.push(Target::Package(name.to_owned()));
     }
     out
+}
+
+/// Help for the call the cursor is in: every overload of the callee, the one that fits the
+/// arguments first, and the parameter the cursor is at.
+pub fn signature_help(an: &Analyzer, u: UnitId, offset: usize) -> Option<Value> {
+    let file = an.file(u);
+    let lx = &file.lexed;
+    let src = &an.unit(u).text;
+    if lx.in_comment(offset) {
+        return None;
+    }
+    // The first token at or after the cursor; the call's parentheses lie before it.
+    let at = lx.tokens.partition_point(|t| t.end <= offset);
+    let open = enclosing_open_paren(lx, at)?;
+    let mut callee = open.checked_sub(1)?;
+    if lx.kind(callee) == Some(Tok::Gt) {
+        callee = super::resolve::matching_lt(lx, callee)?.checked_sub(1)?;
+    }
+    if lx.kind(callee) != Some(Tok::Ident) {
+        return None;
+    }
+    let members: Vec<Member> = targets(an, u, callee, true)
+        .into_iter()
+        .filter_map(|t| match t {
+            Target::Sym(m) if matches!(an.decl(m.sym).kind, Kind::Function | Kind::Constructor) || an.decl(m.sym).kind.is_class() => {
+                Some(m)
+            }
+            _ => None,
+        })
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    // The arguments before the cursor: the commas at depth 0 and the name of the current one.
+    let mut index = 0;
+    let mut arg_start = open + 1;
+    let mut i = open + 1;
+    while i < lx.tokens.len() && lx.tokens[i].start < offset {
+        match lx.kind(i) {
+            Some(Tok::LParen | Tok::LBracket | Tok::LBrace) => match lx.matching.get(i).copied().flatten().filter(|&c| c > i) {
+                Some(c) if lx.tokens[c].end <= offset => {
+                    i = c + 1;
+                    continue;
+                }
+                // The cursor is inside this bracket, so inside the argument.
+                _ => break,
+            },
+            Some(Tok::RParen) => return None,
+            Some(Tok::Comma) => {
+                index += 1;
+                arg_start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let named = (lx.kind(arg_start) == Some(Tok::Ident) && lx.kind(arg_start + 1) == Some(Tok::Eq)).then(|| lx.text(src, arg_start));
+    let mut signatures = Vec::new();
+    let mut active_params = Vec::new();
+    for m in &members {
+        let d = an.decl(m.sym);
+        let decls = &an.file(m.sym.unit_id()).decls;
+        let (label, shown) = signature_parts(an, m);
+        let docs = documentation(an, m.sym);
+        let mut parameters = Vec::new();
+        let mut from = label.find(&d.name).map_or(0, |p| p + d.name.len());
+        for (k, text) in shown.iter().enumerate() {
+            let Some(pos) = label[from..].find(text.as_str()) else { break };
+            let start = from + pos;
+            from = start + text.len();
+            let range = [label[..start].encode_utf16().count(), label[..from].encode_utf16().count()];
+            let mut p = json!({ "label": range });
+            let doc = d.params.get(k).and_then(|&id| docs.as_deref().and_then(|doc| parameter_doc(doc, &decls[id].name)));
+            if let Some(doc) = doc {
+                p["documentation"] = json!({ "kind": "markdown", "value": doc });
+            }
+            parameters.push(p);
+        }
+        let last_vararg = d.params.last().is_some_and(|&p| decls[p].vararg);
+        let active = match named {
+            Some(n) => d.params.iter().position(|&p| decls[p].name == n).unwrap_or(d.params.len()),
+            None if index >= d.params.len() && last_vararg => d.params.len() - 1,
+            None => index,
+        };
+        active_params.push(active);
+        let mut info = json!({ "label": label, "parameters": parameters, "activeParameter": active });
+        if let Some(doc) = docs {
+            info["documentation"] = json!({ "kind": "markdown", "value": doc });
+        }
+        signatures.push(info);
+    }
+    Some(json!({ "signatures": signatures, "activeSignature": 0, "activeParameter": active_params[0] }))
+}
+
+/// The text `@param name` gives in the KDoc Markdown `doc`.
+fn parameter_doc(doc: &str, name: &str) -> Option<String> {
+    let prefix = format!("- `{name}` ");
+    doc.lines().find_map(|l| l.strip_prefix(&prefix)).map(|d| d.trim().to_owned()).filter(|d| !d.is_empty())
 }
 
 /// The parameters named `name` of the function called with the parentheses at `open`, or the
@@ -260,7 +364,7 @@ fn enclosing_open_paren(lx: &lexer::Lexed, tok: usize) -> Option<usize> {
 }
 
 /// Orders candidates for a call by how well they fit its arguments.
-fn rank(an: &Analyzer, u: UnitId, mut members: Vec<Member>, args: Option<Vec<Arg>>) -> Vec<Member> {
+fn rank(an: &Analyzer, u: UnitId, mut members: Vec<Member>, args: Option<Vec<Arg>>, keep_all: bool) -> Vec<Member> {
     let Some(args) = args else {
         // Not a call: values before functions.
         members.sort_by_key(|m| an.decl(m.sym).kind == Kind::Function);
@@ -276,7 +380,7 @@ fn rank(an: &Analyzer, u: UnitId, mut members: Vec<Member>, args: Option<Vec<Arg
         i32::from(d.kind == Kind::Function || d.kind.is_class()) + i32::from(d.doc.is_some())
     };
     let mut ranked: Vec<(Option<i32>, Member)> = fits.into_iter().zip(members).collect();
-    if best.is_some() {
+    if best.is_some() && !keep_all {
         ranked.retain(|(f, _)| *f == best);
     }
     ranked.sort_by_key(|(f, m)| (std::cmp::Reverse(*f), std::cmp::Reverse(tiebreak(m))));
@@ -491,7 +595,13 @@ const SHOWN_MODIFIERS: &[&str] = &[
 
 /// A declaration's signature as Kotlin, with type parameters bound by `m.subst` where known.
 pub fn signature(an: &Analyzer, m: &Member) -> String {
+    signature_parts(an, m).0
+}
+
+/// [`signature`] and the text of each parameter in it, in order.
+fn signature_parts(an: &Analyzer, m: &Member) -> (String, Vec<String>) {
     let s = m.sym;
+    let shown_params = std::cell::RefCell::new(Vec::new());
     let d = an.decl(s);
     let unit = an.unit(s.unit_id());
     let src = &unit.text;
@@ -555,7 +665,9 @@ pub fn signature(an: &Analyzer, m: &Member) -> String {
                 s
             })
             .collect();
-        if list.len() > 3 { format!("(\n    {}\n)", list.join(",\n    ")) } else { format!("({})", list.join(", ")) }
+        let text = if list.len() > 3 { format!("(\n    {}\n)", list.join(",\n    ")) } else { format!("({})", list.join(", ")) };
+        *shown_params.borrow_mut() = list;
+        text
     };
     match d.kind {
         k if k.is_class() => {
@@ -636,7 +748,7 @@ pub fn signature(an: &Analyzer, m: &Member) -> String {
         }
         _ => out.push_str(&d.name),
     }
-    normalize_signature(&out)
+    (normalize_signature(&out), shown_params.into_inner())
 }
 
 fn normalize_signature(s: &str) -> String {

@@ -1014,6 +1014,11 @@ impl State {
                 let (_, tok) = at(unit);
                 Ok(tok.and_then(|t| features::hover(&an, unit, t)).unwrap_or(Value::Null))
             }
+            "textDocument/signatureHelp" => {
+                let Some(unit) = unit else { return Ok(Value::Null) };
+                let (offset, _) = at(unit);
+                Ok(features::signature_help(&an, unit, offset).unwrap_or(Value::Null))
+            }
             "textDocument/definition" | "textDocument/declaration" | "textDocument/typeDefinition" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
                 let (_, tok) = at(unit);
@@ -1121,6 +1126,7 @@ impl State {
                 "textDocumentSync": { "openClose": true, "change": 2, "save": { "includeText": false } },
                 "completionProvider": { "triggerCharacters": ["."], "resolveProvider": true },
                 "hoverProvider": true,
+                "signatureHelpProvider": { "triggerCharacters": ["(", ","], "retriggerCharacters": ["="] },
                 "definitionProvider": true,
                 "declarationProvider": true,
                 "typeDefinitionProvider": true,
