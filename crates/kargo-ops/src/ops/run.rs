@@ -267,7 +267,17 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             if crate::compose::enabled(manifest) {
                 cmd.args(crate::compose::run_jvm_args(manifest, ctx.ws.root(), &manifest.package.name, std::env::consts::OS));
             }
-            cmd.args(&jvm.jvm_args).arg("-cp").arg(join_paths(&classpath)).arg(&main);
+            cmd.args(&jvm.jvm_args);
+            let joined = join_paths(&classpath);
+            if joined.len() >= process::LONG_CLASSPATH {
+                // A long classpath would pass the limit of a command line on Windows (32,767 characters).
+                let argfile = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("run.args");
+                process::write_argfile(&argfile, &["-cp".to_owned(), process::classpath_for_argfile(&classpath)])?;
+                cmd.arg(format!("@{}", process::slash(&argfile)));
+            } else {
+                cmd.arg("-cp").arg(joined);
+            }
+            cmd.arg(&main);
             label = format!("java {main}");
             cmd
         }

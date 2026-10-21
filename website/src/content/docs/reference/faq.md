@@ -214,3 +214,7 @@ Kargo writes a new `kargo.toml`, `kargo.lock` or jar to a temporary file and the
 ### "checksum mismatch" for a locked artifact
 
 A file doesn't match the SHA-256 in `kargo.lock`. If the message says `cached`, the copy in `~/.kargo/cache` is the one that differs: it was corrupted, edited, or replaced, and Kargo won't use it. Delete the file named in the message and build again to download it afresh. If the message says the download differs, read the rest of it: if the download matches the checksum the repository publishes, the lockfile entry is the suspect and `kargo update` re-locks it. If the repository publishes no checksum, find out why the artifact changed before you re-lock. See [Checksum mismatches](../lockfile/#checksum-mismatches).
+
+### `kargo run` or `kargo test` fails to start on Windows with a very large classpath
+
+Windows rejects command lines longer than 32,767 characters. When the class path of `kargo run` or of the JVM tests reaches 8,000 characters, Kargo writes it to `run.args` or `test.args` in the target's output directory (for example `target/debug/jvm/`) and starts the JVM with `@<file>`, so projects with hundreds of jars work. With `-v` the printed command then shows the `@` file instead of the class path; the class path is inside it.

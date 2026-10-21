@@ -462,9 +462,16 @@ fn junit_command(
         .args((!colors).then_some("--disable-ansi-colors"))
         .args(opts.include_tags.iter().map(|tag| format!("--include-tag={tag}")))
         .args(opts.exclude_tags.iter().map(|tag| format!("--exclude-tag={tag}")))
-        .args(test_timeout.map(|limit| format!("--config=junit.jupiter.execution.timeout.default={} ms", limit.as_millis())))
-        .arg("--class-path")
-        .arg(join_paths(&run_cp));
+        .args(test_timeout.map(|limit| format!("--config=junit.jupiter.execution.timeout.default={} ms", limit.as_millis())));
+    let joined = join_paths(&run_cp);
+    if joined.len() >= process::LONG_CLASSPATH {
+        // A long classpath would pass the limit of a command line on Windows (32,767 characters); the launcher reads `@argfiles`.
+        let argfile = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("test.args");
+        process::write_argfile(&argfile, &["--class-path".to_owned(), process::classpath_for_argfile(&run_cp)])?;
+        cmd.arg(format!("@{}", process::slash(&argfile)));
+    } else {
+        cmd.arg("--class-path").arg(joined);
+    }
     match rerun {
         // Only the classes that failed last time: scanning the whole output would run every test again.
         Some(classes) => {
