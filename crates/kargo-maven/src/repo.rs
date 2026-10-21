@@ -151,6 +151,8 @@ pub struct MavenClient {
     snapshot_builds: Mutex<HashMap<(ModuleId, String), String>>,
     /// Every file this client served during this run, by repository-relative path (see [`MavenClient::served_files`]).
     served: Mutex<BTreeMap<String, PathBuf>>,
+    /// Hosts that could not be reached during this run; requests to them fail at once.
+    unreachable: Mutex<HashSet<String>>,
 }
 
 impl MavenClient {
@@ -172,6 +174,7 @@ impl MavenClient {
             rechecked: Mutex::new(HashSet::new()),
             snapshot_builds: Mutex::new(HashMap::new()),
             served: Mutex::new(BTreeMap::new()),
+            unreachable: Mutex::new(HashSet::new()),
         }
     }
 
@@ -419,6 +422,10 @@ impl MavenClient {
     }
 
     fn get(&self, repo: &Repository, url: &str) -> Result<Option<ureq::http::Response<ureq::Body>>> {
+        let host = host_of(url);
+        if self.unreachable.lock().expect("lock poisoned").contains(host) {
+            bail!("{}", unreachable_message(host));
+        }
         let mut attempt = 0;
         let response = loop {
             let mut request = self.agent.get(url);
@@ -426,12 +433,20 @@ impl MavenClient {
                 request = request.header("Authorization", basic_auth(creds));
             }
             let result = request.call();
-            // Rate limits, gateway hiccups and dropped connections are usually transient.
+            // Rate limits, gateway hiccups and dropped connections are usually transient; DNS, TLS and URL errors are not.
             let transient = match &result {
                 Ok(r) => retry::is_transient_status(r.status().as_u16()),
-                Err(_) => true,
+                Err(e) => retry::is_transient_error(e),
             };
             if !transient || attempt >= retry::MAX_RETRIES {
+                if let Err(e) = &result
+                    && !matches!(e, ureq::Error::BadUri(_) | ureq::Error::Http(_))
+                {
+                    self.unreachable.lock().expect("lock poisoned").insert(host.to_owned());
+                    return Err(anyhow::Error::new(result.unwrap_err()))
+                        .with_context(|| unreachable_message(host))
+                        .with_context(|| format!("failed to connect to {url}"));
+                }
                 break result.with_context(|| format!("failed to connect to {url}"))?;
             }
             let delay = result
@@ -447,6 +462,8 @@ impl MavenClient {
         match response.status().as_u16() {
             200..=299 => Ok(Some(response)),
             404 | 410 => Ok(None),
+            // Object storage answers 403 for a key that does not exist, so probes for optional files treat it as absent.
+            403 if is_optional_probe(url) => Ok(None),
             401 | 403 => bail!("access denied to {url} (HTTP {}); check repository credentials", response.status().as_u16()),
             status => bail!("unexpected HTTP {status} from {url}"),
         }
@@ -576,12 +593,17 @@ impl MavenClient {
             // module never sees it missing. A failure just means this repository doesn't know the module.
             match self.fetch_from(repo, rel, cached) {
                 Ok(Fetch::Found) => {}
+                // Only a definitive "not found" invalidates the cached copy.
                 Ok(_) => {
                     let _ = std::fs::remove_file(cached);
                 }
                 Err(e) => {
-                    let _ = std::fs::remove_file(cached);
                     self.shell.verbose("Skipping", format!("{subject} metadata from {}: {e:#}", repo.name));
+                    if let Some(age) =
+                        std::fs::metadata(cached).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok())
+                    {
+                        self.shell.warn(format!("{subject}: using cached metadata from {} ago", describe_age(age)));
+                    }
                 }
             }
         }
@@ -677,6 +699,33 @@ enum CacheCheck {
         expected: String,
         actual: String,
     },
+}
+
+/// The `host[:port]` of an `http(s)` URL.
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    authority.rsplit_once('@').map_or(authority, |(_, host)| host)
+}
+
+fn unreachable_message(host: &str) -> String {
+    format!("cannot reach {host}; run `kargo fetch` while online, or use `--offline`")
+}
+
+/// Whether `url` names a file a repository may legitimately not have: a checksum, Gradle module
+/// metadata or `maven-metadata.xml`.
+fn is_optional_probe(url: &str) -> bool {
+    [".sha1", ".module", "maven-metadata.xml"].iter().any(|suffix| url.ends_with(suffix))
+}
+
+fn describe_age(age: Duration) -> String {
+    let secs = age.as_secs();
+    match secs {
+        0..=89 => format!("{secs}s"),
+        90..=5399 => format!("{}m", secs / 60),
+        5400..=129_599 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
 }
 
 fn sanitize(name: &str) -> String {
@@ -931,5 +980,34 @@ mod tests {
         assert_eq!(Repository::new("x", "https://a/b/").url, "https://a/b");
         assert!(Repository::new("x", "file:///tmp/r").is_local());
         assert!(!Repository::maven_central().is_local());
+    }
+
+    #[test]
+    fn unreachable_hosts_are_remembered_and_stale_metadata_is_kept() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let cache = tempfile::tempdir().unwrap();
+        let config = Config::new(cache.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let client = MavenClient::new(&config, vec![Repository::new("down", format!("http://127.0.0.1:{port}/maven2"))]);
+        let module = ModuleId::new("org.example", "lib");
+        let stale = client.cache_dir().join(module.repo_dir()).join("maven-metadata-down.xml");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "<metadata><versioning><versions><version>1.0</version></versions></versioning></metadata>").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(3 * 24 * 3600);
+        std::fs::File::options().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+
+        let versions = client.versions(&module).unwrap();
+        assert_eq!(versions.len(), 1, "the stale metadata is still used");
+        assert!(stale.is_file(), "a transport error keeps the cached metadata");
+
+        let err = client.fetch("org/example/lib/1.0/lib-1.0.pom").unwrap_err();
+        assert!(format!("{err:#}").contains("cannot reach 127.0.0.1"), "{err:#}");
+    }
+
+    #[test]
+    fn optional_probes_and_hosts() {
+        assert!(is_optional_probe("https://h/a/b.jar.sha1"));
+        assert!(is_optional_probe("https://h/a/b.module"));
+        assert!(!is_optional_probe("https://h/a/b.jar"));
+        assert_eq!(host_of("https://user:pw@repo.example.com:8443/maven2/a"), "repo.example.com:8443");
     }
 }

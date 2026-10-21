@@ -12,6 +12,19 @@ pub fn is_transient_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
 }
 
+/// Whether a transport error may go away when the request is sent again: timeouts and I/O errors
+/// such as a reset or dropped connection. DNS, TLS, URL and refused-connection errors fail at once.
+pub fn is_transient_error(err: &ureq::Error) -> bool {
+    use std::io::ErrorKind::*;
+    match err {
+        ureq::Error::Timeout(_) => true,
+        ureq::Error::Io(e) => {
+            matches!(e.kind(), TimedOut | ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof | Interrupted | WouldBlock)
+        }
+        _ => false,
+    }
+}
+
 /// How long to wait before retry number `retry` (counting from 0): 250 ms, then doubling.
 pub fn backoff(retry: u32) -> Duration {
     Duration::from_millis(250 << retry)
@@ -29,6 +42,15 @@ mod tests {
         for status in [200, 301, 400, 401, 403, 404, 410, 501] {
             assert!(!is_transient_status(status), "{status}");
         }
+    }
+
+    #[test]
+    fn classifies_errors() {
+        assert!(is_transient_error(&ureq::Error::Io(std::io::ErrorKind::ConnectionReset.into())));
+        assert!(!is_transient_error(&ureq::Error::Io(std::io::ErrorKind::NotFound.into())));
+        assert!(!is_transient_error(&ureq::Error::HostNotFound));
+        assert!(!is_transient_error(&ureq::Error::ConnectionFailed));
+        assert!(!is_transient_error(&ureq::Error::BadUri("x".into())));
     }
 
     #[test]
