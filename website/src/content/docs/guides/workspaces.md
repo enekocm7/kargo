@@ -306,6 +306,14 @@ Caused by:
   could not compile `core` due to previous errors
 ```
 
+To see every broken member in one run, pass `--keep-going` (`kargo build`, `kargo check`) or `--no-fail-fast` (`kargo test`). Members that don't depend on a failed member still build, the ones that do are skipped with a note, and a summary follows with exit code 101:
+
+```console
+$ kargo build --keep-going
+note: skipped `server`: a package it depends on failed
+error: could not build 2 of 4 packages (core, web); 1 skipped; 1 succeeded
+```
+
 ### Incremental builds across members
 
 A member recompiles only when what it compiles against changes. When `core` changes, Kargo rebuilds `core`, and its JVM consumers recompile only if `core`'s **ABI** changed: its public, protected and `internal` declarations, their signatures and annotations, constants, and the bodies of `inline` functions (which the compiler copies into callers). A change to a private function, or to the body of a function that is not `inline`, rebuilds `core` and leaves `server` as it is; `server` runs the new code from `core`'s new jar.

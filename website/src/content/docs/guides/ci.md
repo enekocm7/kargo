@@ -219,7 +219,7 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 | `--vendored` | Build from a committed `vendor/` that [`kargo vendor`](../offline-and-mirrors/#vendoring-dependencies) wrote, without the public repositories |
 | `~/.kargo/config.toml` | Send downloads through your company's [mirrors and proxy](../offline-and-mirrors/) |
 | `kargo test --no-fail-fast` | Test every target and print a result per target instead of stopping at the first failure (or set [`[test] fail-fast = false`](../../reference/manifest/#test)) |
-| `kargo build --keep-going` | Build every target and report all failures, not just the first |
+| `kargo build --keep-going` | Build every target (and, in a workspace, every member whose dependencies built) and report all failures, not just the first |
 | `kargo test --report junit` | Write JUnit XML reports for the CI's test summary |
 | `[test] timeout` | Stop a hung test run and fail it, rather than waiting for the CI's own job limit. See [Timeouts](../testing/#timeouts) |
 | `kargo bench --format json` | JMH's results as JSON on stdout, for tracking performance. See [Benchmarks](#benchmarks) |

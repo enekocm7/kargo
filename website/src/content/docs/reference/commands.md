@@ -185,7 +185,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
 | `-j, --jobs <n>` | How many workspace members build at the same time (default: the number of CPUs) |
 
-[Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts, and the error names the member and the target, such as ``could not build `core` (jvm)``.
+[Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts (unless you pass `--keep-going`), and the error names the member and the target, such as ``could not build `core` (jvm)``.
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
@@ -205,6 +205,14 @@ With `--keep-going`, every failed target gets its own error and a summary follow
 $ kargo build --keep-going
 error: could not build the wasm target: ...
 error: could not build 1 of 3 targets (wasm); jvm, native succeeded
+```
+
+In a workspace, `--keep-going` also continues with the other members after one fails. Every failure is printed, members that depend on a failed member are skipped with a note, and a summary ends the run with exit code 101:
+
+```console
+$ kargo build --workspace --keep-going
+note: skipped `app`: a package it depends on failed
+error: could not build 2 of 5 packages (core, cli); 1 skipped; 2 succeeded
 ```
 
 ## `kargo check` (`c`)
@@ -311,7 +319,7 @@ kargo test [filter] [options]
 |---|---|
 | `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
-| `--no-fail-fast` | Test every target even if one fails, then print a result per target. Overrides [`[test] fail-fast`](../manifest/#test) |
+| `--no-fail-fast` | Test every target even if one fails, then print a result per target. In a workspace, also test the other members when one cannot be compiled or started. Overrides [`[test] fail-fast`](../manifest/#test) |
 | `--include-tag <tag>` | Only run JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
 | `--exclude-tag <tag>` | Skip JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
 | `--failed` | Rerun only the JVM test classes that failed in the last run. Conflicts with `--list` and `--no-run`. See [Rerunning failures](../../guides/testing/#rerunning-failures) |
