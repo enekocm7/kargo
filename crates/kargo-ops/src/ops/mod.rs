@@ -75,8 +75,9 @@ pub fn default_jobs() -> usize {
 /// Runs `f` for each package of `order` (which [`Project::dependency_order`] sorted), on up to
 /// `jobs` threads. A package starts once every package of `order` it reaches through path
 /// dependencies (with `dev`, also those of its tests) has finished; independent packages run at
-/// the same time. After a failure no new package starts, and the packages that depend on a failed
-/// one never run (their result is `None`). Results come back in the order of `order`.
+/// the same time. After a failure no new package starts, or with `keep_going` only the packages
+/// that depend on a failed one are held back; they never run (their result is `None`). Results
+/// come back in the order of `order`.
 ///
 /// [`Project::dependency_order`]: crate::workspace::Project::dependency_order
 pub fn build_graph<T: Send>(
@@ -84,6 +85,7 @@ pub fn build_graph<T: Send>(
     order: &[usize],
     dev: bool,
     jobs: usize,
+    keep_going: bool,
     f: impl Fn(usize) -> Result<T> + Sync,
 ) -> Vec<Option<Result<T>>> {
     use std::sync::{Condvar, Mutex};
@@ -105,9 +107,13 @@ pub fn build_graph<T: Send>(
     let jobs = jobs.clamp(1, order.len().max(1));
     if jobs == 1 {
         let mut out: Vec<Option<Result<T>>> = Vec::new();
-        for &package in order {
-            let failed = out.iter().any(|r| matches!(r, Some(Err(_))));
-            out.push(if failed { None } else { Some(f(package)) });
+        for (k, &package) in order.iter().enumerate() {
+            let blocked = if keep_going {
+                deps[k].iter().any(|&d| !matches!(out[d], Some(Ok(_))))
+            } else {
+                out.iter().any(|r| matches!(r, Some(Err(_))))
+            };
+            out.push(if blocked { None } else { Some(f(package)) });
         }
         return out;
     }
@@ -149,7 +155,7 @@ pub fn build_graph<T: Send>(
                     let ok = matches!(result, Ok(Ok(_)));
                     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
                     guard.0[k] = if ok { State::Done } else { State::Failed };
-                    guard.1 |= !ok;
+                    guard.1 |= !ok && !keep_going;
                     drop(guard);
                     wake.notify_all();
                     match result {
@@ -591,7 +597,7 @@ mod tests {
         let order = project.dependency_order(project.members(), false);
         for jobs in [1, 4] {
             let log = Mutex::new(Vec::new());
-            let results = build_graph(&project, &order, false, jobs, |i| {
+            let results = build_graph(&project, &order, false, jobs, false, |i| {
                 let name = project.package(i).name().to_owned();
                 log.lock().unwrap().push(format!("start {name}"));
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -611,11 +617,28 @@ mod tests {
     }
 
     #[test]
+    fn build_graph_keeps_going_past_a_failure() {
+        let (_dir, project) = project();
+        let order = project.dependency_order(project.members(), false);
+        for jobs in [1, 3] {
+            let results = build_graph(&project, &order, false, jobs, true, |i| match project.package(i).name() {
+                "a" => anyhow::bail!("a broke"),
+                name => Ok(name.to_owned()),
+            });
+            let by_name = |name: &str| &results[order.iter().position(|&i| project.package(i).name() == name).unwrap()];
+            assert!(matches!(by_name("a"), Some(Err(_))));
+            // `c` does not depend on `a`, so it still builds; `b` and `d` are skipped.
+            assert!(matches!(by_name("c"), Some(Ok(_))));
+            assert!(by_name("b").is_none() && by_name("d").is_none());
+        }
+    }
+
+    #[test]
     fn build_graph_stops_after_a_failure() {
         let (_dir, project) = project();
         let order = project.dependency_order(project.members(), false);
         for jobs in [1, 3] {
-            let results = build_graph(&project, &order, false, jobs, |i| match project.package(i).name() {
+            let results = build_graph(&project, &order, false, jobs, false, |i| match project.package(i).name() {
                 "a" => anyhow::bail!("a broke"),
                 name => Ok(name.to_owned()),
             });

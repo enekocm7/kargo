@@ -1580,40 +1580,73 @@ fn for_each_package<T>(
     Ok(results)
 }
 
+/// What [`build_packages`] does besides running the operation.
+#[derive(Clone, Copy)]
+struct Packages {
+    jobs: Option<u32>,
+    /// Order packages after the ones their tests use too.
+    dev: bool,
+    /// With `--keep-going` / `--no-fail-fast`, the verb of the summary ("build"): a failed package
+    /// no longer stops the others, only the packages that depend on it.
+    keep_going: Option<&'static str>,
+}
+
 /// Runs `op` for every selected package, sharing one lockfile and the toolchains: in dependency
 /// order, with up to `jobs` independent packages at the same time. `dev` orders packages after the
 /// ones their tests use too. The first failure (in dependency order) is returned; the others are
-/// printed.
+/// printed. With `keep_going` every failure is printed, the packages that depend on a failed one
+/// are skipped with a note, and the error is a summary of the packages.
 fn build_packages<T: Send>(
     config: &Config,
     project: &Project,
     selection: &Selection,
     global: &GlobalArgs,
     profile: ProfileKind,
-    (jobs, dev): (Option<u32>, bool),
+    packages: Packages,
     op: impl Fn(&BuildContext) -> Result<T> + Sync,
 ) -> Result<Vec<T>> {
     let selected = project.select(selection)?;
     let ctx = context(config, project, selected[0], global, profile)?;
-    let order = project.dependency_order(&selected, dev);
+    let order = project.dependency_order(&selected, packages.dev);
     for &index in &order {
         warn_manifest(config.shell(), project, project.package(index));
     }
-    let jobs = jobs.map_or_else(kargo_ops::ops::default_jobs, |j| j as usize);
-    let results = kargo_ops::ops::build_graph(project, &order, dev, jobs, |index| op(&ctx.for_package(index)));
+    let jobs = packages.jobs.map_or_else(kargo_ops::ops::default_jobs, |j| j as usize);
+    let keep_going = packages.keep_going.is_some();
+    let results = kargo_ops::ops::build_graph(project, &order, packages.dev, jobs, keep_going, |index| op(&ctx.for_package(index)));
+    let name = |k: usize| project.package(order[k]).name().to_owned();
     let mut out = Vec::new();
     let mut first_error = None;
-    for result in results.into_iter().flatten() {
+    let (mut failed, mut skipped) = (Vec::new(), Vec::new());
+    for (k, result) in results.into_iter().enumerate() {
         match result {
-            Ok(value) => out.push(value),
-            Err(e) if first_error.is_none() => first_error = Some(e),
-            Err(e) => report_error(config.shell(), &e),
+            Some(Ok(value)) => out.push(value),
+            Some(Err(e)) => {
+                failed.push(name(k));
+                if first_error.is_none() { first_error = Some(e) } else { report_error(config.shell(), &e) }
+            }
+            None if keep_going => skipped.push(name(k)),
+            None => {}
         }
     }
-    match first_error {
-        Some(e) => Err(e),
-        None => Ok(out),
+    let Some(first) = first_error else { return Ok(out) };
+    let Some(action) = packages.keep_going else { return Err(first) };
+    if failed.len() == 1 && out.is_empty() && skipped.is_empty() {
+        return Err(first);
     }
+    report_error(config.shell(), &first);
+    for package in &skipped {
+        config.shell().note(format!("skipped `{package}`: a package it depends on failed"));
+    }
+    let total = failed.len() + skipped.len() + out.len();
+    let mut summary = format!("could not {action} {} of {total} packages ({})", failed.len(), failed.join(", "));
+    if !skipped.is_empty() {
+        summary.push_str(&format!("; {} skipped", skipped.len()));
+    }
+    if !out.is_empty() {
+        summary.push_str(&format!("; {} succeeded", out.len()));
+    }
+    bail!("{summary}")
 }
 
 /// The environment of a package's tasks: its variables from `[env]` and the `.env` files, then Kargo's own.
@@ -1673,7 +1706,7 @@ fn run_tests(config: &Config, project: &Project, global: &GlobalArgs, build: &Bu
         &build.packages.selection(),
         global,
         opts.build.profile.clone(),
-        (build.jobs.or(Some(1)), true),
+        Packages { jobs: build.jobs.or(Some(1)), dev: true, keep_going: opts.no_fail_fast.then_some("test") },
         |ctx| ops::test::test(ctx, opts),
     )?;
     Ok(passed.iter().all(|ok| *ok))
@@ -1879,8 +1912,16 @@ fn import_project(
     }
     let project = Project::discover(&root, None)?;
     let opts = BuildOptions::default();
-    build_packages(config, &project, &Selection::default(), global, ProfileKind::Dev, (None, false), |ctx| ops::build::build(ctx, &opts))
-        .context("the project was imported, but `kargo build` failed; fix what it reports, or see the items above that need manual work")?;
+    build_packages(
+        config,
+        &project,
+        &Selection::default(),
+        global,
+        ProfileKind::Dev,
+        Packages { jobs: None, dev: false, keep_going: None },
+        |ctx| ops::build::build(ctx, &opts),
+    )
+    .context("the project was imported, but `kargo build` failed; fix what it reports, or see the items above that need manual work")?;
     Ok(0)
 }
 
@@ -1975,10 +2016,15 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let opts = BuildOptions { keep_going, xcframework, ..build.options() };
-            let results =
-                build_packages(config, &project, &build.packages.selection(), global, opts.profile.clone(), (build.jobs, false), |ctx| {
-                    ops::build::build(ctx, &opts)
-                });
+            let results = build_packages(
+                config,
+                &project,
+                &build.packages.selection(),
+                global,
+                opts.profile.clone(),
+                Packages { jobs: build.jobs, dev: false, keep_going: keep_going.then_some("build") },
+                |ctx| ops::build::build(ctx, &opts),
+            );
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
@@ -1992,7 +2038,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 &build.packages.selection(),
                 global,
                 opts.build.profile.clone(),
-                (build.jobs, tests),
+                Packages { jobs: build.jobs, dev: tests, keep_going: keep_going.then_some("check") },
                 |ctx| ops::check::check(ctx, &opts),
             );
             build_finished(build.message_format, results.map(|_| ()))?;
@@ -2150,7 +2196,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 &build.packages.selection(),
                 global,
                 opts.build.profile.clone(),
-                (build.jobs.or(Some(1)), true),
+                Packages { jobs: build.jobs.or(Some(1)), dev: true, keep_going: None },
                 |ctx| ops::bench::bench(ctx, &opts),
             )?;
             Ok(0)
