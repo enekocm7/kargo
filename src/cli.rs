@@ -33,7 +33,7 @@ use kargo_util::shell::{Shell, Verbosity};
 use crate::complete::{self, ShellArg};
 
 /// Exit code for build and test failures (matches Cargo).
-const FAILURE: u8 = 101;
+const FAILURE: i32 = 101;
 
 const AFTER_HELP: &str = "See all commands with `kargo --list`.\nSee `kargo help <command>` for more information on a specific command.";
 
@@ -1329,10 +1329,14 @@ fn run() -> ExitCode {
     };
     let shell = Shell::new(verbosity);
     match execute(cli, &shell) {
-        Ok(code) => ExitCode::from(code),
+        Ok(code) => match u8::try_from(code) {
+            Ok(code) => ExitCode::from(code),
+            // A program's full status (Windows exit codes are 32 bits) cannot go through `ExitCode`.
+            Err(_) => std::process::exit(code),
+        },
         Err(err) => {
             report_error(&shell, &err);
-            ExitCode::from(FAILURE)
+            ExitCode::from(FAILURE as u8)
         }
     }
 }
@@ -1526,10 +1530,6 @@ fn report_error(shell: &Shell, err: &anyhow::Error) {
     for cause in err.chain().skip(1) {
         eprintln!("\nCaused by:\n  {cause}");
     }
-}
-
-fn exit_code(code: i32) -> u8 {
-    u8::try_from(code).unwrap_or(1)
 }
 
 fn load_workspace(global: &GlobalArgs) -> Result<Workspace> {
@@ -1822,7 +1822,7 @@ fn new_options(dir: &Path, args: NewArgs) -> Result<NewOptions> {
 
 /// `kargo new` and `kargo init`: a package in `dir` (added to the members of the workspace it is
 /// in, if any), or with `--workspace` an empty workspace.
-fn create_package(shell: &Shell, dir: &Path, args: NewArgs) -> Result<u8> {
+fn create_package(shell: &Shell, dir: &Path, args: NewArgs) -> Result<i32> {
     if args.workspace {
         ops::new::create_workspace(dir, &args.kotlin, !args.no_vcs)?;
         let name = kargo_ops::workspace::dunce_canonicalize(dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1853,7 +1853,7 @@ fn import_project(
     dry_run: bool,
     no_build: bool,
     from: Option<ImportSource>,
-) -> Result<u8> {
+) -> Result<i32> {
     let shell = config.shell();
     let cwd = std::env::current_dir().context("failed to read the current directory")?;
     let root = match path {
@@ -1884,7 +1884,7 @@ fn import_project(
     Ok(0)
 }
 
-fn execute(cli: Cli, shell: &Shell) -> Result<u8> {
+fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
     let global = cli.global;
     let config =
         Config::from_env(shell.clone())?.with_offline(global.offline).with_refresh(global.refresh).with_system_gradle(global.system_gradle);
@@ -1946,7 +1946,7 @@ fn effective_url(config: &Config, repo: &kargo_maven::Repository) -> String {
     }
 }
 
-fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &Shell) -> Result<u8> {
+fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &Shell) -> Result<i32> {
     match command {
         Command::New { path, args } => {
             if path.exists() && path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(true) {
@@ -2044,7 +2044,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             };
             let Some(watch) = watch else {
                 let code = ops::run::run(&ctx, &opts)?;
-                return Ok(exit_code(code));
+                return Ok(code);
             };
             ops::run::check_watchable(&ctx, &opts)?;
             drop(ctx);
@@ -2069,7 +2069,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (None, Some(file)) => kargo_ops::script::Source::File(file.into()),
                 (None, None) => bail!("give a .kts or .kt file to run, or code with --expr"),
             };
-            Ok(exit_code(kargo_ops::script::run(config, &source, &args)?))
+            kargo_ops::script::run(config, &source, &args)
         }
         Command::Test {
             build,
@@ -2666,7 +2666,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
     }
 }
 
-fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) -> Result<u8> {
+fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) -> Result<i32> {
     // Toolchain commands also work outside a project. Packages built together share their
     // toolchains, so the first member stands for a whole workspace.
     let project = load_project(global).ok();
@@ -2743,7 +2743,7 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
     Ok(0)
 }
 
-fn target(shell: &Shell, global: &GlobalArgs, command: TargetCommand) -> Result<u8> {
+fn target(shell: &Shell, global: &GlobalArgs, command: TargetCommand) -> Result<i32> {
     let kinds = |targets: Vec<TargetArg>| targets.into_iter().map(TargetKind::from).collect::<Vec<_>>();
     match command {
         TargetCommand::Add { targets, lib, app, package } => {
@@ -3074,7 +3074,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 /// `kargo <name>`: a task from the manifest, else a `kargo-<name>` executable.
-fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u8> {
+fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<i32> {
     let (name, args) = argv.split_first().context("missing subcommand")?;
     let project = load_project(global).ok();
     if let Some(project) = &project
@@ -3097,7 +3097,7 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<u
     };
     let cwd = std::env::current_dir()?;
     let code = kargo_ops::plugins::run_subcommand(config, name, &program, args, &cwd)?;
-    Ok(exit_code(code))
+    Ok(code)
 }
 
 #[cfg(test)]

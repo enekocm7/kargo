@@ -51,7 +51,7 @@ These work with every command.
 | `-V`, `--version` | Print the version. With `-v` (`kargo -vV`) also the release and the target it was built for (`host: x86_64-unknown-linux-gnu`). When a newer release exists, a note on stderr says so, at most once a day (see [`kargo self`](#kargo-self)) |
 | `-h`, `--help` | Print help |
 
-**Exit codes:** `0` on success, `101` when a build or test fails or Kargo reports an error (as in Cargo). `kargo run` exits with your program's exit code.
+**Exit codes:** `0` on success, `101` when a build or test fails or Kargo reports an error (as in Cargo). `kargo run` exits with your program's exit code (`128 + n` when a signal `n` killed it on Linux and macOS). See [Continuous integration](../../guides/ci/).
 
 Targets are `jvm`, `wasm`, `native` and `android`.
 

@@ -318,7 +318,10 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
     match start(ctx, opts)? {
         Start::Process(launch) => {
             let status = launch.spawn(ctx.shell())?.wait().context("failed to wait for the program")?;
-            Ok(status.code().unwrap_or(1))
+            if status.code().is_none() {
+                ctx.shell().error(format!("process {}", kargo_util::process::describe_status(status)));
+            }
+            Ok(kargo_util::process::exit_code_of(status))
         }
         Start::Finished(code) => Ok(code),
     }

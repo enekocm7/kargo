@@ -474,7 +474,7 @@ fn launch(config: &Config, jdk: &Jdk, classes: &Path, classpath: &[PathBuf], mai
     cmd.args(jdk.default_run_args()).arg("-cp").arg(join_paths(&path)).arg(main).args(args);
     config.shell().verbose("Running", format!("`{main}`"));
     let status = cmd.status().with_context(|| format!("failed to start {}", jdk.java().display()))?;
-    Ok(status.code().unwrap_or(1))
+    Ok(kargo_util::process::exit_code_of(status))
 }
 
 #[cfg(test)]

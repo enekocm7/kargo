@@ -161,7 +161,7 @@ pub fn run_subcommand(config: &Config, name: &str, program: &Path, args: &[Strin
         cmd.envs(base_env(&ws, "dev"));
     }
     let status = process::status(config.shell(), &mut cmd, &format!("`kargo {name}`"))?;
-    Ok(status.code().unwrap_or(1))
+    Ok(process::exit_code_of(status))
 }
 
 #[cfg(test)]
