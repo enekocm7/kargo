@@ -53,6 +53,12 @@ Annotations complete on their own. After `@` you get annotation classes only: th
 
 To know the receiver's type, the server infers the types completion needs: literals, calls of generic functions (`listOf("a")` is a `List<String>`), lambda parameters from the function the lambda is passed to (`it` in `forEach`, `map` or `let`), lambda results (`map { it.length }` is a `List<Int>`), `for` loop variables, destructuring (`for ((key, value) in map)`), delegated properties (`by lazy { }`, `by map`, `Delegates.observable(...)`, or any delegate with a `getValue`), `if`, `when` and `try` expressions (the type their branches share), the operators (`+`, `-`, `*`, `/`, `%`, `..` and unary `-` through the `operator fun` of the left operand's type), function references and lambdas as values (`String::length`, `::foo`, `val f = { x: Int -> x }`), function-type aliases as lambda parameter types, the upper bounds of type parameters (`fun <T : CharSequence> f(x: T)`), and `object : Foo { ... }` expressions with their own members.
 
+### Implementations and hierarchies
+
+Go to implementation goes from an interface, abstract class or `open` class to the classes of your project that extend it, from a member to its overrides in them, and from an `expect` declaration to its `actual` declarations.
+
+The call hierarchy shows who calls a function or constructor of your project (found through its references, so overrides count) and which functions and constructors its body calls. The type hierarchy shows the direct supertypes of a class, library ones included, and the classes of your project that name it as a supertype. Java files are read for declarations only, so calls made from them aren't listed.
+
 ### Rename
 
 Rename works on declarations of your project: classes, functions, properties, parameters and local variables. It changes every reference in every file of the project, including imports and string templates (`"$name"`), and the declarations that must keep the same name: the `actual` declarations of an `expect` one (and the other way around), the overrides of a member and the member it overrides, and named arguments (`greet(name = "x")`) of a parameter. A name that isn't a plain identifier, such as a keyword, gets backquotes.
