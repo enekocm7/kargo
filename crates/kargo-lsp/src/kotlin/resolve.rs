@@ -549,6 +549,10 @@ impl<'a> Analyzer<'a> {
                             push(self, Member { sym: c.unit_id().sym(m), subst: Subst::new() }, &mut out);
                         }
                     }
+                    // `Color.values()`, `Color.entries`.
+                    for &g in d.synthetic.iter().filter(|&&g| file.decls[g].has("static")) {
+                        push(self, Member::plain(c.unit_id().sym(g)), &mut out);
+                    }
                     if matches!(d.kind, Kind::Object | Kind::Companion) {
                         for m in self.members(&self.instance(c), from, all) {
                             push(self, m, &mut out);
@@ -590,6 +594,10 @@ impl<'a> Analyzer<'a> {
                             continue;
                         }
                         push(self, Member { sym: c.unit_id().sym(m), subst: subst.clone() }, &mut out);
+                    }
+                    // `copy`, `component1` and the other members the compiler generates.
+                    for &g in self.decl(*c).synthetic.iter().filter(|&&g| !file.decls[g].has("static")) {
+                        push(self, Member { sym: c.unit_id().sym(g), subst: subst.clone() }, &mut out);
                     }
                 }
                 for m in self.extensions(ty, &closure, from, all) {
@@ -1097,7 +1105,7 @@ impl<'a> Analyzer<'a> {
         let has_it = lambda_params.is_some_and(|s| matches!(s.kind, ScopeKind::Lambda { it: true, .. }));
         let mut best: Option<(Member, &TypeRef, i32)> = None;
         let no_subst = Subst::new();
-        for m in members {
+        for m in members.iter().cloned() {
             let d = self.decl(m.sym);
             if d.kind != Kind::Function {
                 continue;
@@ -1124,7 +1132,17 @@ impl<'a> Analyzer<'a> {
                 best = Some((m, pty, score));
             }
         }
-        let (m, pty, _) = best?;
+        let Some((m, pty, _)) = best else {
+            // `Runnable { ... }`: the lambda is the single method of a functional interface.
+            let (class, func) = members.iter().find_map(|m| Some((m.sym, self.sam_of(m.sym)?)))?;
+            let ctx = Ctx { unit: class.unit_id(), decl: Some(class.decl_id()) };
+            let subst = Subst::new();
+            return Some(LambdaCtx {
+                receiver: None,
+                params: func.params.iter().map(|t| self.ty_of_ref(t, ctx, &subst)).collect(),
+                callee: Some(class),
+            });
+        };
         let ctx = Ctx { unit: m.sym.unit_id(), decl: Some(m.sym.decl_id()) };
         let mut subst = m.subst.clone();
         self.bind_args(&m, &mut subst, u, &call_args, true);
@@ -1149,7 +1167,15 @@ impl<'a> Analyzer<'a> {
             let sym = self.resolve_type(ctx, &tr.name)?;
             let d = self.decl(sym);
             if d.kind != Kind::TypeAlias {
-                return None;
+                // A functional interface takes a lambda for its one method (SAM conversion).
+                let func = self.sam_of(sym)?;
+                let sam_subst: Subst = d
+                    .type_params
+                    .iter()
+                    .zip(&tr.args)
+                    .filter_map(|(p, a)| Some((p.name.clone(), self.ty_of_ref(a, ctx, subst)?)))
+                    .collect();
+                return Some((func, Ctx { unit: sym.unit_id(), decl: Some(sym.decl_id()) }, sam_subst));
             }
             let alias_subst: Subst =
                 d.type_params.iter().zip(&tr.args).filter_map(|(p, a)| Some((p.name.clone(), self.ty_of_ref(a, ctx, subst)?))).collect();
@@ -1159,6 +1185,31 @@ impl<'a> Analyzer<'a> {
         })();
         self.leave();
         out
+    }
+
+    /// The function type of a functional interface (`fun interface`, or a Java interface with one
+    /// abstract method): the parameters and result of that method.
+    fn sam_of(&self, class: SymId) -> Option<syntax::FuncType> {
+        let d = self.decl(class);
+        if d.kind != Kind::Interface || !(d.has("fun") || self.unit(class.unit_id()).is_java()) {
+            return None;
+        }
+        let file = self.file(class.unit_id());
+        let mut abstracts = d.members.iter().copied().filter(|&m| {
+            let md = &file.decls[m];
+            md.kind == Kind::Function
+                && !matches!(md.name.as_str(), "equals" | "hashCode" | "toString")
+                && super::actions::is_abstract(self, class, class.unit_id().sym(m))
+        });
+        let method = &file.decls[abstracts.next()?];
+        if abstracts.next().is_some() {
+            return None;
+        }
+        Some(syntax::FuncType {
+            receiver: None,
+            params: method.params.iter().map(|&p| file.decls[p].ty.clone().unwrap_or_default()).collect(),
+            ret: method.ty.clone().unwrap_or_else(|| TypeRef::named("Unit", Vec::new())),
+        })
     }
 
     /// The function candidates of the callee whose expression ends before token `end`.
