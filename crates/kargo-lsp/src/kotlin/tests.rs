@@ -1945,3 +1945,104 @@ fn resolves_objects_in_when_branches() {
     assert!(f.hover().contains("object Idle"), "{}", f.hover());
     assert_eq!(f.definition(), Some(("Main.kt".into(), "object Idle : State".into())));
 }
+
+/// Replacing one file's entries gives the index a full build would, in the same order.
+#[test]
+fn replaces_a_file_in_the_index_like_a_rebuild() {
+    use std::collections::{BTreeMap, HashMap};
+    let unit = |path: &str, text: &str| Arc::new(Unit::new(PathBuf::from(path), text.to_owned(), Origin::Loose));
+    let a = unit("a.kt", "package p\nclass A { class Inner }\nfun List<Int>.ext() {}\n");
+    let b = unit("b.kt", "package p\nclass B\nfun top() {}\n");
+    let c = unit("c.kt", "package p\nclass A\n");
+    let mut index = Index::new(false, vec![a, b, c.clone()]);
+    let b2 = unit("b.kt", "package p\nclass B2\nclass Inner2 { class Deep }\nfun List<String>.ext() {}\n");
+    assert!(index.replace_unit(1, Arc::clone(&b2)));
+    let fresh = Index::new(false, vec![index.units[0].clone(), b2, c]);
+    let sorted = |m: &HashMap<String, Vec<super::index::SymId>>| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>();
+    assert_eq!(sorted(&index.by_fq), sorted(&fresh.by_fq));
+    assert_eq!(sorted(&index.by_name), sorted(&fresh.by_name));
+    assert_eq!(sorted(&index.by_package), sorted(&fresh.by_package));
+    assert_eq!(sorted(&index.extensions), sorted(&fresh.extensions));
+    assert_eq!(index.names, fresh.names);
+    // A new package needs a rebuild.
+    assert!(!index.replace_unit(1, unit("b.kt", "package q\nclass B\n")));
+}
+
+/// Times the operations that scale with the size of a project: building the index, replacing one
+/// file in it, looking up scopes in a large file, and searching for references. `FILES` (default
+/// 2000) sets the number of files; `KOTLIN_SOURCES`, when set, adds the extracted standard library
+/// sources and reports how much memory their text and declarations take.
+/// `cargo test -p kargo-lsp --release -- --ignored --nocapture scales_with_the_project`.
+#[test]
+#[ignore]
+fn scales_with_the_project() {
+    use std::time::Instant;
+    let files: usize = std::env::var("FILES").ok().and_then(|n| n.parse().ok()).unwrap_or(2000);
+    let source = |i: usize| {
+        let mut text = format!("package p{}\n\nclass C{i} {{\n", i % 20);
+        for m in 0..20 {
+            text.push_str(&format!("    fun m{m}(x: Int): Int {{\n        val y = x + {m}\n        return helper{}(y)\n    }}\n", i % 50));
+        }
+        text.push_str("}\n");
+        if i < 50 {
+            text.push_str(&format!("fun helper{i}(a: Int): Int = a\n"));
+        }
+        text
+    };
+    let unit = |i: usize, text: String| Arc::new(Unit::new(PathBuf::from(format!("/p/src/F{i:05}.kt")), text, Origin::Loose));
+    let t = Instant::now();
+    let units: Vec<Arc<Unit>> = (0..files).map(|i| unit(i, source(i))).collect();
+    println!("parse {files} files: {:?}", t.elapsed());
+    let t = Instant::now();
+    let mut index = Index::new(false, units.clone());
+    println!("build the index: {:?}", t.elapsed());
+    let t = Instant::now();
+    let rounds = 100;
+    for r in 0..rounds {
+        let i = (r * 7) % files;
+        assert!(index.replace_unit(i as u32, unit(i, source(i))));
+    }
+    println!("replace a file (avg of {rounds}, with the parse): {:?}", t.elapsed() / rounds as u32);
+
+    let big: String = (0..2000).map(|i| format!("fun f{i}(a: Int): Int {{\n    val b = a + {i}\n    return b\n}}\n")).collect();
+    let big = unit(0, big);
+    let t = Instant::now();
+    for offset in (0..big.text.len()).step_by(7) {
+        big.file.scope_at(offset);
+    }
+    println!("scope_at at every 7th offset of a {} line file: {:?}", big.text.lines().count(), t.elapsed());
+
+    let lib = Index::new(true, Vec::new());
+    let packages = Packages { visible: vec![vec![0]], platforms: vec![Platforms::ALL] };
+    let an = Analyzer::new(&lib, &index, &packages);
+    let helper = *index.by_name.get("helper7").and_then(|s| s.first()).expect("helper7");
+    let t = Instant::now();
+    let refs = features::references(&an, &features::rename_group(&an, helper), true);
+    println!("references of helper7: {} in {:?}", refs.len(), t.elapsed());
+
+    if let Ok(dir) = std::env::var("KOTLIN_SOURCES") {
+        let paths = kargo_util::fs::collect_files(std::path::Path::new(&dir), &["kt"]);
+        let t = Instant::now();
+        let origin = Origin::Library { name: "stdlib".into(), main: Platforms::ALL, test: Platforms::NONE };
+        let units: Vec<Arc<Unit>> =
+            paths.iter().filter_map(|p| Some(Arc::new(Unit::new(p.clone(), std::fs::read_to_string(p).ok()?, origin.clone())))).collect();
+        let text: usize = units.iter().map(|u| u.text.len()).sum();
+        let decls: usize = units.iter().map(|u| u.file.decls.len()).sum();
+        let tokens: usize = units.iter().map(|u| u.file.lexed.tokens.len()).sum();
+        println!(
+            "library: {} files, {} KiB of text, {decls} declarations, {tokens} tokens, parsed in {:?}",
+            units.len(),
+            text / 1024,
+            t.elapsed()
+        );
+        let token_kib = tokens * std::mem::size_of::<super::lexer::Token>() / 1024;
+        let decl_kib = decls * std::mem::size_of::<super::syntax::Decl>() / 1024;
+        println!("  memory: text {} KiB, tokens {token_kib} KiB, declarations {decl_kib} KiB (shallow)", text / 1024);
+        let t = Instant::now();
+        let blobs: Vec<Vec<u8>> = units.iter().map(|u| super::parsed::encode(&u.file)).collect();
+        println!("  encode: {:?}, {} KiB stored", t.elapsed(), blobs.iter().map(Vec::len).sum::<usize>() / 1024);
+        let t = Instant::now();
+        let decoded: usize = blobs.iter().filter_map(|b| super::parsed::decode(b)).map(|f| f.decls.len()).sum();
+        println!("  decode: {:?} ({decoded} declarations)", t.elapsed());
+    }
+}

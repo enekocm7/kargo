@@ -51,7 +51,9 @@ fn targets(an: &Analyzer, u: UnitId, tok: usize, keep_all: bool) -> Vec<Target> 
     let name = lx.text(src, tok);
     let plain = |s: SymId| Target::Sym(Member { sym: s, subst: Subst::new() });
     // A declaration's own name.
-    if let Some(d) = file.decls.iter().position(|d| d.name_span == t.span() && !d.name.is_empty() && d.kind != Kind::Constructor) {
+    if let Some(d) =
+        file.decls_named_at(&t.span()).iter().copied().find(|&d| !file.decls[d].name.is_empty() && file.decls[d].kind != Kind::Constructor)
+    {
         return vec![plain(u.sym(d))];
     }
     if let Some(pos) = file.package_tokens.iter().position(|&p| p == tok) {
@@ -1591,23 +1593,50 @@ fn same_parameter_types(an: &Analyzer, a: SymId, b: SymId) -> bool {
 
 /// Every place in the project that refers to one of `group`, as (unit, byte range).
 pub fn references(an: &Analyzer, group: &[SymId], include_declaration: bool) -> Vec<(UnitId, std::ops::Range<usize>)> {
-    let Some(&first) = group.first() else { return Vec::new() };
+    search(an, group, include_declaration, &Control::default()).unwrap_or_default()
+}
+
+/// What a long search tells and asks its caller.
+#[derive(Default)]
+pub struct Control<'a> {
+    /// Whether to give up; checked between identifiers.
+    pub cancelled: Option<&'a dyn Fn() -> bool>,
+    /// Called with the files searched so far and their total.
+    pub progress: Option<&'a dyn Fn(usize, usize)>,
+}
+
+/// [`references`], giving up with `None` when `control` says so.
+pub fn search(
+    an: &Analyzer,
+    group: &[SymId],
+    include_declaration: bool,
+    control: &Control,
+) -> Option<Vec<(UnitId, std::ops::Range<usize>)>> {
+    let Some(&first) = group.first() else { return Some(Vec::new()) };
     let d = an.decl(first);
     let name = d.name.clone();
     let mut out = Vec::new();
     // A function's parameters are named in calls anywhere; locals and private declarations
     // only in their file.
     let local = d.local || d.kind == Kind::Variable || d.is_private();
+    let total = an.proj.units.len();
     for (ui, unit) in an.proj.units.iter().enumerate() {
+        if control.cancelled.is_some_and(|c| c()) {
+            return None;
+        }
+        if let Some(progress) = control.progress {
+            progress(ui, total);
+        }
         let uid = UnitId { lib: false, unit: ui as u32 };
         // Java files are read for their declarations only: their uses aren't resolved.
         if unit.is_java() || (local && !first.lib && uid != first.unit_id()) {
             continue;
         }
         let lx = &unit.file.lexed;
-        for (i, t) in lx.tokens.iter().enumerate() {
-            if t.kind != Tok::Ident || lx.text(&unit.text, i) != name {
-                continue;
+        for &i in unit.ident_tokens(&name) {
+            let t = lx.tokens[i];
+            if control.cancelled.is_some_and(|c| c()) {
+                return None;
             }
             let targets = targets_at(an, uid, i);
             let hit = targets.iter().take(1).any(|t| t.sym().is_some_and(|s| group.contains(&s)))
@@ -1624,7 +1653,7 @@ pub fn references(an: &Analyzer, group: &[SymId], include_declaration: bool) -> 
             out.push((uid, t.span()));
         }
     }
-    out
+    Some(out)
 }
 
 /// A new name as Kotlin source: backquoted when it isn't a plain identifier. `None` when it

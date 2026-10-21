@@ -20,6 +20,7 @@ pub mod jdk;
 pub mod kmetadata;
 pub mod lexer;
 pub mod library;
+pub mod parsed;
 pub mod ranges;
 pub mod resolve;
 pub mod semantic;
