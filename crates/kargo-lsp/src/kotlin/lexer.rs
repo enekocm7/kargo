@@ -119,6 +119,20 @@ impl Lexed {
         })
     }
 
+    /// The operator or bracket that starts at `offset`: the tokens that can stand for an
+    /// `operator fun`.
+    pub fn operator_at(&self, offset: usize) -> Option<usize> {
+        let i = self.tokens.partition_point(|t| t.end <= offset);
+        let t = self.tokens.get(i)?;
+        (t.start <= offset && matches!(t.kind, Tok::Op | Tok::Lt | Tok::Gt | Tok::LBracket | Tok::RBracket | Tok::LParen | Tok::LBrace))
+            .then_some(i)
+    }
+
+    /// The identifier at `offset`, else the operator that starts there.
+    pub fn token_at(&self, offset: usize) -> Option<usize> {
+        self.ident_at(offset).or_else(|| self.operator_at(offset))
+    }
+
     pub fn in_comment(&self, offset: usize) -> bool {
         self.comments.iter().any(|c| c.start < offset && offset <= c.end)
     }

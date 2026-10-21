@@ -28,7 +28,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Selection | Expand the selection from an identifier to its dotted call chain, the brackets around it, the statement, the declarations around it (function, class) and the file |
 | Formatting | The whole file, formatted by ktlint with the project's `.editorconfig` and `[fmt]` settings, as `kargo fmt` does. See [Formatting](#formatting) |
 | Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
-| Diagnostics as you type | Unclosed or unmatched brackets, unterminated strings and comments, a `class`, `interface` or `typealias` without a name (errors), unused imports and local variables that are never used (warnings, shown greyed out). Decided from the file alone, so they appear between saves |
+| Diagnostics as you type | Unclosed or unmatched brackets, unterminated strings and comments, a `class`, `interface` or `typealias` without a name (errors), unused imports and local variables that are never used (warnings, shown greyed out), and [operators](#operators) that can't work. Decided from the file and the project's declarations, so they appear between saves |
 | Errors | From [check on save](../editors/#check-on-save), which is on with this server: `kargo check` runs when you save a file and its errors for every target appear in the editor |
 
 ### Inlay hints
@@ -49,6 +49,7 @@ Every kind can be switched off with `initializationOptions`, either nested (`{ "
 | `inlayHints.parameterNames` | The parameter name before a literal argument (number, character, string without templates, `true`, `false`, `null`) that is passed by position |
 | `inlayHints.implicitIt` | `it: T` after the `{` of a lambda that declares no parameters |
 | `inlayHints.implicitReceivers` | `this: T` after the `{` of a lambda with a receiver, such as `buildString { }` |
+| `inlayHints.operators` | The `operator fun` of your project that an operator calls, after the operator (`a + b` shows `plus(o: Money)`). Off by default |
 
 Only fully known types are shown, and a type is left out when the initializer already says it, as IntelliJ does.
 
@@ -90,7 +91,7 @@ Declarations marked `@PublishedApi` and the library package `kotlin.internal` ar
 
 Annotations complete on their own. After `@` you get annotation classes only: those in scope, and once you have typed a letter, the others with an `import` added. `@Rest` offers Spring Web's `RestController`, for example. Inside the parentheses of an annotation you get the arguments it takes that you haven't given yet, as `defaultValue = `. The arguments of a Java annotation are the elements of its `@interface`, and those of an annotation written in Kotlin are its constructor parameters. Hover and go to definition work on annotations on classes, functions, parameters and properties, and on their arguments.
 
-To know the receiver's type, the server infers the types completion needs: literals, calls of generic functions (`listOf("a")` is a `List<String>`), lambda parameters from the function the lambda is passed to (`it` in `forEach`, `map` or `let`), lambda results (`map { it.length }` is a `List<Int>`), `for` loop variables, destructuring (`for ((key, value) in map)`), delegated properties (`by lazy { }`, `by map`, `Delegates.observable(...)`, or any delegate with a `getValue`), `if`, `when` and `try` expressions (the type their branches share), the operators (`+`, `-`, `*`, `/`, `%`, `..` and unary `-` through the `operator fun` of the left operand's type), function references and lambdas as values (`String::length`, `::foo`, `val f = { x: Int -> x }`), function-type aliases as lambda parameter types, the upper bounds of type parameters (`fun <T : CharSequence> f(x: T)`), and `object : Foo { ... }` expressions with their own members.
+To know the receiver's type, the server infers the types completion needs: literals, calls of generic functions (`listOf("a")` is a `List<String>`), lambda parameters from the function the lambda is passed to (`it` in `forEach`, `map` or `let`), lambda results (`map { it.length }` is a `List<Int>`), `for` loop variables, destructuring (`for ((key, value) in map)`), delegated properties (`by lazy { }`, `by map`, `Delegates.observable(...)`, or any delegate with a `getValue`), `if`, `when` and `try` expressions (the type their branches share), the operators (see [Operators](#operators)), function references and lambdas as values (`String::length`, `::foo`, `val f = { x: Int -> x }`), function-type aliases as lambda parameter types, the upper bounds of type parameters (`fun <T : CharSequence> f(x: T)`), and `object : Foo { ... }` expressions with their own members.
 
 ### Newer and rarer syntax
 
@@ -105,6 +106,35 @@ The names in these places resolve, complete and navigate like the ones in an ord
 - **Scripts and file annotations.** A `.kts` file has top-level statements and the `args` array. `@file:JvmName("Name")` and `@file:JvmMultifileClass` are read, so the name of the class a file's top-level declarations are in is known.
 
 Strings and comments that are hard to read are handled as the compiler does: `"$"` and `"${'$'}"`, raw strings with templates over several lines, a backslash at the end of a line, and nested block comments. Whatever you type, the parser finishes: a test edits real sources at random and checks that it never panics or hangs.
+
+### Operators
+
+Kotlin's operators are `operator fun`s that the syntax calls, and the server follows all of them, in your code, in extensions and in the standard library and other libraries:
+
+| Syntax | Calls |
+|---|---|
+| `a + b`, `a - b`, `a * b`, `a / b`, `a % b` | `plus`, `minus`, `times`, `div`, `rem` (the deprecated `mod` when there is no `rem`) |
+| `a..b`, `a..<b` | `rangeTo`, `rangeUntil` |
+| `x in a`, `x !in a` | `a.contains(x)` |
+| `+a`, `-a`, `!a` | `unaryPlus`, `unaryMinus`, `not` |
+| `a++`, `--a` | `inc`, `dec` |
+| `a[i, j]`, `a[i] = v` | `get`, `set` |
+| `a(args)`, `a { }` | `invoke`, on a value that is no function type |
+| `a += b` | `plusAssign`, else `a = a + b` with `plus` |
+| `a < b`, `a == b` | `compareTo`, `equals` |
+| `for (x in a)` | `iterator`, then `hasNext` and `next` |
+| `val (x, y) = a` | `component1`, `component2`, ... |
+| `val x by d` | `getValue`, `setValue`, `provideDelegate` |
+
+- **Types.** The type of `a + b`, `-a`, `a[i]`, `a()`, `a++` and of the variables of a `for` loop or a destructuring comes from the function the operator calls, with the overload chosen by the type of the right operand (`a + 1` and `a + b` can differ). A member wins over an extension of the same fit.
+- **Go to definition and hover** on the operator token (`+`, `[`, `in`, `by`, ...) jump to and show the `operator fun` it calls.
+- **Find references** of an `operator fun` lists the operators that call it next to the uses by name: `a + b` for `plus`, `a[i]` for `get`, the `in` of a `for` loop for `iterator`, and the variable of `val (x, y) = a` for `component1`.
+- **Rename** of an `operator fun` is refused when syntax calls it: a new name would break `a + b`. Remove the `operator` modifier or the uses first.
+- **Completion** offers every operator function after `operator fun` and `operator fun Type.`, with a snippet for its signature (`plus(other: T): T`), including `componentN`, `plusAssign` and the other augmented assignments, `iterator`, `getValue`, `setValue` and `provideDelegate`.
+
+- **Diagnostics.** For operators on classes of your project, the server reports an error when the function an operator calls lacks the `operator` modifier, when the class has no such function, and when none takes the right operand's type. It stays quiet for library types and for classes with a supertype it doesn't know, so `kargo check` remains the authority; the editor may show both messages.
+- **Inlay hints.** With `inlayHints.operators` on, each operator that calls a function of your project shows it (see [Inlay hints](#inlay-hints)).
+- **Position.** A pointer on an operator's first character (`a[0]`, `a + b`) lands on the operator, not on the name before it, when the operator calls an `operator fun`.
 
 ### Implementations and hierarchies
 
@@ -263,7 +293,8 @@ The server reads declarations and infers types as far as completion and navigati
 - Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native, plus the Native-only declarations from the distribution's klib, which have no documentation in hover.
 - Smart casts of parameters and `val`s are followed: inside `if (x is Foo)` (and after `&&`), in the branch of `when (x) { is Foo -> }` or `when { x is Foo -> }`, and after `if (x !is Foo) return`, `x as Foo` or `require(x is Foo)`. Null checks narrow the same way (`x != null`, `if (x == null) return`, `x!!`, `x ?: return`). Smart casts of `var`s and properties are not followed.
 - Nullability is tracked: `x.` on a nullable value offers only the extensions of nullable types (`isNullOrEmpty`, `let`, ...), `x?.` offers the members of the unwrapped type, and the result of a safe call is nullable again. Types from Java count as non-null.
+- Operators are found by their syntax, with each operand's type taken from the expression around it: a long expression with infix calls or lambdas inside can leave an operator unresolved, and a `for` loop's `hasNext` and `next` are looked up on the type that `iterator()` returns. `a { }` is an `invoke` only when `a` is a value of a class type; a function-typed value is a plain call.
 - Overloads are chosen by the arguments' types (subtypes, nullability, named and default arguments, and the parameter count of lambdas); when an argument's type is unknown and several overloads fit, go to definition lists them all. A type argument is not inferred from the expected type of a call (`foo(emptyList())`), so completion may miss members of such expressions. A `when` or `try` whose branches have nothing in common but `Any` completes as `Any`.
-- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings, and no inlay hints. Semantic highlighting leaves keywords, literals and comments to the editor's own grammar. [Formatting](#formatting) is ktlint's: whole files only.
+- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings. Semantic highlighting leaves keywords, literals and comments to the editor's own grammar. [Formatting](#formatting) is ktlint's: whole files only.
 
 For the full analysis of the Kotlin compiler, use IntelliJ IDEA with the Kargo plugin, or run JetBrains' Kotlin LSP behind `kargo lsp` with `--server kotlin-lsp`. See [Choosing the Kotlin server](../editors/#choosing-the-kotlin-server).

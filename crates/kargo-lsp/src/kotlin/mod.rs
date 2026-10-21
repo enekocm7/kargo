@@ -22,6 +22,7 @@ pub mod kdoc;
 pub mod kmetadata;
 pub mod lexer;
 pub mod library;
+pub mod operators;
 pub mod parsed;
 pub mod ranges;
 pub mod rename;

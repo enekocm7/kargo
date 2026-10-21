@@ -31,7 +31,7 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn new(span: Range<usize>, severity: Severity, message: impl Into<String>) -> Self {
+    pub fn new(span: Range<usize>, severity: Severity, message: impl Into<String>) -> Self {
         Self { span, severity, message: message.into(), unnecessary: false }
     }
 

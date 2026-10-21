@@ -578,6 +578,21 @@ impl Plan {
     ) -> Result<(), String> {
         let new_text = features::new_name_text(new_name).ok_or_else(|| format!("`{new_name}` is not a valid Kotlin name"))?;
         let bare = strip_ticks(&new_text).to_owned();
+        // Syntax calls an operator function by its name, so a new name would break its uses.
+        if let Some(&first) = group.first() {
+            let d = an.decl(first);
+            if d.kind == Kind::Function && d.has("operator") && d.name != bare {
+                let uses = super::operators::operator_uses(an, group, control).ok_or_else(cancelled)?;
+                if let Some((unit, range)) = uses.first() {
+                    let example = an.unit(*unit).text[range.clone()].to_owned();
+                    return Err(format!(
+                        "`{}` is an operator function, called by `{example}` in {} place(s), so a new name would break them; remove the `operator` modifier or the uses first",
+                        d.name,
+                        uses.len()
+                    ));
+                }
+            }
+        }
         for (unit, range) in features::search(an, group, true, control).ok_or_else(cancelled)? {
             self.replace(unit, range, &new_text);
         }

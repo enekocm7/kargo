@@ -1520,8 +1520,19 @@ impl State {
     /// Pushes the diagnostics that need no resolution ([`diagnostics`]) for the open document `uri`;
     /// `kargo lsp` merges them with the check's.
     fn publish_diagnostics(&mut self, uri: &str) -> anyhow::Result<()> {
-        let Some(unit) = self.open.get(uri).and_then(|path| self.files.get(path)) else { return Ok(()) };
-        let diagnostics = diagnostics::diagnostics(&unit.text, &unit.file);
+        let Some(path) = self.open.get(uri).cloned() else { return Ok(()) };
+        let Some(unit) = self.files.get(&path).cloned() else { return Ok(()) };
+        let mut problems = diagnostics::problems(&unit.text, &unit.file);
+        // Operators need the project's declarations.
+        let (proj, ids) = self.snapshot();
+        if let Some(&id) = ids.get(&path) {
+            let lib = Arc::clone(&self.lib);
+            let packages = self.model.packages.clone();
+            let an = Analyzer::new(&lib, &proj, &packages);
+            problems.extend(super::operators::problems(&an, UnitId { lib: false, unit: id }));
+            problems.sort_by_key(|p| (p.span.start, p.span.end));
+        }
+        let diagnostics: Vec<Value> = problems.iter().map(|p| p.to_json(&unit.text)).collect();
         self.send(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics })))
     }
 
@@ -1673,7 +1684,7 @@ impl State {
         let at = |unit: UnitId| -> (usize, Option<usize>) {
             let u = an.unit(unit);
             let offset = text::offset(&u.text, &params["position"]);
-            (offset, u.file.lexed.ident_at(offset))
+            (offset, features::token_at(&an, unit, offset))
         };
         match method {
             "textDocument/completion" => {
@@ -1752,7 +1763,8 @@ impl State {
                 let Some(unit) = unit else { return Ok(Value::Null) };
                 let (_, tok) = at(unit);
                 let Some(group) = tok.and_then(|t| group_at(&an, unit, t)) else { return Ok(json!([])) };
-                let refs = features::references(&an, &group, true);
+                let mut refs = features::references(&an, &group, true);
+                refs.extend(super::operators::operator_uses(&an, &group, &features::Control::default()).unwrap_or_default());
                 let text = &an.unit(unit).text;
                 Ok(json!(
                     refs.iter()
@@ -1931,13 +1943,14 @@ fn run_search(
         .map(|u| UnitId { lib: false, unit: u });
     let Some(unit) = unit else { return Ok(Value::Null) };
     let u = an.unit(unit);
-    let tok = u.file.lexed.ident_at(text::offset(&u.text, &params["position"]));
+    let tok = features::token_at(&an, unit, text::offset(&u.text, &params["position"]));
     // The answer to a cancelled search is replaced by the cancellation error.
     let cancelled = || Failure::Invalid("the request was cancelled".into());
     if method == "textDocument/references" {
         let Some(group) = tok.and_then(|t| group_at(&an, unit, t)) else { return Ok(json!([])) };
         let include = params["context"]["includeDeclaration"] != false;
-        let refs = features::search(&an, &group, include, control).ok_or_else(cancelled)?;
+        let mut refs = features::search(&an, &group, include, control).ok_or_else(cancelled)?;
+        refs.extend(super::operators::operator_uses(&an, &group, control).ok_or_else(cancelled)?);
         return Ok(json!(refs.iter().map(|(u, r)| location(&an, *u, r.clone())).collect::<Vec<_>>()));
     }
     let found = rename::subject(&an, unit, text::offset(&u.text, &params["position"])).map_err(Failure::Invalid)?;
