@@ -168,7 +168,9 @@ The server reads declarations and infers types as far as completion and navigati
 - It reads Java but doesn't edit it. Java files get no completion, hover, rename or references of their own, and a Java declaration can't be renamed from Kotlin: the server refuses, because the Java code that uses it wouldn't change. References to a Kotlin declaration from Java code aren't searched.
 - Libraries without sources have no documentation in hover, and a type parameter with several bounds keeps only the first.
 - Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native, plus the Native-only declarations from the distribution's klib, which have no documentation in hover.
-- Smart casts (`if (x is Foo) x.`), the branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
+- Smart casts of parameters and `val`s are followed: inside `if (x is Foo)` (and after `&&`), in the branch of `when (x) { is Foo -> }` or `when { x is Foo -> }`, and after `if (x !is Foo) return`, `x as Foo` or `require(x is Foo)`. Null checks narrow the same way (`x != null`, `if (x == null) return`, `x!!`, `x ?: return`). Smart casts of `var`s and properties are not followed.
+- Nullability is tracked: `x.` on a nullable value offers only the extensions of nullable types (`isNullOrEmpty`, `let`, ...), `x?.` offers the members of the unwrapped type, and the result of a safe call is nullable again. Types from Java count as non-null.
+- The branches of `when` and `try`, and some overloads chosen by argument types are not followed, so completion may miss members of such expressions.
 - Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings, and no signature help, inlay hints or semantic highlighting. [Formatting](#formatting) is ktlint's: whole files only.
 
 For the full analysis of the Kotlin compiler, use IntelliJ IDEA with the Kargo plugin, or run JetBrains' Kotlin LSP behind `kargo lsp` with `--server kotlin-lsp`. See [Choosing the Kotlin server](../editors/#choosing-the-kotlin-server).

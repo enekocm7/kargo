@@ -1366,3 +1366,57 @@ fn annotations_against_the_real_spring_web_sources() {
     let f = fixture_with(&[("src/Main.kt", &main)], libs, None, None);
     assert!(has(&f.labels(), "defaultValue"), "{:?}", f.labels());
 }
+
+#[test]
+fn follows_smart_casts() {
+    let decls = "open class Shape\nclass Circle(val radius: Int) : Shape()\nclass Square(val side: Int) : Shape()\n";
+    let at = |body: &str| fixture(&[("src/Main.kt", &format!("{decls}{body}"))]).labels();
+    let circle = |body: &str| has(&at(body), "radius");
+
+    assert!(circle("fun f(shape: Shape) {\n    if (shape is Circle) shape.$0\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    if (shape is Circle) {\n        shape.$0\n    }\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    if (shape is Circle && shape.$0) {}\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    when (shape) {\n        is Circle -> shape.$0\n        else -> {}\n    }\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    when {\n        shape is Circle -> shape.$0\n    }\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    if (shape !is Circle) return\n    shape.$0\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    if (shape !is Circle) { println() } else shape.$0\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    shape as Circle\n    shape.$0\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    require(shape is Circle)\n    shape.$0\n}\n"));
+    assert!(circle("fun f(shape: Shape) {\n    val s = shape\n    if (s is Circle) s.$0\n}\n"));
+
+    // Outside the check, and for what the compiler does not narrow.
+    assert!(!circle("fun f(shape: Shape) {\n    if (shape is Circle) {}\n    shape.$0\n}\n"));
+    assert!(!circle("fun f(shape: Shape) {\n    if (shape !is Circle) println()\n    shape.$0\n}\n"));
+    assert!(!circle("fun f(shape: Shape) {\n    when (shape) {\n        is Square -> {}\n        else -> shape.$0\n    }\n}\n"));
+    assert!(!circle("fun f(shape: Shape) {\n    var s = shape\n    if (s is Circle) s.$0\n}\n"));
+    assert!(!circle("fun f(shape: Shape, other: Shape) {\n    if (other is Circle) shape.$0\n}\n"));
+    assert!(at("fun f(shape: Shape) {\n    when (shape) {\n        is Square -> shape.$0\n    }\n}\n").contains(&"side".to_owned()));
+}
+
+#[test]
+fn tracks_nullable_receivers() {
+    let at = |body: &str| fixture(&[("src/Main.kt", body)]).labels();
+    let length = |body: &str| has(&at(body), "length");
+
+    // `.` on a nullable value offers the extensions of nullable types only; `?.` unwraps it.
+    assert!(!length("fun f(s: String?) {\n    s.$0\n}\n"));
+    assert!(has(&at("fun f(s: String?) {\n    s.$0\n}\n"), "let"));
+    let l = at("fun f(s: String?) {\n    s.$0\n}\n");
+    assert!(has(&l, "isNullOrEmpty"), "{l:?}");
+    assert!(length("fun f(s: String?) {\n    s?.$0\n}\n"));
+    assert!(length("fun f(s: String) {\n    s.$0\n}\n"));
+    // A safe call's result is nullable again.
+    assert!(!length("fun f(s: String?) {\n    s?.trim().$0\n}\n"));
+    assert!(length("fun f(s: String?) {\n    s?.trim()?.$0\n}\n"));
+    assert!(length("fun f(s: String?) {\n    s!!.$0\n}\n"));
+
+    // Null checks narrow parameters and `val`s.
+    assert!(length("fun f(s: String?) {\n    if (s != null) s.$0\n}\n"));
+    assert!(length("fun f(s: String?) {\n    if (s != null && s.$0) {}\n}\n"));
+    assert!(length("fun f(s: String?) {\n    if (s == null) return\n    s.$0\n}\n"));
+    assert!(length("fun f(s: String?) {\n    if (s == null) println() else s.$0\n}\n"));
+    assert!(length("fun f(s: String?) {\n    s!!\n    s.$0\n}\n"));
+    assert!(length("fun f(s: String?) {\n    s ?: return\n    s.$0\n}\n"));
+    assert!(!length("fun f(s: String?) {\n    if (s != null) {}\n    s.$0\n}\n"));
+    assert!(!length("fun f(s: String?) {\n    var t = s\n    if (t != null) {}\n    t.$0\n}\n"));
+}
