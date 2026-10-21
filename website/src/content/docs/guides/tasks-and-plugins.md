@@ -64,6 +64,10 @@ gen = { run = ["mkdir -p build", "./gen.sh"], shell = "sh" }
 
 On Windows Kargo uses the `sh` from [Git for Windows](https://gitforwindows.org/), even when only `git` is on your `PATH`, or any other `sh` on `PATH` (MSYS2, Cygwin). If none is found, the task fails and tells you so. `shell = "pwsh"` works the same way for PowerShell 7, which also runs on macOS and Linux.
 
+With `pwsh` (PowerShell 7.3 or newer) a command that exits with a non-zero code stops the task, and that exit code becomes the task's, like with `sh` and `cmd`. Windows PowerShell 5.1 (`shell = "powershell"`) keeps running after a failing native command, so only cmdlet errors and the exit code of the script's last native command fail the task; use `pwsh`, or check `$LASTEXITCODE` after each command, when a step in the middle must stop the task.
+
+Arguments after `--` in `kargo task <name> -- <args>` reach the last command as written. In `cmd` a `%` in them is escaped so `%NAME%` stays literal text.
+
 **Give Windows its own commands.** When there is no shared shell, put the Windows version in `windows-run`:
 
 ```toml title="kargo.toml"
