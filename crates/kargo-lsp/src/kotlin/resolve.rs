@@ -277,8 +277,17 @@ impl<'a> Analyzer<'a> {
             if let Some(t) = subst.get(&tr.name) {
                 return Some(nullable(t.clone(), tr.nullable));
             }
-            if self.is_type_param(ctx, &tr.name) {
-                return None;
+            if let Some((owner, bound)) = self.type_param_bound(ctx, &tr.name) {
+                // A generic upper bound stands for the type parameter: `fun <T : CharSequence> f(x: T)`.
+                let bound = bound?;
+                let owner_ctx = Ctx { unit: ctx.unit, decl: Some(owner) };
+                let ty = if bound.name == tr.name || bound.args.iter().any(|a| a.name == tr.name) {
+                    // `T : Comparable<T>`: the class, without the type argument that refers back.
+                    self.instance(self.resolve_type(owner_ctx, &bound.name)?)
+                } else {
+                    self.ty_of_ref(bound, owner_ctx, subst)?
+                };
+                return Some(nullable(ty, tr.nullable));
             }
         }
         let sym = self.resolve_type(ctx, &tr.name)?;
@@ -295,17 +304,18 @@ impl<'a> Analyzer<'a> {
         Some(Ty::Class { sym, args, nullable: tr.nullable })
     }
 
-    fn is_type_param(&self, ctx: Ctx, name: &str) -> bool {
+    /// The declaration that declares the type parameter `name` visible in `ctx`, and its upper bound.
+    fn type_param_bound(&self, ctx: Ctx, name: &str) -> Option<(DeclId, Option<&'a TypeRef>)> {
         let file = self.file(ctx.unit);
         let mut d = ctx.decl;
         while let Some(id) = d {
             let decl = &file.decls[id];
-            if decl.type_params.iter().any(|t| t.name == name) {
-                return true;
+            if let Some(t) = decl.type_params.iter().find(|t| t.name == name) {
+                return Some((id, t.bound.as_ref()));
             }
             d = decl.parent;
         }
-        false
+        None
     }
 
     /// The class (or type alias) a type name denotes in `ctx`.
@@ -768,7 +778,11 @@ impl<'a> Analyzer<'a> {
                             let brace = (start + 1..start + 6).find(|&i| lx.kind(i) == Some(Tok::LBrace))?;
                             return self.lambda_result(u, brace);
                         }
-                        None
+                        // `by map`, `by Delegates.observable(...)`, a custom delegate: its `getValue`.
+                        let delegate = self.infer(u, start, syntax::expr_end(src, lx, start, lx.tokens.len()))?;
+                        let m =
+                            self.members_named(&delegate, "getValue", u).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function)?;
+                        self.value_ty(m.sym, &m.subst)
                     }
                     InitKind::Iterated => {
                         let start = d.init?;
@@ -990,13 +1004,17 @@ impl<'a> Analyzer<'a> {
     /// The type of `this` at `offset`, optionally `this@label`.
     pub fn this_ty(&self, u: UnitId, offset: usize, label: Option<&str>) -> Option<Ty> {
         let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
         for sid in file.scope_chain(offset) {
             match file.scopes[sid].kind {
                 ScopeKind::Lambda { brace, .. } => {
                     let Some(ctx) = self.lambda_ctx(u, brace) else { continue };
                     let Some(receiver) = ctx.receiver else { continue };
                     let callee = ctx.callee.map(|c| self.decl(c).name.as_str());
-                    if label.is_none() || label == callee {
+                    // `this@name`: the callee's name, or the label written before the lambda.
+                    let own = brace.checked_sub(1).filter(|&p| lx.kind(p) == Some(Tok::Label)).map(|p| lx.text(src, p));
+                    if label.is_none() || label == callee || label == own {
                         return Some(receiver);
                     }
                 }
@@ -1011,9 +1029,9 @@ impl<'a> Analyzer<'a> {
                 ScopeKind::Class(cd) => {
                     let d = &file.decls[cd];
                     if d.name.is_empty() {
-                        // An anonymous object: its supertype.
-                        if let Some(st) = d.supertypes.first() {
-                            return self.ty_of_ref(st, Ctx { unit: u, decl: Some(cd) }, &Subst::new());
+                        // An anonymous object: its supertype's members and its own.
+                        if label.is_none() && !d.supertypes.is_empty() {
+                            return Some(self.instance(u.sym(cd)));
                         }
                         continue;
                     }
@@ -1078,6 +1096,7 @@ impl<'a> Analyzer<'a> {
             lambda_params.map_or(0, |s| s.decls.iter().filter(|&&d| matches!(file.decls[d].init_kind, InitKind::LambdaParam(_))).count());
         let has_it = lambda_params.is_some_and(|s| matches!(s.kind, ScopeKind::Lambda { it: true, .. }));
         let mut best: Option<(Member, &TypeRef, i32)> = None;
+        let no_subst = Subst::new();
         for m in members {
             let d = self.decl(m.sym);
             if d.kind != Kind::Function {
@@ -1091,7 +1110,8 @@ impl<'a> Analyzer<'a> {
             };
             let Some(&param) = param else { continue };
             let Some(pty) = fparams[param].ty.as_ref() else { continue };
-            let Some(func) = &pty.func else { continue };
+            let mctx = Ctx { unit: m.sym.unit_id(), decl: Some(m.sym.decl_id()) };
+            let Some((func, _, _)) = self.func_of(pty, mctx, &no_subst) else { continue };
             let arity = func.params.len();
             let mut score = 0;
             if has_it && (arity == 1 || (arity == 0 && func.receiver.is_some())) || !has_it && arity == explicit {
@@ -1108,12 +1128,37 @@ impl<'a> Analyzer<'a> {
         let ctx = Ctx { unit: m.sym.unit_id(), decl: Some(m.sym.decl_id()) };
         let mut subst = m.subst.clone();
         self.bind_args(&m, &mut subst, u, &call_args, true);
-        let func = pty.func.as_ref()?;
+        let (func, ctx, subst) = self.func_of(pty, ctx, &subst)?;
         Some(LambdaCtx {
             receiver: func.receiver.as_ref().and_then(|r| self.ty_of_ref(r, ctx, &subst)),
             params: func.params.iter().map(|t| self.ty_of_ref(t, ctx, &subst)).collect(),
             callee: Some(m.sym),
         })
+    }
+
+    /// The function type that `tr` denotes in `ctx`: written out, or behind a type alias
+    /// (`typealias Handler = (Event) -> Unit`), with the context and type arguments to read it in.
+    fn func_of(&self, tr: &TypeRef, ctx: Ctx, subst: &Subst) -> Option<(syntax::FuncType, Ctx, Subst)> {
+        if let Some(f) = &tr.func {
+            return Some(((**f).clone(), ctx, subst.clone()));
+        }
+        if tr.name.is_empty() || !self.enter() {
+            return None;
+        }
+        let out = (|| {
+            let sym = self.resolve_type(ctx, &tr.name)?;
+            let d = self.decl(sym);
+            if d.kind != Kind::TypeAlias {
+                return None;
+            }
+            let alias_subst: Subst =
+                d.type_params.iter().zip(&tr.args).filter_map(|(p, a)| Some((p.name.clone(), self.ty_of_ref(a, ctx, subst)?))).collect();
+            let alias_ctx = Ctx { unit: sym.unit_id(), decl: Some(sym.decl_id()) };
+            let target = d.ty.as_ref()?;
+            self.func_of(target, alias_ctx, &alias_subst)
+        })();
+        self.leave();
+        out
     }
 
     /// The function candidates of the callee whose expression ends before token `end`.
@@ -1297,6 +1342,11 @@ impl<'a> Analyzer<'a> {
         let lx = &file.lexed;
         let src = &self.unit(u).text;
         let b = b.min(lx.tokens.len());
+        // An `if` runs to the end of the expression, and `when` and `try` hold their branches in
+        // blocks: what follows their conditions is no operand.
+        if ["if", "when", "try"].iter().any(|w| lx.is(src, a, w)) {
+            return self.chain(u, a, b);
+        }
         // Binary operators outside brackets, by precedence.
         let mut ops: Vec<(usize, &str)> = Vec::new();
         let mut k = a;
@@ -1344,9 +1394,14 @@ impl<'a> Analyzer<'a> {
             self.bind_args(&m, &mut subst, u, &[Arg { start: i + 1, end: b, name: None, lambda: false, trailing: false }], false);
             return self.value_ty(m.sym, &subst);
         }
-        if let Some((i, _)) = find(&["..", "..<"]) {
+        if let Some((i, op)) = find(&["..", "..<"]) {
             let left = self.infer(u, a, i)?;
-            let range = match self.class_fq(&left).as_deref() {
+            let fq = self.class_fq(&left);
+            if fq.as_deref().is_some_and(|fq| !fq.starts_with("kotlin.")) {
+                // `operator fun rangeTo` of a custom type.
+                return self.operator_ty(u, &left, op, i + 1, b);
+            }
+            let range = match fq.as_deref() {
                 Some("kotlin.Long") => "kotlin.ranges.LongRange",
                 Some("kotlin.Char") => "kotlin.ranges.CharRange",
                 Some("kotlin.UInt") => "kotlin.ranges.UIntRange",
@@ -1355,9 +1410,12 @@ impl<'a> Analyzer<'a> {
             };
             return self.std_ty(range);
         }
-        if let Some((i, _)) = find(&["+", "-", "*", "/", "%"]) {
-            let left = self.infer(u, a, i);
-            return left.or_else(|| self.infer(u, i + 1, b));
+        // Left to right: the last operator of the lowest precedence ends the left operand.
+        let last = |set: &[&str]| ops.iter().rev().find(|(_, o)| set.contains(o)).map(|(i, o)| (*i, *o));
+        if let Some((i, op)) = last(&["+", "-"]).or_else(|| last(&["*", "/", "%"])) {
+            let Some(left) = self.infer(u, a, i) else { return self.infer(u, i + 1, b) };
+            // The operator function of the left operand; its type when there is none.
+            return Some(self.operator_ty(u, &left, op, i + 1, b).unwrap_or(left));
         }
         if let Some((i, _)) = find(&["as"]) {
             let mut t = i + 1;
@@ -1375,10 +1433,129 @@ impl<'a> Analyzer<'a> {
         if lx.kind(a) == Some(Tok::Op) {
             return match &src[lx.tokens[a].span()] {
                 "!" => boolean(),
+                op @ ("-" | "+") => {
+                    let operand = self.infer(u, a + 1, b)?;
+                    let name = if op == "-" { "unaryMinus" } else { "unaryPlus" };
+                    let m = self.members_named(&operand, name, u).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function);
+                    Some(m.and_then(|m| self.value_ty(m.sym, &m.subst)).unwrap_or(operand))
+                }
                 _ => self.infer(u, a + 1, b),
             };
         }
         self.chain(u, a, b)
+    }
+
+    /// What `left op right` is through the operator function `op` stands for (`plus`, `rangeTo`,
+    /// ...) of `left`, choosing the overload that takes the right operand's type. `right` is the
+    /// expression in tokens `from..to`.
+    fn operator_ty(&self, u: UnitId, left: &Ty, op: &str, from: usize, to: usize) -> Option<Ty> {
+        let name = match op {
+            "+" => "plus",
+            "-" => "minus",
+            "*" => "times",
+            "/" => "div",
+            "%" => "rem",
+            ".." => "rangeTo",
+            "..<" => "rangeUntil",
+            _ => return None,
+        };
+        let candidates: Vec<Member> =
+            self.members_named(left, name, u).into_iter().filter(|m| self.decl(m.sym).kind == Kind::Function).collect();
+        let right = self.infer(u, from, to);
+        let takes = |m: &Member, right: &Ty| {
+            let d = self.decl(m.sym);
+            let ctx = Ctx { unit: m.sym.unit_id(), decl: Some(m.sym.decl_id()) };
+            let param = d.params.first().and_then(|&p| self.file(m.sym.unit_id()).decls[p].ty.as_ref());
+            let ty = param.and_then(|t| self.ty_of_ref(t, ctx, &m.subst));
+            matches!((ty.as_ref().and_then(|t| self.class_fq(t)), self.class_fq(right)), (Some(p), Some(r)) if p == r)
+        };
+        let chosen = right.as_ref().and_then(|r| candidates.iter().find(|m| takes(m, r))).or(candidates.first())?;
+        let mut subst = chosen.subst.clone();
+        self.bind_args(chosen, &mut subst, u, &[Arg { start: from, end: to, name: None, lambda: false, trailing: false }], false);
+        self.value_ty(chosen.sym, &subst)
+    }
+
+    /// The type that values of all of `tys` have in common: the class itself when they agree,
+    /// else the first supertype they share.
+    fn common_supertype(&self, tys: Vec<Ty>) -> Option<Ty> {
+        let mut it = tys.into_iter();
+        let mut acc = it.next()?;
+        for t in it {
+            acc = self.join(acc, t);
+        }
+        Some(acc)
+    }
+
+    fn join(&self, a: Ty, b: Ty) -> Ty {
+        let (Ty::Class { sym: sa, args: aa, nullable: na }, Ty::Class { sym: sb, args: ab, nullable: nb }) = (&a, &b) else {
+            return a;
+        };
+        let nullable = *na || *nb;
+        if sa == sb {
+            let args = aa.iter().zip(ab).map(|(x, y)| if x == y { x.clone() } else { None }).collect();
+            return Ty::Class { sym: *sa, args, nullable };
+        }
+        let other: HashSet<String> = self.closure(&b).into_iter().map(|(c, _)| self.fq(c)).collect();
+        for (c, subst) in self.closure(&a) {
+            if other.contains(&self.fq(c)) {
+                let args = self.decl(c).type_params.iter().map(|p| subst.get(&p.name).cloned()).collect();
+                return Ty::Class { sym: c, args, nullable };
+            }
+        }
+        a
+    }
+
+    /// The type of a branch of `if` or `when`: a block's last expression, or an expression in
+    /// tokens `start..end`.
+    fn branch_ty(&self, u: UnitId, start: usize, end: usize) -> Option<Ty> {
+        if self.file(u).lexed.kind(start) == Some(Tok::LBrace) { self.block_result(u, start) } else { self.infer(u, start, end) }
+    }
+
+    /// The type of a callable reference to `m` (`::foo`, `String::length`, `obj::method`): a
+    /// function type, taking `unbound` first when it is the receiver the reference leaves open.
+    fn callable_ref(&self, m: &Member, unbound: Option<Ty>) -> Option<Ty> {
+        let d = self.decl(m.sym);
+        let u = m.sym.unit_id();
+        let ctx = Ctx { unit: u, decl: Some(m.sym.decl_id()) };
+        let decls = &self.file(u).decls;
+        let mut params: Vec<Option<Ty>> = unbound.into_iter().map(Some).collect();
+        let ret = match d.kind {
+            Kind::Function | Kind::Constructor => {
+                params.extend(d.params.iter().map(|&p| decls[p].ty.as_ref().and_then(|t| self.ty_of_ref(t, ctx, &m.subst))));
+                self.value_ty(m.sym, &m.subst)
+            }
+            k if k.is_class() && k != Kind::Object && k != Kind::Companion => {
+                params.extend(d.params.iter().map(|&p| decls[p].ty.as_ref().and_then(|t| self.ty_of_ref(t, ctx, &m.subst))));
+                Some(self.instance(m.sym))
+            }
+            k if k.is_value() => self.value_ty(m.sym, &m.subst),
+            _ => return None,
+        };
+        Some(Ty::Func { receiver: None, params, ret: ret.map(Box::new) })
+    }
+
+    /// The type of the lambda literal whose `{` is token `brace`, as a value.
+    fn lambda_value(&self, u: UnitId, brace: usize) -> Option<Ty> {
+        let file = self.file(u);
+        let scope = file.scopes.iter().find(|s| matches!(s.kind, ScopeKind::Lambda { brace: b, .. } if b == brace))?;
+        let ctx = Ctx { unit: u, decl: self.decl_containing(u, file.lexed.tokens[brace].start) };
+        let mut written: Vec<(usize, Option<Ty>)> = scope
+            .decls
+            .iter()
+            .filter_map(|&d| match file.decls[d].init_kind {
+                InitKind::LambdaParam(n) | InitKind::LambdaComponent(n, _) => {
+                    Some((n, file.decls[d].ty.as_ref().and_then(|t| self.ty_of_ref(t, ctx, &Subst::new()))))
+                }
+                _ => None,
+            })
+            .collect();
+        written.sort_by_key(|(n, _)| *n);
+        written.dedup_by_key(|(n, _)| *n);
+        let mut params: Vec<Option<Ty>> = written.into_iter().map(|(_, t)| t).collect();
+        if matches!(scope.kind, ScopeKind::Lambda { it: true, .. }) {
+            params = vec![None];
+        }
+        Some(Ty::Func { receiver: None, params, ret: self.lambda_result(u, brace).map(Box::new) })
     }
 
     /// The innermost non-local declaration around `offset`, for resolving type names.
@@ -1403,6 +1580,7 @@ impl<'a> Analyzer<'a> {
     fn chain(&self, u: UnitId, a: usize, b: usize) -> Option<Ty> {
         let file = self.file(u);
         let lx = &file.lexed;
+        let src = &self.unit(u).text;
         let (mut cur, mut i) = self.primary(u, a, b)?;
         while i < b {
             match lx.kind(i)? {
@@ -1418,6 +1596,20 @@ impl<'a> Analyzer<'a> {
                 Tok::BangBang => {
                     cur = strip_nullable(cur);
                     i += 1;
+                }
+                Tok::ColonColon => {
+                    // `String::length` leaves the receiver open; `value::method` binds it.
+                    if lx.kind(i + 1) != Some(Tok::Ident) || i + 1 >= b || lx.is(src, i + 1, "class") {
+                        return None;
+                    }
+                    let name = lx.text(src, i + 1);
+                    let (owner, unbound) = match &cur {
+                        Ty::Static(s) => (self.instance(*s), true),
+                        other => (other.clone(), false),
+                    };
+                    let m = self.members_named(&owner, name, u).into_iter().next()?;
+                    cur = self.callable_ref(&m, unbound.then_some(owner))?;
+                    i += 2;
                 }
                 Tok::LParen => {
                     let next = lx.matching[i].filter(|&c| c > i).map_or(b, |c| c + 1);
@@ -1465,6 +1657,15 @@ impl<'a> Analyzer<'a> {
                 Some((self.std_ty(fq)?, i + 1))
             }
             Tok::Char => Some((self.std_ty("kotlin.Char")?, i + 1)),
+            Tok::LBrace => Some((self.lambda_value(u, i)?, after(i))),
+            Tok::ColonColon => {
+                if lx.kind(i + 1) != Some(Tok::Ident) || i + 1 >= b {
+                    return None;
+                }
+                let found = self.resolve_name(u, lx.tokens[i + 1].start, lx.text(src, i + 1));
+                let m = found.iter().find_map(|f| if let Found::Sym(m) = f { Some(m) } else { None })?;
+                Some((self.callable_ref(m, None)?, i + 2))
+            }
             Tok::LParen => {
                 let close = lx.matching[i].filter(|&c| c > i)?;
                 Some((self.infer(u, i + 1, close)?, close + 1))
@@ -1490,8 +1691,8 @@ impl<'a> Analyzer<'a> {
                         let lp = i + 1;
                         let close = lx.matching.get(lp).copied().flatten()?;
                         let branch = close + 1;
-                        let ty = if lx.kind(branch) == Some(Tok::LBrace) {
-                            self.block_result(u, branch)
+                        let (then_ty, after) = if lx.kind(branch) == Some(Tok::LBrace) {
+                            (self.block_result(u, branch), lx.matching[branch].filter(|&c| c > branch).map_or(b, |c| c + 1))
                         } else {
                             // The branch ends at its `else`.
                             let end = syntax::expr_end(src, lx, branch, b);
@@ -1504,16 +1705,93 @@ impl<'a> Analyzer<'a> {
                                     _ => k + 1,
                                 };
                             }
-                            self.infer(u, branch, k.min(end))
+                            (self.infer(u, branch, k.min(end)), k.min(end))
                         };
-                        Some((ty?, b))
+                        let mut tys = vec![then_ty];
+                        if lx.is(src, after, "else") {
+                            let e = after + 1;
+                            tys.push(self.branch_ty(u, e, syntax::expr_end(src, lx, e, b)));
+                        }
+                        Some((self.common_supertype(tys.into_iter().flatten().collect())?, b))
+                    }
+                    "when" => {
+                        let mut brace = i + 1;
+                        if lx.kind(brace) == Some(Tok::LParen) {
+                            brace = lx.matching[brace].filter(|&c| c > brace)? + 1;
+                        }
+                        if lx.kind(brace) != Some(Tok::LBrace) {
+                            return None;
+                        }
+                        let end = lx.matching[brace].filter(|&c| c > brace)?;
+                        let mut tys = Vec::new();
+                        let mut j = brace + 1;
+                        while j < end {
+                            // A branch: conditions, `->`, then a block or an expression.
+                            let mut a = j;
+                            while a < end && lx.kind(a) != Some(Tok::Arrow) {
+                                a = match lx.kind(a) {
+                                    Some(Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen) => {
+                                        lx.matching[a].filter(|&c| c > a).map_or(end, |c| c + 1)
+                                    }
+                                    _ => a + 1,
+                                };
+                            }
+                            if a >= end {
+                                break;
+                            }
+                            let body = a + 1;
+                            let body_end = if lx.kind(body) == Some(Tok::LBrace) {
+                                lx.matching[body].filter(|&c| c > body).map_or(end, |c| c + 1)
+                            } else {
+                                // The expression stops where the next branch, `else ->`, starts.
+                                let stop = syntax::expr_end(src, lx, body, end);
+                                let mut k = body;
+                                while k < stop && !(lx.is(src, k, "else") && lx.kind(k + 1) == Some(Tok::Arrow)) {
+                                    k = match lx.kind(k) {
+                                        Some(Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen) => {
+                                            lx.matching[k].filter(|&c| c > k).map_or(stop, |c| c + 1)
+                                        }
+                                        _ => k + 1,
+                                    };
+                                }
+                                k.min(stop)
+                            };
+                            tys.extend(self.branch_ty(u, body, body_end));
+                            j = body_end.max(a + 1);
+                            if lx.kind(j) == Some(Tok::Semi) {
+                                j += 1;
+                            }
+                        }
+                        Some((self.common_supertype(tys)?, end + 1))
+                    }
+                    "try" => {
+                        let block = i + 1;
+                        if lx.kind(block) != Some(Tok::LBrace) {
+                            return None;
+                        }
+                        let mut k = lx.matching[block].filter(|&c| c > block)? + 1;
+                        let mut tys = vec![self.block_result(u, block)];
+                        loop {
+                            if lx.is(src, k, "catch") && lx.kind(k + 1) == Some(Tok::LParen) {
+                                let brace = lx.matching[k + 1].filter(|&c| c > k + 1).map_or(b, |c| c + 1);
+                                if lx.kind(brace) != Some(Tok::LBrace) {
+                                    break;
+                                }
+                                tys.push(self.block_result(u, brace));
+                                k = lx.matching[brace].filter(|&c| c > brace).map_or(b, |c| c + 1);
+                            } else if lx.is(src, k, "finally") && lx.kind(k + 1) == Some(Tok::LBrace) {
+                                k = lx.matching[k + 1].filter(|&c| c > k + 1).map_or(b, |c| c + 1);
+                                break;
+                            } else {
+                                break;
+                            }
+                        }
+                        Some((self.common_supertype(tys.into_iter().flatten().collect())?, k))
                     }
                     "object" => {
                         let d = file.decls.iter().position(|d| d.kind == Kind::Object && d.name.is_empty() && d.name_span == t.span())?;
-                        let st = file.decls[d].supertypes.first()?;
-                        let ty = self.ty_of_ref(st, Ctx { unit: u, decl: Some(d) }, &Subst::new())?;
                         let next = file.decls[d].body.map(|s| file.scopes[s].range.end).map_or(b, |end| lx.at_or_after(end));
-                        Some((ty, next))
+                        Some((self.instance(u.sym(d)), next))
                     }
                     _ if HARD_KEYWORDS.contains(&word) => None,
                     _ => self.name_ref(u, i, b),
@@ -2099,6 +2377,16 @@ pub fn chain_start(src: &str, lx: &Lexed, end: usize) -> usize {
                             i = o - 1;
                         } else {
                             return o;
+                        }
+                    }
+                    // `when (x) { ... }.foo`: the `when` starts the chain.
+                    if lx.tokens[t].kind == Tok::RBrace {
+                        let mut h = o;
+                        if h > 0 && lx.kind(h - 1) == Some(Tok::RParen) {
+                            h = lx.matching[h - 1].filter(|&c| c < h - 1).unwrap_or(h);
+                        }
+                        if h > 0 && lx.is(src, h - 1, "when") {
+                            return h - 1;
                         }
                     }
                     continue;
