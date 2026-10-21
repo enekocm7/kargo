@@ -1967,6 +1967,7 @@ fn override_completion(c: &mut Collector, class: DeclId, typed_override: bool, o
     let from = src[..offset].rfind('\n').map_or(0, |i| i + 1);
     let indent: String = src[from..offset].chars().take_while(|ch| ch.is_whitespace()).collect();
     let keyword = if typed_override { "" } else { "override " };
+    let delegated = super::actions::delegated_owners(an, class_sym);
     for (owner, subst) in an.closure(&an.instance(class_sym)) {
         if owner == class_sym {
             continue;
@@ -2008,6 +2009,8 @@ fn override_completion(c: &mut Collector, class: DeclId, typed_override: bool, o
             };
             let name = escape_name(&md.name);
             let inner = format!("{indent}    ");
+            // A member of what the class delegates: already implemented, by the delegate.
+            let forward = delegated.get(&owner).filter(|d| d.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '.')).cloned();
             let (stub, detail, kind);
             if md.kind == Kind::Function {
                 let params: Vec<String> = md
@@ -2040,7 +2043,10 @@ fn override_completion(c: &mut Collector, class: DeclId, typed_override: bool, o
                     _ => String::new(),
                 };
                 let header = format!("{keyword}fun {tparams}{name}({}){ret_text}", params.join(", "));
-                let body = if abstract_ {
+                let body = if let Some(to) = &forward {
+                    let call = format!("{to}.{name}({})", args.join(", "));
+                    if unit_ret { call } else { format!("return {call}") }
+                } else if abstract_ {
                     "TODO(\"Not yet implemented\")".to_owned()
                 } else if unit_ret {
                     format!("super.{name}({})", args.join(", "))
@@ -2054,7 +2060,13 @@ fn override_completion(c: &mut Collector, class: DeclId, typed_override: bool, o
                 let ty = md.ty.as_ref().map(show).or_else(|| an.value_ty(owner.unit_id().sym(m), &subst).map(|t| display_ty(an, &t)));
                 let ty_text = ty.map(|t| format!(": {t}")).unwrap_or_default();
                 let word = if md.mutable { "var" } else { "val" };
-                let value = if abstract_ { "TODO(\"Not yet implemented\")".to_owned() } else { format!("super.{name}") };
+                let value = if let Some(to) = &forward {
+                    format!("{to}.{name}")
+                } else if abstract_ {
+                    "TODO(\"Not yet implemented\")".to_owned()
+                } else {
+                    format!("super.{name}")
+                };
                 let head = format!("{keyword}{word} {name}{ty_text}");
                 stub = if md.mutable { format!("{head} = {value}") } else { format!("{head}\n{inner}get() = {value}") };
                 detail = head;
@@ -2064,7 +2076,10 @@ fn override_completion(c: &mut Collector, class: DeclId, typed_override: bool, o
                 "label": md.name,
                 "kind": kind,
                 "detail": detail,
-                "labelDetails": { "description": format!("override from {}", od.name) },
+                "labelDetails": { "description": match delegated.get(&owner) {
+                    Some(to) => format!("implemented by delegation to {to}"),
+                    None => format!("override from {}", od.name),
+                } },
                 "sortText": format!("{}{}", Group::Local as u8, md.name),
                 "filterText": md.name,
                 "textEdit": { "range": c.range, "newText": stub },

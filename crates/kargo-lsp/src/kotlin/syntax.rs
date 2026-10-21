@@ -174,6 +174,9 @@ pub struct Decl {
     /// `n`th component of a destructuring declaration.
     pub init_kind: InitKind,
     pub supertypes: Vec<TypeRef>,
+    /// The supertypes a class delegates (`Iface by b`): the index into `supertypes` and the
+    /// span of the delegate expression.
+    pub delegated: Vec<(usize, Range<usize>)>,
     /// Members of a class: nested declarations, enum entries, `val`/`var` constructor parameters.
     pub members: Vec<DeclId>,
     pub parent: Option<DeclId>,
@@ -235,6 +238,7 @@ impl Decl {
             init: None,
             init_kind: InitKind::Value,
             supertypes: Vec::new(),
+            delegated: Vec::new(),
             members: Vec::new(),
             parent: None,
             local: false,
@@ -1096,8 +1100,20 @@ impl Parser<'_> {
                 if self.is(k, "by") {
                     k += 1;
                     let delegate = k;
-                    // `by lazy { ... }`: a lambda on the same line is part of the delegate.
+                    // `by lazy { ... }`: a lambda on the same line is part of the delegate; after a plain
+                    // name (`by b {`), the brace is the class body.
                     while k < end && !matches!(self.kind(k), Some(Tok::Comma) | None) && !self.is(k, "where") {
+                        if self.kind(k) == Some(Tok::LBrace)
+                            && k > delegate
+                            && self.kind(k - 1) == Some(Tok::Ident)
+                            && !self.is(k - 1, "lazy")
+                            && self.close(k).is_none_or(|c| self.kind(c + 1) != Some(Tok::LBrace))
+                        {
+                            break;
+                        }
+                        if self.kind(k) == Some(Tok::LBrace) && k == delegate {
+                            break;
+                        }
                         k = if matches!(self.kind(k), Some(Tok::LParen | Tok::LBracket | Tok::LBrace)) {
                             self.after_group(k, end)
                         } else {
@@ -1108,6 +1124,9 @@ impl Parser<'_> {
                         }
                     }
                     self.statements(delegate, k, class_scope, Owner::Local);
+                    let span = self.start(delegate)..self.end_before(k).max(self.start(delegate));
+                    let index = self.decls[id].supertypes.len() - 1;
+                    self.decls[id].delegated.push((index, span));
                 }
                 j = k;
                 if self.kind(j) == Some(Tok::Comma) {

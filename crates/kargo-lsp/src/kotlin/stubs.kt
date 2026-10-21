@@ -227,6 +227,10 @@ public infix fun <A, B> A.to(that: B): Pair<A, B> = Pair(this, that)
 
 /** Creates a new instance of the [Lazy] that uses the specified initialization function [initializer]. */
 public fun <T> lazy(initializer: () -> T): Lazy<T>
+/** Creates a new instance of the [Lazy] that uses the specified initialization function [initializer] and the thread-safety [mode]. */
+public fun <T> lazy(mode: LazyThreadSafetyMode, initializer: () -> T): Lazy<T>
+/** Specifies how a [Lazy] instance synchronizes initialization among multiple threads. */
+public enum class LazyThreadSafetyMode { SYNCHRONIZED, PUBLICATION, NONE }
 /** Gets the value of a property delegated to a [Lazy] instance. */
 public inline operator fun <T> Lazy<T>.getValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>): T
 

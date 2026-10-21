@@ -3163,3 +3163,255 @@ fn mod_stands_in_for_rem() {
     let f = fixture(&[("src/Main.kt", "class N {\n    operator fun mod(k: Int): String = \"\"\n}\nfun f(n: N) {\n    (n $0% 2).\n}\n")]);
     assert!(f.definition().is_some_and(|d| d.1.contains("operator fun mod")));
 }
+
+const DELEGATES: &str = "import kotlin.reflect.KProperty
+class Box<T>(val v: T) { operator fun getValue(r: Any?, p: KProperty<*>): T = v }
+class Cell { operator fun getValue(r: Any?, p: KProperty<*>): String = \"\" }
+class Provider { operator fun provideDelegate(r: Any?, p: KProperty<*>): Cell = Cell() }
+class State<T>(val value: T)
+operator fun <T> State<T>.getValue(r: Any?, p: KProperty<*>): T = value
+fun <T> remember(f: () -> T): T = f()
+fun <T> mutableStateOf(v: T): State<T> = State(v)
+fun compute(): String = \"\"
+fun <T> viewModels(): Lazy<T> = TODO()
+fun <T> inject(): Lazy<T> = TODO()
+class Foo { val tag = 1 }
+";
+
+#[test]
+fn infers_every_kind_of_delegate() {
+    let sees = |member: &str, name: &str| {
+        offers(
+            &format!(
+                "{DELEGATES}class H {{
+    {member}
+}}
+"
+            ),
+            name,
+        )
+    };
+    let cases = [
+        // The standard library's delegates.
+        (
+            "val v by lazy(LazyThreadSafetyMode.NONE) { \"x\" }
+    fun f() { v.$0 }",
+            "length",
+        ),
+        (
+            "val v by lazy(::compute)
+    fun f() { v.$0 }",
+            "length",
+        ),
+        (
+            "val v by lazy { compute() }
+    fun f() { v.$0 }",
+            "length",
+        ),
+        (
+            "val m = mapOf<String, Int>()
+    val v by m
+    fun f() { v.$0 }",
+            "coerceAtLeast",
+        ),
+        (
+            "val m = mutableMapOf<String, Int>()
+    var v by m
+    fun f() { v.$0 }",
+            "coerceAtLeast",
+        ),
+        // A generic class: the type argument is the property's type.
+        (
+            "val v by Box(\"s\")
+    fun f() { v.$0 }",
+            "length",
+        ),
+        // `provideDelegate` first, then `getValue` of what it returns.
+        (
+            "val v by Provider()
+    fun f() { v.$0 }",
+            "length",
+        ),
+        // An extension `getValue`, as Compose's `State` has.
+        (
+            "val v by remember { mutableStateOf(\"s\") }
+    fun f() { v.$0 }",
+            "length",
+        ),
+        (
+            "val v by mutableStateOf(\"s\")
+    fun f() { v.$0 }",
+            "length",
+        ),
+        // The type from an explicit type argument, or the declared type.
+        (
+            "val v by inject<Foo>()
+    fun f() { v.$0 }",
+            "tag",
+        ),
+        (
+            "val v: Foo by viewModels()
+    fun f() { v.$0 }",
+            "tag",
+        ),
+        (
+            "val v: String by Cell()
+    fun f() { v.$0 }",
+            "length",
+        ),
+        // Another property.
+        (
+            "val b = \"s\"
+    val v by ::b
+    fun f() { v.$0 }",
+            "length",
+        ),
+        (
+            "val b = \"s\"
+    val v by this::b
+    fun f() { v.$0 }",
+            "length",
+        ),
+    ];
+    for (member, name) in cases {
+        assert!(sees(member, name), "{member}");
+    }
+    // Local and top-level properties.
+    assert!(offers(
+        &format!(
+            "{DELEGATES}fun f() {{
+    val v by Cell()
+    v.$0
+}}
+"
+        ),
+        "length"
+    ));
+    assert!(offers(
+        &format!(
+            "{DELEGATES}fun f() {{
+    val v by lazy {{ \"x\" }}
+    v.$0
+}}
+"
+        ),
+        "length"
+    ));
+    assert!(offers(
+        &format!(
+            "{DELEGATES}val top by Provider()
+fun f() {{
+    top.$0
+}}
+"
+        ),
+        "length"
+    ));
+}
+
+#[test]
+fn navigates_and_shows_delegated_properties() {
+    let at = |code: &str| fixture(&[("src/Main.kt", &format!("{DELEGATES}{code}"))]);
+    let get = "class Cell { operator fun getValue(r: Any?, p: KProperty<*>): String = \"\" }";
+    let provide = "class Provider { operator fun provideDelegate(r: Any?, p: KProperty<*>): Cell = Cell() }";
+    assert!(at("class H { val v$0 by Cell() }").hover().contains("val v: String"));
+    assert!(at("class H { val v b$0y Cell() }").hover().contains("operator fun getValue"));
+    assert_eq!(at("class H { val v b$0y Cell() }").definition().map(|d| d.1), Some(get.into()));
+    assert_eq!(at("class H { val v b$0y Provider() }").definition().map(|d| d.1), Some(provide.into()));
+    assert_eq!(at("class H { val v: String b$0y Cell() }").definition().map(|d| d.1), Some(get.into()));
+    // The inferred type is an inlay hint, a declared one is not.
+    let hints = inlays(
+        &format!(
+            "{DELEGATES}class H {{ val v by Cell()
+ val w: String by Cell() }}
+"
+        ),
+        Default::default(),
+    );
+    assert_eq!(hints.iter().map(|h| h.2.as_str()).collect::<Vec<_>>(), vec![": String"], "{hints:?}");
+}
+
+#[test]
+fn offers_the_members_of_delegated_interfaces() {
+    let decls = "interface Iface { fun run(): String
+ val size: Int }
+interface Other { fun other() }
+class B : Iface, Other {
+ override fun run() = \"\"
+ override val size = 1
+ override fun other() {} }
+";
+    let sees = |code: &str, name: &str| {
+        offers(
+            &format!(
+                "{decls}{code}
+"
+            ),
+            name,
+        )
+    };
+    assert!(sees(
+        "class A(b: B) : Iface by b {
+ fun f() { this.$0 }
+}",
+        "run"
+    ));
+    assert!(sees(
+        "class A(val b: B) : Iface by b {
+ fun f() { this.$0 }
+}",
+        "run"
+    ));
+    assert!(sees(
+        "class A : Iface by B() {
+ fun f() { run().$0 }
+}",
+        "length"
+    ));
+    assert!(sees(
+        "class A(b: B) : Iface by b
+fun f(a: A) { a.$0 }",
+        "size"
+    ));
+    assert!(sees(
+        "class A(b: B, c: B) : Iface by b, Other by c
+fun f(a: A) { a.$0 }",
+        "other"
+    ));
+    let f = fixture(&[(
+        "src/Main.kt",
+        &format!(
+            "{decls}class A(b: B) : Iface by b
+fun f(a: A) {{ a.ru$0n() }}
+"
+        ),
+    )]);
+    assert_eq!(f.definition().map(|d| d.1), Some("interface Iface { fun run(): String".into()));
+    // What is delegated is implemented: nothing to implement, and `override` offers it as delegated.
+    let f = fixture(&[(
+        "src/Main.kt",
+        &format!(
+            "{decls}class A(val b: B) : Iface by b$0
+"
+        ),
+    )]);
+    assert!(f.titles(Vec::new()).is_empty(), "{:?}", f.titles(Vec::new()));
+    let items = fixture(&[(
+        "src/Main.kt",
+        &format!(
+            "{decls}class A(val b: B) : Iface by b {{
+    override $0
+}}
+"
+        ),
+    )])
+    .items();
+    let run = items
+        .iter()
+        .find(|i| i["label"] == "run" && i["labelDetails"]["description"].as_str().is_some_and(|d| d.contains("delegation")))
+        .unwrap_or_else(|| {
+            panic!("run in {:?}", items.iter().map(|i| (i["label"].as_str(), i["_expected"].clone())).take(8).collect::<Vec<_>>())
+        });
+    assert_eq!(run["labelDetails"]["description"], "implemented by delegation to b");
+    assert!(run["textEdit"]["newText"].as_str().unwrap().contains("return b.run()"), "{run}");
+}
