@@ -1490,7 +1490,7 @@ pub fn rename_group(an: &Analyzer, target: SymId) -> Vec<SymId> {
     group
 }
 
-fn same_shape(an: &Analyzer, a: SymId, b: SymId) -> bool {
+pub(super) fn same_shape(an: &Analyzer, a: SymId, b: SymId) -> bool {
     let (da, db) = (an.decl(a), an.decl(b));
     da.kind.is_class() == db.kind.is_class()
         && (da.kind == Kind::Function) == (db.kind == Kind::Function)

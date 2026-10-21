@@ -32,7 +32,7 @@ use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
 use super::library::{self, CompiledLibrary, SourcesJar, UnitCache};
 use super::resolve::{Analyzer, Packages};
-use super::{ranges, semantic};
+use super::{hierarchy, ranges, semantic};
 use crate::jsonrpc::{self, Kind};
 use crate::{check, text};
 
@@ -1034,6 +1034,32 @@ impl State {
                 let locations: Vec<Value> = targets.iter().take(1).filter_map(|t| features::location(&an, t)).collect();
                 Ok(json!(locations))
             }
+            "textDocument/implementation" => {
+                let Some(unit) = unit else { return Ok(Value::Null) };
+                let (_, tok) = at(unit);
+                let Some(sym) = tok.and_then(|t| features::targets_at(&an, unit, t).into_iter().find_map(|t| t.sym())) else {
+                    return Ok(json!([]));
+                };
+                let found = hierarchy::implementations(&an, sym);
+                let locations = found
+                    .iter()
+                    .filter_map(|&sym| features::location(&an, &Target::Sym(super::resolve::Member { sym, subst: Default::default() })));
+                Ok(json!(locations.collect::<Vec<_>>()))
+            }
+            "textDocument/prepareCallHierarchy" | "textDocument/prepareTypeHierarchy" => {
+                let Some(unit) = unit else { return Ok(Value::Null) };
+                let (_, tok) = at(unit);
+                let Some(tok) = tok else { return Ok(Value::Null) };
+                Ok(if method.contains("Call") {
+                    hierarchy::prepare_calls(&an, unit, tok)
+                } else {
+                    hierarchy::prepare_types(&an, unit, tok)
+                })
+            }
+            "callHierarchy/incomingCalls" => Ok(hierarchy::incoming(&an, &params["item"])),
+            "callHierarchy/outgoingCalls" => Ok(hierarchy::outgoing(&an, &params["item"])),
+            "typeHierarchy/supertypes" => Ok(hierarchy::supertypes(&an, &params["item"])),
+            "typeHierarchy/subtypes" => Ok(hierarchy::direct_subtypes(&an, &params["item"])),
             "textDocument/references" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
                 let (_, tok) = at(unit);
@@ -1159,6 +1185,9 @@ impl State {
                 "definitionProvider": true,
                 "declarationProvider": true,
                 "typeDefinitionProvider": true,
+                "implementationProvider": true,
+                "callHierarchyProvider": true,
+                "typeHierarchyProvider": true,
                 "referencesProvider": true,
                 "documentHighlightProvider": true,
                 "renameProvider": { "prepareProvider": true },

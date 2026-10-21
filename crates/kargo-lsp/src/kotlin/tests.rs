@@ -1768,3 +1768,85 @@ fn selection_ranges_grow_from_the_identifier_to_the_file() {
     // Each range holds the one before it.
     assert!(texts.windows(2).all(|w| w[1].len() > w[0].len()), "{texts:?}");
 }
+
+// ----- implementations and hierarchies -----
+
+/// `file:name` of each symbol.
+fn names(an: &Analyzer, syms: &[super::index::SymId]) -> Vec<String> {
+    let mut v: Vec<String> = syms
+        .iter()
+        .map(|&s| {
+            let file = an.unit(s.unit_id()).path.file_name().unwrap().to_string_lossy().into_owned();
+            let d = an.decl(s);
+            let owner = an.file(s.unit_id()).owner_class(s.decl_id()).map(|c| an.file(s.unit_id()).decls[c].name.clone());
+            format!("{file}:{}{}", owner.map(|o| format!("{o}.")).unwrap_or_default(), d.name)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+const SHAPES: &str = "package app\n\ninterface Sh$0ape {\n    fun area(): Double\n}\n\nclass Circle : Shape {\n    override fun area(): Double = 1.0\n}\n\nopen class Square : Shape {\n    override fun area(): Double = 2.0\n}\n\nclass Cube : Square() {\n    override fun area(): Double = 3.0\n}\n";
+
+#[test]
+fn finds_implementations_of_interfaces_and_members() {
+    let f = fixture(&[("src/Shapes.kt", SHAPES)]);
+    let (u, tok) = f.token();
+    let an = f.an();
+    let sym = features::targets_at(&an, u, tok).into_iter().find_map(|t| t.sym()).unwrap();
+    assert_eq!(names(&an, &super::hierarchy::implementations(&an, sym)), ["Shapes.kt:Circle", "Shapes.kt:Cube", "Shapes.kt:Square"]);
+    let area = an.decl(sym).members[0];
+    let found = super::hierarchy::implementations(&an, u.sym(area));
+    assert_eq!(names(&an, &found), ["Shapes.kt:Circle.area", "Shapes.kt:Cube.area", "Shapes.kt:Square.area"]);
+}
+
+#[test]
+fn finds_actual_declarations_of_expect() {
+    let f = fixture(&[
+        ("src/Platform.kt", "package app\n\nexpect fun platform$0Name(): String\n"),
+        ("src-jvm/Platform.jvm.kt", "package app\n\nactual fun platformName(): String = \"JVM\"\n"),
+    ]);
+    let (u, tok) = f.token();
+    let an = f.an();
+    let sym = features::targets_at(&an, u, tok).into_iter().find_map(|t| t.sym()).unwrap();
+    assert_eq!(names(&an, &super::hierarchy::implementations(&an, sym)), ["Platform.jvm.kt:platformName"]);
+}
+
+#[test]
+fn walks_the_type_hierarchy() {
+    let f = fixture(&[("src/Shapes.kt", SHAPES)]);
+    let (u, tok) = f.token();
+    let an = f.an();
+    let item = super::hierarchy::prepare_types(&an, u, tok)[0].clone();
+    let subs = super::hierarchy::direct_subtypes(&an, &item);
+    let names: Vec<&str> = subs.as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Circle", "Square"], "{subs}");
+    let square = subs[1].clone();
+    let supers = super::hierarchy::supertypes(&an, &square);
+    assert_eq!(supers[0]["name"], "Shape", "{supers}");
+    let cubes = super::hierarchy::direct_subtypes(&an, &square);
+    assert_eq!(cubes[0]["name"], "Cube", "{cubes}");
+}
+
+#[test]
+fn walks_the_call_hierarchy() {
+    let f = fixture(&[(
+        "src/Main.kt",
+        "package app\n\nfun hel$0per(x: Int): Int = x\n\nfun middle(): Int = helper(1) + helper(2)\n\nfun top() {\n    middle()\n    helper(3)\n}\n",
+    )]);
+    let (u, tok) = f.token();
+    let an = f.an();
+    let item = super::hierarchy::prepare_calls(&an, u, tok)[0].clone();
+    let incoming = super::hierarchy::incoming(&an, &item);
+    let calls: Vec<(String, usize)> = incoming
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["from"]["name"].as_str().unwrap().to_owned(), c["fromRanges"].as_array().unwrap().len()))
+        .collect();
+    assert_eq!(calls, [("middle".to_owned(), 2), ("top".to_owned(), 1)], "{incoming}");
+    let top = incoming[1]["from"].clone();
+    let outgoing = super::hierarchy::outgoing(&an, &top);
+    let to: Vec<&str> = outgoing.as_array().unwrap().iter().map(|c| c["to"]["name"].as_str().unwrap()).collect();
+    assert_eq!(to, ["middle", "helper"], "{outgoing}");
+}
