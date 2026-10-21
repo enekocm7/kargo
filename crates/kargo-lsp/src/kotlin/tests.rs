@@ -3415,3 +3415,39 @@ fun f(a: A) {{ a.ru$0n() }}
     assert_eq!(run["labelDetails"]["description"], "implemented by delegation to b");
     assert!(run["textEdit"]["newText"].as_str().unwrap().contains("return b.run()"), "{run}");
 }
+
+#[test]
+fn reports_delegates_that_cannot_work() {
+    let decls = "import kotlin.reflect.KProperty
+class Cell { operator fun getValue(r: Any?, p: KProperty<*>): String = \"\" }
+class Plain { fun getValue(r: Any?, p: KProperty<*>): String = \"\" }
+class Empty
+class Both { operator fun getValue(r: Any?, p: KProperty<*>): Int = 1
+ operator fun setValue(r: Any?, p: KProperty<*>, v: Int) {} }
+class Provider { operator fun provideDelegate(r: Any?, p: KProperty<*>): Cell = Cell() }
+";
+    let problems = |member: &str| {
+        operator_problems(&format!(
+            "{decls}class H {{
+    {member}
+}}
+"
+        ))
+    };
+    assert!(problems("val a by Cell()").is_empty());
+    assert!(problems("val a: String by Cell()").is_empty());
+    assert!(problems("val a: CharSequence by Cell()").is_empty());
+    assert!(problems("val a by Provider()").is_empty());
+    assert!(problems("var a by Both()").is_empty());
+    assert!(problems("val a by lazy { 1 }").is_empty());
+    assert!(problems("val a by mapOf(\"a\" to 1)").is_empty());
+    let one = |member: &str, text: &str| {
+        let found = problems(member);
+        assert!(found.len() == 1 && found[0].contains(text), "{member}: {found:?}");
+    };
+    one("val a by Empty()", "has no `getValue`");
+    one("val a by Plain()", "`operator` modifier is required on `getValue`");
+    one("var a by Cell()", "has no `setValue`");
+    one("val a: Int by Cell()", "not the declared `Int`");
+    one("val a: Int by Provider()", "not the declared `Int`");
+}

@@ -604,6 +604,10 @@ pub fn problems(an: &Analyzer, u: UnitId) -> Vec<Problem> {
     let mut out = Vec::new();
     for (i, t) in lx.tokens.iter().enumerate() {
         let word = &src[t.span()];
+        if t.kind == Tok::Ident && word == "by" {
+            out.extend(delegate_problem(an, u, i));
+            continue;
+        }
         let checked = match t.kind {
             Tok::Op => !matches!(word, "==" | "!=" | "===" | "!==" | "&&" | "||" | "?:" | "!!"),
             Tok::Lt | Tok::Gt | Tok::LBracket | Tok::LParen => true,
@@ -621,6 +625,65 @@ pub fn problems(an: &Analyzer, u: UnitId) -> Vec<Problem> {
         }
     }
     out
+}
+
+/// What is wrong with the delegate of the property declared with the `by` at token `tok`: no
+/// `getValue` (or `setValue` for a `var`) to call, a `getValue` without `operator`, or a type
+/// that is not the declared one. Delegates the server cannot see all of are left alone.
+fn delegate_problem(an: &Analyzer, u: UnitId, tok: usize) -> Option<Problem> {
+    let file = an.file(u);
+    let lx = &file.lexed;
+    let src = &an.unit(u).text;
+    let d = file.decls.iter().find(|d| d.init_kind == InitKind::Delegate && d.init == Some(tok + 1))?;
+    let end = syntax::expr_end(src, lx, tok + 1, lx.tokens.len());
+    let mut delegate = an.infer(u, tok + 1, end)?;
+    let functions = |ty: &Ty, name: &str| -> Vec<Member> {
+        an.members_named(ty, name, u).into_iter().filter(|m| an.decl(m.sym).kind == Kind::Function).collect()
+    };
+    if let Some(m) = functions(&delegate, "provideDelegate").first() {
+        delegate = an.value_ty(m.sym, &m.subst)?;
+    }
+    let Ty::Class { sym, .. } = &delegate else { return None };
+    let own = |s: &super::index::SymId| !s.lib && !an.unit(s.unit_id()).is_java();
+    let span = lx.tokens[tok].span();
+    let shown = features::display_ty(an, &delegate);
+    // Only classes of the project, whose supertypes are all known.
+    let class_known = own(sym) && {
+        let ctx = Ctx { unit: sym.unit_id(), decl: Some(sym.decl_id()) };
+        an.decl(*sym).kind.is_class() && an.decl(*sym).supertypes.iter().all(|t| an.ty_of_ref(t, ctx, &Subst::new()).is_some())
+    };
+    let mut needed = vec!["getValue"];
+    if d.mutable {
+        needed.push("setValue");
+    }
+    for name in needed {
+        let found = functions(&delegate, name);
+        if found.is_empty() {
+            if class_known {
+                let message = format!("the delegate `{shown}` has no `{name}` operator function");
+                return Some(Problem::new(span, Severity::Error, message));
+            }
+            continue;
+        }
+        if found.iter().all(|m| own(&m.sym) && !an.decl(m.sym).has("operator")) {
+            let message = format!("the `operator` modifier is required on `{name}` to delegate a property to it");
+            return Some(Problem::new(span, Severity::Error, message));
+        }
+    }
+    let declared = d
+        .ty
+        .as_ref()
+        .and_then(|t| an.ty_of_ref(t, Ctx { unit: u, decl: Some(file.decls.iter().position(|x| std::ptr::eq(x, d))?) }, &Subst::new()))?;
+    let got = functions(&delegate, "getValue").into_iter().find_map(|m| an.value_ty(m.sym, &m.subst))?;
+    if features::fully_known(&declared) && features::fully_known(&got) && an.type_fit(&got, &declared).is_none() {
+        let message = format!(
+            "the type of the delegate is `{}`, not the declared `{}`",
+            features::display_ty(an, &got),
+            features::display_ty(an, &declared)
+        );
+        return Some(Problem::new(span, Severity::Error, message));
+    }
+    None
 }
 
 fn operator_problem(an: &Analyzer, u: UnitId, site: &Site) -> Option<String> {
