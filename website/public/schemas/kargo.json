@@ -215,7 +215,7 @@
             "linker-options": { "description": "Options for the native linker, on every platform.", "type": "array", "items": { "type": "string" } },
             "static-libraries": { "$ref": "#/definitions/staticLibraries" },
             "library-paths": { "$ref": "#/definitions/libraryPaths" },
-            "frameworks": { "$ref": "#/definitions/frameworks" },
+            "frameworks": { "$ref": "#/definitions/appleFrameworks" },
             "platform": {
               "description": "Linker options for one Kotlin/Native platform, added to the common ones.",
               "type": "object",
@@ -294,7 +294,7 @@
                   "linker-options": { "description": "Linker options recorded in the bindings.", "type": "array", "items": { "type": "string" } },
                   "static-libraries": { "$ref": "#/definitions/staticLibraries" },
                   "library-paths": { "$ref": "#/definitions/libraryPaths" },
-                  "frameworks": { "$ref": "#/definitions/frameworks" },
+                  "frameworks": { "$ref": "#/definitions/appleFrameworks" },
                   "pkg-config": {
                     "description": "pkg-config packages whose compiler and linker flags the bindings use (on the host platform).",
                     "anyOf": [{ "type": "string", "examples": ["sqlite3"] }, { "type": "array", "items": { "type": "string" } }]
@@ -619,7 +619,7 @@
       "type": "array",
       "items": { "type": "string" }
     },
-    "frameworks": {
+    "appleFrameworks": {
       "description": "Apple frameworks to link (`-framework <name>`); ignored on other platforms.",
       "type": "array",
       "items": { "type": "string", "examples": ["Foundation"] }
@@ -636,7 +636,7 @@
         "linker-options": { "description": "Options for the native linker.", "type": "array", "items": { "type": "string" } },
         "static-libraries": { "$ref": "#/definitions/staticLibraries" },
         "library-paths": { "$ref": "#/definitions/libraryPaths" },
-        "frameworks": { "$ref": "#/definitions/frameworks" }
+        "frameworks": { "$ref": "#/definitions/appleFrameworks" }
       }
     },
     "nativeOptions": {
@@ -647,7 +647,7 @@
         "linker-options": { "description": "Linker options recorded in the bindings.", "type": "array", "items": { "type": "string" } },
         "static-libraries": { "$ref": "#/definitions/staticLibraries" },
         "library-paths": { "$ref": "#/definitions/libraryPaths" },
-        "frameworks": { "$ref": "#/definitions/frameworks" }
+        "frameworks": { "$ref": "#/definitions/appleFrameworks" }
       }
     },
     "cFlags": {
