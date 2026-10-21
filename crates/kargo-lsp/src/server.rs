@@ -617,6 +617,8 @@ impl Server {
                     if message["result"].is_object() {
                         let capabilities = &message["result"]["capabilities"];
                         self.backend_pull = !capabilities["diagnosticProvider"].is_null();
+                        // The editor's positions are in the encoding the backend picked.
+                        text::set_encoding(text::Encoding::of_capability(&capabilities["positionEncoding"]));
                         message["result"]["capabilities"] = merge_capabilities(capabilities);
                     }
                 } else if let Some(uri) = self.pulls.remove(&id_key(&message["id"])) {
@@ -743,8 +745,10 @@ impl Server {
                 }
                 // The editor may have opened a workspace member; the server reads the
                 // description at the project root.
+                // (With several workspace folders, the backend finds each one's root itself.)
                 if let Some(root) = &self.root
                     && dir.as_deref() != Some(root.as_path())
+                    && params.get("workspaceFolders").and_then(Value::as_array).is_none_or(|folders| folders.len() <= 1)
                 {
                     let uri = text::path_to_uri(root);
                     let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1106,7 +1110,15 @@ impl Server {
                 self.hints.remove(&uri);
                 self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] }))?;
             }
-            "textDocument/didSave" => self.maybe_reimport()?,
+            "textDocument/didSave" => {
+                // Without watchers the editor doesn't say the manifest changed, and the backend
+                // reloads the layout from that.
+                if is_manifest(&uri) && !self.client_watches {
+                    let changes = json!([{ "uri": uri, "type": 2 }]);
+                    self.send_backend(&jsonrpc::notification("workspace/didChangeWatchedFiles", json!({ "changes": changes })));
+                }
+                self.maybe_reimport()?
+            }
             _ => {}
         }
         Ok(())
@@ -1848,6 +1860,28 @@ local = \"{url}\"
             ["initialize", "textDocument/didOpen", "textDocument/hover", "shutdown", "exit"],
             "kargo.toml stays with Kargo"
         );
+    }
+
+    #[test]
+    fn tells_the_backend_about_a_saved_kargo_toml_when_the_editor_does_not_watch_files() {
+        let dir = project(MANIFEST);
+        let manifest_uri = text::path_to_uri(&dir.path().join("kargo.toml"));
+        let (backend, seen) = fake_backend();
+        let opts = Options { server: KotlinServer::External(ServerKind::KotlinLsp), ..Options::default() };
+        let (mut editor, _home) = Editor::start(opts, Some(backend));
+        editor.request(1, "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} }));
+        editor.send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": manifest_uri, "languageId": "toml", "version": 1, "text": MANIFEST } }),
+        ));
+        editor.send(jsonrpc::notification("textDocument/didSave", json!({ "textDocument": { "uri": manifest_uri } })));
+        assert!(editor.finish());
+        let mut received: Vec<Value> = Vec::new();
+        while received.last().is_none_or(|m| jsonrpc::method(m) != "exit") {
+            received.push(seen.recv_timeout(Duration::from_secs(10)).unwrap());
+        }
+        let changed = received.iter().find(|m| jsonrpc::method(m) == "workspace/didChangeWatchedFiles").expect("a change notice");
+        assert_eq!(changed["params"]["changes"], json!([{ "uri": manifest_uri, "type": 2 }]));
     }
 
     #[test]

@@ -9,14 +9,14 @@
 //! declarations Kargo compiles it with. Files are parsed when the project loads and again
 //! whenever they change; the libraries load in the background.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -59,6 +59,10 @@ fn pipe() -> (io::PipeReader, io::PipeWriter) {
 /// `id` for the document `uri`, which had the text `original` when it was asked.
 enum Event {
     Client(Option<Value>),
+    /// An event of the project served by state number `0`, from its workers.
+    For(usize, Box<Event>),
+    /// A message the project served by state number `0` sends to the editor.
+    Out(usize, Value),
     Project {
         generation: u64,
         model: Box<Model>,
@@ -88,6 +92,17 @@ enum Event {
         token: Value,
         percentage: u32,
     },
+    /// The load number `generation` has nothing more to send.
+    Loaded {
+        generation: u64,
+    },
+    /// What a scan of the source roots found: every file now there, and the ones that changed
+    /// since the last scan, with their text and modification time.
+    Rescanned {
+        generation: u64,
+        present: HashSet<PathBuf>,
+        changed: Vec<(PathBuf, String, SystemTime)>,
+    },
     /// The answer to a references or rename request, which a worker thread computed.
     Searched {
         id: Value,
@@ -95,6 +110,24 @@ enum Event {
         token: Option<Value>,
         outcome: Result<Value, Failure>,
     },
+}
+
+/// How one project's state talks to the loop: its events carry its number, and what it says to the
+/// editor goes through the loop, which merges the answers of several projects.
+#[derive(Clone)]
+struct Tx {
+    index: usize,
+    tx: Sender<Event>,
+}
+
+impl Tx {
+    fn send(&self, event: Event) -> Result<(), ()> {
+        self.tx.send(Event::For(self.index, Box::new(event))).map_err(|_| ())
+    }
+
+    fn out(&self, message: Value) {
+        let _ = self.tx.send(Event::Out(self.index, message));
+    }
 }
 
 /// Formats the text of a Kotlin file; `None` when the file is not to be formatted.
@@ -122,12 +155,14 @@ const REQUEST_FAILED: i64 = -32803;
 /// The error code of a request the editor cancelled.
 const REQUEST_CANCELLED: i64 = -32800;
 
-/// The `$/progress` of downloading sources jars, once the editor accepted its token.
+/// A `$/progress` of loading the project or downloading sources jars, once the editor accepted its token.
 struct Progress {
     generation: u64,
     token: String,
     create_id: String,
-    modules: usize,
+    title: &'static str,
+    /// What the editor shows beside the title, updated until the progress begins.
+    message: String,
     begun: bool,
 }
 
@@ -523,7 +558,12 @@ struct LoadOptions {
 /// Loads the project at `root` and its libraries, sending each as it is ready. Dependencies
 /// without a sources jar in the cache are read from their compiled jars first; then their
 /// sources jars are downloaded (as `kargo fetch --sources` does) and the libraries load again.
-fn load(config: Config, root: PathBuf, generation: u64, tx: Sender<Event>, cache: UnitCache, options: LoadOptions) {
+fn load(config: Config, root: PathBuf, generation: u64, tx: Tx, cache: UnitCache, options: LoadOptions) {
+    load_parts(config, root, generation, &tx, cache, options);
+    let _ = tx.send(Event::Loaded { generation });
+}
+
+fn load_parts(config: Config, root: PathBuf, generation: u64, tx: &Tx, cache: UnitCache, options: LoadOptions) {
     let model = match crate::project::metadata(&config, &root, true) {
         Ok(meta) => model_from_metadata(&meta),
         Err(_) => fallback_model(&root),
@@ -649,30 +689,378 @@ pub(crate) fn serve_with(
             }
         }
     });
-    let mut state = State::new(config, Box::new(output), tx, dependencies, formatter);
+    let mut hub = Hub {
+        config,
+        tx,
+        rx,
+        out: Box::new(output),
+        dependencies,
+        formatter,
+        states: Vec::new(),
+        init: Value::Null,
+        queued: VecDeque::new(),
+        parents: HashMap::new(),
+        subs: HashMap::new(),
+        last_completion: 0,
+    };
     loop {
-        let event = match state.queued.pop_front() {
+        hub.poll_due();
+        let event = match hub.queued.pop_front() {
             Some(message) => Event::Client(message),
-            None => match rx.recv() {
+            None => match hub.rx.recv_timeout(hub.poll_wait()) {
                 Ok(event) => event,
-                Err(_) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
         };
-        if !state.handle(event, &rx)? {
+        if !hub.handle(event)? {
             break;
         }
     }
     Ok(())
 }
 
+/// A `workspace/symbol` request asked of every project, until all have answered.
+struct FanOut {
+    id: Value,
+    remaining: usize,
+    symbols: Vec<Value>,
+    failure: Option<Value>,
+    /// The ids the projects were asked with.
+    subs: Vec<Value>,
+}
+
+/// The server: one [`State`] per project of the editor's workspace folders. Messages about a file
+/// go to the project it is in; the editor's other messages go to the first one or to all of them.
+struct Hub {
+    config: Config,
+    tx: Sender<Event>,
+    rx: Receiver<Event>,
+    out: Box<dyn Write + Send>,
+    dependencies: bool,
+    formatter: Formatter,
+    /// The projects, by number; a closed folder leaves its slot empty, so the numbers in ids hold.
+    states: Vec<Option<State>>,
+    /// The parameters of `initialize`, for the folders that open later.
+    init: Value,
+    /// Editor messages that arrived while waiting for a load.
+    queued: VecDeque<Option<Value>>,
+    /// The symbol searches in flight, by the editor's request id.
+    parents: HashMap<String, FanOut>,
+    /// The project and parent of each request a symbol search sent, by its id.
+    subs: HashMap<String, (String, usize)>,
+    /// The project that answered the last completion, which resolves its items.
+    last_completion: usize,
+}
+
+impl Hub {
+    fn handle(&mut self, event: Event) -> anyhow::Result<bool> {
+        match event {
+            Event::Client(None) => return Ok(false),
+            Event::Client(Some(message)) => return self.client(message),
+            Event::For(index, event) => {
+                if let Some(state) = self.state(index) {
+                    state.loaded(*event);
+                }
+            }
+            Event::Out(index, message) => self.out_message(index, message)?,
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    fn state(&mut self, index: usize) -> Option<&mut State> {
+        self.states.get_mut(index).and_then(Option::as_mut)
+    }
+
+    fn live(&self) -> Vec<usize> {
+        self.states.iter().enumerate().filter(|(_, s)| s.is_some()).map(|(i, _)| i).collect()
+    }
+
+    fn write(&mut self, message: &Value) -> anyhow::Result<()> {
+        jsonrpc::write(&mut self.out, message).map_err(Into::into)
+    }
+
+    fn poll_due(&mut self) {
+        for state in self.states.iter_mut().flatten() {
+            state.poll_due();
+        }
+    }
+
+    fn poll_wait(&self) -> Duration {
+        self.states.iter().flatten().map(State::poll_wait).min().unwrap_or(Duration::from_secs(3600))
+    }
+
+    /// The project a file belongs to: the one whose root is the deepest above it, else the first.
+    fn route(&self, uri: &str) -> usize {
+        let path = file_path(uri);
+        let deepest = self.states.iter().enumerate().filter_map(|(i, state)| {
+            let root = state.as_ref()?.root.as_ref()?;
+            path.as_ref().filter(|p| p.starts_with(root)).map(|_| (root.components().count(), i))
+        });
+        deepest.max().map(|(_, i)| i).or_else(|| self.live().first().copied()).unwrap_or(0)
+    }
+
+    /// Waits a while for the project and the standard library, the first time they load, so
+    /// the first requests see them. Editor messages that arrive meanwhile are queued.
+    fn wait_for_load(&mut self, index: usize) {
+        let start = Instant::now();
+        loop {
+            let Some(state) = self.state(index) else { return };
+            if state.root.is_none() || (state.project_loaded && state.libraries_loaded) {
+                return;
+            }
+            let limit = if state.project_loaded { LIBRARY_WAIT } else { PROJECT_WAIT };
+            let Some(remaining) = limit.checked_sub(start.elapsed()) else { return };
+            match self.rx.recv_timeout(remaining) {
+                Ok(Event::Client(message)) => self.queued.push_back(message),
+                Ok(other) => {
+                    let _ = self.handle(other);
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Writes what a project said to the editor, or takes it in when it answers a symbol search.
+    fn out_message(&mut self, index: usize, mut message: Value) -> anyhow::Result<()> {
+        if jsonrpc::kind(&message) != Kind::Response {
+            return self.write(&message);
+        }
+        let Some((parent_key, _)) = self.subs.remove(&message["id"].to_string()) else { return self.write(&message) };
+        let Some(parent) = self.parents.get_mut(&parent_key) else { return Ok(()) };
+        match message["result"].as_array_mut() {
+            Some(symbols) => {
+                for symbol in symbols.iter_mut() {
+                    if symbol["data"].is_object() {
+                        symbol["data"]["project"] = json!(index);
+                    }
+                }
+                parent.symbols.append(symbols);
+            }
+            None => parent.failure = Some(message),
+        }
+        parent.remaining -= 1;
+        if parent.remaining > 0 {
+            return Ok(());
+        }
+        let parent = self.parents.remove(&parent_key).expect("a symbol search");
+        let reply = match parent.failure {
+            Some(mut failure) if parent.symbols.is_empty() => {
+                failure["id"] = parent.id;
+                failure
+            }
+            _ => jsonrpc::response(&parent.id, json!(parent.symbols.into_iter().take(500).collect::<Vec<_>>())),
+        };
+        self.write(&reply)
+    }
+
+    fn client(&mut self, message: Value) -> anyhow::Result<bool> {
+        let method = jsonrpc::method(&message).to_owned();
+        match jsonrpc::kind(&message) {
+            Kind::Response => {
+                // The editor answers the requests of project `n` under the id `kotlin/n/...`.
+                let index = message["id"].as_str().and_then(|id| id.split('/').nth(1)).and_then(|n| n.parse::<usize>().ok());
+                if let Some(state) = index.and_then(|i| self.state(i)) {
+                    state.message(message)?;
+                }
+            }
+            Kind::Request => match method.as_str() {
+                "initialize" => self.initialize(&message)?,
+                "shutdown" => self.write(&jsonrpc::response(&message["id"], Value::Null))?,
+                _ => self.request(message)?,
+            },
+            Kind::Notification => return self.notification(&method, message),
+        }
+        Ok(true)
+    }
+
+    /// Opens a project for each workspace folder (or the one root), and answers with the
+    /// capabilities of the first.
+    fn initialize(&mut self, message: &Value) -> anyhow::Result<()> {
+        let params = message["params"].clone();
+        self.init = params.clone();
+        let folders = folder_roots(&params["workspaceFolders"]);
+        let mut result = if folders.len() > 1 {
+            let mut first = None;
+            for root in &folders {
+                let result = self.open_folder(root);
+                first.get_or_insert(result);
+            }
+            first.unwrap_or(Value::Null)
+        } else {
+            self.add_state(&params)
+        };
+        result["capabilities"]["workspace"]["workspaceFolders"] = json!({ "supported": true, "changeNotifications": true });
+        self.write(&jsonrpc::response(&message["id"], result))
+    }
+
+    /// Starts the state of the project at `root`; returns its `initialize` result.
+    fn open_folder(&mut self, root: &Path) -> Value {
+        let uri = text::path_to_uri(root);
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut params = self.init.clone();
+        params["rootUri"] = json!(uri);
+        params["rootPath"] = Value::Null;
+        params["workspaceFolders"] = json!([{ "uri": uri, "name": name }]);
+        self.add_state(&params)
+    }
+
+    fn add_state(&mut self, params: &Value) -> Value {
+        let index = self.states.len();
+        let tx = Tx { index, tx: self.tx.clone() };
+        let mut state = State::new(self.config.clone(), tx, index, self.dependencies, Arc::clone(&self.formatter));
+        let result = state.initialize(params);
+        self.states.push(Some(state));
+        result
+    }
+
+    /// The editor opened or closed workspace folders.
+    fn folders_changed(&mut self, params: &Value) -> anyhow::Result<()> {
+        for root in folder_roots(&params["event"]["removed"]) {
+            let found = self.states.iter().position(|s| s.as_ref().is_some_and(|s| s.root.as_deref() == Some(root.as_path())));
+            if let Some(state) = found.and_then(|i| self.states[i].take()) {
+                for uri in state.open.keys() {
+                    self.write(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] })))?;
+                }
+            }
+        }
+        for root in folder_roots(&params["event"]["added"]) {
+            if !self.states.iter().flatten().any(|s| s.root.as_deref() == Some(root.as_path())) {
+                self.open_folder(&root);
+            }
+        }
+        Ok(())
+    }
+
+    fn request(&mut self, message: Value) -> anyhow::Result<()> {
+        let method = jsonrpc::method(&message).to_owned();
+        let params = &message["params"];
+        if method == "workspace/symbol" && self.live().len() > 1 {
+            return self.search_symbols(message);
+        }
+        let uri = [&params["textDocument"]["uri"], &params["item"]["uri"], &params["files"][0]["oldUri"]]
+            .into_iter()
+            .find_map(Value::as_str)
+            .map(str::to_owned);
+        let first = self.live().first().copied().unwrap_or(0);
+        let index = match method.as_str() {
+            "completionItem/resolve" => self.last_completion,
+            "workspaceSymbol/resolve" => params["data"]["project"].as_u64().map_or(first, |n| n as usize),
+            _ => uri.map_or(first, |uri| self.route(&uri)),
+        };
+        if method == "textDocument/completion" {
+            self.last_completion = index;
+        }
+        self.wait_for_load(index);
+        match self.state(index) {
+            Some(state) => {
+                state.message(message)?;
+                Ok(())
+            }
+            None => self.write(&jsonrpc::response(&message["id"], Value::Null)),
+        }
+    }
+
+    /// Asks every project for its symbols; the answers are merged as they arrive.
+    fn search_symbols(&mut self, message: Value) -> anyhow::Result<()> {
+        let key = message["id"].to_string();
+        let live = self.live();
+        let parent = FanOut { id: message["id"].clone(), remaining: live.len(), symbols: Vec::new(), failure: None, subs: Vec::new() };
+        self.parents.insert(key.clone(), parent);
+        for index in live {
+            self.wait_for_load(index);
+            let sub = json!(format!("{key}#{index}"));
+            self.subs.insert(sub.to_string(), (key.clone(), index));
+            if let Some(parent) = self.parents.get_mut(&key) {
+                parent.subs.push(sub.clone());
+            }
+            let mut message = message.clone();
+            message["id"] = sub;
+            // One bar for every project would be confusing.
+            if let Some(params) = message["params"].as_object_mut() {
+                params.remove("workDoneToken");
+            }
+            if let Some(state) = self.state(index) {
+                state.message(message)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn notification(&mut self, method: &str, message: Value) -> anyhow::Result<bool> {
+        let params = &message["params"];
+        match method {
+            "exit" => return Ok(false),
+            "initialized" => {
+                // One registration of the watchers serves every project.
+                let first = self.live().first().copied();
+                if let Some(state) = first.and_then(|i| self.state(i)) {
+                    state.message(message)?;
+                }
+            }
+            "$/cancelRequest" => {
+                let subs = self.parents.get(&params["id"].to_string()).map(|p| p.subs.clone()).unwrap_or_default();
+                for state in self.states.iter_mut().flatten() {
+                    state.message(message.clone())?;
+                }
+                for sub in subs {
+                    let cancel = jsonrpc::notification("$/cancelRequest", json!({ "id": sub }));
+                    for state in self.states.iter_mut().flatten() {
+                        state.message(cancel.clone())?;
+                    }
+                }
+            }
+            "workspace/didChangeWorkspaceFolders" => self.folders_changed(params)?,
+            "workspace/didChangeWatchedFiles" => {
+                let mut by_project: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
+                for change in params["changes"].as_array().into_iter().flatten() {
+                    let index = self.route(change["uri"].as_str().unwrap_or_default());
+                    by_project.entry(index).or_default().push(change.clone());
+                }
+                for (index, changes) in by_project {
+                    if let Some(state) = self.state(index) {
+                        state.message(jsonrpc::notification(method, json!({ "changes": changes })))?;
+                    }
+                }
+            }
+            _ => {
+                if let Some(uri) = params["textDocument"]["uri"].as_str() {
+                    let index = self.route(uri);
+                    if let Some(state) = self.state(index) {
+                        state.message(message)?;
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// The project roots of workspace `folders` (`{ uri, name }`), each at the root of its Kargo project.
+fn folder_roots(folders: &Value) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for dir in folders.as_array().into_iter().flatten().filter_map(|f| f["uri"].as_str()).filter_map(file_path) {
+        let root = crate::project::project_root(&dir).unwrap_or(dir);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
 /// How long the first requests wait for the project's files and for the standard library.
 const PROJECT_WAIT: Duration = Duration::from_secs(30);
 const LIBRARY_WAIT: Duration = Duration::from_secs(5);
+/// How often the source roots are scanned for new, changed and deleted files when the editor
+/// does not watch them.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 
 struct State {
     config: Config,
-    out: Box<dyn Write + Send>,
-    tx: Sender<Event>,
+    tx: Tx,
+    /// The number of this project among the server's, in the ids of its requests.
+    index: usize,
     root: Option<PathBuf>,
     model: Model,
     /// Every project file, by path; open documents hold the editor's text.
@@ -710,16 +1098,22 @@ struct State {
     work_done_progress: bool,
     load_options: LoadOptions,
     progress: Option<Progress>,
+    /// The progress of the current load.
+    loading: Option<Progress>,
     cache: UnitCache,
     next_id: u64,
     /// Whether the current load delivered the project's files, and the libraries.
     project_loaded: bool,
     libraries_loaded: bool,
-    /// Editor messages that arrived while waiting for a load.
-    queued: VecDeque<Option<Value>>,
     formatter: Formatter,
     /// The searches running on worker threads, by request id, and whether the editor cancelled them.
     searches: HashMap<String, Arc<AtomicBool>>,
+    /// Whether `workspace/symbol` results may leave out ranges for `workspaceSymbol/resolve`.
+    symbol_resolve: bool,
+    /// The modification time of each file the last scans read, so a scan reads only changed files.
+    stamps: HashMap<PathBuf, SystemTime>,
+    rescanning: bool,
+    next_poll: Instant,
 }
 
 /// What a completion answer depends on: the document, the position, what triggered it and the
@@ -740,11 +1134,11 @@ const RECENT_NAMES: usize = 256;
 type Snapshot = (Arc<Index>, Arc<HashMap<PathBuf, u32>>);
 
 impl State {
-    fn new(config: Config, out: Box<dyn Write + Send>, tx: Sender<Event>, dependencies: bool, formatter: Formatter) -> Self {
+    fn new(config: Config, tx: Tx, index: usize, dependencies: bool, formatter: Formatter) -> Self {
         Self {
             config,
-            out,
             tx,
+            index,
             root: None,
             model: Model::default(),
             files: HashMap::new(),
@@ -768,53 +1162,29 @@ impl State {
             work_done_progress: false,
             load_options: LoadOptions { dependencies, fetch_sources: true, tried: Arc::default() },
             progress: None,
+            loading: None,
             cache: UnitCache::default(),
             next_id: 0,
             project_loaded: false,
             libraries_loaded: false,
-            queued: VecDeque::new(),
             formatter,
             searches: HashMap::new(),
+            symbol_resolve: false,
+            stamps: HashMap::new(),
+            rescanning: false,
+            next_poll: Instant::now() + RESCAN_INTERVAL,
         }
     }
 
     fn send(&mut self, message: &Value) -> anyhow::Result<()> {
-        jsonrpc::write(&mut self.out, message).map_err(Into::into)
-    }
-
-    /// Handles one event; `false` when the server should stop.
-    fn handle(&mut self, event: Event, rx: &Receiver<Event>) -> anyhow::Result<bool> {
-        match event {
-            Event::Client(None) => return Ok(false),
-            Event::Client(Some(message)) => {
-                if jsonrpc::kind(&message) == Kind::Request && !matches!(jsonrpc::method(&message), "initialize" | "shutdown") {
-                    self.wait_for_load(rx);
-                }
-                return self.message(message);
-            }
-            other => self.loaded(other),
-        }
-        Ok(true)
-    }
-
-    /// Waits a while for the project and the standard library, the first time they load, so
-    /// the first requests see them. Editor messages that arrive meanwhile are queued.
-    fn wait_for_load(&mut self, rx: &Receiver<Event>) {
-        let start = Instant::now();
-        while self.root.is_some() && !(self.project_loaded && self.libraries_loaded) {
-            let limit = if self.project_loaded { LIBRARY_WAIT } else { PROJECT_WAIT };
-            let Some(remaining) = limit.checked_sub(start.elapsed()) else { break };
-            match rx.recv_timeout(remaining) {
-                Ok(Event::Client(message)) => self.queued.push_back(message),
-                Ok(other) => self.loaded(other),
-                Err(_) => break,
-            }
-        }
+        self.tx.out(message.clone());
+        Ok(())
     }
 
     fn loaded(&mut self, event: Event) {
         match event {
             Event::Project { generation, model, units } if generation == self.load_generation => {
+                self.report_loading("Indexing the standard library");
                 self.project_loaded = true;
                 self.model = *model;
                 let open: HashMap<PathBuf, Arc<Unit>> =
@@ -830,16 +1200,14 @@ impl State {
                 self.libraries_loaded = true;
                 self.lib = Arc::new(Index::new(true, units).with_jdk(jdk));
                 self.changed();
+                self.report_loading("Indexing the dependencies");
             }
+            Event::Loaded { generation } if generation == self.load_generation => self.end_loading(),
             Event::Fetching { generation, modules } => {
+                self.end_loading();
                 self.end_progress(None);
-                if self.work_done_progress {
-                    self.next_id += 1;
-                    let create_id = format!("kotlin/{}", self.next_id);
-                    let token = format!("{create_id}/sources");
-                    let _ = self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })));
-                    self.progress = Some(Progress { generation, token, create_id, modules, begun: false });
-                }
+                let message = format!("{modules} librar{}", if modules == 1 { "y" } else { "ies" });
+                self.progress = self.start_progress(generation, "sources", "Fetching dependency sources", message);
             }
             Event::Fetched { generation, found } if self.progress.as_ref().is_some_and(|p| p.generation == generation) => {
                 self.end_progress(Some(format!("{found} sources jar{}", if found == 1 { "" } else { "s" })));
@@ -859,6 +1227,12 @@ impl State {
                     }
                 };
                 let _ = self.send(&reply);
+            }
+            Event::Rescanned { generation, present, changed } => {
+                self.rescanning = false;
+                if generation == self.load_generation {
+                    self.rescanned(present, changed);
+                }
             }
             Event::Searching { token, percentage } => {
                 let value = json!({ "kind": "report", "percentage": percentage });
@@ -888,11 +1262,34 @@ impl State {
         }
     }
 
+    /// Asks the editor to show a progress, if it can; it begins once the editor accepts the token.
+    fn start_progress(&mut self, generation: u64, kind: &str, title: &'static str, message: String) -> Option<Progress> {
+        if !self.work_done_progress {
+            return None;
+        }
+        self.next_id += 1;
+        let create_id = format!("kotlin/{}/{}", self.index, self.next_id);
+        let token = format!("{create_id}/{kind}");
+        let _ = self.send(&jsonrpc::request(&create_id, "window/workDoneProgress/create", json!({ "token": token })));
+        Some(Progress { generation, token, create_id, title, message, begun: false })
+    }
+
     /// Ends the `$/progress` of downloading sources jars, if the editor showed it.
     fn end_progress(&mut self, message: Option<String>) {
-        if let Some(progress) = self.progress.take()
-            && progress.begun
-        {
+        if let Some(progress) = self.progress.take() {
+            self.end(progress, message);
+        }
+    }
+
+    /// Ends the `$/progress` of loading the project, if the editor showed it.
+    fn end_loading(&mut self) {
+        if let Some(progress) = self.loading.take() {
+            self.end(progress, None);
+        }
+    }
+
+    fn end(&mut self, progress: Progress, message: Option<String>) {
+        if progress.begun {
             let mut value = json!({ "kind": "end" });
             if let Some(message) = message {
                 value["message"] = json!(message);
@@ -901,26 +1298,34 @@ impl State {
         }
     }
 
+    /// Says what the load is doing now.
+    fn report_loading(&mut self, message: &str) {
+        let Some(progress) = &mut self.loading else { return };
+        progress.message = message.to_owned();
+        if progress.begun {
+            let params = json!({ "token": progress.token, "value": { "kind": "report", "message": message } });
+            let _ = self.send(&jsonrpc::notification("$/progress", params));
+        }
+    }
+
     /// The editor answered one of the server's requests: begins the progress whose token it accepted.
     fn response(&mut self, message: &Value) -> anyhow::Result<()> {
-        let Some(progress) = &mut self.progress else { return Ok(()) };
-        if message["id"].as_str() != Some(progress.create_id.as_str()) || progress.begun {
-            return Ok(());
+        for loading in [false, true] {
+            let slot = if loading { &mut self.loading } else { &mut self.progress };
+            let Some(progress) = slot else { continue };
+            if message["id"].as_str() != Some(progress.create_id.as_str()) || progress.begun {
+                continue;
+            }
+            if !message["error"].is_null() {
+                *slot = None;
+                return Ok(());
+            }
+            progress.begun = true;
+            let value = json!({ "kind": "begin", "title": progress.title, "message": progress.message, "cancellable": false });
+            let params = json!({ "token": progress.token, "value": value });
+            return self.send(&jsonrpc::notification("$/progress", params));
         }
-        if !message["error"].is_null() {
-            self.progress = None;
-            return Ok(());
-        }
-        progress.begun = true;
-        let n = progress.modules;
-        let value = json!({
-            "kind": "begin",
-            "title": "Fetching dependency sources",
-            "message": format!("{n} librar{}", if n == 1 { "y" } else { "ies" }),
-            "cancellable": false,
-        });
-        let params = json!({ "token": progress.token, "value": value });
-        self.send(&jsonrpc::notification("$/progress", params))
+        Ok(())
     }
 
     fn changed(&mut self) {
@@ -931,6 +1336,8 @@ impl State {
     fn reload(&mut self) {
         let Some(root) = self.root.clone() else { return };
         self.load_generation += 1;
+        self.end_loading();
+        self.loading = self.start_progress(self.load_generation, "load", "Loading Kotlin project", "reading the sources".to_owned());
         let (config, tx, cache, generation, options) =
             (self.config.clone(), self.tx.clone(), Arc::clone(&self.cache), self.load_generation, self.load_options.clone());
         thread::spawn(move || load(config, root, generation, tx, cache, options));
@@ -979,6 +1386,11 @@ impl State {
                         self.publish_diagnostics(uri)?;
                     }
                 }
+                "textDocument/didSave" => {
+                    if self.polling() {
+                        self.rescan();
+                    }
+                }
                 "textDocument/didClose" => {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
                     if let Some(path) = self.open.remove(uri) {
@@ -1024,7 +1436,10 @@ impl State {
                     self.format(id, params)?;
                     return Ok(true);
                 }
-                if matches!(method.as_str(), "textDocument/references" | "textDocument/rename" | "workspace/willRenameFiles") {
+                if matches!(
+                    method.as_str(),
+                    "textDocument/references" | "textDocument/rename" | "workspace/willRenameFiles" | "workspace/symbol"
+                ) {
                     self.search(id, &method, params)?;
                     return Ok(true);
                 }
@@ -1064,11 +1479,15 @@ impl State {
         self.searches.insert(id.to_string(), Arc::clone(&cancel));
         let token = Some(params["workDoneToken"].clone()).filter(|t| !t.is_null());
         if let Some(token) = &token {
-            let title = if method != "textDocument/references" { "Renaming" } else { "Searching for references" };
+            let title = match method {
+                "textDocument/references" => "Searching for references",
+                "workspace/symbol" => "Searching for symbols",
+                _ => "Renaming",
+            };
             let value = json!({ "kind": "begin", "title": title, "cancellable": true, "percentage": 0 });
             self.send(&jsonrpc::notification("$/progress", json!({ "token": token, "value": value })))?;
         }
-        let (method, params) = (method.to_owned(), params.clone());
+        let (method, params, symbol_resolve) = (method.to_owned(), params.clone(), self.symbol_resolve);
         let env = rename::Env {
             roots: self.model.roots.iter().map(|(root, _)| root.clone()).collect(),
             manifests: self.model.manifests.clone(),
@@ -1089,7 +1508,7 @@ impl State {
             };
             let cancelled = || cancel.load(Ordering::Relaxed);
             let control = features::Control { cancelled: Some(&cancelled), progress: Some(&report) };
-            let outcome = run_search(&method, &params, &lib, &proj, &ids, &packages, &env, &control);
+            let outcome = run_search(&method, &params, &lib, &proj, &ids, &packages, &env, &control, symbol_resolve);
             let _ = tx.send(Event::Searched { id, generation, token, outcome });
         });
         Ok(())
@@ -1133,12 +1552,81 @@ impl State {
         }
     }
 
+    /// Whether the editor does not tell the server about changed files, so the server looks.
+    fn polling(&self) -> bool {
+        !self.watch && self.root.is_some() && self.project_loaded
+    }
+
+    /// How long the loop may wait for a message before [`State::poll_due`] is due.
+    fn poll_wait(&self) -> Duration {
+        if self.polling() { self.next_poll.saturating_duration_since(Instant::now()) } else { Duration::from_secs(3600) }
+    }
+
+    /// Scans the source roots when it is time to.
+    fn poll_due(&mut self) {
+        if self.polling() && Instant::now() >= self.next_poll {
+            self.rescan();
+        }
+    }
+
+    /// Looks for new, changed and deleted source files on a worker thread, which reads only the
+    /// files whose modification time changed.
+    fn rescan(&mut self) {
+        self.next_poll = Instant::now() + RESCAN_INTERVAL;
+        if self.rescanning || !self.project_loaded {
+            return;
+        }
+        self.rescanning = true;
+        let (model, stamps, tx, generation) = (self.model.clone(), self.stamps.clone(), self.tx.clone(), self.load_generation);
+        thread::spawn(move || {
+            let mut paths: Vec<PathBuf> =
+                model.roots.iter().flat_map(|(root, _)| kargo_util::fs::collect_files(root, &["kt", "java"])).collect();
+            paths.extend(model.files.iter().map(|(p, _)| p.clone()).filter(|p| p.is_file()));
+            let present: HashSet<PathBuf> = paths.iter().cloned().collect();
+            let changed = paths
+                .into_iter()
+                .filter_map(|path| {
+                    let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+                    if stamps.get(&path) == Some(&stamp) {
+                        return None;
+                    }
+                    let text = std::fs::read_to_string(&path).ok()?;
+                    Some((path, text, stamp))
+                })
+                .collect();
+            let _ = tx.send(Event::Rescanned { generation, present, changed });
+        });
+    }
+
+    /// Takes in what a scan found: files that appeared or changed on disk, and files that are gone.
+    fn rescanned(&mut self, present: HashSet<PathBuf>, changed: Vec<(PathBuf, String, SystemTime)>) {
+        for (path, text, stamp) in changed {
+            self.stamps.insert(path.clone(), stamp);
+            let open = self.open.values().any(|p| *p == path);
+            if !open && self.files.get(&path).is_none_or(|unit| unit.text != text) {
+                self.set_file(path, text);
+            }
+        }
+        let gone: Vec<PathBuf> = self
+            .files
+            .keys()
+            .filter(|path| !present.contains(*path) && self.model.origin(path) != Origin::Loose)
+            .filter(|path| !self.open.values().any(|p| p == *path))
+            .cloned()
+            .collect();
+        for path in gone {
+            self.stamps.remove(&path);
+            self.files.remove(&path);
+            self.changed();
+        }
+    }
+
     fn register_watchers(&mut self) -> anyhow::Result<()> {
         if !self.watch {
             return Ok(());
         }
         self.next_id += 1;
-        let id = format!("kotlin/{}", self.next_id);
+        let id = format!("kotlin/{}/{}", self.index, self.next_id);
         let watchers = json!([
             { "globPattern": "**/*.kt" },
             { "globPattern": "**/*.java" },
@@ -1323,7 +1811,7 @@ impl State {
                 let positions = params["positions"].as_array().cloned().unwrap_or_default();
                 Ok(ranges::selection_ranges(an.file(unit), &an.unit(unit).text, &positions))
             }
-            "workspace/symbol" => Ok(features::workspace_symbols(&an, params["query"].as_str().unwrap_or_default())),
+            "workspaceSymbol/resolve" => Ok(features::resolve_symbol(&an, params.clone())),
             _ => Err(Failure::NotFound),
         }
     }
@@ -1333,6 +1821,11 @@ impl State {
         self.snippets = completion["completionItem"]["snippetSupport"] == true;
         self.watch = params["capabilities"]["workspace"]["didChangeWatchedFiles"]["dynamicRegistration"] == true;
         self.work_done_progress = params["capabilities"]["window"]["workDoneProgress"] == true;
+        self.symbol_resolve = params["capabilities"]["workspace"]["symbol"]["resolveSupport"]["properties"]
+            .as_array()
+            .is_some_and(|properties| properties.iter().any(|p| p == "location.range"));
+        let encoding = text::Encoding::negotiate(&params["capabilities"]["general"]["positionEncodings"]);
+        text::set_encoding(encoding);
         let workspace_edit = &params["capabilities"]["workspace"]["workspaceEdit"];
         self.document_changes = workspace_edit["documentChanges"] == true;
         self.create_files = workspace_edit["resourceOperations"].as_array().is_some_and(|ops| ops.iter().any(|o| o == "create"));
@@ -1348,6 +1841,7 @@ impl State {
         self.reload();
         json!({
             "capabilities": {
+                "positionEncoding": encoding.name(),
                 "textDocumentSync": { "openClose": true, "change": 2, "save": { "includeText": false } },
                 "completionProvider": { "triggerCharacters": [".", "@", "["], "resolveProvider": true },
                 "hoverProvider": true,
@@ -1366,7 +1860,7 @@ impl State {
                 "foldingRangeProvider": true,
                 "selectionRangeProvider": true,
                 "documentFormattingProvider": true,
-                "workspaceSymbolProvider": true,
+                "workspaceSymbolProvider": { "resolveProvider": true },
                 "codeActionProvider": { "codeActionKinds": actions::KINDS },
                 "workspace": {
                     "fileOperations": {
@@ -1389,7 +1883,8 @@ enum Failure {
     Invalid(String),
 }
 
-/// The references or the rename of the identifier at the request's position.
+/// The references or the rename of the identifier at the request's position, or the symbols of
+/// the workspace that match a query.
 #[allow(clippy::too_many_arguments)]
 fn run_search(
     method: &str,
@@ -1400,8 +1895,14 @@ fn run_search(
     packages: &Packages,
     env: &rename::Env,
     control: &features::Control,
+    symbol_resolve: bool,
 ) -> Result<Value, Failure> {
     let an = Analyzer::new(lib, proj, packages);
+    if method == "workspace/symbol" {
+        let query = params["query"].as_str().unwrap_or_default();
+        return features::workspace_symbols(&an, query, symbol_resolve, control)
+            .ok_or_else(|| Failure::Invalid("the request was cancelled".into()));
+    }
     if method == "workspace/willRenameFiles" {
         let files: Vec<(PathBuf, PathBuf)> = params["files"]
             .as_array()
@@ -1732,17 +2233,26 @@ local = \"{url}\"
 
         // The download is reported with `$/progress` once the editor accepts the token.
         let mut progress = Vec::new();
+        let mut loading = Vec::new();
         loop {
             let message = jsonrpc::read(&mut output).unwrap().expect("a message");
             if message["method"] == "window/workDoneProgress/create" {
                 send(jsonrpc::response(&message["id"], Value::Null));
             } else if message["method"] == "$/progress" {
-                progress.push(message["params"]["value"].clone());
+                let value = message["params"]["value"].clone();
+                if message["params"]["token"].as_str().is_some_and(|t| t.ends_with("/load")) {
+                    loading.push(value);
+                    continue;
+                }
+                progress.push(value);
                 if message["params"]["value"]["kind"] == "end" {
                     break;
                 }
             }
         }
+        // Loading the project is reported before the download, and has ended by then.
+        assert_eq!(loading[0]["title"], "Loading Kotlin project", "{loading:?}");
+        assert_eq!(loading.last().unwrap()["kind"], "end", "{loading:?}");
         assert_eq!(progress[0]["title"], "Fetching dependency sources", "{progress:?}");
         // g:lib, kotlin-test-junit5 and junit-jupiter lack one; only g:lib publishes one.
         assert_eq!(progress[0]["message"], "3 libraries", "{progress:?}");
@@ -1911,6 +2421,132 @@ local = \"{url}\"
         assert_eq!(begin["params"]["value"]["cancellable"], true);
         let reply = editor.reply("1");
         assert_eq!(reply["result"][0]["uri"], a, "{reply}");
+        editor.finish();
+    }
+
+    #[test]
+    fn searches_workspace_symbols_on_a_worker_and_resolves_them() {
+        let mut editor = Editor::start(Arc::new(|_, _, _| Ok(None)));
+        let a = "file:///p/src/A.kt";
+        editor.open(a, "package p\n\nfun greet() = 1\n");
+        editor.send(jsonrpc::request("1", "workspace/symbol", json!({ "query": "greet" })));
+        let reply = editor.reply("1");
+        assert_eq!(reply["result"][0]["name"], "greet", "{reply}");
+        assert!(reply["result"][0]["location"]["range"].is_object(), "{reply}");
+        // A cancelled search answers with the cancellation error.
+        editor.send(jsonrpc::request("2", "workspace/symbol", json!({ "query": "greet" })));
+        editor.send(jsonrpc::notification("$/cancelRequest", json!({ "id": "2" })));
+        let reply = editor.reply("2");
+        assert!(reply["result"].is_array() || reply["error"]["code"] == REQUEST_CANCELLED, "{reply}");
+        editor.finish();
+    }
+
+    #[test]
+    fn resolves_workspace_symbol_ranges_when_the_editor_asks_for_it() {
+        let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (server_in, input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, Arc::new(|_, _, _| Ok(None))));
+        let mut editor = Editor { input, output: BufReader::new(output), server: Some(server) };
+        let capabilities = json!({ "workspace": { "symbol": { "resolveSupport": { "properties": ["location.range"] } } } });
+        editor.send(jsonrpc::request("0", "initialize", json!({ "capabilities": capabilities })));
+        let init = editor.reply("0");
+        assert_eq!(init["result"]["capabilities"]["workspaceSymbolProvider"]["resolveProvider"], true);
+        assert_eq!(init["result"]["capabilities"]["positionEncoding"], "utf-16");
+        editor.open("file:///p/src/A.kt", "package p\n\nfun greet() = 1\n");
+        editor.send(jsonrpc::request("1", "workspace/symbol", json!({ "query": "greet" })));
+        let symbol = editor.reply("1")["result"][0].clone();
+        assert!(symbol["location"]["range"].is_null(), "{symbol}");
+        editor.send(jsonrpc::request("2", "workspaceSymbol/resolve", symbol));
+        let resolved = editor.reply("2");
+        assert_eq!(resolved["result"]["location"]["range"]["start"], json!({ "line": 2, "character": 4 }), "{resolved}");
+        editor.finish();
+    }
+
+    #[test]
+    fn rescans_the_source_roots_when_the_editor_does_not_watch_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/A.kt"), "package p\n\nfun zzalpha() = 1\n").unwrap();
+        let config = Config::new(dir.path().join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (server_in, input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, Arc::new(|_, _, _| Ok(None))));
+        let mut editor = Editor { input, output: BufReader::new(output), server: Some(server) };
+        editor.send(jsonrpc::request("0", "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} })));
+        editor.reply("0");
+        fn names(editor: &mut Editor, id: &str, query: &str) -> Vec<String> {
+            editor.send(jsonrpc::request(id, "workspace/symbol", json!({ "query": query })));
+            let reply = editor.reply(id);
+            // A search that overlaps a rescan fails with ContentModified; ask again.
+            match reply["result"].as_array() {
+                Some(symbols) => symbols.iter().map(|s| s["name"].as_str().unwrap().to_owned()).collect(),
+                None => names(editor, &format!("{id}-again"), query),
+            }
+        }
+        assert_eq!(names(&mut editor, "1", "zzalpha"), ["zzalpha"]);
+        // A new file and a deleted one are noticed on save, without any watcher.
+        std::fs::write(dir.path().join("src/B.kt"), "package p\n\nfun zzbeta() = 1\n").unwrap();
+        std::fs::remove_file(dir.path().join("src/A.kt")).unwrap();
+        let saved = text::path_to_uri(&dir.path().join("src/B.kt"));
+        editor.send(jsonrpc::notification("textDocument/didSave", json!({ "textDocument": { "uri": saved } })));
+        let mut found = Vec::new();
+        for n in 0..100 {
+            found = names(&mut editor, &format!("q{n}"), "zzbeta");
+            if !found.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(found, ["zzbeta"]);
+        assert!(names(&mut editor, "last", "zzalpha").is_empty());
+        editor.finish();
+    }
+
+    #[test]
+    fn serves_every_workspace_folder_as_its_own_project() {
+        let home = tempfile::tempdir().unwrap();
+        let project = |name: &str, function: &str| {
+            let dir = home.path().join(name);
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("kargo.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n")).unwrap();
+            std::fs::write(dir.join("src/Main.kt"), format!("package p\n\nfun {function}() = 1\n")).unwrap();
+            dir
+        };
+        let (one, two, three) = (project("one", "zzalpha"), project("two", "zzbeta"), project("three", "zzgamma"));
+        let config = Config::new(home.path().join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (server_in, input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, Arc::new(|_, _, _| Ok(None))));
+        let mut editor = Editor { input, output: BufReader::new(output), server: Some(server) };
+        let folder = |dir: &Path| json!({ "uri": text::path_to_uri(dir), "name": "x" });
+        let folders = json!([folder(&one), folder(&two)]);
+        editor.send(jsonrpc::request("0", "initialize", json!({ "workspaceFolders": folders, "capabilities": {} })));
+        let init = editor.reply("0");
+        assert_eq!(init["result"]["capabilities"]["workspace"]["workspaceFolders"]["supported"], true, "{init}");
+        editor.send(jsonrpc::notification("initialized", json!({})));
+
+        let symbols = |editor: &mut Editor, id: &str| -> Vec<String> {
+            editor.send(jsonrpc::request(id, "workspace/symbol", json!({ "query": "zz" })));
+            let reply = editor.reply(id);
+            let mut names: Vec<String> =
+                reply["result"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap().to_owned()).collect();
+            names.sort();
+            names
+        };
+        // Both projects answer one search.
+        assert_eq!(symbols(&mut editor, "1"), ["zzalpha", "zzbeta"]);
+
+        // A file's requests go to its own project.
+        let main_two = text::path_to_uri(&two.join("src/Main.kt"));
+        editor.send(jsonrpc::request("2", "textDocument/documentSymbol", json!({ "textDocument": { "uri": main_two } })));
+        assert_eq!(editor.reply("2")["result"][0]["name"], "zzbeta");
+
+        // A folder the editor opens later is served too, and a closed one is dropped.
+        let added = json!({ "event": { "added": [folder(&three)], "removed": [folder(&one)] } });
+        editor.send(jsonrpc::notification("workspace/didChangeWorkspaceFolders", added));
+        assert_eq!(symbols(&mut editor, "3"), ["zzbeta", "zzgamma"]);
         editor.finish();
     }
 

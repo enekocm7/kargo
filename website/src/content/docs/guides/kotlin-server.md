@@ -21,7 +21,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Go to definition | Into your project, a path dependency, the sources of the standard library, the JDK and libraries, or stubs of libraries without sources. Go to declaration and go to type definition too |
 | Find references, highlights | Every use in the project, with the declaration |
 | Rename | Every reference in the project, and what must change with it: `expect` and `actual` declarations, overrides, named arguments, KDoc links and tags, labels, the file named after a class, packages and the entry points in `kargo.toml` |
-| Outline | Document symbols for the file, workspace symbols for the project |
+| Outline | Document symbols for the file, workspace symbols for the project, and for its libraries once the query has three characters. See [Protocol details](#protocol-details) |
 | Semantic highlighting | Every identifier classified by what it resolves to: class, interface, enum, enum member, type parameter, function, method, property, parameter, local variable or package. The modifiers `declaration`, `readonly` (`val`, parameters), `static` (members of objects and companions), `deprecated` and `defaultLibrary` (the standard library and other libraries) come with it. Whole file and range requests; the result is kept until the next change |
 | Folding | Bodies, lambdas and multi-line argument lists, raw strings, the import block, KDoc and block comments, and runs of `//` comments |
 | Selection | Expand the selection from an identifier to its dotted call chain, the brackets around it, the statement, the declarations around it (function, class) and the file |
@@ -112,6 +112,15 @@ Rename also changes what isn't Kotlin code:
 With an editor that takes `documentChanges`, the edit carries the version of each open document, so a rename made against text that has changed since is rejected by the editor instead of corrupting the file. Otherwise it is a plain `changes` map, without the file and directory renames.
 
 Finding references and renaming search the whole project on a worker thread, so other requests keep answering while they run. An editor that shows `$/progress` gets a cancellable progress bar, and `$/cancelRequest` stops the search. If you edit a file while a search runs, the request fails with `ContentModified` and the editor asks again.
+
+### Protocol details
+
+- **Cancellation.** References, rename, `workspace/willRenameFiles` and `workspace/symbol` run on a worker thread, so the other requests keep answering, and `$/cancelRequest` stops them. A cancelled request fails with `RequestCancelled`.
+- **Progress.** An editor that shows `$/progress` sees *Loading Kotlin project* while Kargo reads your sources and indexes the standard library and the dependencies, then *Fetching dependency sources* while sources jars download. Until the standard library is indexed, the first requests wait up to five seconds and then answer with what is loaded.
+- **Workspace symbols.** The project's symbols come first, then those of the libraries when the query has at least three characters, 500 at most. An editor that supports `workspaceSymbol/resolve` (it lists `location.range` in `workspace.symbol.resolveSupport`) gets symbols without a range and asks for it when you pick one.
+- **Position encoding.** When the editor lists `utf-8` in `general.positionEncodings`, columns count bytes, which needs no conversion; otherwise they count UTF-16 units, as the protocol's default.
+- **Editors that don't watch files.** Without dynamic registration of `workspace/didChangeWatchedFiles` (some Emacs and Helix versions), the server looks for new, changed and deleted source files itself: on every save, and every five seconds. A saved `kargo.toml` reloads the project layout the same way.
+- **Several projects in one window.** Every workspace folder gets its own project, found at the folder's Kargo project root. A request about a file goes to the project that contains it, and workspace symbols search all of them. Folders added or removed with `workspace/didChangeWorkspaceFolders` are loaded or dropped without a restart. Files outside every folder are served by the first project.
 
 ### Formatting
 

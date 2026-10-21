@@ -748,8 +748,25 @@ fn outlines_files() {
     assert_eq!(symbols[0]["children"][0]["name"], "b");
     assert_eq!(symbols[0]["children"][0]["kind"], 6);
     assert_eq!(symbols[1]["name"], "main");
-    let found = features::workspace_symbols(&an, "mai");
+    let control = features::Control::default();
+    let found = features::workspace_symbols(&an, "mai", false, &control).unwrap();
     assert_eq!(found[0]["name"], "main");
+    assert!(found[0]["location"]["range"].is_object());
+    // Short queries stay in the project; a longer one reaches the libraries.
+    let names = |query: &str| -> Vec<String> {
+        let found = features::workspace_symbols(&an, query, false, &control).unwrap();
+        found.as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap().to_owned()).collect()
+    };
+    assert!(!names("li").contains(&"listOf".to_owned()));
+    assert!(names("listOf").contains(&"listOf".to_owned()));
+    // With resolve support the range comes later, from `workspaceSymbol/resolve`.
+    let found = features::workspace_symbols(&an, "main", true, &control).unwrap();
+    assert!(found[0]["location"]["range"].is_null());
+    let resolved = features::resolve_symbol(&an, found[0].clone());
+    assert_eq!(resolved["location"]["range"], features::workspace_symbols(&an, "main", false, &control).unwrap()[0]["location"]["range"]);
+    let cancelled = || true;
+    let control = features::Control { cancelled: Some(&cancelled), progress: None };
+    assert!(features::workspace_symbols(&an, "main", false, &control).is_none());
 }
 
 /// Runs completion, hover and definition against a real standard library: the extracted
