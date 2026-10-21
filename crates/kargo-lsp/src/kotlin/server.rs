@@ -26,6 +26,7 @@ use kargo_util::config::Config;
 
 use super::actions;
 use super::compiled;
+use super::diagnostics;
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
@@ -846,6 +847,7 @@ impl State {
                         let text = params["textDocument"]["text"].as_str().unwrap_or_default().to_owned();
                         self.open.insert(uri.to_owned(), path.clone());
                         self.set_file(path, text);
+                        self.publish_diagnostics(uri)?;
                     }
                 }
                 "textDocument/didChange" => {
@@ -854,11 +856,13 @@ impl State {
                         let mut text = self.files.get(&path).map(|u| u.text.clone()).unwrap_or_default();
                         text::apply_changes(&mut text, params["contentChanges"].as_array().map(Vec::as_slice).unwrap_or_default());
                         self.set_file(path, text);
+                        self.publish_diagnostics(uri)?;
                     }
                 }
                 "textDocument/didClose" => {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
                     if let Some(path) = self.open.remove(uri) {
+                        self.send(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] })))?;
                         // Back to what is on disk, or gone.
                         match std::fs::read_to_string(&path) {
                             Ok(text) if self.model.origin(&path) != Origin::Loose => self.set_file(path, text),
@@ -922,6 +926,14 @@ impl State {
             let _ = tx.send(Event::Formatted { id, uri, original, outcome });
         });
         Ok(())
+    }
+
+    /// Pushes the diagnostics that need no resolution ([`diagnostics`]) for the open document `uri`;
+    /// `kargo lsp` merges them with the check's.
+    fn publish_diagnostics(&mut self, uri: &str) -> anyhow::Result<()> {
+        let Some(unit) = self.open.get(uri).and_then(|path| self.files.get(path)) else { return Ok(()) };
+        let diagnostics = diagnostics::diagnostics(&unit.text, &unit.file);
+        self.send(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics })))
     }
 
     fn set_file(&mut self, path: PathBuf, text: String) {
@@ -1584,6 +1596,16 @@ local = \"{url}\"
             }
         }
 
+        /// The next message of `method` the server sent.
+        fn notification(&mut self, method: &str) -> Value {
+            loop {
+                let message = jsonrpc::read(&mut self.output).unwrap().expect("a message");
+                if message["method"] == method {
+                    return message;
+                }
+            }
+        }
+
         fn open(&mut self, uri: &str, text: &str) {
             let document = json!({ "uri": uri, "languageId": "kotlin", "version": 1, "text": text });
             self.send(jsonrpc::notification("textDocument/didOpen", json!({ "textDocument": document })));
@@ -1675,6 +1697,32 @@ local = \"{url}\"
         release.send(()).unwrap();
         let reply = editor.reply("1");
         assert_eq!(reply["error"]["code"], CONTENT_MODIFIED, "{reply}");
+        editor.finish();
+    }
+
+    #[test]
+    fn reports_diagnostics_as_the_document_changes() {
+        let mut editor = Editor::start(Arc::new(|_, _, _| Ok(None)));
+        let uri = "file:///p/src/Main.kt";
+        editor.open(
+            uri,
+            "fun main() {
+    println(1
+}
+",
+        );
+        let published = editor.notification("textDocument/publishDiagnostics");
+        assert_eq!(published["params"]["uri"], uri);
+        let diagnostics = published["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1, "{published}");
+        assert_eq!(diagnostics[0]["message"], "unclosed `(`");
+        assert_eq!(diagnostics[0]["range"]["start"], json!({ "line": 1, "character": 11 }));
+        let change = json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": "fun main() {
+    println(1)
+}
+" }] });
+        editor.send(jsonrpc::notification("textDocument/didChange", change));
+        assert_eq!(editor.notification("textDocument/publishDiagnostics")["params"]["diagnostics"], json!([]));
         editor.finish();
     }
 }
