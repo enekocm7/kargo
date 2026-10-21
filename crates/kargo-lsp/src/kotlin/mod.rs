@@ -11,6 +11,7 @@
 pub mod actions;
 pub mod classfile;
 pub mod compiled;
+pub mod diagnostics;
 pub mod features;
 pub mod index;
 pub mod java;

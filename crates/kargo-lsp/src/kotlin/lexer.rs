@@ -79,6 +79,8 @@ pub struct Lexed {
     pub docs: HashMap<usize, Range<usize>>,
     /// Comments, which get no completion.
     pub comments: Vec<Range<usize>>,
+    /// Block comments that reach the end of the file without closing.
+    pub unterminated_comments: Vec<Range<usize>>,
 }
 
 impl Lexed {
@@ -289,6 +291,9 @@ impl Lexer<'_> {
                     }
                 }
                 let end = i.min(self.bytes.len());
+                if depth > 0 {
+                    self.out.unterminated_comments.push(start..end);
+                }
                 if self.src[start..end].contains('\n') {
                     self.nl = true;
                 }
