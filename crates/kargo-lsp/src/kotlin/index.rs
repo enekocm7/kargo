@@ -109,16 +109,27 @@ impl Unit {
     /// A file, parsed as Java when its path ends in `.java`, else as Kotlin. A library's Java
     /// file keeps only what is public.
     pub fn new(path: PathBuf, text: String, origin: Origin) -> Self {
+        let file = Self::parse(&path, &text, &origin);
+        Self { path, text, file, origin, idents: OnceLock::new() }
+    }
+
+    /// A file whose syntax tree was parsed before (see [`super::parsed`]).
+    pub fn with_file(path: PathBuf, text: String, file: File, origin: Origin) -> Self {
+        Self { path, text, file, origin, idents: OnceLock::new() }
+    }
+
+    /// Parses `text` as `new` does.
+    pub fn parse(path: &std::path::Path, text: &str, origin: &Origin) -> File {
         let file = if path.extension().is_some_and(|e| e == "java") {
-            let mut file = java::parse(&text);
+            let mut file = java::parse(text);
             if matches!(origin, Origin::Library { .. }) {
                 java::hide_non_public(&mut file);
             }
             file
         } else {
-            syntax::parse(&text)
+            syntax::parse(text)
         };
-        Self { path, text, file, origin, idents: OnceLock::new() }
+        file
     }
 
     /// The tokens of the identifier `name`, in order: the places to look at when searching for it.

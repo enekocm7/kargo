@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -24,6 +24,7 @@ use kargo_util::config::Config;
 
 use super::compiled;
 use super::index::{Origin, Platforms, Unit};
+use super::parsed::{self, Blob};
 
 /// The built-in outline of the standard library, split into files at `// file:` lines.
 const STUBS: &str = include_str!("stubs.kt");
@@ -115,7 +116,8 @@ pub fn units(config: &Config, cache: &UnitCache, jars: &[SourcesJar]) -> Vec<Arc
         })
         .collect();
     let wanted = merge(listed.iter().map(|(jar, dir, files)| (*jar, dir.as_path(), files.as_slice())));
-    wanted
+    let blobs = Blobs::read(listed.iter().map(|(_, dir, _)| dir.as_path()));
+    let units = wanted
         .par_iter()
         .filter_map(|file| {
             let key = (file.path.clone(), file.main, file.test);
@@ -124,11 +126,42 @@ pub fn units(config: &Config, cache: &UnitCache, jars: &[SourcesJar]) -> Vec<Arc
             }
             let text = std::fs::read_to_string(&file.path).ok()?;
             let origin = Origin::Library { name: file.name.clone(), main: file.main, test: file.test };
-            let unit = Arc::new(Unit::new(file.path.clone(), text, origin));
+            let unit = Arc::new(blobs.unit(file.path.clone(), text, origin));
             cache.lock().expect("lock poisoned").insert(key, Arc::clone(&unit));
             Some(unit)
         })
-        .collect()
+        .collect();
+    blobs.save();
+    units
+}
+
+/// The blobs of parsed files (see [`parsed`]) of the directories a load reads, so that a library's
+/// files are lexed and parsed the first time only.
+struct Blobs(Vec<(PathBuf, RwLock<Blob>)>);
+
+impl Blobs {
+    fn read<'a>(dirs: impl Iterator<Item = &'a Path>) -> Self {
+        Blobs(dirs.map(|dir| (dir.to_path_buf(), RwLock::new(Blob::read(dir)))).collect())
+    }
+
+    /// The unit for the file `path` of `text`, from the blob of its directory when it has it.
+    fn unit(&self, path: PathBuf, text: String, origin: Origin) -> Unit {
+        let Some((blob, rel)) = self.0.iter().find_map(|(dir, blob)| Some((blob, parsed::relative(dir, &path)?))) else {
+            return Unit::new(path, text, origin);
+        };
+        if let Some(file) = blob.read().expect("lock poisoned").get(&rel, text.len()) {
+            return Unit::with_file(path, text, file, origin);
+        }
+        let file = Unit::parse(&path, &text, &origin);
+        blob.write().expect("lock poisoned").insert(rel, text.len(), &file);
+        Unit::with_file(path, text, file, origin)
+    }
+
+    fn save(&self) {
+        for (dir, blob) in &self.0 {
+            blob.read().expect("lock poisoned").save(dir);
+        }
+    }
 }
 
 /// The Kotlin files under `dir` as a library called `name` on the platforms `main` and `test`
@@ -237,7 +270,8 @@ fn library_units(config: &Config, cache: &UnitCache, library: &CompiledLibrary) 
         Ok(())
     })?;
     let files = kargo_util::fs::collect_files(&dir, &["kt", "java"]);
-    Ok(files
+    let blobs = Blobs::read(std::iter::once(dir.as_path()));
+    let units = files
         .par_iter()
         .filter_map(|path| {
             let key = (path.clone(), library.main, library.test);
@@ -246,11 +280,13 @@ fn library_units(config: &Config, cache: &UnitCache, library: &CompiledLibrary) 
             }
             let text = std::fs::read_to_string(path).ok()?;
             let origin = Origin::Library { name: library.name.clone(), main: library.main, test: library.test };
-            let unit = Arc::new(Unit::new(path.clone(), text, origin));
+            let unit = Arc::new(blobs.unit(path.clone(), text, origin));
             cache.lock().expect("lock poisoned").insert(key, Arc::clone(&unit));
             Some(unit)
         })
-        .collect())
+        .collect();
+    blobs.save();
+    Ok(units)
 }
 
 /// Where the sources of `jar` are extracted, extracting them the first time.
@@ -429,5 +465,18 @@ mod tests {
         };
         assert_eq!(read(false), ["Api.kt"]);
         assert_eq!(read(true), ["Api.kt", "Marker.java"]);
+        // The parsed files were stored next to the sources, and a new load takes them from there.
+        let sources = std::fs::read_dir(config.home().join("cache").join("lsp-sources")).unwrap().next().unwrap().unwrap().path();
+        let blob = Blob::read(&sources);
+        let api = kargo_util::fs::collect_files(&sources, &["kt"]).into_iter().next().expect("Api.kt");
+        let (rel, text) = (parsed::relative(&sources, &api).unwrap(), std::fs::read_to_string(&api).unwrap());
+        assert!(blob.get(&rel, text.len()).is_some(), "{rel}");
+        let again = units(
+            &config,
+            &UnitCache::default(),
+            &[SourcesJar { name: "lib 1.0".into(), jar: jar.clone(), main: Platforms::JVM, test: Platforms::NONE, java: true }],
+        );
+        assert_eq!(again.len(), 2);
+        assert!(again.iter().all(|u| !u.file.decls.is_empty()));
     }
 }

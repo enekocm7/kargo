@@ -134,6 +134,8 @@ An edit updates only the index entries of the edited file, so typing stays fast 
 
 ## Libraries
 
+
+The server parses the sources of each library once. It stores the parsed files in a `.kargo-parsed` file in the library's folder under `~/.kargo/cache/lsp-sources`, and the next start reads them from there instead of parsing again (about 7 times faster for the standard library). Delete the file to parse again; a file from another Kargo version is ignored.
 Libraries are seen per target, as the compiler sees them. Common code in `src/` compiles for every target of its package, so it sees only the libraries that every one of them has. `src-jvm/` sees the JVM's libraries, and `src-wasm/` the Wasm ones. Test code also sees the libraries that only the test classpath has, such as `[dev-dependencies]`, and main code doesn't. A Kotlin file outside the source roots sees the libraries of every platform.
 
 The **standard library** comes from its sources jar at the project's [`[kotlin] version`](../../reference/manifest/#kotlin), and so does `kotlin-test`, for tests. Kargo downloads them on first use from the project's repositories into its Maven cache, like any other artifact, and extracts them under `~/.kargo/cache/lsp-sources`, so go to definition opens real files. The server loads the standard library of each platform the project targets: the JVM's sources for `jvm` and `android`, and `kotlin-stdlib-wasm-js` (or `kotlin-stdlib-wasm-wasi` for `environment = "wasi"`) for `wasm`, each with its `kotlin-test` for tests. Native code takes the parts of the Wasm one that Native shares. The JVM-only parts are offered to JVM code alone.

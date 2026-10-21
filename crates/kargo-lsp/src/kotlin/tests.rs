@@ -2035,5 +2035,14 @@ fn scales_with_the_project() {
             text / 1024,
             t.elapsed()
         );
+        let token_kib = tokens * std::mem::size_of::<super::lexer::Token>() / 1024;
+        let decl_kib = decls * std::mem::size_of::<super::syntax::Decl>() / 1024;
+        println!("  memory: text {} KiB, tokens {token_kib} KiB, declarations {decl_kib} KiB (shallow)", text / 1024);
+        let t = Instant::now();
+        let blobs: Vec<Vec<u8>> = units.iter().map(|u| super::parsed::encode(&u.file)).collect();
+        println!("  encode: {:?}, {} KiB stored", t.elapsed(), blobs.iter().map(Vec::len).sum::<usize>() / 1024);
+        let t = Instant::now();
+        let decoded: usize = blobs.iter().filter_map(|b| super::parsed::decode(b)).map(|f| f.decls.len()).sum();
+        println!("  decode: {:?} ({decoded} declarations)", t.elapsed());
     }
 }
