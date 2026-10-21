@@ -373,6 +373,53 @@ fn goes_to_definitions() {
     assert_eq!(f.definition(), Some(("Config.kt".into(), "fun configure(verbose: Boolean = false) {}".into())));
 }
 
+/// The declarations of `pick`, and the return type of `val r = ...` at the second cursor.
+fn overloads(decls: &str, call: &str) -> Fixture {
+    fixture(&[("src/Main.kt", &format!("open class Base\nclass Derived : Base()\n{decls}\nfun main() {{\n    {call}\n}}\n"))])
+}
+
+#[test]
+fn picks_overloads_by_subtype() {
+    let decls = "fun log(message: String) {}\nfun log(error: Throwable) {}\nfun log(base: Base) {}\n";
+    let f = overloads(decls, "lo$0g(IllegalStateException(\"x\"))");
+    assert_eq!(f.definition().map(|d| d.1), Some("fun log(error: Throwable) {}".into()));
+    let f = overloads(decls, "lo$0g(\"x\")");
+    assert_eq!(f.definition().map(|d| d.1), Some("fun log(message: String) {}".into()));
+    // The most specific applicable overload wins.
+    let decls = "fun take(a: Any) {}\nfun take(b: Base) {}\n";
+    let f = overloads(decls, "ta$0ke(Derived())");
+    assert_eq!(f.definition().map(|d| d.1), Some("fun take(b: Base) {}".into()));
+    // Renaming one overload leaves the calls of the other.
+    let f = overloads("fun log(message: String) {}\nfun log(base: Base) {}\n", "lo$0g(Derived())\n    log(\"x\")");
+    let edits = f.rename("note");
+    assert!(edits.iter().any(|(_, l)| l.contains("fun note(base: Base)")), "{edits:?}");
+    assert!(edits.iter().any(|(_, l)| l.contains("note(Derived())")), "{edits:?}");
+    assert!(!edits.iter().any(|(_, l)| l.contains("note(\"x\")") || l.contains("note(message")), "{edits:?}");
+}
+
+#[test]
+fn picks_overloads_by_nullability_and_function_types() {
+    let decls = "fun len(s: String): Int = 0\nfun len(s: String?): Long = 0\n";
+    let f = overloads(decls, "val x: String? = null\n    val r = len(x)\n    r$0");
+    assert!(f.hover().contains("Long"), "{}", f.hover());
+    let f = overloads(decls, "val r = len(\"a\")\n    r$0");
+    assert!(f.hover().contains("Int"), "{}", f.hover());
+
+    let decls = "fun run(block: () -> String): Int = 0\nfun run(block: (Int) -> String): Long = 0\n";
+    let f = overloads(decls, "val r = run { a -> \"x\" }\n    r$0");
+    assert!(f.hover().contains("Long"), "{}", f.hover());
+    let f = overloads(decls, "val r = run { \"x\" }\n    r$0");
+    assert!(f.hover().contains("Int"), "{}", f.hover());
+}
+
+#[test]
+fn keeps_every_overload_when_the_arguments_are_unknown() {
+    let f = overloads("fun log(message: String) {}\nfun log(base: Base) {}\n", "lo$0g(unknown)");
+    let (u, tok) = f.token();
+    let an = f.an();
+    assert_eq!(features::targets_at(&an, u, tok).len(), 2);
+}
+
 #[test]
 fn respects_source_sets() {
     let f = fixture(&[
