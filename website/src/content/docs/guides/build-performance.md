@@ -16,7 +16,7 @@ $ touch src/Main.kt && kargo build
 The first compilation starts a **compiler daemon**: a background JVM that runs the Kotlin compiler (and `javac`) in-process. Later builds send their compiler arguments to it over a local socket, so they get an already-running, already-optimized compiler. A rebuild of a small project drops from several seconds to well under one.
 
 - One daemon runs per JDK, Kotlin version and `KARGO_COMPILER_JVM_OPTS`; changing any of them starts a new one.
-- It exits after 3 hours without work, and when its state directory under `~/.kargo/daemon` is removed.
+- It exits after 3 hours without work, and when its state directory under `~/.kargo/daemon` is removed. On exit it deletes its `info` file. If one is left behind (after a crash or a reboot) and another program now uses its port, Kargo notices that the program does not answer like the daemon within 10 seconds and starts a new daemon instead of waiting.
 - It serves several builds at once, so parallel targets and concurrent `kargo` invocations share it.
 - Compiler output looks exactly like a standalone compiler run, with paths relative to the directory you ran `kargo` in.
 
