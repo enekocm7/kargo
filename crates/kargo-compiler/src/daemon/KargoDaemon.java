@@ -30,7 +30,10 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class KargoDaemon {
     static final int PROTOCOL = 1;
@@ -42,6 +45,8 @@ public final class KargoDaemon {
     /** Where `System.out`/`System.err` of the current request (and threads it starts) go. */
     static final InheritableThreadLocal<OutputStream> SINK = new InheritableThreadLocal<>();
     static final AtomicInteger ACTIVE = new AtomicInteger();
+    /** One lock per output directory, so a request waits for an orphaned compilation writing to the same one. */
+    static final ConcurrentHashMap<String, ReentrantLock> OUTPUT_LOCKS = new ConcurrentHashMap<>();
     static volatile long lastUse = System.currentTimeMillis();
     /** The daemon's log (its original stderr), for problems that are not the client's output. */
     static PrintStream log = System.err;
@@ -131,6 +136,65 @@ public final class KargoDaemon {
                 exit(out, 0);
                 System.exit(0);
             }
+            // The client sends nothing after the request, so a read that ends means it went away.
+            AtomicBoolean gone = new AtomicBoolean();
+            Thread watcher = new Thread(() -> {
+                try {
+                    while (in.read() >= 0) {
+                        // ignore stray bytes
+                    }
+                } catch (IOException e) {
+                    // closed
+                }
+                gone.set(true);
+            }, "kargo-client-watcher");
+            watcher.setDaemon(true);
+            watcher.start();
+            String outputDir = outputDirectory(command, arguments);
+            ReentrantLock lock = null;
+            if (outputDir != null) {
+                lock = OUTPUT_LOCKS.computeIfAbsent(outputDir, k -> new ReentrantLock());
+                lock.lock();
+            }
+            try {
+                if (gone.get()) {
+                    // The client left while waiting for an earlier compilation of the same output.
+                    return;
+                }
+                compileAndReply(command, arguments, out, gone);
+            } finally {
+                if (lock != null) {
+                    lock.unlock();
+                }
+            }
+        } catch (IOException e) {
+            // The client went away (e.g. Ctrl-C); nothing to report to.
+        } finally {
+            lastUse = System.currentTimeMillis();
+            ACTIVE.decrementAndGet();
+        }
+    }
+
+    /** The directory a request writes its classes to, if it names one. */
+    static String outputDirectory(String command, String[] arguments) {
+        String flag = command.equals("kotlin-ic") ? "--dest" : command.equals("kotlin") || command.equals("javac") ? "-d" : null;
+        if (flag == null) {
+            return null;
+        }
+        for (int i = 0; i + 1 < arguments.length; i++) {
+            if (arguments[i].equals(flag)) {
+                try {
+                    return Paths.get(arguments[i + 1]).toAbsolutePath().normalize().toString();
+                } catch (RuntimeException e) {
+                    return arguments[i + 1];
+                }
+            }
+        }
+        return null;
+    }
+
+    static void compileAndReply(String command, String[] arguments, DataOutputStream out, AtomicBoolean gone) throws IOException {
+        {
             FrameStream frames = new FrameStream(out);
             PrintStream output = new PrintStream(new BufferedOutputStream(frames, 8192), false, "UTF-8");
             SINK.set(output);
@@ -153,12 +217,9 @@ public final class KargoDaemon {
                 SINK.remove();
             }
             output.flush();
-            exit(out, code);
-        } catch (IOException e) {
-            // The client went away (e.g. Ctrl-C); nothing to report to.
-        } finally {
-            lastUse = System.currentTimeMillis();
-            ACTIVE.decrementAndGet();
+            if (!gone.get()) {
+                exit(out, code);
+            }
         }
     }
 
