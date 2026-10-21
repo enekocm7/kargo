@@ -295,6 +295,7 @@ fn import_candidates(an: &Analyzer, u: UnitId, tok: usize) -> Vec<String> {
                 return Vec::new();
             }
             let Some(receiver) = an.infer(u, start, tok - 1) else { return Vec::new() };
+            let receiver = if prev == Some(Tok::SafeDot) { super::resolve::strip_nullable(receiver) } else { receiver };
             if matches!(receiver, Ty::Package(_)) || !an.members_named(&receiver, name, u).is_empty() {
                 return Vec::new();
             }

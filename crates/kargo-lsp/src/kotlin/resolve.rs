@@ -566,7 +566,9 @@ impl<'a> Analyzer<'a> {
                     }
                     kotlin_names.extend(self.extensions(ty, &closure, from, true).iter().map(|m| self.decl(m.sym).name.clone()));
                 }
-                for (c, subst) in &closure {
+                // A nullable receiver has only the extensions of nullable types; `?.` unwraps it.
+                let nullable_receiver = matches!(ty, Ty::Class { nullable: true, .. });
+                for (c, subst) in closure.iter().filter(|_| !nullable_receiver) {
                     let platform = self.is_platform(*c);
                     let file = self.file(c.unit_id());
                     for &m in &self.decl(*c).members {
@@ -601,6 +603,7 @@ impl<'a> Analyzer<'a> {
     }
 
     fn extensions(&self, ty: &Ty, closure: &[(SymId, Subst)], from: UnitId, all: bool) -> Vec<Member> {
+        let nullable_receiver = matches!(ty, Ty::Class { nullable: true, .. });
         let mut out = Vec::new();
         let mut names: Vec<(&str, Ty)> = Vec::new();
         for (c, subst) in closure {
@@ -617,6 +620,9 @@ impl<'a> Analyzer<'a> {
                     }
                     let d = self.decl(e);
                     let Some(receiver) = &d.receiver else { continue };
+                    if nullable_receiver && !receiver.nullable {
+                        continue;
+                    }
                     let mut subst = Subst::new();
                     let tparams: Vec<String> = d.type_params.iter().map(|t| t.name.clone()).collect();
                     self.unify(receiver, class_ty, &tparams, &mut subst);
@@ -630,6 +636,13 @@ impl<'a> Analyzer<'a> {
                 let d = self.decl(e);
                 let Some(receiver) = &d.receiver else { continue };
                 if receiver.func.is_some() != matches!(ty, Ty::Func { .. }) {
+                    continue;
+                }
+                // `fun <T : Any> T.f()` is not for a nullable receiver.
+                if nullable_receiver
+                    && !receiver.nullable
+                    && d.type_params.iter().find(|t| t.name == receiver.name).and_then(|t| t.bound.as_ref()).is_some_and(|b| !b.nullable)
+                {
                     continue;
                 }
                 let bound_ok = d.type_params.iter().find(|t| t.name == receiver.name).and_then(|t| t.bound.as_ref()).is_none_or(|b| {
@@ -1397,8 +1410,9 @@ impl<'a> Analyzer<'a> {
                     if lx.kind(i + 1) != Some(Tok::Ident) || i + 1 >= b {
                         return None;
                     }
-                    let (ty, next) = self.member_access(u, &cur, i + 1, b)?;
-                    cur = ty;
+                    let safe = lx.kind(i) == Some(Tok::SafeDot);
+                    let (ty, next) = self.member_access(u, &if safe { strip_nullable(cur) } else { cur }, i + 1, b)?;
+                    cur = if safe { nullable(ty, true) } else { ty };
                     i = next;
                 }
                 Tok::BangBang => {
@@ -1568,10 +1582,252 @@ impl<'a> Analyzer<'a> {
             Found::It { unit, brace } => self.lambda_ctx(*unit, *brace).and_then(|c| c.params.first().cloned().flatten()),
             Found::Sym(m) => {
                 let d = self.decl(m.sym);
-                (d.kind != Kind::Function).then(|| self.value_ty(m.sym, &m.subst)).flatten()
+                (d.kind != Kind::Function).then(|| self.value_ty(m.sym, &m.subst).map(|t| self.smart_cast(u, i, m.sym, t))).flatten()
             }
         })?;
         Some((ty, j))
+    }
+
+    /// The type of the stable value `sym` (a parameter or a `val`) used at token `i`, narrowed by
+    /// the checks that surround it: `if (x is T)` and its `&&` chains, `when (x) { is T -> }`,
+    /// `when { x is T -> }`, and, for the code after them, `if (x !is T) return`, `x as T` and
+    /// `require(x is T)`. `declared` is its type without the narrowing.
+    fn smart_cast(&self, u: UnitId, i: usize, sym: SymId, declared: Ty) -> Ty {
+        let d = self.decl(sym);
+        if sym.unit_id() != u || !(d.kind == Kind::Parameter || d.kind == Kind::Variable && !d.mutable) {
+            return declared;
+        }
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let name = d.name.as_str();
+        let same = |k: usize| {
+            lx.kind(k) == Some(Tok::Ident)
+                && lx.text(src, k) == name
+                && !matches!(k.checked_sub(1).and_then(|p| lx.kind(p)), Some(Tok::Dot | Tok::SafeDot))
+                && matches!(self.resolve_name(u, lx.tokens[k].start, name).first(), Some(Found::Sym(m)) if m.sym == sym)
+        };
+        let len = lx.tokens.len();
+        // The end of a branch: its block, or its expression up to an `else`.
+        let branch_end = |start: usize| -> usize {
+            if lx.kind(start) == Some(Tok::LBrace) {
+                return lx.matching[start].filter(|&c| c > start).map_or(len, |c| c + 1);
+            }
+            // A bare `return` ends at its line.
+            if matches!(lx.text(src, start), "return" | "break" | "continue") && lx.tokens.get(start + 1).is_none_or(|t| t.nl) {
+                return start + 1;
+            }
+            let end = syntax::expr_end(src, lx, start, len);
+            let mut k = start;
+            while k < end && !lx.is(src, k, "else") {
+                k = match lx.kind(k) {
+                    Some(Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen) => {
+                        lx.matching[k].filter(|&c| c > k).map_or(end, |c| c + 1)
+                    }
+                    _ => k + 1,
+                };
+            }
+            k.min(end)
+        };
+        // The types the operands of a condition (split at `sep`) check `name` against.
+        let facts = |a: usize, b: usize, sep: &str, negated: bool| -> Vec<Option<Ty>> {
+            let mut out = Vec::new();
+            let mut s = a;
+            let mut k = a;
+            while k <= b {
+                let at_end = k >= b;
+                if !at_end && matches!(lx.kind(k), Some(Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen)) {
+                    k = lx.matching[k].filter(|&c| c > k).map_or(b, |c| c + 1);
+                    continue;
+                }
+                if at_end || lx.kind(k) == Some(Tok::Op) && lx.text(src, k) == sep {
+                    if same(s) {
+                        // `x != null` (`x == null` when negated): not null.
+                        let op = (lx.kind(s + 1) == Some(Tok::Op)).then(|| lx.text(src, s + 1));
+                        if op == Some(if negated { "==" } else { "!=" }) && lx.is(src, s + 2, "null") {
+                            out.push(None);
+                        }
+                        let ty_at = if negated {
+                            (lx.kind(s + 1) == Some(Tok::Op) && lx.text(src, s + 1) == "!" && lx.is(src, s + 2, "is")).then_some(s + 3)
+                        } else {
+                            lx.is(src, s + 1, "is").then_some(s + 2)
+                        };
+                        if let Some((ty, _)) = ty_at.and_then(|j| self.checked_type(u, j)) {
+                            out.push(Some(ty));
+                        }
+                    }
+                    s = k + 1;
+                }
+                k += 1;
+            }
+            out
+        };
+        let diverges = |a: usize, b: usize| {
+            (a..b.min(len)).any(|k| lx.kind(k) == Some(Tok::Ident) && matches!(lx.text(src, k), "return" | "throw" | "break" | "continue"))
+        };
+        // The narrowings that reach `i`, each with the token it starts at.
+        let mut found: Vec<(usize, Option<Ty>)> = Vec::new();
+        // Narrowings for the rest of the block they are in: (start, block's `{`, type).
+        let mut after: Vec<(usize, Option<usize>, Option<Ty>)> = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        let mut k = lx.at_or_after(d.name_span.start);
+        while k < i.min(len) {
+            match lx.kind(k) {
+                Some(Tok::LBrace | Tok::TemplateOpen) => open.push(k),
+                Some(Tok::RBrace) => {
+                    open.pop();
+                }
+                Some(Tok::Ident) => {
+                    let word = lx.text(src, k);
+                    let paren = lx.kind(k + 1) == Some(Tok::LParen);
+                    let close = lx.matching.get(k + 1).copied().flatten().filter(|&c| c > k + 1);
+                    match word {
+                        "if" if paren => {
+                            if let Some(close) = close {
+                                let pos = facts(k + 2, close, "&&", false);
+                                let neg = facts(k + 2, close, "||", true);
+                                let then = close + 1;
+                                let then_end = branch_end(then);
+                                if (then..then_end).contains(&i) {
+                                    found.extend(pos.iter().map(|t| (then, t.clone())));
+                                }
+                                if lx.is(src, then_end, "else") {
+                                    let end = branch_end(then_end + 1);
+                                    if (then_end + 1..end).contains(&i) {
+                                        found.extend(neg.iter().map(|t| (then_end + 1, t.clone())));
+                                    }
+                                } else if diverges(then, then_end) {
+                                    after.extend(neg.iter().map(|t| (then_end, open.last().copied(), t.clone())));
+                                }
+                            }
+                        }
+                        "when" => {
+                            let (subject, brace) = match (paren, close) {
+                                (true, Some(c)) => (c == k + 3 && same(k + 2), c + 1),
+                                _ => (false, k + 1),
+                            };
+                            if lx.kind(brace) == Some(Tok::LBrace) && (subject || !paren) {
+                                let end = lx.matching[brace].filter(|&c| c > brace).unwrap_or(len);
+                                let mut j = brace + 1;
+                                while j < end {
+                                    let mut a = j;
+                                    let mut single = true;
+                                    while a < end && lx.kind(a) != Some(Tok::Arrow) {
+                                        single &= lx.kind(a) != Some(Tok::Comma);
+                                        a = match lx.kind(a) {
+                                            Some(Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen) => {
+                                                lx.matching[a].filter(|&c| c > a).map_or(end, |c| c + 1)
+                                            }
+                                            _ => a + 1,
+                                        };
+                                    }
+                                    if a >= end {
+                                        break;
+                                    }
+                                    let body = a + 1;
+                                    let body_end = if lx.kind(body) == Some(Tok::LBrace) {
+                                        lx.matching[body].filter(|&c| c > body).map_or(end, |c| c + 1)
+                                    } else {
+                                        syntax::expr_end(src, lx, body, end)
+                                    };
+                                    if (body..body_end).contains(&i) {
+                                        let ty = if subject {
+                                            let ty = (single && lx.is(src, j, "is")).then(|| self.checked_type(u, j + 1)).flatten();
+                                            ty.map(|t| vec![Some(t.0)]).unwrap_or_default()
+                                        } else {
+                                            facts(j, a, "&&", false)
+                                        };
+                                        found.extend(ty.into_iter().map(|t| (body, t)));
+                                    }
+                                    j = body_end.max(a + 1);
+                                    if lx.kind(j) == Some(Tok::Semi) {
+                                        j += 1;
+                                    }
+                                }
+                            }
+                        }
+                        "require" | "check" if paren => {
+                            if let Some(close) = close {
+                                after.extend(facts(k + 2, close, "&&", false).into_iter().map(|t| (close + 1, open.last().copied(), t)));
+                            }
+                        }
+                        _ if same(k) => {
+                            let statement = k == 0 || lx.tokens[k].nl || matches!(lx.kind(k - 1), Some(Tok::Semi | Tok::LBrace));
+                            let negated = lx.kind(k + 1) == Some(Tok::Op) && lx.text(src, k + 1) == "!" && lx.is(src, k + 2, "is");
+                            if lx.is(src, k + 1, "as") && lx.kind(k + 2) != Some(Tok::Question) && statement {
+                                if let Some((ty, end)) = self.checked_type(u, k + 2) {
+                                    after.push((end, open.last().copied(), Some(ty)));
+                                }
+                            } else if statement && lx.kind(k + 1) == Some(Tok::BangBang) {
+                                // `x!!` and `x ?: return`: not null for the rest of the block.
+                                after.push((k + 2, open.last().copied(), None));
+                            } else if lx.kind(k + 1) == Some(Tok::Op)
+                                && lx.text(src, k + 1) == "?:"
+                                && matches!(lx.text(src, k + 2), "return" | "throw" | "break" | "continue")
+                            {
+                                after.push((k + 2, open.last().copied(), None));
+                            } else if lx.kind(k + 1) == Some(Tok::Op)
+                                && lx.is(src, k + 2, "null")
+                                && lx.kind(k + 3) == Some(Tok::Op)
+                                && matches!((lx.text(src, k + 1), lx.text(src, k + 3)), ("!=", "&&") | ("==", "||"))
+                                && (k + 3..syntax::expr_end(src, lx, k + 3, len)).contains(&i)
+                            {
+                                // `x != null && ...` and `x == null || ...`.
+                                found.push((k + 3, None));
+                            } else if negated || lx.is(src, k + 1, "is") {
+                                // `x is T && ...` and `x !is T || ...`: the operands that follow.
+                                if let Some((ty, end)) = self.checked_type(u, k + if negated { 3 } else { 2 }) {
+                                    let sep = if negated { "||" } else { "&&" };
+                                    if lx.kind(end) == Some(Tok::Op)
+                                        && lx.text(src, end) == sep
+                                        && (end..syntax::expr_end(src, lx, end, len)).contains(&i)
+                                    {
+                                        found.push((end, Some(ty)));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        found.extend(
+            after.into_iter().filter(|(from, block, _)| *from <= i && block.is_none_or(|b| open.contains(&b))).map(|(f, _, t)| (f, t)),
+        );
+        let narrowed = found.iter().filter_map(|(from, t)| t.as_ref().map(|t| (*from, t))).max_by_key(|(from, _)| *from);
+        let ty = narrowed.map_or(declared, |(_, t)| t.clone());
+        if found.iter().any(|(_, t)| t.is_none()) { strip_nullable(ty) } else { ty }
+    }
+
+    /// The class named by the type that starts at token `j` after `is` or `as`, and the token
+    /// after the type. Nullable types and unknown names are not narrowings.
+    fn checked_type(&self, u: UnitId, j: usize) -> Option<(Ty, usize)> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let mut k = j;
+        let mut name = String::new();
+        while matches!(lx.kind(k), Some(Tok::Ident | Tok::Dot))
+            && (k == j || lx.kind(k) == Some(Tok::Dot) || lx.kind(k - 1) == Some(Tok::Dot))
+        {
+            name.push_str(lx.text(src, k));
+            k += 1;
+        }
+        if name.is_empty() {
+            return None;
+        }
+        if lx.kind(k) == Some(Tok::Lt) {
+            k = matching_gt(lx, k)? + 1;
+        }
+        if lx.kind(k) == Some(Tok::Question) {
+            return None;
+        }
+        let decl = self.decl_containing(u, lx.tokens[j].start);
+        let sym = self.resolve_type(Ctx { unit: u, decl }, &name)?;
+        Some((self.instance(sym), k))
     }
 
     /// `<String, Int>` at `j` in an expression: the types and the token after them.

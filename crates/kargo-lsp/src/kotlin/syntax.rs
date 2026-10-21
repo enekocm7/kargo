@@ -1054,8 +1054,10 @@ impl Parser<'_> {
         if (self.kind(j) != Some(Tok::LParen) || self.kind(self.after_group(j, end)).is_some_and(|k| matches!(k, Tok::Dot | Tok::Question)))
             && let Some((ty, segs, k)) = self.parse_type_segments(j)
         {
-            if self.kind(k) == Some(Tok::Dot) && self.is_name(k + 1) {
-                receiver = Some(ty);
+            // `String?.name` lexes `?.` as one token.
+            let safe = self.kind(k) == Some(Tok::SafeDot);
+            if (self.kind(k) == Some(Tok::Dot) || safe) && self.is_name(k + 1) {
+                receiver = Some(TypeRef { nullable: ty.nullable || safe, ..ty });
                 name_tok = Some(k + 1);
                 j = k + 2;
             } else if ty.args.is_empty() && !ty.nullable && ty.func.is_none() {
@@ -1164,8 +1166,10 @@ impl Parser<'_> {
         let mut receiver = None;
         let mut name_tok = None;
         if let Some((ty, segs, k)) = self.parse_type_segments(j) {
-            if self.kind(k) == Some(Tok::Dot) && self.is_name(k + 1) {
-                receiver = Some(ty);
+            // `String?.name` lexes `?.` as one token.
+            let safe = self.kind(k) == Some(Tok::SafeDot);
+            if (self.kind(k) == Some(Tok::Dot) || safe) && self.is_name(k + 1) {
+                receiver = Some(TypeRef { nullable: ty.nullable || safe, ..ty });
                 name_tok = Some(k + 1);
                 j = k + 2;
             } else if ty.args.is_empty() && !ty.nullable && ty.func.is_none() {

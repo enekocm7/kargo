@@ -475,6 +475,7 @@ public inline fun CharSequence.isNotBlank(): Boolean
 public inline fun CharSequence.isEmpty(): Boolean
 /** Returns `true` if this char sequence is not empty. */
 public inline fun CharSequence.isNotEmpty(): Boolean
+public inline fun CharSequence?.isNullOrEmpty(): Boolean
 /** Returns a string with leading and trailing whitespace removed. */
 public inline fun String.trim(): String
 /** Splits this char sequence to a list of strings around occurrences of the specified [delimiters]. */

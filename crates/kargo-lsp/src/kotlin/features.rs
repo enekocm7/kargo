@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use super::index::{DEFAULT_IMPORTS, SymId, UnitId, is_internal_package};
 use super::java::javadoc_markdown;
 use super::lexer::{self, HARD_KEYWORDS, Tok};
-use super::resolve::{Analyzer, Arg, Found, Member, Subst, Ty, chain_start};
+use super::resolve::{Analyzer, Arg, Found, Member, Subst, Ty, chain_start, strip_nullable};
 use super::syntax::{Decl, DeclId, File, Kind, ScopeKind, normalize};
 use crate::text;
 
@@ -92,6 +92,7 @@ pub fn targets_at(an: &Analyzer, u: UnitId, tok: usize) -> Vec<Target> {
     if matches!(prev, Some(Tok::Dot | Tok::SafeDot)) {
         let start = chain_start(src, lx, tok - 1);
         let Some(receiver) = an.infer(u, start, tok - 1) else { return Vec::new() };
+        let receiver = if prev == Some(Tok::SafeDot) { strip_nullable(receiver) } else { receiver };
         if let Ty::Package(p) = &receiver {
             let fq = format!("{p}.{name}");
             let syms = an.by_fq(&fq);
@@ -1056,6 +1057,7 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
                 // A qualified annotation name, `@pkg.Name`, takes annotations only.
                 c.annotations_only = start > 0 && lx.kind(start - 1) == Some(Tok::At);
                 if let Some(receiver) = an.infer(u, start, dot) {
+                    let receiver = if prev_kind == Some(Tok::SafeDot) { strip_nullable(receiver) } else { receiver };
                     member_completion(&mut c, &receiver);
                 }
                 return finish(c);
