@@ -1420,3 +1420,140 @@ fn tracks_nullable_receivers() {
     assert!(!length("fun f(s: String?) {\n    if (s != null) {}\n    s.$0\n}\n"));
     assert!(!length("fun f(s: String?) {\n    var t = s\n    if (t != null) {}\n    t.$0\n}\n"));
 }
+
+/// Whether completion at the cursor of `body` offers `name`.
+fn offers(body: &str, name: &str) -> bool {
+    has(&fixture(&[("src/Main.kt", body)]).labels(), name)
+}
+
+#[test]
+fn infers_when_try_and_if_branches() {
+    let decls = "open class Shape\nclass Circle(val radius: Int) : Shape()\nclass Square(val side: Int) : Shape()\n";
+    let body = |code: &str| format!("{decls}fun f(n: Int) {{\n{code}\n}}\n");
+
+    assert!(offers(&body("val s = when (n) {\n 1 -> \"a\"\n else -> \"b\"\n}\ns.$0"), "length"));
+    assert!(offers(&body("val s = when {\n n > 1 -> { println(); \"a\" }\n else -> throw IllegalStateException()\n}\ns.$0"), "length"));
+    assert!(offers(&body("when (n) {\n 1 -> \"a\"\n else -> \"b\"\n}.$0"), "length"));
+    // Branches of different classes: the supertype they share.
+    assert!(offers(&body("val s = when (n) {\n 1 -> Circle(1)\n else -> Square(2)\n}\ns.$0"), "toString"));
+    assert!(!offers(&body("val s = when (n) {\n 1 -> Circle(1)\n else -> Square(2)\n}\ns.$0"), "radius"));
+    assert!(offers(&body("val s = when (n) {\n 1 -> Circle(1)\n else -> Circle(2)\n}\ns.$0"), "radius"));
+    assert!(offers(&body("val s = if (n > 1) Circle(1) else Square(2)\ns.$0"), "toString"));
+    assert!(!offers(&body("val s = if (n > 1) Circle(1) else Square(2)\ns.$0"), "radius"));
+    assert!(offers(&body("val s = if (n > 1) throw Exception() else \"a\"\ns.$0"), "length"));
+    assert!(offers(&body("val s = if (n > 1) { 1 } else if (n > 0) { 2 } else { 3 }\ns.$0"), "shl"));
+
+    assert!(offers(&body("val s = try {\n \"a\"\n} catch (e: Exception) {\n \"b\"\n} finally {\n println()\n}\ns.$0"), "length"));
+    assert!(offers(&body("val s = try { Circle(1) } catch (e: Exception) { Square(2) }\ns.$0"), "toString"));
+    assert!(offers(&body("val s = try { throw Exception() } catch (e: Exception) { \"b\" }\ns.$0"), "length"));
+    assert!(offers(&body("val s = try { \"a\" } catch (e: Exception) { return }\ns.$0"), "length"));
+}
+
+#[test]
+fn infers_the_operators_of_custom_types() {
+    let decls = "class Vec(val x: Int) {\n    operator fun plus(o: Vec): Vec = this\n    operator fun times(k: Int): Scaled = Scaled()\n    operator fun times(o: Vec): String = \"\"\n    operator fun unaryMinus(): Vec = this\n    operator fun rangeTo(o: Vec): Span = Span()\n    operator fun get(i: Int): String = \"\"\n}\nclass Scaled { val factor = 1 }\nclass Span { val length2 = 1 }\n";
+    let body = |code: &str| format!("{decls}fun f(a: Vec, b: Vec) {{\n{code}\n}}\n");
+
+    assert!(offers(&body("(a + b).$0"), "x"));
+    assert!(offers(&body("val t = a * 2\nt.$0"), "factor"));
+    assert!(offers(&body("val t = a * b\nt.$0"), "length"));
+    assert!(offers(&body("val t = a + b * 2\nt.$0"), "x"));
+    assert!(offers(&body("val t = -a\nt.$0"), "x"));
+    assert!(offers(&body("val t = a..b\nt.$0"), "length2"));
+    assert!(offers(&body("val t = a[0]\nt.$0"), "length"));
+    // Standard types keep their own.
+    assert!(offers(&body("val t = 1 + 2\nt.$0"), "shl"));
+    assert!(offers(&body("val t = \"a\" + 1\nt.$0"), "length"));
+    assert!(offers(&body("val t = 1L + 2L\nt.$0"), "toInt"));
+}
+
+#[test]
+fn infers_function_references_and_lambdas_as_values() {
+    let at = |code: &str| {
+        format!(
+            "fun twice(n: Int): String = \"\"\nclass A {{\n    fun name(): String = \"\"\n    val size: Int = 0\n}}\nfun f(a: A) {{\n{code}\n}}\n"
+        )
+    };
+
+    assert!(offers(&at("val g = ::twice\ng(1).$0"), "length"));
+    assert!(offers(&at("val g = String::length\ng(\"a\").$0"), "shl"));
+    assert!(offers(&at("val g = A::name\ng(a).$0"), "length"));
+    assert!(offers(&at("val g = a::name\ng().$0"), "length"));
+    assert!(offers(&at("val g = A::size\ng(a).$0"), "shl"));
+    assert!(offers(&at("val g = { x: Int -> \"v\" + x }\ng(1).$0"), "length"));
+    assert!(offers(&at("val g = { x: Int -> x }\ng(1).$0"), "shl"));
+    assert!(offers(&at("val g = { \"a\" }\ng().$0"), "length"));
+    assert!(offers(&at("listOf(1).map(::twice).first().$0"), "length"));
+    assert!(offers(&at("listOf(a).map(A::name).first().$0"), "length"));
+}
+
+#[test]
+fn expands_function_type_aliases_for_lambdas() {
+    let code = "class Event(val id: Int)\ntypealias Handler = (Event) -> Unit\ntypealias Mapper<T> = (T) -> String\nfun on(h: Handler) {}\nfun <T> convert(m: Mapper<T>, v: T) {}\nfun f() {\n";
+    assert!(offers(&format!("{code}    on {{ it.$0 }}\n}}\n"), "id"));
+    assert!(offers(&format!("{code}    on {{ e -> e.$0 }}\n}}\n"), "id"));
+    assert!(offers(&format!("{code}    convert({{ it.$0 }}, \"a\")\n}}\n"), "length"));
+}
+
+#[test]
+fn uses_upper_bounds_of_type_parameters() {
+    assert!(offers("fun <T : CharSequence> f(x: T) {\n    x.$0\n}\n", "length"));
+    assert!(offers("fun <T : CharSequence> f(x: T?) {\n    x?.$0\n}\n", "length"));
+    assert!(offers("class Box<T : CharSequence>(val v: T) {\n    fun f() = v.$0\n}\n", "length"));
+    assert!(!offers("fun <T> f(x: T) {\n    x.$0\n}\n", "length"));
+    assert!(offers("fun <T : Comparable<T>> f(x: T) {\n    x.$0\n}\n", "compareTo"));
+}
+
+#[test]
+fn takes_type_arguments_from_the_declared_type() {
+    assert!(offers("fun f() {\n    val list: List<String> = emptyList()\n    list.first().$0\n}\n", "length"));
+    assert!(offers("fun f() {\n    val list: MutableList<String> = mutableListOf()\n    list.first().$0\n}\n", "length"));
+    assert!(offers("fun names(): List<String> = emptyList()\nfun f() {\n    names().first().$0\n}\n", "length"));
+}
+
+#[test]
+fn knows_the_members_of_object_expressions() {
+    let decls = "interface Foo {\n    fun base(): Int\n}\n";
+    let object = "val o = object : Foo {\n        override fun base() = 1\n        val extra = \"x\"\n    }\n";
+    assert!(offers(&format!("{decls}fun f() {{\n    {object}    o.$0\n}}\n"), "extra"));
+    assert!(offers(&format!("{decls}fun f() {{\n    {object}    o.$0\n}}\n"), "base"));
+    assert!(offers(&format!("{decls}fun f() {{\n    {object}    o.extra.$0\n}}\n"), "length"));
+    assert!(offers(
+        &format!("{decls}fun f() {{\n    object : Foo {{\n        override fun base() = 1\n        fun own() = this.$0\n    }}\n}}\n"),
+        "base"
+    ));
+    // A class declared inside a function.
+    assert!(offers("fun f() {\n    class Local {\n        val v = \"x\"\n    }\n    Local().$0\n}\n", "v"));
+    assert!(offers("fun f() {\n    class Local {\n        val v = \"x\"\n    }\n    val l = Local()\n    l.v.$0\n}\n", "length"));
+}
+
+#[test]
+fn infers_delegated_properties() {
+    let at = |code: &str| {
+        format!(
+            "import kotlin.properties.Delegates\nclass Holder(val map: Map<String, Any?>) {{\n{code}\n    fun f() {{\n        value.$0\n    }}\n}}\n"
+        )
+    };
+    assert!(offers(&at("    val value by lazy { \"x\" }"), "length"));
+    assert!(offers(&at("    var value by Delegates.observable(\"x\") { _, _, _ -> }"), "length"));
+    assert!(offers(&at("    var value by Delegates.vetoable(\"x\") { _, _, _ -> true }"), "length"));
+    assert!(offers(&at("    var value by Delegates.notNull<String>()"), "length"));
+    assert!(offers(
+        &at(
+            "    val value by Own()\n    class Own {\n        operator fun getValue(r: Any?, p: kotlin.reflect.KProperty<*>): String = \"\"\n    }"
+        ),
+        "length"
+    ));
+    // The type of a map-delegated property follows the map's values.
+    assert!(offers("class H(val map: Map<String, String>) {\n    val value by map\n    fun f() {\n        value.$0\n    }\n}\n", "length"));
+}
+
+#[test]
+fn resolves_labels_of_lambdas() {
+    let code = "fun run2(block: StringBuilder.() -> Unit) {}\nfun f() {\n    run2 outer@{\n        val g = { this@outer.$0 }\n    }\n}\n";
+    assert!(offers(code, "append"));
+    let code = "fun f() {\n    with(StringBuilder()) label@{\n        this@label.$0\n    }\n}\n";
+    assert!(offers(code, "append"));
+    let code = "fun f() {\n    with(StringBuilder()) {\n        this@with.$0\n    }\n}\n";
+    assert!(offers(code, "append"));
+}

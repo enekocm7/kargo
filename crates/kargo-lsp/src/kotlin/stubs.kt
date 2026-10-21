@@ -227,6 +227,8 @@ public infix fun <A, B> A.to(that: B): Pair<A, B> = Pair(this, that)
 
 /** Creates a new instance of the [Lazy] that uses the specified initialization function [initializer]. */
 public fun <T> lazy(initializer: () -> T): Lazy<T>
+/** Gets the value of a property delegated to a [Lazy] instance. */
+public inline operator fun <T> Lazy<T>.getValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>): T
 
 /** Calls the specified function [block] with `this` value as its argument and returns its result. */
 public inline fun <T, R> T.let(block: (T) -> R): R
@@ -391,6 +393,8 @@ public fun <T> setOf(vararg elements: T): Set<T>
 public fun <T> mutableSetOf(vararg elements: T): MutableSet<T>
 /** Returns a new read-only map with the specified contents, given as a list of pairs. */
 public fun <K, V> mapOf(vararg pairs: Pair<K, V>): Map<K, V>
+/** Returns the value of the property named like the delegated property in this map. */
+public inline operator fun <V, V1 : V> Map<in String, V>.getValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>): V1
 /** Returns a new [MutableMap] with the specified contents, given as a list of pairs. */
 public fun <K, V> mutableMapOf(vararg pairs: Pair<K, V>): MutableMap<K, V>
 /** Returns an array containing the specified elements. */
@@ -551,3 +555,39 @@ public infix fun IntProgression.step(step: Int): IntProgression
 public fun Int.coerceIn(minimumValue: Int, maximumValue: Int): Int
 /** Ensures that this value is not less than the specified [minimumValue]. */
 public fun <T : Comparable<T>> T.coerceAtLeast(minimumValue: T): T
+
+// file: kotlin/properties/Delegates.kt
+package kotlin.properties
+
+/** Base interface that can be used for implementing property delegates of read-only properties. */
+public fun interface ReadOnlyProperty<in T, out V> {
+    /** Returns the value of the property for the given object. */
+    public operator fun getValue(thisRef: T, property: kotlin.reflect.KProperty<*>): V
+}
+
+/** Base interface that can be used for implementing property delegates of read-write properties. */
+public interface ReadWriteProperty<in T, V> {
+    /** Returns the value of the property for the given object. */
+    public operator fun getValue(thisRef: T, property: kotlin.reflect.KProperty<*>): V
+    /** Sets the value of the property for the given object. */
+    public operator fun setValue(thisRef: T, property: kotlin.reflect.KProperty<*>, value: V)
+}
+
+/** Standard property delegates. */
+public object Delegates {
+    /** Returns a property delegate for a read/write property with a non-`null` value that is initialized not during object construction time but at a later time. */
+    public fun <T : Any> notNull(): ReadWriteProperty<Any?, T>
+    /** Returns a property delegate for a read/write property that calls a specified callback function when changed. */
+    public inline fun <T> observable(initialValue: T, crossinline onChange: (property: kotlin.reflect.KProperty<*>, oldValue: T, newValue: T) -> Unit): ReadWriteProperty<Any?, T>
+    /** Returns a property delegate for a read/write property that calls a specified callback function when changed, allowing the callback to veto the modification. */
+    public inline fun <T> vetoable(initialValue: T, crossinline onChange: (property: kotlin.reflect.KProperty<*>, oldValue: T, newValue: T) -> Boolean): ReadWriteProperty<Any?, T>
+}
+
+// file: kotlin/reflect/KProperty.kt
+package kotlin.reflect
+
+/** Represents a property, such as a named `val` or `var` declaration. */
+public interface KProperty<out V> {
+    /** The name of this property. */
+    public val name: String
+}
