@@ -32,6 +32,7 @@ use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
 use super::library::{self, CompiledLibrary, SourcesJar, UnitCache};
 use super::resolve::{Analyzer, Packages};
+use super::{ranges, semantic};
 use crate::jsonrpc::{self, Kind};
 use crate::{check, text};
 
@@ -646,6 +647,8 @@ struct State {
     open: HashMap<String, PathBuf>,
     lib: Arc<Index>,
     proj: Option<(Arc<Index>, HashMap<PathBuf, u32>)>,
+    /// The classified identifiers of each file (see [`semantic`]) at the generation they were computed.
+    classified: HashMap<PathBuf, (u64, Arc<Vec<semantic::Classified>>)>,
     /// Which load of the project is current.
     load_generation: u64,
     /// Bumped on every change, so stale completion items are not resolved.
@@ -681,6 +684,7 @@ impl State {
             open: HashMap::new(),
             lib: Arc::new(Index::new(true, Vec::new())),
             proj: None,
+            classified: HashMap::new(),
             load_generation: 0,
             generation: 0,
             snippets: false,
@@ -1101,6 +1105,31 @@ impl State {
                 };
                 Ok(json!(actions::code_actions(&an, &request)))
             }
+            "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => {
+                let Some(unit) = unit else { return Ok(Value::Null) };
+                let path = an.unit(unit).path.clone();
+                let tokens = match self.classified.get(&path) {
+                    Some((g, tokens)) if *g == generation => Arc::clone(tokens),
+                    _ => {
+                        let tokens = Arc::new(semantic::classify(&an, unit));
+                        self.classified.insert(path, (generation, Arc::clone(&tokens)));
+                        tokens
+                    }
+                };
+                let text = &an.unit(unit).text;
+                let range = (method.ends_with("range"))
+                    .then(|| text::offset(text, &params["range"]["start"])..text::offset(text, &params["range"]["end"]));
+                Ok(semantic::encode(text, &tokens, range))
+            }
+            "textDocument/foldingRange" => {
+                let Some(unit) = unit else { return Ok(json!([])) };
+                Ok(ranges::folding_ranges(an.file(unit), &an.unit(unit).text))
+            }
+            "textDocument/selectionRange" => {
+                let Some(unit) = unit else { return Ok(Value::Null) };
+                let positions = params["positions"].as_array().cloned().unwrap_or_default();
+                Ok(ranges::selection_ranges(an.file(unit), &an.unit(unit).text, &positions))
+            }
             "workspace/symbol" => Ok(features::workspace_symbols(&an, params["query"].as_str().unwrap_or_default())),
             _ => Err(Failure::NotFound),
         }
@@ -1134,6 +1163,9 @@ impl State {
                 "documentHighlightProvider": true,
                 "renameProvider": { "prepareProvider": true },
                 "documentSymbolProvider": true,
+                "semanticTokensProvider": semantic::legend(),
+                "foldingRangeProvider": true,
+                "selectionRangeProvider": true,
                 "documentFormattingProvider": true,
                 "workspaceSymbolProvider": true,
                 "codeActionProvider": { "codeActionKinds": actions::KINDS },

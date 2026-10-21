@@ -1660,3 +1660,111 @@ fn resolves_labels_of_lambdas() {
     let code = "fun f() {\n    with(StringBuilder()) {\n        this@with.$0\n    }\n}\n";
     assert!(offers(code, "append"));
 }
+
+/// The classified identifiers of the first file, as `(text, type, modifiers)`.
+fn classified(f: &Fixture) -> Vec<(String, &'static str, Vec<&'static str>)> {
+    use super::semantic::{self, MODIFIERS, TYPES};
+    let u = UnitId { lib: false, unit: 0 };
+    let text = &f.proj.units[0].text;
+    semantic::classify(&f.an(), u)
+        .into_iter()
+        .map(|c| {
+            let mods = (0..MODIFIERS.len()).filter(|b| c.modifiers & (1 << b) != 0).map(|b| MODIFIERS[b]).collect();
+            (text[c.span].to_owned(), TYPES[c.kind as usize], mods)
+        })
+        .collect()
+}
+
+#[test]
+fn classifies_identifiers_by_what_they_resolve_to() {
+    let f = fixture(&[(
+        "src/Main.kt",
+        "package app\n\nclass Box<T>(val item: T, var count: Int) {\n    fun open(arg: T): T = arg\n    companion object { val ZERO = 0 }\n}\n\n@Deprecated(\"no\")\nfun old() {}\n\nfun main() {\n    val b = Box(1, 2)\n    var n = b.count\n    b.open(n)\n    println(Box.ZERO)\n    old()\n}\n",
+    )]);
+    let tokens = classified(&f);
+    let find = |name: &str, nth: usize| tokens.iter().filter(|t| t.0 == name).nth(nth).cloned().unwrap_or_else(|| panic!("{name} {nth}"));
+    assert_eq!(find("Box", 0), ("Box".into(), "class", vec!["declaration"]));
+    assert_eq!(find("T", 0), ("T".into(), "typeParameter", vec!["declaration"]));
+    assert_eq!(find("item", 0), ("item".into(), "property", vec!["declaration", "readonly"]));
+    assert_eq!(find("count", 0).2, vec!["declaration"]);
+    assert_eq!(find("open", 0), ("open".into(), "method", vec!["declaration"]));
+    assert_eq!(find("arg", 0), ("arg".into(), "parameter", vec!["declaration", "readonly"]));
+    assert_eq!(find("T", 1).1, "typeParameter");
+    assert_eq!(find("ZERO", 0), ("ZERO".into(), "property", vec!["declaration", "readonly", "static"]));
+    assert_eq!(find("old", 1), ("old".into(), "function", vec!["deprecated"]));
+    assert_eq!(find("b", 1), ("b".into(), "variable", vec!["readonly"]));
+    assert_eq!(find("n", 1), ("n".into(), "variable", vec![]));
+    assert_eq!(find("count", 1), ("count".into(), "property", vec![]));
+    assert_eq!(find("open", 1).1, "method");
+    assert_eq!(find("println", 0), ("println".into(), "function", vec!["defaultLibrary"]));
+}
+
+#[test]
+fn encodes_semantic_tokens_relative_to_the_previous_one() {
+    use super::semantic;
+    let f = fixture(&[("src/Main.kt", "fun a() {}\nfun b() { a() }\n")]);
+    let u = UnitId { lib: false, unit: 0 };
+    let text = &f.proj.units[0].text;
+    let tokens = semantic::classify(&f.an(), u);
+    // function (0,4) a; (1,4) b; (1,10) a
+    let all = semantic::encode(text, &tokens, None);
+    assert_eq!(all["data"], serde_json::json!([0, 4, 1, 10, 1, 1, 4, 1, 10, 1, 0, 6, 1, 10, 0]));
+    let second_line = semantic::encode(text, &tokens, Some(11..text.len()));
+    assert_eq!(second_line["data"], serde_json::json!([1, 4, 1, 10, 1, 0, 6, 1, 10, 0]));
+}
+
+fn folds(src: &str) -> Vec<(u64, u64, Option<String>)> {
+    let file = super::syntax::parse(src);
+    super::ranges::folding_ranges(&file, src)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["startLine"].as_u64().unwrap(), r["endLine"].as_u64().unwrap(), r["kind"].as_str().map(str::to_owned)))
+        .collect()
+}
+
+#[test]
+fn folds_bodies_imports_comments_and_strings() {
+    let src = "import a.B\nimport a.C\n\n/**\n * Doc.\n */\nclass K {\n    fun f() {\n        run {\n            1\n        }\n    }\n    val s = \"\"\"\n        x\n    \"\"\"\n}\n// one\n// two\nfun g(a: Int) { }\n";
+    let got = folds(src);
+    assert!(got.contains(&(0, 1, Some("imports".into()))), "{got:?}");
+    assert!(got.contains(&(3, 5, Some("comment".into()))), "{got:?}");
+    // The class folds up to the line before its closing brace; so does the function and the lambda.
+    assert!(got.contains(&(6, 14, None)), "{got:?}");
+    assert!(got.contains(&(7, 10, None)), "{got:?}");
+    assert!(got.contains(&(8, 9, None)), "{got:?}");
+    assert!(got.contains(&(12, 14, None)), "{got:?}");
+    assert!(got.contains(&(16, 17, Some("comment".into()))), "{got:?}");
+    // One line stays unfolded.
+    assert!(!got.iter().any(|f| f.0 == 18), "{got:?}");
+}
+
+#[test]
+fn selection_ranges_grow_from_the_identifier_to_the_file() {
+    let src = "class K {\n    fun f(list: List<Int>) {\n        val n = list.size + 1\n    }\n}\n";
+    let file = super::syntax::parse(src);
+    let at = src.find("size").unwrap() + 1;
+    let position = crate::text::position(src, at);
+    let result = super::ranges::selection_ranges(&file, src, &[position]);
+    let mut texts = Vec::new();
+    let mut node = &result[0];
+    let text = |range: &Value| {
+        let (s, e) = (crate::text::offset(src, &range["start"]), crate::text::offset(src, &range["end"]));
+        src[s..e].to_owned()
+    };
+    loop {
+        texts.push(text(&node["range"]));
+        if node["parent"].is_null() {
+            break;
+        }
+        node = &node["parent"];
+    }
+    assert_eq!(texts[0], "size");
+    assert_eq!(texts[1], "list.size");
+    assert!(texts.contains(&"val n = list.size + 1".to_owned()), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("fun f(")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("class K")), "{texts:?}");
+    assert_eq!(texts.last().unwrap(), src);
+    // Each range holds the one before it.
+    assert!(texts.windows(2).all(|w| w[1].len() > w[0].len()), "{texts:?}");
+}
