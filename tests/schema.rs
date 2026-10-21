@@ -16,6 +16,17 @@ fn schema() -> Value {
     serde_json::from_str(text).expect("the schema is valid JSON")
 }
 
+/// `kargo-lsp` compiles in its own copy of the schema so the crate can be published.
+#[test]
+fn the_language_server_copy_matches_the_website_schema() {
+    let site = include_str!("../website/public/schemas/kargo.json");
+    let copy = include_str!("../crates/kargo-lsp/schema/kargo.json");
+    assert!(
+        site == copy,
+        "crates/kargo-lsp/schema/kargo.json differs from website/public/schemas/kargo.json: copy the website file over it"
+    );
+}
+
 /// Follows a `{ "$ref": "#/definitions/<name>" }`.
 fn resolve<'a>(root: &'a Value, node: &'a Value) -> &'a Value {
     match node.get("$ref").and_then(Value::as_str) {

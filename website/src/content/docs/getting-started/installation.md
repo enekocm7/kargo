@@ -49,7 +49,7 @@ These use this repository directly:
 | Tool | Command |
 |---|---|
 | Nix | `nix run github:enekocm7/kargo`, or `nix profile install github:enekocm7/kargo` (builds the flake in the repository from source; it has not been tested with a Nix build yet) |
-| `cargo binstall` | `cargo binstall --git https://github.com/enekocm7/kargo kargo` (downloads the release archive instead of building, so it works once a release is published) |
+| `cargo binstall` | `cargo binstall kargo-cli` (downloads the release archive instead of building, so it works once a release is published) |
 
 Every release also builds the files that Homebrew, Scoop, winget and the AUR need (the `packages` artifact of the release workflow, rendered from `packaging/` by `packaging/render.sh`). They are submitted to those registries by hand, so Kargo is **not yet listed** in them; use the install script until it is. Once listed, the commands will be `brew install enekocm7/tap/kargo`, `scoop install kargo` after adding its bucket, `winget install enekocm7.kargo` and `yay -S kargo-bin`. SDKMAN! needs a vendor account and is not set up.
 
@@ -77,7 +77,7 @@ gh attestation verify kargo-0.3.0-x86_64-unknown-linux-gnu.tar.gz --repo enekocm
 If you have Rust, Cargo can build Kargo. You need **Rust 1.89 or newer**; install it with [rustup](https://rustup.rs).
 
 ```sh
-cargo install --locked --git https://github.com/enekocm7/kargo kargo
+cargo install --locked kargo-cli
 ```
 
 This builds Kargo and puts the `kargo` binary in `~/.cargo/bin`, which rustup adds to your `PATH`. From a local clone:

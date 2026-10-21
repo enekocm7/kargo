@@ -1,0 +1,941 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://enekocm7.github.io/kargo/schemas/kargo.json",
+  "title": "kargo.toml",
+  "description": "The manifest of a Kargo package or workspace. See https://enekocm7.github.io/kargo/reference/manifest/",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "package": {
+      "description": "The package's name, version and publishing details.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "description": "The package name.", "type": "string", "minLength": 1 },
+        "version": { "description": "The package version; names the jar and is the version in its Maven coordinates. `{ workspace = true }` inherits [workspace.package].", "anyOf": [{ "type": "string", "minLength": 1 }, { "$ref": "#/definitions/inherit" }], "examples": ["0.1.0"] },
+        "group": { "description": "Maven group, also the base Kotlin package in templates. Required to publish.", "anyOf": [{ "type": "string" }, { "$ref": "#/definitions/inherit" }], "examples": ["com.example"] },
+        "description": { "description": "One sentence about the package (POM <description>). Required by Maven Central.", "anyOf": [{ "type": "string" }, { "$ref": "#/definitions/inherit" }] },
+        "authors": { "description": "`Name <email>` entries (POM <developers>). Required by Maven Central.", "anyOf": [{ "type": "array", "items": { "type": "string" } }, { "$ref": "#/definitions/inherit" }] },
+        "license": { "description": "An SPDX expression such as `MIT` or `MIT OR Apache-2.0`. Required by Maven Central.", "anyOf": [{ "type": "string" }, { "$ref": "#/definitions/inherit" }] },
+        "homepage": { "description": "The project's web page, an http(s) URL. Defaults to `repository`.", "anyOf": [{ "type": "string", "format": "uri" }, { "$ref": "#/definitions/inherit" }] },
+        "repository": { "description": "The source repository, an http(s) URL. Required by Maven Central.", "anyOf": [{ "type": "string", "format": "uri" }, { "$ref": "#/definitions/inherit" }] },
+        "publish": { "description": "`false` makes `kargo publish` refuse the package.", "type": "boolean", "default": true },
+        "jlink": {
+          "description": "The Java runtime of `kargo package --format jlink` and `--format installer`.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "modules": { "description": "JDK modules to add to the ones jdeps finds, such as modules only loaded through reflection.", "type": "array", "items": { "type": "string" }, "examples": [["java.naming", "jdk.crypto.ec"]] },
+            "jdeps": { "description": "Ask jdeps which JDK modules the program uses. `false` uses only `modules`.", "type": "boolean", "default": true }
+          }
+        },
+        "native-image": {
+          "description": "Options for `kargo package --format native-image` (GraalVM).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "args": { "description": "Extra native-image arguments.", "type": "array", "items": { "type": "string" }, "examples": [["--enable-url-protocols=https"]] },
+            "static": { "description": "Link a fully static executable against musl (Linux only).", "type": "boolean", "default": false },
+            "initialize-at-build-time": { "description": "Packages or classes initialized while the image is built.", "type": "array", "items": { "type": "string" } },
+            "metadata-repository": { "description": "Use the GraalVM reachability metadata repository for the dependencies.", "type": "boolean", "default": true }
+          }
+        },
+        "installer": {
+          "description": "Options for `kargo package --format installer` and `--desktop` (jpackage).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "description": "The application name. Default: the package name (or `--bin`).", "type": "string", "examples": ["Hello"] },
+            "vendor": { "description": "The vendor shown by the installer.", "type": "string" },
+            "description": { "description": "The description shown by the installer. Default: [package] description.", "type": "string" },
+            "app-version": { "description": "One to three numbers such as \"1.2.3\". Default: the numbers at the start of [package] version.", "type": "string", "pattern": "^[0-9]{1,9}(\\.[0-9]{1,9}){0,2}$", "examples": ["1.2.3"] },
+            "type": {
+              "description": "What jpackage builds: one type, or a list from which each OS builds its own. Default: msi on Windows, dmg on macOS, deb on Linux.",
+              "anyOf": [
+                { "$ref": "#/definitions/installer-type" },
+                { "type": "array", "items": { "$ref": "#/definitions/installer-type" }, "minItems": 1, "examples": [["msi", "dmg", "deb"]] }
+              ]
+            },
+            "icon": {
+              "description": "The icon: one path for every OS, or one per OS (.ico on Windows, .icns on macOS, .png on Linux).",
+              "anyOf": [
+                { "type": "string", "examples": ["packaging/app.png"] },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "windows": { "description": "A .ico file.", "type": "string" },
+                    "macos": { "description": "A .icns file.", "type": "string" },
+                    "linux": { "description": "A .png file.", "type": "string" }
+                  }
+                }
+              ]
+            },
+            "license-file": { "description": "A license the installer shows.", "type": "string", "examples": ["LICENSE"] },
+            "menu": { "description": "Add a Start menu (Windows) or menu (Linux) entry.", "type": "boolean", "default": false },
+            "shortcut": { "description": "Add a desktop shortcut (Windows, Linux).", "type": "boolean", "default": false },
+            "console": { "description": "Windows: make the launcher a console program, for command-line tools.", "type": "boolean", "default": false },
+            "upgrade-uuid": { "description": "Windows: the upgrade code that lets a newer .msi replace an older one. Keep it across releases.", "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "examples": ["0b5b2d6e-8f5c-4a37-9d1e-3a6c2f4b7e90"] },
+            "bundle-id": { "description": "macOS: the bundle identifier.", "type": "string", "examples": ["com.example.hello"] },
+            "signing-identity": { "description": "macOS: sign the app with this keychain identity.", "type": "string" },
+            "category": { "description": "Linux: the package's section or group.", "type": "string" },
+            "file-associations": {
+              "description": "File types the installed application opens.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["extension", "mime-type"],
+                "properties": {
+                  "extension": { "description": "The file extension, without the dot.", "type": "string", "examples": ["note"] },
+                  "mime-type": { "description": "The file type's MIME type.", "type": "string", "examples": ["application/x-note"] },
+                  "description": { "description": "The file type's name, shown by the OS.", "type": "string" },
+                  "icon": { "description": "The file type's icon, relative to the project root.", "type": "string" }
+                }
+              }
+            },
+            "notarize": {
+              "description": "macOS: notarize each .dmg and .pkg with `xcrun notarytool` and staple the ticket. Needs `signing-identity`.",
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["apple-id-env", "password-env", "team-id"],
+                  "properties": {
+                    "apple-id-env": { "description": "The environment variable that holds the Apple ID.", "type": "string", "examples": ["APPLE_ID"] },
+                    "password-env": { "description": "The environment variable that holds an app-specific password.", "type": "string", "examples": ["APPLE_APP_PASSWORD"] },
+                    "team-id": { "description": "The Apple Developer team ID.", "type": "string", "examples": ["ABCDE12345"] }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["keychain-profile"],
+                  "properties": {
+                    "keychain-profile": { "description": "Credentials saved with `xcrun notarytool store-credentials`.", "type": "string" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "kotlin": {
+      "description": "Kotlin compiler settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": { "description": "Kotlin compiler and standard library version.", "type": "string", "default": "2.4.21" },
+        "language-version": { "description": "Passed as `-language-version`.", "type": "string", "examples": ["2.4"] },
+        "api-version": { "description": "Passed as `-api-version`.", "type": "string", "examples": ["2.4"] },
+        "ksp": { "description": "KSP version for `scope = \"ksp\"` dependencies.", "type": "string", "default": "2.3.12" },
+        "opt-in": { "description": "Annotations to opt in to everywhere.", "type": "array", "items": { "type": "string" } },
+        "compiler-args": { "description": "Extra arguments for every compilation.", "type": "array", "items": { "type": "string" } },
+        "warnings-as-errors": { "description": "Fail on compiler warnings.", "type": "boolean", "default": false }
+      }
+    },
+    "toolchain": {
+      "description": "Which JDK builds and runs the project, which GraalVM builds native images, and which Kargo versions the project needs.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jdk": {
+          "description": "\"system\" (JAVA_HOME or java on PATH), a major version such as \"21\", or an exact Temurin release such as \"21.0.5+11\".",
+          "type": ["string", "integer"],
+          "default": "system",
+          "examples": ["system", "21", "25"]
+        },
+        "graalvm": {
+          "description": "The GraalVM of `kargo package --format native-image` and `kargo run --native-agent`: \"system\" (GRAALVM_HOME, then a JAVA_HOME or PATH with native-image), a Java version such as \"25\" for GraalVM Community Edition, or \"oracle-25\" for Oracle GraalVM.",
+          "type": ["string", "integer"],
+          "default": "system",
+          "examples": ["system", "25", "oracle-25"]
+        },
+        "kargo": {
+          "description": "The Kargo versions this project builds with, a semver requirement such as \">=0.3\". An older Kargo stops with a message that points to `kargo self update`.",
+          "type": "string",
+          "examples": [">=0.3", "^0.3.1"]
+        }
+      }
+    },
+    "target": {
+      "description": "The targets to build. Without it the project targets the JVM with default settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jvm": {
+          "description": "Build for the JVM.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "jvm-target": { "description": "Java bytecode version: 8 (or 1.8), or 9 and up. Defaults to 25, lowered to the JDK that builds the project.", "type": "string", "examples": ["17", "21", "25"] },
+            "main-class": { "description": "The JVM main class. Default: detected from a Kotlin `fun main`.", "type": "string", "examples": ["com.example.app.MainKt"] },
+            "jvm-args": { "description": "JVM options for `kargo run` and `kargo test`.", "type": "array", "items": { "type": "string" } },
+            "javac-args": { "description": "Extra javac options for Java sources.", "type": "array", "items": { "type": "string" } },
+            "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the JVM target only." }
+          }
+        },
+        "wasm": {
+          "description": "Build for WebAssembly.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "environment": { "description": "`js` for Node.js, `browser` for web pages, `wasi` for WASI runtimes.", "enum": ["js", "browser", "wasi"], "default": "js" },
+            "kind": { "description": "`application` for a program with a `main`, `library` for an npm package of @JsExport functions.", "enum": ["application", "app", "library", "lib"], "default": "application" },
+            "module-name": { "description": "Name of the compiled module's files (`<name>.mjs`, `<name>.wasm`). Default: the package name.", "type": "string" },
+            "npm-name": { "description": "`name` in the package.json of a library. Default: the lowercase package name.", "type": "string" },
+            "package-manager": { "description": "The tool that installs npm packages. Default: the first of npm, pnpm, bun on PATH.", "enum": ["npm", "pnpm", "bun"] },
+            "wasm-opt": { "description": "Run Binaryen's wasm-opt in release builds: true (when on PATH), false, or the path of the executable.", "type": ["boolean", "string"], "default": true },
+            "npm-dependencies": { "description": "npm packages (`name = \"version\"`) to install besides those the klibs ask for.", "type": "object", "additionalProperties": { "type": "string" } },
+            "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the Wasm target only." }
+          }
+        },
+        "native": {
+          "description": "Build for Kotlin/Native.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "platforms": {
+              "description": "Kotlin/Native platforms to build for. Gradle-style names like `linuxX64` are accepted too.",
+              "type": "array",
+              "default": ["host"],
+              "items": {
+                "type": "string",
+                "examples": ["host", "linux_x64", "linux_arm64", "mingw_x64", "macos_x64", "macos_arm64", "ios_arm64", "ios_x64", "ios_simulator_arm64", "watchos_arm64", "watchos_simulator_arm64", "tvos_arm64", "tvos_simulator_arm64", "android_arm64", "android_arm32", "android_x64"]
+              }
+            },
+            "kind": {
+              "description": "What to link: an executable, a klib, a C shared or static library (with its `_api.h` header in `include/`), or an Apple framework.",
+              "enum": ["executable", "program", "library", "klib", "shared", "dynamic", "static", "framework"],
+              "default": "executable"
+            },
+            "entry-point": { "description": "The Kotlin/Native entry function. Default: the single `main` in the sources.", "type": "string", "examples": ["com.example.main"] },
+            "linker-options": { "description": "Options for the native linker, on every platform.", "type": "array", "items": { "type": "string" } },
+            "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+            "library-paths": { "$ref": "#/definitions/libraryPaths" },
+            "frameworks": { "$ref": "#/definitions/appleFrameworks" },
+            "platform": {
+              "description": "Linker options for one Kotlin/Native platform, added to the common ones.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "linux_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "linux_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "mingw_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "macos_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "macos_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "ios_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "ios_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "ios_simulator_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "watchos_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "watchos_simulator_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "tvos_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "tvos_simulator_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_arm64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_arm32": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_x64": { "$ref": "#/definitions/nativeLinkOptions" },
+                "android_x86": { "$ref": "#/definitions/nativeLinkOptions" }
+              }
+            },
+            "bundle-id": { "description": "The bundle identifier of a framework (kind = \"framework\"). Default: `<group>.<name>`.", "type": "string", "examples": ["com.example.Shared"] },
+            "export": {
+              "description": "Dependencies (`group:artifact`) whose API a framework, shared or static library exports too.",
+              "type": "array",
+              "items": { "type": "string", "examples": ["org.jetbrains.kotlinx:kotlinx-datetime"] }
+            },
+            "c-sources": {
+              "description": "C, C++ and Objective-C sources compiled with the Kotlin/Native toolchain's clang into a static library that every native binary links.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "sources": { "description": "Files, directories and globs (gitignore syntax), relative to the project root.", "type": "array", "default": ["c"], "items": { "type": "string" } },
+                "include-dirs": { "description": "Include directories, relative to the project root; the C bindings get them too.", "type": "array", "default": ["c"], "items": { "type": "string" } },
+                "defines": { "$ref": "#/definitions/defines" },
+                "compiler-options": { "description": "More clang options.", "type": "array", "items": { "type": "string" } },
+                "platform": {
+                  "description": "Defines and clang options for one Kotlin/Native platform.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "linux_x64": { "$ref": "#/definitions/cFlags" },
+                    "linux_arm64": { "$ref": "#/definitions/cFlags" },
+                    "mingw_x64": { "$ref": "#/definitions/cFlags" },
+                    "macos_x64": { "$ref": "#/definitions/cFlags" },
+                    "macos_arm64": { "$ref": "#/definitions/cFlags" },
+                    "ios_arm64": { "$ref": "#/definitions/cFlags" },
+                    "ios_x64": { "$ref": "#/definitions/cFlags" },
+                    "ios_simulator_arm64": { "$ref": "#/definitions/cFlags" },
+                    "watchos_arm64": { "$ref": "#/definitions/cFlags" },
+                    "watchos_simulator_arm64": { "$ref": "#/definitions/cFlags" },
+                    "tvos_arm64": { "$ref": "#/definitions/cFlags" },
+                    "tvos_simulator_arm64": { "$ref": "#/definitions/cFlags" },
+                    "android_arm64": { "$ref": "#/definitions/cFlags" },
+                    "android_arm32": { "$ref": "#/definitions/cFlags" },
+                    "android_x64": { "$ref": "#/definitions/cFlags" },
+                    "android_x86": { "$ref": "#/definitions/cFlags" }
+                  }
+                }
+              }
+            },
+            "cinterop": {
+              "description": "C libraries bound with cinterop, one table per library.",
+              "type": "object",
+              "propertyNames": { "pattern": "^[A-Za-z0-9_-]+$" },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "def": { "description": "The .def file, relative to the project root. Default: interop/<name>.def.", "type": "string" },
+                  "package": { "description": "Kotlin package of the generated bindings.", "type": "string" },
+                  "headers": { "description": "Headers to bind; without a .def file they describe the library.", "type": "array", "items": { "type": "string" } },
+                  "compiler-options": { "description": "clang options for reading the headers.", "type": "array", "items": { "type": "string" } },
+                  "linker-options": { "description": "Linker options recorded in the bindings.", "type": "array", "items": { "type": "string" } },
+                  "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+                  "library-paths": { "$ref": "#/definitions/libraryPaths" },
+                  "frameworks": { "$ref": "#/definitions/appleFrameworks" },
+                  "pkg-config": {
+                    "description": "pkg-config packages whose compiler and linker flags the bindings use (on the host platform).",
+                    "anyOf": [{ "type": "string", "examples": ["sqlite3"] }, { "type": "array", "items": { "type": "string" } }]
+                  },
+                  "link": { "description": "`static` embeds the static libraries (`lib<name>.a`) of the `-l` options, so programs run without the library installed.", "enum": ["dynamic", "static"], "default": "dynamic" },
+                  "header-filter": { "description": "The .def file's headerFilter: globs of the headers to bind.", "type": "array", "items": { "type": "string" } },
+                  "excluded-functions": { "description": "The .def file's excludedFunctions: functions left out of the bindings.", "type": "array", "items": { "type": "string" } },
+                  "strict-enums": { "description": "The .def file's strictEnums: C enums bound as Kotlin enums.", "type": "array", "items": { "type": "string" } },
+                  "non-strict-enums": { "description": "The .def file's nonStrictEnums: C enums bound as integer constants.", "type": "array", "items": { "type": "string" } },
+                  "modules": { "description": "The .def file's modules: Clang modules (Objective-C frameworks) to bind.", "type": "array", "items": { "type": "string" } },
+                  "language": { "description": "The .def file's language.", "enum": ["C", "Objective-C"] },
+                  "platform": {
+                    "description": "Options of this library for one Kotlin/Native platform, added to the common ones.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "linux_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "linux_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "mingw_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "macos_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "macos_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "ios_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "ios_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "ios_simulator_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "watchos_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "watchos_simulator_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "tvos_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "tvos_simulator_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "android_arm64": { "$ref": "#/definitions/nativeOptions" },
+                      "android_arm32": { "$ref": "#/definitions/nativeOptions" },
+                      "android_x64": { "$ref": "#/definitions/nativeOptions" },
+                      "android_x86": { "$ref": "#/definitions/nativeOptions" }
+                    }
+                  }
+                }
+              }
+            },
+            "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the Native target only." }
+          }
+        },
+        "android": {
+          "description": "Build for Android (through a generated Gradle project).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["namespace"],
+          "properties": {
+            "namespace": { "description": "The Android namespace.", "type": "string", "examples": ["com.example.app"] },
+            "application-id": { "description": "The application id. Default: `namespace`.", "type": "string" },
+            "kind": { "enum": ["application", "library"], "default": "application" },
+            "min-sdk": { "type": "integer", "minimum": 1, "default": 24 },
+            "target-sdk": { "type": "integer", "minimum": 1, "default": 36 },
+            "compile-sdk": { "type": "integer", "minimum": 1, "default": 37 },
+            "version-code": { "type": "integer", "minimum": 1, "default": 1 },
+            "version-name": { "type": "string" },
+            "agp-version": { "description": "Android Gradle Plugin version.", "type": "string", "default": "9.4.1" },
+            "gradle-version": { "description": "Gradle version that runs the build. Default: the minimum `agp-version` requires.", "type": "string" },
+            "minify": { "description": "Shrink, obfuscate and optimize release builds with R8.", "type": "boolean", "default": false },
+            "shrink-resources": { "description": "Remove unused resources from release builds. Needs `minify`. Default: `minify`, for applications.", "type": "boolean" },
+            "proguard-files": { "description": "ProGuard/R8 rule files for release builds, relative to the project root.", "type": "array", "items": { "type": "string" }, "examples": [["android/proguard-rules.pro"]] },
+            "consumer-proguard-files": { "description": "ProGuard/R8 rules a library ships to the apps that use it (libraries only).", "type": "array", "items": { "type": "string" } },
+            "build-config": { "$ref": "#/definitions/android-build-config" },
+            "signing": {
+              "description": "Signing configurations by build type. Passwords come from environment variables.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "debug": { "$ref": "#/definitions/android-signing" },
+                "release": { "$ref": "#/definitions/android-signing" }
+              }
+            },
+            "flavor-dimensions": { "description": "The order of the flavor dimensions; required when the flavors use more than one.", "type": "array", "items": { "type": "string" } },
+            "flavors": {
+              "description": "Product flavors by name.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["dimension"],
+                "properties": {
+                  "dimension": { "description": "The flavor dimension this flavor belongs to.", "type": "string", "examples": ["tier"] },
+                  "application-id-suffix": { "description": "Appended to the application id.", "type": "string", "examples": [".free"] },
+                  "version-name-suffix": { "description": "Appended to the version name.", "type": "string" },
+                  "version-code": { "type": "integer", "minimum": 1 },
+                  "min-sdk": { "type": "integer", "minimum": 1 },
+                  "build-config": { "$ref": "#/definitions/android-build-config" }
+                }
+              }
+            },
+            "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the Android target only." }
+          }
+        }
+      }
+    },
+    "bin": {
+      "description": "Named programs besides the default one, run with `kargo run --bin <name>`.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "description": "Letters, digits, `-` and `_`, starting with a letter; unique.", "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+          "path": { "description": "A .kt file, relative to the project root, that declares exactly one `main`.", "type": "string", "pattern": "\\.kt$" },
+          "main": { "description": "The JVM main class.", "type": "string" },
+          "entry-point": { "description": "The Kotlin/Native entry function.", "type": "string" }
+        }
+      }
+    },
+    "generate": {
+      "description": "Steps that write sources or resources before they are compiled: protobuf, OpenAPI, BuildConfig. Each writes into `$KARGO_GEN_DIR`, `target/generated/<profile>/<name>/`.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "description": "Letters, digits, `-` and `_`, starting with a letter; unique. Names the output directory.", "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+          "inputs": {
+            "description": "Globs (gitignore syntax, relative to the project root) of the files the output comes from. The step runs only when they, its definition or Kargo changed. Without inputs, it runs on every build.",
+            "type": "array",
+            "items": { "type": "string", "examples": ["proto/**/*.proto"] }
+          },
+          "run": { "$ref": "#/definitions/commands", "description": "Shell commands that write into `$KARGO_GEN_DIR`, run at the project root." },
+          "windows-run": { "$ref": "#/definitions/commands", "description": "Replaces `run` on Windows." },
+          "shell": { "description": "The shell of `run` (default: sh on Unix, cmd on Windows).", "type": "string", "enum": ["sh", "bash", "cmd", "powershell", "pwsh"] },
+          "tool": { "description": "A Maven artifact `group:artifact:version` whose main class Kargo runs on the project's JDK. It is resolved and pinned in kargo.lock.", "type": "string", "examples": ["org.openapitools:openapi-generator-cli:7.16.0"] },
+          "main-class": { "description": "The class `tool` runs; by default the Main-Class of the jar's manifest.", "type": "string" },
+          "args": { "description": "Arguments of `tool`, or more arguments of `protoc`. `$NAME` and `${NAME}` become the variable's value (`$KARGO_GEN_DIR`).", "type": "array", "items": { "type": "string" } },
+          "builtin": { "description": "One of Kargo's own generators.", "type": "string", "enum": ["build-config", "protobuf"] },
+          "targets": {
+            "description": "The targets that compile the output. Default: every target (for protobuf, jvm and android).",
+            "type": "array",
+            "items": { "type": "string", "enum": ["jvm", "wasm", "native", "android"] }
+          },
+          "kind": { "description": "What the step writes: main `sources` (the default), `resources` or `test-sources`.", "type": "string", "enum": ["sources", "resources", "test-sources"], "default": "sources" },
+          "roots": {
+            "description": "Directories of the output, relative to it, that hold the sources or resources, such as `src/main/kotlin` for a tool that writes a whole project. Default: the whole output directory.",
+            "type": "array",
+            "items": { "type": "string", "examples": ["src/main/kotlin"] }
+          },
+          "after": { "description": "Steps that run before this one.", "type": "array", "items": { "type": "string" } },
+          "env": { "description": "Environment variables of the step, on top of the `KARGO_*` ones.", "type": "object", "additionalProperties": { "type": "string" } },
+          "package": { "description": "build-config: the Kotlin package of the object. Default: the package's group and name.", "type": "string" },
+          "object": { "description": "build-config: the name of the object.", "type": "string", "default": "BuildConfig" },
+          "fields": {
+            "description": "build-config: constants of your own. A string, integer or boolean becomes a `const val` of that type.",
+            "type": "object",
+            "additionalProperties": { "type": ["string", "integer", "boolean"] }
+          },
+          "expose": { "description": "build-config: variables of the project environment (`[env]`, `.env` files) to write as constants, as `[env] expose` does.", "type": "array", "items": { "type": "string" } },
+          "build-time": { "description": "build-config: also write `BUILD_TIME`. It changes on every build, and so recompiles, unless SOURCE_DATE_EPOCH is set.", "type": "boolean", "default": false },
+          "version": { "description": "protobuf: the protoc version.", "type": "string", "default": "4.31.1" },
+          "proto-path": { "description": "protobuf: directories searched for imports (`-I`), relative to the project root.", "type": "array", "items": { "type": "string" }, "default": ["proto"] },
+          "java": { "description": "protobuf: generate Java classes.", "type": "boolean", "default": true },
+          "kotlin": { "description": "protobuf: generate the Kotlin DSL (needs `java`).", "type": "boolean", "default": true },
+          "grpc": { "description": "protobuf: also generate gRPC stubs, Java ones and, with `kotlin`, Kotlin ones.", "type": "boolean", "default": false },
+          "grpc-java-version": { "description": "protobuf: the version of protoc-gen-grpc-java.", "type": "string", "default": "1.73.0" },
+          "grpc-kotlin-version": { "description": "protobuf: the version of protoc-gen-grpc-kotlin.", "type": "string", "default": "1.4.3" }
+        }
+      }
+    },
+    "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of every target." },
+    "dev-dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies used only to compile and run tests." },
+    "repositories": {
+      "description": "Maven repositories besides Maven Central: a URL, \"maven-local\", or a table with credentials.",
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          { "type": "string", "examples": ["https://jitpack.io", "maven-local"] },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["url"],
+            "properties": {
+              "url": { "description": "An http(s):// or file: URL, or \"maven-local\".", "type": "string" },
+              "username-env": { "description": "Environment variable holding the user name.", "type": "string" },
+              "password-env": { "description": "Environment variable holding the password or token.", "type": "string" }
+            }
+          }
+        ]
+      }
+    },
+    "frameworks": { "$ref": "#/definitions/frameworks" },
+    "plugins": { "$ref": "#/definitions/plugins" },
+    "tasks": { "$ref": "#/definitions/tasks" },
+    "env": {
+      "$ref": "#/definitions/env",
+      "description": "Variables for `kargo run`, `kargo test`, tasks and hooks. See `kargo env`."
+    },
+    "profile": {
+      "description": "Build profiles: `dev` and `release`, and custom ones such as `[profile.staging]` that build with `--profile staging`.",
+      "type": "object",
+      "properties": {
+        "dev": { "$ref": "#/definitions/profile" },
+        "release": { "$ref": "#/definitions/profile" }
+      },
+      "additionalProperties": { "$ref": "#/definitions/profile" }
+    },
+    "doc": {
+      "description": "Options for `kargo doc` (Dokka).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "includes": { "description": "Markdown files with module and package documentation.", "type": "array", "items": { "type": "string" } },
+        "source-link": { "description": "http(s) URL of the project root in a code browser.", "type": "string" },
+        "external-links": { "description": "http(s) roots of Dokka or Javadoc sites to link dependency types to.", "type": "array", "items": { "type": "string" } },
+        "dokka": { "description": "Exact Dokka version.", "type": "string", "default": "2.2.0" }
+      }
+    },
+    "fmt": {
+      "description": "Options for `kargo fmt` (ktlint).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exclude": { "description": "Globs of files ktlint skips.", "type": "array", "items": { "type": "string" } },
+        "ktlint": { "description": "Exact ktlint version.", "type": "string", "default": "1.8.0" }
+      }
+    },
+    "lint": {
+      "description": "Options for `kargo lint` (detekt).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config": { "description": "detekt configuration files, relative to the project root.", "type": "array", "items": { "type": "string" } },
+        "baseline": { "description": "Baseline file, relative to the project root.", "type": "string" },
+        "detekt": { "description": "Exact detekt version.", "type": "string", "default": "1.23.8" }
+      }
+    },
+    "test": {
+      "description": "Options for `kargo test`.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fail-fast": { "description": "Stop at the first target whose tests fail.", "type": "boolean", "default": true },
+        "timeout": { "description": "How long the whole test run may take, such as \"30s\", \"5m\" or \"1h\". The run is stopped when it passes.", "type": "string" },
+        "test-timeout": { "description": "How long one JVM test may take, such as \"30s\" or \"2m\" (JUnit Jupiter's default timeout).", "type": "string" },
+        "jvm-args": { "description": "JVM arguments for the test process, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "bench": {
+      "description": "Options for `kargo bench`. A setting left out is taken from the benchmarks' JMH annotations, then from Kargo's defaults.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "warmup": { "description": "Warmup iterations as a count and how long each lasts, such as \"5x1s\" or \"3x500ms\". Kargo's default is \"3x1s\".", "type": "string", "examples": ["5x1s"] },
+        "iterations": { "description": "Measured iterations as a count and how long each lasts, such as \"5x1s\". Kargo's default is \"5x1s\".", "type": "string", "examples": ["5x1s"] },
+        "forks": { "description": "How many JVMs run each benchmark one after the other; 0 runs it in the JVM of the launcher. Kargo's default is 2.", "type": "integer", "minimum": 0 },
+        "mode": { "description": "What to measure: thrpt (operations per time), avgt (time per operation), sample (time per operation, sampled), ss (a single operation) or all. Kargo's default is avgt.", "enum": ["thrpt", "avgt", "sample", "ss", "all"] },
+        "time-unit": { "description": "The unit results are reported in. Without one, each result is shown in whichever unit reads best.", "enum": ["ns", "us", "ms", "s", "m", "h", "d"] },
+        "jvm-args": { "description": "JVM arguments for the benchmark JVMs, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "publish": {
+      "description": "Options for `kargo publish`.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "description": "Where `kargo publish` publishes without --repository: maven-central, maven-local or a [repositories] entry.", "type": "string" },
+        "sign": { "description": "Sign every file with GnuPG (default: true for Maven Central).", "type": "boolean" },
+        "sources": { "description": "Publish -sources.jar files.", "type": "boolean", "default": true },
+        "javadoc": { "description": "The -javadoc.jar: \"dokka\" (or true), \"empty\" or false.", "anyOf": [{ "type": "boolean" }, { "enum": ["dokka", "empty"] }], "default": "dokka" },
+        "central-publishing": { "description": "What Maven Central does with a validated upload.", "enum": ["manual", "automatic"], "default": "manual" }
+      }
+    },
+    "workspace": {
+      "description": "A workspace: its kargo.toml has only this table, no [package].",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["members"],
+      "properties": {
+        "members": { "description": "Directories of the member packages, relative to this file, or globs such as \"libs/*\". `kargo new <dir>` inside the workspace adds new members.", "type": "array", "items": { "type": "string" }, "examples": [["app", "libs/*"]] },
+        "exclude": { "description": "Directories that `members` globs must not match.", "type": "array", "items": { "type": "string" } },
+        "default-members": { "description": "The members that `kargo build` and the other commands work on at the workspace root (default: every member).", "type": "array", "items": { "type": "string" } },
+        "package": {
+          "description": "[package] keys members inherit with `key.workspace = true`.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": { "type": "string", "examples": ["0.1.0"] },
+            "group": { "type": "string", "examples": ["com.example"] },
+            "description": { "type": "string" },
+            "authors": { "type": "array", "items": { "type": "string" } },
+            "license": { "type": "string" },
+            "homepage": { "type": "string", "format": "uri" },
+            "repository": { "type": "string", "format": "uri" }
+          }
+        },
+        "kotlin": {
+          "description": "Kotlin settings of every member. A member's own `opt-in` and `compiler-args` add to these; its other [kotlin] keys take precedence.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": { "description": "The Kotlin version of every member.", "type": "string" },
+            "language-version": { "type": "string", "examples": ["2.4"] },
+            "api-version": { "type": "string", "examples": ["2.4"] },
+            "ksp": { "description": "KSP version for `scope = \"ksp\"` dependencies.", "type": "string" },
+            "opt-in": { "type": "array", "items": { "type": "string" } },
+            "compiler-args": { "type": "array", "items": { "type": "string" } },
+            "warnings-as-errors": { "type": "boolean", "default": false },
+            "jvm-target": { "description": "The default [target.jvm] jvm-target of members.", "type": "string", "examples": ["17"] }
+          }
+        },
+        "dependencies": { "$ref": "#/definitions/dependencies", "description": "Entries members inherit with `name = { workspace = true }`." },
+        "frameworks": { "$ref": "#/definitions/frameworks", "description": "Entries members inherit with `name = { workspace = true }` in [frameworks]." },
+        "plugins": { "$ref": "#/definitions/plugins", "description": "Entries members inherit with `name = { workspace = true }` in [plugins]." },
+        "tasks": { "$ref": "#/definitions/tasks", "description": "Tasks run at the workspace root with `kargo <task>`; members inherit them with `name = { workspace = true }` in [tasks]." }
+      }
+    }
+  },
+  "oneOf": [
+    { "required": ["package"], "not": { "required": ["workspace"] } },
+    { "required": ["workspace"], "maxProperties": 1 }
+  ],
+  "definitions": {
+    "staticLibraries": {
+      "description": "Static libraries (file names such as `libfoo.a`) found in `library-paths` and embedded in the output.",
+      "type": "array",
+      "items": { "type": "string", "examples": ["libsqlite3.a"] }
+    },
+    "libraryPaths": {
+      "description": "Directories searched for `static-libraries` and passed to the linker as `-L`, relative to the project root.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "appleFrameworks": {
+      "description": "Apple frameworks to link (`-framework <name>`); ignored on other platforms.",
+      "type": "array",
+      "items": { "type": "string", "examples": ["Foundation"] }
+    },
+    "defines": {
+      "description": "Preprocessor macros: `NAME` or `NAME=value`.",
+      "type": "array",
+      "items": { "type": "string", "examples": ["NDEBUG"] }
+    },
+    "nativeLinkOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "linker-options": { "description": "Options for the native linker.", "type": "array", "items": { "type": "string" } },
+        "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+        "library-paths": { "$ref": "#/definitions/libraryPaths" },
+        "frameworks": { "$ref": "#/definitions/appleFrameworks" }
+      }
+    },
+    "nativeOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "compiler-options": { "description": "clang options for reading the headers.", "type": "array", "items": { "type": "string" } },
+        "linker-options": { "description": "Linker options recorded in the bindings.", "type": "array", "items": { "type": "string" } },
+        "static-libraries": { "$ref": "#/definitions/staticLibraries" },
+        "library-paths": { "$ref": "#/definitions/libraryPaths" },
+        "frameworks": { "$ref": "#/definitions/appleFrameworks" }
+      }
+    },
+    "cFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defines": { "$ref": "#/definitions/defines" },
+        "compiler-options": { "description": "More clang options.", "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "inherit": {
+      "description": "Inherit this key from the workspace's kargo.toml.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace"],
+      "properties": { "workspace": { "const": true } }
+    },
+    "frameworks": {
+      "description": "Built-in frameworks: each adds libraries, compiler plugins and flags. In a member, `name = { workspace = true }` inherits the entry of [workspace.frameworks].",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serialization": {
+          "description": "kotlinx.serialization.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "1.11.0" },
+                "formats": { "type": "array", "items": { "enum": ["json", "cbor", "protobuf", "properties", "hocon", "core"] }, "default": ["json"] }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "coroutines": {
+          "description": "kotlinx.coroutines: true, false or a version string.",
+          "anyOf": [{ "type": ["boolean", "string"] }, { "$ref": "#/definitions/inherit" }],
+          "examples": [true, "1.11.0"]
+        },
+        "compose": {
+          "description": "Compose Multiplatform.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "1.12.1" },
+                "material3": { "description": "Add Material 3.", "type": "boolean", "default": true },
+                "resources-package": { "description": "The package of the `Res` class generated from composeResources/. Default: <group>.<name>.generated.resources.", "type": "string", "examples": ["com.example.app.res"] },
+                "public-resources": { "description": "Make `Res` and its accessors public instead of internal.", "type": "boolean", "default": false }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "ktor": {
+          "description": "Ktor server and/or client.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "3.6.0" },
+                "server": { "description": "Server engine.", "type": "string", "examples": ["netty", "cio", "jetty", "tomcat"] },
+                "client": { "description": "Client engine.", "type": "string", "examples": ["cio", "okhttp", "java", "apache5", "js", "curl", "winhttp", "darwin"] },
+                "server-plugins": { "type": "array", "items": { "type": "string" } },
+                "client-plugins": { "type": "array", "items": { "type": "string" } },
+                "json": { "description": "Add ktor-serialization-kotlinx-json (default: when serialization is enabled).", "type": "boolean" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "lombok": {
+          "description": "Lombok for Java sources.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "1.18.48" },
+                "config": { "description": "Path to lombok.config, relative to the project root.", "type": "string" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "spring-boot": {
+          "description": "Spring Boot.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "type": "string", "default": "4.1.1" },
+                "starters": { "description": "Starters without the `spring-boot-starter-` prefix.", "type": "array", "items": { "type": "string" }, "default": ["web"] },
+                "jpa": { "description": "Apply the JPA no-arg preset (default: when `data-jpa` is a starter).", "type": "boolean" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        },
+        "benchmark": {
+          "description": "kotlinx-benchmark's annotations and JMH, for the benchmarks in benches/ that `kargo bench` runs on the JVM.",
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "description": "The kotlinx-benchmark version.", "type": "string", "default": "0.5.0" }
+              }
+            },
+            { "$ref": "#/definitions/inherit" }
+          ]
+        }
+      }
+    },
+    "plugins": {
+      "description": "Compiler plugins (`maven`) and hook plugins (`command`).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maven": { "description": "A compiler plugin's `group:artifact:version`.", "type": "string" },
+          "id": { "description": "The compiler plugin id, for its options.", "type": "string" },
+          "options": { "description": "Compiler plugin options.", "type": "object", "additionalProperties": { "type": "string" } },
+          "command": { "description": "A hook plugin's executable.", "type": "string" },
+          "windows-command": { "description": "Used instead of `command` on Windows.", "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "windows-args": { "description": "Used instead of `args` on Windows.", "type": "array", "items": { "type": "string" } },
+          "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } },
+          "env": { "type": "object", "additionalProperties": { "type": "string" } },
+          "workspace": { "description": "In a member: inherit the plugin of the same name from [workspace.plugins] (alone, without other keys).", "const": true }
+        }
+      }
+    },
+    "tasks": {
+      "description": "Commands run with `kargo <task>` or `kargo task <name>`.",
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "run": { "$ref": "#/definitions/commands" },
+              "windows-run": { "$ref": "#/definitions/commands", "description": "Replaces `run` on Windows." },
+              "description": { "type": "string" },
+              "shell": { "enum": ["sh", "bash", "cmd", "powershell", "pwsh"] },
+              "depends-on": { "type": "array", "items": { "type": "string" } },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } },
+              "cwd": { "description": "Working directory, relative to the project root.", "type": "string" },
+              "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } },
+              "workspace": { "description": "In a member: inherit the task of the same name from [workspace.tasks] (alone, without other keys).", "const": true }
+            }
+          }
+        ]
+      }
+    },
+    "android-build-config": {
+      "description": "`BuildConfig` fields: a string becomes a `String`, a boolean a `boolean`, an integer an `int` (or `long`).",
+      "type": "object",
+      "additionalProperties": { "type": ["string", "boolean", "integer"] },
+      "examples": [{ "API_URL": "https://api.example.com" }]
+    },
+    "android-signing": {
+      "description": "The keystore that signs this build type.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store-file", "store-password-env", "key-alias"],
+      "properties": {
+        "store-file": { "description": "The keystore, relative to the project root.", "type": "string", "examples": ["release.jks"] },
+        "store-password-env": { "description": "Environment variable holding the keystore password.", "type": "string", "examples": ["KS_PASS"] },
+        "key-alias": { "description": "The alias of the key in the keystore.", "type": "string", "examples": ["upload"] },
+        "key-password-env": { "description": "Environment variable holding the key password. Default: `store-password-env`.", "type": "string", "examples": ["KEY_PASS"] },
+        "store-type": { "description": "The keystore type. Default: detected.", "enum": ["jks", "pkcs12"] }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "Keys are `group:artifact`, a package name (with `path`) or any name (with `group`/`coords`).",
+      "additionalProperties": { "$ref": "#/definitions/dependency" }
+    },
+    "dependency": {
+      "anyOf": [
+        { "description": "A version or Maven range.", "type": "string", "examples": ["1.0.0", "[1.0,2.0)"] },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": { "description": "Version or Maven range. Optional when a BOM manages it.", "type": "string" },
+            "group": { "description": "Maven group when the key isn't `group:artifact`.", "type": "string" },
+            "artifact": { "description": "Artifact id; defaults to the key.", "type": "string" },
+            "coords": { "description": "`group:artifact[:version]` in one string.", "type": "string" },
+            "scope": { "enum": ["compile", "implementation", "api", "runtime", "runtime-only", "provided", "compile-only", "processor", "annotation-processor", "ksp"], "default": "compile" },
+            "classifier": { "type": "string" },
+            "extension": { "type": "string", "default": "jar" },
+            "type": { "description": "Alias of `extension`.", "type": "string" },
+            "exclude": { "description": "`group:artifact` or `group:*` to exclude transitively.", "type": "array", "items": { "type": "string" } },
+            "force": { "description": "Use this version even if a newer one is requested.", "type": "boolean", "default": false },
+            "transitive": { "description": "Include this dependency's dependencies.", "type": "boolean", "default": true },
+            "bom": { "description": "Import as a BOM.", "type": "boolean", "default": false },
+            "path": { "description": "Directory of another Kargo package to build from source; only `scope`, `exported` and `test-fixtures` can be set with it.", "type": "string" },
+            "exported": { "description": "Part of this package's API: packages that depend on it through `path` compile against it too, and its POM scope is `compile`. Otherwise they only get it at runtime.", "type": "boolean", "default": false },
+            "test-fixtures": { "description": "With `path`, in [dev-dependencies]: also use the dependency's test fixtures (`test-fixtures/`).", "type": "boolean", "default": false },
+            "workspace": { "description": "Inherit the entry of the same name from [workspace.dependencies]; only `scope`, `exported` and `test-fixtures` can be added.", "const": true }
+          }
+        }
+      ]
+    },
+    "commands": {
+      "description": "A command or a list of commands.",
+      "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }]
+    },
+    "hook": { "enum": ["pre-build", "post-build", "pre-test", "post-test", "pre-run", "post-package"] },
+    "installer-type": { "enum": ["msi", "exe", "dmg", "pkg", "deb", "rpm", "app-image"] },
+    "env": {
+      "description": "Variables for the program: a string, or a table with `value`, `force`, `relative` or `required`. Also `env-files` and `expose`.",
+      "type": "object",
+      "propertyNames": { "pattern": "^(env-files|expose|[A-Za-z_][A-Za-z0-9_]*)$" },
+      "properties": {
+        "env-files": {
+          "description": "More `.env` files, relative to the package root, read after the standard ones. `--no-env-file` skips them.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expose": {
+          "description": "Variables compiled into a generated `BuildConfig` object, for the JVM, Native and Wasm (Node.js) targets.",
+          "anyOf": [
+            { "$ref": "#/definitions/env-var" },
+            { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" } }
+          ]
+        }
+      },
+      "additionalProperties": { "$ref": "#/definitions/env-var" }
+    },
+    "profile-env": {
+      "description": "Variables that replace `[env]` for this profile, variable by variable. Also `env-files`.",
+      "type": "object",
+      "propertyNames": { "pattern": "^(env-files|[A-Za-z_][A-Za-z0-9_]*)$" },
+      "properties": {
+        "env-files": {
+          "description": "More `.env` files for this profile, relative to the package root.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": { "$ref": "#/definitions/env-var" }
+    },
+    "env-var": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "integer" },
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": { "description": "The value. Not used with `required`.", "type": "string" },
+            "force": { "description": "Use `value` even when the shell or a `.env` file sets the variable.", "type": "boolean", "default": false },
+            "relative": { "description": "Resolve `value` against the package root.", "type": "boolean", "default": false },
+            "required": { "description": "Fail before anything runs unless the shell or a `.env` file sets the variable.", "type": "boolean", "default": false }
+          }
+        }
+      ]
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inherits": { "description": "The profile this one starts from: `dev` (the default), `release` or another custom profile. Not for `dev` and `release`.", "type": "string" },
+        "debug": { "description": "Include debug information.", "type": "boolean" },
+        "optimize": { "description": "Optimize (mainly Native and Wasm).", "type": "boolean" },
+        "compiler-args": { "description": "Extra compiler arguments for this profile.", "type": "array", "items": { "type": "string" } },
+        "jvm-args": { "description": "JVM options for `kargo run` and `kargo test`, after `[target.jvm] jvm-args`.", "type": "array", "items": { "type": "string" } },
+        "env": { "$ref": "#/definitions/profile-env" },
+        "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies only this profile's builds have." }
+      }
+    }
+  }
+}

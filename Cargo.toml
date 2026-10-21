@@ -9,13 +9,13 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
 [workspace.dependencies]
-kargo-util = { path = "crates/kargo-util" }
-kargo-maven = { path = "crates/kargo-maven" }
-kargo-manifest = { path = "crates/kargo-manifest" }
-kargo-toolchain = { path = "crates/kargo-toolchain" }
-kargo-compiler = { path = "crates/kargo-compiler" }
-kargo-ops = { path = "crates/kargo-ops" }
-kargo-lsp = { path = "crates/kargo-lsp" }
+kargo-util = { path = "crates/kargo-util", version = "0.1.0" }
+kargo-maven = { path = "crates/kargo-maven", version = "0.1.0" }
+kargo-manifest = { path = "crates/kargo-manifest", version = "0.1.0" }
+kargo-toolchain = { path = "crates/kargo-toolchain", version = "0.1.0" }
+kargo-compiler = { path = "crates/kargo-compiler", version = "0.1.0" }
+kargo-ops = { path = "crates/kargo-ops", version = "0.1.0" }
+kargo-lsp = { path = "crates/kargo-lsp", version = "0.1.0" }
 
 anstream = "1.0.0"
 anstyle = "1.0.14"
@@ -49,7 +49,7 @@ predicates = "3.1.4"
 tempfile = "3.27.0"
 
 [package]
-name = "kargo"
+name = "kargo-cli"
 description = "A Cargo-like build tool and package manager for Kotlin"
 repository = "https://github.com/enekocm7/kargo"
 homepage = "https://enekocm7.github.io/kargo/"
@@ -57,6 +57,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+# The tests, website and editor plugins stay in the repository; the crate is the sources of the binary.
+include = ["/src/**", "/README.md", "/Cargo.toml", "/Cargo.lock"]
 
 [[bin]]
 name = "kargo"
@@ -88,7 +91,7 @@ zip.workspace = true
 strip = true
 lto = "thin"
 
-# `cargo binstall kargo` downloads the archives of the release workflow (.github/workflows/release.yml).
+# `cargo binstall kargo-cli` downloads the archives of the release workflow (.github/workflows/release.yml).
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/kargo-{ version }-{ target }.tar.gz"
 bin-dir = "kargo-{ version }-{ target }/{ bin }{ binary-ext }"
