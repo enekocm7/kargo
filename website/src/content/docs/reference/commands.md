@@ -147,6 +147,29 @@ kargo import ../legacy-service --no-build
 
 The command refuses a directory that already has a `kargo.toml`, plans every move before making one, and fails without changing anything when two files would land on the same path. A Maven project is translated exactly. A Gradle project is read without running Gradle, so what the scripts compute in code is listed in the report instead. If the final build fails, the project is imported anyway and the command exits with code 101. See [Importing a Maven or Gradle project](../../guides/importing/).
 
+## `kargo init-ci`
+
+Write a CI workflow for the project, from its `kargo.toml`.
+
+```sh
+kargo init-ci [--system github] [--junit] [--force]
+```
+
+```console
+$ kargo init-ci
+     Created .github/workflows/ci.yml
+        note: left out actions/setup-node: no Wasm target
+        note: left out OS matrix: no Kotlin/Native target (the job runs on ubuntu-latest)
+```
+
+| Flag | Meaning |
+|---|---|
+| `--system <name>` | The CI system. Only `github` (GitHub Actions) for now, the default |
+| `--junit` | Run `kargo test --report junit` and publish the reports in the run summary |
+| `--force` | Replace the workflow if it exists. Without it, an existing file is an error |
+
+It prints what it wrote and each step it left out, with the reason. See [Continuous integration](../../guides/ci/#generating-a-workflow) for the workflow and the `setup-kargo` action it uses.
+
 ## `kargo build` (`b`)
 
 Compile all enabled targets, or the ones you name. Targets build at the same time; if one fails, the command reports that failure and exits with code 101.

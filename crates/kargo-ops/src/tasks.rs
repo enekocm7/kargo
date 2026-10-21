@@ -77,10 +77,31 @@ pub fn shell_command(shell: TaskShell, script: &str) -> Result<Command> {
         }
         TaskShell::PowerShell | TaskShell::Pwsh => {
             let mut cmd = Command::new(shell.as_str());
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command"]).arg(powershell_script(shell, script));
             cmd
         }
     })
+}
+
+/// Wraps `script` so a failing command stops the task and its exit code becomes the task's, as with `sh`
+/// and `cmd`. PowerShell keeps going after a native command fails, and `-Command` reports only the last
+/// statement's status. `pwsh` 7.3+ turns a failing native command into an error with
+/// `$PSNativeCommandUseErrorActionPreference`; Windows PowerShell 5.1 has no such switch, so it can only
+/// report the code of the last native command.
+fn powershell_script(shell: TaskShell, script: &str) -> String {
+    let mut out = String::from(
+        "$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; try {
+",
+    );
+    out.push_str(script);
+    out.push_str(
+        "
+} catch { [Console]::Error.WriteLine($_); if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }",
+    );
+    if shell == TaskShell::PowerShell {
+        out.push_str("; if ($LASTEXITCODE) { exit $LASTEXITCODE }");
+    }
+    out
 }
 
 /// Runs a single shell command with extra environment variables.
@@ -134,6 +155,9 @@ pub fn tasks_for_hook(tasks: &BTreeMap<String, Task>, hook: Hook) -> Vec<&Task> 
 
 fn quote_for_shell(shell: TaskShell, arg: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c);
+    if shell == TaskShell::Cmd && arg.contains('%') {
+        return quote_percents_for_cmd(arg);
+    }
     if !arg.is_empty() && arg.chars().all(safe) {
         return arg.to_owned();
     }
@@ -142,6 +166,20 @@ fn quote_for_shell(shell: TaskShell, arg: &str) -> String {
         TaskShell::PowerShell | TaskShell::Pwsh => format!("'{}'", arg.replace('\'', "''")),
         TaskShell::Sh | TaskShell::Bash => format!("'{}'", arg.replace('\'', "'\\''")),
     }
+}
+
+/// Quotes an argument with `%` for `cmd`, which expands `%NAME%` even inside quotes. A caret right after
+/// the `%` (outside quotes, where it is removed afterwards) keeps cmd from finding a variable name between
+/// two percent signs, so the text reaches the program as written.
+fn quote_percents_for_cmd(arg: &str) -> String {
+    let pieces: Vec<String> = arg
+        .split('%')
+        .map(|piece| {
+            let bare = piece.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c));
+            if piece.is_empty() || bare { piece.to_owned() } else { format!("\"{}\"", piece.replace('"', "\"\"")) }
+        })
+        .collect();
+    pieces.join("^%")
 }
 
 #[cfg(test)]
@@ -223,6 +261,53 @@ mod tests {
         assert_eq!(quote_for_shell(TaskShell::Sh, "it's"), r"'it'\''s'");
         assert_eq!(quote_for_shell(TaskShell::Cmd, "a \"b\""), "\"a \"\"b\"\"\"");
         assert_eq!(quote_for_shell(TaskShell::PowerShell, "it's"), "'it''s'");
+    }
+
+    #[test]
+    fn percent_signs_are_escaped_for_cmd() {
+        assert_eq!(quote_for_shell(TaskShell::Cmd, "%COMPUTERNAME%"), "^%COMPUTERNAME^%");
+        assert_eq!(quote_for_shell(TaskShell::Cmd, "50% off"), "50^%\" off\"");
+        assert_eq!(quote_for_shell(TaskShell::Sh, "%PATH%"), "%PATH%");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_does_not_expand_forwarded_percent_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tasks(
+            "say = { run = \"echo > out.txt\", shell = \"cmd\" }
+",
+        );
+        let quiet = Shell::new(kargo_util::shell::Verbosity::Quiet);
+        run(&quiet, dir.path(), &t, "say", &["%COMPUTERNAME%".into(), "a b".into()], &[]).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
+        assert_eq!(written.trim(), "%COMPUTERNAME% \"a b\"");
+    }
+
+    #[test]
+    fn powershell_stops_at_a_failing_command_and_keeps_its_exit_code() {
+        if process::find_on_path("pwsh").is_none() {
+            eprintln!("skipping: no pwsh available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let quiet = Shell::new(kargo_util::shell::Verbosity::Quiet);
+        let fail = if cfg!(windows) { "cmd /c exit 3" } else { "sh -c 'exit 3'" };
+        let t = tasks(&format!(
+            "bad = {{ run = [\"{fail}\", \"echo done > out.txt\"], shell = \"pwsh\" }}
+"
+        ));
+        let err = run(&quiet, dir.path(), &t, "bad", &[], &[]).unwrap_err();
+        assert!(err.to_string().contains("exit code 3"), "{err}");
+        assert!(!dir.path().join("out.txt").exists());
+
+        let one_script = tasks(&format!(
+            "bad = {{ run = \"{fail}; echo done > out.txt\", shell = \"pwsh\" }}
+"
+        ));
+        let err = run(&quiet, dir.path(), &one_script, "bad", &[], &[]).unwrap_err();
+        assert!(err.to_string().contains("exit code 3"), "{err}");
+        assert!(!dir.path().join("out.txt").exists());
     }
 
     #[test]

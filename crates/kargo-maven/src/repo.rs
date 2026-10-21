@@ -75,6 +75,12 @@ impl Repository {
         self.url.starts_with("file:") || !self.url.contains("://")
     }
 
+    /// The directory name of this repository's files in the Maven cache, when they are kept apart from other
+    /// repositories': its name, and a hash of its URL so that two repositories with the same name stay apart.
+    pub fn cache_dir_name(&self) -> String {
+        format!("{SCOPE_PREFIX}{}-{}", sanitize(&self.name), &hash::sha256_bytes(self.url.as_bytes())[..8])
+    }
+
     /// The directory of a local repository.
     pub fn local_root(&self) -> PathBuf {
         let path = self.url.strip_prefix("file://").or_else(|| self.url.strip_prefix("file:")).unwrap_or(&self.url);
@@ -101,26 +107,56 @@ pub fn effective_repositories(config: &Config, declared: &[Repository]) -> Vec<R
     if let Some(dir) = config.vendor_dir() {
         return vec![vendor_repository(dir)];
     }
-    let settings = config.settings();
     let mut out: Vec<Repository> = Vec::new();
     for repo in declared {
-        let mut repo = repo.clone();
-        if !repo.is_local() {
-            if let Some(mirror) = settings.repository_mirror(&repo.name, &repo.url) {
-                repo.url = mirror.trim_end_matches('/').to_owned();
-                repo.credentials = None;
-            }
-            if repo.credentials.is_none()
-                && let Some((username, password)) = settings.credentials(&repo.url)
-            {
-                repo.credentials = Some(Credentials { username, password });
-            }
-        }
+        let repo = mirrored(config, repo);
         if !out.iter().any(|r| r.url == repo.url) {
             out.push(repo);
         }
     }
     out
+}
+
+/// `repo` as Kargo contacts it: a remote repository replaced by its mirror from `[mirrors]`, with the credentials configured for the URL.
+fn mirrored(config: &Config, repo: &Repository) -> Repository {
+    let settings = config.settings();
+    let mut repo = repo.clone();
+    if !repo.is_local() {
+        if let Some(mirror) = settings.repository_mirror(&repo.name, &repo.url) {
+            repo.url = mirror.trim_end_matches('/').to_owned();
+            repo.credentials = None;
+        }
+        if repo.credentials.is_none()
+            && let Some((username, password)) = settings.credentials(&repo.url)
+        {
+            repo.credentials = Some(Credentials { username, password });
+        }
+    }
+    repo
+}
+
+/// Cached files of repositories that are not shared (see [`MavenClient`]) live in a directory of this form, named after the
+/// repository, directly under the cache: `@<name>-<hash of the URL>/<group>/<artifact>/...`.
+const SCOPE_PREFIX: char = '@';
+
+/// Splits a cache-relative path into the directory of its repository (if it has one) and the repository-relative path.
+fn split_scope(rel: &str) -> (Option<&str>, &str) {
+    if rel.starts_with(SCOPE_PREFIX)
+        && let Some((scope, plain)) = rel.split_once('/')
+    {
+        return (Some(scope), plain);
+    }
+    (None, rel)
+}
+
+/// The repository-relative path of a cache-relative path (as `kargo.lock` and `kargo vendor` list them).
+pub fn plain_rel(rel: &str) -> &str {
+    split_scope(rel).1
+}
+
+/// Whether `rel` is in the directory of a SNAPSHOT version, whose files change under one name.
+fn is_snapshot_path(rel: &str) -> bool {
+    rel.split('/').any(|seg| seg.ends_with("-SNAPSHOT"))
 }
 
 /// Outcome of looking for a single remote file.
@@ -149,8 +185,14 @@ pub struct MavenClient {
     rechecked: Mutex<HashSet<String>>,
     /// SNAPSHOTs fixed at a build (`1.0-20240101.120000-1`) instead of the newest one.
     snapshot_builds: Mutex<HashMap<(ModuleId, String), String>>,
+    /// URLs of the repositories whose released files are cached under their plain path: Maven Central and Google
+    /// (or their mirrors), whose releases never change, and the vendor directory. The files of every other
+    /// repository, and every SNAPSHOT, are cached in a directory of their repository.
+    shared: HashSet<String>,
     /// Every file this client served during this run, by repository-relative path (see [`MavenClient::served_files`]).
     served: Mutex<BTreeMap<String, PathBuf>>,
+    /// Hosts that could not be reached during this run; requests to them fail at once.
+    unreachable: Mutex<HashSet<String>>,
 }
 
 impl MavenClient {
@@ -158,8 +200,15 @@ impl MavenClient {
     /// repository, as the configuration says (see [`effective_repositories`]).
     pub fn new(config: &Config, repos: Vec<Repository>) -> Self {
         let agent = kargo_util::http::agent(config, Duration::from_secs(600));
+        let effective = effective_repositories(config, &repos);
+        let shared = if config.vendor_dir().is_some() {
+            effective.iter().map(|r| r.url.clone()).collect()
+        } else {
+            repos.iter().filter(|r| r.url == MAVEN_CENTRAL || r.url == GOOGLE).map(|r| mirrored(config, r).url).collect()
+        };
         Self {
-            repos: effective_repositories(config, &repos),
+            repos: effective,
+            shared,
             declared: repos,
             cache: config.maven_cache(),
             offline: config.offline(),
@@ -172,6 +221,7 @@ impl MavenClient {
             rechecked: Mutex::new(HashSet::new()),
             snapshot_builds: Mutex::new(HashMap::new()),
             served: Mutex::new(BTreeMap::new()),
+            unreachable: Mutex::new(HashSet::new()),
         }
     }
 
@@ -209,25 +259,60 @@ impl MavenClient {
         rel.split('/').fold(self.cache.clone(), |path, seg| path.join(seg))
     }
 
-    /// Fetches a repository-relative path, returning the cached file or `None`
-    /// if no repository has it.
+    /// Where `repo`'s copy of the repository-relative path `rel` is cached, relative to the cache.
+    fn key_for(&self, repo: &Repository, rel: &str) -> String {
+        if self.shared.contains(&repo.url) && !is_snapshot_path(rel) { rel.to_owned() } else { format!("{}/{rel}", repo.cache_dir_name()) }
+    }
+
+    /// The repositories that may hold the file at cache path `rel` (a plain repository path, or one in a
+    /// repository's directory, as `kargo.lock` lists it), each with the cache-relative path of its copy.
+    fn candidates<'a>(&'a self, rel: &'a str) -> Vec<(&'a Repository, String)> {
+        match split_scope(rel) {
+            (None, plain) => self.repos.iter().map(|r| (r, self.key_for(r, plain))).collect(),
+            // A vendored build has one repository, which holds every file under its plain path.
+            (Some(_), _) if self.repos.iter().all(|r| self.shared.contains(&r.url)) => {
+                self.repos.iter().map(|r| (r, rel.to_owned())).collect()
+            }
+            (Some(scope), _) => self.repos.iter().filter(|r| r.cache_dir_name() == scope).map(|r| (r, rel.to_owned())).collect(),
+        }
+    }
+
+    /// The cached copy of the repository-relative path `rel` from any of the repositories, if there is one.
+    fn cached_file(&self, rel: &str) -> Option<PathBuf> {
+        self.cached_copies(rel).into_iter().next()
+    }
+
+    /// Every cached copy of the repository-relative path `rel`, one per repository that has it cached, in repository order.
+    pub fn cached_copies(&self, rel: &str) -> Vec<PathBuf> {
+        self.candidates(rel).into_iter().map(|(_, key)| self.cache_path(&key)).filter(|p| p.is_file()).collect()
+    }
+
+    /// Fetches a path, returning the cached file or `None` if no repository has it. `rel` is a
+    /// repository-relative path (`org/acme/lib/1.0/lib-1.0.jar`); the file comes from the first repository
+    /// that has it, and is cached apart from other repositories' copies (see [`MavenClient::new`]). The path
+    /// of a cached file, as `kargo.lock` lists it, fetches that file again.
     pub fn fetch(&self, rel: &str) -> Result<Option<PathBuf>> {
         validate_rel_path(rel)?;
-        let cached = self.cache_path(rel);
-        if cached.is_file() {
-            self.recheck_plain_snapshot(rel, &cached);
-        }
-        if cached.is_file() {
-            self.serve(rel, &cached);
-            return Ok(Some(cached));
+        let plain = plain_rel(rel);
+        let candidates = self.candidates(rel);
+        for (repo, key) in &candidates {
+            let cached = self.cache_path(key);
+            if cached.is_file() {
+                self.recheck_plain_snapshot(repo, plain, key, &cached);
+            }
+            if cached.is_file() {
+                self.serve(plain, &cached);
+                return Ok(Some(cached));
+            }
         }
         if self.missing.lock().expect("lock poisoned").contains(rel) {
             return Ok(None);
         }
-        for repo in &self.repos {
-            match self.fetch_from(repo, rel, &cached)? {
+        for (repo, key) in &candidates {
+            let cached = self.cache_path(key);
+            match self.fetch_from(repo, plain, key, &cached)? {
                 Fetch::Found => {
-                    self.serve(rel, &cached);
+                    self.serve(plain, &cached);
                     return Ok(Some(cached));
                 }
                 Fetch::Missing => continue,
@@ -245,30 +330,27 @@ impl MavenClient {
     /// per run, the copy is compared with the repository's checksum, and deleted (to be downloaded again)
     /// if it changed. Remote repositories are only asked when the copy is older than [`METADATA_TTL`] or
     /// after `--refresh`; local ones every time.
-    fn recheck_plain_snapshot(&self, rel: &str, cached: &Path) {
+    fn recheck_plain_snapshot(&self, repo: &Repository, rel: &str, key: &str, cached: &Path) {
         let mut segments = rel.rsplit('/');
         let (Some(name), Some(dir)) = (segments.next(), segments.next()) else { return };
         let is_plain_snapshot = dir.ends_with("-SNAPSHOT") && name.contains("-SNAPSHOT");
         // A file downloaded or checked during this run is current.
-        if !is_plain_snapshot || self.is_verified(rel) || !self.rechecked.lock().expect("lock poisoned").insert(rel.to_owned()) {
+        if !is_plain_snapshot || self.is_verified(key) || !self.rechecked.lock().expect("lock poisoned").insert(key.to_owned()) {
             return;
         }
         let modified = std::fs::metadata(cached).and_then(|m| m.modified()).ok();
         let due = self.refresh || modified.and_then(|t| SystemTime::now().duration_since(t).ok()).is_none_or(|age| age >= METADATA_TTL);
-        for repo in &self.repos {
-            if !repo.is_local() && (self.offline || !due) {
-                continue;
-            }
-            let Ok(Some(expected)) = self.published_sha1(repo, rel) else { continue };
-            if hash::sha1_file(cached).is_ok_and(|actual| actual == expected) {
-                // Up to date: restart the clock for remote repositories.
-                let _ = std::fs::File::options().write(true).open(cached).and_then(|f| f.set_modified(SystemTime::now()));
-                self.mark_verified(rel);
-            } else {
-                self.shell.verbose("Updating", format!("{rel} (changed in {})", repo.name));
-                let _ = std::fs::remove_file(cached);
-            }
+        if !repo.is_local() && (self.offline || !due) {
             return;
+        }
+        let Ok(Some(expected)) = self.published_sha1(repo, rel) else { return };
+        if hash::sha1_file(cached).is_ok_and(|actual| actual == expected) {
+            // Up to date: restart the clock for remote repositories.
+            let _ = std::fs::File::options().write(true).open(cached).and_then(|f| f.set_modified(SystemTime::now()));
+            self.mark_verified(key);
+        } else {
+            self.shell.verbose("Updating", format!("{rel} (changed in {})", repo.name));
+            let _ = std::fs::remove_file(cached);
         }
     }
 
@@ -286,14 +368,18 @@ impl MavenClient {
     /// written to `kargo.lock`, so a bad file is never locked.
     pub fn fetch_verified(&self, rel: &str) -> Result<PathBuf> {
         validate_rel_path(rel)?;
-        let cached = self.cache_path(rel);
-        if cached.is_file() && !self.is_verified(rel) {
-            match self.check_cached(rel, &cached)? {
-                CacheCheck::Matches => self.mark_verified(rel),
+        for (repo, key) in self.candidates(rel) {
+            let cached = self.cache_path(&key);
+            if !cached.is_file() || self.is_verified(&key) {
+                continue;
+            }
+            match self.check_cached(repo, plain_rel(rel), &cached)? {
+                CacheCheck::Matches => self.mark_verified(&key),
                 CacheCheck::Unknown => self.shell.verbose("Unverified", format!("{rel} (no checksum published)")),
-                CacheCheck::Mismatch { repo, expected, actual } => {
+                CacheCheck::Mismatch { expected, actual } => {
                     self.shell.warn(format!(
-                        "cached {rel} does not match the checksum published by `{repo}` (expected sha1 {expected}, got {actual}); downloading it again"
+                        "cached {rel} does not match the checksum published by `{}` (expected sha1 {expected}, got {actual}); downloading it again",
+                        repo.name
                     ));
                     std::fs::remove_file(&cached).with_context(|| format!("failed to remove corrupt {}", cached.display()))?;
                 }
@@ -302,31 +388,25 @@ impl MavenClient {
         self.fetch_required(rel)
     }
 
-    /// Whether `rel` was checked against a checksum published by its repository during this run,
-    /// either when it was downloaded or by [`MavenClient::fetch_verified`].
+    /// Whether the cached file at `rel` (as [`MavenClient::fetch`] returned it) was checked against a checksum
+    /// published by its repository during this run, either when it was downloaded or by [`MavenClient::fetch_verified`].
     pub fn is_verified(&self, rel: &str) -> bool {
-        self.verified.lock().expect("lock poisoned").contains(rel)
+        let verified = self.verified.lock().expect("lock poisoned");
+        verified.contains(rel) || self.candidates(rel).iter().any(|(_, key)| verified.contains(key))
     }
 
     fn mark_verified(&self, rel: &str) {
         self.verified.lock().expect("lock poisoned").insert(rel.to_owned());
     }
 
-    /// Compares a cached file with the checksum of the first repository that publishes one.
-    fn check_cached(&self, rel: &str, cached: &Path) -> Result<CacheCheck> {
-        for repo in &self.repos {
-            if self.offline && !repo.is_local() {
-                continue;
-            }
-            let Some(expected) = self.published_sha1(repo, rel)? else { continue };
-            let actual = hash::sha1_file(cached).with_context(|| format!("failed to hash {}", cached.display()))?;
-            return Ok(if actual == expected {
-                CacheCheck::Matches
-            } else {
-                CacheCheck::Mismatch { repo: repo.name.clone(), expected, actual }
-            });
+    /// Compares a cached file with the checksum its repository publishes.
+    fn check_cached(&self, repo: &Repository, rel: &str, cached: &Path) -> Result<CacheCheck> {
+        if self.offline && !repo.is_local() {
+            return Ok(CacheCheck::Unknown);
         }
-        Ok(CacheCheck::Unknown)
+        let Some(expected) = self.published_sha1(repo, rel)? else { return Ok(CacheCheck::Unknown) };
+        let actual = hash::sha1_file(cached).with_context(|| format!("failed to hash {}", cached.display()))?;
+        Ok(if actual == expected { CacheCheck::Matches } else { CacheCheck::Mismatch { expected, actual } })
     }
 
     pub fn fetch_text(&self, rel: &str) -> Result<Option<String>> {
@@ -336,14 +416,15 @@ impl MavenClient {
         }
     }
 
-    fn fetch_from(&self, repo: &Repository, rel: &str, dest: &Path) -> Result<Fetch> {
+    /// Copies or downloads `rel` from `repo` into `dest`, which is cached under `key`.
+    fn fetch_from(&self, repo: &Repository, rel: &str, key: &str, dest: &Path) -> Result<Fetch> {
         if repo.is_local() {
             let src = repo.local_root().join(rel);
             if !src.is_file() {
                 return Ok(Fetch::Missing);
             }
             kfs::write_atomic_if_absent(dest, |f| io::copy(&mut std::fs::File::open(&src)?, f).map(|_| ()))?;
-            self.mark_verified(rel);
+            self.mark_verified(key);
             return Ok(Fetch::Found);
         }
         if self.offline {
@@ -359,7 +440,7 @@ impl MavenClient {
         kfs::write_atomic_if_absent(dest, |f| io::copy(&mut reader, f).map(|_| ())).with_context(|| format!("failed to download {url}"))?;
 
         match self.verify_checksum(repo, rel, dest) {
-            Ok(true) => self.mark_verified(rel),
+            Ok(true) => self.mark_verified(key),
             Ok(false) => {}
             Err(e) => {
                 let _ = std::fs::remove_file(dest);
@@ -419,6 +500,10 @@ impl MavenClient {
     }
 
     fn get(&self, repo: &Repository, url: &str) -> Result<Option<ureq::http::Response<ureq::Body>>> {
+        let host = host_of(url);
+        if self.unreachable.lock().expect("lock poisoned").contains(host) {
+            bail!("{}", unreachable_message(host));
+        }
         let mut attempt = 0;
         let response = loop {
             let mut request = self.agent.get(url);
@@ -426,12 +511,20 @@ impl MavenClient {
                 request = request.header("Authorization", basic_auth(creds));
             }
             let result = request.call();
-            // Rate limits, gateway hiccups and dropped connections are usually transient.
+            // Rate limits, gateway hiccups and dropped connections are usually transient; DNS, TLS and URL errors are not.
             let transient = match &result {
                 Ok(r) => retry::is_transient_status(r.status().as_u16()),
-                Err(_) => true,
+                Err(e) => retry::is_transient_error(e),
             };
             if !transient || attempt >= retry::MAX_RETRIES {
+                if let Err(e) = &result
+                    && !matches!(e, ureq::Error::BadUri(_) | ureq::Error::Http(_))
+                {
+                    self.unreachable.lock().expect("lock poisoned").insert(host.to_owned());
+                    return Err(anyhow::Error::new(result.unwrap_err()))
+                        .with_context(|| unreachable_message(host))
+                        .with_context(|| format!("failed to connect to {url}"));
+                }
                 break result.with_context(|| format!("failed to connect to {url}"))?;
             }
             let delay = result
@@ -447,6 +540,8 @@ impl MavenClient {
         match response.status().as_u16() {
             200..=299 => Ok(Some(response)),
             404 | 410 => Ok(None),
+            // Object storage answers 403 for a key that does not exist, so probes for optional files treat it as absent.
+            403 if is_optional_probe(url) => Ok(None),
             401 | 403 => bail!("access denied to {url} (HTTP {}); check repository credentials", response.status().as_u16()),
             status => bail!("unexpected HTTP {status} from {url}"),
         }
@@ -574,14 +669,19 @@ impl MavenClient {
         if !fresh && !(self.offline && !repo.is_local()) {
             // The download replaces the cached copy atomically, so a concurrent resolution of the same
             // module never sees it missing. A failure just means this repository doesn't know the module.
-            match self.fetch_from(repo, rel, cached) {
+            match self.fetch_from(repo, rel, rel, cached) {
                 Ok(Fetch::Found) => {}
+                // Only a definitive "not found" invalidates the cached copy.
                 Ok(_) => {
                     let _ = std::fs::remove_file(cached);
                 }
                 Err(e) => {
-                    let _ = std::fs::remove_file(cached);
                     self.shell.verbose("Skipping", format!("{subject} metadata from {}: {e:#}", repo.name));
+                    if let Some(age) =
+                        std::fs::metadata(cached).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok())
+                    {
+                        self.shell.warn(format!("{subject}: using cached metadata from {} ago", describe_age(age)));
+                    }
                 }
             }
         }
@@ -632,7 +732,7 @@ impl MavenClient {
         });
         let mut candidates: Vec<String> = builds.map(|b| artifact.repo_path_for_build(&b)).collect();
         candidates.push(artifact.repo_path());
-        candidates.into_iter().filter(|rel| validate_rel_path(rel).is_ok()).map(|rel| self.cache_path(&rel)).find(|p| p.is_file())
+        candidates.into_iter().filter(|rel| validate_rel_path(rel).is_ok()).find_map(|rel| self.cached_file(&rel))
     }
 
     /// Fixes SNAPSHOT `module:version` at the build whose files are named `build` (`1.0-20240101.120000-1`),
@@ -673,10 +773,36 @@ enum CacheCheck {
     /// No repository publishes a checksum (or none is reachable offline).
     Unknown,
     Mismatch {
-        repo: String,
         expected: String,
         actual: String,
     },
+}
+
+/// The `host[:port]` of an `http(s)` URL.
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    authority.rsplit_once('@').map_or(authority, |(_, host)| host)
+}
+
+fn unreachable_message(host: &str) -> String {
+    format!("cannot reach {host}; run `kargo fetch` while online, or use `--offline`")
+}
+
+/// Whether `url` names a file a repository may legitimately not have: a checksum, Gradle module
+/// metadata or `maven-metadata.xml`.
+fn is_optional_probe(url: &str) -> bool {
+    [".sha1", ".module", "maven-metadata.xml"].iter().any(|suffix| url.ends_with(suffix))
+}
+
+fn describe_age(age: Duration) -> String {
+    let secs = age.as_secs();
+    match secs {
+        0..=89 => format!("{secs}s"),
+        90..=5399 => format!("{}m", secs / 60),
+        5400..=129_599 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
 }
 
 fn sanitize(name: &str) -> String {
@@ -908,7 +1034,7 @@ mod tests {
         std::fs::write(repo.path().join(rel), "good").unwrap();
 
         let client = local_client(repo.path(), home.path());
-        let cached = client.cache_path(rel);
+        let cached = client.cache_path(&client.key_for(&client.repos[0], rel));
         std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
         std::fs::write(&cached, "garbage").unwrap();
         assert_eq!(std::fs::read_to_string(client.fetch(rel).unwrap().unwrap()).unwrap(), "garbage", "plain fetch trusts the cache");
@@ -927,9 +1053,89 @@ mod tests {
     }
 
     #[test]
+    fn each_repository_has_its_own_cached_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let rel = "com/acme/lib/1.0/lib-1.0.jar";
+        let repo_with = |content: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("com/acme/lib/1.0")).unwrap();
+            std::fs::write(dir.path().join(rel), content).unwrap();
+            dir
+        };
+        let (a, b) = (repo_with("from a"), repo_with("from b"));
+        let read = |p: PathBuf| std::fs::read_to_string(p).unwrap();
+
+        let first = local_client(a.path(), home.path());
+        let from_a = first.fetch(rel).unwrap().unwrap();
+        assert_eq!(read(from_a.clone()), "from a");
+        // The same repository again is served from the cache, even after it changed.
+        std::fs::write(a.path().join(rel), "changed").unwrap();
+        assert_eq!(read(local_client(a.path(), home.path()).fetch(rel).unwrap().unwrap()), "from a");
+
+        // Another repository with the same coordinates gets its own copy, and the first stays.
+        let second = local_client(b.path(), home.path());
+        let from_b = second.fetch(rel).unwrap().unwrap();
+        assert_ne!(from_a, from_b);
+        assert_eq!(read(from_b.clone()), "from b");
+        assert_eq!(read(second.fetch_verified(rel).unwrap()), "from b");
+        assert_eq!(read(from_a), "from a");
+
+        // The path of a cached copy, as `kargo.lock` names files, is the repository-relative path.
+        assert_eq!(second.cached_copies(rel), [from_b]);
+        let key = second.key_for(&second.repos[0], rel);
+        assert_eq!(plain_rel(&key), rel);
+        assert!(key.starts_with(&second.repos[0].cache_dir_name()));
+    }
+
+    #[test]
+    fn only_released_files_of_public_repositories_are_shared() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let client =
+            MavenClient::new(&config, vec![Repository::maven_central(), Repository::new("corp", "https://repo.corp.example/maven")]);
+        let (central, corp) = (&client.repos[0], &client.repos[1]);
+        let rel = "com/acme/lib/1.0/lib-1.0.jar";
+        assert_eq!(client.key_for(central, rel), rel);
+        assert!(client.key_for(corp, rel).starts_with('@'));
+        // A SNAPSHOT changes under one name, so it is never shared.
+        let snapshot = "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar";
+        assert!(client.key_for(central, snapshot).starts_with('@'));
+        assert_eq!(plain_rel(&client.key_for(corp, snapshot)), snapshot);
+    }
+
+    #[test]
     fn repository_urls_are_normalized() {
         assert_eq!(Repository::new("x", "https://a/b/").url, "https://a/b");
         assert!(Repository::new("x", "file:///tmp/r").is_local());
         assert!(!Repository::maven_central().is_local());
+    }
+
+    #[test]
+    fn unreachable_hosts_are_remembered_and_stale_metadata_is_kept() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let cache = tempfile::tempdir().unwrap();
+        let config = Config::new(cache.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let client = MavenClient::new(&config, vec![Repository::new("down", format!("http://127.0.0.1:{port}/maven2"))]);
+        let module = ModuleId::new("org.example", "lib");
+        let stale = client.cache_dir().join(module.repo_dir()).join("maven-metadata-down.xml");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "<metadata><versioning><versions><version>1.0</version></versions></versioning></metadata>").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(3 * 24 * 3600);
+        std::fs::File::options().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+
+        let versions = client.versions(&module).unwrap();
+        assert_eq!(versions.len(), 1, "the stale metadata is still used");
+        assert!(stale.is_file(), "a transport error keeps the cached metadata");
+
+        let err = client.fetch("org/example/lib/1.0/lib-1.0.pom").unwrap_err();
+        assert!(format!("{err:#}").contains("cannot reach 127.0.0.1"), "{err:#}");
+    }
+
+    #[test]
+    fn optional_probes_and_hosts() {
+        assert!(is_optional_probe("https://h/a/b.jar.sha1"));
+        assert!(is_optional_probe("https://h/a/b.module"));
+        assert!(!is_optional_probe("https://h/a/b.jar"));
+        assert_eq!(host_of("https://user:pw@repo.example.com:8443/maven2/a"), "repo.example.com:8443");
     }
 }

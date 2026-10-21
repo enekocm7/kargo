@@ -1,0 +1,62 @@
+name: Set up Kargo
+description: Install Kargo, put it on PATH and cache ~/.kargo (without the compiler daemon's state).
+author: enekocm7
+
+inputs:
+  version:
+    description: The Kargo version to install, such as 0.3.0. Defaults to the latest release.
+    required: false
+    default: latest
+  cache:
+    description: Restore and save the cache of the Kargo home (toolchains and downloaded dependencies).
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Find the Kargo home
+      id: home
+      shell: pwsh
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        $kargoHome = if ($env:KARGO_HOME) { $env:KARGO_HOME } else { Join-Path $HOME '.kargo' }
+        "path=$kargoHome" >> $env:GITHUB_OUTPUT
+        $version = $env:INPUT_VERSION.TrimStart('v')
+        if ($version -eq 'latest') { $version = '' }
+        "version=$version" >> $env:GITHUB_OUTPUT
+
+    - name: Cache Kargo
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ steps.home.outputs.path }}
+          !${{ steps.home.outputs.path }}/daemon
+          !${{ steps.home.outputs.path }}/bin
+        key: kargo-${{ runner.os }}-${{ hashFiles('kargo.lock', 'kargo.toml') }}
+        restore-keys: kargo-${{ runner.os }}-
+
+    - name: Install Kargo (Linux and macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        KARGO_VERSION: ${{ steps.home.outputs.version }}
+        KARGO_HOME: ${{ steps.home.outputs.path }}
+      run: curl -fsSL https://enekocm7.github.io/kargo/install.sh | sh -s -- --no-modify-path
+
+    - name: Install Kargo (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        KARGO_VERSION: ${{ steps.home.outputs.version }}
+        KARGO_HOME: ${{ steps.home.outputs.path }}
+        KARGO_NO_MODIFY_PATH: '1'
+      run: irm https://enekocm7.github.io/kargo/install.ps1 | iex
+
+    - name: Put Kargo on PATH
+      shell: pwsh
+      env:
+        KARGO_BIN: ${{ steps.home.outputs.path }}
+      run: Join-Path $env:KARGO_BIN 'bin' >> $env:GITHUB_PATH

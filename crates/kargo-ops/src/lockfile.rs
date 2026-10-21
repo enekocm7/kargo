@@ -119,7 +119,8 @@ impl Lockfile {
                             .with_context(|| format!("{} is outside the Kargo cache", file.display()))?;
                         let file = client.fetch_verified(&rel)?;
                         let sha256 = cached_sha256(&file, false)?;
-                        Ok(LockedFile { path: rel, sha256 })
+                        // The repository a file came from is a property of this machine's cache, not of the lock.
+                        Ok(LockedFile { path: kargo_maven::repo::plain_rel(&rel).to_owned(), sha256 })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(LockedPackage {
@@ -159,23 +160,35 @@ impl Lockfile {
                 }
             }
         }
-        let local = |path: &str| path.split('/').fold(client.cache_dir().to_path_buf(), |p, seg| p.join(seg));
-        let (cached, missing): (Vec<&LockedFile>, Vec<&LockedFile>) =
-            locked.packages.iter().flat_map(|p| &p.files).partition(|f| local(&f.path).is_file());
-
         // A cached copy is used only if it matches the lock. Unlike a missing file it is not downloaded again
-        // here: the error says how to replace it, so the cache is never changed behind the user's back.
-        let hashes = kargo_maven::par_map_io(&cached, |file| cached_sha256(&local(&file.path), trust_stamps));
-        for (file, actual) in cached.iter().zip(hashes) {
+        // here: the error says how to replace it, so the cache is never changed behind the user's back. Several
+        // repositories can have a cached copy of the same path; the one that matches the lock is used.
+        let copies: Vec<Vec<PathBuf>> = locked.packages.iter().flat_map(|p| &p.files).map(|f| client.cached_copies(&f.path)).collect();
+        let (cached, missing): (Vec<(&LockedFile, &Vec<PathBuf>)>, Vec<&LockedFile>) = {
+            let files = locked.packages.iter().flat_map(|p| &p.files);
+            let (mut cached, mut missing) = (Vec::new(), Vec::new());
+            for (file, found) in files.zip(&copies) {
+                if found.is_empty() { missing.push(file) } else { cached.push((file, found)) }
+            }
+            (cached, missing)
+        };
+        let hashes = kargo_maven::par_map_io(&cached, |(_, found)| {
+            found.iter().map(|path| cached_sha256(path, trust_stamps)).collect::<Result<Vec<_>>>()
+        });
+        let mut chosen: std::collections::HashMap<&str, PathBuf> = std::collections::HashMap::new();
+        for ((file, found), actual) in cached.iter().zip(hashes) {
             let actual = actual?;
-            if actual != file.sha256 {
-                bail!(
-                    "checksum mismatch for {} (locked sha256 {}, cached {actual}); delete {} so it is downloaded again, \
-                     or run `kargo update` to re-lock it if the lock entry is wrong",
+            match actual.iter().position(|a| *a == file.sha256) {
+                Some(i) => {
+                    chosen.insert(file.path.as_str(), found[i].clone());
+                }
+                None => bail!(
+                    "checksum mismatch for {} (locked sha256 {}, cached {}); delete {} so it is downloaded again,                      or run `kargo update` to re-lock it if the lock entry is wrong",
                     file.path,
                     file.sha256,
-                    local(&file.path).display()
-                );
+                    actual[0],
+                    found[0].display()
+                ),
             }
         }
 
@@ -194,7 +207,7 @@ impl Lockfile {
             let mut files: Vec<PathBuf> = Vec::new();
             for file in &pkg.files {
                 let Some(result) = downloaded.remove(file.path.as_str()) else {
-                    files.push(local(&file.path));
+                    files.push(chosen.remove(file.path.as_str()).expect("a cached file was chosen"));
                     continue;
                 };
                 let (fetched, actual) = result?;

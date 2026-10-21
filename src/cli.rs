@@ -110,6 +110,20 @@ struct GlobalArgs {
     manifest_path: Option<PathBuf>,
 }
 
+/// The CI system `kargo init-ci` writes a workflow for.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CiSystemArg {
+    Github,
+}
+
+impl From<CiSystemArg> for ops::ci::CiSystem {
+    fn from(system: CiSystemArg) -> Self {
+        match system {
+            CiSystemArg::Github => ops::ci::CiSystem::Github,
+        }
+    }
+}
+
 /// The build tool `kargo import` reads.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ImportSource {
@@ -579,6 +593,18 @@ enum Command {
         /// The build tool to read, when the directory has the files of both
         #[arg(long, value_enum)]
         from: Option<ImportSource>,
+    },
+    /// Write a CI workflow for the project, from its kargo.toml
+    InitCi {
+        /// The CI system to write a workflow for
+        #[arg(long, value_enum, default_value = "github")]
+        system: CiSystemArg,
+        /// Replace the workflow if it exists
+        #[arg(long)]
+        force: bool,
+        /// Publish the JUnit test reports in the run summary
+        #[arg(long)]
+        junit: bool,
     },
     /// Compile the project
     #[command(visible_alias = "b")]
@@ -1935,6 +1961,15 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             };
             create_package(shell, &dir, args)
         }
+        Command::InitCi { system, force, junit } => {
+            let project = load_project(global)?;
+            let report = ops::ci::init_ci(&project, &ops::ci::CiOptions { system: system.into(), force, junit })?;
+            shell.status("Created", report.path.display());
+            for step in &report.left_out {
+                shell.note(format!("left out {step}"));
+            }
+            Ok(0)
+        }
         Command::Import { path, dry_run, no_build, from } => import_project(config, global, path, dry_run, no_build, from),
         Command::Build { build, keep_going, xcframework } => {
             set_message_format(build.message_format);
@@ -3241,6 +3276,8 @@ mod tests {
         assert!(
             matches!(cli.command, Command::Vendor { path: Some(ref p), toolchains: true, sync: true } if p == Path::new("third_party"))
         );
+        let cli = Cli::try_parse_from(["kargo", "init-ci", "--junit", "--force"]).unwrap();
+        assert!(matches!(cli.command, Command::InitCi { force: true, junit: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "build", "--vendored"]).unwrap();
         assert!(cli.global.vendored);
         let cli = Cli::try_parse_from(["kargo", "fetch", "--sources"]).unwrap();
