@@ -1,4 +1,5 @@
-//! The `kargo.toml` JSON Schema (`website/public/schemas/kargo.json`, compiled in): looking up
+//! The `kargo.toml` JSON Schema (`schema/kargo.json`, compiled in; a copy of `website/public/schemas/kargo.json`
+//! that the crate keeps so it can be published): looking up
 //! the schema of a key path for completion and hover, and validating a parsed manifest.
 //!
 //! Only the keywords the schema uses are supported: `$ref` to local definitions, `type`,
@@ -14,8 +15,7 @@ use serde_json::Value;
 /// The schema document.
 pub fn root() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
-    SCHEMA
-        .get_or_init(|| serde_json::from_str(include_str!("../../../website/public/schemas/kargo.json")).expect("the schema is valid JSON"))
+    SCHEMA.get_or_init(|| serde_json::from_str(include_str!("../schema/kargo.json")).expect("the schema is valid JSON"))
 }
 
 /// Follows `$ref`s to local definitions.

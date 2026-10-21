@@ -48,6 +48,14 @@ These names are used by `crates/kargo-ops/src/ops/self_update.rs` (`archive_name
 
 `packaging/render.sh <version> <SHA256SUMS> <dir>` fills the templates for Homebrew (`kargo.rb`), Scoop (`kargo.json`), winget (three manifests) and the AUR (`PKGBUILD` of `kargo-bin`) from a release's checksums; the workflow uploads the result as the `packages` artifact. Copy the files to the tap, the bucket, a winget-pkgs pull request and the AUR repository by hand. The root `flake.nix` builds Kargo from source for Nix.
 
+The crates are also published to [crates.io](https://crates.io), so `cargo install --locked kargo-cli` works. The `kargo` crate name belongs to another project, so the binary crate is `kargo-cli` (its binary is still `kargo`); the libraries are `kargo-util`, `kargo-maven`, `kargo-manifest`, `kargo-toolchain`, `kargo-compiler`, `kargo-ops` and `kargo-lsp`. They share one version, and the path dependencies in `[workspace.dependencies]` carry it too, so bump both together. Publish from the tagged commit, dependencies first:
+
+```sh
+cargo publish --workspace --locked
+```
+
+A crate can only include files inside its own directory, which is why `crates/kargo-lsp/schema/kargo.json` is a copy of `website/public/schemas/kargo.json` (`tests/schema.rs` fails when they differ).
+
 Artifacts are not signed with a key of ours: `kargo self update` and the install scripts verify the SHA-256 from the same release, which catches corrupt and swapped files but not a compromised release. For that, verify the attestation.
 
 ## The JetBrains plugin

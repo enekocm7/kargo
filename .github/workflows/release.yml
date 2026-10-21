@@ -95,7 +95,9 @@ jobs:
           exe=kargo
           [ -n "$WINDOWS" ] && exe=kargo.exe
           # The binary must run before it ships, and report the version it is released as.
-          "target/${TARGET}/release/${exe}" --version | tee /dev/stderr | grep -qx "kargo ${VERSION}"
+          reported=$("target/${TARGET}/release/${exe}" --version)
+          echo "$reported"
+          [ "$reported" = "kargo ${VERSION}" ]
           mkdir -p "dist/${name}"
           cp "target/${TARGET}/release/${exe}" README.md "dist/${name}/"
           cd dist
