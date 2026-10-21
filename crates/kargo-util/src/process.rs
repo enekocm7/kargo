@@ -156,6 +156,17 @@ pub fn write_argfile(path: &Path, args: &[String]) -> Result<()> {
     crate::fs::write_string_atomic(path, &contents)
 }
 
+/// Command lines at or above this length (in characters) pass their classpath through an argfile.
+/// Windows rejects command lines over 32,767 characters, and `cmd` over 8,191.
+pub const LONG_CLASSPATH: usize = 8000;
+
+/// Joins classpath entries with forward slashes and the platform separator, which the JVM and the
+/// JUnit launcher read the same inside an argfile.
+pub fn classpath_for_argfile(paths: &[PathBuf]) -> String {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    paths.iter().map(|p| slash(p)).collect::<Vec<_>>().join(sep)
+}
+
 /// Converts a path to a string with forward slashes (portable in argfiles).
 pub fn slash(path: &Path) -> String {
     let s = path.to_string_lossy();
@@ -226,6 +237,13 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classpath_in_an_argfile_uses_forward_slashes() {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let joined = classpath_for_argfile(&[PathBuf::from("a b/x.jar"), PathBuf::from("lib/y.jar")]);
+        assert_eq!(joined, format!("a b/x.jar{sep}lib/y.jar"));
+    }
 
     #[test]
     fn quotes_argfile_entries() {
