@@ -1273,7 +1273,7 @@ pub fn escape_name(name: &str) -> String {
 }
 
 /// The LSP `CompletionItemKind` of a declaration.
-fn completion_kind(d: &Decl, member: bool) -> u8 {
+pub(super) fn completion_kind(d: &Decl, member: bool) -> u8 {
     match d.kind {
         Kind::Class | Kind::Annotation => 7,
         Kind::Interface => 8,
@@ -1298,6 +1298,11 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
     let src = &unit.text;
     let file = &unit.file;
     let lx = &file.lexed;
+    if lx.in_comment(offset)
+        && let Some(list) = super::kdoc::completion(an, u, offset, opts.snippets)
+    {
+        return list;
+    }
     if lx.in_comment(offset) || lx.in_string_text(offset) {
         return empty;
     }

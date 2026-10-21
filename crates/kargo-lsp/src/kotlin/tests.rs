@@ -2272,3 +2272,329 @@ fn completion_offers_postfix_templates() {
     let items = f.items();
     assert!(!items.iter().any(|i| i["label"] == "val") && items.iter().any(|i| i["label"] == "not" && i["kind"] == 15));
 }
+
+// ----- rename beyond identifiers -----
+
+mod renaming {
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::kotlin::rename::{self, Env};
+    use crate::text;
+
+    fn env(manifest: Option<&std::path::Path>) -> Env {
+        Env {
+            roots: vec![PathBuf::from("/project/src")],
+            manifests: manifest.map(|m| vec![m.to_owned()]).unwrap_or_default(),
+            versions: [(PathBuf::from("/project/src/Main.kt"), 7)].into(),
+            document_changes: true,
+            resource_renames: true,
+            rename_files: true,
+            move_directories: true,
+        }
+    }
+
+    /// The edit of renaming what is at the cursor.
+    fn edit(f: &Fixture, to: &str, env: &Env) -> Result<Value, String> {
+        let (unit, offset) = f.cursor();
+        let an = f.an();
+        let found = rename::subject(&an, unit, offset)?;
+        rename::rename(&an, env, &found, to, &features::Control::default())
+    }
+
+    fn name(uri: &str) -> String {
+        uri.rsplit('/').next().unwrap().to_owned()
+    }
+
+    /// The files an edit changes, by file name, with the edits applied; and the renames.
+    fn apply(f: &Fixture, edit: &Value) -> (BTreeMap<String, String>, Vec<(String, String)>) {
+        let mut files = BTreeMap::new();
+        let mut renames = Vec::new();
+        for change in edit["documentChanges"].as_array().expect("documentChanges") {
+            if change["kind"] == "rename" {
+                renames.push((name(change["oldUri"].as_str().unwrap()), name(change["newUri"].as_str().unwrap())));
+                continue;
+            }
+            let uri = change["textDocument"]["uri"].as_str().unwrap();
+            let mut text = match f.proj.units.iter().find(|u| text::path_to_uri(&u.path) == uri) {
+                Some(unit) => unit.text.clone(),
+                None => std::fs::read_to_string(text::uri_to_path(uri).unwrap()).unwrap(),
+            };
+            let mut edits = change["edits"].as_array().unwrap().clone();
+            edits.sort_by_key(|e| std::cmp::Reverse((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64())));
+            for e in edits {
+                let (start, end) = (text::offset(&text, &e["range"]["start"]), text::offset(&text, &e["range"]["end"]));
+                text.replace_range(start..end, e["newText"].as_str().unwrap());
+            }
+            files.insert(name(uri), text);
+        }
+        (files, renames)
+    }
+
+    /// Renames what is at the cursor and applies the edit.
+    fn renamed(f: &Fixture, to: &str) -> BTreeMap<String, String> {
+        apply(f, &edit(f, to, &env(None)).unwrap()).0
+    }
+
+    #[test]
+    fn renames_the_file_of_a_class_with_the_class() {
+        let f = fixture(&[
+            ("src/User.kt", "package app\n\nclass Us$0er(val name: String)\n"),
+            ("src/Main.kt", "package app\n\nfun main() {\n    println(User(\"a\").name)\n}\n"),
+        ]);
+        let edit = edit(&f, "Person", &env(None)).unwrap();
+        let (files, renames) = apply(&f, &edit);
+        assert_eq!(renames, [("User.kt".to_owned(), "Person.kt".to_owned())]);
+        assert!(files["User.kt"].contains("class Person("), "{files:?}");
+        assert!(files["Main.kt"].contains("Person(\"a\")"), "{files:?}");
+        // An open document is edited at the version the editor has; the others at none.
+        let versions: Vec<(String, Value)> = edit["documentChanges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c.get("textDocument").is_some())
+            .map(|c| (name(c["textDocument"]["uri"].as_str().unwrap()), c["textDocument"]["version"].clone()))
+            .collect();
+        assert!(versions.contains(&("Main.kt".to_owned(), json!(7))), "{versions:?}");
+        assert!(versions.contains(&("User.kt".to_owned(), Value::Null)), "{versions:?}");
+
+        // Without `rename` operations only the text changes.
+        let mut plain = env(None);
+        plain.resource_renames = false;
+        let (_, renames) = apply(&f, &super::renaming::edit(&f, "Person", &plain).unwrap());
+        assert!(renames.is_empty());
+        let mut changes = env(None);
+        changes.document_changes = false;
+        let edit = super::renaming::edit(&f, "Person", &changes).unwrap();
+        assert!(edit["changes"].is_object() && edit.get("documentChanges").is_none(), "{edit}");
+        // A file that isn't named after the class stays.
+        let f = fixture(&[("src/Models.kt", "package app\n\nclass Us$0er\n")]);
+        let (_, renames) = apply(&f, &super::renaming::edit(&f, "Person", &env(None)).unwrap());
+        assert!(renames.is_empty());
+    }
+
+    #[test]
+    fn renames_a_file_through_will_rename() {
+        let f = fixture(&[
+            ("src/User.kt", "package app\n\nclass User(val name: String)\n"),
+            ("src/Main.kt", "package app\n\nfun main() {\n    println(User(\"a\").name)\n}\n"),
+        ]);
+        let files = [(PathBuf::from("/project/src/User.kt"), PathBuf::from("/project/src/Person.kt"))];
+        let edit = rename::will_rename(&f.an(), &env(None), &files, &features::Control::default()).unwrap();
+        let (changed, renames) = apply(&f, &edit);
+        assert!(renames.is_empty());
+        assert!(changed["User.kt"].contains("class Person("), "{changed:?}");
+        assert!(changed["Main.kt"].contains("Person(\"a\")"), "{changed:?}");
+        // A file that names no class changes nothing.
+        let other = [(PathBuf::from("/project/src/Main.kt"), PathBuf::from("/project/src/Start.kt"))];
+        assert!(rename::will_rename(&f.an(), &env(None), &other, &features::Control::default()).unwrap().is_null());
+    }
+
+    #[test]
+    fn renames_packages_everywhere() {
+        let f = fixture(&[
+            ("src/model/User.kt", "package app.mo$0del\n\n/** See [app.model.User]. */\nclass User\n"),
+            ("src/Main.kt", "package app\n\nimport app.model.User\n\nfun main() {\n    val u: app.model.User = User()\n}\n"),
+            ("src/Other.kt", "package app.model.deep\n\nimport app.model.*\n\nval x = 1\n"),
+        ]);
+        let files = renamed(&f, "domain");
+        assert!(files["User.kt"].starts_with("package app.domain\n"), "{files:?}");
+        assert!(files["User.kt"].contains("[app.domain.User]"), "{files:?}");
+        assert!(files["Main.kt"].contains("import app.domain.User"), "{files:?}");
+        assert!(files["Main.kt"].contains("val u: app.domain.User"), "{files:?}");
+        assert!(files["Other.kt"].starts_with("package app.domain.deep\n"), "{files:?}");
+        assert!(files["Other.kt"].contains("import app.domain.*"), "{files:?}");
+        // A package that exists is refused.
+        let f = fixture(&[("src/A.kt", "package app.o$0ne\n\nval a = 1\n"), ("src/B.kt", "package app.two\n\nval b = 1\n")]);
+        assert!(edit(&f, "two", &env(None)).is_err());
+    }
+
+    #[test]
+    fn updates_the_entry_points_in_kargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("kargo.toml");
+        std::fs::write(
+            &manifest,
+            "[package]\nname = \"app\"\n\n[target.jvm]\nmain-class = \"app.MainKt\"\n\n[target.native]\nentry-point = \"app.main\"\n\n[[bin]]\nname = \"tool\"\nmain = \"app.Tool\"\n",
+        )
+        .unwrap();
+        let env = env(Some(&manifest));
+        let toml_after = |f: &Fixture, to: &str| -> String {
+            let (files, _) = apply(f, &edit(f, to, &env).unwrap());
+            files["kargo.toml"].clone()
+        };
+        // The function `main`.
+        let f = fixture(&[("src/Main.kt", "package app\n\nfun ma$0in() {}\n")]);
+        let out = toml_after(&f, "start");
+        assert!(out.contains("entry-point = \"app.start\""), "{out}");
+        assert!(out.contains("main-class = \"app.MainKt\""), "{out}");
+        // A class named by `[[bin]]`.
+        let f = fixture(&[("src/Tool.kt", "package app\n\nclass To$0ol\n")]);
+        let out = toml_after(&f, "Cli");
+        assert!(out.contains("main = \"app.Cli\""), "{out}");
+        // The package.
+        let f = fixture(&[("src/Main.kt", "package a$0pp\n\nfun main() {}\n")]);
+        let out = toml_after(&f, "demo");
+        assert!(out.contains("main-class = \"demo.MainKt\""), "{out}");
+        assert!(out.contains("entry-point = \"demo.main\""), "{out}");
+        assert!(out.contains("main = \"demo.Tool\""), "{out}");
+        // The file: `Main.kt` compiles to `MainKt`.
+        let f = fixture(&[("src/Main.kt", "package app\n\nfun main() {}\n")]);
+        let files = [(PathBuf::from("/project/src/Main.kt"), PathBuf::from("/project/src/Start.kt"))];
+        let edit = rename::will_rename(&f.an(), &env, &files, &features::Control::default()).unwrap();
+        let (changed, _) = apply(&f, &edit);
+        assert!(changed["kargo.toml"].contains("main-class = \"app.StartKt\""), "{changed:?}");
+    }
+
+    #[test]
+    fn renames_kdoc_links_and_tags() {
+        let src = "package app\n\n/**\n * A user, see [User.name] and [name].\n * @param name the name\n * @property name again\n * @see User\n */\nclass User(val na$0me: String)\n\n/** Uses [User] and [User.name]. */\nfun use(u: User) = u.name\n";
+        let f = fixture(&[("src/User.kt", src)]);
+        let files = renamed(&f, "title");
+        let out = &files["User.kt"];
+        assert!(out.contains("[User.title] and [title]"), "{out}");
+        assert!(out.contains("@param title the name"), "{out}");
+        assert!(out.contains("@property title again"), "{out}");
+        assert!(out.contains("[User] and [User.title]"), "{out}");
+        assert!(out.contains("@see User"), "{out}");
+        assert!(out.contains("u.title"), "{out}");
+
+        // Renaming the class changes its links and `@see`.
+        let class = src.replace("class User(val na$0me", "class Us$0er(val name");
+        let f = fixture(&[("src/User.kt", &class)]);
+        let files = renamed(&f, "Person");
+        let out = &files["User.kt"];
+        assert!(out.contains("[Person.name]") && out.contains("@see Person") && out.contains("[Person] and"), "{out}");
+
+        // A function's parameters.
+        let f = fixture(&[("src/F.kt", "/**\n * @param count how many\n */\nfun repeat(cou$0nt: Int) = count\n")]);
+        let files = renamed(&f, "times");
+        assert!(files["F.kt"].contains("@param times how many") && files["F.kt"].contains("repeat(times: Int) = times"), "{files:?}");
+
+        // The bracket form of the tags, `@sample`, and brackets in code.
+        let src = "package app
+
+/**
+ * Use `a[count]` and [`count`].
+ * @param[count] how many
+ * @sample app.repeat
+ */
+fun repeat(cou$0nt: Int) = count
+";
+        let f = fixture(&[("src/F.kt", src)]);
+        let out = renamed(&f, "times")["F.kt"].clone();
+        assert!(out.contains("`a[count]`") && out.contains("and [times]") && out.contains("@param[times] how many"), "{out}");
+        let src = "package app
+
+/**
+ * @sample app.re$0peat
+ */
+fun use() = repeat()
+
+fun repeat() = 1
+";
+        let f = fixture(&[("src/F.kt", src)]);
+        let out = renamed(&f, "again")["F.kt"].clone();
+        assert!(out.contains("@sample app.again") && out.contains("fun again() = 1") && out.contains("= again()"), "{out}");
+
+        // Starting inside the comment.
+        let f = fixture(&[("src/User.kt", "class User\n\n/** Makes a [Us$0er]. */\nfun make() = User()\n")]);
+        let files = renamed(&f, "Person");
+        assert!(
+            files["User.kt"].contains("class Person") && files["User.kt"].contains("[Person]") && files["User.kt"].contains("= Person()"),
+            "{files:?}"
+        );
+    }
+
+    #[test]
+    fn renames_type_parameters() {
+        let src = "/**\n * @param T the element\n * Holds a [T].\n */\nclass Box<T$0>(val value: T) {\n    fun <T> other(x: T): T = x\n    fun get(): T = value\n    fun copy(): Box<T> = Box(value)\n}\n";
+        let f = fixture(&[("src/Box.kt", src)]);
+        let files = renamed(&f, "Item");
+        let out = &files["Box.kt"];
+        assert!(out.contains("class Box<Item>(val value: Item)"), "{out}");
+        assert!(out.contains("fun get(): Item = value") && out.contains("Box<Item> = Box(value)"), "{out}");
+        assert!(out.contains("fun <T> other(x: T): T = x"), "the inner T hides the class's: {out}");
+        assert!(out.contains("@param Item the element") && out.contains("Holds a [Item]"), "{out}");
+
+        // From a use.
+        let f = fixture(&[("src/Id.kt", "fun <T> id(x: T$0): T = x\n")]);
+        assert_eq!(renamed(&f, "A")["Id.kt"], "fun <A> id(x: A): A = x\n");
+    }
+
+    #[test]
+    fn renames_labels() {
+        let src = "fun main() {\n    outer$0@ for (i in 1..3) {\n        for (j in 1..3) {\n            if (j == 2) continue@outer\n            if (i == 3) break@outer\n        }\n    }\n    outer@ for (k in 1..2) {\n        break@outer\n    }\n}\n";
+        let f = fixture(&[("src/Main.kt", src)]);
+        let files = renamed(&f, "rows");
+        let out = &files["Main.kt"];
+        assert!(out.contains("rows@ for (i") && out.contains("continue@rows") && out.contains("break@rows"), "{out}");
+        assert!(out.contains("outer@ for (k") && out.contains("break@outer"), "the second loop's label stays: {out}");
+
+        // From a reference, and a label on a lambda.
+        let src = "fun main() {\n    listOf(1).forEach loop@{\n        if (it == 1) return@lo$0op\n    }\n}\n";
+        let f = fixture(&[("src/Main.kt", src)]);
+        let files = renamed(&f, "each");
+        assert!(files["Main.kt"].contains("forEach each@{") && files["Main.kt"].contains("return@each"), "{files:?}");
+    }
+
+    #[test]
+    fn renaming_a_function_renames_the_labels_that_name_it() {
+        let src =
+            "fun run$0Twice(block: () -> Unit) { block(); block() }\n\nfun main() {\n    runTwice {\n        return@runTwice\n    }\n}\n";
+        let f = fixture(&[("src/Main.kt", src)]);
+        let files = renamed(&f, "twice");
+        assert!(files["Main.kt"].contains("return@twice") && files["Main.kt"].contains("    twice {"), "{files:?}");
+    }
+}
+
+#[test]
+fn completes_kdoc_tags_names_and_links() {
+    // The tags.
+    let f = fixture(&[("src/F.kt", "/**\n * Repeats.\n * @$0\n */\nfun repeat(count: Int) = count\n")]);
+    let labels = f.labels();
+    for tag in [
+        "@param",
+        "@return",
+        "@receiver",
+        "@constructor",
+        "@property",
+        "@throws",
+        "@exception",
+        "@sample",
+        "@see",
+        "@author",
+        "@since",
+        "@suppress",
+    ] {
+        assert!(labels.contains(&tag.to_owned()), "{tag} in {labels:?}");
+    }
+    let item = f.items().into_iter().find(|i| i["label"] == "@param").unwrap();
+    assert_eq!(item["textEdit"]["newText"], "param ${1:name} ${2:description}");
+
+    // Parameters and type parameters after `@param`.
+    let f = fixture(&[("src/F.kt", "/**\n * @param $0\n */\nfun <T> repeat(count: Int, times: T) = count\n")]);
+    assert_eq!(f.labels(), ["count", "times", "T"]);
+    let f = fixture(&[("src/F.kt", "/**\n * @param co$0\n */\nfun <T> repeat(count: Int, times: T) = count\n")]);
+    assert!(f.labels().contains(&"count".to_owned()));
+
+    // Links: the file's declarations, then the members after a dot.
+    let src = "package app\n\nclass User(val name: String) {\n    fun greet() {}\n}\n\n/** See [Us$0] */\nfun make() = User(\"a\")\n";
+    let f = fixture(&[("src/User.kt", src)]);
+    assert!(f.labels().contains(&"User".to_owned()), "{:?}", f.labels());
+    let src = "package app\n\nclass User(val name: String) {\n    fun greet() {}\n}\n\n/** See [User.$0] */\nfun make() = User(\"a\")\n";
+    let f = fixture(&[("src/User.kt", src)]);
+    let labels = f.labels();
+    assert!(labels.contains(&"name".to_owned()) && labels.contains(&"greet".to_owned()), "{labels:?}");
+    let src = "package app\n\nclass User\n\n/**\n * @see User$0\n */\nfun make() = User()\n";
+    let f = fixture(&[("src/User.kt", src)]);
+    assert!(f.labels().contains(&"User".to_owned()));
+
+    // Plain comment text and code get nothing.
+    let f = fixture(&[("src/F.kt", "/**\n * Some text $0\n */\nfun f() = 1\n")]);
+    assert!(f.labels().is_empty());
+    let f = fixture(&[("src/F.kt", "// @$0\nfun f() = 1\n")]);
+    assert!(f.labels().is_empty());
+}
