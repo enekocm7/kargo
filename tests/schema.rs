@@ -261,3 +261,21 @@ fn schema_defaults_match_kargo() {
     let jvm_target = props["target"]["properties"]["jvm"]["properties"]["jvm-target"]["description"].as_str().unwrap();
     assert!(jvm_target.contains(&format!("Defaults to {}", kargo_manifest::DEFAULT_JVM_TARGET)), "{jvm_target}");
 }
+
+#[test]
+fn native_frameworks_are_lists_of_apple_frameworks() {
+    let root = schema();
+    let native = &root["properties"]["target"]["properties"]["native"];
+    let nodes = [
+        &native["properties"]["frameworks"],
+        &native["properties"]["cinterop"]["additionalProperties"]["properties"]["frameworks"],
+        &root["definitions"]["nativeLinkOptions"]["properties"]["frameworks"],
+        &root["definitions"]["nativeOptions"]["properties"]["frameworks"],
+    ];
+    for node in nodes {
+        let resolved = resolve(&root, node);
+        assert_eq!(resolved["type"], "array", "{node}");
+        assert_eq!(resolved["items"]["type"], "string", "{node}");
+    }
+    assert_eq!(resolve(&root, &root["properties"]["frameworks"])["type"], "object");
+}
