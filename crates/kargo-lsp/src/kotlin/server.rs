@@ -33,7 +33,7 @@ use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
 use super::library::{self, CompiledLibrary, SourcesJar, UnitCache};
 use super::resolve::{Analyzer, Packages};
-use super::{hierarchy, ranges, semantic};
+use super::{hierarchy, ranges, rename, semantic};
 use crate::jsonrpc::{self, Kind};
 use crate::{check, text};
 
@@ -698,6 +698,14 @@ struct State {
     /// Whether the editor takes `documentChanges` in workspace edits, and can create files there.
     document_changes: bool,
     create_files: bool,
+    /// Whether the editor takes `rename` operations in workspace edits.
+    rename_files: bool,
+    /// `initializationOptions`: rename the file of a renamed class, move the directory of a
+    /// renamed package.
+    rename_option: bool,
+    move_option: bool,
+    /// The version of each open document, as the editor sent it.
+    versions: HashMap<PathBuf, i64>,
     /// Whether the editor shows `$/progress`.
     work_done_progress: bool,
     load_options: LoadOptions,
@@ -753,6 +761,10 @@ impl State {
             watch: false,
             document_changes: false,
             create_files: false,
+            rename_files: false,
+            rename_option: true,
+            move_option: true,
+            versions: HashMap::new(),
             work_done_progress: false,
             load_options: LoadOptions { dependencies, fetch_sources: true, tried: Arc::default() },
             progress: None,
@@ -942,6 +954,9 @@ impl State {
                     if let Some(path) = file_path(uri).filter(|_| uri.ends_with(".kt")) {
                         let text = params["textDocument"]["text"].as_str().unwrap_or_default().to_owned();
                         self.open.insert(uri.to_owned(), path.clone());
+                        if let Some(version) = params["textDocument"]["version"].as_i64() {
+                            self.versions.insert(path.clone(), version);
+                        }
                         self.set_file(path, text);
                         self.publish_diagnostics(uri)?;
                     }
@@ -957,6 +972,9 @@ impl State {
                             }
                         }
                         text::apply_changes(&mut text, changes);
+                        if let Some(version) = params["textDocument"]["version"].as_i64() {
+                            self.versions.insert(path.clone(), version);
+                        }
                         self.set_file(path, text);
                         self.publish_diagnostics(uri)?;
                     }
@@ -964,6 +982,7 @@ impl State {
                 "textDocument/didClose" => {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
                     if let Some(path) = self.open.remove(uri) {
+                        self.versions.remove(&path);
                         self.send(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] })))?;
                         // Back to what is on disk, or gone.
                         match std::fs::read_to_string(&path) {
@@ -1005,7 +1024,7 @@ impl State {
                     self.format(id, params)?;
                     return Ok(true);
                 }
-                if method == "textDocument/references" || method == "textDocument/rename" {
+                if matches!(method.as_str(), "textDocument/references" | "textDocument/rename" | "workspace/willRenameFiles") {
                     self.search(id, &method, params)?;
                     return Ok(true);
                 }
@@ -1045,11 +1064,20 @@ impl State {
         self.searches.insert(id.to_string(), Arc::clone(&cancel));
         let token = Some(params["workDoneToken"].clone()).filter(|t| !t.is_null());
         if let Some(token) = &token {
-            let title = if method == "textDocument/rename" { "Renaming" } else { "Searching for references" };
+            let title = if method != "textDocument/references" { "Renaming" } else { "Searching for references" };
             let value = json!({ "kind": "begin", "title": title, "cancellable": true, "percentage": 0 });
             self.send(&jsonrpc::notification("$/progress", json!({ "token": token, "value": value })))?;
         }
         let (method, params) = (method.to_owned(), params.clone());
+        let env = rename::Env {
+            roots: self.model.roots.iter().map(|(root, _)| root.clone()).collect(),
+            manifests: self.model.manifests.clone(),
+            versions: self.versions.clone(),
+            document_changes: self.document_changes,
+            resource_renames: self.rename_files,
+            rename_files: self.rename_option,
+            move_directories: self.move_option,
+        };
         thread::spawn(move || {
             let last = std::cell::Cell::new(u32::MAX);
             let report = |done: usize, total: usize| {
@@ -1061,7 +1089,7 @@ impl State {
             };
             let cancelled = || cancel.load(Ordering::Relaxed);
             let control = features::Control { cancelled: Some(&cancelled), progress: Some(&report) };
-            let outcome = run_search(&method, &params, &lib, &proj, &ids, &packages, &control);
+            let outcome = run_search(&method, &params, &lib, &proj, &ids, &packages, &env, &control);
             let _ = tx.send(Event::Searched { id, generation, token, outcome });
         });
         Ok(())
@@ -1244,12 +1272,9 @@ impl State {
             }
             "textDocument/prepareRename" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
-                let (_, tok) = at(unit);
-                let Some(tok) = tok else { return Err(Failure::Invalid("there is nothing to rename here".into())) };
-                rename_target(&an, unit, tok)?;
                 let u = an.unit(unit);
-                let span = u.file.lexed.tokens[tok].span();
-                Ok(json!({ "range": text::range(&u.text, span), "placeholder": u.file.lexed.text(&u.text, tok) }))
+                let found = rename::subject(&an, unit, text::offset(&u.text, &params["position"])).map_err(Failure::Invalid)?;
+                Ok(json!({ "range": text::range(&u.text, found.span), "placeholder": found.placeholder }))
             }
             "textDocument/documentSymbol" => {
                 let Some(unit) = unit else { return Ok(json!([])) };
@@ -1311,6 +1336,9 @@ impl State {
         let workspace_edit = &params["capabilities"]["workspace"]["workspaceEdit"];
         self.document_changes = workspace_edit["documentChanges"] == true;
         self.create_files = workspace_edit["resourceOperations"].as_array().is_some_and(|ops| ops.iter().any(|o| o == "create"));
+        self.rename_files = workspace_edit["resourceOperations"].as_array().is_some_and(|ops| ops.iter().any(|o| o == "rename"));
+        self.rename_option = params["initializationOptions"]["renameFiles"] != false;
+        self.move_option = params["initializationOptions"]["movePackageDirectories"] != false;
         self.load_options.fetch_sources = params["initializationOptions"]["fetchSources"] != false;
         self.root = params["rootUri"]
             .as_str()
@@ -1321,7 +1349,7 @@ impl State {
         json!({
             "capabilities": {
                 "textDocumentSync": { "openClose": true, "change": 2, "save": { "includeText": false } },
-                "completionProvider": { "triggerCharacters": ["."], "resolveProvider": true },
+                "completionProvider": { "triggerCharacters": [".", "@", "["], "resolveProvider": true },
                 "hoverProvider": true,
                 "signatureHelpProvider": { "triggerCharacters": ["(", ","], "retriggerCharacters": ["="] },
                 "definitionProvider": true,
@@ -1340,6 +1368,16 @@ impl State {
                 "documentFormattingProvider": true,
                 "workspaceSymbolProvider": true,
                 "codeActionProvider": { "codeActionKinds": actions::KINDS },
+                "workspace": {
+                    "fileOperations": {
+                        "willRename": {
+                            "filters": [
+                                { "pattern": { "glob": "**/*.kt", "matches": "file" } },
+                                { "pattern": { "glob": "**", "matches": "folder" } }
+                            ]
+                        }
+                    }
+                },
             },
             "serverInfo": { "name": "kargo-kotlin", "version": env!("CARGO_PKG_VERSION") },
         })
@@ -1352,6 +1390,7 @@ enum Failure {
 }
 
 /// The references or the rename of the identifier at the request's position.
+#[allow(clippy::too_many_arguments)]
 fn run_search(
     method: &str,
     params: &Value,
@@ -1359,9 +1398,19 @@ fn run_search(
     proj: &Index,
     ids: &HashMap<PathBuf, u32>,
     packages: &Packages,
+    env: &rename::Env,
     control: &features::Control,
 ) -> Result<Value, Failure> {
     let an = Analyzer::new(lib, proj, packages);
+    if method == "workspace/willRenameFiles" {
+        let files: Vec<(PathBuf, PathBuf)> = params["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| Some((file_path(f["oldUri"].as_str()?)?, file_path(f["newUri"].as_str()?)?)))
+            .collect();
+        return rename::will_rename(&an, env, &files, control).map_err(Failure::Invalid);
+    }
     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
     let unit = file_path(uri)
         .and_then(|p| ids.get(&p).copied())
@@ -1378,21 +1427,9 @@ fn run_search(
         let refs = features::search(&an, &group, include, control).ok_or_else(cancelled)?;
         return Ok(json!(refs.iter().map(|(u, r)| location(&an, *u, r.clone())).collect::<Vec<_>>()));
     }
-    let Some(tok) = tok else { return Err(Failure::Invalid("there is nothing to rename here".into())) };
+    let found = rename::subject(&an, unit, text::offset(&u.text, &params["position"])).map_err(Failure::Invalid)?;
     let new_name = params["newName"].as_str().unwrap_or_default();
-    let Some(new_text) = features::new_name_text(new_name) else {
-        return Err(Failure::Invalid(format!("`{new_name}` is not a valid Kotlin name")));
-    };
-    let group = rename_target(&an, unit, tok)?;
-    let mut changes: HashMap<String, Vec<Value>> = HashMap::new();
-    for (u, range) in features::search(&an, &group, true, control).ok_or_else(cancelled)? {
-        let unit = an.unit(u);
-        changes
-            .entry(text::path_to_uri(&unit.path))
-            .or_default()
-            .push(json!({ "range": text::range(&unit.text, range), "newText": new_text }));
-    }
-    Ok(json!({ "changes": changes }))
+    rename::rename(&an, env, &found, new_name, control).map_err(Failure::Invalid)
 }
 
 fn location(an: &Analyzer, u: UnitId, range: std::ops::Range<usize>) -> Value {
@@ -1418,33 +1455,6 @@ fn type_targets(an: &Analyzer, targets: &[Target]) -> Vec<Target> {
 fn group_at(an: &Analyzer, unit: UnitId, tok: usize) -> Option<Vec<super::index::SymId>> {
     let sym = features::targets_at(an, unit, tok).into_iter().find_map(|t| t.sym())?;
     Some(features::rename_group(an, sym))
-}
-
-/// What renaming the identifier at `tok` changes: a declaration of the project and its counterparts.
-fn rename_target(an: &Analyzer, unit: UnitId, tok: usize) -> Result<Vec<super::index::SymId>, Failure> {
-    let targets = features::targets_at(an, unit, tok);
-    match targets.first() {
-        Some(Target::Sym(m)) if an.decl(m.sym).generated => {
-            let name = &an.decl(m.sym).name;
-            Err(Failure::Invalid(format!("`{name}` is generated by the compiler, so it can't be renamed")))
-        }
-        Some(Target::Sym(m)) if !m.sym.lib && !an.unit(m.sym.unit_id()).is_java() => Ok(features::rename_group(an, m.sym)),
-        Some(Target::Sym(m)) if !m.sym.lib => {
-            let name = &an.decl(m.sym).name;
-            Err(Failure::Invalid(format!("`{name}` is declared in a Java file, which this server doesn't edit, so it can't be renamed")))
-        }
-        Some(Target::Sym(m)) => {
-            let name = &an.decl(m.sym).name;
-            let origin = match &an.unit(m.sym.unit_id()).origin {
-                Origin::Library { name, .. } => name.clone(),
-                _ => "a library".into(),
-            };
-            Err(Failure::Invalid(format!("`{name}` is declared in {origin}, not in this project, so it can't be renamed")))
-        }
-        Some(Target::It { .. }) => Err(Failure::Invalid("`it` is an implicit parameter; name the lambda's parameter to rename it".into())),
-        Some(Target::Package(_)) => Err(Failure::Invalid("renaming packages isn't supported".into())),
-        None => Err(Failure::Invalid("there is no declaration to rename here".into())),
-    }
 }
 
 #[cfg(test)]

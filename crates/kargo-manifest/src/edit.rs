@@ -332,6 +332,54 @@ impl ManifestEditor {
             }
         }
     }
+
+    /// Renames the Kotlin declarations that entry points name: `[target.jvm] main-class`,
+    /// `[target.native] entry-point` and the `main` and `entry-point` of `[[bin]]`. A name is
+    /// changed when it is `old` or inside it (`old.`, `old$`), so a renamed package or class takes
+    /// the entries below it along. Returns how many entries changed.
+    pub fn rename_entry_points(&mut self, old: &str, new: &str) -> usize {
+        let mut changed = 0;
+        let mut rename = |item: Option<&mut Item>| {
+            let Some(item) = item else { return };
+            let Some(current) = item.as_str() else { return };
+            let rest = match current.strip_prefix(old) {
+                Some("") => "",
+                Some(rest) if rest.starts_with('.') || rest.starts_with('$') => rest,
+                _ => return,
+            };
+            let renamed = format!("{new}{rest}");
+            replace_str(item, &renamed);
+            changed += 1;
+        };
+        if let Some(target) = self.doc.get_mut("target") {
+            rename(target.get_mut("jvm").and_then(|t| t.get_mut("main-class")));
+            rename(target.get_mut("native").and_then(|t| t.get_mut("entry-point")));
+        }
+        if let Some(bins) = self.doc.get_mut("bin").and_then(Item::as_array_of_tables_mut) {
+            for bin in bins.iter_mut() {
+                rename(bin.get_mut("main"));
+                rename(bin.get_mut("entry-point"));
+            }
+        }
+        changed
+    }
+
+    /// Points the `path` of the `[[bin]]` entries that name the file `old` (relative to the
+    /// manifest, with `/`) at `new`. Returns how many entries changed.
+    pub fn rename_bin_path(&mut self, old: &str, new: &str) -> usize {
+        let mut changed = 0;
+        if let Some(bins) = self.doc.get_mut("bin").and_then(Item::as_array_of_tables_mut) {
+            for bin in bins.iter_mut() {
+                if let Some(path) = bin.get_mut("path")
+                    && path.as_str().is_some_and(|p| p.replace('\\', "/").trim_start_matches("./") == old)
+                {
+                    replace_str(path, new);
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
 }
 
 /// Replaces a string value, keeping the whitespace and comments around it.
@@ -359,6 +407,34 @@ alias = { coords = "com.b:y", version = "2.0" }
 
     fn editor() -> ManifestEditor {
         ManifestEditor::from_str(Path::new("kargo.toml"), BASE).unwrap()
+    }
+
+    #[test]
+    fn renames_entry_points() {
+        let text = "[target.jvm]
+main-class = \"com.a.MainKt\" # app
+
+[target.native]
+entry-point = \"com.a.main\"
+
+[[bin]]
+name = \"x\"
+main = \"com.a.Tool$Inner\"
+
+[[bin]]
+name = \"y\"
+path = \"./src/Y.kt\"
+";
+        let mut e = ManifestEditor::from_str(Path::new("kargo.toml"), text).unwrap();
+        assert_eq!(e.rename_entry_points("com.a", "org.b"), 3);
+        assert_eq!(e.rename_entry_points("org.b.Tool", "org.b.Cli"), 1);
+        assert_eq!(e.rename_entry_points("org.bb", "z"), 0);
+        assert_eq!(e.rename_bin_path("src/Y.kt", "src/Z.kt"), 1);
+        let out = e.contents();
+        assert!(out.contains("main-class = \"org.b.MainKt\" # app"), "{out}");
+        assert!(out.contains("entry-point = \"org.b.main\""), "{out}");
+        assert!(out.contains("main = \"org.b.Cli$Inner\""), "{out}");
+        assert!(out.contains("path = \"src/Z.kt\""), "{out}");
     }
 
     #[test]

@@ -20,7 +20,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Hover | The declaration's signature, its package or class, and its KDoc as Markdown. Inferred types of variables, such as `val names: List<String>`. The same for annotations and their arguments |
 | Go to definition | Into your project, a path dependency, the sources of the standard library, the JDK and libraries, or stubs of libraries without sources. Go to declaration and go to type definition too |
 | Find references, highlights | Every use in the project, with the declaration |
-| Rename | Every reference in the project, and the declarations that must change with it: `expect` and `actual` declarations, overrides, named arguments |
+| Rename | Every reference in the project, and what must change with it: `expect` and `actual` declarations, overrides, named arguments, KDoc links and tags, labels, the file named after a class, packages and the entry points in `kargo.toml` |
 | Outline | Document symbols for the file, workspace symbols for the project |
 | Semantic highlighting | Every identifier classified by what it resolves to: class, interface, enum, enum member, type parameter, function, method, property, parameter, local variable or package. The modifiers `declaration`, `readonly` (`val`, parameters), `static` (members of objects and companions), `deprecated` and `defaultLibrary` (the standard library and other libraries) come with it. Whole file and range requests; the result is kept until the next change |
 | Folding | Bodies, lambdas and multi-line argument lists, raw strings, the import block, KDoc and block comments, and runs of `//` comments |
@@ -76,11 +76,26 @@ Go to implementation goes from an interface, abstract class or `open` class to t
 
 The call hierarchy shows who calls a function or constructor of your project (found through its references, so overrides count) and which functions and constructors its body calls. The type hierarchy shows the direct supertypes of a class, library ones included, and the classes of your project that name it as a supertype. Java files are read for declarations only, so calls made from them aren't listed.
 
+### KDoc completion
+
+Inside a `/** */` comment, `@` offers the block tags (`@param`, `@return`, `@constructor`, `@receiver`, `@property`, `@throws`, `@exception`, `@sample`, `@see`, `@author`, `@since`, `@suppress`) with a snippet for what follows. After `@param` and `@property` it offers the parameters, properties and type parameters of the documented declaration. In a link (`[`) and after `@see`, `@throws`, `@exception` and `@sample` it offers the declarations in scope, and the members after a dot (`[User.`) or the contents of a package.
+
 ### Rename
 
 Rename works on declarations of your project: classes, functions, properties, parameters and local variables. It changes every reference in every file of the project, including imports and string templates (`"$name"`), and the declarations that must keep the same name: the `actual` declarations of an `expect` one (and the other way around), the overrides of a member and the member it overrides, and named arguments (`greet(name = "x")`) of a parameter. A name that isn't a plain identifier, such as a keyword, gets backquotes.
 
 Declarations of the standard library and of other libraries can't be renamed; the editor says so before you type a name.
+
+Rename also changes what isn't Kotlin code:
+
+- **KDoc.** Links (`[User]`, `[User.name]`, `[app.User]`, `@see User`, `@throws`, `@exception`, `@sample`) and the names in `@param` and `@property` tags (also `@param[name]`) follow the declaration they name. Brackets in code spans (`a[i]`) are not links. You can start a rename on a name inside a KDoc comment too.
+- **Labels.** Renaming `loop@` renames the `break@loop` and `continue@loop` of that loop (and not those of another loop with the same label), and the same for `return@label` on a lambda. Renaming a function also renames the `return@forEach`-style references to it, and renaming a class the `this@Outer` ones.
+- **Type parameters.** Renaming `T` in `class Box<T>` changes its uses in the class, the `@param T` tag and `[T]` links, and leaves a member that declares its own `T`.
+- **The file of a class.** Renaming `User` in `User.kt` also renames the file to `Person.kt`, when the editor takes `rename` operations in a workspace edit. Set `renameFiles` to `false` in the editor's `initializationOptions` to turn that off. The other way round works too: when the editor sends `workspace/willRenameFiles`, renaming `User.kt` to `Person.kt` renames the class `User`. A file with `expect` and `actual` declarations (`User.kt`, `User.jvm.kt`) keeps its target suffix.
+- **Packages.** Renaming a segment of a package name (in a `package` directive, an import or a qualified name) renames it in every `package` directive, import, qualified reference and KDoc link of the project, and moves the directory of the package (`src/app/model/` to `src/app/domain/`) when the directory holds only that package. Set `movePackageDirectories` to `false` to leave the directories. Renaming the directory in the editor renames the package, through `workspace/willRenameFiles`. A package that exists already can't be the new name.
+- **`kargo.toml`.** The entry points name Kotlin declarations: `[target.jvm] main-class`, `[target.native] entry-point` and the `main` and `entry-point` of `[[bin]]`. Renaming the function `main`, the class a `[[bin]]` names, a package, or the file whose top-level `main` the entry point names (`Main.kt` is the class `MainKt`, unless the file has `@file:JvmName`) updates them, keeping the file's formatting and comments. The `path` of a `[[bin]]` follows a renamed file.
+
+With an editor that takes `documentChanges`, the edit carries the version of each open document, so a rename made against text that has changed since is rejected by the editor instead of corrupting the file. Otherwise it is a plain `changes` map, without the file and directory renames.
 
 Finding references and renaming search the whole project on a worker thread, so other requests keep answering while they run. An editor that shows `$/progress` gets a cancellable progress bar, and `$/cancelRequest` stops the search. If you edit a file while a search runs, the request fails with `ContentModified` and the editor asks again.
 
