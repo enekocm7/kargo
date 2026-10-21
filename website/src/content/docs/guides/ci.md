@@ -5,6 +5,35 @@ description: Build and test Kargo projects on GitHub Actions and other CI system
 
 Kargo is a single binary, so CI is simple: install it, cache `~/.kargo`, and run `kargo test --locked`.
 
+## Generating a workflow
+
+`kargo init-ci` writes `.github/workflows/ci.yml` for the project:
+
+```sh
+kargo init-ci            # add --junit for the test report step
+```
+
+It runs `fmt --check`, `lint`, `check --tests --locked`, `build --locked`, `test --locked` and `package --release --locked`, and reads `kargo.toml` for the setup around them:
+
+- `actions/setup-java` only when a package does not set `[toolchain] jdk`.
+- `actions/setup-node` when a package has a Wasm target.
+- An `ubuntu-latest`, `macos-latest` and `windows-latest` matrix when a package has a Kotlin/Native target.
+- `--junit` runs `kargo test --report junit` and publishes the reports (see [Test results](#test-results)).
+
+The command prints each step it left out and why. It refuses to replace an existing workflow unless you pass `--force`; `--system` picks the CI system, and `github` is the only one so far.
+
+### The setup-kargo action
+
+The workflow installs Kargo with the `setup-kargo` action of this repository. It installs the prebuilt release (`version` defaults to the latest; the generated workflow pins the version of the Kargo that wrote it), puts `kargo` on `PATH`, and restores and saves the cache of `~/.kargo` (or `$KARGO_HOME`) without `daemon/`, keyed on the runner OS, `kargo.lock` and `kargo.toml`. It works on Linux, macOS and Windows runners.
+
+```yaml
+      - uses: enekocm7/kargo/setup-kargo@master
+        with:
+          version: 0.1.0   # optional; `cache: 'false'` turns the cache off
+```
+
+Pin the action to a tag or commit if you want it to change only when you decide. The workflow below is what you write by hand without the action.
+
 ## GitHub Actions
 
 ```yaml title=".github/workflows/ci.yml"
