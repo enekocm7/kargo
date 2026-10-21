@@ -4189,3 +4189,39 @@ fn update_locks_the_tools_of_generate_steps() {
     p.kargo().args(["update", "--offline"]).assert().success();
     assert_eq!(modules(&p, "generate/api"), ["tools:codegen", "tools:runtime"]);
 }
+
+#[test]
+fn init_ci_writes_a_workflow_for_a_jvm_project() {
+    let p = Project::new();
+    p.kargo().args(["new", "app", "--no-vcs"]).assert().success();
+    let app = p.path().join("app");
+    let run = |args: &[&str]| {
+        let mut cmd = p.kargo();
+        cmd.current_dir(&app).arg("init-ci").args(args);
+        cmd
+    };
+    run(&[])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ci.yml"))
+        .stderr(predicate::str::contains("actions/setup-node: no Wasm target"));
+    let workflow = std::fs::read_to_string(app.join(".github/workflows/ci.yml")).unwrap();
+    assert!(workflow.contains("actions/setup-java@v4") && workflow.contains("setup-kargo@"));
+    assert!(workflow.contains("kargo test --locked\n") && workflow.contains("kargo package --release --locked"));
+    assert!(!workflow.contains("setup-node") && !workflow.contains("matrix"));
+
+    run(&[]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));
+    run(&["--force", "--junit"]).assert().success();
+    assert!(std::fs::read_to_string(app.join(".github/workflows/ci.yml")).unwrap().contains("--report junit"));
+}
+
+#[test]
+fn init_ci_follows_the_manifest() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[toolchain]\njdk = \"21\"\n[target.wasm]\n[target.native]\n"));
+    p.kargo().arg("init-ci").assert().success();
+    let workflow = p.read(".github/workflows/ci.yml");
+    assert!(!workflow.contains("setup-java"), "the JDK is pinned");
+    assert!(workflow.contains("actions/setup-node@v4"), "Wasm tests need Node");
+    assert!(workflow.contains("os: [ubuntu-latest, macos-latest, windows-latest]"), "Native needs an OS matrix");
+}

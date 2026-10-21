@@ -4,6 +4,7 @@ pub mod add;
 pub mod bench;
 pub mod build;
 pub mod check;
+pub mod ci;
 pub mod classpath;
 pub mod context;
 pub mod doc;
