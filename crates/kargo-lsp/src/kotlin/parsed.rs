@@ -17,7 +17,7 @@ use super::lexer::{Lexed, Tok, Token};
 use super::syntax::{Decl, File, FuncType, Import, InitKind, Kind, Scope, ScopeKind, TypeParam, TypeRef};
 
 /// Bump when the syntax tree or its parser changes in a way the version of Kargo does not show.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 const MAGIC: &[u8; 4] = b"KPF\0";
 /// The name of the blob in a directory of library sources.
 const FILE_NAME: &str = ".kargo-parsed";
@@ -163,6 +163,7 @@ impl Writer {
             init,
             init_kind,
             supertypes,
+            delegated,
             members,
             parent,
             local,
@@ -215,6 +216,10 @@ impl Writer {
             }
         }
         self.list(supertypes, Self::type_ref);
+        self.list(delegated, |w, (n, r)| {
+            w.u(*n);
+            w.range(r);
+        });
         self.usizes(members);
         self.opt(parent, |w, n| w.u(*n));
         self.b(*local);
@@ -431,6 +436,7 @@ impl Reader<'_> {
             init,
             init_kind,
             supertypes: self.list(Self::type_ref)?,
+            delegated: self.list(|r| Some((r.u()?, r.range()?)))?,
             members: self.usizes()?,
             parent: self.opt(Self::u)?,
             local: self.b()?,

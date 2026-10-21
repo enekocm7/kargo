@@ -7,7 +7,7 @@
 //! runs as `kargo add` does, so the action and the command take the same code path. Every
 //! other action is a workspace edit computed from the snapshot the request sees.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -688,6 +688,8 @@ fn implement_actions(an: &Analyzer, req: &Request, lines: &Range<usize>, out: &m
 /// with the type arguments of the supertype each comes from.
 pub fn missing_members(an: &Analyzer, class: SymId) -> Vec<(SymId, Subst)> {
     let own = an.class_decls(class);
+    // What the class delegates (`Iface by b`) is implemented by the delegate.
+    let delegated = delegated_owners(an, class);
     let mut concrete: HashSet<(String, bool, usize)> = HashSet::new();
     let mut abstracts: Vec<((String, bool, usize), SymId, Subst)> = Vec::new();
     for (c, subst) in an.closure(&an.instance(class)) {
@@ -700,7 +702,7 @@ pub fn missing_members(an: &Analyzer, class: SymId) -> Vec<(SymId, Subst)> {
             let function = md.kind == Kind::Function;
             let key = (md.name.clone(), function, if function { md.params.len() } else { 0 });
             let sym = c.unit_id().sym(m);
-            if !own.contains(&c) && is_abstract(an, c, sym) {
+            if !own.contains(&c) && !delegated.contains_key(&c) && is_abstract(an, c, sym) {
                 if !md.is_private() {
                     abstracts.push((key, sym, subst.clone()));
                 }
@@ -711,6 +713,24 @@ pub fn missing_members(an: &Analyzer, class: SymId) -> Vec<(SymId, Subst)> {
     }
     let mut seen = HashSet::new();
     abstracts.into_iter().filter(|(key, ..)| !concrete.contains(key) && seen.insert(key.clone())).map(|(_, s, subst)| (s, subst)).collect()
+}
+
+/// The classes whose members the class `class` delegates with `by` (the delegated supertypes and
+/// everything they inherit), each with the text of the delegate expression.
+pub(super) fn delegated_owners(an: &Analyzer, class: SymId) -> HashMap<SymId, String> {
+    let mut out = HashMap::new();
+    for c in an.class_decls(class) {
+        let (d, unit) = (an.decl(c), an.unit(c.unit_id()));
+        let ctx = Ctx { unit: c.unit_id(), decl: Some(c.decl_id()) };
+        for (index, span) in &d.delegated {
+            let Some(ty) = d.supertypes.get(*index).and_then(|t| an.ty_of_ref(t, ctx, &Subst::new())) else { continue };
+            let text = unit.text.get(span.clone()).unwrap_or_default().trim().to_owned();
+            for (owner, _) in an.closure(&ty) {
+                out.entry(owner).or_insert_with(|| text.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Whether the member `m` of the class or interface `class` is abstract.

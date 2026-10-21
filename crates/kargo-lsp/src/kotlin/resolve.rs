@@ -783,19 +783,7 @@ impl<'a> Analyzer<'a> {
                         let start = d.init?;
                         self.infer(u, start, syntax::expr_end(src, lx, start, lx.tokens.len()))
                     }
-                    InitKind::Delegate => {
-                        let start = d.init?;
-                        // `by lazy { ... }`: what the lambda returns.
-                        if lx.is(src, start, "lazy") {
-                            let brace = (start + 1..start + 6).find(|&i| lx.kind(i) == Some(Tok::LBrace))?;
-                            return self.lambda_result(u, brace);
-                        }
-                        // `by map`, `by Delegates.observable(...)`, a custom delegate: its `getValue`.
-                        let delegate = self.infer(u, start, syntax::expr_end(src, lx, start, lx.tokens.len()))?;
-                        let m =
-                            self.members_named(&delegate, "getValue", u).into_iter().find(|m| self.decl(m.sym).kind == Kind::Function)?;
-                        self.value_ty(m.sym, &m.subst)
-                    }
+                    InitKind::Delegate => self.delegate_ty(u, d.init?),
                     InitKind::Iterated => {
                         let start = d.init?;
                         let end = self.iterated_end(u, start);
@@ -823,6 +811,40 @@ impl<'a> Analyzer<'a> {
                 }
             }
         }
+    }
+
+    /// The type of a property delegated with `by`, whose delegate starts at token `start`: what
+    /// the `getValue` of the delegate (or of what its `provideDelegate` returns) returns.
+    fn delegate_ty(&self, u: UnitId, start: usize) -> Option<Ty> {
+        let src = &self.unit(u).text;
+        let lx = &self.file(u).lexed;
+        let end = syntax::expr_end(src, lx, start, lx.tokens.len());
+        let delegate = match self.infer(u, start, end) {
+            Some(delegate) => delegate,
+            // `by lazy { ... }` before the standard library is known: what the lambda returns.
+            None if lx.is(src, start, "lazy") => {
+                let brace = (start + 1..start + 8).find(|&i| lx.kind(i) == Some(Tok::LBrace))?;
+                return self.lambda_result(u, brace);
+            }
+            None => return None,
+        };
+        // `by ::other` and `by this::other`: the property delegates to another property.
+        if let Ty::Func { params, ret, .. } = &delegate
+            && params.is_empty()
+            && lx.tokens[start..end.min(lx.tokens.len())].iter().any(|t| t.kind == Tok::ColonColon)
+        {
+            return ret.as_deref().cloned();
+        }
+        let function = |this: &Self, ty: &Ty, name: &str| {
+            this.members_named(ty, name, u).into_iter().find(|m| this.decl(m.sym).kind == Kind::Function)
+        };
+        // `provideDelegate` runs first: its result is the delegate that `getValue` is called on.
+        let delegate = match function(self, &delegate, "provideDelegate") {
+            Some(m) => self.value_ty(m.sym, &m.subst)?,
+            None => delegate,
+        };
+        let m = function(self, &delegate, "getValue")?;
+        self.value_ty(m.sym, &m.subst)
     }
 
     /// The end of the iterated expression of a `for` loop starting at `start`: its `)`.
