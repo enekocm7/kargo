@@ -7,7 +7,7 @@
 //   request:  u32 PROTOCOL, string token, string command, u32 n, n * string argument
 //             commands: `kotlin` (first argument is the compiler main class), `javac`,
 //             `kotlin-ic` (incremental compilation, see KargoIc.java), `stop`
-//   response: frames of u8 kind + payload: 'o' u32 length + bytes (compiler output),
+//   response: frames of u8 kind + payload: 'a' (no payload, sent once the request is read), 'o' u32 length + bytes (compiler output),
 //             'x' i32 exit code (last frame).
 
 import java.io.BufferedOutputStream;
@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class KargoDaemon {
-    static final int PROTOCOL = 1;
+    static final int PROTOCOL = 2;
     /** Exit code telling the client to run the tool as a separate process instead. */
     static final int UNSUPPORTED = -1000;
     /** Exit code for an incremental compilation that failed for reasons other than compile errors. */
@@ -98,6 +98,14 @@ public final class KargoDaemon {
                 owner = false;
             }
             if (!owner || System.currentTimeMillis() - lastUse > idleMillis) {
+                if (owner) {
+                    // Leave no info file behind for a port another program may take.
+                    try {
+                        Files.deleteIfExists(info);
+                    } catch (IOException e) {
+                        // The next client finds the stale file by its handshake.
+                    }
+                }
                 System.exit(0);
             }
         }
@@ -131,6 +139,10 @@ public final class KargoDaemon {
             String[] arguments = new String[in.readInt()];
             for (int i = 0; i < arguments.length; i++) {
                 arguments[i] = readString(in);
+            }
+            synchronized (out) {
+                out.writeByte('a');
+                out.flush();
             }
             if (command.equals("stop")) {
                 exit(out, 0);

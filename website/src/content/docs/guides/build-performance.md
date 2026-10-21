@@ -17,7 +17,7 @@ The first compilation starts a **compiler daemon**: a background JVM that runs t
 
 - One daemon runs per JDK, Kotlin version and `KARGO_COMPILER_JVM_OPTS`; changing any of them starts a new one.
 - If you press Ctrl-C during a build, the daemon finishes that compilation without replying. A build you start right after waits for it, because the daemon runs one compilation at a time per output directory, so the two never write into the same classes directory.
-- It exits after 3 hours without work, and when its state directory under `~/.kargo/daemon` is removed.
+- It exits after 3 hours without work, and when its state directory under `~/.kargo/daemon` is removed. On exit it deletes its `info` file. If one is left behind (after a crash or a reboot) and another program now uses its port, Kargo notices that the program does not answer like the daemon within 10 seconds and starts a new daemon instead of waiting.
 - It serves several builds at once, so parallel targets and concurrent `kargo` invocations share it.
 - Compiler output looks exactly like a standalone compiler run, with paths relative to the directory you ran `kargo` in.
 

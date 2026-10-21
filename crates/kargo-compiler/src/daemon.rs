@@ -25,7 +25,10 @@ use kargo_util::shell::Shell;
 const SOURCE: &str = include_str!("daemon/KargoDaemon.java");
 /// The incremental compilation bridge, built against the project's Build Tools API.
 const IC_SOURCE: &str = include_str!("daemon/KargoIc.java");
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
+/// How long the daemon has to acknowledge a request. It answers as soon as it has read the request, so a
+/// port that stays silent longer belongs to another program.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Exit code with which the daemon asks the client to run the tool as a process.
 const UNSUPPORTED: i32 = -1000;
 /// Exit code of an incremental compilation that failed for reasons other than compile
@@ -274,9 +277,34 @@ fn connect(info: &Path) -> Option<(TcpStream, String)> {
     let mut parts = text.split_whitespace();
     let port: u16 = parts.next()?.parse().ok()?;
     let token = parts.next()?.to_owned();
+    if let Some(pid) = parts.next().and_then(|p| p.parse::<u32>().ok())
+        && !daemon_process_alive(pid)
+    {
+        remove_if_unchanged(info, &text);
+        return None;
+    }
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
     Some((stream, token))
+}
+
+/// Whether `pid` can still be the daemon's JVM. Only Linux can tell cheaply (through `/proc`); elsewhere
+/// the handshake of [`request`] recognizes a port that is not the daemon's.
+fn daemon_process_alive(pid: u32) -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(name) => name.trim().contains("java"),
+        Err(_) => !Path::new(&format!("/proc/{pid}")).exists(),
+    }
+}
+
+/// Deletes `info` if it still holds `text`, so a file a new daemon wrote in the meantime stays.
+fn remove_if_unchanged(info: &Path, text: &str) {
+    if std::fs::read_to_string(info).is_ok_and(|now| now == text) {
+        let _ = std::fs::remove_file(info);
+    }
 }
 
 /// Compiles the daemon class once per source version and JDK major, shared by all daemons.
@@ -336,7 +364,11 @@ fn write_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
 
 /// Sends one request and relays its output; returns the exit code, or `None` if the
 /// connection closed before any response (not a daemon of ours, or the wrong token).
-fn request(mut stream: TcpStream, token: &str, command: &str, args: &[&str]) -> Result<Option<i32>> {
+fn request(stream: TcpStream, token: &str, command: &str, args: &[&str]) -> Result<Option<i32>> {
+    request_within(stream, HANDSHAKE_TIMEOUT, token, command, args)
+}
+
+fn request_within(mut stream: TcpStream, handshake: Duration, token: &str, command: &str, args: &[&str]) -> Result<Option<i32>> {
     stream.set_nodelay(true).ok();
     let mut buf = Vec::new();
     buf.extend_from_slice(&PROTOCOL.to_be_bytes());
@@ -350,21 +382,19 @@ fn request(mut stream: TcpStream, token: &str, command: &str, args: &[&str]) -> 
         return Ok(None);
     }
 
+    // The daemon acknowledges a request with an `a` frame before it starts working. Anything else, or
+    // silence, means the port is not the daemon's: do not wait for a compilation that will never come.
+    stream.set_read_timeout(Some(handshake)).ok();
     let mut reader = BufReader::new(stream);
+    let mut ack = [0u8; 1];
+    if reader.read_exact(&mut ack).is_err() || ack[0] != b'a' {
+        return Ok(None);
+    }
+    reader.get_ref().set_read_timeout(None).ok();
     let mut output = OutputRelay::new();
-    let mut answered = false;
     loop {
         let mut kind = [0u8; 1];
-        if let Err(e) = reader.read_exact(&mut kind) {
-            if !answered {
-                return Ok(None);
-            }
-            return Err(e).context("the compiler daemon closed the connection");
-        }
-        if !answered && !matches!(kind[0], b'o' | b'x') {
-            return Ok(None);
-        }
-        answered = true;
+        reader.read_exact(&mut kind).context("the compiler daemon closed the connection")?;
         let mut word = [0u8; 4];
         reader.read_exact(&mut word)?;
         match kind[0] {
@@ -497,6 +527,38 @@ mod tests {
         assert_eq!(a, daemon_key(&jdk, &[PathBuf::from("a.jar")]));
         assert_ne!(a, daemon_key(&jdk, &[PathBuf::from("b.jar")]));
         assert_ne!(a, daemon_key(&Jdk { home: PathBuf::from("/jdk"), version: 17 }, &[PathBuf::from("a.jar")]));
+    }
+
+    #[test]
+    fn silent_port_is_not_waited_for() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let start = Instant::now();
+        let answer = request_within(stream, Duration::from_millis(200), "token", "kotlin", &[]).unwrap();
+        assert_eq!(answer, None);
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn stale_info_file_is_removed_only_when_unchanged() {
+        let dir = std::env::temp_dir().join(format!("kargo-daemon-info-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = dir.join("info");
+        std::fs::write(
+            &info,
+            "1 token 2
+",
+        )
+        .unwrap();
+        remove_if_unchanged(&info, "other");
+        assert!(info.exists());
+        remove_if_unchanged(
+            &info,
+            "1 token 2
+",
+        );
+        assert!(!info.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
