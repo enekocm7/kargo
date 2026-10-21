@@ -205,7 +205,11 @@ impl<'a> Analyzer<'a> {
                 if f.package == t.package {
                     kind_ok && target_ok
                 } else {
-                    t.kind == SetKind::Main && target_ok && self.packages.visible.get(f.package).is_some_and(|v| v.contains(&t.package))
+                    // `internal` stays inside the package (the Gradle module) that declares it.
+                    t.kind == SetKind::Main
+                        && target_ok
+                        && !d.is_internal()
+                        && self.packages.visible.get(f.package).is_some_and(|v| v.contains(&t.package))
                 }
             }
         }
