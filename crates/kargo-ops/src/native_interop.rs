@@ -244,6 +244,9 @@ pub fn compile_c_sources(ctx: &BuildContext, konan_target: &str) -> Result<Optio
         output_dir: ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target).join("c"),
     };
     let toolchain = ctx.native_toolchain()?;
+    if !unit.files.is_empty() {
+        toolchain.ensure_dependencies(ctx.config, konan_target)?;
+    }
     let what = format!(", {konan_target}, C sources");
     let outcome =
         unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| compiling(ctx, TargetKind::Native, &what))?;

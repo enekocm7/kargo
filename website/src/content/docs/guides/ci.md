@@ -174,6 +174,8 @@ GitHub's Windows runners come with Visual Studio, which `native-image` needs. `j
 
 Debug builds of a native target link a precompiled [standard library cache](../native/#build-speed) that Kotlin/Native builds on first use, which takes one to two minutes per platform. It lives under `~/.kargo/toolchains/kotlin-native/<version>/klib/cache`, so the `~/.kargo` cache above keeps it between runs. If your CI starts from an empty home every time, building it costs more than it saves; set `KARGO_NATIVE_CACHE=false` for those jobs.
 
+Kotlin/Native also downloads several hundred megabytes of LLVM and sysroots for each platform, into `~/.kargo/toolchains/konan`. Run `kargo toolchain install` as a setup step to download them for every platform the runner can build before the build starts (and before `pre-build` tasks that use the bundled clang); the `~/.kargo` cache keeps them too.
+
 ### Jobs that share a home directory
 
 Jobs on one runner that share `~/.kargo` can run in parallel. Kargo locks each toolchain while it installs it, so when two jobs need the same JDK, the second waits for the first instead of deleting or repeating its download. See [Parallel installs and retries](../toolchains/#parallel-installs-and-retries).

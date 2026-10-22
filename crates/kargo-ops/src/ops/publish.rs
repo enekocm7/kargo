@@ -146,6 +146,7 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     // Fail on a missing key before compiling anything.
     let signer = if sign { Some(Signer::from_env(ctx.shell())?) } else { None };
 
+    super::build::prepare_native_hooks(ctx, &targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ws, Hook::PreBuild, &env)?;
     super::build::generate_sources(ctx, &targets)?;
