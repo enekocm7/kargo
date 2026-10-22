@@ -3,19 +3,19 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
 [workspace.dependencies]
-kargo-util = { path = "crates/kargo-util", version = "0.1.0" }
-kargo-maven = { path = "crates/kargo-maven", version = "0.1.0" }
-kargo-manifest = { path = "crates/kargo-manifest", version = "0.1.0" }
-kargo-toolchain = { path = "crates/kargo-toolchain", version = "0.1.0" }
-kargo-compiler = { path = "crates/kargo-compiler", version = "0.1.0" }
-kargo-ops = { path = "crates/kargo-ops", version = "0.1.0" }
-kargo-lsp = { path = "crates/kargo-lsp", version = "0.1.0" }
+kargo-util = { path = "crates/kargo-util", version = "0.1.1" }
+kargo-maven = { path = "crates/kargo-maven", version = "0.1.1" }
+kargo-manifest = { path = "crates/kargo-manifest", version = "0.1.1" }
+kargo-toolchain = { path = "crates/kargo-toolchain", version = "0.1.1" }
+kargo-compiler = { path = "crates/kargo-compiler", version = "0.1.1" }
+kargo-ops = { path = "crates/kargo-ops", version = "0.1.1" }
+kargo-lsp = { path = "crates/kargo-lsp", version = "0.1.1" }
 
 anstream = "1.0.0"
 anstyle = "1.0.14"
