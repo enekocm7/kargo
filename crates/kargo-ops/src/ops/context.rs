@@ -535,6 +535,53 @@ impl<'a> BuildContext<'a> {
         Ok(resolution)
     }
 
+    /// Pins files that are fetched apart from a resolution, such as the web resources of Wasm libraries, under
+    /// `key` in `kargo.lock`, the way [`BuildContext::resolve`] pins a resolution's artifacts. `inputs` names what
+    /// is fetched (`group:artifact:version` and the file); `fetch` downloads it when the lock does not match, as
+    /// one node per module. Nothing is locked, and an old entry is dropped, when `inputs` is empty.
+    pub fn lock_files(&self, key: &str, inputs: &[String], fetch: impl FnOnce() -> Result<Resolution>) -> Result<Resolution> {
+        let key = &self.ws.lock_key(&self.profile_resolution(key)?);
+        if inputs.is_empty() {
+            let mut lock = self.shared.lock.lock().expect("lock poisoned");
+            if lock.resolutions.contains_key(key) {
+                if self.locked {
+                    bail!(
+                        "kargo.lock needs to be updated for `{key}` but --locked was passed; run `kargo update` without --locked and commit kargo.lock"
+                    );
+                }
+                lock.resolutions.remove(key);
+                self.shared.lock_dirty.store(true, Ordering::SeqCst);
+            }
+            return Ok(Resolution::default());
+        }
+        let mut fp = Fingerprint::new();
+        for input in inputs {
+            fp.str(input);
+        }
+        fp.str("--repos");
+        for repo in self.client.declared_repositories() {
+            fp.str(&repo.url);
+        }
+        let fingerprint = fp.finish();
+        if !self.config.refresh() {
+            let lock = self.shared.lock.lock().expect("lock poisoned");
+            if let Some(res) = lock.restore(key, &fingerprint, &self.client, !self.locked)? {
+                return Ok(res);
+            }
+        }
+        if self.locked {
+            bail!(
+                "kargo.lock needs to be updated for `{key}` but --locked was passed; run `kargo update` (or `kargo fetch`) without --locked and commit kargo.lock"
+            );
+        }
+        let fetched = fetch()?;
+        let previous = self.shared.lock.lock().expect("lock poisoned").resolutions.get(key).cloned();
+        let locked = Lockfile::lock_resolution(previous.as_ref(), &fingerprint, &fetched, &self.client)?;
+        self.shared.lock.lock().expect("lock poisoned").resolutions.insert(key.to_owned(), locked);
+        self.shared.lock_dirty.store(true, Ordering::SeqCst);
+        Ok(fetched)
+    }
+
     /// Fetches compiler plugin jars.
     pub fn plugin_jars(&self, plugins: &[PluginSpec]) -> Result<Vec<ResolvedPlugin>> {
         let kotlin = &self.ws.manifest().kotlin.version;

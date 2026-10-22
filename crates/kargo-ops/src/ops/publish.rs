@@ -333,12 +333,15 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     javadoc: None,
                     dependencies,
                     main_class: jvm.main_class.clone(),
+                    web_resources: None,
                 });
             }
             TargetKind::Wasm => {
                 let build =
                     compile_wasm(ctx, false)?.context("there are no Wasm sources to publish; add them under `src/` or `src-wasm/`")?;
                 let resolution = wasm_resolution(ctx, &setup, false)?;
+                let web_resources =
+                    crate::web_resources::archive(ctx.ws, &jars.join(format!("{}-{}-web-resources.zip", pkg.name, pkg.version)))?;
                 platforms.push(PlatformPublication {
                     kind: PlatformKind::Wasm { environment: build.environment.platform().to_owned() },
                     artifact: build.klib,
@@ -347,6 +350,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     javadoc: None,
                     dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
                     main_class: None,
+                    web_resources,
                 });
             }
             TargetKind::Native => {
@@ -366,6 +370,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                         javadoc: None,
                         dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
                         main_class: None,
+                        web_resources: None,
                     });
                 }
             }

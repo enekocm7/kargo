@@ -22,4 +22,5 @@ pub mod tasks;
 pub mod warnings;
 pub mod wasm_output;
 pub mod web;
+pub mod web_resources;
 pub mod workspace;

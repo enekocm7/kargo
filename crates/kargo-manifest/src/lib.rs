@@ -408,6 +408,12 @@ pub struct WasmTarget {
     /// npm packages the project needs besides those its Wasm libraries ask for, by name.
     pub npm_dependencies: BTreeMap<String, String>,
     pub wasm_opt: WasmOpt,
+    /// Files and directories of a library, relative to the package, that every browser app depending
+    /// on it gets next to its module, under their own names.
+    pub web_resources: Vec<PathBuf>,
+    /// A script of a library, relative to the package, that the page Kargo generates for a dependent
+    /// browser app imports before the app module. It is shipped like `web_resources`.
+    pub web_init: Option<PathBuf>,
     pub dependencies: Vec<Dependency>,
 }
 

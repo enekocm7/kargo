@@ -333,6 +333,8 @@ module-name = "hello"     # name of the .mjs and .wasm files; default: the packa
 npm-name = "@acme/hello"  # npm package name of a library; default: the lowercase package name
 package-manager = "pnpm"  # "npm", "pnpm" or "bun"; default: the first one found on PATH
 wasm-opt = false          # false, or the path of a wasm-opt executable; default: wasm-opt on PATH
+web-resources = ["web/raylib.mjs", "web/raylib.wasm"]  # a library's files for the browser apps using it
+web-init = "web/init.mjs" # a library's script that runs before a dependent app's module
 
 [target.wasm.npm-dependencies]
 "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for
@@ -347,6 +349,8 @@ wasm-opt = false          # false, or the path of a wasm-opt executable; default
 | `package-manager` | first of `npm`, `pnpm`, `bun` on `PATH` | The tool that installs the [npm packages](../../guides/wasm/#npm-packages) your project needs |
 | `wasm-opt` | `true` | In release builds, run Binaryen's `wasm-opt` over the module when there is one on `PATH`. `false` never runs it; a string is the path of the executable to run, relative to the project. See [Release builds](../../guides/wasm/#release-builds) |
 | `npm-dependencies` | none | A table of npm packages (`name = "version"`) to install in addition to those the klibs ask for. Your version wins on a conflict. Each gets [Kotlin declarations](../../guides/wasm/#kotlin-declarations-for-npm-packages) generated from its TypeScript ones |
+| `web-resources` | none | Files and directories of a library, relative to the package, that every browser app depending on it gets next to its module under their own names (a directory keeps its name). Published as a `web-resources` zip. Needs `kind = "library"` and `environment = "js"` or `"browser"`. See [Web resources from libraries](../../guides/wasm/#web-resources-from-libraries) |
+| `web-init` | none | A script of a library, relative to the package, that the page Kargo generates for a dependent browser app imports before the app module, after the init scripts of the libraries it depends on. It is shipped like `web-resources`. Same requirements as `web-resources` |
 
 With `optimize = true`, as in the [release profile](#profilename), a Wasm build removes code nothing reaches, runs `wasm-opt` and reports the size of the output.
 

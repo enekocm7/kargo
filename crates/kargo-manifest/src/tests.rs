@@ -453,6 +453,35 @@ fn wasm_target_option_errors() {
 }
 
 #[test]
+fn wasm_web_resources() {
+    let with = |t: &str| format!("{MINIMAL}\n[target.wasm]\n{t}\n");
+    let library = parse(&with(
+        "environment = \"browser\"\nkind = \"library\"\nweb-resources = [\"web/raylib.mjs\", \"web/raylib.wasm\", \"web/assets\"]\nweb-init = \"web/init.mjs\"",
+    ))
+    .targets
+    .wasm
+    .unwrap();
+    assert_eq!(library.web_resources, [PathBuf::from("web/raylib.mjs"), "web/raylib.wasm".into(), "web/assets".into()]);
+    assert_eq!(library.web_init, Some(PathBuf::from("web/init.mjs")));
+    assert!(parse(&with("kind = \"library\"")).targets.wasm.unwrap().web_resources.is_empty());
+    // The init script may be listed among the resources too.
+    parse(&with("kind = \"library\"\nweb-resources = [\"web/init.mjs\"]\nweb-init = \"web/init.mjs\""));
+
+    assert!(
+        parse_err(&with("web-resources = [\"a.mjs\"]"))
+            .contains("set kind = \"library\", or put an application's own files in `resources/`")
+    );
+    assert!(parse_err(&with("web-init = \"init.mjs\"")).contains("set kind = \"library\""));
+    assert!(parse_err(&with("kind = \"library\"\nenvironment = \"wasi\"\nweb-resources = [\"a.mjs\"]")).contains("needs environment"));
+    assert!(parse_err(&with("kind = \"library\"\nweb-resources = [\"../a.mjs\"]")).contains("use a path inside the package"));
+    assert!(parse_err(&with("kind = \"library\"\nweb-resources = [\"\"]")).contains("use a path inside the package"));
+    assert!(
+        parse_err(&with("kind = \"library\"\nweb-resources = [\"a/x.mjs\", \"b/x.mjs\"]")).contains("would both be shipped as `x.mjs`")
+    );
+    assert!(parse_err(&with("kind = \"library\"\nweb-resources = [\"a/init.mjs\"]\nweb-init = \"init.mjs\"")).contains("`init.mjs`"));
+}
+
+#[test]
 fn target_errors() {
     let with = |t: &str| format!("{MINIMAL}\n{t}\n");
     assert!(parse_err(&with("[target]")).contains("no target is enabled"));

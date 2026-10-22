@@ -763,6 +763,86 @@ fn wasm_browser_app_serves_its_own_page() {
 }
 
 #[test]
+fn wasm_browser_app_gets_the_web_resources_of_its_libraries() {
+    require_e2e!();
+    let t = E2e::new();
+    let repo = t.dir.path().join("repo");
+    // A library that binds to a separately built module, which it ships with an init script.
+    t.create(&["physics", "--lib", "--target", "wasm"]);
+    t.write(
+        "physics/kargo.toml",
+        &format!(
+            "[package]\nname = \"physics\"\nversion = \"0.4.0\"\ngroup = \"com.example\"\n\n[target.wasm]\nenvironment = \"browser\"\nkind = \"library\"\n\
+             web-resources = [\"web/engine.mjs\", \"web/assets\"]\nweb-init = \"web/init.mjs\"\n\n[repositories]\nstaging = \"{}\"\n\n\
+             [publish]\nrepository = \"staging\"\n",
+            file_url(&repo)
+        ),
+    );
+    t.write("physics/web/engine.mjs", "export default () => 42;\n");
+    t.write("physics/web/assets/logo.txt", "logo\n");
+    t.write("physics/web/init.mjs", "import engine from './engine.mjs';\nglobalThis.engine = engine();\n");
+
+    wasm_project(&t, "game", "environment = \"browser\"\n\n[dependencies]\nphysics = { path = \"../physics\" }\n");
+    t.write("game/resources/style.css", "body { margin: 0 }\n");
+    {
+        let server = Served::start(&t, "game");
+        let home = http_get(&server.host, "/");
+        let init = home.find("await import(\"./init.mjs\");").unwrap_or_else(|| panic!("the page imports the init script:\n{home}"));
+        assert!(init < home.find("await import(\"./game.mjs\");").unwrap(), "the init script runs first:\n{home}");
+        assert!(http_get(&server.host, "/engine.mjs").contains("export default () => 42;"));
+        assert!(http_get(&server.host, "/assets/logo.txt").contains("logo"));
+        assert!(http_get(&server.host, "/style.css").contains("margin: 0"));
+    }
+    // The app's own file of the same name wins, and a dropped file does not linger.
+    t.write("game/resources/engine.mjs", "export default () => 7;\n");
+    t.kargo("game").arg("build").assert().success();
+    let out = t.dir.path().join("game/target/debug/wasm");
+    assert_eq!(std::fs::read_to_string(out.join("engine.mjs")).unwrap(), "export default () => 7;\n");
+    std::fs::remove_file(t.dir.path().join("game/resources/engine.mjs")).unwrap();
+    std::fs::remove_file(t.dir.path().join("game/resources/style.css")).unwrap();
+    t.kargo("game").arg("build").assert().success();
+    assert!(!out.join("style.css").exists());
+    assert_eq!(std::fs::read_to_string(out.join("engine.mjs")).unwrap(), "export default () => 42;\n");
+    // The tests' page gets them too.
+    t.kargo("game").args(["test", "--no-run"]).assert().success();
+    let tests = std::fs::read_to_string(out.join("test/index.html")).unwrap();
+    assert!(tests.contains("for (const init of [\"./init.mjs\"]) await import(init);") && out.join("test/engine.mjs").is_file(), "{tests}");
+
+    // A declared file that is missing is named.
+    std::fs::rename(t.dir.path().join("physics/web/init.mjs"), t.dir.path().join("physics/web/init.bak")).unwrap();
+    t.kargo("game")
+        .arg("build")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`physics` ships the web resource `web/init.mjs`"));
+    std::fs::rename(t.dir.path().join("physics/web/init.bak"), t.dir.path().join("physics/web/init.mjs")).unwrap();
+
+    // Published, the files travel as a classifier zip that a Maven dependency brings along.
+    t.kargo("physics").arg("publish").assert().success();
+    let zip = repo.join("com/example/physics-wasm-js/0.4.0/physics-wasm-js-0.4.0-web-resources.zip");
+    let mut names = zip_names(&zip);
+    names.sort();
+    assert_eq!(names, ["assets/logo.txt", "engine.mjs", "init.mjs"]);
+    wasm_project(
+        &t,
+        "remote",
+        &format!(
+            "environment = \"browser\"\n\n[dependencies]\n\"com.example:physics\" = \"0.4.0\"\n\n[repositories]\nstaging = \"{}\"\n",
+            file_url(&repo)
+        ),
+    );
+    t.kargo("remote").arg("build").assert().success();
+    let remote = t.dir.path().join("remote/target/debug/wasm");
+    assert_eq!(std::fs::read_to_string(remote.join("engine.mjs")).unwrap(), "export default () => 42;\n");
+    assert!(std::fs::read_to_string(remote.join("index.html")).unwrap().contains("await import(\"./init.mjs\");"));
+    assert!(
+        std::fs::read_to_string(t.dir.path().join("remote/kargo.lock")).unwrap().contains("physics-wasm-js-0.4.0-web-resources.zip"),
+        "the zip is locked"
+    );
+}
+
+#[test]
 fn wasm_library_builds_an_npm_package() {
     require_e2e!();
     let t = E2e::new();

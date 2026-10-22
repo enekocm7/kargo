@@ -271,6 +271,9 @@ struct RawWasm {
     npm_dependencies: BTreeMap<String, String>,
     wasm_opt: Option<Value>,
     #[serde(default)]
+    web_resources: Vec<PathBuf>,
+    web_init: Option<PathBuf>,
+    #[serde(default)]
     dependencies: toml::Table,
 }
 
@@ -514,6 +517,44 @@ fn validate_cinterop(name: String, c: RawCinterop) -> Result<Cinterop> {
         pkg_config,
         link,
     })
+}
+
+/// `web-resources` and `web-init` ship files to the browser apps that depend on a Wasm library: only a
+/// library has dependents, and only the `js` and `browser` environments have a page. Each lands in the
+/// app's output under its file name, so two of them cannot share one.
+fn validate_web_resources(kind: WasmKind, environment: WasmEnvironment, resources: &[PathBuf], init: Option<&Path>) -> Result<()> {
+    if resources.is_empty() && init.is_none() {
+        return Ok(());
+    }
+    if kind != WasmKind::Library {
+        bail!(
+            "[target.wasm] `web-resources` and `web-init` ship files to the apps that depend on a library; \
+             set kind = \"library\", or put an application's own files in `resources/`"
+        );
+    }
+    if environment == WasmEnvironment::Wasi {
+        bail!(
+            "[target.wasm] `web-resources` and `web-init` are for the browser; they need environment = \"js\" or \"browser\", not \"wasi\""
+        );
+    }
+    let mut names: BTreeMap<String, &Path> = BTreeMap::new();
+    for (key, path) in resources.iter().map(|p| ("web-resources", p.as_path())).chain(init.map(|p| ("web-init", p))) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let inside = !path.as_os_str().is_empty() && !path.is_absolute() && !path.components().any(|c| c.as_os_str() == "..");
+        let Some(name) = name.filter(|_| inside) else {
+            bail!("[target.wasm] `{key}` lists `{}`; use a path inside the package", path.display());
+        };
+        if let Some(other) = names.insert(name.clone(), path)
+            && other != path
+        {
+            bail!(
+                "[target.wasm] `{}` and `{}` would both be shipped as `{name}`; each file lands next to the app module under its own name, so rename one",
+                other.display(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_c_sources(c: RawCSources) -> Result<CSources> {
@@ -1673,6 +1714,7 @@ impl RawManifest {
                                 Some(_) => bail!("[target.wasm] `wasm-opt` must be true, false or the path of a wasm-opt executable"),
                             };
                             let package_manager = w.package_manager.as_deref().map(str::parse).transpose()?;
+                            validate_web_resources(kind, environment, &w.web_resources, w.web_init.as_deref())?;
                             Ok(WasmTarget {
                                 environment,
                                 kind,
@@ -1681,6 +1723,8 @@ impl RawManifest {
                                 package_manager,
                                 npm_dependencies: w.npm_dependencies,
                                 wasm_opt,
+                                web_resources: w.web_resources,
+                                web_init: w.web_init,
                                 dependencies: deps.parse(&w.dependencies, "target.wasm.dependencies", false, Some(TargetKind::Wasm))?,
                             })
                         })
