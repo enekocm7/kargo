@@ -195,6 +195,15 @@ impl Model {
     }
 }
 
+/// The package a file at `path` belongs in by its directory under its source root: `app.model`
+/// for `src/app/model/User.kt`. `None` outside the roots and directly in one.
+pub fn directory_package(roots: &[(PathBuf, SourceSet)], path: &Path) -> Option<String> {
+    let (root, _) = roots.iter().find(|(root, _)| path.starts_with(root))?;
+    let dir = path.parent()?.strip_prefix(root).ok()?;
+    let segments: Vec<String> = dir.components().map(|c| features::escape_name(&c.as_os_str().to_string_lossy())).collect();
+    (!segments.is_empty()).then(|| segments.join("."))
+}
+
 /// The project's layout from its `kargo metadata` (without dependencies).
 pub fn model_from_metadata(meta: &Value) -> Model {
     let packages = meta["packages"].as_array().cloned().unwrap_or_default();
@@ -1694,7 +1703,7 @@ impl State {
             "textDocument/completion" => {
                 let Some(unit) = unit else { return Ok(json!({ "isIncomplete": false, "items": [] })) };
                 let trigger = params["context"]["triggerCharacter"].as_str();
-                if trigger.is_some_and(|t| t != "." && t != ":") {
+                if trigger.is_some_and(|t| t != "." && t != ":" && t != "@") {
                     return Ok(json!({ "isIncomplete": true, "items": [] }));
                 }
                 let (offset, _) = at(unit);
@@ -1705,7 +1714,9 @@ impl State {
                 {
                     return Ok(list.clone());
                 }
-                let mut list = features::completion(&an, unit, offset, CompletionOptions { snippets: self.snippets }, generation);
+                let opts =
+                    CompletionOptions { snippets: self.snippets, package: directory_package(&self.model.roots, &an.unit(unit).path) };
+                let mut list = features::completion(&an, unit, offset, opts, generation);
                 features::rank_recent(&mut list, &self.recent);
                 self.completions = Some((key, list.clone()));
                 Ok(list)
@@ -1990,6 +2001,18 @@ fn group_at(an: &Analyzer, unit: UnitId, tok: usize) -> Option<Vec<super::index:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_the_package_of_a_directory_under_its_source_root() {
+        let set = SourceSet { package: 0, kind: SetKind::Main, target: None };
+        let roots = vec![(PathBuf::from("/p/src-jvm"), set.clone()), (PathBuf::from("/p/src"), set)];
+        assert_eq!(directory_package(&roots, Path::new("/p/src/app/model/User.kt")).as_deref(), Some("app.model"));
+        assert_eq!(directory_package(&roots, Path::new("/p/src-jvm/app/Main.kt")).as_deref(), Some("app"));
+        // A keyword is backquoted.
+        assert_eq!(directory_package(&roots, Path::new("/p/src/app/fun/F.kt")).as_deref(), Some("app.`fun`"));
+        assert_eq!(directory_package(&roots, Path::new("/p/src/Main.kt")), None);
+        assert_eq!(directory_package(&roots, Path::new("/elsewhere/Main.kt")), None);
+    }
 
     #[test]
     fn reads_the_layout_from_metadata() {

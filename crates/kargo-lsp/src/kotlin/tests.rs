@@ -108,13 +108,16 @@ impl Fixture {
 
     fn labels(&self) -> Vec<String> {
         let (u, offset) = self.cursor();
-        let list = features::completion(&self.an(), u, offset, CompletionOptions { snippets: true }, 0);
+        let list = features::completion(&self.an(), u, offset, CompletionOptions { snippets: true, ..Default::default() }, 0);
         list["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_owned()).collect()
     }
 
     fn items(&self) -> Vec<Value> {
         let (u, offset) = self.cursor();
-        features::completion(&self.an(), u, offset, CompletionOptions { snippets: true }, 0)["items"].as_array().unwrap().clone()
+        features::completion(&self.an(), u, offset, CompletionOptions { snippets: true, ..Default::default() }, 0)["items"]
+            .as_array()
+            .unwrap()
+            .clone()
     }
 
     /// The token at the cursor.
@@ -320,7 +323,7 @@ fn completion_inserts_scaffolds_for_keywords_with_a_condition() {
     // Without snippet support, and when a parenthesis already follows, the plain keyword is inserted.
     let f = fixture(&[("src/Main.kt", "fun main() {\n    whi$0\n}\n")]);
     let (u, offset) = f.cursor();
-    let list = features::completion(&f.an(), u, offset, CompletionOptions { snippets: false }, 0);
+    let list = features::completion(&f.an(), u, offset, CompletionOptions { snippets: false, ..Default::default() }, 0);
     let plain = keyword(list["items"].as_array().unwrap(), "while");
     assert_eq!(plain["textEdit"]["newText"], "while");
     assert_eq!(plain["insertTextFormat"], 1);
@@ -732,7 +735,8 @@ fn platforms_against_the_real_standard_library() {
         let proj = Index::new(false, vec![Arc::new(Unit::new(PathBuf::from("/p/src/Main.kt"), text, origin))]);
         let packages = Packages { visible: vec![vec![0]], platforms: vec![platforms] };
         let an = Analyzer::new(&lib, &proj, &packages);
-        let list = features::completion(&an, UnitId { lib: false, unit: 0 }, at, CompletionOptions { snippets: true }, 0);
+        let list =
+            features::completion(&an, UnitId { lib: false, unit: 0 }, at, CompletionOptions { snippets: true, ..Default::default() }, 0);
         let labels: Vec<&str> = list["items"].as_array().unwrap().iter().filter_map(|i| i["label"].as_str()).collect();
         assert_eq!(labels.contains(&label), expected, "{label} in {target:?} code: {src:?}");
     }
@@ -820,7 +824,8 @@ fn against_the_real_standard_library() {
         let proj = Index::new(false, vec![Arc::new(Unit::new(PathBuf::from("/p/src/Main.kt"), text, origin))]);
         let an = Analyzer::new(&lib, &proj, &packages);
         let t = std::time::Instant::now();
-        let list = features::completion(&an, UnitId { lib: false, unit: 0 }, at, CompletionOptions { snippets: true }, 0);
+        let list =
+            features::completion(&an, UnitId { lib: false, unit: 0 }, at, CompletionOptions { snippets: true, ..Default::default() }, 0);
         let labels: Vec<String> = list["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_owned()).collect();
         let missing: Vec<&&str> = expected.iter().filter(|e| !labels.iter().any(|l| l == **e)).collect();
         eprintln!("{:>8.1?} {:>5} items, missing {:?}: {}", t.elapsed(), labels.len(), missing, src.lines().nth(1).unwrap_or(src).trim());
@@ -2266,7 +2271,7 @@ fn completion_puts_recently_inserted_names_first() {
     let src = "fun main() {\n    val alpha = 1\n    val beta = 2\n    $0\n}\n";
     let f = fixture(&[("src/Main.kt", src)]);
     let (u, offset) = f.cursor();
-    let mut list = features::completion(&f.an(), u, offset, CompletionOptions { snippets: true }, 0);
+    let mut list = features::completion(&f.an(), u, offset, CompletionOptions { snippets: true, ..Default::default() }, 0);
     assert_eq!(first_labels(list["items"].as_array().unwrap(), 2), vec!["alpha", "beta"]);
     let recent = std::collections::HashMap::from([("beta".to_owned(), 1u64)]);
     features::rank_recent(&mut list, &recent);
@@ -3450,4 +3455,283 @@ class Provider { operator fun provideDelegate(r: Any?, p: KProperty<*>): Cell = 
     one("var a by Cell()", "has no `setValue`");
     one("val a: Int by Cell()", "not the declared `Int`");
     one("val a: Int by Provider()", "not the declared `Int`");
+}
+
+// ----- completion outside expressions -----
+
+impl Fixture {
+    /// The items completed at the cursor with `opts`.
+    fn items_with(&self, opts: CompletionOptions) -> Vec<Value> {
+        let (u, offset) = self.cursor();
+        features::completion(&self.an(), u, offset, opts, 0)["items"].as_array().unwrap().clone()
+    }
+}
+
+#[test]
+fn completes_the_package_of_the_directory() {
+    let opts = || CompletionOptions { snippets: true, package: Some("app.model".into()) };
+    let f = fixture(&[("src/app/model/User.kt", "package $0\n\nclass User\n")]);
+    let items = f.items_with(opts());
+    assert_eq!(item(&items, "app.model")["textEdit"]["newText"], "app.model");
+    // The segments typed so far are replaced with the whole name.
+    let f = fixture(&[("src/app/model/User.kt", "package app.mo$0\n\nclass User\n")]);
+    let items = f.items_with(opts());
+    assert_eq!(item(&items, "app.model")["textEdit"]["range"]["start"]["character"], 8, "{items:?}");
+    // Something else typed gets nothing, and so does a file without a known directory.
+    let f = fixture(&[("src/app/model/User.kt", "package other$0\n")]);
+    assert!(f.items_with(opts()).is_empty());
+    assert!(fixture(&[("src/Main.kt", "package $0\n")]).labels().is_empty());
+}
+
+#[test]
+fn completes_import_stars_and_aliases() {
+    let labels = completes("import kotlin.collections.$0\n");
+    assert!(has(&labels, "*") && has(&labels, "List") && has(&labels, "listOf"), "{labels:?}");
+    assert!(!has(&completes("import kotlin.collections.Li$0\n"), "*"));
+    assert_eq!(completes("import kotlin.collections.List $0\n"), ["as"]);
+    assert_eq!(completes("import kotlin.collections.List a$0\n"), ["as"]);
+    // The alias is a new name.
+    assert!(completes("import kotlin.collections.List as $0\n").is_empty());
+}
+
+const SEALED_SHAPES: &str = "sealed interface Shape\nclass Circle(val r: Double) : Shape\nobject Empty : Shape\nclass Square : Shape\n";
+const COLORS: &str = "enum class Color { RED, GREEN, BLUE }\n";
+
+#[test]
+fn completes_the_branches_a_when_is_missing() {
+    let f = fixture(&[("src/Main.kt", &format!("{COLORS}fun f(c: Color) = when (c) {{\n    Color.RED -> 1\n    $0\n}}\n"))]);
+    let items = f.items();
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"Color.GREEN") && labels.contains(&"Color.BLUE") && !labels.contains(&"Color.RED"), "{labels:?}");
+    assert_eq!(item(&items, "Color.GREEN")["textEdit"]["newText"], "Color.GREEN -> ");
+    assert!(labels.contains(&"else"), "something is missing, so `else` adds something: {labels:?}");
+    // Typing the entry's name finds it.
+    let labels = completes(&format!("{COLORS}fun f(c: Color) = when (c) {{\n    Color.RED -> 1\n    GR$0\n}}\n"));
+    assert!(has(&labels, "Color.GREEN") && !has(&labels, "Color.BLUE"), "{labels:?}");
+
+    // Everything covered: neither the cases nor `else`.
+    let labels =
+        completes(&format!("{COLORS}fun f(c: Color) = when (c) {{\n    Color.RED, Color.GREEN -> 1\n    Color.BLUE -> 2\n    $0\n}}\n"));
+    assert!(!has(&labels, "else") && !labels.iter().any(|l| l.starts_with("Color.")), "{labels:?}");
+    // After a comma, another condition of the same branch.
+    let f = fixture(&[("src/Main.kt", &format!("{COLORS}fun f(c: Color) = when (c) {{\n    Color.RED, $0 -> 1\n}}\n"))]);
+    assert_eq!(item(&f.items(), "Color.GREEN")["textEdit"]["newText"], "Color.GREEN");
+
+    // A sealed type: `is` for classes, the object itself, and `null` for a nullable subject.
+    let labels = completes(&format!("{SEALED_SHAPES}fun f(s: Shape?) = when (s) {{\n    is Square -> 0\n    $0\n}}\n"));
+    for expected in ["is Circle", "Empty", "null"] {
+        assert!(has(&labels, expected), "{expected}: {labels:?}");
+    }
+    assert!(!has(&labels, "is Square"), "{labels:?}");
+    // `when (val x = ...)` and a Boolean.
+    let labels = completes(&format!("{SEALED_SHAPES}fun s(): Shape = Empty\nfun f() = when (val x = s()) {{\n    $0\n}}\n"));
+    assert!(has(&labels, "is Circle"), "{labels:?}");
+    let labels = completes("fun f(b: Boolean) = when (b) {\n    true -> 1\n    $0\n}\n");
+    assert!(has(&labels, "false") && has(&labels, "else"), "{labels:?}");
+
+    // `else` once only, and freely where the subject has no known cases.
+    let labels = completes(&format!("{COLORS}fun f(c: Color) = when (c) {{\n    else -> 1\n    $0\n}}\n"));
+    assert!(!has(&labels, "else"), "{labels:?}");
+    let labels = completes("fun f(n: Int) = when (n) {\n    1 -> 1\n    $0\n}\n");
+    assert!(has(&labels, "else"), "{labels:?}");
+
+    // A class in another package is imported with its case.
+    let shapes = format!("package shapes\n\n{SEALED_SHAPES}");
+    let f = fixture(&[
+        ("src/shapes/Shapes.kt", &shapes),
+        ("src/app/Main.kt", "package app\n\nimport shapes.Shape\n\nfun f(s: Shape) = when (s) {\n    $0\n}\n"),
+    ]);
+    let items = f.items();
+    assert_eq!(item(&items, "is Circle")["additionalTextEdits"][0]["newText"], "import shapes.Circle\n", "{items:?}");
+}
+
+#[test]
+fn adds_the_remaining_branches_of_a_when() {
+    let f = fixture(&[("src/Main.kt", &format!("{COLORS}fun f(c: Color) = wh$0en (c) {{\n    Color.RED -> 1\n}}\n"))]);
+    assert_eq!(
+        f.applied(Vec::new(), "Add remaining branches"),
+        format!(
+            "{COLORS}fun f(c: Color) = when (c) {{\n    Color.RED -> 1\n    Color.GREEN -> TODO(\"Not yet implemented\")\n    Color.BLUE -> TODO(\"Not yet implemented\")\n}}\n"
+        )
+    );
+    // Before `else`, which stays last; and into empty braces.
+    let f = fixture(&[(
+        "src/Main.kt",
+        &format!("{SEALED_SHAPES}fun f(s: Shape) {{\n    wh$0en (s) {{\n        is Circle -> 1\n        else -> 2\n    }}\n}}\n"),
+    )]);
+    assert_eq!(
+        f.applied(Vec::new(), "Add remaining branches"),
+        format!(
+            "{SEALED_SHAPES}fun f(s: Shape) {{\n    when (s) {{\n        is Circle -> 1\n        Empty -> TODO(\"Not yet implemented\")\n        is Square -> TODO(\"Not yet implemented\")\n        else -> 2\n    }}\n}}\n"
+        )
+    );
+    let f = fixture(&[("src/Main.kt", "fun f(b: Boolean) = wh$0en (b) {}\n")]);
+    assert_eq!(
+        f.applied(Vec::new(), "Add remaining branches"),
+        "fun f(b: Boolean) = when (b) {\n    true -> TODO(\"Not yet implemented\")\n    false -> TODO(\"Not yet implemented\")\n}\n"
+    );
+    let f = fixture(&[("src/Main.kt", &format!("{COLORS}fun f(c: Color) = wh$0en (c) {{\n    Color.RED, Color.GREEN -> 1\n}}\n"))]);
+    assert!(f.titles(Vec::new()).contains(&"Add the missing branch `Color.BLUE`".to_owned()), "{:?}", f.titles(Vec::new()));
+    // Complete, or over something without cases: no action.
+    let f = fixture(&[("src/Main.kt", "fun f(b: Boolean) = wh$0en (b) {\n    true -> 1\n    false -> 2\n}\n")]);
+    assert!(f.titles(Vec::new()).is_empty());
+    let f = fixture(&[("src/Main.kt", "fun f(n: Int) = wh$0en (n) {\n    1 -> 1\n}\n")]);
+    assert!(f.titles(Vec::new()).is_empty());
+}
+
+#[test]
+fn completes_annotation_targets_and_arguments() {
+    let decls = "annotation class Marker(val level: Int, val note: String = \"\")\nfun markerFun() = 1\n";
+    let labels = completes(&format!("{decls}class A(@$0 val x: Int)\n"));
+    assert!(has(&labels, "get:") && has(&labels, "field:") && has(&labels, "param:") && has(&labels, "Marker"), "{labels:?}");
+    assert!(!has(&labels, "file:") && !has(&labels, "markerFun"), "{labels:?}");
+    let labels = completes(&format!("@$0\n{decls}"));
+    assert!(has(&labels, "file:"), "at the top of the file: {labels:?}");
+    // After a target, annotation classes only.
+    let labels = completes(&format!("{decls}class A(@get:Mar$0 val x: Int)\n"));
+    assert!(has(&labels, "Marker") && !has(&labels, "markerFun"), "{labels:?}");
+    // The parameters of a Kotlin annotation's constructor.
+    let f = fixture(&[("src/Main.kt", &format!("{decls}@Marker($0)\nclass B\n"))]);
+    let items = f.items();
+    assert_eq!(item(&items, "level")["textEdit"]["newText"], "level = ");
+    let labels = completes(&format!("{decls}@Marker(level = 1, $0)\nclass B\n"));
+    assert!(has(&labels, "note") && !has(&labels, "level"), "{labels:?}");
+}
+
+#[test]
+fn completes_values_in_string_templates() {
+    let src = "class User(val name: String) {\n    fun greet(count: Int) = \"$na$0\"\n}\n";
+    let labels = completes(src);
+    assert!(has(&labels, "name"), "{labels:?}");
+    let labels = completes(&src.replace("$na$0", "$c$0"));
+    assert!(has(&labels, "count") && !has(&labels, "greet") && !has(&labels, "class"), "{labels:?}");
+    let labels = completes(&src.replace("$na$0", "Hi $th$0"));
+    assert!(has(&labels, "this"), "{labels:?}");
+    // `${ }` is a full expression.
+    let labels = completes(&src.replace("$na$0", "${na$0}"));
+    assert!(has(&labels, "name"), "{labels:?}");
+    let labels = completes(&src.replace("$na$0", "${name.$0}"));
+    assert!(has(&labels, "length"), "{labels:?}");
+    let labels = completes(&src.replace("$na$0", "${gr$0}"));
+    assert!(has(&labels, "greet"), "{labels:?}");
+}
+
+#[test]
+fn completes_supertypes_receivers_and_type_parameters() {
+    let decls = "interface Shape\ninterface Named\nopen class Base(val x: Int)\nabstract class Plain\nclass Final\n";
+    let f = fixture(&[("src/Main.kt", &format!("{decls}class A : $0\n"))]);
+    let items = f.items();
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    for expected in ["Shape", "Named", "Base", "Plain"] {
+        assert!(labels.contains(&expected), "{expected}: {labels:?}");
+    }
+    assert!(!labels.contains(&"Final") && !labels.contains(&"A") && !labels.contains(&"println"), "{labels:?}");
+    assert_eq!(item(&items, "Base")["textEdit"]["newText"], "Base($0)");
+    assert_eq!(item(&items, "Plain")["textEdit"]["newText"], "Plain()");
+    assert_eq!(item(&items, "Shape")["textEdit"]["newText"], "Shape");
+    // After the first supertype, and after a constructor.
+    let labels = completes(&format!("{decls}class A(val n: Int) : Base(n), $0\n"));
+    assert!(has(&labels, "Shape") && !has(&labels, "Final"), "{labels:?}");
+    // An interface extends interfaces only; an object expression takes classes too.
+    let labels = completes(&format!("{decls}interface I : $0\n"));
+    assert!(has(&labels, "Shape") && !has(&labels, "Base"), "{labels:?}");
+    let labels = completes(&format!("{decls}val o = object : $0\n"));
+    assert!(has(&labels, "Base") && has(&labels, "Shape"), "{labels:?}");
+
+    // The receiver type after `fun`, and nothing after it: a new name.
+    let labels = completes("fun Str$0\n");
+    assert!(has(&labels, "String") && !has(&labels, "println"), "{labels:?}");
+    let labels = completes("fun <T> Li$0\n");
+    assert!(has(&labels, "List") && !has(&labels, "listOf"), "{labels:?}");
+    assert!(completes("fun String.$0\n").is_empty());
+
+    // Type parameters in scope, in types.
+    let labels = completes("fun <Item> f(x: It$0) {}\n");
+    assert!(has(&labels, "Item"), "{labels:?}");
+    let labels = completes("class Box<E> {\n    fun get(): $0\n}\n");
+    assert!(has(&labels, "E") && has(&labels, "String"), "{labels:?}");
+    let labels = completes("val xs: List<$0>\n");
+    assert!(has(&labels, "String") && !has(&labels, "println"), "{labels:?}");
+    let labels = completes("fun <Item> f(xs: List<It$0>) {}\n");
+    assert!(has(&labels, "Item"), "{labels:?}");
+}
+
+#[test]
+fn new_names_get_nothing() {
+    for src in [
+        "val $0",
+        "fun f() {\n    var co$0\n}\n",
+        "class $0",
+        "interface Sh$0",
+        "object $0",
+        "typealias $0",
+        "fun <$0",
+        "class Box<$0",
+        "fun f() {\n    try {} catch ($0\n}\n",
+        "fun f() {\n    for ($0\n}\n",
+    ] {
+        assert!(completes(src).is_empty(), "{src}: {:?}", completes(src));
+    }
+    // A parameter's name: only the modifiers that fit before it.
+    assert_eq!(completes("fun f($0"), ["vararg", "noinline", "crossinline"]);
+    assert_eq!(completes("fun f(a: Int, v$0"), ["vararg"]);
+    let labels = completes("class A($0");
+    assert!(has(&labels, "val") && has(&labels, "var") && has(&labels, "private") && !has(&labels, "println"), "{labels:?}");
+    let labels = completes("class A private constructor(v$0");
+    assert!(has(&labels, "val"), "{labels:?}");
+    assert_eq!(completes("class A {\n    constructor(v$0\n}\n"), ["vararg"]);
+    // Arguments of calls are expressions still.
+    assert!(has(&completes("fun f(a: Int) = a\nfun g() = f($0"), "a ="));
+}
+
+#[test]
+fn completes_class_body_keywords() {
+    let labels = completes("class A {\n    $0\n}\n");
+    for expected in ["constructor", "init", "companion object", "fun", "val"] {
+        assert!(has(&labels, expected), "{expected}: {labels:?}");
+    }
+    let labels = completes("interface I {\n    $0\n}\n");
+    assert!(!has(&labels, "constructor") && !has(&labels, "init") && has(&labels, "companion object"), "{labels:?}");
+    let labels = completes("object O {\n    $0\n}\n");
+    assert!(!has(&labels, "constructor") && has(&labels, "init") && !has(&labels, "companion object"), "{labels:?}");
+    let labels = completes("class A {\n    companion object {}\n    $0\n}\n");
+    assert!(!has(&labels, "companion object"), "{labels:?}");
+    // Not in functions.
+    let labels = completes("class A {\n    fun f() {\n        $0\n    }\n}\n");
+    assert!(!has(&labels, "constructor") && !has(&labels, "init"), "{labels:?}");
+}
+
+#[test]
+fn completes_labels_in_scope() {
+    let labels = completes("fun f() {\n    listOf(1).forEach {\n        return@$0\n    }\n}\n");
+    assert_eq!(labels, ["forEach"]);
+    let labels = completes("fun f() {\n    run outer@{\n        listOf(1).map { return@o$0 }\n    }\n}\n");
+    assert_eq!(labels, ["outer"]);
+    let labels = completes(
+        "fun f() {\n    loop@ for (i in 1..2) {\n        inner@ while (true) {\n            break@$0\n        }\n    }\n    done@ for (j in 1..2) {}\n}\n",
+    );
+    assert_eq!(labels, ["loop", "inner"]);
+    let labels = completes("fun f() {\n    loop@ for (i in 1..2) {\n        continue@l$0\n    }\n}\n");
+    assert_eq!(labels, ["loop"]);
+    let labels = completes("class Outer {\n    inner class Inner {\n        fun String.f() = this@$0\n    }\n}\n");
+    assert_eq!(labels, ["f", "Inner", "Outer"]);
+    let labels = completes("fun f() {\n    buildString {\n        this@$0\n    }\n}\n");
+    assert_eq!(labels, ["buildString"]);
+    // No labels: nothing, not annotations.
+    assert!(completes("fun f() {\n    break@$0\n}\n").is_empty());
+}
+
+#[test]
+fn completes_lambda_parameter_names() {
+    let decl = "fun call(block: (String, Int) -> Unit) {}\n";
+    let f = fixture(&[("src/Main.kt", &format!("{decl}fun main() {{\n    call {{ $0 }}\n}}\n"))]);
+    let items = f.items();
+    assert_eq!(item(&items, "string, int ->")["textEdit"]["newText"], "string, int -> ");
+    let labels = completes(&format!("{decl}fun main() {{\n    call {{ s$0 }}\n}}\n"));
+    assert!(has(&labels, "string, int ->"), "{labels:?}");
+    let labels = completes("fun main() {\n    listOf(\"a\").map { $0 }\n}\n");
+    assert!(has(&labels, "string ->"), "{labels:?}");
+    // A lambda without parameters gets none.
+    let labels = completes("fun main() {\n    run { $0 }\n}\n");
+    assert!(!labels.iter().any(|l| l.ends_with("->")), "{labels:?}");
 }

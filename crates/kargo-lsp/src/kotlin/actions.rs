@@ -1,6 +1,6 @@
 //! Code actions for Kotlin files: importing an unresolved name, organizing the imports, adding
 //! the dependency an unresolved import needs, implementing the abstract members a class lacks,
-//! adding the `actual` declarations an `expect` one is missing, and quick fixes for the compiler
+//! adding the branches a `when` over an enum or a sealed type is missing, adding the `actual` declarations an `expect` one is missing, and quick fixes for the compiler
 //! messages of `kargo check` it recognises (a missing `override`, an unused variable).
 //!
 //! A dependency is added by Kargo's [`crate::actions::ADD_DEPENDENCY`] command, which `kargo lsp`
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::features::{display_ty, escape_name, fully_known, targets_at};
+use super::features::{display_ty, escape_name, fully_known, targets_at, when_cases};
 use super::index::{DEFAULT_IMPORTS, Origin, SourceSet, SymId, Unit, UnitId, is_internal_package};
 use super::lexer::{self, HARD_KEYWORDS, Tok};
 use super::resolve::{Analyzer, Ctx, Subst, Ty, chain_start};
@@ -59,6 +59,7 @@ pub fn code_actions(an: &Analyzer, req: &Request) -> Vec<Value> {
         import_actions(an, req, &lines, &mut out);
         dependency_actions(an, req, &lines, &mut out);
         implement_actions(an, req, &lines, &mut out);
+        when_actions(an, req, &lines, &mut out);
         actual_actions(an, req, &lines, &mut out);
         compiler_fixes(an, req, &mut out);
     }
@@ -623,6 +624,55 @@ fn class_body(file: &File, d: &Decl) -> Option<(usize, usize)> {
 
 /// Offers to implement the abstract members that a class on the selected lines inherits and
 /// doesn't implement.
+/// "Add remaining branches" on a `when` over an enum, a sealed type or a `Boolean` whose
+/// branches don't name every case: one `Case -> TODO(...)` each, before the `else` branch.
+fn when_actions(an: &Analyzer, req: &Request, lines: &Range<usize>, out: &mut Vec<Value>) {
+    let u = req.unit;
+    let unit = an.unit(u);
+    let (lx, src) = (&unit.file.lexed, &unit.text);
+    for i in 0..lx.tokens.len() {
+        if !lx.is(src, i, "when") || !touches(lines, &lx.tokens[i].span()) {
+            continue;
+        }
+        let brace = if lx.kind(i + 1) == Some(Tok::LParen) {
+            match lx.matching[i + 1].filter(|&c| c > i + 1) {
+                Some(close) => close + 1,
+                None => continue,
+            }
+        } else {
+            i + 1
+        };
+        let Some(close) = lx.matching.get(brace).copied().flatten().filter(|&c| c > brace) else { continue };
+        let Some(cases) = when_cases(an, u, brace, None) else { continue };
+        if !cases.exhaustive || cases.missing.is_empty() {
+            continue;
+        }
+        let when_indent = indent_at(src, lx.tokens[i].start).to_owned();
+        let branch_indent = if brace + 1 < close && lx.tokens[brace + 1].nl {
+            indent_at(src, lx.tokens[brace + 1].start).to_owned()
+        } else {
+            format!("{when_indent}    ")
+        };
+        let branches: String = cases.missing.iter().map(|c| format!("{branch_indent}{} -> {TODO}\n", c.text)).collect();
+        // The `else` branch stays last.
+        let anchor = lx.tokens[cases.else_at.unwrap_or(close)].start;
+        let at = line_start(src, anchor);
+        let mut edits = vec![if src[at..anchor].trim().is_empty() {
+            text_edit(src, at..at, branches)
+        } else {
+            let indent = if cases.else_at.is_some() { &branch_indent } else { &when_indent };
+            text_edit(src, anchor..anchor, format!("\n{branches}{indent}"))
+        }];
+        let imports: BTreeSet<&String> = cases.missing.iter().filter_map(|c| c.import.as_ref()).collect();
+        edits.extend(imports.into_iter().map(|fq| import_edit(unit, fq)));
+        let title = match cases.missing.as_slice() {
+            [one] => format!("Add the missing branch `{}`", one.text),
+            _ => "Add remaining branches".to_owned(),
+        };
+        out.push(edit_action(title, &text::path_to_uri(&unit.path), edits, None, true));
+    }
+}
+
 fn implement_actions(an: &Analyzer, req: &Request, lines: &Range<usize>, out: &mut Vec<Value>) {
     let u = req.unit;
     let unit = an.unit(u);

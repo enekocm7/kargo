@@ -43,7 +43,7 @@ pub fn implementations(an: &Analyzer, sym: SymId) -> Vec<SymId> {
 
 /// The classes of the project that have `class` among their supertypes: all of them, or with
 /// `transitive` false only the ones that name it directly.
-fn subtypes(an: &Analyzer, class: SymId, transitive: bool) -> Vec<SymId> {
+pub(super) fn subtypes(an: &Analyzer, class: SymId, transitive: bool) -> Vec<SymId> {
     let fq = an.fq(class);
     let mut out = Vec::new();
     for (ui, unit) in an.proj.units.iter().enumerate() {
@@ -73,7 +73,7 @@ fn subtypes(an: &Analyzer, class: SymId, transitive: bool) -> Vec<SymId> {
 }
 
 /// The classes `class` names after its `:`.
-fn direct_supertypes(an: &Analyzer, class: SymId) -> Vec<SymId> {
+pub(super) fn direct_supertypes(an: &Analyzer, class: SymId) -> Vec<SymId> {
     let ctx = Ctx { unit: class.unit_id(), decl: Some(class.decl_id()) };
     an.decl(class)
         .supertypes
