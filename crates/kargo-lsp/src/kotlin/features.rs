@@ -905,9 +905,11 @@ pub fn display_ty(an: &Analyzer, ty: &Ty) -> String {
 
 // ----- completion -----
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CompletionOptions {
     pub snippets: bool,
+    /// The package the file's directory names under its source root, offered after `package`.
+    pub package: Option<String>,
 }
 
 const KEYWORDS: &[&str] = &[
@@ -918,6 +920,7 @@ const KEYWORDS: &[&str] = &[
     "class",
     "companion",
     "const",
+    "constructor",
     "continue",
     "data",
     "do",
@@ -996,11 +999,25 @@ struct Collector<'a, 'b> {
     types_only: bool,
     /// Only annotation classes (after `@`).
     annotations_only: bool,
+    /// Only what a class can extend or implement (after `class Foo :`): interfaces, and open
+    /// classes with their constructor call unless `interfaces_only`.
+    supertypes: Option<Supertypes>,
+    /// Only values (after `$` in a string).
+    values_only: bool,
     /// Whether some classes were left out, so the list is asked for again as more is typed.
     incomplete: bool,
     generation: u64,
     /// The type the expression being typed is expected to have, so values of it rank first.
     expected: Option<Ty>,
+}
+
+/// The supertype list of a class header being completed.
+#[derive(Debug, Clone)]
+struct Supertypes {
+    /// The class being declared, which is not its own supertype.
+    class: String,
+    /// An interface extends interfaces only.
+    interfaces_only: bool,
 }
 
 /// The most JDK classes one completion offers: each one parses its file, and the rest of the
@@ -1035,6 +1052,14 @@ impl Collector<'_, '_> {
             return;
         }
         if self.annotations_only && d.kind != Kind::Annotation {
+            return;
+        }
+        if let Some(s) = &self.supertypes
+            && !self.extendable(m.sym, s)
+        {
+            return;
+        }
+        if self.values_only && !(d.kind.is_value() || matches!(d.kind, Kind::Object | Kind::EnumEntry)) {
             return;
         }
         if m.sym.lib && (d.has("@PublishedApi") || self.an.package_of(m.sym).starts_with("kotlin.internal")) {
@@ -1115,6 +1140,24 @@ impl Collector<'_, '_> {
         self.items.push(item);
     }
 
+    /// Whether a class can name `sym` among its supertypes: an interface, or a class that is
+    /// open, abstract or sealed (a Java class unless it is final), other than itself.
+    fn extendable(&self, sym: SymId, s: &Supertypes) -> bool {
+        let d = self.an.decl(sym);
+        if d.name == s.class {
+            return false;
+        }
+        match d.kind {
+            Kind::Interface => true,
+            Kind::Class if !s.interfaces_only => {
+                let java = self.an.unit(sym.unit_id()).is_java();
+                ["open", "abstract", "sealed"].iter().any(|m| d.has(m)) || (java && !d.has("final")) || self.an.fq(sym) == "kotlin.Any"
+            }
+            Kind::TypeAlias => true,
+            _ => false,
+        }
+    }
+
     /// Whether the value or call `m` has the type the expression is expected to have.
     fn fits_expected(&self, m: &Member, group: Group) -> bool {
         let Some(expected) = &self.expected else { return false };
@@ -1168,6 +1211,15 @@ impl Collector<'_, '_> {
     }
 
     fn insert_text(&self, d: &Decl, name: &str, decls: &[Decl]) -> (String, bool) {
+        // A superclass is named with the call of its constructor.
+        if self.supertypes.is_some() && d.kind == Kind::Class {
+            if self.paren_follows {
+                return (name.to_owned(), false);
+            }
+            let arguments =
+                !d.params.is_empty() || d.members.iter().any(|&m| decls[m].kind == Kind::Constructor && !decls[m].params.is_empty());
+            return if arguments && self.opts.snippets { (format!("{name}($0)"), true) } else { (format!("{name}()"), false) };
+        }
         if d.kind != Kind::Function || self.paren_follows || self.types_only {
             return (name.to_owned(), false);
         }
@@ -1207,8 +1259,10 @@ impl Collector<'_, '_> {
             Some(s) => (s.to_owned(), true),
             None => (word.to_owned(), false),
         };
+        // `companion` only ever declares the companion object.
+        let (label, new_text) = if word == "companion" { ("companion object", "companion object".to_owned()) } else { (word, new_text) };
         self.items.push(json!({
-            "label": word,
+            "label": label,
             "kind": 14,
             "sortText": format!("{}{}", Group::Keyword as u8, word),
             "textEdit": { "range": self.range, "newText": new_text },
@@ -1233,13 +1287,26 @@ impl Collector<'_, '_> {
 /// Names for the parameters of a lambda of the function type `func`, from their types: `Int` is
 /// `int`, a type parameter `T` is `t`, and repeated names are numbered.
 fn lambda_parameter_names(func: &super::syntax::FuncType) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for (i, p) in func.params.iter().enumerate() {
-        if let Some(written) = func.names.get(i).filter(|n| !n.is_empty()) {
-            names.push(written.clone());
-            continue;
+    let mut names = parameter_names(
+        func.params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| func.names.get(i).filter(|n| !n.is_empty()).map_or_else(|| p.simple_name(), String::as_str)),
+    );
+    // Names written in the function type are kept as they are.
+    for (i, n) in func.names.iter().enumerate() {
+        if !n.is_empty() && i < names.len() {
+            names[i] = n.clone();
         }
-        let simple = p.simple_name();
+    }
+    names
+}
+
+/// Names for parameters whose types have the simple names `types`: `Int` is `int`, a type
+/// parameter `T` is `t`, and repeated names are numbered.
+fn parameter_names<'a>(types: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for simple in types {
         let mut base = if simple.chars().count() == 1 || simple.is_empty() || simple == "*" {
             simple.to_lowercase()
         } else {
@@ -1351,19 +1418,75 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
         paren_follows,
         types_only,
         annotations_only: prev_kind == Some(Tok::At),
+        supertypes: None,
+        values_only: false,
         incomplete: false,
         generation,
         expected: None,
     };
-    // `package a.b` gets nothing; `import a.b.` gets packages and declarations.
+    // `return@`, `break@`, `continue@`, `this@` and `super@` take the labels in scope.
+    if let Some(word) = label_keyword(src, p) {
+        label_completion(&mut c, p, word);
+        return finish(c);
+    }
+    // `package a.b` gets the package of the file's directory; `import a.b.` gets packages and
+    // declarations.
     let line_start = src[..p].rfind('\n').map_or(0, |i| i + 1);
     let line = src[line_start..p].trim_start();
-    if line.starts_with("package ") {
-        return empty;
+    if let Some(rest) = line.strip_prefix("package ") {
+        package_completion(&mut c, p - rest.trim_start().len(), offset);
+        return finish(c);
     }
     if let Some(path) = line.strip_prefix("import ") {
-        import_completion(&mut c, path.trim());
+        match path.split_whitespace().count() {
+            0 => import_completion(&mut c, ""),
+            // `import a.B ` takes an alias.
+            1 if src[..p].ends_with(char::is_whitespace) => c.keyword("as"),
+            1 => import_completion(&mut c, path.trim()),
+            // The alias itself is a new name.
+            _ => return empty,
+        }
         return finish(c);
+    }
+    // `"$name"` takes values only.
+    if src[..p].ends_with('$') && !prefix.is_empty() && matches!(prev_kind, Some(Tok::StrOpen | Tok::Str | Tok::Ident | Tok::RBrace)) {
+        c.values_only = true;
+        scope_completion(&mut c, p);
+        c.keyword("this");
+        return finish(c);
+    }
+    if let Some(prev) = prev {
+        // A use-site target, `@get:`, takes annotations only.
+        if prev_kind == Some(Tok::Colon)
+            && prev >= 2
+            && lx.kind(prev - 2) == Some(Tok::At)
+            && USE_SITE_TARGETS.contains(&lx.text(src, prev - 1))
+        {
+            c.annotations_only = true;
+            c.types_only = false;
+        }
+        if prev_kind == Some(Tok::At) {
+            use_site_target_completion(&mut c, prev);
+        }
+        if let Some(supertypes) = supertype_list(lx, src, prev) {
+            c.types_only = true;
+            c.supertypes = Some(supertypes);
+        }
+        match name_position(file, src, prev) {
+            Some(NamePosition::New) => return empty,
+            Some(NamePosition::Parameter(words)) => {
+                for word in words {
+                    c.keyword(word);
+                }
+                return finish(c);
+            }
+            Some(NamePosition::Type) => c.types_only = true,
+            None => {}
+        }
+        // `call { ` offers names for the lambda's parameters.
+        if prev_kind == Some(Tok::LBrace) {
+            lambda_parameters_completion(&mut c, prev);
+        }
     }
     // The arguments of an annotation: `@Name(arg = ...)`.
     if let Some(prev) = prev.filter(|_| matches!(prev_kind, Some(Tok::LParen | Tok::Comma))) {
@@ -1398,6 +1521,14 @@ pub fn completion(an: &Analyzer, u: UnitId, offset: usize, opts: CompletionOptio
         Some(Tok::Dot | Tok::SafeDot) => {
             let dot = prev.unwrap_or_default();
             let start = chain_start(src, lx, dot);
+            // `fun String.` declares a name, unless the receiver type is being qualified.
+            let declaring = prev_kind == Some(Tok::Dot) && receiver_fun(lx, src, dot).is_some();
+            if declaring {
+                c.types_only = true;
+            }
+            if declaring && !matches!(an.infer(u, start, dot), Some(Ty::Package(_))) {
+                return empty;
+            }
             if start < dot {
                 // A qualified annotation name, `@pkg.Name`, takes annotations only.
                 c.annotations_only = start > 0 && lx.kind(start - 1) == Some(Tok::At);
@@ -1492,6 +1623,517 @@ fn operator_name_completion(c: &mut Collector) {
     }
 }
 
+// ----- positions that are not expressions -----
+
+/// The use-site targets of an annotation: `@get:Name`.
+const USE_SITE_TARGETS: &[&str] = &["field", "get", "set", "param", "setparam", "property", "receiver", "delegate", "file"];
+
+/// Offers the use-site targets after the `@` at token `at`; `file:` only before the package
+/// and the declarations.
+fn use_site_target_completion(c: &mut Collector, at: usize) {
+    let file = c.an.file(c.u);
+    let start = file.lexed.tokens[at].start;
+    // A declaration's span starts at its annotations.
+    let file_level = file.package_tokens.first().is_none_or(|&t| start < file.lexed.tokens[t].start)
+        && file.top.first().is_none_or(|&t| start <= file.decls[t].span.start);
+    for &target in USE_SITE_TARGETS {
+        if (target == "file" && !file_level) || !matches_prefix(target, &c.prefix) {
+            continue;
+        }
+        c.items.push(json!({
+            "label": format!("{target}:"),
+            "kind": 14,
+            "detail": "use-site target",
+            "sortText": format!("{}{target}", Group::Keyword as u8),
+            "filterText": target,
+            "textEdit": { "range": c.range, "newText": format!("{target}:") },
+        }));
+    }
+}
+
+/// Offers the package of the file's directory after `package`; `start` is where the name starts.
+fn package_completion(c: &mut Collector, start: usize, offset: usize) {
+    let src = &c.an.unit(c.u).text;
+    let Some(package) = c.opts.package.clone().filter(|p| !p.is_empty()) else { return };
+    if !package.to_lowercase().starts_with(&src[start..offset].to_lowercase()) {
+        return;
+    }
+    c.items.push(json!({
+        "label": package,
+        "kind": 9,
+        "detail": "the package of the file's directory",
+        "sortText": "0",
+        "filterText": package,
+        "textEdit": { "range": text::range(src, start..offset), "newText": package },
+    }));
+}
+
+/// The keyword whose label reference starts at `p`: `return` in `return@` and `return@na`.
+fn label_keyword(src: &str, p: usize) -> Option<&'static str> {
+    let before = src[..p].strip_suffix('@')?;
+    ["return", "break", "continue", "this", "super"]
+        .into_iter()
+        .find(|w| before.strip_suffix(w).is_some_and(|rest| !rest.chars().next_back().is_some_and(lexer::is_ident_char)))
+}
+
+/// Offers the labels the `keyword@` at `offset` can name: lambdas for `return`, loops for
+/// `break` and `continue`, classes, extension functions and lambdas with a receiver for `this`,
+/// classes for `super`.
+fn label_completion(c: &mut Collector, offset: usize, keyword: &str) {
+    let an = c.an;
+    let u = c.u;
+    let file = an.file(u);
+    let lx = &file.lexed;
+    let src = &an.unit(u).text;
+    let mut labels: Vec<(String, &str)> = Vec::new();
+    if matches!(keyword, "break" | "continue") {
+        for i in 0..lx.tokens.len() {
+            if lx.kind(i) != Some(Tok::Label) || lx.tokens[i].start >= offset {
+                continue;
+            }
+            if let Some((open, close)) = loop_body(lx, src, i + 1)
+                && lx.tokens[open].end <= offset
+                && close.is_none_or(|close| offset <= lx.tokens[close].start)
+            {
+                labels.push((lx.text(src, i).to_owned(), "loop"));
+            }
+        }
+    } else {
+        for sid in file.scope_chain(offset) {
+            match file.scopes[sid].kind {
+                ScopeKind::Lambda { brace, .. } => {
+                    let fits = keyword == "return" || (keyword == "this" && an.lambda_ctx(u, brace).is_some_and(|l| l.receiver.is_some()));
+                    if let Some(name) = lambda_label(lx, src, brace).filter(|_| fits) {
+                        labels.push((name, "lambda"));
+                    }
+                }
+                ScopeKind::Class(cd) if matches!(keyword, "this" | "super") && !file.decls[cd].name.is_empty() => {
+                    labels.push((file.decls[cd].name.clone(), "class"));
+                }
+                ScopeKind::Function(fd) if keyword == "this" && file.decls[fd].receiver.is_some() => {
+                    labels.push((file.decls[fd].name.clone(), "extension receiver"));
+                }
+                _ => {}
+            }
+        }
+    }
+    for (name, what) in labels {
+        if !matches_prefix(&name, &c.prefix) || !c.seen.insert(format!("label|{name}")) {
+            continue;
+        }
+        c.items.push(json!({
+            "label": name,
+            "kind": 18,
+            "detail": format!("{keyword}@{name}: {what}"),
+            "sortText": format!("{}{:04}", Group::Local as u8, c.items.len()),
+            "textEdit": { "range": c.range, "newText": name },
+        }));
+    }
+}
+
+/// The `{` and `}` of the body of the loop whose keyword is token `k`; no `}` while it is unclosed.
+fn loop_body(lx: &lexer::Lexed, src: &str, k: usize) -> Option<(usize, Option<usize>)> {
+    let open = if lx.is(src, k, "do") {
+        k + 1
+    } else if (lx.is(src, k, "for") || lx.is(src, k, "while")) && lx.kind(k + 1) == Some(Tok::LParen) {
+        lx.matching[k + 1].filter(|&c| c > k + 1)? + 1
+    } else {
+        return None;
+    };
+    (lx.kind(open) == Some(Tok::LBrace)).then(|| (open, lx.matching[open].filter(|&c| c > open)))
+}
+
+/// The label of the lambda whose `{` is token `brace`: written, `name@{`, or else the name of
+/// the function it is passed to.
+fn lambda_label(lx: &lexer::Lexed, src: &str, brace: usize) -> Option<String> {
+    let before = brace.checked_sub(1)?;
+    let callee = |open: usize| {
+        open.checked_sub(1)
+            .filter(|&k| lx.kind(k) == Some(Tok::Ident) && !HARD_KEYWORDS.contains(&lx.text(src, k)))
+            .map(|k| lx.text(src, k).to_owned())
+    };
+    match lx.kind(before)? {
+        Tok::Label => Some(lx.text(src, before).to_owned()),
+        Tok::Ident => callee(brace),
+        Tok::RParen => callee(lx.matching[before].filter(|&o| o < before)?),
+        Tok::LParen => callee(before),
+        Tok::Comma => callee(enclosing_open_paren(lx, before)?),
+        _ => None,
+    }
+}
+
+/// What the position after the token `prev` is, when it is not an expression.
+enum NamePosition {
+    /// A new name: after `val`, `class` or `fun <`, in `catch (`.
+    New,
+    /// The name of a parameter, before which only these modifiers fit.
+    Parameter(&'static [&'static str]),
+    /// A type: the receiver after `fun`, or a type argument after `List<`.
+    Type,
+}
+
+const CLASS_PARAMETER_MODIFIERS: &[&str] = &["val", "var", "vararg", "private", "protected", "internal", "public", "override"];
+const PARAMETER_MODIFIERS: &[&str] = &["vararg", "noinline", "crossinline"];
+
+fn name_position(file: &File, src: &str, prev: usize) -> Option<NamePosition> {
+    let lx = &file.lexed;
+    match lx.kind(prev)? {
+        Tok::Ident => match lx.text(src, prev) {
+            "val" | "var" | "class" | "interface" | "object" | "typealias" => Some(NamePosition::New),
+            "fun" => Some(NamePosition::Type),
+            _ => None,
+        },
+        // `fun <T> `
+        Tok::Gt => {
+            let lt = super::resolve::matching_lt(lx, prev)?;
+            (lt > 0 && lx.is(src, lt - 1, "fun")).then_some(NamePosition::Type)
+        }
+        Tok::Lt => {
+            let before = prev.checked_sub(1)?;
+            let declares = lx.is(src, before, "fun")
+                || (before > 0
+                    && lx.kind(before) == Some(Tok::Ident)
+                    && ["class", "interface", "typealias"].iter().any(|w| lx.is(src, before - 1, w)));
+            if declares {
+                return Some(NamePosition::New);
+            }
+            let type_args = lx.kind(before) == Some(Tok::Ident)
+                && lx.tokens[before].end == lx.tokens[prev].start
+                && lx.text(src, before).starts_with(char::is_uppercase);
+            type_args.then_some(NamePosition::Type)
+        }
+        Tok::LParen | Tok::Comma => {
+            let open = if lx.kind(prev) == Some(Tok::LParen) { prev } else { enclosing_open_paren(lx, prev)? };
+            let callee = open.checked_sub(1)?;
+            if lx.is(src, callee, "catch") || lx.is(src, callee, "for") {
+                return Some(NamePosition::New);
+            }
+            if receiver_fun(lx, src, open).is_some() {
+                return Some(NamePosition::Parameter(PARAMETER_MODIFIERS));
+            }
+            // A primary constructor: the first `(` after the class's name.
+            let open_start = lx.tokens[open].start;
+            let primary = file.decls.iter().any(|d| {
+                let from = lx.at_or_after(d.name_span.end);
+                d.kind.is_class()
+                    && !d.name.is_empty()
+                    && from <= open
+                    && (from..open).all(|k| !matches!(lx.kind(k), Some(Tok::LParen | Tok::LBrace | Tok::Eq | Tok::Colon)))
+                    && d.name_span.end <= open_start
+            });
+            if primary {
+                return Some(NamePosition::Parameter(CLASS_PARAMETER_MODIFIERS));
+            }
+            lx.is(src, callee, "constructor").then_some(NamePosition::Parameter(PARAMETER_MODIFIERS))
+        }
+        _ => None,
+    }
+}
+
+/// The supertype list the `:` or `,` at token `prev` is in: `class Foo(x: Int) :`, `object :`.
+fn supertype_list(lx: &lexer::Lexed, src: &str, prev: usize) -> Option<Supertypes> {
+    let colon = match lx.kind(prev)? {
+        Tok::Colon => prev,
+        Tok::Comma => {
+            // The `:` before the supertypes already written.
+            let mut k = prev;
+            loop {
+                k = k.checked_sub(1)?;
+                match lx.kind(k)? {
+                    Tok::Colon => break k,
+                    Tok::RParen => k = lx.matching[k].filter(|&o| o < k)?,
+                    Tok::Gt => k = super::resolve::matching_lt(lx, k)?,
+                    Tok::Ident | Tok::Dot | Tok::Comma | Tok::Question => {}
+                    _ => return None,
+                }
+            }
+        }
+        _ => return None,
+    };
+    let mut k = colon.checked_sub(1)?;
+    if lx.is(src, k, "object") {
+        return Some(Supertypes { class: String::new(), interfaces_only: false });
+    }
+    if lx.kind(k) == Some(Tok::RParen) {
+        k = lx.matching[k].filter(|&o| o < k)?.checked_sub(1)?;
+        // `class A private constructor(...)`
+        while lx.kind(k) == Some(Tok::Ident) && (lx.is(src, k, "constructor") || MODIFIERS.contains(&lx.text(src, k))) {
+            k = k.checked_sub(1)?;
+        }
+    }
+    if lx.kind(k) == Some(Tok::Gt) {
+        k = super::resolve::matching_lt(lx, k)?.checked_sub(1)?;
+    }
+    if lx.kind(k) != Some(Tok::Ident) {
+        return None;
+    }
+    let keyword = k.checked_sub(1)?;
+    ["class", "object", "interface"]
+        .iter()
+        .any(|w| lx.is(src, keyword, w))
+        .then(|| Supertypes { class: lx.text(src, k).to_owned(), interfaces_only: lx.is(src, keyword, "interface") })
+}
+
+/// Offers names for the parameters of the lambda whose `{` is token `brace`, from the types the
+/// call gives them: `s, i ->`.
+fn lambda_parameters_completion(c: &mut Collector, brace: usize) {
+    let an = c.an;
+    let file = an.file(c.u);
+    if !file.scopes.iter().any(|s| matches!(s.kind, ScopeKind::Lambda { brace: b, .. } if b == brace)) {
+        return;
+    }
+    let Some(ctx) = an.lambda_ctx(c.u, brace) else { return };
+    if ctx.params.is_empty() {
+        return;
+    }
+    let simple: Vec<String> = ctx
+        .params
+        .iter()
+        .map(|p| match p {
+            Some(Ty::Class { sym, .. }) => an.decl(*sym).name.clone(),
+            Some(Ty::Func { .. }) => "Block".to_owned(),
+            _ => String::new(),
+        })
+        .collect();
+    let names = parameter_names(simple.iter().map(String::as_str));
+    if !matches_prefix(&names[0], &c.prefix) {
+        return;
+    }
+    let types: Vec<String> = ctx.params.iter().map(|p| p.as_ref().map_or_else(|| "?".to_owned(), |t| display_ty(an, t))).collect();
+    let list = names.join(", ");
+    c.items.push(json!({
+        "label": format!("{list} ->"),
+        "kind": 15,
+        "detail": format!("({})", types.join(", ")),
+        "sortText": format!("{}", Group::Local as u8),
+        "filterText": list,
+        "textEdit": { "range": c.range, "newText": format!("{list} -> ") },
+        "_expected": true,
+    }));
+}
+
+/// Offers the type parameters of the declarations around `offset`, in a type.
+fn type_parameter_completion(c: &mut Collector, offset: usize) {
+    if c.supertypes.is_some() || c.annotations_only {
+        return;
+    }
+    let file = c.an.file(c.u);
+    let src = &c.an.unit(c.u).text;
+    for d in file.decls.iter().filter(|d| d.span.start <= offset && offset <= d.span.end) {
+        for tp in &d.type_params {
+            if !matches_prefix(&tp.name, &c.prefix) || !c.seen.insert(format!("{}|type parameter", tp.name)) {
+                continue;
+            }
+            c.items.push(json!({
+                "label": tp.name,
+                "kind": 25,
+                "detail": src.get(tp.span.clone()).unwrap_or(&tp.name),
+                "sortText": format!("{}{}", Group::Local as u8, tp.name),
+                "textEdit": { "range": c.range, "newText": tp.name },
+            }));
+        }
+    }
+}
+
+// ----- `when` -----
+
+/// The cases of the subject of a `when`, and which of them its branches name.
+pub(super) struct WhenCases {
+    /// The cases no branch names, in the order they are declared.
+    pub missing: Vec<WhenCase>,
+    pub has_else: bool,
+    /// The token of the `else` branch.
+    pub else_at: Option<usize>,
+    /// The subject is an enum, a sealed type or a `Boolean`, so naming every case is exhaustive.
+    pub exhaustive: bool,
+}
+
+pub(super) struct WhenCase {
+    /// As a branch writes it: `Color.RED`, `is Circle`, `Empty`, `true`, `null`.
+    pub text: String,
+    /// The name a branch uses: `RED`, `Circle`.
+    pub name: String,
+    /// The LSP `CompletionItemKind`.
+    pub kind: u8,
+    /// The import the text needs, when its class is in another package.
+    pub import: Option<String>,
+}
+
+/// The cases of the `when` whose body opens at the token `brace`, or `None` when it is not the
+/// body of a `when`. A name at `cursor` is the one being typed, which covers nothing yet.
+pub(super) fn when_cases(an: &Analyzer, u: UnitId, brace: usize, cursor: Option<usize>) -> Option<WhenCases> {
+    let file = an.file(u);
+    let lx = &file.lexed;
+    let src = &an.unit(u).text;
+    let before = brace.checked_sub(1)?;
+    let subject = if lx.is(src, before, "when") {
+        None
+    } else if lx.kind(before) == Some(Tok::RParen) {
+        let open = lx.matching[before].filter(|&o| o < before)?;
+        if !open.checked_sub(1).is_some_and(|w| lx.is(src, w, "when")) {
+            return None;
+        }
+        Some((open + 1, before))
+    } else {
+        return None;
+    };
+    // The names the conditions of the branches use: the last of `Color.RED`, `is Circle`.
+    let close = lx.matching[brace].filter(|&c| c > brace).unwrap_or(lx.tokens.len());
+    let mut covered: HashSet<&str> = HashSet::new();
+    let mut else_at = None;
+    let mut condition = true;
+    let mut i = brace + 1;
+    while i < close {
+        let t = lx.tokens[i];
+        if !condition && t.nl {
+            condition = true;
+        }
+        match t.kind {
+            Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::StrOpen => {
+                if let Some(m) = lx.matching[i].filter(|&m| m > i) {
+                    i = m + 1;
+                    continue;
+                }
+            }
+            Tok::Arrow => condition = false,
+            Tok::Ident if condition && !cursor.is_some_and(|o| t.start <= o && o <= t.end) => match lx.text(src, i) {
+                "else" => {
+                    else_at.get_or_insert(i);
+                }
+                word if lx.kind(i + 1) != Some(Tok::Dot) => {
+                    covered.insert(word);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        i += 1;
+    }
+    let mut out = WhenCases { missing: Vec::new(), has_else: else_at.is_some(), else_at, exhaustive: false };
+    let Some((mut a, b)) = subject else { return Some(out) };
+    // `when (val x = expr)`
+    if lx.is(src, a, "val") || lx.is(src, a, "var") {
+        a = (a..b).find(|&k| lx.kind(k) == Some(Tok::Eq))? + 1;
+    }
+    let Some(Ty::Class { sym, nullable, .. }) = an.infer(u, a, b) else { return Some(out) };
+    let d = an.decl(sym);
+    let mut cases: Vec<WhenCase> = Vec::new();
+    let keyword = |word: &str| WhenCase { text: word.to_owned(), name: word.to_owned(), kind: 14, import: None };
+    if an.fq(sym) == "kotlin.Boolean" {
+        cases.extend([keyword("true"), keyword("false")]);
+    } else if d.kind == Kind::Enum {
+        let (class, import) = written_name(an, u, sym);
+        let decls = &an.file(sym.unit_id()).decls;
+        for &m in d.members.iter().filter(|&&m| decls[m].kind == Kind::EnumEntry) {
+            let name = decls[m].name.clone();
+            cases.push(WhenCase { text: format!("{class}.{}", escape_name(&name)), name, kind: 20, import: import.clone() });
+        }
+    } else if d.has("sealed") {
+        for sub in sealed_subclasses(an, sym) {
+            let sd = an.decl(sub);
+            let (written, import) = written_name(an, u, sub);
+            let object = sd.kind == Kind::Object;
+            let text = if object { written } else { format!("is {written}") };
+            cases.push(WhenCase { text, name: sd.name.clone(), kind: completion_kind(sd, false), import });
+        }
+    } else {
+        return Some(out);
+    }
+    if nullable {
+        cases.push(keyword("null"));
+    }
+    out.exhaustive = true;
+    out.missing = cases.into_iter().filter(|c| !covered.contains(c.name.as_str())).collect();
+    Some(out)
+}
+
+/// The direct subclasses of the sealed `class`: in the project, and in the class's own file
+/// when it comes from a library.
+fn sealed_subclasses(an: &Analyzer, class: SymId) -> Vec<SymId> {
+    let mut out = super::hierarchy::subtypes(an, class, false);
+    if class.lib {
+        let unit = class.unit_id();
+        for (ci, cd) in an.file(unit).decls.iter().enumerate() {
+            let sub = unit.sym(ci);
+            if cd.kind.is_class() && sub != class && super::hierarchy::direct_supertypes(an, sub).contains(&class) {
+                out.push(sub);
+            }
+        }
+    }
+    out
+}
+
+/// How code in `u` names the class `sym`: from its package on, `Outer.Inner`, and the import
+/// that name needs when the class's package is another one that `u` does not import.
+fn written_name(an: &Analyzer, u: UnitId, sym: SymId) -> (String, Option<String>) {
+    let fq = an.fq(sym);
+    let package = an.package_of(sym);
+    let relative = if package.is_empty() { fq.as_str() } else { fq.strip_prefix(package).and_then(|r| r.strip_prefix('.')).unwrap_or(&fq) };
+    let first = relative.split('.').next().unwrap_or(relative);
+    let top = if package.is_empty() { first.to_owned() } else { format!("{package}.{first}") };
+    let file = an.file(u);
+    let imported = package.is_empty()
+        || package == file.package
+        || DEFAULT_IMPORTS.contains(&package)
+        || file.imports.iter().any(|i| i.fq() == top || (i.star && i.fq() == package));
+    let written: Vec<String> = relative.split('.').map(escape_name).collect();
+    (written.join("."), (!imported).then_some(top))
+}
+
+/// Offers the cases of the `when` whose branch starts at `offset` that no branch names yet, and
+/// says whether an `else` branch would add something there; `None` where no branch starts.
+fn when_branch_completion(c: &mut Collector, offset: usize) -> Option<bool> {
+    if c.types_only || c.annotations_only || c.values_only {
+        return None;
+    }
+    let an = c.an;
+    let u = c.u;
+    let file = an.file(u);
+    let lx = &file.lexed;
+    let src = &an.unit(u).text;
+    let at = lx.tokens.partition_point(|t| t.end <= offset);
+    let brace = enclosing_open_brace(lx, at)?;
+    if enclosing_open_paren(lx, at).is_some_and(|o| o > brace) {
+        return None;
+    }
+    let prev = lx.before(offset)?;
+    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let at_line_start = src[line_start..offset].trim().is_empty();
+    let after_comma = lx.kind(prev) == Some(Tok::Comma);
+    let continues = matches!(lx.kind(prev), Some(Tok::Eq | Tok::Op | Tok::Arrow | Tok::Dot | Tok::SafeDot | Tok::Colon));
+    if !(prev == brace || after_comma || (at_line_start && !continues)) {
+        return None;
+    }
+    let cases = when_cases(an, u, brace, Some(offset))?;
+    // Whether the arrow is written already, as when an existing condition is retyped.
+    let after = src[offset..].trim_start_matches(lexer::is_ident_char).trim_start();
+    let arrow = !after_comma && !after.starts_with("->") && !after.starts_with(',');
+    let unit = an.unit(u);
+    for case in &cases.missing {
+        if !matches_prefix(&case.name, &c.prefix) && !matches_prefix(&case.text, &c.prefix) {
+            continue;
+        }
+        if !c.seen.insert(format!("when|{}", case.text)) {
+            continue;
+        }
+        let filter = if matches_prefix(&case.text, &c.prefix) { &case.text } else { &case.name };
+        let mut item = json!({
+            "label": case.text,
+            "kind": case.kind,
+            "detail": "a case no branch covers yet",
+            "sortText": format!("{}{:04}", Group::Local as u8, c.items.len()),
+            "filterText": filter,
+            "textEdit": { "range": c.range, "newText": if arrow { format!("{} -> ", case.text) } else { case.text.clone() } },
+            "_expected": true,
+        });
+        if let Some(fq) = &case.import {
+            item["additionalTextEdits"] = json!([super::actions::import_edit(unit, fq)]);
+        }
+        c.items.push(item);
+    }
+    Some(!cases.has_else && !(cases.exhaustive && cases.missing.is_empty()))
+}
+
 // ----- context-aware keywords -----
 
 /// What can be written at a position: used to offer only the keywords that fit.
@@ -1515,6 +2157,10 @@ struct KeywordContext {
     after_if: bool,
     /// A property or class is being declared on this line, so `by` can follow.
     property_line: bool,
+    /// The kind of the class whose body this is, at class level.
+    class_kind: Option<Kind>,
+    /// That class has a companion object already.
+    has_companion: bool,
 }
 
 const MODIFIERS: &[&str] = &[
@@ -1593,7 +2239,7 @@ fn after_if(lx: &lexer::Lexed, src: &str, prev: usize) -> bool {
 
 /// What can be written at `offset`, or `None` where no keyword can (after `val`, in a type).
 fn keyword_context(c: &Collector, chain: &[ScopeId], offset: usize) -> Option<KeywordContext> {
-    if c.types_only || c.annotations_only {
+    if c.types_only || c.annotations_only || c.values_only {
         return None;
     }
     let an = c.an;
@@ -1609,8 +2255,14 @@ fn keyword_context(c: &Collector, chain: &[ScopeId], offset: usize) -> Option<Ke
     let scope = chain.first().map(|&s| file.scopes[s].kind);
     let declaring = matches!(scope, Some(ScopeKind::File | ScopeKind::Class(_))) || scope.is_none();
     let at = lx.tokens.partition_point(|t| t.end <= offset);
+    let class = match scope {
+        Some(ScopeKind::Class(cd)) => Some(cd),
+        _ => None,
+    };
     let mut k = KeywordContext {
-        class_level: matches!(scope, Some(ScopeKind::Class(_))),
+        class_level: class.is_some(),
+        class_kind: class.map(|cd| file.decls[cd].kind),
+        has_companion: class.is_some_and(|cd| file.companion(cd).is_some()),
         file_level: matches!(scope, Some(ScopeKind::File)) || scope.is_none(),
         property_line: line.contains("val ") || line.contains("var ") || line.contains("class ") || line.contains("object "),
         ..KeywordContext::default()
@@ -1645,7 +2297,7 @@ fn keyword_context(c: &Collector, chain: &[ScopeId], offset: usize) -> Option<Ke
                 k.expression = true;
             }
         }
-        Some(Tok::Eq | Tok::Op | Tok::Comma | Tok::LParen | Tok::LBracket) => k.expression = true,
+        Some(Tok::Eq | Tok::Op | Tok::Comma | Tok::LParen | Tok::LBracket | Tok::TemplateOpen) => k.expression = true,
         Some(Tok::Label) => block_start(&mut k),
         Some(Tok::RParen) => after_expression(&mut k, true),
         Some(Tok::RBracket | Tok::Gt | Tok::Question | Tok::BangBang | Tok::Int | Tok::Float | Tok::Char | Tok::StrClose | Tok::Str) => {
@@ -1730,7 +2382,12 @@ fn keyword_fits(word: &str, k: &KeywordContext) -> bool {
         "as" => k.infix,
         "by" => k.infix && k.property_line,
         "import" => k.declaration && k.file_level,
-        "init" | "companion" | "override" => k.declaration && k.class_level,
+        // Interfaces and objects have no constructors, interfaces no initializers, and objects
+        // no companion.
+        "constructor" => k.declaration && matches!(k.class_kind, Some(Kind::Class | Kind::Enum)),
+        "init" => k.declaration && k.class_level && k.class_kind != Some(Kind::Interface),
+        "companion" => k.declaration && k.class_level && !k.has_companion && !matches!(k.class_kind, Some(Kind::Object | Kind::Companion)),
+        "override" => k.declaration && k.class_level,
         _ => {
             (k.declaration && DECLARATION.contains(&word))
                 || (k.local_declaration && LOCAL.contains(&word))
@@ -2245,6 +2902,15 @@ fn import_completion(c: &mut Collector, path: &str) {
         return;
     };
     c.paren_follows = true;
+    if c.prefix.is_empty() && (c.an.has_package(package) || !c.an.by_fq(package).is_empty()) {
+        c.items.push(json!({
+            "label": "*",
+            "kind": 9,
+            "detail": format!("import everything in {package}"),
+            "sortText": "0*",
+            "textEdit": { "range": c.range, "newText": "*" },
+        }));
+    }
     package_contents(c, package);
     // `import a.B.` for nested classes and object members.
     for class in c.an.by_fq(package) {
@@ -2263,6 +2929,10 @@ fn scope_completion(c: &mut Collector, offset: usize) {
     let chain = file.scope_chain(offset);
     if !c.types_only && !c.annotations_only {
         c.expected = expected_type(an, u, &chain, offset);
+    }
+    let else_fits = when_branch_completion(c, offset);
+    if c.types_only {
+        type_parameter_completion(c, offset);
     }
     if let Some(typed) = override_position(c, &chain, offset)
         && let Some(&ScopeKind::Class(class)) = chain.first().map(|&s| &file.scopes[s].kind)
@@ -2357,12 +3027,12 @@ fn scope_completion(c: &mut Collector, offset: usize) {
         }
     }
     if let Some(k) = keyword_context(c, &chain, offset) {
-        for word in KEYWORDS.iter().filter(|w| keyword_fits(w, &k)) {
+        for word in KEYWORDS.iter().filter(|w| keyword_fits(w, &k) && !(**w == "else" && else_fits == Some(false))) {
             c.keyword(word);
         }
     }
     // Declarations that need an import, once something is typed.
-    if !c.prefix.is_empty() {
+    if !c.prefix.is_empty() && !c.values_only {
         let mut offered: HashMap<String, usize> = HashMap::new();
         for index in [an.proj, an.lib] {
             for (name, syms) in &index.by_name {

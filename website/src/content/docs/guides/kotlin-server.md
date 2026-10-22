@@ -15,7 +15,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 
 | Feature | What you get |
 |---|---|
-| Completion | Members after `.`, `?.` and `::`, extension functions included; everything in scope otherwise, ranked by the expected type; named arguments; `override` stubs; `import` paths. Declarations that need an import come with it. Annotation classes after `@`, and the arguments of an annotation inside its parentheses |
+| Completion | Members after `.`, `?.` and `::`, extension functions included; everything in scope otherwise, ranked by the expected type; named arguments; `override` stubs. Declarations that need an import come with it. Beyond expressions: the `package` of the file's directory, `import` paths, the cases a `when` is missing, annotations and their use-site targets and arguments, `$name` in strings, supertypes, types and type parameters, labels and lambda parameter names. See [Completion outside expressions](#completion-outside-expressions) |
 | Signature help | Typing `(` or `,` in a call shows every overload of the function or constructor, the one that fits the arguments first, with the parameter you are at highlighted and its `@param` text. Named arguments (`f(b = `) pick their parameter, and a `vararg` stays active |
 | Hover | The declaration's signature, its package or class, and its KDoc as Markdown. Inferred types of variables, such as `val names: List<String>`. The same for annotations and their arguments |
 | Go to definition | Into your project, a path dependency, the sources of the standard library, the JDK and libraries, or stubs of libraries without sources. Go to declaration and go to type definition too |
@@ -27,7 +27,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Folding | Bodies, lambdas and multi-line argument lists, raw strings, the import block, KDoc and block comments, and runs of `//` comments |
 | Selection | Expand the selection from an identifier to its dotted call chain, the brackets around it, the statement, the declarations around it (function, class) and the file |
 | Formatting | The whole file, formatted by ktlint with the project's `.editorconfig` and `[fmt]` settings, as `kargo fmt` does. See [Formatting](#formatting) |
-| Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
+| Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add the branches a `when` is missing, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
 | Diagnostics as you type | Unclosed or unmatched brackets, unterminated strings and comments, a `class`, `interface` or `typealias` without a name (errors), unused imports and local variables that are never used (warnings, shown greyed out), and [operators](#operators) that can't work. Decided from the file and the project's declarations, so they appear between saves |
 | Errors | From [check on save](../editors/#check-on-save), which is on with this server: `kargo check` runs when you save a file and its errors for every target appear in the editor |
 
@@ -79,7 +79,7 @@ Completion also looks at where you are typing:
 - **Expected type.** After `val x: String = `, after `return` in a function that declares its return type, as an argument (`take(` for `fun take(n: Int)`) and after `name = ` of a named argument or an assignment, the values and calls whose type fits come first, ahead of the rest of their group. Among items of the same group, your project's declarations come before the libraries'.
 - **Named arguments.** Inside the parentheses of a call you are offered `name = ` for the parameters that no argument gives yet. Once an argument is positional, the parameters before it are left out.
 - **Overrides.** In a class body, typing the start of a member's name or `override ` offers the open and abstract members of the supertypes that the class doesn't override yet, and inserts a stub with the full signature: `override fun area(scale: Double): Double { TODO("Not yet implemented") }` for an abstract member, a call of `super` for an open one. Type arguments of the supertype are filled in.
-- **Keywords.** Only the keywords that are valid at the cursor are offered: declaration keywords in a class body and at the top of a file, `if`, `return` and the other expression keywords after `=`, `else` after an `if` that has none, `is` and `in` in `when` branches, and `as`, `is` and `in` after an expression.
+- **Keywords.** Only the keywords that are valid at the cursor are offered: declaration keywords in a class body and at the top of a file (`constructor` and `init` in classes, `companion object` where the class has none yet), `if`, `return` and the other expression keywords after `=`, `else` after an `if` that has none, `is` and `in` in `when` branches, and `as`, `is` and `in` after an expression.
 - **Trailing lambdas.** A function whose last parameter is a function type is inserted with its lambda, with the names the function type gives its parameters (`(index: Int, value: String) -> Unit` inserts `{ index, value -> $0 }`), or names made from their types when it gives none: `repeatIt(${1:times}) { $0 }`.
 
 - **Recently used.** A name you inserted in one edit lately (a completion you accepted, a paste) comes first among the items of its group.
@@ -90,6 +90,35 @@ The same request for the same position in an unchanged project is answered from 
 Declarations marked `@PublishedApi` and the library package `kotlin.internal` are left out of every list.
 
 Annotations complete on their own. After `@` you get annotation classes only: those in scope, and once you have typed a letter, the others with an `import` added. `@Rest` offers Spring Web's `RestController`, for example. Inside the parentheses of an annotation you get the arguments it takes that you haven't given yet, as `defaultValue = `. The arguments of a Java annotation are the elements of its `@interface`, and those of an annotation written in Kotlin are its constructor parameters. Hover and go to definition work on annotations on classes, functions, parameters and properties, and on their arguments.
+
+### Completion outside expressions
+
+Where Kotlin code is not an expression, completion offers what fits there, and nothing where you are writing a new name:
+
+```kotlin title="src/app/shapes/Area.kt"
+package |                                 // app.shapes
+
+fun area(s: Shape) = when (s) {
+    is Circle -> 3.14 * s.r * s.r
+    |                                     // is Square, Empty
+}
+```
+
+| Where | You get |
+|---|---|
+| `package ` | The package that matches the file's directory under its source root: `app.shapes` for `src/app/shapes/Area.kt`. It replaces the segments you typed |
+| `import ` | Packages for each segment, then the classes, functions and properties of the package, nested classes after a class, and `*`. After a complete path, `as`; the alias itself is a new name |
+| A `when` branch | With a subject that is an enum, a `sealed` class or interface, or a `Boolean`, the cases no branch names yet: `Color.GREEN`, `is Circle` for a class, `Empty` for an object, `true`, and `null` when the subject is nullable. A case from another package comes with its `import`. `else` is offered only when it adds something: never twice, and not once every case is covered |
+| `@` | Annotation classes, and the use-site targets `field:`, `get:`, `set:`, `param:`, `setparam:`, `property:`, `receiver:` and `delegate:`, with `file:` before the package. After a target (`@get:`), annotation classes only |
+| `"$` in a string | The values in scope (locals, parameters, properties) and `this`, not functions or classes. `${ }` takes any expression |
+| `class Foo :` | Interfaces, and classes that are `open`, `abstract` or `sealed`, with their constructor call: `Base($0)`, or `Base()` when it takes nothing. After `interface Foo :`, interfaces only |
+| After `fun` | The receiver type: types only. After `fun String.` comes the new function's name, so nothing |
+| A type, after `:` or `List<` | Types and the type parameters in scope: `T` in `fun <T> f(x: T)` |
+| `return@`, `break@`, `continue@`, `this@`, `super@` | The labels in scope: lambdas by their label or the function they are passed to (`return@forEach`), loops for `break` and `continue`, and for `this@` the enclosing classes, extension functions and lambdas with a receiver (`this@buildString`) |
+| `call { ` | Names for the lambda's parameters from the function type, as `string, int ->` |
+| `val `, `class `, `fun <`, `catch (` | Nothing: a new name. In a parameter list, only the modifiers that fit before the name: `val`, `var`, `vararg` and the visibilities in a class's primary constructor, `vararg`, `noinline` and `crossinline` in a function |
+
+The `package` suggestion comes from the source roots of `kargo metadata`, so a file outside them, or directly in one, gets none.
 
 To know the receiver's type, the server infers the types completion needs: literals, calls of generic functions (`listOf("a")` is a `List<String>`), lambda parameters from the function the lambda is passed to (`it` in `forEach`, `map` or `let`), lambda results (`map { it.length }` is a `List<Int>`), `for` loop variables, destructuring (`for ((key, value) in map)`), delegated properties (see [Delegation](#delegation)), `if`, `when` and `try` expressions (the type their branches share), the operators (see [Operators](#operators)), function references and lambdas as values (`String::length`, `::foo`, `val f = { x: Int -> x }`), function-type aliases as lambda parameter types, the upper bounds of type parameters (`fun <T : CharSequence> f(x: T)`), and `object : Foo { ... }` expressions with their own members.
 
@@ -204,6 +233,7 @@ The server offers code actions in Kotlin files: the light bulb, or *Quick Fix* a
 | Organize imports | Anywhere (a *Source Action*, `source.organizeImports`) | Removes unused, duplicate and same-package imports and sorts the rest as IntelliJ IDEA and [`kargo fmt`](../formatting-and-linting/) do: other packages, then `java`, `javax`, `kotlin`, then aliased imports. Star imports and imports of operator functions (`getValue`, `plus`, `component1`, ...) stay. Not offered when a comment sits among the imports |
 | Add `<group:artifact>` to kargo.toml | An `import` of a well-known library that no dependency provides, such as `kotlinx.coroutines`, `kotlinx.serialization`, `kotlinx.datetime` or `io.ktor` | Runs [`kargo/addDependency`](../editors/#commands-for-editor-plugins), which adds the library at its latest version as `kargo add` does: to `[dev-dependencies]` from test code, to `[target.<target>.dependencies]` from `src-<target>/` |
 | Implement members | The header of a class or object that doesn't implement the abstract members of its supertypes | Writes an `override` with a `TODO()` body for each one, with the supertype's type arguments filled in (`Repo<User>` gives `fun find(id: Int): User`) and the imports they need |
+| Add remaining branches | A `when` over an enum, a `sealed` type or a `Boolean` whose branches don't name every case | Writes `Case -> TODO("Not yet implemented")` for each missing case, before the `else` branch if there is one, with the imports they need. With one case missing, it is *Add the missing branch `<case>`* |
 | Add `actual` for `<name>` | An `expect` declaration in `src/` that a target of the package lacks | Writes the `actual` declaration, with `TODO()` bodies, to `src-<target>/` at the common file's path with the target in its name (`Platform.kt` gets `Platform.jvm.kt`): appended to that file, or in a new one when the editor can create files. *To every target* does them all at once |
 | Add `override` | `kargo check`'s "hides member of supertype and needs an 'override' modifier" | Adds `override` before `fun`, `val` or `var` |
 | Remove variable | `kargo check`'s "Variable 'x' is never used" | Removes the declaration. An initializer that may have side effects (a call) stays as a statement. A destructured component or loop variable is renamed to `_` instead |
@@ -305,6 +335,7 @@ The server reads declarations and infers types as far as completion and navigati
 - Nullability is tracked: `x.` on a nullable value offers only the extensions of nullable types (`isNullOrEmpty`, `let`, ...), `x?.` offers the members of the unwrapped type, and the result of a safe call is nullable again. Types from Java count as non-null.
 - Operators are found by their syntax, with each operand's type taken from the expression around it: a long expression with infix calls or lambdas inside can leave an operator unresolved, and a `for` loop's `hasNext` and `next` are looked up on the type that `iterator()` returns. `a { }` is an `invoke` only when `a` is a value of a class type; a function-typed value is a plain call.
 - Delegates: a type argument that only the expected type decides (`val x by viewModels()` without a declared type) stays unknown, so completion after `x.` is empty; write `viewModels<Foo>()` or `val x: Foo by viewModels()`. Renaming a `getValue` is refused like any operator function.
+- The cases of a `when` over a `sealed` type are its direct subclasses in your project, and in the file that declares it when it comes from a library. A branch counts as covering a case when it names it, so a branch on a nested sealed class (`is Shape.Round` for `Circle` and `Oval`) leaves them offered.
 - Overloads are chosen by the arguments' types (subtypes, nullability, named and default arguments, and the parameter count of lambdas); when an argument's type is unknown and several overloads fit, go to definition lists them all. A type argument is not inferred from the expected type of a call (`foo(emptyList())`), so completion may miss members of such expressions. A `when` or `try` whose branches have nothing in common but `Any` completes as `Any`.
 - Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings. Semantic highlighting leaves keywords, literals and comments to the editor's own grammar. [Formatting](#formatting) is ktlint's: whole files only.
 
