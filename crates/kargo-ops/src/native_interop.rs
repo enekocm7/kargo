@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use ignore::gitignore::GitignoreBuilder;
 
 use kargo_compiler::Outcome;
-use kargo_compiler::native::{CSourcesUnit, NativeLink, def_file_contents};
+use kargo_compiler::native::{CSourcesUnit, NativeLink, cinterop_linker_options, def_file_contents};
 use kargo_manifest::{CSources, Cinterop, LinkMode, NativeOptions, TargetKind, is_apple_target};
 use kargo_toolchain::native::Host;
 use kargo_util::process::slash;
@@ -143,18 +143,26 @@ pub fn check(ctx: &BuildContext, platforms: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The `.def` file `cinterop` reads: the project's own, or, when kargo.toml sets `.def` properties,
-/// one written into `output_dir` with them followed by the project's. It is rewritten only when its
-/// text changes, so the bindings stay up to date.
-pub fn cinterop_def(interop: &Cinterop, project_def: Option<PathBuf>, output_dir: &Path) -> Result<Option<PathBuf>> {
-    if interop.def_properties().is_empty() {
+/// The `.def` file `cinterop` reads: the project's own, or, when kargo.toml sets `.def` properties
+/// or `options` has linker options (which only the `.def` file records in the klib), one written
+/// into `output_dir` with them followed by the project's. It is rewritten only when its text
+/// changes, so the bindings stay up to date.
+pub fn cinterop_def(
+    interop: &Cinterop,
+    project_def: Option<PathBuf>,
+    options: &NativeOptions,
+    konan_target: &str,
+    output_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let linker_options = cinterop_linker_options(options, konan_target);
+    if interop.def_properties().is_empty() && linker_options.is_empty() {
         return Ok(project_def);
     }
     let project_text = match &project_def {
         Some(def) => Some(std::fs::read_to_string(def).with_context(|| format!("failed to read {}", def.display()))?),
         None => None,
     };
-    let text = def_file_contents(interop, project_text.as_deref());
+    let text = def_file_contents(interop, &linker_options, project_text.as_deref());
     let path = output_dir.join(format!("{}.def", interop.name));
     if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
         std::fs::create_dir_all(output_dir).with_context(|| format!("failed to create {}", output_dir.display()))?;
@@ -395,15 +403,49 @@ mod tests {
             link: LinkMode::Dynamic,
         };
         let out = dir.path().join("out");
-        assert_eq!(cinterop_def(&interop, Some(project.clone()), &out).unwrap(), Some(project.clone()));
+        let none = NativeOptions::default();
+        assert_eq!(cinterop_def(&interop, Some(project.clone()), &none, "linux_x64", &out).unwrap(), Some(project.clone()));
         interop.excluded_functions = vec!["x_debug".into()];
-        let written = cinterop_def(&interop, Some(project.clone()), &out).unwrap().unwrap();
+        let written = cinterop_def(&interop, Some(project.clone()), &none, "linux_x64", &out).unwrap().unwrap();
         assert_eq!(written, out.join("x.def"));
         let text = std::fs::read_to_string(&written).unwrap();
         assert!(text.contains("excludedFunctions = x_debug\nheaders = x.h\n"), "{text}");
         let modified = std::fs::metadata(&written).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        cinterop_def(&interop, Some(project), &out).unwrap();
+        cinterop_def(&interop, Some(project.clone()), &none, "linux_x64", &out).unwrap();
         assert_eq!(std::fs::metadata(&written).unwrap().modified().unwrap(), modified);
+    }
+
+    #[test]
+    fn linker_options_are_written_to_the_def_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let interop = Cinterop {
+            name: "raylib".into(),
+            def: None,
+            package: None,
+            headers: vec!["raylib.h".into()],
+            options: NativeOptions::default(),
+            platform: Default::default(),
+            header_filter: Vec::new(),
+            excluded_functions: Vec::new(),
+            strict_enums: Vec::new(),
+            non_strict_enums: Vec::new(),
+            modules: Vec::new(),
+            language: None,
+            pkg_config: Vec::new(),
+            link: LinkMode::Dynamic,
+        };
+        let options = NativeOptions {
+            linker_options: vec!["-lopengl32".into(), "-lgdi32".into(), "-lwinmm".into()],
+            frameworks: vec!["Cocoa".into()],
+            ..Default::default()
+        };
+        // Without a `.def` file of the project, one is written just for the linker options.
+        let written = cinterop_def(&interop, None, &options, "mingw_x64", dir.path()).unwrap().unwrap();
+        let text = std::fs::read_to_string(written).unwrap();
+        assert!(text.ends_with("\nlinkerOpts = -lopengl32 -lgdi32 -lwinmm\n"), "{text}");
+        let written = cinterop_def(&interop, None, &options, "macos_arm64", dir.path()).unwrap().unwrap();
+        let text = std::fs::read_to_string(written).unwrap();
+        assert!(text.ends_with("\nlinkerOpts = -lopengl32 -lgdi32 -lwinmm -framework Cocoa\n"), "{text}");
     }
 }

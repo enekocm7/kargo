@@ -761,12 +761,13 @@ pub fn native_cinterop(ctx: &BuildContext, konan_target: &str) -> Result<Vec<Pat
     let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
     defs.into_iter()
         .map(|(interop, def)| {
+            let options = native_interop::cinterop_options(ctx, interop, konan_target)?;
             let unit = CinteropUnit {
                 interop,
                 konan_target: konan_target.to_owned(),
                 root: ctx.ws.root(),
-                def: native_interop::cinterop_def(interop, def, &output_dir)?,
-                options: native_interop::cinterop_options(ctx, interop, konan_target)?,
+                def: native_interop::cinterop_def(interop, def, &options, konan_target, &output_dir)?,
+                options,
                 output_dir: output_dir.clone(),
             };
             unit.generate(ctx.shell(), toolchain, &fp_dir, &|| {
