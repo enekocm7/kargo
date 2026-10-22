@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use kargo_manifest::Package;
 use kargo_maven::deploy::escape;
-use kargo_maven::pom::{GRADLE_METADATA_MARKER, MAIN_CLASS_PROPERTY};
+use kargo_maven::pom::{GRADLE_METADATA_MARKER, MAIN_CLASS_PROPERTY, WEB_INIT_PROPERTY, WEB_RESOURCES_PROPERTY};
 use kargo_maven::{Artifact, ModuleId};
 use kargo_util::hash;
 
@@ -158,6 +158,34 @@ pub struct PlatformPublication {
     /// The main class of a JVM application. Its POM names it in the `kargo.main-class` property, so
     /// `kargo install group:artifact` knows what to run.
     pub main_class: Option<String>,
+    /// The web resources of a Wasm library (see [`crate::web_resources`]): a zip published under the
+    /// `web-resources` classifier and announced by POM properties. It is not part of any variant of the
+    /// `.module`, so no consumer puts it on a classpath.
+    pub web_resources: Option<WebResourcesArchive>,
+}
+
+/// The zip of a Wasm library's web resources and the name of its init script inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebResourcesArchive {
+    pub zip: PathBuf,
+    pub init: Option<String>,
+}
+
+impl PlatformPublication {
+    /// The `<properties>` of the platform's POM.
+    fn pom_properties(&self) -> Vec<(&'static str, &str)> {
+        let mut properties = Vec::new();
+        if let Some(main_class) = &self.main_class {
+            properties.push((MAIN_CLASS_PROPERTY, main_class.as_str()));
+        }
+        if let Some(web) = &self.web_resources {
+            properties.push((WEB_RESOURCES_PROPERTY, crate::web_resources::CLASSIFIER));
+            if let Some(init) = &web.init {
+                properties.push((WEB_INIT_PROPERTY, init.as_str()));
+            }
+        }
+        properties
+    }
 }
 
 /// Everything published for one package.
@@ -228,6 +256,9 @@ impl Publication<'_> {
             if let Some(javadoc) = &platform.javadoc {
                 writer.copy(Some("javadoc"), "jar", javadoc)?;
             }
+            if let Some(web) = &platform.web_resources {
+                writer.copy(Some(crate::web_resources::CLASSIFIER), "zip", &web.zip)?;
+            }
             if self.multiplatform() {
                 let mut files = vec![main];
                 files.extend(extra);
@@ -235,7 +266,7 @@ impl Publication<'_> {
                 writer.write(None, "module", &metadata)?;
             }
             let packaging = (platform.kind.extension() != "jar").then_some(platform.kind.extension());
-            let pom = self.pom(&module, packaging, &platform.dependencies, platform.main_class.as_deref(), self.multiplatform());
+            let pom = self.pom(&module, packaging, &platform.dependencies, &platform.pom_properties(), self.multiplatform());
             writer.write(None, "pom", &pom)?;
             staged.push(writer.finish());
         }
@@ -247,7 +278,7 @@ impl Publication<'_> {
                 writer.copy(Some("javadoc"), "jar", javadoc)?;
             }
             writer.write(None, "module", &self.root_metadata(sources))?;
-            writer.write(None, "pom", &self.pom(&root, Some("pom"), &[], None, true))?;
+            writer.write(None, "pom", &self.pom(&root, Some("pom"), &[], &[], true))?;
             staged.push(writer.finish());
         }
         Ok(staged)
@@ -355,7 +386,7 @@ impl Publication<'_> {
         module: &ModuleId,
         packaging: Option<&str>,
         dependencies: &[PublishedDependency],
-        main_class: Option<&str>,
+        properties: &[(&str, &str)],
         gradle_metadata: bool,
     ) -> String {
         let pkg = self.package;
@@ -382,9 +413,11 @@ impl Publication<'_> {
         if let Some(url) = pkg.homepage.as_ref().or(pkg.repository.as_ref()) {
             element(&mut x, 1, "url", url);
         }
-        if let Some(main_class) = main_class {
+        if !properties.is_empty() {
             x.push_str("  <properties>\n");
-            element(&mut x, 2, MAIN_CLASS_PROPERTY, main_class);
+            for (name, value) in properties {
+                element(&mut x, 2, name, value);
+            }
             x.push_str("  </properties>\n");
         }
         let licenses = licenses(pkg.license.as_deref());
@@ -701,6 +734,7 @@ mod tests {
                 javadoc: Some(file(dir.path(), "doc.jar")),
                 dependencies: vec![stdlib, logback, bom],
                 main_class: Some("com.acme.MainKt".into()),
+                web_resources: None,
             }],
             common_sources: None,
             common_javadoc: None,
@@ -754,6 +788,7 @@ mod tests {
                     javadoc: None,
                     dependencies: vec![coroutines, runtime],
                     main_class: None,
+                    web_resources: None,
                 },
                 PlatformPublication {
                     kind: PlatformKind::Native { konan_target: "linux_x64".into() },
@@ -763,6 +798,7 @@ mod tests {
                     javadoc: None,
                     dependencies: Vec::new(),
                     main_class: None,
+                    web_resources: None,
                 },
             ],
             common_sources: Some(file(dir.path(), "common-src.jar")),
@@ -825,6 +861,46 @@ mod tests {
         let urls: Vec<&str> = klibs.files.iter().map(|f| f.url.as_str()).collect();
         assert_eq!(urls, ["mathlib-linuxx64-1.2.0.klib", "mathlib-linuxx64-1.2.0-cinterop-sqlite.klib"]);
         assert!(std::fs::read_to_string(staged[1].dir.join("mathlib-linuxx64-1.2.0.pom")).unwrap().contains("<packaging>klib</packaging>"));
+    }
+
+    #[test]
+    fn web_resources_are_a_classifier_zip_announced_by_the_pom() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package();
+        let publication = Publication {
+            group: "com.acme".into(),
+            package: &pkg,
+            platforms: vec![PlatformPublication {
+                kind: PlatformKind::Wasm { environment: "js".into() },
+                artifact: file(dir.path(), "lib.klib"),
+                extra: Vec::new(),
+                sources: None,
+                javadoc: None,
+                dependencies: Vec::new(),
+                main_class: None,
+                web_resources: Some(WebResourcesArchive { zip: file(dir.path(), "web.zip"), init: Some("init.mjs".into()) }),
+            }],
+            common_sources: None,
+            common_javadoc: None,
+        };
+        let staged = publication.stage(&dir.path().join("repo")).unwrap();
+        let wasm = &staged[0];
+        assert_eq!(wasm.module.artifact, "mathlib-wasm-js", "the zip goes with the platform module");
+        assert_eq!(
+            wasm.files,
+            [
+                "mathlib-wasm-js-1.2.0.klib",
+                "mathlib-wasm-js-1.2.0-web-resources.zip",
+                "mathlib-wasm-js-1.2.0.module",
+                "mathlib-wasm-js-1.2.0.pom"
+            ]
+        );
+        let pom = kargo_maven::pom::Pom::parse(&std::fs::read_to_string(wasm.dir.join("mathlib-wasm-js-1.2.0.pom")).unwrap()).unwrap();
+        assert_eq!(pom.properties.get(WEB_RESOURCES_PROPERTY).map(String::as_str), Some("web-resources"));
+        assert_eq!(pom.properties.get(WEB_INIT_PROPERTY).map(String::as_str), Some("init.mjs"));
+        // No variant lists the zip, so no consumer compiles against it.
+        let module = std::fs::read_to_string(wasm.dir.join("mathlib-wasm-js-1.2.0.module")).unwrap();
+        assert!(!module.contains("web-resources"), "{module}");
     }
 
     #[test]

@@ -14,6 +14,14 @@ pub const GRADLE_METADATA_MARKER: &str = "do_not_remove: published-with-gradle-m
 /// for a package with a main class, and `kargo install group:artifact` runs that class.
 pub const MAIN_CLASS_PROPERTY: &str = "kargo.main-class";
 
+/// The POM property that says a Kotlin/Wasm library ships web resources: a zip under the
+/// `web-resources` classifier that Kargo unpacks next to the module of every browser app using it.
+pub const WEB_RESOURCES_PROPERTY: &str = "kargo.web-resources";
+
+/// The POM property that names the init script among a library's web resources, which the page
+/// Kargo generates for a browser app imports before the app module.
+pub const WEB_INIT_PROPERTY: &str = "kargo.web-init";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParentRef {
     pub group: String,

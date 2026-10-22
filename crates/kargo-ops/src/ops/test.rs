@@ -1137,7 +1137,12 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
 /// Writes the page that runs the compiled Wasm tests and finds the browser to run it in.
 fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation, node_modules: Option<PathBuf>) -> Result<TestRun> {
     let imports = node_modules.as_deref().map(crate::wasm_output::import_map).unwrap_or_default();
-    std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports))
+    // The tests get the web resources of the package's libraries and of the package itself, after theirs.
+    let mut shipments = crate::web_resources::dependencies(ctx, true)?;
+    shipments.extend(crate::web_resources::own(ctx.ws, false)?);
+    crate::wasm_output::copy_site_files(&unit.output, None, &shipments)?;
+    let inits = crate::web_resources::init_scripts(&shipments);
+    std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports, &inits))
         .context("failed to write the test page")?;
     if opts.no_run {
         return Ok(TestRun::Done(true));

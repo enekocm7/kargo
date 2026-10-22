@@ -16,6 +16,8 @@ For every resolution (one per target and classpath, such as `jvm/runtime`):
 
 `kargo bench` pins the libraries of the benchmarks under `jvm/bench` (the dependencies, dev-dependencies, kotlinx-benchmark and JMH) and JMH's harness generator under `jvm/bench-tools`.
 
+The [web resources](../../guides/wasm/#web-resources-from-libraries) of Wasm libraries from a repository are pinned under `wasm/web-resources` (and `wasm/web-resources-test` for the tests): one entry per library that ships them, with its `-web-resources.zip`. A project whose libraries ship none has no such entry.
+
 A [`[[generate]]` step](../../guides/code-generation/) that runs a `tool`, or the `protobuf` built-in, pins what it downloads under `generate/<name>`: the tool and its dependencies, or `protoc` and the gRPC plugins.
 
 A [profile](../manifest/#profilename) with dependencies of its own has resolutions of its own, named after it: `jvm/runtime@staging` is the runtime classpath of the `staging` profile. The profiles without such dependencies all share `jvm/runtime`.

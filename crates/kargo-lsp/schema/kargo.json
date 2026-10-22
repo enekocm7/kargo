@@ -189,6 +189,8 @@
             "package-manager": { "description": "The tool that installs npm packages. Default: the first of npm, pnpm, bun on PATH.", "enum": ["npm", "pnpm", "bun"] },
             "wasm-opt": { "description": "Run Binaryen's wasm-opt in release builds: true (when on PATH), false, or the path of the executable.", "type": ["boolean", "string"], "default": true },
             "npm-dependencies": { "description": "npm packages (`name = \"version\"`) to install besides those the klibs ask for.", "type": "object", "additionalProperties": { "type": "string" } },
+            "web-resources": { "description": "Files and directories of a library (relative to the package) that every browser app depending on it gets next to its module, under their own names. Needs kind = \"library\".", "type": "array", "items": { "type": "string" } },
+            "web-init": { "description": "A script of a library (relative to the package) that the page Kargo generates for a dependent browser app imports before the app module. It is shipped like `web-resources`. Needs kind = \"library\".", "type": "string" },
             "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the Wasm target only." }
           }
         },

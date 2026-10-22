@@ -347,6 +347,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 if crate::npm::dependencies(ctx, &test)? != crate::npm::dependencies(ctx, &main)? {
                     crate::npm::fetch(ctx, &test, &test_dir)?;
                 }
+                crate::web_resources::fetch(ctx)?;
             }
             TargetKind::Native => {
                 let setup = ctx.setup(target)?;
@@ -397,6 +398,9 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
             build::jvm_processor_path(ctx, &setup, true)?;
             build::jvm_ksp_path(ctx, &setup, false)?;
             build::jvm_ksp_path(ctx, &setup, true)?;
+        }
+        if target == TargetKind::Wasm {
+            crate::web_resources::fetch(ctx)?;
         }
     }
     crate::generate::fetch_tools(ctx, &[])?;

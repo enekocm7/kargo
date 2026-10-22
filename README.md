@@ -179,6 +179,8 @@ environment = "js"          # or "browser" (serves a page, tests in a headless b
 # npm-name = "@acme/hello"  # npm name of a library; default: the lowercase package name
 # package-manager = "pnpm"  # npm, pnpm or bun for npm packages of Wasm libraries; default: first on PATH
 # wasm-opt = false          # release builds run wasm-opt from PATH if there is one; or the path of one
+# web-resources = ["web/raylib.mjs", "web/raylib.wasm"]  # a library's files, copied next to every browser app using it
+# web-init = "web/init.mjs" # a library's script the generated page imports before the app module
 
 # [target.wasm.npm-dependencies]
 # "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for; Kotlin gets declarations from their .d.ts

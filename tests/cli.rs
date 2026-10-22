@@ -1930,6 +1930,79 @@ fn wasm_target_options_are_validated() {
         .stderr(predicate::str::contains("kind = \"library\" builds an npm package, which needs environment = \"js\" or \"browser\""));
     p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"desktop\"\n"));
     p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("expected `js`, `browser` or `wasi`"));
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"browser\"\nweb-resources = [\"web/raylib.mjs\"]\n"));
+    p.kargo()
+        .arg("build")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("set kind = \"library\", or put an application's own files in `resources/`"));
+}
+
+#[test]
+fn web_resources_of_maven_libraries_are_locked() {
+    let repo = LocalRepo::new();
+    // A Wasm library that ships web resources, the way `kargo publish` lays it out, and one that ships none.
+    let library = |coord: &str, version: &str, properties: &str| {
+        let (group, artifact) = coord.split_once(':').unwrap();
+        let dir = format!("{}/{artifact}/{version}", group.replace('.', "/"));
+        repo.write(
+            &format!("{dir}/{artifact}-{version}.pom"),
+            &format!(
+                "<project><!-- do_not_remove: published-with-gradle-metadata -->                 <groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version>                 <packaging>klib</packaging><properties>{properties}</properties></project>"
+            ),
+        );
+        repo.write(&format!("{dir}/{artifact}-{version}.klib"), "klib");
+        repo.write(
+            &format!("{dir}/{artifact}-{version}.module"),
+            &format!(
+                r#"{{"formatVersion": "1.1", "component": {{"group": "{group}", "module": "{artifact}", "version": "{version}"}},
+                "variants": [{{"name": "wasmJsApiElements-published", "attributes": {{"org.gradle.usage": "kotlin-api",
+                "org.jetbrains.kotlin.platform.type": "wasm", "org.jetbrains.kotlin.wasm.target": "js"}},
+                "files": [{{"name": "{artifact}-{version}.klib", "url": "{artifact}-{version}.klib"}}]}}]}}"#
+            ),
+        );
+    };
+    library(
+        "org.acme:raylib-kt",
+        "0.4.0",
+        "<kargo.web-resources>web-resources</kargo.web-resources><kargo.web-init>init.mjs</kargo.web-init>",
+    );
+    library("org.acme:plain", "0.4.0", "");
+    library("org.jetbrains.kotlin:kotlin-stdlib-wasm-js", "2.4.21", "");
+    library("org.jetbrains.kotlin:kotlin-test-wasm-js", "2.4.21", "");
+    let zip_path = repo.dir.path().join("org/acme/raylib-kt/0.4.0/raylib-kt-0.4.0-web-resources.zip");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+    for name in ["init.mjs", "raylib.mjs"] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, name.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[target.wasm]\nenvironment = \"js\"\n[target.wasm.dependencies]\n\
+                 \"org.acme:raylib-kt\" = \"0.4.0\"\n\"org.acme:plain\" = \"0.4.0\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["update", "--offline"]).assert().success();
+    let lock = kargo_ops::lockfile::Lockfile::load(&p.path().join("kargo.lock")).unwrap();
+    let web = &lock.resolutions["wasm/web-resources"];
+    let files: Vec<&str> = web.packages.iter().flat_map(|p| &p.files).map(|f| f.path.as_str()).collect();
+    assert_eq!(files, ["org/acme/raylib-kt/0.4.0/raylib-kt-0.4.0-web-resources.zip"], "only the library that ships them");
+    assert_eq!(web.packages[0].files[0].sha256, kargo_util::hash::sha256_file(&zip_path).unwrap());
+    assert!(lock.resolutions.contains_key("wasm/web-resources-test"));
+
+    // Without libraries that ship web resources there is no entry.
+    p.file("kargo.toml", &p.read("kargo.toml").replace("\"org.acme:raylib-kt\" = \"0.4.0\"\n", ""));
+    p.kargo().args(["update", "--offline"]).assert().success();
+    assert!(!p.read("kargo.lock").contains("web-resources"));
 }
 
 #[test]

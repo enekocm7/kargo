@@ -83,6 +83,9 @@ fn resolve_package(ctx: &BuildContext) -> Result<()> {
                 build::jvm_ksp_path(ctx, &setup, test)?;
             }
         }
+        if target == TargetKind::Wasm {
+            crate::web_resources::fetch(ctx)?;
+        }
     }
     crate::generate::fetch_tools(ctx, &[])?;
     Ok(())
