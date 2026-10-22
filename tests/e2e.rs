@@ -1697,6 +1697,35 @@ fn pinned_jdk_is_downloaded_and_used() {
 }
 
 #[test]
+fn a_machine_without_java_gets_a_managed_jdk() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    // A home of its own, so no managed JDK is installed yet, and nothing on PATH, so no `java`.
+    let home = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let kargo = |args: &[&str]| {
+        let mut cmd = t.kargo("app");
+        cmd.env("KARGO_HOME", home.path()).env_remove("JAVA_HOME").env("PATH", empty.path()).env_remove("KARGO_AUTO_INSTALL").args(args);
+        cmd
+    };
+    kargo(&["run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello, Kotlin!"))
+        .stderr(predicate::str::contains("installing Temurin JDK 21"));
+    // The next command uses it as it is, offline too.
+    kargo(&["--offline", "run"]).assert().success().stderr(predicate::str::contains("installing").not());
+    let which = kargo(&["toolchain", "which"]).assert().success().get_output().stdout.clone();
+    let which = String::from_utf8(which).unwrap();
+    assert!(
+        which.contains("system (JDK 21 at") && which.contains(&home.path().join("toolchains").join("jdk").display().to_string()),
+        "{which}"
+    );
+    kargo(&["daemon", "stop"]).assert().success();
+}
+
+#[test]
 fn path_dependencies() {
     require_e2e!();
     let t = calc_with_mathlib();

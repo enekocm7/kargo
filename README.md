@@ -29,7 +29,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 
 ## How it works
 
-* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo can also download the JDK for you (`[toolchain] jdk = "21"`), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`).
+* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo also downloads a JDK when you have none (or the one `[toolchain] jdk = "21"` pins), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`).
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
 * **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and before a cached artifact is first locked, and every artifact a build uses is checked against the lockfile, so a corrupt cached file fails the build instead of being used. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
 * **Incremental:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, only the affected Kotlin/JVM files are recompiled, in a warm compiler daemon, so an edit rebuilds in well under a second.
@@ -336,7 +336,7 @@ graalvm = "25"        # GraalVM CE for native images (or "oracle-25"); default "
 kargo = ">=0.3"       # the Kargo versions the project builds with; an older Kargo stops and points to `kargo self update`
 ```
 
-With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`. Any other value makes Kargo download that Temurin JDK from Adoptium on first use. The download is verified against the published SHA-256 and installed under `~/.kargo/toolchains/jdk/<release>`; it is then used for compiling, running and testing, and passed to Gradle for Android builds. A major version picks the newest installed release of it. Kargo also checks that `jvm-target` is not newer than the JDK that builds the project (pinned or system), and that the Kotlin compiler can run on it: compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer, so pin `jdk = "21"` or upgrade Kotlin.
+With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`; on a machine with neither, it downloads Temurin 21 (or the LTS the project's `jvm-target` and Kotlin version need) into `~/.kargo/toolchains/jdk/` and uses that, except with `--offline` or `--locked`. Every toolchain a command needs installs on first use like this; `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` in `config.toml` turns it off, and the error then names the `kargo toolchain install` command to run (see [what installs automatically](https://enekocm7.github.io/kargo/guides/toolchains/#what-installs-automatically)). Any other value makes Kargo download that Temurin JDK from Adoptium on first use. The download is verified against the published SHA-256 and installed under `~/.kargo/toolchains/jdk/<release>`; it is then used for compiling, running and testing, and passed to Gradle for Android builds. A major version picks the newest installed release of it. Kargo also checks that `jvm-target` is not newer than the JDK that builds the project (pinned or system), and that the Kotlin compiler can run on it: compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer, so pin `jdk = "21"` or upgrade Kotlin.
 
 `graalvm` is only used by `kargo package --format `kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`` and `kargo run --native-agent`. Kargo looks the release up with the foojay Disco API, downloads it on first use, verifies its SHA-256 and installs it under `~/.kargo/toolchains/graalvm/<distribution>-<version>`, next to the GraalVM reachability metadata repository that native images of the dependencies use.
 
@@ -349,7 +349,7 @@ Toolchains are locked while they install, so concurrent Kargo processes sharing 
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
 $ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, graalvm 25, native 2.4.21, gradle 9.6.0, kotlin-lsp, kls, kotlin-debug-adapter
-$ kargo toolchain install            # whatever the current project needs
+$ kargo toolchain install            # whatever the current project needs (a JDK too, when there is none)
 $ kargo toolchain list               # installed JDKs/GraalVMs/Kotlin/Native/Gradle, disk usage, what the project uses
 $ kargo toolchain which              # toolchains resolved for this project
 $ kargo toolchain remove jdk 17      # all JDK 17 releases (or one release)
@@ -420,6 +420,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_VENDORED` | Same as `--vendored` |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | Proxy for Kargo's downloads (overridden by `[http] proxy` in `config.toml`) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
+| `KARGO_AUTO_INSTALL` | `0` stops commands from downloading the toolchains they need (a JDK when none is on `JAVA_HOME` or `PATH`, a pinned JDK or GraalVM, Kotlin/Native, Gradle, the language servers); `1` turns installs on over `[toolchain] auto-install = false` in `config.toml` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
 | `SOURCE_DATE_EPOCH` | The time (seconds since 1970) that a `build-config` generator with `build-time = true` writes as `BUILD_TIME`, instead of the current time |
 | `KARGO_DAEMON` | `false` turns off the compiler daemon |

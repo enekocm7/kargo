@@ -857,10 +857,12 @@ Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, and the Kotlin la
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses |
-| `install [jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs. `graalvm` takes `25` (GraalVM Community Edition) or `oracle-25` (Oracle GraalVM). `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
+| `install [jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs (with `jdk = "system"` and no JDK on `JAVA_HOME` or `PATH`, the JDK a build would install). It installs even with `KARGO_AUTO_INSTALL=0`. `graalvm` takes `25` (GraalVM Community Edition) or `oracle-25` (Oracle GraalVM). `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
 | `remove` (`rm`) `<jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs and GraalVMs, a major version removes all its releases |
 | `available` | JDK versions available for download (LTS marked) |
 | `which` | The toolchains this project resolves to |
+
+Other commands install the toolchains they need on first use, including a JDK when the project uses the system JDK and the machine has none; `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` in `config.toml` turns that off. See [what installs automatically](../../guides/toolchains/#what-installs-automatically).
 
 ## `kargo self`
 

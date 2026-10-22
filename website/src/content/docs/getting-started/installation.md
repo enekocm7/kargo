@@ -110,7 +110,7 @@ Cargo for Kotlin: a build tool and package manager
 
 ## 2. Get a JDK
 
-The Kotlin compiler runs on the JVM, so Kargo needs a **JDK 11 or newer** for every target. JVM tests need **JDK 17 or newer**, because `kargo test` runs the JUnit 6 launcher on the project's JDK. You have two options.
+The Kotlin compiler runs on the JVM, so Kargo needs a **JDK 11 or newer** for every target. JVM tests need **JDK 17 or newer**, because `kargo test` runs the JUnit 6 launcher on the project's JDK. You don't have to install one yourself.
 
 **Use the JDK you already have.** Kargo looks at `JAVA_HOME`, then at `java` on your `PATH`.
 
@@ -119,12 +119,14 @@ $ java -version
 openjdk version "21.0.5" 2024-10-15 LTS
 ```
 
-**Let Kargo download one.** Add a `[toolchain]` section to a project and Kargo will download that [Eclipse Temurin](https://adoptium.net) JDK on first use, verify its checksum and keep it under `~/.kargo/toolchains`:
+**Let Kargo download one.** On a machine with no JDK on `JAVA_HOME` or `PATH`, the first command that needs one (`kargo build`, `run`, `test`, ...) downloads an [Eclipse Temurin](https://adoptium.net) JDK 21, verifies its checksum and keeps it under `~/.kargo/toolchains`, so `kargo new app && cd app && kargo run` works on a fresh machine. To use the same JDK everywhere, whatever is installed, pin it in the project instead:
 
 ```toml title="kargo.toml"
 [toolchain]
 jdk = "21"
 ```
+
+`KARGO_AUTO_INSTALL=0` turns automatic downloads off.
 
 See [Managing JDKs](../../guides/toolchains/) for details.
 

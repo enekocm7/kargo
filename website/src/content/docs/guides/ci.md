@@ -15,7 +15,7 @@ kargo init-ci            # add --junit for the test report step
 
 It runs `fmt --check`, `lint`, `check --tests --locked`, `build --locked`, `test --locked` and `package --release --locked`, and reads `kargo.toml` for the setup around them:
 
-- `actions/setup-java` only when a package does not set `[toolchain] jdk`.
+- `actions/setup-java` only when a package does not set `[toolchain] jdk`. With `--locked`, Kargo doesn't download a JDK for a project on the system JDK by itself, so the job needs one on `PATH` or a pinned one.
 - `actions/setup-node` when a package has a Wasm target.
 - An `ubuntu-latest`, `macos-latest` and `windows-latest` matrix when a package has a Kotlin/Native target.
 - `--junit` runs `kargo test --report junit` and publishes the reports (see [Test results](#test-results)).
@@ -201,7 +201,7 @@ For release builds, Binaryen's `wasm-opt` makes the Wasm module much smaller; `n
 The steps are the same everywhere:
 
 1. Install Kargo: `curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=<version> sh -s -- --no-modify-path`, then put `~/.kargo/bin` on `PATH` (on Windows, `$env:KARGO_VERSION = '<version>'; irm https://enekocm7.github.io/kargo/install.ps1 | iex`). Pin the version so a new release cannot change your build, and set `[toolchain] kargo = ">=<version>"` in `kargo.toml` so a developer's older Kargo says so.
-2. Provide a JDK, or pin one with `[toolchain] jdk`.
+2. Provide a JDK, or pin one with `[toolchain] jdk`. Without either, Kargo downloads Temurin 21 itself, but not with `--locked` or `--offline`: there it stops and names the `kargo toolchain install jdk` command to run (see [Without a JDK](../toolchains/#without-a-jdk)).
 3. Cache `~/.kargo` (or `$KARGO_HOME`), except its `daemon/` directory.
 4. Run `kargo test --locked`, adding `--report junit` if the CI shows JUnit XML results.
 
@@ -215,6 +215,7 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 |---|---|
 | `--locked` | Fail instead of silently changing `kargo.lock`, and check every cached artifact against it |
 | `--offline` | Make sure a step uses only what's cached |
+| `KARGO_AUTO_INSTALL=0` | Fail instead of downloading a toolchain the cache doesn't have (a JDK, Kotlin/Native, Gradle), with the `kargo toolchain install` command to run. See [What installs automatically](../toolchains/#what-installs-automatically) |
 | `kargo fetch` | Download everything in a step of its own (add `--tools` for the doc, fmt and lint tools), so the steps after it can use `--offline` |
 | `--vendored` | Build from a committed `vendor/` that [`kargo vendor`](../offline-and-mirrors/#vendoring-dependencies) wrote, without the public repositories |
 | `~/.kargo/config.toml` | Send downloads through your company's [mirrors and proxy](../offline-and-mirrors/) |

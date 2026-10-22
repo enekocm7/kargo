@@ -1,9 +1,68 @@
 ---
 title: Managing JDKs
-description: Pin a JDK per project and manage installed JDKs, GraalVMs, Kotlin/Native and Gradle distributions.
+description: Pin a JDK per project, see which toolchains Kargo installs on its own, and manage installed JDKs, GraalVMs, Kotlin/Native and Gradle distributions.
 ---
 
-Kargo can use the JDK you already have, or download and manage JDKs for you, per project.
+Kargo can use the JDK you already have, or download and manage JDKs for you, per project. A command that needs a toolchain it doesn't find installs it, so a new machine needs nothing but Kargo.
+
+## Without a JDK
+
+With the default `jdk = "system"`, Kargo uses the JDK on `JAVA_HOME`, then `java` on `PATH`. If there is neither, it downloads a Temurin JDK into `~/.kargo/toolchains/jdk/` and uses that, so this works on a machine without Java:
+
+```console
+$ kargo new app && cd app
+$ kargo run
+note: no JDK on JAVA_HOME or PATH; installing Temurin JDK 21 for Kargo (KARGO_AUTO_INSTALL=0 turns this off)
+ Downloading jdk-21.0.12.1_1.zip
+  Installing JDK jdk-21.0.12.1+1 (Temurin)
+   ...
+   Compiling app v0.1.0 (jvm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.88s
+     Running `java com.example.app.MainKt`
+Hello, Kotlin!
+```
+
+Kargo picks Temurin 21, the LTS it builds with by default. A project that needs a newer one gets the next LTS: `jvm-target = "25"` gets JDK 25. Kotlin versions before 2.1.10 can't run on JDK 25, so they always get 21. Once a managed JDK is installed, later commands use it without a download, offline too. If you have several, they use the newest one that fits the project.
+
+A JDK on `JAVA_HOME` or `PATH` always wins, so nothing changes if you have one. A `JAVA_HOME` that points at a broken JDK is still an error, not a reason to download another one.
+
+With `--offline` or `--locked`, Kargo never chooses and downloads a JDK by itself. The error names the command that installs it, `kargo toolchain install jdk 21`. Under `--locked` it also suggests pinning that JDK with `[toolchain] jdk`, which makes the build reproducible.
+
+## What installs automatically
+
+| Toolchain | Needed by | Installs automatically |
+|---|---|---|
+| JDK (`[toolchain] jdk = "system"`) | `build`, `run`, `test`, `check`, `bench`, `package`, `fmt`, `lint`, `doc`, `script`, `lsp`, `dap`, `install` | Yes, when no JDK is on `JAVA_HOME` or `PATH`: Temurin 21, or the LTS the project needs. Not with `--offline` or `--locked` |
+| JDK (pinned `[toolchain] jdk = "21"`) | The same commands | Yes, on first use. Not with `--offline` |
+| GraalVM (`[toolchain] graalvm`) | `package --format native-image`, `run --native-agent` | Yes, when pinned. With `system`, Kargo looks on `GRAALVM_HOME`, `JAVA_HOME` and `PATH` |
+| GraalVM reachability metadata | `package --format native-image` | Yes |
+| Kotlin/Native | Builds of the `native` target | Yes |
+| Gradle | Builds of the `android` target without a `gradlew` | Yes |
+| Kotlin LSP, kotlin-language-server | `lsp --server kotlin-lsp`, `lsp --server kls` | Yes |
+| kotlin-debug-adapter | `dap` | Yes |
+| Kotlin compiler, compiler plugins | Every build | Yes, from Maven Central like a dependency |
+| ktlint, detekt, Dokka, JUnit launcher, JMH | `fmt`, `lint`, `doc`, `test`, `bench` | Yes, from Maven Central like a dependency |
+| Node.js, a browser | Running Wasm programs and tests | No: install them yourself |
+
+Every install prints a status line, verifies the download's SHA-256 and takes the toolchain's [lock](#parallel-installs-and-retries). It never prompts, so CI behaves like your terminal. Downloads go through [`[toolchain-mirrors]`](../offline-and-mirrors/#toolchain-mirrors).
+
+### Turning automatic installs off
+
+Set `KARGO_AUTO_INSTALL=0`, or put this in `~/.kargo/config.toml` (or a project's `.kargo/config.toml`):
+
+```toml title="~/.kargo/config.toml"
+[toolchain]
+auto-install = false
+```
+
+The environment variable wins over the file, and `KARGO_AUTO_INSTALL=1` turns installs back on. With installs off, a command that needs a toolchain that isn't installed stops and names the command that installs it:
+
+```console
+$ KARGO_AUTO_INSTALL=0 kargo build
+error: no Java installation found on JAVA_HOME or PATH, and automatic toolchain installs are off (KARGO_AUTO_INSTALL=0, or [toolchain] auto-install = false in config.toml); run `kargo toolchain install jdk 21`, or install a JDK and set JAVA_HOME
+```
+
+`kargo toolchain install` always installs, because you asked for that toolchain by name. Tools that come from Maven, such as the Kotlin compiler and ktlint, are dependencies, not toolchains, so they still download.
 
 ## Pinning a JDK
 
@@ -61,7 +120,7 @@ $ kargo toolchain install jdk 21.0.5+11
 $ kargo toolchain install graalvm 25 # newest GraalVM CE for JDK 25 (or: graalvm oracle-25)
 $ kargo toolchain install native 2.4.21
 $ kargo toolchain install gradle     # the Gradle this Android project needs (or: gradle 9.6.0)
-$ kargo toolchain install            # everything the current project needs
+$ kargo toolchain install            # everything the current project needs (a JDK too, when there is none)
 $ kargo toolchain list               # installed toolchains, disk usage, and what this project uses
 $ kargo toolchain which              # the toolchains this project resolves to
 $ kargo toolchain remove jdk 17      # every JDK 17 release

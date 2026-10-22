@@ -12,8 +12,9 @@ use crate::env::{EnvOptions, ProjectEnv};
 use crate::lockfile::Lockfile;
 use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
-use kargo_manifest::{Dependency, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::{DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
+use kargo_toolchain::jdks::JdkNeeds;
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
 use kargo_util::flock::FileLock;
@@ -22,6 +23,16 @@ use kargo_util::shell::Shell;
 
 /// Minimum JDK supported by the Kotlin compiler.
 pub const MIN_JDK: u32 = 11;
+
+/// What a project needs of a JDK that Kargo installs for it when the machine has none: new
+/// enough for its `jvm-target`, and not newer than its Kotlin compiler runs on.
+pub fn jdk_needs(manifest: &Manifest) -> JdkNeeds {
+    let jvm_target = manifest.targets.jvm.as_ref().and_then(|jvm| jvm.required_jdk());
+    JdkNeeds {
+        min: jvm_target.map_or(JdkNeeds::default().min, |t| t.max(JdkNeeds::default().min)),
+        max: kargo_toolchain::kotlin::max_compiler_jdk(&manifest.kotlin.version),
+    }
+}
 
 /// The build of one package. Path dependencies are built through contexts of their own
 /// ([`BuildContext::for_package`]) that share the lockfile and toolchains.
@@ -364,8 +375,8 @@ impl<'a> BuildContext<'a> {
 
     pub fn jdk(&self) -> Result<&Jdk> {
         self.shared.jdk.get_or_try_init(|| {
-            let request = &self.ws.manifest().toolchain.jdk;
-            let jdk = kargo_toolchain::jdks::resolve(self.config, request)?;
+            let manifest = self.ws.manifest();
+            let jdk = kargo_toolchain::jdks::resolve_for(self.config, &manifest.toolchain.jdk, jdk_needs(manifest))?;
             jdk.require_version(MIN_JDK)?;
             self.shell().verbose("Using", format!("JDK {} at {}", jdk.version, jdk.home.display()));
             Ok(jdk)

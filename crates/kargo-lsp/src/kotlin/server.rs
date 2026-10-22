@@ -315,17 +315,21 @@ fn fallback_model(root: &Path) -> Model {
 }
 
 /// The JDK the project builds with, for its sources: the installed JDK that its manifest asks
-/// for, else the one on `JAVA_HOME` or the path. A missing JDK isn't downloaded here; `kargo build` does that.
+/// for, else the one on `JAVA_HOME` or the path, else the managed JDK Kargo installed for a
+/// machine without one. A missing JDK isn't downloaded here; `kargo build` does that.
 fn project_jdk(config: &Config, root: &Path) -> Option<Arc<Jdk>> {
-    let installed = kargo_manifest::Manifest::load(&root.join(kargo_manifest::MANIFEST_NAME))
-        .ok()
-        .and_then(|manifest| kargo_toolchain::jdks::find_installed(config, &manifest.toolchain.jdk).ok().flatten());
+    let manifest = kargo_manifest::Manifest::load(&root.join(kargo_manifest::MANIFEST_NAME)).ok();
+    let installed = manifest.as_ref().and_then(|m| kargo_toolchain::jdks::find_installed(config, &m.toolchain.jdk).ok().flatten());
     let (home, version) = match installed {
         Some(installed) => (installed.jdk().home, installed.major),
-        None => {
-            let jdk = kargo_toolchain::Jdk::detect().ok()?;
-            (jdk.home, jdk.version)
-        }
+        None => match kargo_toolchain::Jdk::find().ok()? {
+            Some(jdk) => (jdk.home, jdk.version),
+            None => {
+                let needs = manifest.as_ref().map(kargo_ops::ops::context::jdk_needs).unwrap_or_default();
+                let managed = kargo_toolchain::jdks::find_fallback(config, needs).ok()??;
+                (managed.home, managed.major)
+            }
+        },
     };
     Jdk::open(&home, &config.home().join("cache"), &format!("JDK {version}")).map(Arc::new)
 }

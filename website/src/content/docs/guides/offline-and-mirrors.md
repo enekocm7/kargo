@@ -175,4 +175,7 @@ cainfo = "corp-ca.pem"
 [source]
 vendored = true
 directory = "vendor"
+
+[toolchain]
+auto-install = false
 ```

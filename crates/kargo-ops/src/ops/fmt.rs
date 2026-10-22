@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
-use super::context::{BuildContext, MIN_JDK, fat_jar};
+use super::context::{BuildContext, MIN_JDK, fat_jar, jdk_needs};
 use crate::workspace::Project;
 use kargo_manifest::FmtSettings;
 use kargo_maven::MavenClient;
@@ -112,7 +112,7 @@ pub fn format_text(config: &Config, project: &Project, package: usize, file: &Pa
         return Ok(None);
     }
     let version = settings.ktlint_version.as_deref().unwrap_or(KTLINT_VERSION);
-    let jdk = kargo_toolchain::jdks::resolve(config, &ws.manifest().toolchain.jdk)?;
+    let jdk = kargo_toolchain::jdks::resolve_for(config, &ws.manifest().toolchain.jdk, jdk_needs(ws.manifest()))?;
     jdk.require_version(MIN_JDK)?;
     let client = MavenClient::new(config, project.repositories());
     let jar = fat_jar(&client, KTLINT_GROUP, "ktlint-cli", version).with_context(|| format!("failed to fetch ktlint {version}"))?;

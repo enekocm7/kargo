@@ -51,13 +51,22 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
     let mut out = String::new();
     let installed = jdks::installed(config)?;
     let jdk_request = project.map(|m| m.toolchain.jdk.clone());
+    let system = Jdk::find();
+    // A project on the system JDK uses a managed one on a machine without Java.
+    let fallback = match project {
+        Some(m) if m.toolchain.jdk == JdkRequest::System && matches!(system, Ok(None)) => {
+            jdks::find_fallback(config, crate::ops::context::jdk_needs(m))?
+        }
+        _ => None,
+    };
 
     let _ = writeln!(out, "JDKs ({}):", config.jdks_dir().display());
     if installed.is_empty() {
         let _ = writeln!(out, "    (none installed)");
     }
     for jdk in &installed {
-        let used = jdk_request.as_ref().is_some_and(|r| is_selected(jdk, r, &installed));
+        let used = jdk_request.as_ref().is_some_and(|r| is_selected(jdk, r, &installed))
+            || fallback.as_ref().is_some_and(|f| f.release == jdk.release);
         let _ = writeln!(
             out,
             "    {:<22} {:>3}  {:<8} {:>10}{}",
@@ -68,8 +77,8 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
             if used { "  (used by this project)" } else { "" }
         );
     }
-    match Jdk::detect() {
-        Ok(system) => {
+    match system {
+        Ok(Some(system)) => {
             let used = matches!(jdk_request, Some(JdkRequest::System));
             let _ = writeln!(
                 out,
@@ -79,7 +88,7 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
                 if used { "  (used by this project)" } else { "" }
             );
         }
-        Err(_) => {
+        Ok(None) | Err(_) => {
             let _ = writeln!(out, "    system: none found (JAVA_HOME / PATH)");
         }
     }
@@ -183,6 +192,8 @@ Kotlin language servers and debug adapter ({}):",
 
 /// Installs a toolchain. `version` defaults to what the project needs.
 pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, version: Option<&str>) -> Result<String> {
+    // Asked for by name, so `KARGO_AUTO_INSTALL=0` doesn't apply.
+    let config = &config.clone().with_auto_install(true);
     match kind {
         ToolKind::Jdk => {
             let request: JdkRequest = match (version, project) {
@@ -234,6 +245,12 @@ pub fn install_for_project(config: &Config, manifest: &Manifest) -> Result<Vec<S
     let mut done = Vec::new();
     if manifest.toolchain.jdk != JdkRequest::System {
         done.push(install(config, Some(manifest), ToolKind::Jdk, None)?);
+    } else {
+        // The JDK a build would install on a machine without one.
+        let needs = crate::ops::context::jdk_needs(manifest);
+        if Jdk::find()?.is_none() && jdks::find_fallback(config, needs)?.is_none() {
+            done.push(install(config, Some(manifest), ToolKind::Jdk, Some(&needs.choose().to_string()))?);
+        }
     }
     if manifest.toolchain.graalvm != GraalvmRequest::System {
         done.push(install(config, Some(manifest), ToolKind::Graalvm, None)?);

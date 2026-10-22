@@ -215,6 +215,11 @@ impl LanguageServer {
         if let Some(found) = Self::find(config, kind, version)? {
             return Ok(found);
         }
+        crate::ensure_auto_install(
+            config,
+            &format!("{} {version}", kind.title()),
+            &format!("kargo toolchain install {} {version}", kind.as_str()),
+        )?;
         let server = Self::at(config, kind, version)?;
         let (url, file, archive_kind, sha256) = match kind {
             ServerKind::KotlinLsp => {

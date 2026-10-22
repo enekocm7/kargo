@@ -12,12 +12,18 @@ use crate::shell::Shell;
 /// Environment variable overriding the Kargo home directory (default `~/.kargo`).
 pub const HOME_ENV: &str = "KARGO_HOME";
 
+/// Environment variable that turns automatic toolchain installs off (`0`) or on (`1`), over
+/// `[toolchain] auto-install` of `config.toml`.
+pub const AUTO_INSTALL_ENV: &str = "KARGO_AUTO_INSTALL";
+
 #[derive(Debug, Clone)]
 pub struct Config {
     home: PathBuf,
     offline: bool,
     refresh: bool,
     system_gradle: bool,
+    auto_install: bool,
+    locked: bool,
     shell: Shell,
     settings: Arc<Settings>,
     network: Arc<Network>,
@@ -31,6 +37,8 @@ impl Config {
             offline: false,
             refresh: false,
             system_gradle: false,
+            auto_install: true,
+            locked: false,
             shell,
             settings: Arc::default(),
             network: Arc::default(),
@@ -59,6 +67,18 @@ impl Config {
 
     pub fn with_system_gradle(mut self, system_gradle: bool) -> Self {
         self.system_gradle = system_gradle;
+        self
+    }
+
+    /// Whether a command may download a toolchain it needs (see [`Config::auto_install`]).
+    pub fn with_auto_install(mut self, auto_install: bool) -> Self {
+        self.auto_install = auto_install;
+        self
+    }
+
+    /// Records `--locked`, which also keeps Kargo from choosing a JDK for the project by itself.
+    pub fn with_locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
         self
     }
 
@@ -160,6 +180,17 @@ impl Config {
     /// Run Android builds with the Gradle on `PATH` instead of a Kargo-managed one (`--system-gradle`).
     pub fn system_gradle(&self) -> bool {
         self.system_gradle
+    }
+
+    /// Whether a command may download a toolchain it needs but doesn't find installed (a JDK,
+    /// GraalVM, Kotlin/Native, Gradle, a language server). `kargo toolchain install` always may.
+    pub fn auto_install(&self) -> bool {
+        self.auto_install
+    }
+
+    /// Whether the command runs with `--locked`.
+    pub fn locked(&self) -> bool {
+        self.locked
     }
 
     pub fn shell(&self) -> &Shell {

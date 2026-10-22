@@ -21,6 +21,9 @@
 //! [source]
 //! vendored = true
 //! directory = "vendor"
+//!
+//! [toolchain]
+//! auto-install = false
 //! ```
 
 use std::collections::BTreeMap;
@@ -49,6 +52,8 @@ struct RawSettings {
     http: RawHttp,
     #[serde(default)]
     source: RawSource,
+    #[serde(default)]
+    toolchain: RawToolchain,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -80,6 +85,12 @@ struct RawSource {
     directory: Option<PathBuf>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawToolchain {
+    auto_install: Option<bool>,
+}
+
 /// Environment variables that hold the credentials for every URL starting with a prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialsEnv {
@@ -100,6 +111,7 @@ pub struct Settings {
     cainfo: Option<PathBuf>,
     vendored: Option<bool>,
     vendor_dir: Option<PathBuf>,
+    auto_install: Option<bool>,
     /// The files the settings were read from, in the order they apply.
     files: Vec<PathBuf>,
 }
@@ -183,6 +195,9 @@ impl Settings {
         if let Some(dir) = raw.source.directory {
             self.vendor_dir = Some(dir);
         }
+        if let Some(auto_install) = raw.toolchain.auto_install {
+            self.auto_install = Some(auto_install);
+        }
         Ok(())
     }
 
@@ -248,6 +263,11 @@ impl Settings {
     pub fn vendor_dir(&self) -> &Path {
         self.vendor_dir.as_deref().unwrap_or(Path::new(DEFAULT_VENDOR_DIR))
     }
+
+    /// `[toolchain] auto-install`: whether a command may download a toolchain it needs (default true).
+    pub fn auto_install(&self) -> bool {
+        self.auto_install.unwrap_or(true)
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +331,19 @@ mod tests {
         assert!(s.merge_str("[mirrors]\n\"*\" = \"artifactory\"\n", Path::new("/")).is_err());
         assert!(s.merge_str("[http]\nproxy = \"proxy:3128\"\n", Path::new("/")).is_err());
         assert!(s.merge_str("[unknown]\n", Path::new("/")).is_err());
+        assert!(s.merge_str("[toolchain]\njdk = \"21\"\n", Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn toolchain_auto_install_defaults_to_on() {
+        let mut s = Settings::default();
+        assert!(s.auto_install());
+        s.merge_str("[toolchain]\nauto-install = false\n", Path::new("/")).unwrap();
+        assert!(!s.auto_install());
+        s.merge_str("[http]\nproxy = \"\"\n", Path::new("/")).unwrap();
+        assert!(!s.auto_install(), "a later file without the key keeps it");
+        s.merge_str("[toolchain]\nauto-install = true\n", Path::new("/")).unwrap();
+        assert!(s.auto_install());
     }
 
     #[test]

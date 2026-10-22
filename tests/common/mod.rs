@@ -32,10 +32,15 @@ impl Project {
         std::fs::read_to_string(self.path().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
     }
 
-    /// `kargo` running in the project with an isolated home directory.
+    /// `kargo` running in the project with an isolated home directory. Toolchains are never
+    /// installed automatically (`KARGO_AUTO_INSTALL=0`), so a machine without Java needs no network.
     pub fn kargo(&self) -> Command {
         let mut cmd = Command::cargo_bin("kargo").unwrap();
-        cmd.current_dir(self.path()).env("KARGO_HOME", self.home.path()).env_remove("KARGO_TARGET_DIR").env("NO_COLOR", "1");
+        cmd.current_dir(self.path())
+            .env("KARGO_HOME", self.home.path())
+            .env_remove("KARGO_TARGET_DIR")
+            .env("NO_COLOR", "1")
+            .env("KARGO_AUTO_INSTALL", "0");
         cmd
     }
 }

@@ -15,7 +15,7 @@ pub mod native;
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub use graalvm::Graalvm;
 pub use gradle::GradleDistribution;
@@ -32,6 +32,21 @@ use kargo_util::process::find_on_path;
 pub fn node() -> Result<PathBuf> {
     find_on_path("node").context("Node.js is required to run Kotlin/Wasm programs; install it and put `node` on PATH")
 }
+
+/// Fails when the user turned automatic installs off (`KARGO_AUTO_INSTALL=0`, `[toolchain]
+/// auto-install = false`) and a command needs `what`, a toolchain it doesn't find installed.
+/// `install` is the command that installs it by hand. Offline mode is left to the download,
+/// which a mirror or vendored repository on disk can still serve.
+pub fn ensure_auto_install(config: &Config, what: &str, install: &str) -> Result<()> {
+    if !config.auto_install() {
+        bail!("{what} is not installed and {AUTO_INSTALL_OFF}; run `{install}`");
+    }
+    Ok(())
+}
+
+/// Why [`ensure_auto_install`] refuses when the user turned automatic installs off.
+pub(crate) const AUTO_INSTALL_OFF: &str =
+    "automatic toolchain installs are off (KARGO_AUTO_INSTALL=0, or [toolchain] auto-install = false in config.toml)";
 
 /// Locks toolchain `name` (e.g. `jdk-21.0.2+13`) across Kargo processes, for an install or a removal.
 ///
