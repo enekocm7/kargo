@@ -149,6 +149,8 @@ excluded-functions = ["SDL_main"]
 
 Kargo writes them with the contents of the project's `.def` file, if there is one, into `target/<profile>/native/<platform>/cinterop/<name>.def`. A key set in both places takes the `.def` file's value.
 
+The linker options of the entry for that platform go into the same file as `linkerOpts`: `-L` for each of `library-paths`, `linker-options` (pkg-config's included) and, on Apple platforms, `-framework` for each of `frameworks`. `cinterop` stores the `.def` file's `linkerOpts` in the klib, so every program that links the bindings gets them, including programs of other projects that depend on your published library. If the project's `.def` file sets `linkerOpts` too, Kargo appends its options to that value.
+
 ## pkg-config
 
 `pkg-config = "<package>"` takes the compiler and linker flags of an installed library from its `<package>.pc` file:

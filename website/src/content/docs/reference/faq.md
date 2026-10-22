@@ -158,6 +158,10 @@ Either you changed `kargo.toml` without committing the updated lockfile, or the 
 
 Add `"host"` to `[target.native] platforms` to run locally.
 
+### `undefined symbol` when linking a program that uses a Native library with C bindings
+
+The library's cinterop klib must carry the linker options of its `[target.native.cinterop.<name>]` entry. Kargo 0.1.1 and older passed them to `cinterop` on the command line, which does not store them in the klib, so a library published with those versions links on its own but not in the programs that depend on it. Publish the library again with a newer Kargo. Until then, repeat its options in your own `kargo.toml`, for example `linker-options = ["-lgdi32", "-lwinmm"]` under `[target.native.platform.mingw_x64]`.
+
 ### `test JVM exited with code N before finishing`
 
 A test ended the test JVM early: a call to `System.exit(N)` is the usual cause, and an `OutOfMemoryError` the other. Look for the test that calls `exit`, or raise the heap with `[test] jvm-args = ["-Xmx1g"]`. See [When a test run stops early](../../guides/testing/#when-a-test-run-stops-early).

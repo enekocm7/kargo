@@ -1582,8 +1582,11 @@ fn cinterop_project() -> E2e {
     let manifest = std::fs::read_to_string(t.dir.path().join("cin/kargo.toml")).unwrap();
     t.write(
         "cin/kargo.toml",
-        &format!("{manifest}\n[target.native.cinterop.mathx]\npackage = \"mathx\"\ncompiler-options = [\"-Iinclude\"]\n"),
+        &format!(
+            "{manifest}\n[target.native.cinterop.mathx]\npackage = \"mathx\"\ncompiler-options = [\"-Iinclude\"]\nlibrary-paths = [\"lib\"]\n"
+        ),
     );
+    t.write("cin/lib/.keep", "");
     t.write("cin/include/twice.h", "static inline int twice(int x) { return 2 * x; }\n");
     t.write("cin/interop/mathx.def", "headers = twice.h\n---\nstatic int add(int a, int b) { return a + b; }\n");
     t.write(
@@ -1611,6 +1614,12 @@ fn native_cinterop() {
         .stdout(predicate::str::contains("answer 42"));
     // Up to date: the bindings are not regenerated.
     t.kargo("cin").arg("build").assert().success().stderr(predicate::str::contains("Generating").not());
+    // The klib records the linker options, so programs that depend on it link them too.
+    let klib = t.dir.path().join(format!("cin/target/debug/native/{}/cinterop/mathx.klib", host_konan_target()));
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&klib).unwrap()).unwrap();
+    let mut manifest = String::new();
+    std::io::Read::read_to_string(&mut archive.by_name("default/manifest").unwrap(), &mut manifest).unwrap();
+    assert!(manifest.lines().any(|l| l.starts_with("linkerOpts=-L") && l.contains("/cin/lib")), "no -L option in:\n{manifest}");
 }
 
 #[test]

@@ -266,20 +266,83 @@ pub fn header_hint(lines: &[String], interop: &str) -> Option<String> {
     None
 }
 
-/// The text of the `.def` file Kargo writes for a `cinterop` entry with `.def` properties in kargo.toml:
-/// those properties, then the project's own `.def` file (whose values win, being read last).
-pub fn def_file_contents(interop: &Cinterop, project_def: Option<&str>) -> String {
+/// The linker options a `cinterop` klib records for every program that links it: `-L` for the
+/// library paths, the linker options, and on Apple targets `-framework` for the frameworks.
+pub fn cinterop_linker_options(options: &NativeOptions, konan_target: &str) -> Vec<String> {
+    let mut opts: Vec<String> = options.library_paths.iter().map(|dir| format!("-L{}", slash(dir))).collect();
+    opts.extend(options.linker_options.iter().cloned());
+    if is_apple_target(konan_target) {
+        for framework in &options.frameworks {
+            opts.push("-framework".to_owned());
+            opts.push(framework.clone());
+        }
+    }
+    opts
+}
+
+/// The text of the `.def` file Kargo writes for a `cinterop` entry with `.def` properties or linker
+/// options in kargo.toml: those properties, then the project's own `.def` file (whose values win,
+/// being read last). The linker options go into `linkerOpts`, after the project's own if it sets
+/// them: `cinterop` records only the `.def` file's `linkerOpts` in the klib, not `-linker-option`.
+pub fn def_file_contents(interop: &Cinterop, linker_options: &[String], project_def: Option<&str>) -> String {
     let mut out = format!("# Written by Kargo from [target.native.cinterop.{}] in kargo.toml.\n", interop.name);
     for (key, value) in interop.def_properties() {
         out.push_str(&format!("{key} = {value}\n"));
     }
-    if let Some(def) = project_def {
+    let linker_opts = def_list(linker_options);
+    let merged = project_def.filter(|_| !linker_opts.is_empty()).and_then(|def| append_to_property(def, "linkerOpts", &linker_opts));
+    if merged.is_none() && !linker_opts.is_empty() {
+        out.push_str(&format!("linkerOpts = {linker_opts}\n"));
+    }
+    if let Some(def) = merged.as_deref().or(project_def) {
         out.push_str(def);
         if !def.ends_with('\n') {
             out.push('\n');
         }
     }
     out
+}
+
+/// A `.def` list value: the arguments separated by spaces, quoted when they hold whitespace, with
+/// backslashes doubled for the properties syntax.
+fn def_list(args: &[String]) -> String {
+    let quoted: Vec<String> = args
+        .iter()
+        .map(|arg| {
+            let arg = arg.replace('\\', "\\\\");
+            if arg.chars().any(char::is_whitespace) { format!("\"{arg}\"") } else { arg }
+        })
+        .collect();
+    quoted.join(" ")
+}
+
+/// `def` with `value` appended to the last `key` property before its `---` line, or `None` when
+/// it sets no `key`. A property spans the lines ending in an odd number of backslashes.
+fn append_to_property(def: &str, key: &str, value: &str) -> Option<String> {
+    let lines: Vec<&str> = def.split_inclusive('\n').collect();
+    let continues = |line: &str| line.trim_end_matches(['\n', '\r']).chars().rev().take_while(|&c| c == '\\').count() % 2 == 1;
+    let mut found = None;
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim_end_matches(['\n', '\r']) == "---" {
+            break;
+        }
+        let line = lines[i].trim_start();
+        let mut end = i;
+        if !line.starts_with(['#', '!']) {
+            while end + 1 < lines.len() && continues(lines[end]) {
+                end += 1;
+            }
+            if line.split(|c: char| c == '=' || c == ':' || c.is_whitespace()).next() == Some(key) {
+                found = Some(end);
+            }
+        }
+        i = end + 1;
+    }
+    let end = found?;
+    let last = lines[end];
+    let body = last.trim_end_matches(['\n', '\r']);
+    Some(format!("{}{body} {value}{}{}", lines[..end].concat(), &last[body.len()..], lines[end + 1..].concat()))
 }
 
 /// One `cinterop` run: a C library bound to a klib for one Konan target.
@@ -320,23 +383,11 @@ impl CinteropUnit<'_> {
             args.push("-compiler-option".to_owned());
             args.push(opt.clone());
         }
-        // Recorded in the klib, so every program linking it gets them.
-        let mut linker_options = Vec::new();
+        // Where `-staticLibrary` looks. The linker options are the `.def` file's `linkerOpts`
+        // (see `def_file_contents`), the only ones `cinterop` records in the klib.
         for dir in &self.options.library_paths {
             args.push("-libraryPath".to_owned());
             args.push(slash(dir));
-            linker_options.push(format!("-L{}", slash(dir)));
-        }
-        linker_options.extend(self.options.linker_options.iter().cloned());
-        if is_apple_target(&self.konan_target) {
-            for framework in &self.options.frameworks {
-                linker_options.push("-framework".to_owned());
-                linker_options.push(framework.clone());
-            }
-        }
-        for opt in linker_options {
-            args.push("-linker-option".to_owned());
-            args.push(opt);
         }
         // Embedded in the klib, so programs run without the library installed.
         for lib in &self.options.static_libraries {
@@ -600,17 +651,25 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-pkg", "sqlite3"]));
         assert!(args.windows(2).any(|w| w == ["-header", "sqlite3.h"]));
         assert!(args.windows(2).any(|w| w == ["-compiler-option", "-Iinclude"]));
-        assert!(args.windows(2).any(|w| w == ["-linker-option", "-lsqlite3"]));
         assert!(args.windows(2).any(|w| w == ["-libraryPath", "/opt/lib"]));
-        assert!(args.windows(2).any(|w| w == ["-linker-option", "-L/opt/lib"]));
         assert!(args.windows(2).any(|w| w == ["-staticLibrary", "libz.a"]));
-        // Frameworks only exist on Apple platforms.
-        assert!(!args.contains(&"-framework".to_owned()));
-        let apple = CinteropUnit { konan_target: "macos_arm64".into(), ..unit.clone() };
-        let args = apple.args();
-        assert!(args.windows(4).any(|w| w == ["-linker-option", "-framework", "-linker-option", "Security"]));
+        // cinterop does not record `-linker-option` in the klib; the `.def` file carries them.
+        assert!(!args.contains(&"-linker-option".to_owned()));
         let headers_only = CinteropUnit { def: None, ..unit };
         assert!(!headers_only.args().contains(&"-def".to_owned()));
+    }
+
+    #[test]
+    fn cinterop_linker_options_include_library_paths_and_frameworks() {
+        let options = NativeOptions {
+            linker_options: vec!["-lsqlite3".into()],
+            library_paths: vec![PathBuf::from("/opt/lib")],
+            frameworks: vec!["Security".into()],
+            ..Default::default()
+        };
+        assert_eq!(cinterop_linker_options(&options, "linux_x64"), ["-L/opt/lib", "-lsqlite3"]);
+        // Frameworks only exist on Apple platforms.
+        assert_eq!(cinterop_linker_options(&options, "macos_arm64"), ["-L/opt/lib", "-lsqlite3", "-framework", "Security"]);
     }
 
     #[test]
@@ -618,11 +677,30 @@ mod tests {
         let mut interop = interop();
         interop.header_filter = vec!["sqlite3*.h".into()];
         interop.strict_enums = vec!["A".into(), "B".into()];
-        let text = def_file_contents(&interop, Some("headers = sqlite3.h\n---\nstatic int x = 1;"));
+        let text = def_file_contents(&interop, &[], Some("headers = sqlite3.h\n---\nstatic int x = 1;"));
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("# Written by Kargo"));
         assert_eq!(lines[1..], ["headerFilter = sqlite3*.h", "strictEnums = A B", "headers = sqlite3.h", "---", "static int x = 1;"]);
-        assert!(def_file_contents(&interop, None).ends_with("strictEnums = A B\n"));
+        assert!(def_file_contents(&interop, &[], None).ends_with("strictEnums = A B\n"));
+    }
+
+    #[test]
+    fn generated_def_records_the_linker_options() {
+        let interop = interop();
+        let opts = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let linker = opts(&["-LC:\\raylib lib", "-lgdi32", "-lwinmm"]);
+        let text = def_file_contents(&interop, &linker, None);
+        assert!(text.ends_with("\nlinkerOpts = \"-LC:\\\\raylib lib\" -lgdi32 -lwinmm\n"), "{text}");
+        // Before the project's own properties.
+        let text = def_file_contents(&interop, &opts(&["-lm"]), Some("headers = x.h\n---\nint linkerOpts = 1;\n"));
+        assert!(text.ends_with("\nlinkerOpts = -lm\nheaders = x.h\n---\nint linkerOpts = 1;\n"), "{text}");
+        // Appended to the project's `linkerOpts`, which would otherwise replace them, even over several lines.
+        let project = "linkerOpts.mingw = -lopengl32\nlinkerOpts = -lx \\\n  -ly\nheaders = x.h\n";
+        let text = def_file_contents(&interop, &opts(&["-lm"]), Some(project));
+        assert!(text.ends_with("\nlinkerOpts.mingw = -lopengl32\nlinkerOpts = -lx \\\n  -ly -lm\nheaders = x.h\n"), "{text}");
+        let text = def_file_contents(&interop, &opts(&["-lm"]), Some("# linkerOpts = -lold\nlinkerOpts:-lx"));
+        assert!(text.ends_with("\n# linkerOpts = -lold\nlinkerOpts:-lx -lm\n"), "{text}");
+        assert!(!def_file_contents(&interop, &[], None).contains("linkerOpts"));
     }
 
     #[test]
