@@ -43,6 +43,10 @@ Yes. A package can depend on another package on disk with `{ path = "../lib" }`,
 
 ## Errors
 
+### `no Java installation found on JAVA_HOME or PATH, and ...`
+
+Normally Kargo downloads a Temurin JDK when you have none. It doesn't with `--offline` or `--locked`, or when `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` turns automatic installs off. Run the `kargo toolchain install jdk <version>` command the error names, install a JDK and set `JAVA_HOME`, or pin one with `[toolchain] jdk = "21"`. See [Without a JDK](../../guides/toolchains/#without-a-jdk).
+
 ### `JDK ... is too old; Kargo needs JDK 11 or newer`
 
 Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one.

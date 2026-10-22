@@ -332,6 +332,7 @@ pub fn resolve(config: &Config, request: &GraalvmRequest) -> Result<Graalvm> {
     if config.offline() {
         bail!("GraalVM {request} is not installed and Kargo is offline; run `kargo toolchain install graalvm {request}` while online");
     }
+    crate::ensure_auto_install(config, &format!("GraalVM {request}"), &format!("kargo toolchain install graalvm {request}"))?;
     Ok(install(config, request)?.graalvm())
 }
 

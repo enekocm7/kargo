@@ -1,5 +1,6 @@
 //! Kargo-managed JDKs: Temurin builds downloaded on demand into
-//! `~/.kargo/toolchains/jdk/<release>`.
+//! `~/.kargo/toolchains/jdk/<release>`, for a pinned `[toolchain] jdk` and for projects on the
+//! system JDK when the machine has none.
 
 use std::path::{Path, PathBuf};
 
@@ -12,8 +13,43 @@ use kargo_util::config::Config;
 
 use crate::adoptium::{self, JdkPackage};
 use crate::archive;
-use crate::install_lock;
 use crate::jdk::Jdk;
+use crate::{AUTO_INSTALL_OFF, ensure_auto_install, install_lock};
+
+/// The JDK feature versions with long-term support, oldest first, that Kargo picks from when a
+/// project on the system JDK runs on a machine without one.
+pub const LTS_JDKS: &[u32] = &[17, 21, 25];
+
+/// The JDK Kargo installs for such a project unless it needs another one.
+pub const DEFAULT_MANAGED_JDK: u32 = 21;
+
+/// What a project needs of a JDK that Kargo chooses for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JdkNeeds {
+    /// The oldest JDK that builds the project (Kargo's minimum, or the `jvm-target`).
+    pub min: u32,
+    /// The newest JDK its Kotlin compiler runs on, when there is a limit.
+    pub max: Option<u32>,
+}
+
+impl Default for JdkNeeds {
+    fn default() -> Self {
+        Self { min: 17, max: None }
+    }
+}
+
+impl JdkNeeds {
+    fn fits(&self, major: u32) -> bool {
+        major >= self.min && self.max.is_none_or(|max| major <= max)
+    }
+
+    /// The JDK to install: the first LTS from [`DEFAULT_MANAGED_JDK`] on that fits, else the
+    /// oldest that is new enough (a `jvm-target` beyond the newest LTS).
+    pub fn choose(&self) -> u32 {
+        let floor = self.min.max(DEFAULT_MANAGED_JDK);
+        LTS_JDKS.iter().copied().find(|&m| m >= floor && self.fits(m)).unwrap_or(floor)
+    }
+}
 
 /// Written into each installation so it can be listed without probing `java`.
 const METADATA_FILE: &str = "kargo-jdk.json";
@@ -136,20 +172,67 @@ pub fn install(config: &Config, request: &JdkRequest) -> Result<ManagedJdk> {
     install_package(config, &package)
 }
 
-/// Returns the JDK to use for `request`, installing it if necessary.
+/// Returns the JDK to use for `request`, installing it if necessary (see [`resolve_for`]).
 pub fn resolve(config: &Config, request: &JdkRequest) -> Result<Jdk> {
+    resolve_for(config, request, JdkNeeds::default())
+}
+
+/// Returns the JDK to use for `request`, installing it if necessary. For `system`, that is the
+/// JDK on `JAVA_HOME` or `PATH`; without one, a managed JDK that fits `needs`, installed if
+/// there is none.
+pub fn resolve_for(config: &Config, request: &JdkRequest, needs: JdkNeeds) -> Result<Jdk> {
     match request {
-        JdkRequest::System => Jdk::detect(),
+        JdkRequest::System => match Jdk::find()? {
+            Some(jdk) => Ok(jdk),
+            None => managed_fallback(config, needs),
+        },
         other => {
             if let Some(found) = find_installed(config, other)? {
                 return Ok(found.jdk());
             }
+            let install_command = format!("kargo toolchain install jdk {other}");
             if config.offline() {
-                bail!("JDK {other} is not installed and Kargo is offline; run `kargo toolchain install jdk {other}` while online");
+                bail!("JDK {other} is not installed and Kargo is offline; run `{install_command}` while online");
             }
+            ensure_auto_install(config, &format!("JDK {other}"), &install_command)?;
             Ok(install(config, other)?.jdk())
         }
     }
+}
+
+/// The installed managed JDK a project on the system JDK uses when the machine has none: the
+/// newest that fits `needs`.
+pub fn find_fallback(config: &Config, needs: JdkNeeds) -> Result<Option<ManagedJdk>> {
+    Ok(installed(config)?.into_iter().filter(|j| needs.fits(j.major)).max_by_key(ManagedJdk::sort_key))
+}
+
+/// The JDK of a project on the system JDK when the machine has none: [`find_fallback`], else a
+/// new install of the one [`JdkNeeds::choose`] picks.
+fn managed_fallback(config: &Config, needs: JdkNeeds) -> Result<Jdk> {
+    if let Some(found) = find_fallback(config, needs)? {
+        return Ok(found.jdk());
+    }
+    let major = needs.choose();
+    let none = "no Java installation found on JAVA_HOME or PATH";
+    let install_command = format!("kargo toolchain install jdk {major}");
+    if config.offline() {
+        bail!(
+            "{none}, and Kargo is offline so it can't download JDK {major}; run `{install_command}` while online, or install a JDK and set JAVA_HOME"
+        );
+    }
+    if config.locked() {
+        bail!(
+            "{none}, and with --locked Kargo doesn't choose a JDK for the project; run `{install_command}`, \
+             set `[toolchain] jdk = \"{major}\"` in kargo.toml, or install a JDK and set JAVA_HOME"
+        );
+    }
+    if !config.auto_install() {
+        bail!("{none}, and {AUTO_INSTALL_OFF}; run `{install_command}`, or install a JDK and set JAVA_HOME");
+    }
+    config
+        .shell()
+        .note(format!("no JDK on JAVA_HOME or PATH; installing Temurin JDK {major} for Kargo (KARGO_AUTO_INSTALL=0 turns this off)"));
+    Ok(install(config, &JdkRequest::Major(major))?.jdk())
 }
 
 /// Removes installed JDKs matching `selector` (a major version or release name).
@@ -230,6 +313,47 @@ mod tests {
         assert_eq!(resolve(&offline, &JdkRequest::Major(17)).unwrap().version, 17);
         let err = resolve(&offline, &JdkRequest::Major(11)).unwrap_err().to_string();
         assert!(err.contains("offline"), "{err}");
+    }
+
+    #[test]
+    fn chooses_an_lts_the_project_can_use() {
+        let needs = |min, max| JdkNeeds { min, max };
+        assert_eq!(JdkNeeds::default().choose(), DEFAULT_MANAGED_JDK);
+        // Kotlin before 2.1.10 runs on JDK 24 at most.
+        assert_eq!(needs(17, Some(24)).choose(), 21);
+        // jvm-target 22..25 needs the next LTS; one beyond the newest LTS gets itself.
+        assert_eq!(needs(22, None).choose(), 25);
+        assert_eq!(needs(26, None).choose(), 26);
+        assert!(needs(17, Some(24)).fits(17) && !needs(17, Some(24)).fits(25) && !needs(17, None).fits(11));
+    }
+
+    #[test]
+    fn falls_back_to_a_managed_jdk_that_fits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path()).with_offline(true);
+        let needs = JdkNeeds { min: 17, max: Some(24) };
+        let err = managed_fallback(&config, needs).unwrap_err().to_string();
+        assert!(err.contains("offline") && err.contains("kargo toolchain install jdk 21"), "{err}");
+        let online = config.clone().with_offline(false);
+        let err = managed_fallback(&online.clone().with_auto_install(false), needs).unwrap_err().to_string();
+        assert!(err.contains("KARGO_AUTO_INSTALL=0") && err.contains("kargo toolchain install jdk 21"), "{err}");
+        let err = managed_fallback(&online.with_locked(true), needs).unwrap_err().to_string();
+        assert!(err.contains("--locked") && err.contains("[toolchain] jdk = \"21\""), "{err}");
+
+        // Installed JDKs are used without a download: the newest that fits.
+        fake_install(&config, "jdk-25.0.1+8", 25, false);
+        fake_install(&config, "jdk-17.0.9+9", 17, false);
+        fake_install(&config, "jdk-21.0.4+7", 21, false);
+        assert_eq!(managed_fallback(&config, needs).unwrap().version, 21);
+        assert_eq!(managed_fallback(&config, JdkNeeds::default()).unwrap().version, 25);
+    }
+
+    #[test]
+    fn pinned_jdks_follow_the_auto_install_setting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path()).with_auto_install(false);
+        let err = resolve(&config, &JdkRequest::Major(21)).unwrap_err().to_string();
+        assert!(err.contains("KARGO_AUTO_INSTALL=0") && err.contains("kargo toolchain install jdk 21"), "{err}");
     }
 
     #[test]

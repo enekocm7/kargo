@@ -270,6 +270,12 @@ pub struct JvmTarget {
 }
 
 impl JvmTarget {
+    /// The oldest JDK that can compile for the configured `jvm-target`; `None` when it is the
+    /// default, which [`JvmTarget::target_for`] lowers to fit any JDK.
+    pub fn required_jdk(&self) -> Option<u32> {
+        self.jvm_target_set.then(|| jvm_target_major(&self.jvm_target))
+    }
+
     /// The bytecode target to compile for with a JDK of major version `jdk`: the
     /// configured `jvm-target`, or the default lowered to `jdk` when that JDK is older.
     /// Fails when the configured target is newer than `jdk`, which cannot compile for it.

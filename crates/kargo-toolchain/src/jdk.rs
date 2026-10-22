@@ -42,16 +42,22 @@ impl Jdk {
 
     /// Finds a JDK via `JAVA_HOME`, falling back to `java` on `PATH`.
     pub fn detect() -> Result<Self> {
+        Self::find()?.context("no Java installation found: install a JDK (17 or newer) and set JAVA_HOME or put `java` on PATH")
+    }
+
+    /// Like [`Jdk::detect`], with `None` when there is no JDK on `JAVA_HOME` or `PATH`. A JDK
+    /// that is found but unusable is still an error.
+    pub fn find() -> Result<Option<Self>> {
         if let Some(home) = std::env::var_os("JAVA_HOME").filter(|h| !h.is_empty()) {
             let home = PathBuf::from(home);
             let java = home.join("bin").join(exe("java"));
             if java.is_file() {
-                return Self::from_java(&java).with_context(|| format!("JAVA_HOME points at an unusable JDK ({})", home.display()));
+                return Self::from_java(&java)
+                    .map(Some)
+                    .with_context(|| format!("JAVA_HOME points at an unusable JDK ({})", home.display()));
             }
         }
-        let java = find_on_path("java")
-            .context("no Java installation found: install a JDK (17 or newer) and set JAVA_HOME or put `java` on PATH")?;
-        Self::from_java(&java)
+        find_on_path("java").map(|java| Self::from_java(&java)).transpose()
     }
 
     /// Identifies the JDK of a `java` executable, from the `release` file next to its `bin`

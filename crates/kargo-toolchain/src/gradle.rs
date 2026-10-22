@@ -177,6 +177,7 @@ impl GradleDistribution {
         if let Some(found) = Self::find(config, version)? {
             return Ok(found);
         }
+        crate::ensure_auto_install(config, &format!("Gradle {version}"), &format!("kargo toolchain install gradle {version}"))?;
         let dist = Self::at(config, version)?;
         let url = distribution_url(version);
         let sha256 = crate::download::get_text(config, &format!("{url}.sha256"))

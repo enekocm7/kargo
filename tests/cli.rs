@@ -809,6 +809,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "dap",
         "self",
         "completions",
+        "init-ci",
     ];
     let p = Project::new();
     let stdout = |args: &[&str]| {
@@ -1530,6 +1531,84 @@ fn toolchain_install_requires_network_or_cache() {
     // A pinned JDK that is not installed cannot be provisioned offline.
     p.file("kargo.toml", &manifest("tc", "[toolchain]\njdk = \"21\"\n"));
     p.kargo().args(["toolchain", "which", "--offline"]).assert().failure().stderr(predicate::str::contains("offline"));
+    // So can't one with automatic installs off, which then names the command to run.
+    p.kargo()
+        .args(["toolchain", "which"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("KARGO_AUTO_INSTALL=0").and(predicate::str::contains("kargo toolchain install jdk 21")));
+}
+
+/// `kargo` in `p` as on a machine without Java: no `JAVA_HOME`, and nothing on `PATH`.
+fn kargo_without_java(p: &Project, empty: &tempfile::TempDir) -> assert_cmd::Command {
+    let mut cmd = p.kargo();
+    cmd.env_remove("JAVA_HOME").env("PATH", empty.path());
+    cmd
+}
+
+#[test]
+fn a_project_on_the_system_jdk_falls_back_to_a_managed_one() {
+    let p = Project::new();
+    let empty = tempfile::tempdir().unwrap();
+    p.file("kargo.toml", &manifest("tc", ""));
+
+    // Offline, nothing can be installed, and the error says what to run.
+    kargo_without_java(&p, &empty)
+        .args(["--offline", "toolchain", "which"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no Java installation found").and(predicate::str::contains("kargo toolchain install jdk 21")));
+    // Turned off by KARGO_AUTO_INSTALL (Project::kargo sets it to 0) ...
+    kargo_without_java(&p, &empty).args(["toolchain", "which"]).assert().failure().stderr(
+        predicate::str::contains("automatic toolchain installs are off").and(predicate::str::contains("kargo toolchain install jdk 21")),
+    );
+    // ... or by config.toml.
+    p.file(".kargo/config.toml", "[toolchain]\nauto-install = false\n");
+    kargo_without_java(&p, &empty)
+        .env_remove("KARGO_AUTO_INSTALL")
+        .args(["toolchain", "which"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("automatic toolchain installs are off"));
+    kargo_without_java(&p, &empty)
+        .env("KARGO_AUTO_INSTALL", "maybe")
+        .args(["toolchain", "which"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("KARGO_AUTO_INSTALL must be `1` or `0`"));
+    // --locked never picks a JDK by itself.
+    kargo_without_java(&p, &empty)
+        .env("KARGO_AUTO_INSTALL", "1")
+        .args(["--locked", "toolchain", "which"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--locked").and(predicate::str::contains("[toolchain] jdk = \"21\"")));
+
+    // Allowed, it installs Temurin JDK 21, here from a toolchain mirror that has nothing.
+    let mirror = LocalRepo::new();
+    p.file(".kargo/config.toml", &format!("[toolchain-mirrors]\n\"https://api.adoptium.net\" = \"{}\"\n", mirror.url()));
+    kargo_without_java(&p, &empty)
+        .env("KARGO_AUTO_INSTALL", "1")
+        .args(["toolchain", "which"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("installing Temurin JDK 21").and(predicate::str::contains("failed to look up Temurin JDK 21")));
+    // A jvm-target past JDK 21 asks for the next LTS.
+    p.file("kargo.toml", &manifest("tc", "[target.jvm]\njvm-target = \"25\"\n"));
+    kargo_without_java(&p, &empty)
+        .args(["--offline", "toolchain", "which"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("kargo toolchain install jdk 25"));
+
+    // An installed managed JDK is used without a download, offline too.
+    fake_jdk(p.home.path(), "jdk-25.0.1+8", 25);
+    let out = kargo_without_java(&p, &empty).args(["--offline", "toolchain", "which"]).assert().success().get_output().stdout.clone();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("jdk:           system (JDK 25 at") && out.contains("jdk-25.0.1+8"), "{out}");
+    let list = kargo_without_java(&p, &empty).args(["toolchain", "list"]).assert().success().get_output().stdout.clone();
+    let list = String::from_utf8(list).unwrap();
+    assert!(list.lines().any(|l| l.contains("jdk-25.0.1+8") && l.contains("(used by this project)")), "{list}");
 }
 
 #[test]
@@ -2622,8 +2701,16 @@ fn lsp_describes_the_project_for_the_kotlin_lsp() {
         json!({ "jsonrpc": "2.0", "method": "exit" }),
     ]);
     // Offline, the Kotlin LSP can't be downloaded: Kargo says so and keeps serving kargo.toml.
-    let out =
-        p.kargo().args(["--offline", "lsp", "--server", "kotlin-lsp"]).write_stdin(input).assert().success().get_output().stdout.clone();
+    let out = p
+        .kargo()
+        .env("KARGO_AUTO_INSTALL", "1")
+        .args(["--offline", "lsp", "--server", "kotlin-lsp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let messages = lsp_output(&out);
     let shown = messages.iter().find(|m| m["method"] == "window/showMessage").unwrap_or_else(|| panic!("{messages:?}"));
     assert!(shown["params"]["message"].as_str().unwrap().contains("offline"), "{shown}");

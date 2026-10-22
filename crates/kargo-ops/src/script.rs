@@ -80,7 +80,8 @@ pub fn run(config: &Config, source: &Source, args: &[String]) -> Result<i32> {
     let repositories = repositories(&script.settings);
     let entry = config.scripts_cache().join(cache_key(&script, &kotlin, &jdk_request, &repositories, &frameworks));
 
-    let jdk = jdks::resolve(config, &jdk_request)?;
+    let needs = jdks::JdkNeeds { max: kargo_toolchain::kotlin::max_compiler_jdk(&kotlin), ..Default::default() };
+    let jdk = jdks::resolve_for(config, &jdk_request, needs)?;
     if let Some(cached) = Cached::read(&entry) {
         shell.verbose("Cached", format!("`{}`", script.name));
         return launch(config, &jdk, &cached.classes, &cached.classpath, &cached.main_class, args);

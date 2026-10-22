@@ -167,6 +167,7 @@ impl NativeToolchain {
         if let Some(found) = Self::find(config, version)? {
             return Ok(found);
         }
+        crate::ensure_auto_install(config, &format!("Kotlin/Native {version}"), &format!("kargo toolchain install native {version}"))?;
         let toolchain = Self::at(config, version)?;
         let host = Host::current()?;
         let artifact = Self::distribution(version)?;

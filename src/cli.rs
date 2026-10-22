@@ -1930,6 +1930,8 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
     let config =
         Config::from_env(shell.clone())?.with_offline(global.offline).with_refresh(global.refresh).with_system_gradle(global.system_gradle);
     let config = with_settings(config, &global, &cli.command)?;
+    let auto_install = auto_install_env()?.unwrap_or(config.settings().auto_install());
+    let config = config.with_auto_install(auto_install).with_locked(global.locked);
 
     // Commands that may change kargo.toml or kargo.lock keep the files for language servers current.
     let refreshes_editor_files = matches!(
@@ -1950,6 +1952,16 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
         refresh_editor_files(&config, &global, shell);
     }
     result
+}
+
+/// `KARGO_AUTO_INSTALL`, when it is set: whether commands may download the toolchains they need.
+fn auto_install_env() -> Result<Option<bool>> {
+    let Some(value) = std::env::var_os(kargo_util::config::AUTO_INSTALL_ENV).filter(|v| !v.is_empty()) else { return Ok(None) };
+    match value.to_string_lossy().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        other => bail!("{} must be `1` or `0`, got `{other}`", kargo_util::config::AUTO_INSTALL_ENV),
+    }
 }
 
 /// Applies `~/.kargo/config.toml` and the project's `.kargo/config.toml`, and with `--vendored` (or
