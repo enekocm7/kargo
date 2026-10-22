@@ -45,6 +45,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.build.targets)?;
     // Pre-build hooks may generate sources, so they run before checking.
+    super::build::prepare_native_hooks(ctx, &targets)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx, &EnvOptions::default())?)?;
     super::build::generate_sources(ctx, &targets)?;
     warn_about_sources(ctx, &targets);

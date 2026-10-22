@@ -134,8 +134,11 @@ note: building the Kotlin/Native standard library cache for linux_x64 (one time 
 
 Kotlin/Native's dependency cache normally lives in `~/.konan`. Kargo keeps it under `~/.kargo/toolchains/konan` instead so everything Kargo downloads is in one place. Set `KONAN_DATA_DIR` to use a different directory.
 
+Kotlin/Native downloads those dependencies on the first link of each platform. `kargo toolchain install` in a project downloads them right away for every platform in `platforms` that the host can build (Apple platforms need macOS), so a CI job or Docker image can build `--offline` afterwards, and `kargo toolchain list` says which platforms have them. Kargo also downloads them before the `pre-build` hooks of a project with the Native target, which may run the bundled clang, and before it compiles [C sources](../c-interop/#bundled-c-sources). The LLVM directory is `llvm-<version>-<arch>-<os>-dev-<n>` on Linux and macOS but `llvm-...-essentials-<n>` on Windows, so a script that looks for it should accept both.
+
 ```sh
 kargo toolchain list                    # see installed Kotlin/Native versions
 kargo toolchain install native 2.4.21   # pre-install, for example in a Docker image
+kargo toolchain install                 # in a project: also the LLVM and sysroots of each platform
 kargo toolchain remove native 2.4.10    # free disk space
 ```

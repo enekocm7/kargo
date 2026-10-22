@@ -9,6 +9,7 @@ use kargo_manifest::{GraalvmRequest, JdkRequest, Manifest, TargetKind};
 use kargo_maven::MavenClient;
 use kargo_toolchain::archive::{dir_size, human_size};
 use kargo_toolchain::jdks::{self, ManagedJdk};
+use kargo_toolchain::native::{buildable_on_host, resolve_platform};
 use kargo_toolchain::{Graalvm, GradleDistribution, Jdk, LanguageServer, NativeToolchain, ServerKind, adoptium, graalvm};
 use kargo_util::config::Config;
 
@@ -33,6 +34,19 @@ fn project_gradle(project: &Manifest) -> Result<Option<String>> {
         return Ok(Some(version.clone()));
     }
     Ok(Some(kargo_toolchain::gradle::gradle_for_agp(crate::gradle::agp_version(&android.config))?.version().to_owned()))
+}
+
+/// The Konan targets of the project's `[target.native] platforms`, `host` resolved; none
+/// without the Native target.
+fn native_platforms(project: &Manifest) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for p in project.targets.native.iter().flat_map(|n| &n.platforms) {
+        let resolved = resolve_platform(p)?;
+        if !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    Ok(out)
 }
 
 /// Whether a managed JDK is the one `request` selects among `installed`.
@@ -148,6 +162,20 @@ GraalVM ({}):",
     if data.is_dir() {
         let _ = writeln!(out, "    dependencies (LLVM, sysroots): {} at {}", human_size(dir_size(&data)), data.display());
     }
+    if let (Some(version), Some(m)) = (&kotlin, project)
+        && let Some(toolchain) = natives.iter().find(|n| &n.version == version)
+    {
+        for konan_target in native_platforms(m)? {
+            let state = if !buildable_on_host(&konan_target) {
+                "builds only on macOS"
+            } else if toolchain.has_dependencies(&konan_target) {
+                "downloaded"
+            } else {
+                "not downloaded (`kargo toolchain install` downloads them)"
+            };
+            let _ = writeln!(out, "    dependencies for {konan_target}: {state}");
+        }
+    }
 
     let gradles = GradleDistribution::installed(config)?;
     let gradle = project.and_then(|m| project_gradle(m).ok().flatten());
@@ -222,7 +250,18 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
             let repos = project.map(|m| m.repositories.clone()).unwrap_or_else(|| vec![kargo_maven::Repository::maven_central()]);
             let client = MavenClient::new(config, repos);
             let toolchain = NativeToolchain::ensure(config, &client, &version)?;
-            Ok(format!("Kotlin/Native {} at {}", toolchain.version, toolchain.home.display()))
+            // The project's platforms, so builds (and the bundled clang) work offline afterwards.
+            let mut ready = Vec::new();
+            for konan_target in project.map(native_platforms).transpose()?.unwrap_or_default() {
+                if buildable_on_host(&konan_target) {
+                    toolchain.ensure_dependencies(config, &konan_target)?;
+                    ready.push(konan_target);
+                } else {
+                    config.shell().note(format!("skipping the Kotlin/Native dependencies for {konan_target}, which builds only on macOS"));
+                }
+            }
+            let deps = if ready.is_empty() { String::new() } else { format!(" (dependencies for {})", ready.join(", ")) };
+            Ok(format!("Kotlin/Native {} at {}{deps}", toolchain.version, toolchain.home.display()))
         }
         ToolKind::Gradle => {
             let version = match (version, project.map(project_gradle).transpose()?.flatten()) {
@@ -343,6 +382,8 @@ mod tests {
         assert_eq!(used.len(), 2, "{text}");
         assert!(used[0].contains("jdk-21.0.9+10"), "newest 21 is used: {text}");
         assert!(used[1].contains("2.4.21"));
+        let host = kargo_toolchain::native::Host::current().unwrap().konan_target;
+        assert!(text.contains(&format!("dependencies for {host}: not downloaded")), "{text}");
 
         let text = list(&config, None).unwrap();
         assert!(!text.contains("used by this project"));

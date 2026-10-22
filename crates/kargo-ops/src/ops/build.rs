@@ -20,7 +20,7 @@ use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
 use kargo_manifest::{Bin, Cinterop, GeneratedKind, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
 use kargo_maven::{ModuleId, Platform, Resolution};
-use kargo_toolchain::native::resolve_platform;
+use kargo_toolchain::native::{buildable_on_host, resolve_platform};
 use kargo_util::fs::collect_files;
 
 #[derive(Debug, Clone, Default)]
@@ -196,9 +196,24 @@ pub fn warn_about_sources(ctx: &BuildContext, targets: &[TargetKind]) {
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, messages);
 }
 
+/// Downloads the Kotlin/Native dependencies (LLVM, sysroots) of the platforms this host builds
+/// before the pre-build hooks run, since they may use the bundled clang. Without such hooks, or
+/// without the Native target among `targets`, the first link downloads them as usual.
+pub fn prepare_native_hooks(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
+    if !targets.contains(&TargetKind::Native) || !crate::plugins::has_hook(ctx.ws, Hook::PreBuild) {
+        return Ok(());
+    }
+    let toolchain = ctx.native_toolchain()?;
+    for konan_target in native_platforms(ctx)?.iter().filter(|t| buildable_on_host(t)) {
+        toolchain.ensure_dependencies(ctx.config, konan_target)?;
+    }
+    Ok(())
+}
+
 pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.targets)?;
+    prepare_native_hooks(ctx, &targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     generate_sources(ctx, &targets)?;

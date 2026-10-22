@@ -141,7 +141,7 @@ You only need these for some targets:
 | Make release **Wasm** modules smaller | [Binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-opt` on `PATH`. Without it, release builds still remove dead code. |
 | Build for **Android** | The [Android SDK](https://developer.android.com/studio) (set `ANDROID_HOME`). Kargo downloads Gradle itself. |
 | Run on an **Android** device | `adb` from the SDK platform-tools, plus a device or emulator |
-| Build **Kotlin/Native** | Nothing. Kargo downloads Kotlin/Native and its LLVM toolchain on the first native build. |
+| Build **Kotlin/Native** | Nothing. Kargo downloads Kotlin/Native and its LLVM toolchain on the first native build, or ahead of time with `kargo toolchain install`. |
 | `kargo new` creating a git repository | `git` (optional; pass `--no-vcs` to skip) |
 
 ## 4. Shell completions (optional)

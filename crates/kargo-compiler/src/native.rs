@@ -455,6 +455,9 @@ impl CSourcesUnit<'_> {
 
     /// Compiles the sources and archives them unless the library is up to date. Changes to the
     /// sources, the files under the include directories or the flags trigger a rebuild.
+    ///
+    /// clang comes with the target's toolchain dependencies, so the caller downloads them first
+    /// ([`NativeToolchain::ensure_dependencies`]).
     pub fn compile(&self, shell: &Shell, toolchain: &NativeToolchain, fingerprint_dir: &Path, announce: &dyn Fn()) -> Result<Outcome> {
         if self.files.is_empty() {
             return Ok(Outcome::Empty);
@@ -480,14 +483,6 @@ impl CSourcesUnit<'_> {
         announce();
         std::fs::create_dir_all(fingerprint_dir)?;
         kargo_util::fs::remove_dir_all_if_exists(&self.output_dir.join("obj"))?;
-
-        // clang comes with the target's toolchain dependencies, which the compiler downloads on first use.
-        let mut deps = toolchain.command();
-        deps.args(["-target", &self.konan_target, "-Xcheck-dependencies"]).stdout(Stdio::null());
-        let status = process::status(shell, &mut deps, "the Kotlin/Native compiler")?;
-        if !status.success() {
-            bail!("could not download the Kotlin/Native toolchain for {} ({})", self.konan_target, process::describe_status(status));
-        }
 
         let mut objects = Vec::new();
         for file in &self.files {

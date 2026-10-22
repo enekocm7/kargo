@@ -86,7 +86,7 @@ kargo build --offline
 `--offline` keeps everything else (JDK and Gradle downloads, npm) from trying the network, and `[source] vendored = true` in the committed `.kargo/config.toml` makes the build use `vendor/`. To check that `vendor/` is complete before you ship it, build with an empty Kargo home: `KARGO_HOME=$(mktemp -d) kargo build --vendored --offline`.
 
 :::note
-Some downloads are not Maven files and are not vendored: a JDK that `[toolchain] jdk` pins (install one on the machine, or copy `~/.kargo/toolchains/jdk`), the [npm packages](../wasm/#npm-packages) of the Wasm target, the LLVM and sysroots that Kotlin/Native downloads on first use (copy `~/.kargo/toolchains/konan`), and the dependencies of the Android target, which Gradle resolves itself. `kargo vendor` warns about an Android target and skips it.
+Some downloads are not Maven files and are not vendored: a JDK that `[toolchain] jdk` pins (install one on the machine, or copy `~/.kargo/toolchains/jdk`), the [npm packages](../wasm/#npm-packages) of the Wasm target, the LLVM and sysroots that Kotlin/Native downloads on first use (run `kargo toolchain install` in the project, or copy `~/.kargo/toolchains/konan`), and the dependencies of the Android target, which Gradle resolves itself. `kargo vendor` warns about an Android target and skips it.
 :::
 
 | Key | Meaning |

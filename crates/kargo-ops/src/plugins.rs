@@ -57,6 +57,12 @@ pub fn workspace_env(project: &Project) -> Vec<(String, String)> {
 }
 
 /// Runs the tasks and hook plugins attached to `hook`.
+/// Whether any task or plugin of the project runs at `hook`.
+pub fn has_hook(ws: &Workspace, hook: Hook) -> bool {
+    let manifest = ws.manifest();
+    !tasks::tasks_for_hook(&manifest.tasks, hook).is_empty() || manifest.process_plugins.iter().any(|p| p.hooks.contains(&hook))
+}
+
 pub fn run_hook(shell: &Shell, ws: &Workspace, hook: Hook, env: &[(String, String)]) -> Result<()> {
     let manifest = ws.manifest();
     let mut env = env.to_vec();

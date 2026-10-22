@@ -517,6 +517,7 @@ fn native_artifact(ctx: &BuildContext, results: &BuildResults, program: &Program
 /// function (`--main`), or an example linked against the main sources as a library (`--example`).
 fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf> {
     let start = Instant::now();
+    super::build::prepare_native_hooks(ctx, &[TargetKind::Native])?;
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
     let manifest = ctx.ws.manifest();

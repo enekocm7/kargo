@@ -342,7 +342,7 @@ With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`;
 
 `graalvm` is only used by `kargo package --format `kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`` and `kargo run --native-agent`. Kargo looks the release up with the foojay Disco API, downloads it on first use, verifies its SHA-256 and installs it under `~/.kargo/toolchains/graalvm/<distribution>-<version>`, next to the GraalVM reachability metadata repository that native images of the dependencies use.
 
-Kotlin/Native distributions are tied to `[kotlin] version`. They are installed under `~/.kargo/toolchains/kotlin-native/<version>` on the first native build. Their LLVM and sysroot dependencies go to `~/.kargo/toolchains/konan` instead of `~/.konan` (override with `KONAN_DATA_DIR`). Debug builds link a precompiled standard library that the compiler builds on first use (one to two minutes) into the distribution's `klib/cache`, which roughly halves rebuild times; `KARGO_NATIVE_CACHE=false` turns it off.
+Kotlin/Native distributions are tied to `[kotlin] version`. They are installed under `~/.kargo/toolchains/kotlin-native/<version>` on the first native build. Their LLVM and sysroot dependencies go to `~/.kargo/toolchains/konan` instead of `~/.konan` (override with `KONAN_DATA_DIR`); `kargo toolchain install` downloads them for every `[target.native]` platform the host can build, so later builds work offline. Debug builds link a precompiled standard library that the compiler builds on first use (one to two minutes) into the distribution's `klib/cache`, which roughly halves rebuild times; `KARGO_NATIVE_CACHE=false` turns it off.
 
 Android builds run on a Gradle that Kargo downloads from `services.gradle.org` (checksum-verified, under `~/.kargo/toolchains/gradle/<version>`): the version the Android Gradle Plugin in use requires, or `[target.android] gradle-version`. A `gradlew` in the project root takes precedence, `--system-gradle` uses the `gradle` on `PATH`, and `target/android` gets a Gradle wrapper so it opens in Android Studio.
 
@@ -351,7 +351,7 @@ Toolchains are locked while they install, so concurrent Kargo processes sharing 
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS marked)
 $ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, graalvm 25, native 2.4.21, gradle 9.6.0, kotlin-lsp, kls, kotlin-debug-adapter
-$ kargo toolchain install            # whatever the current project needs (a JDK too, when there is none)
+$ kargo toolchain install            # whatever the current project needs (a JDK too, when there is none; Kotlin/Native's LLVM and sysroots)
 $ kargo toolchain list               # installed JDKs/GraalVMs/Kotlin/Native/Gradle, disk usage, what the project uses
 $ kargo toolchain which              # toolchains resolved for this project
 $ kargo toolchain remove jdk 17      # all JDK 17 releases (or one release)

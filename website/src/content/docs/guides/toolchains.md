@@ -120,7 +120,7 @@ $ kargo toolchain install jdk 21.0.5+11
 $ kargo toolchain install graalvm 25 # newest GraalVM CE for JDK 25 (or: graalvm oracle-25)
 $ kargo toolchain install native 2.4.21
 $ kargo toolchain install gradle     # the Gradle this Android project needs (or: gradle 9.6.0)
-$ kargo toolchain install            # everything the current project needs (a JDK too, when there is none)
+$ kargo toolchain install            # everything the current project needs (a JDK too, when there is none; the Kotlin/Native LLVM and sysroots of its platforms)
 $ kargo toolchain list               # installed toolchains, disk usage, and what this project uses
 $ kargo toolchain which              # the toolchains this project resolves to
 $ kargo toolchain remove jdk 17      # every JDK 17 release
@@ -150,7 +150,7 @@ Kargo also downloads the [GraalVM reachability metadata repository](https://gith
 
 ## Kotlin/Native
 
-Kotlin/Native distributions are tied to `[kotlin] version` and installed automatically on the first native build, under `~/.kargo/toolchains/kotlin-native/<version>`. Their LLVM toolchains and sysroots go in `~/.kargo/toolchains/konan` (override with `KONAN_DATA_DIR`). The precompiled standard library that speeds up [debug builds](../native/#build-speed) is built into the distribution itself (`klib/cache`), so `kargo toolchain remove native <version>` removes it too.
+Kotlin/Native distributions are tied to `[kotlin] version` and installed automatically on the first native build, under `~/.kargo/toolchains/kotlin-native/<version>`. Their LLVM toolchains and sysroots go in `~/.kargo/toolchains/konan` (override with `KONAN_DATA_DIR`); the first link of a platform downloads them, or `kargo toolchain install` does for every platform of the project. The precompiled standard library that speeds up [debug builds](../native/#build-speed) is built into the distribution itself (`klib/cache`), so `kargo toolchain remove native <version>` removes it too.
 
 ## Gradle
 
