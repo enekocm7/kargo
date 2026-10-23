@@ -16,6 +16,7 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `KARGO_TARGET_DIR` | Build output directory (default `target/` next to the project's or workspace's `kargo.toml`) |
 | `KARGO_OFFLINE` | Same as `--offline` |
 | `KARGO_VENDORED` | Same as `--vendored`: resolve dependencies only from the repository [`kargo vendor`](../commands/#kargo-vendor) wrote |
+| `KARGO_REQUIRE_CHECKSUMS` | Same as `--require-checksums`: fail on a download whose repository publishes no checksum for it (see [`kargo.lock`](../lockfile/#requiring-published-checksums)) |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | The proxy for Kargo's downloads, and the hosts that bypass it (lowercase forms too). `[http] proxy` in `config.toml` overrides them; see [Offline and corporate builds](../../guides/offline-and-mirrors/#proxies-and-certificates) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
 | `KARGO_AUTO_INSTALL` | `0` stops commands from downloading the toolchains they need (a JDK when none is on `JAVA_HOME` or `PATH`, a pinned JDK or GraalVM, Kotlin/Native, Gradle, the language servers); they fail with the `kargo toolchain install` command to run instead. `1` turns installs on over `[toolchain] auto-install = false` in `config.toml`. See [Managing JDKs](../../guides/toolchains/#what-installs-automatically) |

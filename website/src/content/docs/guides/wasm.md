@@ -237,7 +237,9 @@ By default Kargo uses the first of `npm`, `pnpm` and `bun` it finds on your `PAT
 package-manager = "bun"   # "npm", "pnpm" or "bun"
 ```
 
-The package manager's lockfile (`package-lock.json`, `pnpm-lock.yaml` or `bun.lock`) stays in `target/<profile>/`. When you switch package managers, Kargo deletes the old `node_modules` and lockfile and installs again. The packages always run on Node.js or in the browser, whichever tool installed them.
+The package manager's lockfile (`package-lock.json`, `pnpm-lock.yaml` or `bun.lock`) stays in `target/<profile>/` and is kept when the packages are installed again, so a version range stays at the version it was first installed at until you delete it (or run `kargo clean`). When you switch package managers, Kargo deletes the old `node_modules` and lockfile and installs again. The packages always run on Node.js or in the browser, whichever tool installed them.
+
+Kargo installs the packages with `--ignore-scripts`, so their `preinstall`, `install` and `postinstall` scripts never run: the packages come from the metadata of Maven libraries, which should not get to run programs on your machine. A package that needs its install script to work (to build a native addon, say) won't; Wasm programs rarely use such packages.
 
 ## Libraries and npm packages
 

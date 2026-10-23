@@ -24,6 +24,7 @@ pub struct Config {
     system_gradle: bool,
     auto_install: bool,
     locked: bool,
+    require_checksums: bool,
     shell: Shell,
     settings: Arc<Settings>,
     network: Arc<Network>,
@@ -39,6 +40,7 @@ impl Config {
             system_gradle: false,
             auto_install: true,
             locked: false,
+            require_checksums: false,
             shell,
             settings: Arc::default(),
             network: Arc::default(),
@@ -79,6 +81,12 @@ impl Config {
     /// Records `--locked`, which also keeps Kargo from choosing a JDK for the project by itself.
     pub fn with_locked(mut self, locked: bool) -> Self {
         self.locked = locked;
+        self
+    }
+
+    /// Fails on a downloaded file whose repository publishes no checksum (`--require-checksums`).
+    pub fn with_require_checksums(mut self, require: bool) -> Self {
+        self.require_checksums = require;
         self
     }
 
@@ -191,6 +199,12 @@ impl Config {
     /// Whether the command runs with `--locked`.
     pub fn locked(&self) -> bool {
         self.locked
+    }
+
+    /// Whether a file downloaded without a checksum published next to it is an error rather than
+    /// accepted unverified (`--require-checksums`). Files `kargo.lock` pins are checked against it instead.
+    pub fn require_checksums(&self) -> bool {
+        self.require_checksums
     }
 
     pub fn shell(&self) -> &Shell {

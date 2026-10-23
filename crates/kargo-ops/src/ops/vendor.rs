@@ -95,10 +95,13 @@ pub fn write(ctx: &BuildContext, opts: &VendorOptions, earlier: BTreeMap<String,
     files.extend(ctx.client.served_files());
     // The toolchains, unless asked for. A project that depends on one of their modules keeps its locked files.
     files.retain(|rel, _| !rel.ends_with(".sha1") && (opts.toolchains || !TOOLCHAIN_MODULES.iter().any(|m| rel.starts_with(m))));
-    for pkg in ctx.lockfile().resolutions.values().flat_map(|r| &r.packages) {
+    let lock = ctx.lockfile();
+    // The compiler's own lock entry is vendored with the toolchains only.
+    let resolutions = lock.resolutions.iter().filter(|(key, _)| opts.toolchains || key.as_str() != super::context::COMPILER_KEY);
+    for pkg in resolutions.flat_map(|(_, r)| &r.packages) {
         for file in &pkg.files {
             // A resolution `kargo fetch` does not restore (another profile's) may not be cached yet.
-            let cached = ctx.client.fetch_required(&file.path)?;
+            let cached = ctx.client.fetch_pinned(&file.path)?;
             let actual = hash::sha256_file(&cached).with_context(|| format!("failed to hash {}", cached.display()))?;
             if actual != file.sha256 {
                 bail!(

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::BoolishValueParser;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, SubcommandCandidates};
 
@@ -91,19 +92,22 @@ struct GlobalArgs {
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
     /// Run without accessing the network
-    #[arg(long, global = true, env = "KARGO_OFFLINE")]
+    #[arg(long, global = true, env = "KARGO_OFFLINE", value_parser = BoolishValueParser::new())]
     offline: bool,
     /// Require kargo.lock to be up to date
     #[arg(long, global = true)]
     locked: bool,
     /// Resolve dependencies only from the repository `kargo vendor` wrote
-    #[arg(long, global = true, env = "KARGO_VENDORED")]
+    #[arg(long, global = true, env = "KARGO_VENDORED", value_parser = BoolishValueParser::new())]
     vendored: bool,
     /// Ignore cached metadata and kargo.lock, re-checking repositories and re-verifying cached artifacts
     #[arg(long, global = true)]
     refresh: bool,
+    /// Fail on a download whose repository publishes no checksum for it
+    #[arg(long, global = true, env = "KARGO_REQUIRE_CHECKSUMS", value_parser = BoolishValueParser::new())]
+    require_checksums: bool,
     /// Run Android builds with the Gradle on PATH instead of a Kargo-managed one
-    #[arg(long, global = true, env = "KARGO_SYSTEM_GRADLE")]
+    #[arg(long, global = true, env = "KARGO_SYSTEM_GRADLE", value_parser = BoolishValueParser::new())]
     system_gradle: bool,
     /// Path to kargo.toml
     #[arg(long, global = true, value_name = "PATH")]
@@ -1769,6 +1773,9 @@ fn forwarded_args(global: &GlobalArgs) -> Vec<String> {
     if global.refresh {
         args.push("--refresh".to_owned());
     }
+    if global.require_checksums {
+        args.push("--require-checksums".to_owned());
+    }
     if global.system_gradle {
         args.push("--system-gradle".to_owned());
     }
@@ -1927,8 +1934,11 @@ fn import_project(
 
 fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
     let global = cli.global;
-    let config =
-        Config::from_env(shell.clone())?.with_offline(global.offline).with_refresh(global.refresh).with_system_gradle(global.system_gradle);
+    let config = Config::from_env(shell.clone())?
+        .with_offline(global.offline)
+        .with_refresh(global.refresh)
+        .with_require_checksums(global.require_checksums)
+        .with_system_gradle(global.system_gradle);
     let config = with_settings(config, &global, &cli.command)?;
     let auto_install = auto_install_env()?.unwrap_or(config.settings().auto_install());
     let config = config.with_auto_install(auto_install).with_locked(global.locked);

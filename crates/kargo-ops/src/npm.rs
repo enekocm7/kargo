@@ -4,6 +4,11 @@
 //! npm, pnpm or bun into a `node_modules` that Node.js finds from the compiled
 //! `.mjs` files (a browser gets an import map, see `wasm_output`). The project's own
 //! packages also get Kotlin declarations generated from their TypeScript ones ([`declarations`]).
+//!
+//! Packages are installed with their lifecycle scripts off (`--ignore-scripts`): the names and
+//! versions come from the metadata of Maven libraries, which must not get to run programs on the
+//! machine that builds. The package manager's lockfile is kept between installs, so a version range
+//! stays at the version it was first installed at.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,8 +25,13 @@ use kargo_maven::Version;
 use kargo_util::fs::{collect_files, remove_dir_all_if_exists};
 use kargo_util::process::{self, find_on_path};
 
-/// Lockfiles the package managers leave next to `package.json`.
-const LOCKFILES: [&str; 4] = ["package-lock.json", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
+/// Lockfiles the package managers leave next to `package.json`, with the manager that writes each.
+const LOCKFILES: [(&str, PackageManager); 4] = [
+    ("package-lock.json", PackageManager::Npm),
+    ("pnpm-lock.yaml", PackageManager::Pnpm),
+    ("bun.lock", PackageManager::Bun),
+    ("bun.lockb", PackageManager::Bun),
+];
 
 /// The npm packages the project needs, as `name -> version`: those its Wasm
 /// `libraries` ask for, and `[target.wasm.npm-dependencies]`, which wins on a conflict.
@@ -156,10 +166,13 @@ fn install_into(ctx: &BuildContext, deps: &BTreeMap<String, String>, dir: &Path,
     if std::fs::read_to_string(&marker).is_ok_and(|s| s == installed) {
         return Ok(node_modules);
     }
-    // Start clean: package managers don't share `node_modules` layouts or lockfiles.
+    // Start clean: package managers don't share `node_modules` layouts or lockfiles. The manager's own
+    // lockfile stays, so the packages it installed before keep their versions.
     remove_dir_all_if_exists(&node_modules)?;
-    for lockfile in LOCKFILES {
-        let _ = std::fs::remove_file(dir.join(lockfile));
+    for (lockfile, owner) in LOCKFILES {
+        if owner != manager {
+            let _ = std::fs::remove_file(dir.join(lockfile));
+        }
     }
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("package.json"), &manifest)?;
@@ -204,13 +217,14 @@ fn package_list(deps: &BTreeMap<String, String>) -> String {
     deps.iter().map(|(name, version)| format!("{name}@{version}")).collect::<Vec<_>>().join(", ")
 }
 
-/// The arguments that install `package.json` quietly, without touching any parent workspace.
+/// The arguments that install `package.json` quietly, without lifecycle scripts and without touching
+/// any parent workspace.
 fn install_args(manager: PackageManager, offline: bool) -> Vec<&'static str> {
     let mut args = match manager {
-        PackageManager::Npm => vec!["install", "--no-audit", "--no-fund", "--loglevel=error"],
-        // pnpm defaults to a frozen lockfile in CI, and there is none here.
-        PackageManager::Pnpm => vec!["install", "--ignore-workspace", "--no-frozen-lockfile"],
-        PackageManager::Bun => vec!["install", "--no-progress"],
+        PackageManager::Npm => vec!["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
+        // pnpm defaults to a frozen lockfile in CI, and the dependencies here change with the libraries.
+        PackageManager::Pnpm => vec!["install", "--ignore-scripts", "--ignore-workspace", "--no-frozen-lockfile"],
+        PackageManager::Bun => vec!["install", "--ignore-scripts", "--no-progress"],
     };
     if offline {
         args.push("--offline");
@@ -242,8 +256,17 @@ mod tests {
 
     #[test]
     fn install_arguments() {
-        assert_eq!(install_args(PackageManager::Npm, false), ["install", "--no-audit", "--no-fund", "--loglevel=error"]);
-        assert_eq!(install_args(PackageManager::Pnpm, true), ["install", "--ignore-workspace", "--no-frozen-lockfile", "--offline"]);
-        assert_eq!(install_args(PackageManager::Bun, true), ["install", "--no-progress", "--offline"]);
+        assert_eq!(
+            install_args(PackageManager::Npm, false),
+            ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"]
+        );
+        assert_eq!(
+            install_args(PackageManager::Pnpm, true),
+            ["install", "--ignore-scripts", "--ignore-workspace", "--no-frozen-lockfile", "--offline"]
+        );
+        assert_eq!(install_args(PackageManager::Bun, true), ["install", "--ignore-scripts", "--no-progress", "--offline"]);
+        for manager in PackageManager::ALL {
+            assert!(install_args(manager, false).contains(&"--ignore-scripts"), "{manager} runs no lifecycle scripts");
+        }
     }
 }

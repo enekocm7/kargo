@@ -187,6 +187,8 @@ pub struct MavenClient {
     cache: PathBuf,
     offline: bool,
     refresh: bool,
+    /// Fail on a downloaded file without a published checksum (see [`Config::require_checksums`]).
+    require_checksums: bool,
     agent: ureq::Agent,
     shell: Shell,
     /// Paths known to be missing from every repository during this run.
@@ -229,6 +231,7 @@ impl MavenClient {
             cache: config.maven_cache(),
             offline: config.offline(),
             refresh: config.refresh(),
+            require_checksums: config.require_checksums(),
             agent,
             shell: config.shell().clone(),
             missing: Mutex::new(HashSet::new()),
@@ -309,6 +312,11 @@ impl MavenClient {
     /// that has it, and is cached apart from other repositories' copies (see [`MavenClient::new`]). The path
     /// of a cached file, as `kargo.lock` lists it, fetches that file again.
     pub fn fetch(&self, rel: &str) -> Result<Option<PathBuf>> {
+        self.fetch_with(rel, false)
+    }
+
+    /// [`MavenClient::fetch`]; `pinned` says the caller checks the file against a hash it already knows.
+    fn fetch_with(&self, rel: &str, pinned: bool) -> Result<Option<PathBuf>> {
         validate_rel_path(rel)?;
         let plain = plain_rel(rel);
         let candidates = self.candidates(rel);
@@ -327,7 +335,7 @@ impl MavenClient {
         }
         for (repo, key) in &candidates {
             let cached = self.cache_path(key);
-            match self.fetch_from(repo, plain, key, &cached)? {
+            match self.fetch_from(repo, plain, key, &cached, pinned)? {
                 Fetch::Found => {
                     self.serve(plain, &cached);
                     return Ok(Some(cached));
@@ -360,8 +368,8 @@ impl MavenClient {
         if !repo.is_local() && (self.offline || !due) {
             return;
         }
-        let Ok(Some(expected)) = self.published_sha1(repo, rel) else { return };
-        if hash::sha1_file(cached).is_ok_and(|actual| actual == expected) {
+        let Ok(Some(expected)) = self.published_checksum(repo, rel) else { return };
+        if expected.algorithm.hash_file(cached).is_ok_and(|actual| actual == expected.hex) {
             // Up to date: restart the clock for remote repositories.
             let _ = std::fs::File::options().write(true).open(cached).and_then(|f| f.set_modified(SystemTime::now()));
             self.mark_verified(key);
@@ -373,7 +381,18 @@ impl MavenClient {
 
     /// Like [`MavenClient::fetch`] but fails with a helpful error if missing.
     pub fn fetch_required(&self, rel: &str) -> Result<PathBuf> {
-        self.fetch(rel)?.with_context(|| {
+        self.fetch_required_with(rel, false)
+    }
+
+    /// Like [`MavenClient::fetch_required`], for a file whose SHA-256 the caller already knows and checks the
+    /// download against, such as one `kargo.lock` pins. That hash vouches for the file, so a repository that
+    /// publishes no checksum for it is no error under `--require-checksums`.
+    pub fn fetch_pinned(&self, rel: &str) -> Result<PathBuf> {
+        self.fetch_required_with(rel, true)
+    }
+
+    fn fetch_required_with(&self, rel: &str, pinned: bool) -> Result<PathBuf> {
+        self.fetch_with(rel, pinned)?.with_context(|| {
             let names: Vec<_> = self.repos.iter().map(|r| r.name.as_str()).collect();
             format!("could not find `{rel}` in any repository ({})", names.join(", "))
         })
@@ -396,7 +415,12 @@ impl MavenClient {
                 self.mark_verified(&key);
                 continue;
             }
-            match self.check_cached(repo, plain_rel(rel), &cached)? {
+            let check = match self.check_cached(repo, plain_rel(rel), &cached) {
+                // Another thread found it corrupt and removed it; the fetch below gets a fresh copy.
+                Err(_) if !cached.is_file() => continue,
+                check => check?,
+            };
+            match check {
                 CacheCheck::Matches => {
                     self.mark_verified(&key);
                     if let Some(fingerprint) = fingerprint {
@@ -404,7 +428,12 @@ impl MavenClient {
                         let _ = kfs::write_string_atomic(&verified_stamp(&cached), &fingerprint);
                     }
                 }
-                CacheCheck::Unknown => self.shell.verbose("Unverified", format!("{rel} (no checksum published)")),
+                CacheCheck::Unknown => self.unverified(&repo.url, rel)?,
+                CacheCheck::Offline if self.require_checksums => bail!(
+                    "{rel} was never checked against the checksum its repository publishes, which --require-checksums needs, \
+                     and Kargo is offline; run the command once without --offline"
+                ),
+                CacheCheck::Offline => self.shell.verbose("Unverified", format!("{rel} (offline)")),
                 CacheCheck::Mismatch { expected, actual } => {
                     // Resolutions are locked in parallel and can share a file: one thread replaces it, the others use that copy.
                     let _repairing = self.repairing.lock().expect("lock poisoned");
@@ -415,8 +444,8 @@ impl MavenClient {
                         continue;
                     }
                     self.shell.warn(format!(
-                        "cached {rel} does not match the checksum published by `{}` (expected sha1 {expected}, got {actual}); downloading it again",
-                        repo.name
+                        "cached {rel} does not match the checksum published by `{}` (expected {} {}, got {actual}); downloading it again",
+                        repo.name, expected.algorithm, expected.hex
                     ));
                     std::fs::remove_file(&cached).with_context(|| format!("failed to remove corrupt {}", cached.display()))?;
                 }
@@ -439,11 +468,11 @@ impl MavenClient {
     /// Compares a cached file with the checksum its repository publishes.
     fn check_cached(&self, repo: &Repository, rel: &str, cached: &Path) -> Result<CacheCheck> {
         if self.offline && !repo.is_local() {
-            return Ok(CacheCheck::Unknown);
+            return Ok(CacheCheck::Offline);
         }
-        let Some(expected) = self.published_sha1(repo, rel)? else { return Ok(CacheCheck::Unknown) };
-        let actual = hash::sha1_file(cached).with_context(|| format!("failed to hash {}", cached.display()))?;
-        Ok(if actual == expected { CacheCheck::Matches } else { CacheCheck::Mismatch { expected, actual } })
+        let Some(expected) = self.published_checksum(repo, rel)? else { return Ok(CacheCheck::Unknown) };
+        let actual = expected.algorithm.hash_file(cached).with_context(|| format!("failed to hash {}", cached.display()))?;
+        Ok(if actual == expected.hex { CacheCheck::Matches } else { CacheCheck::Mismatch { expected, actual } })
     }
 
     pub fn fetch_text(&self, rel: &str) -> Result<Option<String>> {
@@ -454,7 +483,7 @@ impl MavenClient {
     }
 
     /// Copies or downloads `rel` from `repo` into `dest`, which is cached under `key`.
-    fn fetch_from(&self, repo: &Repository, rel: &str, key: &str, dest: &Path) -> Result<Fetch> {
+    fn fetch_from(&self, repo: &Repository, rel: &str, key: &str, dest: &Path, pinned: bool) -> Result<Fetch> {
         if repo.is_local() {
             let src = repo.local_root().join(rel);
             if !src.is_file() {
@@ -470,13 +499,13 @@ impl MavenClient {
         let url = format!("{}/{rel}", repo.url);
         let Some(response) = self.get(repo, &url)? else { return Ok(Fetch::Missing) };
         let file_name = rel.rsplit('/').next().unwrap_or(rel);
-        if !rel.ends_with(".sha1") && !rel.ends_with("maven-metadata.xml") {
+        if !is_checksum_file(rel) && !rel.ends_with("maven-metadata.xml") {
             self.shell.status("Downloading", if self.shell.is_verbose() { &url } else { file_name });
         }
         let mut reader = response.into_body().into_reader();
         kfs::write_atomic_if_absent(dest, |f| io::copy(&mut reader, f).map(|_| ())).with_context(|| format!("failed to download {url}"))?;
 
-        match self.verify_checksum(repo, rel, dest) {
+        match self.verify_checksum(repo, rel, dest, pinned) {
             Ok(true) => self.mark_verified(key),
             Ok(false) => {}
             Err(e) => {
@@ -487,53 +516,74 @@ impl MavenClient {
         Ok(Fetch::Found)
     }
 
-    /// Verifies the `.sha1` published next to the file, returning whether there was one to check.
-    fn verify_checksum(&self, repo: &Repository, rel: &str, file: &Path) -> Result<bool> {
-        let Some(expected) = self.published_sha1(repo, rel)? else {
-            self.shell.verbose("Unverified", format!("{rel} (no checksum published)"));
+    /// Verifies the checksum published next to the file (see [`MavenClient::published_checksum`]), returning
+    /// whether there was one to check. A file without one is accepted unverified, or with `--require-checksums`
+    /// is an error, unless it is `pinned` (its caller checks it against a hash it already knows).
+    fn verify_checksum(&self, repo: &Repository, rel: &str, file: &Path, pinned: bool) -> Result<bool> {
+        let Some(expected) = self.published_checksum(repo, rel)? else {
+            if pinned {
+                self.shell.verbose("Unverified", format!("{rel} (no checksum published; checked against kargo.lock)"));
+            } else {
+                self.unverified(&repo.url, rel)?;
+            }
             return Ok(false);
         };
-        let actual = hash::sha1_file(file)?;
-        if actual != expected {
-            bail!("checksum mismatch for {}/{rel}: expected sha1 {expected}, got {actual}", repo.url);
+        let actual = expected.algorithm.hash_file(file)?;
+        if actual != expected.hex {
+            bail!("checksum mismatch for {}/{rel}: expected {} {}, got {actual}", repo.url, expected.algorithm, expected.hex);
         }
         Ok(true)
     }
 
-    /// The SHA-1 a repository publishes for `rel`, or `None` if it has none (or a malformed one).
-    /// A local repository without a `.sha1` file vouches for the file it holds, so that file's hash is used.
-    fn published_sha1(&self, repo: &Repository, rel: &str) -> Result<Option<String>> {
-        if rel.ends_with(".sha1") || rel.ends_with(".md5") || rel.ends_with(".asc") {
+    /// Accepts a file of `repo_url` that has no published checksum, or fails under `--require-checksums`.
+    fn unverified(&self, repo_url: &str, rel: &str) -> Result<()> {
+        if self.require_checksums {
+            bail!(
+                "{repo_url}/{rel} has no published checksum (`.sha256` or `.sha1`) to verify it against, and --require-checksums is set; \
+                 ask the repository's maintainers to publish one, or build without --require-checksums"
+            );
+        }
+        self.shell.verbose("Unverified", format!("{rel} (no checksum published)"));
+        Ok(())
+    }
+
+    /// The strongest checksum a repository publishes for `rel` (see [`Algorithm`]), or `None` if it has none (or
+    /// only malformed ones). A local repository without a checksum file vouches for the file it holds, so that
+    /// file's hash is used.
+    fn published_checksum(&self, repo: &Repository, rel: &str) -> Result<Option<Checksum>> {
+        if is_checksum_file(rel) {
             return Ok(None);
         }
-        let body = if repo.is_local() {
-            let src = repo.local_root().join(rel);
-            let sidecar = repo.local_root().join(format!("{rel}.sha1"));
-            if sidecar.is_file() {
+        for algorithm in Algorithm::ALL {
+            let body = if repo.is_local() {
+                let sidecar = repo.local_root().join(format!("{rel}.{algorithm}"));
+                if !sidecar.is_file() {
+                    continue;
+                }
                 std::fs::read_to_string(&sidecar).with_context(|| format!("failed to read {}", sidecar.display()))?
-            } else if src.is_file() {
-                return Ok(Some(hash::sha1_file(&src).with_context(|| format!("failed to hash {}", src.display()))?));
             } else {
-                return Ok(None);
+                let url = format!("{}/{rel}.{algorithm}", repo.url);
+                let Some(response) = self.get(repo, &url)? else { continue };
+                let mut body = String::new();
+                response
+                    .into_body()
+                    .into_reader()
+                    .take(1024)
+                    .read_to_string(&mut body)
+                    .with_context(|| format!("failed to read checksum {url}"))?;
+                body
+            };
+            match Checksum::parse(algorithm, &body) {
+                Some(checksum) => return Ok(Some(checksum)),
+                None => self.shell.verbose("Unverified", format!("{rel} (malformed {algorithm} checksum)")),
             }
-        } else {
-            let url = format!("{}/{rel}.sha1", repo.url);
-            let Some(response) = self.get(repo, &url)? else { return Ok(None) };
-            let mut body = String::new();
-            response
-                .into_body()
-                .into_reader()
-                .take(1024)
-                .read_to_string(&mut body)
-                .with_context(|| format!("failed to read checksum {url}"))?;
-            body
-        };
-        let expected = body.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-        if expected.len() != 40 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
-            self.shell.verbose("Unverified", format!("{rel} (malformed checksum)"));
-            return Ok(None);
         }
-        Ok(Some(expected))
+        let src = repo.local_root().join(rel);
+        if repo.is_local() && src.is_file() {
+            let hex = Algorithm::Sha256.hash_file(&src).with_context(|| format!("failed to hash {}", src.display()))?;
+            return Ok(Some(Checksum { algorithm: Algorithm::Sha256, hex }));
+        }
+        Ok(None)
     }
 
     fn get(&self, repo: &Repository, url: &str) -> Result<Option<ureq::http::Response<ureq::Body>>> {
@@ -706,7 +756,7 @@ impl MavenClient {
         if !fresh && !(self.offline && !repo.is_local()) {
             // The download replaces the cached copy atomically, so a concurrent resolution of the same
             // module never sees it missing. A failure just means this repository doesn't know the module.
-            match self.fetch_from(repo, rel, rel, cached) {
+            match self.fetch_from(repo, rel, rel, cached, false) {
                 Ok(Fetch::Found) => {}
                 // Only a definitive "not found" invalidates the cached copy.
                 Ok(_) => {
@@ -807,12 +857,72 @@ impl MavenClient {
 /// Outcome of checking a cached file against its repository.
 enum CacheCheck {
     Matches,
-    /// No repository publishes a checksum (or none is reachable offline).
+    /// The repository publishes no checksum.
     Unknown,
+    /// The repository is remote and Kargo is offline.
+    Offline,
     Mismatch {
-        expected: String,
+        expected: Checksum,
         actual: String,
     },
+}
+
+/// The checksum algorithms Kargo checks a download with, strongest first: the SHA-256 that Maven 3.9 and Gradle
+/// publish next to every file (with a SHA-512 that would only cost another request), else the SHA-1 that every
+/// Maven repository has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Algorithm {
+    Sha256,
+    Sha1,
+}
+
+impl Algorithm {
+    const ALL: [Algorithm; 2] = [Algorithm::Sha256, Algorithm::Sha1];
+
+    fn hex_len(self) -> usize {
+        match self {
+            Algorithm::Sha256 => 64,
+            Algorithm::Sha1 => 40,
+        }
+    }
+
+    fn hash_file(self, path: &Path) -> io::Result<String> {
+        match self {
+            Algorithm::Sha256 => hash::sha256_file(path),
+            Algorithm::Sha1 => hash::sha1_file(path),
+        }
+    }
+}
+
+impl std::fmt::Display for Algorithm {
+    /// The name, which is also the extension of the file it is published in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Algorithm::Sha256 => "sha256",
+            Algorithm::Sha1 => "sha1",
+        })
+    }
+}
+
+/// A checksum a repository publishes next to a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Checksum {
+    algorithm: Algorithm,
+    /// Lowercase hexadecimal.
+    hex: String,
+}
+
+impl Checksum {
+    /// Reads a checksum file: the hash, optionally followed by the file name (`<hash>  lib-1.0.jar`).
+    fn parse(algorithm: Algorithm, body: &str) -> Option<Self> {
+        let hex = body.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        (hex.len() == algorithm.hex_len() && hex.chars().all(|c| c.is_ascii_hexdigit())).then_some(Self { algorithm, hex })
+    }
+}
+
+/// Whether `rel` is itself a checksum or signature, which nothing is published next to.
+fn is_checksum_file(rel: &str) -> bool {
+    [".sha1", ".sha256", ".sha512", ".md5", ".asc"].iter().any(|ext| rel.ends_with(ext))
 }
 
 /// The `host[:port]` of an `http(s)` URL.
@@ -829,7 +939,7 @@ fn unreachable_message(host: &str) -> String {
 /// Whether `url` names a file a repository may legitimately not have: a checksum, Gradle module
 /// metadata or `maven-metadata.xml`.
 fn is_optional_probe(url: &str) -> bool {
-    [".sha1", ".module", "maven-metadata.xml"].iter().any(|suffix| url.ends_with(suffix))
+    [".sha1", ".sha256", ".module", "maven-metadata.xml"].iter().any(|suffix| url.ends_with(suffix))
 }
 
 fn describe_age(age: Duration) -> String {
@@ -1192,9 +1302,89 @@ mod tests {
         assert!(format!("{err:#}").contains("cannot reach 127.0.0.1"), "{err:#}");
     }
 
+    /// A client of a repository served over HTTP with `files` (path below the root -> content); anything else is a 404.
+    fn http_client(
+        files: Vec<(String, String)>,
+        require_checksums: bool,
+    ) -> (crate::testserver::TestServer, MavenClient, tempfile::TempDir) {
+        let server =
+            crate::testserver::TestServer::start(move |request| match files.iter().find(|(path, _)| request.path == format!("/{path}")) {
+                Some((_, content)) => (200, content.clone()),
+                None => (404, String::new()),
+            });
+        let home = tempfile::tempdir().unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_require_checksums(require_checksums);
+        let client = MavenClient::new(&config, vec![Repository::new("remote", &server.url)]);
+        (server, client, home)
+    }
+
+    #[test]
+    fn downloads_are_checked_against_the_published_sha256_first() {
+        let rel = "com/acme/lib/1.0/lib-1.0.jar";
+        let sha256 = hash::sha256_bytes(b"good");
+        let file = |path: &str, content: &str| (path.to_owned(), content.to_owned());
+
+        // A SHA-256 wins over a SHA-1, even a wrong one.
+        let (_server, client, _home) = http_client(
+            vec![
+                file(rel, "good"),
+                file(&format!("{rel}.sha256"), &format!("{sha256}  lib-1.0.jar\n")),
+                file(&format!("{rel}.sha1"), "0".repeat(40).as_str()),
+            ],
+            false,
+        );
+        assert_eq!(std::fs::read_to_string(client.fetch_required(rel).unwrap()).unwrap(), "good");
+        assert!(client.is_verified(rel));
+
+        let (_server, client, _home) = http_client(vec![file(rel, "evil"), file(&format!("{rel}.sha256"), &sha256)], false);
+        let err = format!("{:#}", client.fetch_required(rel).unwrap_err());
+        assert!(err.contains(&format!("expected sha256 {sha256}")), "{err}");
+        assert!(client.cached_copies(rel).is_empty(), "a file that fails its check is not cached");
+
+        // Without a SHA-256, the SHA-1 is checked.
+        let (server, client, _home) =
+            http_client(vec![file(rel, "evil"), file(&format!("{rel}.sha1"), &hash::checksums_bytes(b"good").sha1)], false);
+        let err = format!("{:#}", client.fetch_required(rel).unwrap_err());
+        assert!(err.contains("expected sha1"), "{err}");
+        let asked: Vec<String> = server.requests().into_iter().map(|r| r.path).collect();
+        assert_eq!(asked, [format!("/{rel}"), format!("/{rel}.sha256"), format!("/{rel}.sha1")]);
+    }
+
+    #[test]
+    fn require_checksums_rejects_files_without_one() {
+        let rel = "com/acme/lib/1.0/lib-1.0.jar";
+        let files = vec![(rel.to_owned(), "bytes".to_owned())];
+        let (_server, client, _home) = http_client(files.clone(), false);
+        assert!(client.fetch_required(rel).is_ok(), "accepted unverified by default");
+        assert!(!client.is_verified(rel));
+
+        let (_server, client, _home) = http_client(files.clone(), true);
+        let err = format!("{:#}", client.fetch_required(rel).unwrap_err());
+        assert!(err.contains("has no published checksum") && err.contains("--require-checksums"), "{err}");
+        assert!(client.cached_copies(rel).is_empty());
+        // A file kargo.lock pins is checked against the lock instead.
+        assert_eq!(std::fs::read_to_string(client.fetch_pinned(rel).unwrap()).unwrap(), "bytes");
+
+        // A cached file that was never checked fails too, before it is locked.
+        let (_server, client, _home) = http_client(files, true);
+        let cached = client.cache_path(&client.key_for(&client.repos[0], rel));
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, "bytes").unwrap();
+        assert!(client.fetch_verified(rel).is_err());
+    }
+
+    #[test]
+    fn checksum_files() {
+        assert_eq!(Checksum::parse(Algorithm::Sha1, &format!("{}  x.jar\n", "A".repeat(40))).unwrap().hex, "a".repeat(40));
+        assert!(Checksum::parse(Algorithm::Sha256, &"a".repeat(40)).is_none(), "a SHA-1 is no SHA-256");
+        assert!(Checksum::parse(Algorithm::Sha1, "<html>not found</html>").is_none());
+        assert!(is_checksum_file("a/b.jar.sha256") && is_checksum_file("a/b.jar.asc") && !is_checksum_file("a/b.jar"));
+    }
+
     #[test]
     fn optional_probes_and_hosts() {
         assert!(is_optional_probe("https://h/a/b.jar.sha1"));
+        assert!(is_optional_probe("https://h/a/b.jar.sha256"));
         assert!(is_optional_probe("https://h/a/b.module"));
         assert!(!is_optional_probe("https://h/a/b.jar"));
         assert_eq!(host_of("https://user:pw@repo.example.com:8443/maven2/a"), "repo.example.com:8443");

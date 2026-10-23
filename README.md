@@ -32,7 +32,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 
 * **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo also downloads a JDK when you have none (or the one `[toolchain] jdk = "21"` pins), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`).
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
-* **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact. Checksums are verified against `.sha1` files on download and before a cached artifact is first locked, and every artifact a build uses is checked against the lockfile, so a corrupt cached file fails the build instead of being used. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
+* **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact, and of the tools the build runs: the Kotlin compiler, compiler plugins, the JUnit launcher, KSP, Dokka, ktlint and detekt. Checksums are verified against the repository's `.sha256` (else `.sha1`) files on download and before a cached artifact is first locked (`--require-checksums` fails on artifacts with neither), and every artifact a build uses is checked against the lockfile, so a corrupt cached file fails the build instead of being used. npm packages for Wasm install with `--ignore-scripts`. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
 * **Incremental:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, only the affected Kotlin/JVM files are recompiled, in a warm compiler daemon, so an edit rebuilds in well under a second.
 * **Android** is built by the Android Gradle Plugin. Kargo generates the Gradle project under `target/android` from `kargo.toml`, so you never edit Gradle files, and downloads the Gradle version that plugin needs (a project `gradlew` wins; `gradle-version` pins another).
 
@@ -87,7 +87,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`; `--release` or `--profile` only that profile's output and generated files), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 
-Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--vendored`, `--refresh`, `--manifest-path`.
+Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--vendored`, `--refresh`, `--require-checksums`, `--manifest-path`.
 
 Behind a company firewall, `~/.kargo/config.toml` (or a project's `.kargo/config.toml`) sends downloads through mirrors and a proxy:
 
@@ -420,6 +420,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
+| `KARGO_REQUIRE_CHECKSUMS` | Same as `--require-checksums` |
 | `KARGO_VENDORED` | Same as `--vendored` |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | Proxy for Kargo's downloads (overridden by `[http] proxy` in `config.toml`) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |

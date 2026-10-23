@@ -46,6 +46,7 @@ These work with every command.
 | `--locked` | Fail if `kargo.lock` would need to change, and hash every cached artifact instead of trusting its `.stamp` |
 | `--vendored` | Resolve dependencies only from the repository [`kargo vendor`](#kargo-vendor) wrote (also `KARGO_VENDORED=1`, or `[source] vendored = true` in `.kargo/config.toml`) |
 | `--refresh` | Ignore cached metadata and `kargo.lock`, re-check repositories, and re-verify cached artifacts (re-downloading corrupt ones) |
+| `--require-checksums` | Fail on a download whose repository publishes no `.sha256` or `.sha1` for it, instead of accepting it unverified (also `KARGO_REQUIRE_CHECKSUMS=1`). Files `kargo.lock` pins are checked against it instead. See [Requiring published checksums](../lockfile/#requiring-published-checksums) |
 | `--system-gradle` | Run Android builds with the `gradle` on `PATH` instead of a Kargo-managed Gradle (also `KARGO_SYSTEM_GRADLE=1`). A project `gradlew` still wins |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
 | `-V`, `--version` | Print the version. With `-v` (`kargo -vV`) also the release and the target it was built for (`host: x86_64-unknown-linux-gnu`). When a newer release exists, a note on stderr says so, at most once a day (see [`kargo self`](#kargo-self)) |
@@ -704,13 +705,13 @@ kargo uninstall <name>... [--root <dir>]
 
 ## `kargo fetch`
 
-Download all dependencies and toolchains so later builds can run offline. For each enabled target this is the Kotlin compiler, its plugins and the dependencies. The JVM and Wasm targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs and, in a package with `benches/`, the libraries and the harness generator of [`kargo bench`](#kargo-bench) (locked as `jvm/bench` and `jvm/bench-tools`), and the Wasm target gets the [npm packages](../../guides/wasm/#npm-packages) of its Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
+Download all dependencies and toolchains so later builds can run offline, and lock them in `kargo.lock`. For each enabled target this is the Kotlin compiler, its plugins and the dependencies; the compiler, the plugins and the JUnit launcher are pinned as [build tools](../lockfile/#build-tools). The JVM and Wasm targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs and, in a package with `benches/`, the libraries and the harness generator of [`kargo bench`](#kargo-bench) (locked as `jvm/bench` and `jvm/bench-tools`), and the Wasm target gets the [npm packages](../../guides/wasm/#npm-packages) of its Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
 
 | Option | Meaning |
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
 | `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. Libraries that publish none are skipped. Sources jars are not recorded in `kargo.lock` |
-| `--tools` | Also download the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint) and [`kargo lint`](../../guides/formatting-and-linting/) (detekt), so they work with `--offline` |
+| `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint) and [`kargo lint`](../../guides/formatting-and-linting/) (detekt), so they work with `--offline` and `--locked` |
 | `-p, --package <name>`, `--workspace` | Which packages to fetch for |
 
 ```console
@@ -755,7 +756,7 @@ kargo vendor [path] [--toolchains] [--sync]
 | Option | Meaning |
 |---|---|
 | `path` | The directory to write, relative to the project root (default: `[source] directory` of `.kargo/config.toml`, else `vendor`) |
-| `--toolchains` | Also copy the Kotlin compiler and the Kotlin/Native distribution for this host |
+| `--toolchains` | Also copy the Kotlin compiler and the Kotlin/Native distribution for this host. Without it, the compiler's `tools/kotlin-compiler` entry of `kargo.lock` is not copied |
 | `--sync` | Remove the files of the directory that the project no longer needs |
 
 ```console
@@ -769,7 +770,7 @@ vendored = true
 
 ## `kargo update`
 
-Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges and new builds of [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) are picked up.
+Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges and new builds of [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) are picked up. The [build tools](../lockfile/#build-tools) that `kargo.lock` had are locked again too, so `--locked` builds still find them; a tool it did not have is locked by the first build that runs it.
 
 ```sh
 kargo update [group:artifact]... [--precise <version>] [--dry-run]
