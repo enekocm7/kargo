@@ -27,9 +27,9 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Folding | Bodies, lambdas and multi-line argument lists, raw strings, the import block, KDoc and block comments, and runs of `//` comments |
 | Selection | Expand the selection from an identifier to its dotted call chain, the brackets around it, the statement, the declarations around it (function, class) and the file |
 | Formatting | The whole file, formatted by ktlint with the project's `.editorconfig` and `[fmt]` settings, as `kargo fmt` does. See [Formatting](#formatting) |
-| Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add the branches a `when` is missing, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
+| Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add the branches a `when` is missing, add missing `actual` declarations, quick fixes for `kargo check` errors, and quick fixes for its own unused-code and deprecation diagnostics. See [Code actions](#code-actions) |
 | Refactorings | Extract a variable or a function, inline a variable or a function, move or remove a parameter, and move a declaration to another package or a file of its own. See [Refactorings](#refactorings) |
-| Diagnostics as you type | Unclosed or unmatched brackets, unterminated strings and comments, a `class`, `interface` or `typealias` without a name (errors), unused imports and local variables that are never used (warnings, shown greyed out), and [operators](#operators) that can't work. Decided from the file and the project's declarations, so they appear between saves |
+| Diagnostics as you type | Unclosed or unmatched brackets, unterminated strings and comments, a `class`, `interface` or `typealias` without a name (errors), unused code (warnings, shown greyed out: see [Unused code and deprecated usages](#unused-code-and-deprecated-usages)), deprecated usages (shown struck through), and [operators](#operators) that can't work. Decided from the file and the project's declarations, so they appear between saves |
 | Errors | From [check on save](../editors/#check-on-save), which is on with this server: `kargo check` runs when you save a file and its errors for every target appear in the editor |
 
 ### Inlay hints
@@ -53,6 +53,19 @@ Every kind can be switched off with `initializationOptions`, either nested (`{ "
 | `inlayHints.operators` | The `operator fun` of your project that an operator calls, after the operator (`a + b` shows `plus(o: Money)`). Off by default |
 
 Only fully known types are shown, and a type is left out when the initializer already says it, as IntelliJ does.
+
+### Unused code and deprecated usages
+
+Your editor greys out code nothing uses, and strikes through the names that are deprecated:
+
+- **Unused code** (warnings, greyed out): imports that nothing names, local `val`s and `var`s that are never read, `private` functions, properties and classes whose name appears nowhere else in their file, parameters of `private` and local functions that the body doesn't read, and the statements after a `return`, `throw`, `break`, `continue` or `TODO()` in the same block.
+- **Deprecated usages** (hints, struck through): a use of a declaration marked `@Deprecated`, in your project or a library. The message is the one you wrote, with the `ReplaceWith` when there is one. A `DeprecationLevel.ERROR` declaration is an error here, and a `HIDDEN` one is left to `kargo check`, which reports it as unresolved.
+
+The server is conservative. A name counts as used when it appears anywhere else in the file, so a declaration that shares its name with something else is never reported. Declarations that are used by name from outside the code the server reads are left alone: annotated ones (`@Test`, `@Serializable`, `@JvmStatic`, ...), `operator` and `infix` functions, `override`s, `main`, `componentN` functions, the JVM's serialization hooks (`readObject`, `writeReplace`, `serialVersionUID`, ...) and names that start with `_`. Public declarations are never reported as unused, since other code in the project or your dependencies may use them.
+
+Turn them off with `initializationOptions`: `{ "unusedCode": false }` for the unused code, `{ "deprecated": false }` for the deprecated usages. Both are on by default.
+
+The [code actions](#code-actions) remove an unused import or variable and replace a deprecated call with its `ReplaceWith`. A deprecation that `kargo check` reports too is shown once, with the compiler's message.
 
 ### Completion
 
@@ -238,6 +251,9 @@ The server offers code actions in Kotlin files: the light bulb, or *Quick Fix* a
 | Add `actual` for `<name>` | An `expect` declaration in `src/` that a target of the package lacks | Writes the `actual` declaration, with `TODO()` bodies, to `src-<target>/` at the common file's path with the target in its name (`Platform.kt` gets `Platform.jvm.kt`): appended to that file, or in a new one when the editor can create files. *To every target* does them all at once |
 | Add `override` | `kargo check`'s "hides member of supertype and needs an 'override' modifier" | Adds `override` before `fun`, `val` or `var` |
 | Remove variable | `kargo check`'s "Variable 'x' is never used" | Removes the declaration. An initializer that may have side effects (a call) stays as a statement. A destructured component or loop variable is renamed to `_` instead |
+| Remove unused import | The server's own *unused import* warning | Removes the import's line |
+| Remove variable `x` | The server's own *variable `x` is never used* warning, when `kargo check` doesn't report the same variable | Removes the declaration, as above. Destructured and delegated variables get no fix here |
+| Replace with `<ReplaceWith>` | The server's own deprecation hint or error for a call | Replaces the call with the `ReplaceWith` expression, each argument taking the place of the parameter it is passed to (in parentheses when it is an expression). Not offered for a qualified call (`a.old()`), a call with a trailing lambda, a bare name of a function, or a `ReplaceWith` that names imports, where the expression may not mean the same thing |
 
 With the cursor on `class Users : Repo<User> {}`, where `Repo<T>` declares `fun find(id: Int): T` and `val size: Int`, *Implement 2 members* gives:
 
@@ -359,7 +375,7 @@ Then run `kargo fetch --sources` yourself when you want them; the server reads t
 
 The server reads declarations and infers types as far as completion and navigation need. It is not the Kotlin compiler:
 
-- It reports only syntax problems and unused code of its own (see the table above). It doesn't report unresolved references or type errors. Those come from `kargo check` on save, which compiles the code for real. Turn it off with `{ "checkOnSave": false }` in the editor's `initializationOptions`; see [Check on save](../editors/#check-on-save).
+- It reports only syntax problems, unused code and deprecated usages of its own (see the table above and [Unused code and deprecated usages](#unused-code-and-deprecated-usages)). It doesn't report unresolved references or type errors. Those come from `kargo check` on save, which compiles the code for real. Turn it off with `{ "checkOnSave": false }` in the editor's `initializationOptions`; see [Check on save](../editors/#check-on-save).
 - It reads Java but doesn't edit it. Java files get no completion, hover, rename or references of their own, and a Java declaration can't be renamed from Kotlin: the server refuses, because the Java code that uses it wouldn't change. References to a Kotlin declaration from Java code aren't searched.
 - Libraries without sources have no documentation in hover, and a type parameter with several bounds (`<T> ... where T : A, T : B`) keeps only the first. The compiler's context-sensitive features are not all followed: a property's accessors don't see its `context(...)`, and name-based destructuring (`(val a, val b)`) is read as positional.
 - Kotlin/Native code gets the standard library's parts that its Wasm sources jar shares with Native, plus the Native-only declarations from the distribution's klib, which have no documentation in hover.

@@ -1,7 +1,8 @@
 //! Code actions for Kotlin files: importing an unresolved name, organizing the imports, adding
 //! the dependency an unresolved import needs, implementing the abstract members a class lacks,
 //! adding the branches a `when` over an enum or a sealed type is missing, adding the `actual` declarations an `expect` one is missing, and quick fixes for the compiler
-//! messages of `kargo check` it recognises (a missing `override`, an unused variable). The
+//! messages of `kargo check` it recognises (a missing `override`, an unused variable), and quick fixes for
+//! its own diagnostics (an unused import or variable, a call to a deprecated declaration). The
 //! refactorings (`refactor.*`) are in [`super::refactor`].
 //!
 //! A dependency is added by Kargo's [`crate::actions::ADD_DEPENDENCY`] command, which `kargo lsp`
@@ -64,6 +65,7 @@ pub fn code_actions(an: &Analyzer, req: &Request) -> Vec<Value> {
         when_actions(an, req, &lines, &mut out);
         actual_actions(an, req, &lines, &mut out);
         compiler_fixes(an, req, &mut out);
+        own_fixes(an, req, &mut out);
     }
     if req.wants("source.organizeImports") {
         organize_imports(an, req, &mut out);
@@ -1283,11 +1285,175 @@ fn remove_variable(src: &str, lx: &lexer::Lexed, d: &Decl) -> Value {
             return text_edit(src, d.span.start..lx.tokens[init].start, "");
         }
     }
-    let start = line_start(src, d.span.start);
-    let line_end = src[d.span.end..].find('\n').map_or(src.len(), |i| d.span.end + i);
-    if src[start..d.span.start].trim().is_empty() && src[d.span.end..line_end].trim().trim_end_matches(';').is_empty() {
+    remove_span(src, d.span.clone())
+}
+
+/// The edit that removes `span`, with its whole line when nothing else is on it.
+fn remove_span(src: &str, span: Range<usize>) -> Value {
+    let start = line_start(src, span.start);
+    let line_end = src[span.end..].find('\n').map_or(src.len(), |i| span.end + i);
+    if src[start..span.start].trim().is_empty() && src[span.end..line_end].trim().trim_end_matches(';').is_empty() {
         let next = (line_end + 1).min(src.len());
         return text_edit(src, start..next, "");
     }
-    text_edit(src, d.span.clone(), "")
+    text_edit(src, span, "")
+}
+
+// ----- quick fixes for the diagnostics the server reports itself -----
+
+/// Quick fixes for the diagnostics of [`super::diagnostics`]: removing an unused import or local
+/// variable, and replacing a call to a deprecated declaration with its `ReplaceWith`.
+fn own_fixes(an: &Analyzer, req: &Request, out: &mut Vec<Value>) {
+    let unit = an.unit(req.unit);
+    let (file, src) = (&unit.file, &unit.text);
+    let lx = &file.lexed;
+    let uri = text::path_to_uri(&unit.path);
+    for diagnostic in &req.diagnostics {
+        let message = diagnostic["message"].as_str().unwrap_or_default();
+        let span = diagnostic_span(src, diagnostic);
+        if let Some(fq) = message.strip_prefix("unused import `").and_then(|m| m.strip_suffix('`')) {
+            let Some(import) = file.imports.iter().find(|im| im.span.start == span.start) else { continue };
+            let edit = remove_span(src, import.span.clone());
+            out.push(edit_action(format!("Remove unused import `{fq}`"), &uri, vec![edit], Some(diagnostic), true));
+        } else if let Some(name) = message.strip_prefix("variable `").and_then(|m| m.strip_suffix("` is never used")) {
+            // The compiler reports the same variable too, and its fix is offered already.
+            if req.diagnostics.iter().any(|d| unused_variable(d["message"].as_str().unwrap_or_default()) == Some(name)) {
+                continue;
+            }
+            let Some(d) = file.decls.iter().find(|d| d.kind == Kind::Variable && d.local && d.name_span.start == span.start) else {
+                continue;
+            };
+            if d.init_kind != InitKind::Value {
+                continue;
+            }
+            let edit = remove_variable(src, lx, d);
+            out.push(edit_action(format!("Remove variable `{name}`"), &uri, vec![edit], Some(diagnostic), true));
+        } else if message.contains("is deprecated") && diagnostic["tags"].as_array().is_some_and(|tags| tags.contains(&json!(2))) {
+            let Some(i) = lx.tokens.iter().position(|t| t.kind == Tok::Ident && t.start == span.start) else { continue };
+            let Some((edit, expr)) = replace_with_edit(an, req.unit, i) else { continue };
+            out.push(edit_action(format!("Replace with `{expr}`"), &uri, vec![edit], Some(diagnostic), true));
+        }
+    }
+}
+
+/// The edit that replaces the call of the deprecated declaration named at token `i` with its
+/// `ReplaceWith` expression, and that expression. The arguments of the call take the places of
+/// the parameters the expression names. Qualified names, a trailing lambda and replacements that
+/// need imports are left alone: there the expression may not mean the same thing.
+fn replace_with_edit(an: &Analyzer, u: UnitId, i: usize) -> Option<(Value, String)> {
+    let unit = an.unit(u);
+    let (file, src) = (&unit.file, &unit.text);
+    let lx = &file.lexed;
+    if i > 0 && matches!(lx.tokens[i - 1].kind, Tok::Dot | Tok::SafeDot | Tok::ColonColon) {
+        return None;
+    }
+    let (sym, deprecation) = super::diagnostics::deprecated_target(an, u, i)?;
+    let expr = deprecation.replace.filter(|_| !deprecation.replace_imports)?;
+    let decl = an.decl(sym);
+    let (end, supplied) = if lx.tokens.get(i + 1).is_some_and(|t| t.kind == Tok::LParen && !t.nl) {
+        if matches!(decl.kind, Kind::Property | Kind::Variable | Kind::Parameter | Kind::EnumEntry) {
+            return None;
+        }
+        let open = i + 1;
+        let close = lx.matching[open]?;
+        if lx.tokens.get(close + 1).is_some_and(|t| t.kind == Tok::LBrace && !t.nl) {
+            return None;
+        }
+        (close, call_arguments(src, lx, open + 1, close)?)
+    } else {
+        // A name without a call stands for a property, which takes no arguments.
+        if decl.kind != Kind::Property || !decl.params.is_empty() {
+            return None;
+        }
+        (i, Vec::new())
+    };
+    let declaring = an.file(sym.unit_id());
+    let mut params = Vec::new();
+    for &p in &decl.params {
+        let param = &declaring.decls[p];
+        if param.vararg {
+            return None;
+        }
+        params.push(param.name.clone());
+    }
+    let mut values = HashMap::new();
+    for (position, (name, tokens)) in supplied.into_iter().enumerate() {
+        let param = match name {
+            Some(name) => params.iter().find(|p| **p == name)?.clone(),
+            None => params.get(position)?.clone(),
+        };
+        values.insert(param, argument_text(src, lx, tokens));
+    }
+    let text = substitute(&expr, &params, &values)?;
+    let edit = text_edit(src, lx.tokens[i].start..lx.tokens[end].end, text);
+    Some((edit, expr))
+}
+
+/// The arguments of a call whose parentheses hold the tokens `from..to`: each with its name when
+/// it has one (`name = value`), and the tokens of its value. `None` when they don't split cleanly.
+fn call_arguments(src: &str, lx: &lexer::Lexed, from: usize, to: usize) -> Option<Vec<(Option<String>, Range<usize>)>> {
+    let mut out = Vec::new();
+    if from == to {
+        return Some(out);
+    }
+    let (mut start, mut k) = (from, from);
+    loop {
+        if k > to {
+            return None;
+        }
+        if k == to || lx.tokens[k].kind == Tok::Comma {
+            out.push(argument(src, lx, start..k)?);
+            if k == to {
+                return Some(out);
+            }
+            start = k + 1;
+            k = start;
+            continue;
+        }
+        if matches!(lx.tokens[k].kind, Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::TemplateOpen) {
+            k = lx.matching[k]?;
+        }
+        k += 1;
+    }
+}
+
+/// One argument of a call, from the tokens `range`: its name when it has one, and its value.
+fn argument(src: &str, lx: &lexer::Lexed, range: Range<usize>) -> Option<(Option<String>, Range<usize>)> {
+    if range.len() >= 3 && lx.tokens[range.start].kind == Tok::Ident && lx.tokens[range.start + 1].kind == Tok::Eq {
+        return Some((Some(lx.text(src, range.start).to_owned()), range.start + 2..range.end));
+    }
+    (!range.is_empty()).then_some((None, range))
+}
+
+/// The text of an argument's tokens, in parentheses when it is an expression that needs them
+/// where a name stands for it.
+fn argument_text(src: &str, lx: &lexer::Lexed, tokens: Range<usize>) -> String {
+    let text = &src[lx.tokens[tokens.start].start..lx.tokens[tokens.end - 1].end];
+    let compound = tokens.clone().any(|k| {
+        matches!(lx.tokens[k].kind, Tok::Op | Tok::Question | Tok::Arrow | Tok::Eq | Tok::Colon)
+            || matches!(lx.text(src, k), "as" | "is" | "in")
+    });
+    if compound && tokens.len() > 1 { format!("({text})") } else { text.to_owned() }
+}
+
+/// `expr` with each parameter it names (not after a `.`, nor a named argument's name) replaced by
+/// its argument's text. `None` when it names a parameter the call doesn't pass.
+fn substitute(expr: &str, params: &[String], values: &HashMap<String, String>) -> Option<String> {
+    let lx = lexer::lex(expr);
+    let mut out = String::new();
+    let mut at = 0;
+    for (k, t) in lx.tokens.iter().enumerate() {
+        out.push_str(&expr[at..t.start]);
+        let word = lx.text(expr, k);
+        let member = k > 0 && matches!(lx.tokens[k - 1].kind, Tok::Dot | Tok::SafeDot | Tok::ColonColon);
+        let named = lx.tokens.get(k + 1).is_some_and(|n| n.kind == Tok::Eq);
+        if t.kind == Tok::Ident && !member && !named && params.iter().any(|p| p == word) {
+            out.push_str(values.get(word)?);
+        } else {
+            out.push_str(&expr[t.start..t.end]);
+        }
+        at = t.end;
+    }
+    out.push_str(&expr[at..]);
+    Some(out)
 }

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::actions;
+use super::diagnostics::{Severity, Tag};
 use super::features::{self, CompletionOptions, Target};
 use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::tests::fake_jdk;
@@ -1330,6 +1331,54 @@ fn fixes_compiler_messages() {
     let f = fixture(&[("src/Main.kt", "fun main() {\n    val (a, b$0) = Pair(1, 2)\n    println(a)\n}\n")]);
     let diagnostic = f.diagnostic("Variable 'b' is never used.");
     assert_eq!(f.applied(vec![diagnostic], "Rename to `_`"), "fun main() {\n    val (a, _) = Pair(1, 2)\n    println(a)\n}\n");
+}
+
+/// A diagnostic of the server's own with `message` and `tags` on the identifier at the cursor.
+fn own_diagnostic(f: &Fixture, message: &str, tags: Value) -> Value {
+    let (u, tok) = f.token();
+    let unit = &f.proj.units[u.unit as usize];
+    let span = unit.file.lexed.tokens[tok].span();
+    serde_json::json!({ "range": crate::text::range(&unit.text, span), "severity": 2, "source": "kargo", "tags": tags, "message": message })
+}
+
+#[test]
+fn fixes_the_server_own_diagnostics() {
+    // An unused import is removed with its line.
+    let code = "package app\n\nimport kotlin.math.max\nimport kotlin.math.min\n\nfun main() = min(1, 2)$0\n";
+    let f = fixture(&[("src/Main.kt", code)]);
+    let import = code.find("import kotlin.math.max").unwrap();
+    let range = crate::text::range(code, import..import + "import kotlin.math.max".len());
+    let diagnostic =
+        serde_json::json!({ "range": range, "severity": 2, "source": "kargo", "tags": [1], "message": "unused import `kotlin.math.max`" });
+    assert_eq!(
+        f.applied(vec![diagnostic], "Remove unused import `kotlin.math.max`"),
+        "package app\n\nimport kotlin.math.min\n\nfun main() = min(1, 2)\n"
+    );
+
+    // An unused local variable is removed; the compiler's report of it gives the same fix only once.
+    let main = "fun main() {\n    val un$0used = 1\n    println(\"x\")\n}\n";
+    let f = fixture(&[("src/Main.kt", main)]);
+    let diagnostic = own_diagnostic(&f, "variable `unused` is never used", serde_json::json!([1]));
+    assert_eq!(f.applied(vec![diagnostic.clone()], "Remove variable `unused`"), "fun main() {\n    println(\"x\")\n}\n");
+    let compiler = f.diagnostic("Variable 'unused' is never used.");
+    let titles = f.titles(vec![diagnostic, compiler]);
+    assert_eq!(titles.iter().filter(|t| *t == "Remove variable `unused`").count(), 1, "{titles:?}");
+
+    // A call to a deprecated declaration becomes its `ReplaceWith`, with the arguments in place of
+    // the parameters, parenthesized where they are expressions.
+    let code = "@Deprecated(\"use fresh\", ReplaceWith(\"fresh(value + 1)\"))\nfun old(value: Int) = value\n\nfun fresh(v: Int) = v\n\nfun main() {\n    val r = ol$0d(2 * 3)\n}\n";
+    let f = fixture(&[("src/Main.kt", code)]);
+    let message = "`old` is deprecated: use fresh. Use `fresh(value + 1)` instead";
+    let diagnostic = own_diagnostic(&f, message, serde_json::json!([2]));
+    assert_eq!(f.applied(vec![diagnostic], "Replace with `fresh(value + 1)`"), code.replace("ol$0d(2 * 3)", "fresh((2 * 3) + 1)"));
+    // A named argument is taken by the parameter it names.
+    let code = "@Deprecated(\"use fresh\", ReplaceWith(\"fresh(value + 1)\"))\nfun old(value: Int) = value\n\nfun fresh(v: Int) = v\n\nfun main() {\n    val s = o$0ld(value = 4)\n}\n";
+    let f = fixture(&[("src/Main.kt", code)]);
+    let diagnostic = own_diagnostic(&f, message, serde_json::json!([2]));
+    assert_eq!(f.applied(vec![diagnostic], "Replace with `fresh(value + 1)`"), code.replace("o$0ld(value = 4)", "fresh(4 + 1)"));
+    // The compiler's own deprecation reports get no fix here: they have no tag.
+    let compiler = own_diagnostic(&f, message, serde_json::json!(null));
+    assert!(!f.titles(vec![compiler]).iter().any(|t| t.starts_with("Replace with")));
 }
 
 // ----- annotations -----
@@ -4000,4 +4049,21 @@ mod refactoring {
         let private = "package app\n\nprivate val secret = 1\n\nfun sh$0ow() = secret\n";
         assert!(!titles(&[("src/app/Util.kt", private), ("src/app/model/User.kt", user)]).iter().any(|t| t.starts_with("Move")));
     }
+}
+
+#[test]
+fn marks_uses_of_deprecated_declarations() {
+    let code = "package app\n\n@Deprecated(\"use fresh\", ReplaceWith(\"fresh()\"))\nfun old() {}\n\n@Deprecated(\"gone\", level = DeprecationLevel.ERROR)\nclass Gone\n\n@Deprecated(\"hidden\", level = DeprecationLevel.HIDDEN)\nfun secret() {}\n\nfun fresh() {}\n\nfun main() {\n    old()\n    fresh()\n    Gone()\n    secret()\n}\n";
+    let f = fixture(&[("src/Main.kt", code)]);
+    let an = f.an();
+    let problems = super::diagnostics::deprecated_usages(&an, UnitId { lib: false, unit: 0 });
+    let found: Vec<(&str, Severity, Vec<Tag>, &str)> =
+        problems.iter().map(|p| (&code[p.span.clone()], p.severity, p.tags.clone(), p.message.as_str())).collect();
+    assert_eq!(
+        found,
+        [
+            ("old", Severity::Hint, vec![Tag::Deprecated], "`old` is deprecated: use fresh. Use `fresh()` instead"),
+            ("Gone", Severity::Error, vec![Tag::Deprecated], "`Gone` is deprecated: gone"),
+        ],
+    );
 }
