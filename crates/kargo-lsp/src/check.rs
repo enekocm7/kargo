@@ -248,13 +248,21 @@ fn source_range(source: Option<&str>, line: usize, column: Option<usize>) -> Val
     text::range(source, line_start + span.start..line_start + span.end)
 }
 
-/// Whether the Kotlin server already reports `ours`: a diagnostic on the same line with the
-/// same message.
+/// Whether `theirs` already reports `ours`: a diagnostic on the same line with the same message,
+/// or, for a deprecated use (tagged `Deprecated` by the Kotlin server), one on the same word that
+/// says it is deprecated, in the compiler's wording.
 pub fn is_reported(ours: &Value, theirs: &[Value]) -> bool {
     let normalize = |m: &Value| m.as_str().unwrap_or_default().trim().trim_end_matches('.').to_lowercase();
     let line = &ours["range"]["start"]["line"];
-    theirs.iter().any(|d| &d["range"]["start"]["line"] == line && normalize(&d["message"]) == normalize(&ours["message"]))
+    let deprecated = ours["tags"].as_array().is_some_and(|tags| tags.contains(&json!(DEPRECATED_TAG)));
+    theirs.iter().any(|d| {
+        (&d["range"]["start"]["line"] == line && normalize(&d["message"]) == normalize(&ours["message"]))
+            || (deprecated && d["range"] == ours["range"] && d["message"].as_str().is_some_and(|m| m.contains("is deprecated")))
+    })
 }
+
+/// The LSP `DiagnosticTag` of a deprecated name.
+const DEPRECATED_TAG: u8 = 2;
 
 /// `theirs` followed by those of `ours` the Kotlin server doesn't report.
 pub fn merge(theirs: &[Value], ours: &[Value]) -> Vec<Value> {
@@ -353,6 +361,20 @@ mod tests {
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[1]["message"], "type mismatch");
         assert_eq!(merged[2]["range"]["start"]["line"], 2);
+    }
+
+    #[test]
+    fn leaves_out_a_deprecated_use_the_compiler_marks_too() {
+        let range = |line: u32, start: u32, end: u32| json!({ "start": { "line": line, "character": start }, "end": { "line": line, "character": end } });
+        let theirs = [json!({ "range": range(3, 4, 7), "severity": 2, "message": "'fun old(): Int' is deprecated. use other." })];
+        let deprecated = |line: u32, start: u32, end: u32| json!({ "range": range(line, start, end), "severity": 4, "tags": [2], "message": "`old` is deprecated: use other" });
+        // The same word, in the compiler's wording: dropped.
+        let merged = merge(&theirs, &[deprecated(3, 4, 7)]);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        // Another word on the same line, or the same word without the tag, stays.
+        assert_eq!(merge(&theirs, &[deprecated(3, 8, 11)]).len(), 2);
+        let untagged = json!({ "range": range(3, 4, 7), "severity": 4, "message": "`old` is deprecated" });
+        assert_eq!(merge(&theirs, &[untagged]).len(), 2);
     }
 
     #[test]

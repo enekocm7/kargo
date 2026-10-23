@@ -1111,6 +1111,8 @@ struct State {
     move_option: bool,
     /// `initializationOptions`: the kinds of inlay hints shown.
     inlay_options: inlay::Options,
+    /// `initializationOptions`: whether unused code and deprecated usages are reported.
+    diagnostic_options: diagnostics::Options,
     /// The version of each open document, as the editor sent it.
     versions: HashMap<PathBuf, i64>,
     /// Whether the editor shows `$/progress`.
@@ -1178,6 +1180,7 @@ impl State {
             rename_option: true,
             move_option: true,
             inlay_options: inlay::Options::default(),
+            diagnostic_options: diagnostics::Options::default(),
             versions: HashMap::new(),
             work_done_progress: false,
             load_options: LoadOptions { dependencies, fetch_sources: true, tried: Arc::default() },
@@ -1534,19 +1537,24 @@ impl State {
         Ok(())
     }
 
-    /// Pushes the diagnostics that need no resolution ([`diagnostics`]) for the open document `uri`;
-    /// `kargo lsp` merges them with the check's.
+    /// Pushes the diagnostics of the open document `uri`: those that need no resolution
+    /// ([`diagnostics`]), and those that need the project's declarations (operators and
+    /// deprecated usages). `kargo lsp` merges them with the check's.
     fn publish_diagnostics(&mut self, uri: &str) -> anyhow::Result<()> {
         let Some(path) = self.open.get(uri).cloned() else { return Ok(()) };
         let Some(unit) = self.files.get(&path).cloned() else { return Ok(()) };
-        let mut problems = diagnostics::problems(&unit.text, &unit.file);
-        // Operators need the project's declarations.
+        let mut problems = diagnostics::problems(&unit.text, &unit.file, self.diagnostic_options);
+        // Operators and deprecated usages need the project's declarations.
         let (proj, ids) = self.snapshot();
         if let Some(&id) = ids.get(&path) {
             let lib = Arc::clone(&self.lib);
             let packages = self.model.packages.clone();
             let an = Analyzer::new(&lib, &proj, &packages);
-            problems.extend(super::operators::problems(&an, UnitId { lib: false, unit: id }));
+            let u = UnitId { lib: false, unit: id };
+            problems.extend(super::operators::problems(&an, u));
+            if self.diagnostic_options.deprecated {
+                problems.extend(diagnostics::deprecated_usages(&an, u));
+            }
             problems.sort_by_key(|p| (p.span.start, p.span.end));
         }
         let diagnostics: Vec<Value> = problems.iter().map(|p| p.to_json(&unit.text)).collect();
@@ -1874,6 +1882,7 @@ impl State {
         self.rename_option = params["initializationOptions"]["renameFiles"] != false;
         self.move_option = params["initializationOptions"]["movePackageDirectories"] != false;
         self.inlay_options = inlay::Options::from_json(&params["initializationOptions"]);
+        self.diagnostic_options = diagnostics::Options::from_json(&params["initializationOptions"]);
         self.load_options.fetch_sources = params["initializationOptions"]["fetchSources"] != false;
         self.root = params["rootUri"]
             .as_str()

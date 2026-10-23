@@ -801,7 +801,7 @@ It speaks LSP over stdin and stdout and gives you:
 - **Code actions in `kargo.toml`**: quick fixes for its errors, and the edits of `kargo add`, `kargo add --framework`, `kargo target add` and `kargo upgrade` from the editor. See [Code actions in `kargo.toml`](#code-actions-in-kargotoml).
 - **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
 - **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
-- **Check on save**: when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear in the editor. It is on with Kargo's own server, which reports only syntax problems and unused code of its own, and opt-in with the others. See [Check on save](#check-on-save).
+- **Check on save**: when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear in the editor. It is on with Kargo's own server, which reports only syntax problems, unused code and deprecated usages of its own, and opt-in with the others. See [Check on save](#check-on-save).
 
 With `--server kotlin-lsp`, the first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
 
@@ -1074,7 +1074,7 @@ kargo fetch --sources
 
 ## Check on save
 
-[Kargo's own Kotlin server](../kotlin-server/) reports only syntax problems and unused code as you type, so with it check on save is on: the errors come from `kargo check`, which compiles your code for real. The Kotlin LSP and kotlin-language-server analyze your code for the JVM, with the compiler plugins and flags they know about, so errors only the real build finds don't show until you run `kargo build`: type errors in `src-wasm/` or `src-native/`, errors from compiler plugins, and [`warnings-as-errors`](../../reference/manifest/#kotlin) failures. With check on save, `kargo lsp` finds them for you. Turn it on (or off, with `false`) in the editor's `initializationOptions`:
+[Kargo's own Kotlin server](../kotlin-server/) reports only syntax problems, unused code and deprecated usages as you type, so with it check on save is on: the errors come from `kargo check`, which compiles your code for real. The Kotlin LSP and kotlin-language-server analyze your code for the JVM, with the compiler plugins and flags they know about, so errors only the real build finds don't show until you run `kargo build`: type errors in `src-wasm/` or `src-native/`, errors from compiler plugins, and [`warnings-as-errors`](../../reference/manifest/#kotlin) failures. With check on save, `kargo lsp` finds them for you. Turn it on (or off, with `false`) in the editor's `initializationOptions`:
 
 ```lua title="init.lua"
 vim.lsp.config('kargo', {
