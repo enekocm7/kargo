@@ -1124,6 +1124,12 @@ impl Fixture {
         self.actions(diagnostics, &[]).iter().map(|a| a["title"].as_str().unwrap().to_owned()).collect()
     }
 
+    /// [`Fixture::titles`] without "Generate KDoc", which any declaration without a comment on the
+    /// cursor's line offers.
+    fn titles_but_kdoc(&self, diagnostics: Vec<Value>) -> Vec<String> {
+        self.titles(diagnostics).into_iter().filter(|t| t != "Generate KDoc").collect()
+    }
+
     /// The cursor's file after the edits of the action titled `title`.
     fn applied(&self, diagnostics: Vec<Value>, title: &str) -> String {
         let actions = self.actions(diagnostics, &[]);
@@ -1175,7 +1181,7 @@ fn imports_unresolved_names() {
 
     // A name that isn't a call or a type only from a diagnostic.
     let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nfun main() = println(ans$0wer)\n")]);
-    assert!(f.titles(Vec::new()).is_empty());
+    assert!(f.titles_but_kdoc(Vec::new()).is_empty());
     let diagnostic = f.diagnostic("Unresolved reference 'answer'.");
     let found = f.actions(vec![diagnostic.clone()], &[]);
     assert_eq!(found[0]["title"], "Import `lib.answer`");
@@ -1183,7 +1189,7 @@ fn imports_unresolved_names() {
 
     // Resolved names get nothing.
     let f = fixture(&[lib, ("src/app/Main.kt", "package app\n\nimport lib.Thing\n\nfun main() = Thi$0ng()\n")]);
-    assert!(f.titles(Vec::new()).is_empty());
+    assert!(f.titles_but_kdoc(Vec::new()).is_empty());
 }
 
 #[test]
@@ -1271,7 +1277,7 @@ fn adds_missing_actual_declarations() {
     let f = fixture(&[("src/app/Platform.kt", common), ("src-jvm/app/Platform.jvm.kt", jvm)]);
     let roots = multiplatform_roots();
     let found = f.actions(Vec::new(), &roots);
-    let titles: Vec<&str> = found.iter().map(|a| a["title"].as_str().unwrap()).collect();
+    let titles: Vec<&str> = found.iter().map(|a| a["title"].as_str().unwrap()).filter(|t| *t != "Generate KDoc").collect();
     assert_eq!(titles, ["Add `actual` for `platform` to the native target"]);
     let changes = found[0]["edit"]["documentChanges"].as_array().unwrap();
     let uri = crate::text::path_to_uri(std::path::Path::new("/project/src-native/app/Platform.native.kt"));
@@ -2670,6 +2676,87 @@ fn completes_kdoc_tags_names_and_links() {
     assert!(f.labels().is_empty());
 }
 
+#[test]
+fn completes_the_exceptions_the_body_throws() {
+    let src = "/**\n * Checks.\n * @throws $0\n */\nfun check(n: Int) {\n    if (n < 0) throw IllegalArgumentException(\"negative\")\n    if (n > 9) throw IllegalStateException()\n    if (n == 5) throw n\n}\n";
+    let f = fixture(&[("src/F.kt", src)]);
+    let items = f.items();
+    assert_eq!(first_labels(&items, 2), ["IllegalArgumentException", "IllegalStateException"]);
+    assert_eq!(item(&items, "IllegalArgumentException")["detail"], "thrown in the body");
+    // A rethrown variable is not an exception the body names: it is offered only as a parameter.
+    assert_ne!(item(&items, "n")["detail"], "thrown in the body");
+    let f = fixture(&[("src/F.kt", "/**\n * @see $0\n */\nfun check(n: Int) {\n    throw IllegalStateException()\n}\n")]);
+    assert!(f.items().iter().all(|i| i["detail"] != "thrown in the body"));
+}
+
+#[test]
+fn hints_kdoc_names_that_resolve_to_nothing() {
+    let src = "package app\n\nclass User\n\n/**\n * Makes a [User] and a [Missing].\n * @param count how many\n * @see app.Nope\n */\nfun make(size: Int) = User()\n";
+    let f = fixture(&[("src/app/Main.kt", src)]);
+    let problems = super::kdoc::problems(&f.an(), UnitId { lib: false, unit: 0 });
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+    assert_eq!(problems.len(), 3, "{messages:?}");
+    assert!(messages.contains(&"`count` is not a parameter or property of this declaration"), "{messages:?}");
+    assert!(messages.contains(&"unresolved reference `app.Nope`") && messages.contains(&"unresolved reference `Missing`"), "{messages:?}");
+    assert!(problems.iter().all(|p| p.severity == Severity::Hint));
+    let missing = problems.iter().find(|p| p.message.ends_with("`Missing`")).unwrap();
+    assert_eq!(&f.proj.units[0].text[missing.span.clone()], "Missing");
+}
+
+#[test]
+fn navigates_the_names_in_kdoc_comments() {
+    let src = "package app\n\nclass User(val name: String)\n\n/** Makes a [User] with its [User.name]. */\nfun make() = User(\"a\")\n";
+    let f = fixture(&[("src/app/User.kt", src)]);
+    let an = f.an();
+    let unit = UnitId { lib: false, unit: 0 };
+    let text = &f.proj.units[0].text;
+
+    let link = text.find("[User]").unwrap() + 2;
+    let (span, targets) = super::kdoc::reference_at(&an, unit, link).expect("a link");
+    assert_eq!(&text[span], "User");
+    assert_eq!(an.decl(targets[0].sym().unwrap()).name, "User");
+
+    // `[User.name]` names the property.
+    let member = text.find("[User.name]").unwrap() + 7;
+    let (span, targets) = super::kdoc::reference_at(&an, unit, member).expect("a member link");
+    assert_eq!(&text[span], "name");
+    assert_eq!(an.decl(targets[0].sym().unwrap()).name, "name");
+    let hover = features::reference_hover(&an, unit, member).expect("a hover");
+    assert!(hover["contents"]["value"].as_str().unwrap().contains("val name: String"), "{hover}");
+
+    // The links are references of the class: both name it, and find references lists them.
+    let group = super::kdoc::group_at(&an, unit, link).expect("the class");
+    let refs = features::doc_references(&an, &group, &features::Control::default()).expect("a search");
+    assert!(refs.iter().any(|(u, r)| *u == unit && r.start == link - 1), "{refs:?}");
+    assert!(refs.iter().all(|(_, r)| &text[r.clone()] == "User"), "{refs:?}");
+    assert_eq!(refs.len(), 2, "{refs:?}");
+}
+
+#[test]
+fn hovers_show_see_links_and_sample_code() {
+    let src = "package app\n\nclass User\n\n/**\n * Makes a user.\n * @see User\n * @sample app.sample\n */\nfun make() = User()\n\nfun sample() {\n    val user = make()\n    println(user)\n}\n\nfun call() = ma$0ke()\n";
+    let f = fixture(&[("src/app/Main.kt", src)]);
+    let hover = f.hover();
+    assert!(hover.contains("**See also** [`User`](") && hover.contains("#L3)"), "{hover}");
+    assert!(hover.contains("**Sample** `app.sample`") && hover.contains("val user = make()\nprintln(user)"), "{hover}");
+}
+
+#[test]
+fn generates_kdoc_for_a_declaration_without_one() {
+    let src = "package app\n\nfun sp$0lit(text: String, limit: Int): List<String> {\n    if (limit < 1) throw IllegalArgumentException(\"limit\")\n    return listOf(text)\n}\n\nfun log(message: String) {}\n";
+    let f = fixture(&[("src/app/Main.kt", src)]);
+    assert_eq!(
+        f.applied(Vec::new(), "Generate KDoc"),
+        "package app\n\n/**\n * @param text\n * @param limit\n * @return\n * @throws IllegalArgumentException\n */\nfun split(text: String, limit: Int): List<String> {\n    if (limit < 1) throw IllegalArgumentException(\"limit\")\n    return listOf(text)\n}\n\nfun log(message: String) {}\n"
+    );
+
+    // A declaration with a comment, or with nothing to document, gets no action.
+    let f = fixture(&[("src/app/Main.kt", "/** Logs. */\nfun l$0og(message: String) {}\n")]);
+    assert!(!f.titles(Vec::new()).contains(&"Generate KDoc".to_owned()));
+    let f = fixture(&[("src/app/Main.kt", "fun lo$0g() {}\n")]);
+    assert!(!f.titles(Vec::new()).contains(&"Generate KDoc".to_owned()));
+}
+
 /// The names completed at the cursor of a single-file project.
 fn completes(src: &str) -> Vec<String> {
     fixture(&[("src/Main.kt", src)]).labels()
@@ -3449,7 +3536,7 @@ fun f(a: A) {{ a.ru$0n() }}
 "
         ),
     )]);
-    assert!(f.titles(Vec::new()).is_empty(), "{:?}", f.titles(Vec::new()));
+    assert!(f.titles_but_kdoc(Vec::new()).is_empty(), "{:?}", f.titles(Vec::new()));
     let items = fixture(&[(
         "src/Main.kt",
         &format!(
@@ -3623,9 +3710,9 @@ fn adds_the_remaining_branches_of_a_when() {
     assert!(f.titles(Vec::new()).contains(&"Add the missing branch `Color.BLUE`".to_owned()), "{:?}", f.titles(Vec::new()));
     // Complete, or over something without cases: no action.
     let f = fixture(&[("src/Main.kt", "fun f(b: Boolean) = wh$0en (b) {\n    true -> 1\n    false -> 2\n}\n")]);
-    assert!(f.titles(Vec::new()).is_empty());
+    assert!(f.titles_but_kdoc(Vec::new()).is_empty());
     let f = fixture(&[("src/Main.kt", "fun f(n: Int) = wh$0en (n) {\n    1 -> 1\n}\n")]);
-    assert!(f.titles(Vec::new()).is_empty());
+    assert!(f.titles_but_kdoc(Vec::new()).is_empty());
 }
 
 #[test]

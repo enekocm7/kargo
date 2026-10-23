@@ -1552,6 +1552,7 @@ impl State {
             let an = Analyzer::new(&lib, &proj, &packages);
             let u = UnitId { lib: false, unit: id };
             problems.extend(super::operators::problems(&an, u));
+            problems.extend(super::kdoc::problems(&an, u));
             if self.diagnostic_options.deprecated {
                 problems.extend(diagnostics::deprecated_usages(&an, u));
             }
@@ -1741,8 +1742,12 @@ impl State {
             }
             "textDocument/hover" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
-                let (_, tok) = at(unit);
-                Ok(tok.and_then(|t| features::hover(&an, unit, t)).unwrap_or(Value::Null))
+                let (offset, tok) = at(unit);
+                let hover = match tok {
+                    Some(tok) => features::hover(&an, unit, tok),
+                    None => features::reference_hover(&an, unit, offset),
+                };
+                Ok(hover.unwrap_or(Value::Null))
             }
             "textDocument/signatureHelp" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
@@ -1751,9 +1756,12 @@ impl State {
             }
             "textDocument/definition" | "textDocument/declaration" | "textDocument/typeDefinition" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
-                let (_, tok) = at(unit);
-                let Some(tok) = tok else { return Ok(Value::Null) };
-                let mut targets = features::targets_at(&an, unit, tok);
+                let (offset, tok) = at(unit);
+                let mut targets = match tok {
+                    Some(tok) => features::targets_at(&an, unit, tok),
+                    // A name in a KDoc comment.
+                    None => super::kdoc::reference_at(&an, unit, offset).map(|(_, targets)| targets).unwrap_or_default(),
+                };
                 if method == "textDocument/typeDefinition" {
                     targets = type_targets(&an, &targets);
                 }
@@ -1788,9 +1796,10 @@ impl State {
             "typeHierarchy/subtypes" => Ok(hierarchy::direct_subtypes(&an, &params["item"])),
             "textDocument/documentHighlight" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
-                let (_, tok) = at(unit);
-                let Some(group) = tok.and_then(|t| group_at(&an, unit, t)) else { return Ok(json!([])) };
+                let (offset, tok) = at(unit);
+                let Some(group) = group_of(&an, unit, offset, tok) else { return Ok(json!([])) };
                 let mut refs = features::references(&an, &group, true);
+                refs.extend(features::doc_references(&an, &group, &features::Control::default()).unwrap_or_default());
                 refs.extend(super::operators::operator_uses(&an, &group, &features::Control::default()).unwrap_or_default());
                 let text = &an.unit(unit).text;
                 Ok(json!(
@@ -1971,13 +1980,15 @@ fn run_search(
         .map(|u| UnitId { lib: false, unit: u });
     let Some(unit) = unit else { return Ok(Value::Null) };
     let u = an.unit(unit);
-    let tok = features::token_at(&an, unit, text::offset(&u.text, &params["position"]));
+    let offset = text::offset(&u.text, &params["position"]);
+    let tok = features::token_at(&an, unit, offset);
     // The answer to a cancelled search is replaced by the cancellation error.
     let cancelled = || Failure::Invalid("the request was cancelled".into());
     if method == "textDocument/references" {
-        let Some(group) = tok.and_then(|t| group_at(&an, unit, t)) else { return Ok(json!([])) };
+        let Some(group) = group_of(&an, unit, offset, tok) else { return Ok(json!([])) };
         let include = params["context"]["includeDeclaration"] != false;
         let mut refs = features::search(&an, &group, include, control).ok_or_else(cancelled)?;
+        refs.extend(features::doc_references(&an, &group, control).ok_or_else(cancelled)?);
         refs.extend(super::operators::operator_uses(&an, &group, control).ok_or_else(cancelled)?);
         return Ok(json!(refs.iter().map(|(u, r)| location(&an, *u, r.clone())).collect::<Vec<_>>()));
     }
@@ -2009,6 +2020,15 @@ fn type_targets(an: &Analyzer, targets: &[Target]) -> Vec<Target> {
 fn group_at(an: &Analyzer, unit: UnitId, tok: usize) -> Option<Vec<super::index::SymId>> {
     let sym = features::targets_at(an, unit, tok).into_iter().find_map(|t| t.sym())?;
     Some(features::rename_group(an, sym))
+}
+
+/// The declarations the name at `offset` refers to: the identifier at `tok`, or else a name in a
+/// KDoc comment.
+fn group_of(an: &Analyzer, unit: UnitId, offset: usize, tok: Option<usize>) -> Option<Vec<super::index::SymId>> {
+    match tok {
+        Some(tok) => group_at(an, unit, tok),
+        None => super::kdoc::group_at(an, unit, offset),
+    }
 }
 
 #[cfg(test)]

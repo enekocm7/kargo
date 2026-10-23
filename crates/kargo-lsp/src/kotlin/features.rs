@@ -440,6 +440,18 @@ pub fn hover(an: &Analyzer, u: UnitId, tok: usize) -> Option<Value> {
     Some(json!({ "contents": { "kind": "markdown", "value": markdown }, "range": range }))
 }
 
+/// Hover on a name in a KDoc comment (`[Name]`, `@see Name`, `@param name`): what it refers to.
+pub fn reference_hover(an: &Analyzer, u: UnitId, offset: usize) -> Option<Value> {
+    let (span, targets) = super::kdoc::reference_at(an, u, offset)?;
+    let markdown = match targets.first()? {
+        Target::Sym(m) => describe(an, m),
+        Target::Package(p) => format!("```kotlin\npackage {p}\n```"),
+        Target::It { .. } => return None,
+    };
+    let unit = an.unit(u);
+    Some(json!({ "contents": { "kind": "markdown", "value": markdown }, "range": text::range(&unit.text, span) }))
+}
+
 /// A declaration's signature, where it is, and its documentation, as Markdown.
 pub fn describe(an: &Analyzer, m: &Member) -> String {
     let mut out = format!("```kotlin\n{}\n```", signature(an, m));
@@ -563,13 +575,14 @@ pub fn documentation(an: &Analyzer, s: SymId) -> Option<String> {
             return documentation(an, other);
         }
     };
-    let markdown = kdoc_to_markdown(doc);
+    let markdown = super::kdoc::markdown(an, s.unit_id(), s.decl_id(), doc);
     // Javadoc has inline tags and HTML that KDoc doesn't.
     if an.unit(s.unit_id()).is_java() { Some(javadoc_markdown(&markdown)) } else { Some(markdown) }
 }
 
-/// Turns a `/** ... */` comment into Markdown: block tags become lists, `[links]` code.
-pub fn kdoc_to_markdown(doc: &str) -> String {
+/// Turns a `/** ... */` comment into Markdown: block tags become lists, `[links]` code. `see`
+/// gives the Markdown of a `@see` name and `sample` the code of a `@sample` one, if it has any.
+pub fn kdoc_to_markdown(doc: &str, see: &dyn Fn(&str) -> String, sample: &dyn Fn(&str) -> Option<String>) -> String {
     let body = doc.trim_start_matches("/**").trim_end_matches("*/");
     let mut lines: Vec<String> = Vec::new();
     for line in body.lines() {
@@ -610,9 +623,16 @@ pub fn kdoc_to_markdown(doc: &str) -> String {
                     let (name, desc) = rest.split_once(' ').unwrap_or((rest, ""));
                     tags.push(format!("**Throws** `{}` {}", name.trim_matches(['[', ']', '`']), desc.trim()));
                 }
-                "see" => tags.push(format!("**See also** {}", rest.trim())),
+                "see" => tags.push(format!("**See also** {}", see(rest.trim().trim_matches(['[', ']', '`'])))),
                 "since" => tags.push(format!("**Since** Kotlin {}", rest.trim())),
-                "sample" | "suppress" => {}
+                "sample" => {
+                    let name = rest.trim().trim_matches(['[', ']', '`']);
+                    tags.push(match sample(name) {
+                        Some(code) => format!("**Sample** `{name}`\n\n```kotlin\n{code}\n```"),
+                        None => format!("**Sample** `{name}`"),
+                    });
+                }
+                "suppress" => {}
                 other => tags.push(format!("**{other}** {}", rest.trim())),
             }
         } else if let Some(last) = params.last_mut().filter(|_| !line.is_empty() && tags.is_empty() && text.is_empty()) {
@@ -3232,6 +3252,26 @@ pub fn search(
             }
             out.push((uid, t.span()));
         }
+    }
+    Some(out)
+}
+
+/// The names in the KDoc comments of the project that refer to `group`: the links, `@see` and
+/// `@param` names. Find references adds them to [`search`]; rename and the refactorings, which
+/// rewrite code, keep to code and do their own pass over the comments.
+pub fn doc_references(an: &Analyzer, group: &[SymId], control: &Control) -> Option<Vec<(UnitId, std::ops::Range<usize>)>> {
+    let Some(&first) = group.first() else { return Some(Vec::new()) };
+    let name = an.decl(first).name.clone();
+    let mut out = Vec::new();
+    for ui in 0..an.proj.units.len() {
+        if control.cancelled.is_some_and(|c| c()) {
+            return None;
+        }
+        let uid = UnitId { lib: false, unit: ui as u32 };
+        if an.unit(uid).is_java() {
+            continue;
+        }
+        out.extend(super::rename::doc_hits(an, uid, &super::rename::DocQuery::Syms(group), &name).into_iter().map(|r| (uid, r)));
     }
     Some(out)
 }
