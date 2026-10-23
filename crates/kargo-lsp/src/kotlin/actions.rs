@@ -1,7 +1,8 @@
 //! Code actions for Kotlin files: importing an unresolved name, organizing the imports, adding
 //! the dependency an unresolved import needs, implementing the abstract members a class lacks,
 //! adding the branches a `when` over an enum or a sealed type is missing, adding the `actual` declarations an `expect` one is missing, and quick fixes for the compiler
-//! messages of `kargo check` it recognises (a missing `override`, an unused variable).
+//! messages of `kargo check` it recognises (a missing `override`, an unused variable). The
+//! refactorings (`refactor.*`) are in [`super::refactor`].
 //!
 //! A dependency is added by Kargo's [`crate::actions::ADD_DEPENDENCY`] command, which `kargo lsp`
 //! runs as `kargo add` does, so the action and the command take the same code path. Every
@@ -16,12 +17,13 @@ use serde_json::{Value, json};
 use super::features::{display_ty, escape_name, fully_known, targets_at, when_cases};
 use super::index::{DEFAULT_IMPORTS, Origin, SourceSet, SymId, Unit, UnitId, is_internal_package};
 use super::lexer::{self, HARD_KEYWORDS, Tok};
+use super::refactor;
 use super::resolve::{Analyzer, Ctx, Subst, Ty, chain_start};
 use super::syntax::{Decl, DeclId, File, InitKind, Kind, TypeRef};
 use crate::text;
 
 /// The kinds of code actions the server offers.
-pub const KINDS: &[&str] = &["quickfix", "source.organizeImports"];
+pub const KINDS: &[&str] = &["quickfix", "source.organizeImports", refactor::EXTRACT, refactor::INLINE, refactor::REWRITE, refactor::MOVE];
 
 /// The body of the stubs the actions write.
 const TODO: &str = "TODO(\"Not yet implemented\")";
@@ -45,7 +47,7 @@ pub struct Request<'a> {
 }
 
 impl Request<'_> {
-    fn wants(&self, kind: &str) -> bool {
+    pub(super) fn wants(&self, kind: &str) -> bool {
         self.only.is_empty() || self.only.iter().any(|o| kind == o || kind.strip_prefix(o.as_str()).is_some_and(|r| r.starts_with('.')))
     }
 }
@@ -66,6 +68,7 @@ pub fn code_actions(an: &Analyzer, req: &Request) -> Vec<Value> {
     if req.wants("source.organizeImports") {
         organize_imports(an, req, &mut out);
     }
+    refactor::code_actions(an, req, &mut out);
     out
 }
 
@@ -81,7 +84,7 @@ fn lines_of(text: &str, range: &Range<usize>) -> Range<usize> {
     first..last
 }
 
-fn line_start(text: &str, offset: usize) -> usize {
+pub(super) fn line_start(text: &str, offset: usize) -> usize {
     text[..offset].rfind('\n').map_or(0, |i| i + 1)
 }
 
@@ -89,7 +92,7 @@ fn touches(lines: &Range<usize>, span: &Range<usize>) -> bool {
     span.start <= lines.end && lines.start <= span.end
 }
 
-fn text_edit(text: &str, span: Range<usize>, new_text: impl Into<String>) -> Value {
+pub(super) fn text_edit(text: &str, span: Range<usize>, new_text: impl Into<String>) -> Value {
     json!({ "range": text::range(text, span), "newText": new_text.into() })
 }
 
@@ -120,14 +123,14 @@ fn quoted(message: &str) -> Option<&str> {
 }
 
 /// The indentation of the line `offset` is on.
-fn indent_at(text: &str, offset: usize) -> &str {
+pub(super) fn indent_at(text: &str, offset: usize) -> &str {
     let start = line_start(text, offset);
     let line = &text[start..];
     &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
 /// The `<T, R : Any>` of a declaration, with a space after it, or nothing.
-fn type_params_text(src: &str, d: &Decl) -> String {
+pub(super) fn type_params_text(src: &str, d: &Decl) -> String {
     if d.type_params.is_empty() {
         return String::new();
     }
@@ -138,7 +141,7 @@ fn type_params_text(src: &str, d: &Decl) -> String {
 // ----- imports -----
 
 /// Words that are never a reference to import.
-const SOFT_KEYWORDS: &[&str] = &[
+pub(super) const SOFT_KEYWORDS: &[&str] = &[
     "abstract",
     "actual",
     "annotation",
@@ -339,7 +342,7 @@ fn import_candidates(an: &Analyzer, u: UnitId, tok: usize) -> Vec<String> {
 }
 
 /// A dotted name as Kotlin source, each segment backquoted where it needs to be.
-fn escape_path(fq: &str) -> String {
+pub(super) fn escape_path(fq: &str) -> String {
     fq.split('.').map(escape_name).collect::<Vec<_>>().join(".")
 }
 
@@ -856,7 +859,7 @@ fn override_type(an: &Analyzer, tr: &TypeRef, ctx: Ctx, subst: &Subst, target: C
 }
 
 /// Adds to `imports` the classes in `ty` that the code at `target` doesn't see by their name.
-fn collect_imports(an: &Analyzer, ty: &Ty, target: Ctx, imports: &mut BTreeSet<String>) {
+pub(super) fn collect_imports(an: &Analyzer, ty: &Ty, target: Ctx, imports: &mut BTreeSet<String>) {
     match ty {
         Ty::Class { sym, args, .. } => {
             let d = an.decl(*sym);
@@ -984,15 +987,15 @@ fn actual_actions(an: &Analyzer, req: &Request, lines: &Range<usize>, out: &mut 
 }
 
 /// Edits to one file, which may have to be created first.
-struct FileChange {
-    uri: String,
-    edits: Vec<Value>,
-    create: bool,
+pub(super) struct FileChange {
+    pub(super) uri: String,
+    pub(super) edits: Vec<Value>,
+    pub(super) create: bool,
 }
 
 /// A `WorkspaceEdit` for `changes`: `documentChanges` when a file is created, which needs the
 /// editor's support.
-fn workspace_edit(req: &Request, changes: &[FileChange]) -> Option<Value> {
+pub(super) fn workspace_edit(req: &Request, changes: &[FileChange]) -> Option<Value> {
     let creates = changes.iter().any(|c| c.create);
     if creates && !(req.create_files && req.document_changes) {
         return None;
