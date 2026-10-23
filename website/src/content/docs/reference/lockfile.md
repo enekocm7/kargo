@@ -20,6 +20,21 @@ The [web resources](../../guides/wasm/#web-resources-from-libraries) of Wasm lib
 
 A [`[[generate]]` step](../../guides/code-generation/) that runs a `tool`, or the `protobuf` built-in, pins what it downloads under `generate/<name>`: the tool and its dependencies, or `protoc` and the gRPC plugins.
 
+### Build tools
+
+What the build downloads and runs is pinned too, under `tools/`, so a changed or tampered compiler or plugin fails the build like a changed dependency does:
+
+| Key | What it pins |
+|---|---|
+| `tools/kotlin-compiler` | The Kotlin compiler (`kotlin-compiler-embeddable`) and the Build Tools API that incremental compilation uses, with their dependencies. Packages built together share one Kotlin version, so a workspace has one entry |
+| `tools/<artifact>` of a compiler plugin | The compiler plugin of a framework, such as `tools/kotlin-serialization-compiler-plugin-embeddable` |
+| `tools/junit-platform-console-standalone` | The JUnit console launcher that runs the JVM tests |
+| `tools/ksp` | The KSP tool and its dependencies, when a `ksp` dependency needs it |
+| `tools/dokka-cli`, `tools/dokka-plugins` | Dokka and its plugins, once `kargo doc` ran |
+| `tools/ktlint-cli`, `tools/detekt-cli` | ktlint and detekt, once `kargo fmt` or `kargo lint` ran |
+
+Each entry is recorded and checked like a dependency resolution, and `--locked` fails when one is missing or out of date. `kargo fetch` locks the tools of the enabled targets (`--tools` adds Dokka, ktlint and detekt), `kargo update` locks again the ones the lockfile had, and a build locks any other the first time it runs it. A [Compose Desktop](../../guides/compose/) jar for other platforms (`kargo package --platforms`) pins the Skiko natives it adds the same way, as `tools/skiko-awt-runtime-<platform>`. In a workspace, every entry but the compiler's is keyed with its package's name, like the resolutions.
+
 A [profile](../manifest/#profilename) with dependencies of its own has resolutions of its own, named after it: `jvm/runtime@staging` is the runtime classpath of the `staging` profile. The profiles without such dependencies all share `jvm/runtime`.
 
 ```toml title="kargo.lock"
@@ -63,8 +78,8 @@ sha256 = "91d0..."
 - Every artifact is **checked against its locked SHA-256** before it is used. Missing files are downloaded and checked. A cached file in `~/.kargo/cache/maven` that doesn't match is an error: Kargo doesn't use it, and doesn't replace it either.
 - Hashing a large dependency tree on every build is slow, so Kargo keeps each cached file's hash in a `.stamp` file next to it, and reuses that hash while the file's size and modification time are unchanged. A copy whose content was replaced without changing its size or modification time is therefore only caught by `--locked`, which hashes every cached file.
 - When `kargo.lock` is rewritten (`kargo add`, `kargo update`, a manifest change), cached artifacts are checked against the checksum their repository publishes, in parallel. A file that is unchanged since it was last checked (a `.verified` stamp next to it records its size and modification time) or whose SHA-256 equals its entry in the previous lockfile is not checked again, so adding a dependency does not re-verify the whole tree over the network.
-- Downloads are also checked against the repository's `.sha1` files.
-- When the lockfile is written (the first build, or `kargo update`), a file that was already in `~/.kargo/cache/maven` is checked against the repository's `.sha1` too. A corrupt cached file (for example, left by an interrupted download) is downloaded again, so a bad file is never locked.
+- Downloads are also checked against the checksum the repository publishes next to them: the `.sha256` file when there is one (Maven 3.9 and Gradle publish it), else the `.sha1`. A repository on disk that has neither vouches for its own copy. A file without any published checksum is accepted, and `-v` prints `Unverified` for it; [`--require-checksums`](#requiring-published-checksums) makes that an error.
+- When the lockfile is written (the first build, or `kargo update`), a file that was already in `~/.kargo/cache/maven` is checked against the repository's checksum too. A corrupt cached file (for example, left by an interrupted download) is downloaded again, so a bad file is never locked.
 - The cache keeps the files of each repository apart. Files from Maven Central and Google (or their mirrors) are stored by their plain Maven path, `~/.kargo/cache/maven/<group>/<artifact>/<version>/`, since a release there never changes. Everything else, including every SNAPSHOT, is stored in a directory of its repository, `~/.kargo/cache/maven/@<name>-<hash of the URL>/<group>/...`. So a private or forked artifact that reuses the coordinates of a public one never replaces it, and one repository's copy is never used for another. `kargo.lock` lists the plain Maven path without the repository directory, and a locked build uses the cached copy that matches the lock. Files cached by an older Kargo that are not from Central or Google are downloaded again once.
 - When you change dependencies in `kargo.toml`, only the affected resolutions are recomputed.
 - The file is only rewritten when its content changes.
@@ -95,6 +110,16 @@ When a file doesn't match `kargo.lock`, the error is `checksum mismatch for ...`
 
 - If the downloaded file matches the checksum the repository publishes, the **lockfile entry** is likely wrong, for example because it was recorded from a corrupt cached file. If you trust the repository, run `kargo update` to re-lock it.
 - If the repository publishes no checksum, Kargo can't tell: the artifact may have changed upstream or been tampered with, or the lockfile entry may be wrong. Investigate before running `kargo update`.
+
+### Requiring published checksums
+
+A repository that publishes no checksum for a file gives Kargo nothing to check the download against before it is locked. `--require-checksums` (or `KARGO_REQUIRE_CHECKSUMS=1`) makes such a download an error, which suits CI:
+
+```sh
+kargo build --locked --require-checksums
+```
+
+A file that `kargo.lock` already pins is checked against the lock instead, so a locked project builds even from a repository without checksums. Offline, a cached file that was never checked against its repository can't be locked with `--require-checksums`; run once online first.
 
 ## Commands
 

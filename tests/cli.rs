@@ -3880,6 +3880,63 @@ fn vendors_dependencies_and_builds_from_them_alone() {
 }
 
 #[test]
+fn locks_the_build_tools() {
+    let repo = vendor_repo();
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &format!("[kotlin]\nversion = \"2.4.21\"\n[repositories]\nlocal = \"{}\"\n", repo.url())));
+    p.kargo().args(["fetch", "--offline"]).assert().success();
+    let lock = p.read("kargo.lock");
+    for key in ["tools/kotlin-compiler", "tools/junit-platform-console-standalone"] {
+        assert!(lock.contains(&format!("[resolution.\"{key}\"]")), "{key} in {lock}");
+    }
+    assert!(lock.contains("org/jetbrains/kotlin/kotlin-compiler-embeddable/2.4.21/kotlin-compiler-embeddable-2.4.21.jar"), "{lock}");
+
+    // `kargo update` locks them again, so a `--locked` build still finds them.
+    p.kargo().args(["update", "--offline"]).assert().success();
+    assert_eq!(p.read("kargo.lock"), lock);
+    p.kargo().args(["fetch", "--offline", "--locked"]).assert().success();
+
+    // A lock without them is out of date.
+    let path = p.path().join("kargo.lock");
+    let mut partial = kargo_ops::lockfile::Lockfile::load(&path).unwrap();
+    partial.resolutions.remove("tools/kotlin-compiler");
+    partial.save(&path).unwrap();
+    p.kargo()
+        .args(["fetch", "--offline", "--locked"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("kargo.lock needs to be updated for `tools/kotlin-compiler`"));
+    p.kargo().args(["fetch", "--offline"]).assert().success();
+    assert_eq!(p.read("kargo.lock"), lock);
+
+    // A compiler that changed in the cache is caught like any locked artifact.
+    fn find(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+        std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+            let path = e.path();
+            if path.is_dir() { find(&path, name) } else { (e.file_name() == name).then_some(path) }
+        })
+    }
+    let jar = find(p.home.path(), "kotlin-compiler-embeddable-2.4.21.jar").expect("the compiler is cached");
+    std::fs::write(&jar, "a compiler that was tampered with").unwrap();
+    p.kargo()
+        .args(["fetch", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("checksum mismatch for org/jetbrains/kotlin/kotlin-compiler-embeddable/2.4.21"));
+}
+
+#[test]
+fn require_checksums_accepts_a_locked_project() {
+    // A local repository vouches for its files, so only the flag's plumbing is checked here; the
+    // Maven client's tests cover remote repositories without checksums.
+    let repo = vendor_repo();
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &format!("[kotlin]\nversion = \"2.4.21\"\n[repositories]\nlocal = \"{}\"\n", repo.url())));
+    p.kargo().args(["fetch", "--offline", "--require-checksums"]).assert().success();
+    p.kargo().args(["fetch", "--offline", "--locked"]).env("KARGO_REQUIRE_CHECKSUMS", "1").assert().success();
+}
+
+#[test]
 fn mirrors_replace_the_declared_repositories() {
     let repo = vendor_repo();
     let p = Project::new();

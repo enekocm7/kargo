@@ -13,7 +13,8 @@ use crate::lockfile::Lockfile;
 use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
 use kargo_manifest::{Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
-use kargo_maven::{DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
+use kargo_maven::resolver::ResolvedNode;
+use kargo_maven::{Artifact, DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
 use kargo_toolchain::jdks::JdkNeeds;
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
@@ -23,6 +24,9 @@ use kargo_util::shell::Shell;
 
 /// Minimum JDK supported by the Kotlin compiler.
 pub const MIN_JDK: u32 = 11;
+
+/// The `kargo.lock` key of the Kotlin compiler's classpath, which every package of a project shares.
+pub const COMPILER_KEY: &str = "tools/kotlin-compiler";
 
 /// What a project needs of a JDK that Kargo installs for it when the machine has none: new
 /// enough for its `jvm-target`, and not newer than its Kotlin compiler runs on.
@@ -63,7 +67,7 @@ struct Shared {
     jdk: Lazy<Jdk>,
     compiler: Lazy<KotlinCompiler>,
     native: Lazy<NativeToolchain>,
-    /// KSP tool classpaths by KSP version (members of a workspace may pick different ones).
+    /// KSP tool classpaths by `kargo.lock` key and KSP version (members of a workspace may pick different ones).
     ksp: Mutex<HashMap<String, Vec<PathBuf>>>,
     /// Artifacts of path dependencies built in this invocation, by package, target and platform. Each
     /// entry has its own lock, so packages building at the same time build a shared dependency once.
@@ -402,29 +406,65 @@ impl<'a> BuildContext<'a> {
         Ok(jdk)
     }
 
+    /// The Kotlin compiler, with its classpath locked in `kargo.lock` as `tools/kotlin-compiler`. Packages built
+    /// together share one Kotlin version, so the whole project shares the entry.
     pub fn kotlin_compiler(&self) -> Result<&KotlinCompiler> {
-        self.shared.compiler.get_or_try_init(|| KotlinCompiler::resolve(&self.client, &self.ws.manifest().kotlin.version))
+        self.shared.compiler.get_or_try_init(|| {
+            use kargo_toolchain::kotlin::{compiler_roots, has_build_tools};
+            let version = &self.ws.manifest().kotlin.version;
+            // A locked classpath tells by itself whether it has the Build Tools API (incremental compilation).
+            for build_tools in [true, false] {
+                if let Some(locked) = self.restore(COMPILER_KEY, &Platform::Jvm, &compiler_roots(version, build_tools), &[])? {
+                    return Ok(KotlinCompiler::new(version, locked.files(), build_tools));
+                }
+            }
+            // Without the Build Tools API (not published, or offline), compile non-incrementally.
+            if !self.locked
+                && has_build_tools(&self.client, version)
+                && let Ok(resolution) = self.resolve_at(COMPILER_KEY, Platform::Jvm, &compiler_roots(version, true), &[])
+            {
+                return Ok(KotlinCompiler::new(version, resolution.files(), true));
+            }
+            let resolution = self
+                .resolve_at(COMPILER_KEY, Platform::Jvm, &compiler_roots(version, false), &[])
+                .with_context(|| format!("failed to obtain the Kotlin {version} compiler"))?;
+            Ok(KotlinCompiler::new(version, resolution.files(), false))
+        })
     }
 
     pub fn native_toolchain(&self) -> Result<&NativeToolchain> {
         self.shared.native.get_or_try_init(|| NativeToolchain::ensure(self.config, &self.client, &self.ws.manifest().kotlin.version))
     }
 
-    /// The KSP2 command-line tool's classpath (`symbol-processing-aa-embeddable` and its dependencies).
+    /// The KSP2 command-line tool's classpath (`symbol-processing-aa-embeddable` and its dependencies), locked in
+    /// `kargo.lock` as `tools/ksp`.
     pub fn ksp_tool(&self) -> Result<Vec<PathBuf>> {
         let version = builtins::ksp_version(self.ws.manifest());
+        let key = self.tool_key("ksp");
         // Held while resolving, so parallel targets never download KSP twice.
         let mut tools = self.shared.ksp.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(classpath) = tools.get(version) {
+        let cached = format!("{key}@{version}");
+        if let Some(classpath) = tools.get(&cached) {
             return Ok(classpath.clone());
         }
         let root =
             DependencyRequest::new(ModuleId::new("com.google.devtools.ksp", "symbol-processing-aa-embeddable"), Some(version.to_owned()));
-        let resolution =
-            Resolver::new(&self.client, Platform::Jvm).resolve(&[root]).with_context(|| format!("failed to obtain KSP {version}"))?;
+        let resolution = self.resolve_at(&key, Platform::Jvm, &[root], &[]).with_context(|| format!("failed to obtain KSP {version}"))?;
         let classpath = resolution.files();
-        tools.insert(version.to_owned(), classpath.clone());
+        tools.insert(cached, classpath.clone());
         Ok(classpath)
+    }
+
+    /// The `kargo.lock` key of the tool `name`, `tools/<name>`: one for each package, whose settings pick the
+    /// tools' versions, but shared by its profiles.
+    pub fn tool_key(&self, name: &str) -> String {
+        self.ws.lock_key(&format!("tools/{name}"))
+    }
+
+    /// Resolves the classpath of a tool the build runs, such as Dokka's plugins, locked in `kargo.lock` under
+    /// [`BuildContext::tool_key`] like a dependency resolution.
+    pub fn resolve_tool(&self, name: &str, roots: &[DependencyRequest]) -> Result<Resolution> {
+        self.resolve_at(&self.tool_key(name), Platform::Jvm, roots, &[])
     }
 
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {
@@ -503,14 +543,26 @@ impl<'a> BuildContext<'a> {
 
     /// Resolves `roots` for `platform`, reusing `kargo.lock` when possible.
     pub fn resolve(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
-        let key = &self.ws.lock_key(&self.profile_resolution(key)?);
+        self.resolve_at(&self.ws.lock_key(&self.profile_resolution(key)?), platform, roots, boms)
+    }
+
+    /// The resolution locked under the full `kargo.lock` key `key`, if it is there for these inputs (and not
+    /// `--refresh`), with every artifact checked against its locked SHA-256.
+    fn restore(&self, key: &str, platform: &Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Option<Resolution>> {
+        if self.config.refresh() {
+            return Ok(None);
+        }
+        let inputs = self.inputs_fingerprint(platform, roots, boms);
+        let lock = self.shared.lock.lock().expect("lock poisoned");
+        // Under --locked, cached artifacts are hashed rather than trusted by their stamps.
+        lock.restore(key, &inputs, &self.client, !self.locked)
+    }
+
+    /// [`BuildContext::resolve`] under the full `kargo.lock` key `key`.
+    fn resolve_at(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
         let inputs = self.inputs_fingerprint(&platform, roots, boms);
-        if !self.config.refresh() {
-            let lock = self.shared.lock.lock().expect("lock poisoned");
-            // Under --locked, cached artifacts are hashed rather than trusted by their stamps.
-            if let Some(res) = lock.restore(key, &inputs, &self.client, !self.locked)? {
-                return Ok(res);
-            }
+        if let Some(res) = self.restore(key, &platform, roots, boms)? {
+            return Ok(res);
         }
         if self.locked {
             bail!(
@@ -545,7 +597,11 @@ impl<'a> BuildContext<'a> {
     /// is fetched (`group:artifact:version` and the file); `fetch` downloads it when the lock does not match, as
     /// one node per module. Nothing is locked, and an old entry is dropped, when `inputs` is empty.
     pub fn lock_files(&self, key: &str, inputs: &[String], fetch: impl FnOnce() -> Result<Resolution>) -> Result<Resolution> {
-        let key = &self.ws.lock_key(&self.profile_resolution(key)?);
+        self.lock_files_at(&self.ws.lock_key(&self.profile_resolution(key)?), inputs, fetch)
+    }
+
+    /// [`BuildContext::lock_files`] under the full `kargo.lock` key `key`.
+    fn lock_files_at(&self, key: &str, inputs: &[String], fetch: impl FnOnce() -> Result<Resolution>) -> Result<Resolution> {
         if inputs.is_empty() {
             let mut lock = self.shared.lock.lock().expect("lock poisoned");
             if lock.resolutions.contains_key(key) {
@@ -587,23 +643,43 @@ impl<'a> BuildContext<'a> {
         Ok(fetched)
     }
 
-    /// Fetches compiler plugin jars.
+    /// Fetches compiler plugin jars, each locked in `kargo.lock` like a [`BuildContext::tool_jar`].
     pub fn plugin_jars(&self, plugins: &[PluginSpec]) -> Result<Vec<ResolvedPlugin>> {
         let kotlin = &self.ws.manifest().kotlin.version;
         plugins
             .iter()
             .map(|p| {
                 let version = p.version.as_deref().unwrap_or(kotlin);
-                let jar = kargo_toolchain::kotlin::fetch_jar(&self.client, &p.group, &p.artifact, version)
+                let jar = self
+                    .tool_jar(&p.group, &p.artifact, version)
                     .with_context(|| format!("failed to fetch compiler plugin {}:{}:{version}", p.group, p.artifact))?;
                 Ok(ResolvedPlugin { jar, options: builtins::plugin_option_args(p) })
             })
             .collect()
     }
 
-    /// A single tool jar (e.g. the JUnit console launcher), without dependencies.
+    /// A single tool jar (e.g. the JUnit console launcher), without dependencies, locked in `kargo.lock` as
+    /// `tools/<artifact>`.
     pub fn tool_jar(&self, group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
-        kargo_toolchain::kotlin::fetch_jar(&self.client, group, artifact, version)
+        self.locked_tool_file(Artifact::new(ModuleId::new(group, artifact), version))
+    }
+
+    /// Fetches `artifact` and pins it in `kargo.lock` under the tool key of its artifact name.
+    fn locked_tool_file(&self, artifact: Artifact) -> Result<PathBuf> {
+        let key = self.tool_key(&artifact.module.artifact);
+        let rel = self.client.artifact_path(&artifact)?;
+        let inputs = [format!("{}:{} {rel}", artifact.module, artifact.version)];
+        let locked = self.lock_files_at(&key, &inputs, || {
+            let file = self.client.fetch_verified(&rel)?;
+            let node = ResolvedNode {
+                module: artifact.module.clone(),
+                version: artifact.version.clone(),
+                files: vec![file],
+                dependencies: Vec::new(),
+            };
+            Ok(Resolution { roots: Vec::new(), nodes: vec![node] })
+        })?;
+        locked.files().into_iter().next().with_context(|| format!("kargo.lock lists no file for `{key}`; run `kargo update`"))
     }
 
     /// A copy of the lockfile as currently resolved.
@@ -611,9 +687,10 @@ impl<'a> BuildContext<'a> {
         self.shared.lock.lock().expect("lock poisoned").clone()
     }
 
-    /// Fetches the self-contained (`-all` classifier) jar of a command-line tool such as ktlint or detekt.
+    /// Fetches the self-contained (`-all` classifier) jar of a command-line tool such as ktlint or detekt, locked
+    /// in `kargo.lock` as `tools/<artifact>`.
     pub fn tool_fat_jar(&self, group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
-        fat_jar(&self.client, group, artifact, version)
+        self.locked_tool_file(Artifact::new(ModuleId::new(group, artifact), version).with_classifier(Some("all".to_owned())))
     }
 
     /// Persists `kargo.lock` if any resolution changed it.

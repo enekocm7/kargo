@@ -4,9 +4,10 @@
 use anyhow::{Result, bail};
 
 use super::build;
-use super::context::{BuildContext, UpdatePlan};
+use super::context::{BuildContext, COMPILER_KEY, UpdatePlan};
 use super::{Configuration, resolution_for};
-use crate::lockfile::LockChange;
+use crate::builtins::PluginSpec;
+use crate::lockfile::{LockChange, Lockfile};
 use kargo_manifest::TargetKind;
 use kargo_maven::{ModuleId, VersionReq};
 
@@ -60,14 +61,15 @@ pub fn update(ctx: &mut BuildContext, opts: &UpdateOptions) -> Result<Vec<LockCh
 
 /// Resolves every configuration of every enabled target of every package into a fresh lockfile.
 fn resolve_all(ctx: &BuildContext) -> Result<()> {
+    let previous = ctx.lockfile();
     ctx.reset_lockfile(None);
     for package in 0..ctx.project.packages().len() {
-        resolve_package(&ctx.for_package(package))?;
+        resolve_package(&ctx.for_package(package), &previous)?;
     }
     Ok(())
 }
 
-fn resolve_package(ctx: &BuildContext) -> Result<()> {
+fn resolve_package(ctx: &BuildContext, previous: &Lockfile) -> Result<()> {
     let targets: Vec<TargetKind> = ctx.ws.manifest().targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
     for target in targets {
         for configuration in [Configuration::Compile, Configuration::Runtime, Configuration::Test] {
@@ -86,8 +88,44 @@ fn resolve_package(ctx: &BuildContext) -> Result<()> {
         if target == TargetKind::Wasm {
             crate::web_resources::fetch(ctx)?;
         }
+        relock_tools(ctx, target, previous)?;
     }
     crate::generate::fetch_tools(ctx, &[])?;
+    let had = |artifact: &str| previous.resolutions.contains_key(&ctx.tool_key(artifact));
+    if had("dokka-cli") {
+        super::doc::fetch_tool(ctx)?;
+    }
+    if had("ktlint-cli") {
+        super::fmt::fetch_tool(ctx)?;
+    }
+    if had("detekt-cli") {
+        super::lint::fetch_tool(ctx)?;
+    }
+    Ok(())
+}
+
+/// Locks again the build tools of `target` (see [`super::lock_tools`]) that `previous` had locked, so a `--locked`
+/// build still finds them. A tool that was not locked is locked by the first build that runs it, so updating a
+/// project that was never built downloads no compiler.
+fn relock_tools(ctx: &BuildContext, target: TargetKind, previous: &Lockfile) -> Result<()> {
+    let had = |key: &str| previous.resolutions.contains_key(key);
+    let setup = ctx.setup(target)?;
+    if target != TargetKind::Native && had(COMPILER_KEY) {
+        ctx.kotlin_compiler()?;
+    }
+    let plugins: Vec<PluginSpec> = setup.contributions.plugins.iter().filter(|p| had(&ctx.tool_key(&p.artifact))).cloned().collect();
+    ctx.plugin_jars(&plugins)?;
+    if target == TargetKind::Jvm {
+        if had(&ctx.tool_key("junit-platform-console-standalone")) {
+            super::test::console_launcher(ctx)?;
+        }
+        if had(&ctx.tool_key("ksp")) && !build::jvm_ksp_path(ctx, &setup, true)?.is_empty() {
+            ctx.ksp_tool()?;
+        }
+        if had(&ctx.ws.lock_key("jvm/bench-tools")) {
+            super::bench::fetch(ctx)?;
+        }
+    }
     Ok(())
 }
 

@@ -33,14 +33,20 @@ pub struct KotlinCompiler {
 impl KotlinCompiler {
     /// Resolves the compiler's classpath, with the Build Tools API implementation when the
     /// version publishes one. The result for a version never changes, so it is remembered
-    /// in the download cache and later runs skip dependency resolution entirely.
+    /// in the download cache and later runs skip dependency resolution entirely. A project
+    /// build locks the classpath in `kargo.lock` instead (see [`compiler_roots`]).
     pub fn resolve(client: &MavenClient, version: &str) -> Result<Self> {
         if let Some(classpath) = resolve_memoized(client, version, true)? {
-            return Ok(Self { version: version.to_owned(), classpath, build_tools: true });
+            return Ok(Self::new(version, classpath, true));
         }
         let classpath =
             resolve_memoized(client, version, false)?.with_context(|| format!("failed to obtain the Kotlin {version} compiler"))?;
-        Ok(Self { version: version.to_owned(), classpath, build_tools: false })
+        Ok(Self::new(version, classpath, false))
+    }
+
+    /// The compiler `version` with the resolved `classpath` of [`compiler_roots`].
+    pub fn new(version: &str, classpath: Vec<PathBuf>, build_tools: bool) -> Self {
+        Self { version: version.to_owned(), classpath, build_tools }
     }
 
     /// The Build Tools API jar, against which Kargo's incremental compilation bridge is built.
@@ -50,13 +56,47 @@ impl KotlinCompiler {
     }
 }
 
+/// The modules whose resolution is the compiler's classpath: `kotlin-compiler-embeddable`, and with
+/// `build_tools` the Build Tools API implementation (`kotlin-build-tools-impl`).
+pub fn compiler_roots(version: &str, build_tools: bool) -> Vec<DependencyRequest> {
+    let mut roots = vec![DependencyRequest::new(ModuleId::new(KOTLIN_GROUP, "kotlin-compiler-embeddable"), Some(version.to_owned()))];
+    if build_tools {
+        roots.push(DependencyRequest::new(ModuleId::new(KOTLIN_GROUP, "kotlin-build-tools-impl"), Some(version.to_owned())));
+    }
+    roots
+}
+
+/// Whether Kotlin `version` publishes the Build Tools API implementation, which incremental compilation needs.
+/// A version without one is remembered in the download cache. Offline, a version whose POM is not cached
+/// compiles non-incrementally this time.
+pub fn has_build_tools(client: &MavenClient, version: &str) -> bool {
+    let memo = memo_path(client, "kotlin-build-tools-impl", version);
+    if !client.refresh() && std::fs::read_to_string(&memo).is_ok_and(|text| text.trim() == UNAVAILABLE) {
+        return false;
+    }
+    let pom = Artifact::new(ModuleId::new(KOTLIN_GROUP, "kotlin-build-tools-impl"), version).with_extension("pom").repo_path();
+    match client.fetch(&pom) {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            let _ = kargo_util::fs::write_string_atomic(&memo, UNAVAILABLE);
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+/// The file that remembers the classpath of `name` (the compiler, or the compiler with the Build Tools API).
+fn memo_path(client: &MavenClient, name: &str, version: &str) -> PathBuf {
+    client.cache_dir().join(".classpaths").join(format!("{name}-{version}.txt"))
+}
+
 /// The compiler classpath, optionally with `kotlin-build-tools-impl`. `Ok(None)` when the
 /// Build Tools API implementation is not published for `version`.
 fn resolve_memoized(client: &MavenClient, version: &str, build_tools: bool) -> Result<Option<Vec<PathBuf>>> {
     let cache = client.cache_dir();
     let name = if build_tools { "kotlin-build-tools-impl" } else { "kotlin-compiler-embeddable" };
-    let memo = cache.join(".classpaths").join(format!("{name}-{version}.txt"));
-    // `--refresh` resolves again, which also serves every file of the compiler (for `kargo vendor`).
+    let memo = memo_path(client, name, version);
+    // `--refresh` resolves again.
     if let Ok(text) = std::fs::read_to_string(&memo)
         && !client.refresh()
     {
@@ -68,23 +108,11 @@ fn resolve_memoized(client: &MavenClient, version: &str, build_tools: bool) -> R
             return Ok(Some(classpath));
         }
     }
-    let mut roots = vec![DependencyRequest::new(ModuleId::new(KOTLIN_GROUP, "kotlin-compiler-embeddable"), Some(version.to_owned()))];
-    if build_tools {
-        let impl_module = ModuleId::new(KOTLIN_GROUP, "kotlin-build-tools-impl");
-        let pom = Artifact::new(impl_module.clone(), version).with_extension("pom").repo_path();
-        match client.fetch(&pom) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                let _ = kargo_util::fs::write_string_atomic(&memo, UNAVAILABLE);
-                return Ok(None);
-            }
-            // Offline without it in the cache: compile non-incrementally this time.
-            Err(_) => return Ok(None),
-        }
-        roots.push(DependencyRequest::new(impl_module, Some(version.to_owned())));
+    if build_tools && !has_build_tools(client, version) {
+        return Ok(None);
     }
     let resolver = Resolver::new(client, Platform::Jvm);
-    let resolution = match resolver.resolve(&roots) {
+    let resolution = match resolver.resolve(&compiler_roots(version, build_tools)) {
         Ok(r) => r,
         Err(_) if build_tools => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("failed to obtain the Kotlin {version} compiler")),

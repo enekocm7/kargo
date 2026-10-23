@@ -21,7 +21,7 @@ use super::build::{
 };
 use super::context::BuildContext;
 use kargo_manifest::{DocSettings, GeneratedKind, TargetKind};
-use kargo_maven::{DependencyRequest, ModuleId, Platform, Resolver};
+use kargo_maven::{DependencyRequest, ModuleId};
 use kargo_util::fs::{collect_files, remove_dir_all_if_exists, write_string_atomic};
 use kargo_util::process;
 use kargo_util::shell::Verbosity;
@@ -226,12 +226,12 @@ pub fn fetch_tool(ctx: &BuildContext) -> Result<()> {
 /// Fetches the Dokka CLI jar and the plugin classpath (`dokka-base` and the K2 analysis).
 fn dokka(ctx: &BuildContext, version: &str) -> Result<(PathBuf, Vec<PathBuf>)> {
     let cli = ctx.tool_jar(DOKKA_GROUP, "dokka-cli", version).with_context(|| format!("failed to fetch Dokka {version}"))?;
-    let resolver = Resolver::new(&ctx.client, Platform::Jvm);
     let roots: Vec<DependencyRequest> = ["dokka-base", "analysis-kotlin-symbols"]
         .iter()
         .map(|a| DependencyRequest::new(ModuleId::new(DOKKA_GROUP, *a), Some(version.to_owned())))
         .collect();
-    let plugins = resolver.resolve(&roots).with_context(|| format!("failed to obtain the Dokka {version} plugins"))?.files();
+    let plugins =
+        ctx.resolve_tool("dokka-plugins", &roots).with_context(|| format!("failed to obtain the Dokka {version} plugins"))?.files();
     Ok((cli, plugins))
 }
 

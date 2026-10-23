@@ -211,7 +211,7 @@ impl Lockfile {
 
         // Download whatever is missing from the cache in parallel (a fresh CI machine has nothing).
         let downloaded: Vec<Result<(PathBuf, String)>> = kargo_maven::par_map_io(&missing, |file| {
-            let fetched = client.fetch_required(&file.path)?;
+            let fetched = client.fetch_pinned(&file.path)?;
             let actual = cached_sha256(&fetched, false)?;
             Ok((fetched, actual))
         });

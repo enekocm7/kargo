@@ -312,10 +312,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 let (toolchain, (main, test)) = join(
                     || -> Result<()> {
                         ctx.kotlin_compiler()?;
-                        ctx.plugin_jars(&setup.contributions.plugins)?;
-                        fetch_pinned_jdk(ctx)?;
-                        test::console_launcher(ctx)?;
-                        Ok(())
+                        fetch_pinned_jdk(ctx)
                     },
                     || join(|| jvm_classpaths(ctx, &setup), || resolution_for(ctx, target, Configuration::Test)),
                 );
@@ -325,16 +322,13 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 build::jvm_processor_path(ctx, &setup, false)?;
                 build::jvm_processor_path(ctx, &setup, true)?;
                 build::jvm_ksp_path(ctx, &setup, false)?;
-                if !build::jvm_ksp_path(ctx, &setup, true)?.is_empty() {
-                    ctx.ksp_tool()?;
-                }
-                bench::fetch(ctx)?;
+                lock_tools(ctx, target)?;
             }
             TargetKind::Wasm => {
                 let setup = ctx.setup(target)?;
                 let (compiler, (main, test)) = join(
                     || -> Result<()> {
-                        ctx.kotlin_compiler()?;
+                        lock_tools(ctx, target)?;
                         fetch_pinned_jdk(ctx)
                     },
                     || join(|| wasm_resolution(ctx, &setup, false), || wasm_resolution(ctx, &setup, true)),
@@ -356,6 +350,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                     native_resolution(ctx, &setup, &p, false)?;
                     native_resolution(ctx, &setup, &p, true)?;
                 }
+                lock_tools(ctx, target)?;
                 ctx.native_toolchain()?;
             }
             TargetKind::Android => crate::gradle::fetch(ctx)?,
@@ -370,6 +365,25 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
         dokka?;
         ktlint?;
         detekt?;
+    }
+    Ok(())
+}
+
+/// Downloads and locks in `kargo.lock` what builds of `target` run besides the project's dependencies: the
+/// Kotlin compiler (JVM and Wasm), the frameworks' compiler plugins and, on the JVM, the JUnit console
+/// launcher, KSP when a processor needs it and what `kargo bench` runs. `kargo fetch` and `kargo update` call it.
+pub(crate) fn lock_tools(ctx: &BuildContext, target: TargetKind) -> Result<()> {
+    let setup = ctx.setup(target)?;
+    if target != TargetKind::Native {
+        ctx.kotlin_compiler()?;
+    }
+    ctx.plugin_jars(&setup.contributions.plugins)?;
+    if target == TargetKind::Jvm {
+        test::console_launcher(ctx)?;
+        if !build::jvm_ksp_path(ctx, &setup, true)?.is_empty() {
+            ctx.ksp_tool()?;
+        }
+        bench::fetch(ctx)?;
     }
     Ok(())
 }
