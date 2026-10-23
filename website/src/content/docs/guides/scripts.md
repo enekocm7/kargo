@@ -97,7 +97,9 @@ Compiler messages give the line numbers of your file. The path they show is Karg
 
 The [language server](../editors/#language-server) treats a `.kts` file as a Kargo script when it lies outside any project, or when its shebang runs `kargo script`. A `.kts` file inside a project is a build script that Kargo does not run, so the server leaves it alone unless its shebang says otherwise. In Zed, a folder with only scripts needs a setting to start the server; see [Kargo scripts in Zed](../editors/#kargo-scripts-in-zed).
 
-For a Kargo script, the server completes the annotation names, the values of `@file:Jdk`, `@file:Framework` and `@file:Repository`, the coordinates and versions of `@file:DependsOn`, and the versions of `@file:Kotlin`. It shows what each annotation means on hover, and it reports a header that `kargo script` would reject, such as a dependency without a version, as a diagnostic on that annotation. The rest of the file goes to the Kotlin server.
+For a Kargo script, the server completes the annotation names, the values of `@file:Jdk`, `@file:Framework` and `@file:Repository`, the coordinates and versions of `@file:DependsOn`, and the versions of `@file:Kotlin`. It shows what each annotation means on hover, and it reports a header that `kargo script` would reject, such as a dependency without a version, as a diagnostic on that annotation.
+
+The rest of the file goes to the Kotlin server, which reads its top-level statements and `args` as it runs the script. The libraries of its `@file:DependsOn` declarations are loaded for that script alone, so completion, hover and go to definition work on them, while the project's own files don't see them. The [Kotlin server](../kotlin-server/) page explains where those libraries come from.
 
 ## Limits
 
@@ -105,4 +107,5 @@ For a Kargo script, the server completes the annotation names, the values of `@f
 - Compiler plugins do not run in a `.kts` script. `@file:Framework("serialization")`, `"compose"`, `"lombok"` and `"spring-boot"` need a `.kt` file, which runs them the way a project does. `"coroutines"` and `"ktor"` are libraries and work in scripts.
 - A `.kts` script's dependencies come from its annotations only. A script has no `kargo.toml`, so it does not use a project's `[dependencies]`, `[toolchain]` or `[env]` settings.
 - Each `@file:DependsOn` needs an exact version. Kargo does not resolve the latest one.
+- In the editor, the libraries of `@file:Framework` are not loaded, so the classes they add don't complete there yet. `kargo script` runs them.
 - Kargo cannot turn a script into a project yet. When a script outgrows one file, create a project with `kargo new` and move the code into it.
