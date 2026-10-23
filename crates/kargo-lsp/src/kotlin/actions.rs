@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 
 use super::features::{display_ty, escape_name, fully_known, targets_at, when_cases};
 use super::index::{DEFAULT_IMPORTS, Origin, SourceSet, SymId, Unit, UnitId, is_internal_package};
+use super::kdoc;
 use super::lexer::{self, HARD_KEYWORDS, Tok};
 use super::refactor;
 use super::resolve::{Analyzer, Ctx, Subst, Ty, chain_start};
@@ -70,6 +71,9 @@ pub fn code_actions(an: &Analyzer, req: &Request) -> Vec<Value> {
     if req.wants("source.organizeImports") {
         organize_imports(an, req, &mut out);
     }
+    if req.wants(refactor::REWRITE) {
+        kdoc::generate_actions(an, req, &lines, &mut out);
+    }
     refactor::code_actions(an, req, &mut out);
     out
 }
@@ -90,7 +94,7 @@ pub(super) fn line_start(text: &str, offset: usize) -> usize {
     text[..offset].rfind('\n').map_or(0, |i| i + 1)
 }
 
-fn touches(lines: &Range<usize>, span: &Range<usize>) -> bool {
+pub(super) fn touches(lines: &Range<usize>, span: &Range<usize>) -> bool {
     span.start <= lines.end && lines.start <= span.end
 }
 

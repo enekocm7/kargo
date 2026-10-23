@@ -313,7 +313,7 @@ pub(super) struct DocRef {
 }
 
 /// The names the KDoc comment at `doc` mentions.
-fn doc_refs(src: &str, doc: &Range<usize>) -> Vec<DocRef> {
+pub(super) fn doc_refs(src: &str, doc: &Range<usize>) -> Vec<DocRef> {
     let mut out = Vec::new();
     let body = &src[doc.clone()];
     let is_path = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '`' | '$');
@@ -391,14 +391,14 @@ fn doc_refs(src: &str, doc: &Range<usize>) -> Vec<DocRef> {
 }
 
 /// What a KDoc name is looked for as.
-enum DocQuery<'a> {
+pub(super) enum DocQuery<'a> {
     Syms(&'a [SymId]),
     Package(&'a str),
     TypeParam { owner: DeclId },
 }
 
 /// The ranges in the KDoc comments of `unit` that name `name` as `query` describes.
-fn doc_hits(an: &Analyzer, unit: UnitId, query: &DocQuery, name: &str) -> Vec<Range<usize>> {
+pub(super) fn doc_hits(an: &Analyzer, unit: UnitId, query: &DocQuery, name: &str) -> Vec<Range<usize>> {
     let u = an.unit(unit);
     let file = &u.file;
     let mut out = Vec::new();
