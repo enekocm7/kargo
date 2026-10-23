@@ -1,9 +1,9 @@
 ---
-title: Compose Desktop
-description: Build a desktop GUI with Compose Multiplatform, use Compose resources and ship installers for Windows, macOS and Linux.
+title: Compose
+description: Build user interfaces with Compose Multiplatform for the desktop, the web, iOS and Android, with Compose resources, hot reload, previews and installers.
 ---
 
-[Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) lets you build desktop user interfaces in Kotlin. Kargo sets up the compiler plugin, the right native runtime for your OS, Material 3 and Compose resources, and packages the application as an installer.
+[Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) lets you build user interfaces in Kotlin for the desktop, the browser, iOS and Android, from shared code. Kargo sets up the compiler plugin, the Compose libraries of each target, Material 3 and Compose resources. It reloads a running desktop app when you save, renders `@Preview` functions to images, and packages desktop apps as installers.
 
 ## Create the project
 
@@ -52,6 +52,28 @@ fun main() =
         }
     }
 ```
+
+## One UI for every target
+
+`--with compose-multiplatform` creates a project whose UI lives in `src/App.kt` and runs on the desktop and in the browser:
+
+```sh
+kargo new counter -w compose-multiplatform
+cd counter
+kargo run              # the desktop app
+kargo run -t wasm      # the same UI in the browser, at http://127.0.0.1:8080/
+```
+
+```text
+counter/
+  kargo.toml           [target.jvm], [target.wasm] environment = "browser", [frameworks] compose = true
+  src/App.kt           @Composable fun App(), shared by every target
+  src-jvm/Main.kt      the desktop window, and a @Preview of App()
+  src-wasm/Main.kt     ComposeViewport(document.body!!) { App() }
+  tests/GreetingTest.kt
+```
+
+Add `-t android` for an Android app whose activity shows `App()`, and `-t native` for an iOS framework (see [iOS](#ios)). Each target keeps its entry point in its own `src-<target>/` directory, and `src/` holds what they share. See [Multiplatform projects](../multiplatform/) for how the directories combine.
 
 ## How state works
 
@@ -140,7 +162,34 @@ The rules follow Compose Multiplatform's:
 compose = { resources-package = "com.example.notes.res", public-resources = true }
 ```
 
-Kargo adds the resources runtime (`org.jetbrains.compose.components:components-resources`) once `composeResources/` exists, writes `Res.kt` into `target/<profile>/jvm/generated/compose-resources/` on every build and rebuilds when a resource changes, also under `kargo run --watch`. The same directory works for the [Android target](../android/), where the files become assets of the APK.
+Kargo adds the resources runtime (`org.jetbrains.compose.components:components-resources`) once `composeResources/` exists, writes `Res.kt` into `target/<profile>/<target>/generated/compose-resources/` (`target/<profile>/wasm-generated/compose-resources/` on Wasm) on every build and rebuilds when a resource changes, also under `kargo run --watch`. `Res` belongs to the code every target shares, so `src/` can use it. The same directory works for the [Android target](../android/), where the files become assets of the APK, for the [web](#compose-for-the-web), where they are served next to the page, and for [iOS](#ios).
+
+## Compiler options
+
+The Compose compiler takes the options its Gradle plugin's `composeCompiler { }` block sets, as keys of `[frameworks.compose]`:
+
+```toml title="kargo.toml"
+[frameworks]
+compose = { stability-config = "compose-stability.conf", metrics = true, reports = true }
+```
+
+```txt title="compose-stability.conf"
+// Classes the compiler should treat as stable.
+java.time.*
+com.example.notes.model.Note
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `stability-config` | none | One or more [stability configuration files](https://developer.android.com/develop/ui/compose/performance/stability/fix#configuration-file), relative to the package. The build fails if one is missing |
+| `strong-skipping` | `true` | Strong skipping mode. `false` makes composables with unstable parameters non-skippable again |
+| `feature-flags` | `[]` | Compose compiler feature flags: `StrongSkipping`, `IntrinsicRemember`, `OptimizeNonSkippingGroups` and `PausableComposition`. Prefix one with `-` to disable it, as in `"-IntrinsicRemember"` |
+| `metrics` | `false` | Write the compiler's metrics (`<module>-module.json`) to `target/compose/<target>/metrics/` |
+| `reports` | `false` | Write the compiler's stability reports (`<module>-classes.txt`, `<module>-composables.txt`, `<module>-composables.csv`) to `target/compose/<target>/reports/` |
+
+`<target>` is `jvm` or `android`; in a workspace the directories are `target/compose/<member>/<target>/`. The options apply to both targets: on the JVM Kargo passes them to the compiler plugin, on Android it adds them to the generated Gradle project. Changing them rebuilds the package.
+
+The Compose compiler ships with Kotlin, so its version is always `[kotlin] version`: there is no separate compiler version to match. The runtime (`version`, default 1.12.1) can be any Compose Multiplatform release that supports that Kotlin version.
 
 ## Running
 
@@ -153,6 +202,124 @@ icon = { windows = "icons/notes.ico", macos = "icons/notes.icns", linux = "icons
 ```
 
 On Windows and Linux the taskbar shows the window's title and the icon you pass to `Window(icon = ...)`.
+
+## Hot reload
+
+```console
+$ kargo run --hot-reload
+     Running `java com.example.counter.MainKt`
+     Changed src/App.kt
+   Compiling counter v0.1.0 (jvm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.64s
+    Reloaded 2 classes
+```
+
+`--hot-reload` works like [`--watch`](../../reference/commands/#kargo-run-r): Kargo rebuilds when a file changes. The desktop app keeps running, though. Kargo swaps the classes that changed into it and Compose recomposes the window with the new code, keeping what `remember` holds, such as the click count. A build that fails leaves the app as it was.
+
+The app runs on [JetBrains Runtime](https://github.com/JetBrains/JetBrainsRuntime) (JBR) with `-XX:+AllowEnhancedClassRedefinition`, so new functions, fields and classes reload too. Kargo downloads the JBR of your project's Java version into `~/.kargo/toolchains/jbr/` the first time (about 300 MB) and checks it against the SHA-512 checksum JetBrains publishes. Offline, or where there is no JBR, the app runs on the project's JDK with a warning, and only changes inside function bodies reload.
+
+Kargo restarts the app instead when a change cannot be applied in place, and when the command line changes, as with a new dependency or JVM option. The app runs from a copy of its classes in `target/<profile>/jvm/hot-reload/`, which also holds `agent.log`, a record of each reload.
+
+`--hot-reload` needs `[frameworks] compose` and the jvm target. It takes the options of `--watch` (`--clear`, `--ignore`), and not `--debug` or `--native-agent`.
+
+## Previews
+
+Annotate a top-level `@Composable` function without parameters with `@Preview`, and `kargo preview` renders it to a PNG file:
+
+```kotlin title="src-jvm/Main.kt"
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.tooling.preview.Preview
+
+@Preview
+@Composable
+fun AppPreview() {
+    App()
+}
+```
+
+```console
+$ kargo preview --list
+com.example.counter.AppPreview	src-jvm/Main.kt:18
+$ kargo preview --density 2
+   Compiling the preview renderer
+   Rendering 1 preview
+    Rendered target/preview/com.example.counter.AppPreview.png
+```
+
+Without names it renders every preview; `kargo preview AppPreview` renders one, by its function or qualified name. Each image is `--width` by `--height` density-independent pixels (800 by 600 by default) times `--density`. It is drawn off screen, without a window, so `kargo preview` also works on a CI machine without a display. `--out-dir` writes the files somewhere other than `target/preview/`.
+
+Previews come from the JVM sources (`src/` and `src-jvm/`) and are drawn by Compose Desktop, so the project needs the jvm target. Any of the Compose `@Preview` annotations counts. A preview with parameters (`@PreviewParameter`) or inside a class is left out.
+
+Editors see them too: [`kargo lsp`](../editors/) lists each preview as a runnable of kind `preview`, and the IntelliJ plugin puts a render icon in the gutter of each one and a Previews group in the Kargo tool window.
+
+## Compose for the web
+
+Compose for Web draws the UI on a canvas with Skia compiled to WebAssembly. Enable Compose and the Wasm target for the browser:
+
+```toml title="kargo.toml"
+[target.wasm]
+environment = "browser"
+
+[frameworks]
+compose = true
+```
+
+```kotlin title="src-wasm/Main.kt"
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.window.ComposeViewport
+import kotlinx.browser.document
+
+@OptIn(ExperimentalComposeUiApi::class)
+fun main() {
+    ComposeViewport(document.body!!) {
+        App()
+    }
+}
+```
+
+`kargo run -t wasm` builds the app and serves it. `kargo build -t wasm` writes the site into `target/<profile>/wasm/`:
+
+- the module (`<name>.mjs`, `<name>.wasm`) and Skiko's runtime (`skiko.mjs`, `skiko.wasm`), taken from the `skiko-js-wasm-runtime` jar the Compose libraries depend on,
+- `composeResources/`, the files `Res` fetches,
+- an `index.html` whose canvas fills the window, unless `resources/index.html` is your own page.
+
+Compose for Web needs `environment = "browser"`; with `js` or `wasi` the build stops with an error. A release build runs `wasm-opt` on the module and reports its size, as for any [Wasm app](../wasm/).
+
+## iOS
+
+Compose for iOS is a framework that an Xcode project shows through a `UIViewController`. Set the Native target to iOS platforms and `kind = "framework"`:
+
+```toml title="kargo.toml"
+[target.native]
+platforms = ["ios_arm64", "ios_simulator_arm64"]
+kind = "framework"
+
+[frameworks]
+compose = true
+```
+
+```kotlin title="src-native/MainViewController.kt"
+import androidx.compose.ui.window.ComposeUIViewController
+import platform.UIKit.UIViewController
+
+fun MainViewController(): UIViewController = ComposeUIViewController { App() }
+```
+
+`kargo build -t native` writes `target/<profile>/native/<platform>/<name>.framework`, and `kargo build -t native --xcframework` one `<name>.xcframework` for the devices and the simulators (see [Kotlin/Native](../native/)). In Swift, show the controller:
+
+```swift title="ContentView.swift"
+import SwiftUI
+import counter
+
+struct ComposeView: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController { MainViewControllerKt.MainViewController() }
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+}
+```
+
+Compose for iOS reads resources from a `compose-resources` folder in the app bundle. Kargo writes that folder to `target/<profile>/native/compose-resources/`; add it to the app target's Copy Bundle Resources phase as a folder reference.
+
+The platforms can be `ios_arm64`, `ios_simulator_arm64` and `ios_x64`. Building them needs macOS with Xcode.
 
 ## Distributing
 

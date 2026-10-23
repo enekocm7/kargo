@@ -160,7 +160,7 @@ struct PackageInfo {
 }
 
 /// The newest entry of a `/packages` response: its id, version and file name.
-fn parse_packages(json: &str) -> Result<Option<(String, String, u32, String)>> {
+pub(crate) fn parse_packages(json: &str) -> Result<Option<(String, String, u32, String)>> {
     let packages: Packages = serde_json::from_str(json).context("unexpected response from the foojay Disco API")?;
     let newest = packages
         .result
@@ -171,7 +171,7 @@ fn parse_packages(json: &str) -> Result<Option<(String, String, u32, String)>> {
 }
 
 /// The download URL and SHA-256 of an `/ids/{id}` response.
-fn parse_info(json: &str) -> Result<(String, String)> {
+pub(crate) fn parse_info(json: &str) -> Result<(String, String)> {
     let infos: PackageInfos = serde_json::from_str(json).context("unexpected response from the foojay Disco API")?;
     let info = infos.result.into_iter().next().context("the foojay Disco API returned no download for this package")?;
     if !info.checksum_type.eq_ignore_ascii_case("sha256") || info.checksum.is_empty() {

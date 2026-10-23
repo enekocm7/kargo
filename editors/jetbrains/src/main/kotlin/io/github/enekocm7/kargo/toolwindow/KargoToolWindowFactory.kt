@@ -81,7 +81,7 @@ class KargoRunnablesPanel(private val project: Project) : SimpleToolWindowPanel(
 
     private fun show(runnables: List<KargoRunnable>) {
         root.removeAllChildren()
-        for ((kind, title) in listOf("run" to "Programs", "test" to "Tests", "task" to "Tasks")) {
+        for ((kind, title) in listOf("run" to "Programs", "test" to "Tests", "preview" to "Previews", "task" to "Tasks")) {
             val entries = runnables.filter { it.kind == kind }
             if (entries.isEmpty()) continue
             val group = DefaultMutableTreeNode(title)
@@ -108,6 +108,7 @@ class KargoRunnablesPanel(private val project: Project) : SimpleToolWindowPanel(
             icon = when (node.kind) {
                 "test" -> AllIcons.RunConfigurations.Junit
                 "task" -> KargoIcons.KARGO
+                "preview" -> AllIcons.Actions.Preview
                 else -> AllIcons.RunConfigurations.Application
             }
             append(node.label)

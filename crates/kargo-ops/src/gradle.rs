@@ -389,6 +389,15 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let mut free_args: Vec<String> = manifest.kotlin.compiler_args.clone();
     let contributions = builtins::contributions(manifest, TargetKind::Android, root)?;
     free_args.extend(contributions.compiler_args.iter().cloned());
+    // The Compose Gradle plugin applies the compiler plugin; its options go in as `-P` arguments,
+    // like on the JVM target.
+    if let Some(compose) = &manifest.frameworks.compose {
+        builtins::check_compose_stability_config(manifest, root)?;
+        for (key, value) in builtins::compose_compiler_options(compose, root, &ws.work_dir("compose"), TargetKind::Android) {
+            free_args.push("-P".to_owned());
+            free_args.push(format!("plugin:{}:{key}={value}", builtins::COMPOSE_PLUGIN_ID));
+        }
+    }
     let _ = writeln!(s, "kotlin {{\n    compilerOptions {{");
     if !free_args.is_empty() {
         let args: Vec<String> = free_args.iter().map(|a| kts_string(a)).collect();
@@ -1341,6 +1350,22 @@ mod tests {
                 "assets.setSrcDirs(listOf({}, {}))",
                 kts_path(&dir.path().join("android/assets")),
                 kts_path(&generated.join("resources"))
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn compose_compiler_options_on_android() {
+        let (_dir, ws) = workspace("[frameworks]\ncompose = { strong-skipping = false, reports = true }\n");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        let reports = kargo_util::process::slash(&ws.work_dir("compose").join("android/reports"));
+        let id = builtins::COMPOSE_PLUGIN_ID;
+        assert!(
+            text.contains(&format!(
+                "freeCompilerArgs.addAll(\"-P\", \"plugin:{id}:featureFlag=-StrongSkipping\", \"-P\", {})",
+                kts_string(&format!("plugin:{id}:reportsDestination={reports}"))
             )),
             "{text}"
         );

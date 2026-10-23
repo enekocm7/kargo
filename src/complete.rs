@@ -134,6 +134,11 @@ pub fn frameworks() -> Vec<CompletionCandidate> {
     kargo_ops::builtins::FRAMEWORK_NAMES.iter().map(CompletionCandidate::new).collect()
 }
 
+/// The framework names and presets for `kargo new --with`.
+pub fn new_frameworks() -> Vec<CompletionCandidate> {
+    kargo_ops::builtins::FRAMEWORK_NAMES.iter().chain(kargo_ops::ops::new::PRESETS).map(CompletionCandidate::new).collect()
+}
+
 /// Installed JDK releases and majors and Kotlin/Native versions, for `kargo toolchain remove`.
 pub fn installed_toolchains() -> Vec<CompletionCandidate> {
     let Some(config) = config() else { return Vec::new() };

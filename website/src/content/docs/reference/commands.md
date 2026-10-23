@@ -94,7 +94,7 @@ kargo new <path> [options]
 |---|---|---|
 | `--lib` | | Library template instead of an application |
 | `-t, --target <list>` | `jvm` | Comma-separated targets to enable |
-| `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot`, `benchmark` |
+| `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot`, `benchmark`; or the preset `compose-multiplatform`: Compose on the jvm and wasm (browser) targets, besides the `--target`s you give, with a shared `App()` in `src/App.kt`. See [Compose](../../guides/compose/#one-ui-for-every-target) |
 | `--bench` | | Add the `benchmark` framework and a sample benchmark in `benches/SampleBench.kt`, as `--with benchmark` does. See [Benchmarking](../../guides/benchmarking/) |
 | `--group <group>` | `com.example` | Maven group, also the base Kotlin package |
 | `--name <name>` | directory name | Package name |
@@ -268,6 +268,7 @@ Build and run the program. Arguments after `--` go to the program.
 | `--flavor <name>` | Android: install this [product flavor](../../guides/android/#product-flavors) (repeatable, one per dimension; default: the first flavor of each dimension). Needs `-t android` |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 | `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for Android or Wasm browser apps. See [Watch mode](../../guides/watch/) |
+| `--hot-reload` | Like `--watch`, but a Compose Desktop app keeps running: the classes a build changed are swapped into it and the UI recomposes. Runs on JetBrains Runtime, which Kargo downloads. Needs `[frameworks] compose` and the jvm target; conflicts with `--debug`. See [Hot reload](../../guides/compose/#hot-reload) |
 | `--clear` | With `--watch`: clear the terminal before each run |
 | `--ignore <glob>` | With `--watch`: leave out the files matching this gitignore-style pattern, on top of `.gitignore`. Repeatable |
 
@@ -408,6 +409,26 @@ kargo doc [--open] [-t <target>]
 | `-p, --package <name>`, `--workspace` | Which packages to document. In a workspace, each goes to `target/debug/<name>/doc/`, and `--open` opens the first |
 
 Configure it with [`[doc]`](../manifest/#doc). See [API documentation](../../guides/documentation/).
+
+## `kargo preview`
+
+Render the `@Preview` composables of a Compose Desktop app to PNG files, into `target/preview/<package>.<function>.png`.
+
+```sh
+kargo preview [<name>...] [--list] [--width <dp>] [--height <dp>] [--density <n>] [--out-dir <dir>]
+```
+
+| Option | Meaning |
+|---|---|
+| `<name>...` | The previews to render, by function name (`AppPreview`) or qualified name (`com.example.AppPreview`). Default: all of them |
+| `--list` | Print each preview's qualified name and `file:line`, tab-separated, without building |
+| `--width <dp>`, `--height <dp>` | The size of the image in density-independent pixels (default 800 by 600) |
+| `--density <n>` | Pixels per density-independent pixel (default 1; 2 for a high-density image) |
+| `--out-dir <dir>` | Write the PNG files here instead of `target/preview/` |
+| `-r, --release`, `--profile <name>` | Build with this profile |
+| `-p, --package <name>` | The package, in a workspace |
+
+A preview is a top-level `@Composable` function without parameters annotated with a Compose `@Preview`, in `src/` or `src-jvm/`. Needs `[frameworks] compose` and the jvm target. The images are drawn off screen, so no display is needed. See [Previews](../../guides/compose/#previews).
 
 ## `kargo fmt`
 
@@ -569,7 +590,7 @@ note: run `kargo build --target wasm` to build it
 
 `kargo target add`:
 
-- Writes the defaults of `kargo new`: `environment = "js"` for Wasm, `platforms = ["host"]` and a `kind` for Native, and `namespace`, `kind` and `min-sdk = 24` for Android (the namespace is the package's `group` plus its name).
+- Writes the defaults of `kargo new`: `environment = "js"` for Wasm, `platforms = ["host"]` and a `kind` for Native, and `namespace`, `kind` and `min-sdk = 24` for Android (the namespace is the package's `group` plus its name). With `[frameworks] compose`, Wasm gets `environment = "browser"` and Native the iOS platforms with `kind = "framework"`, as [Compose](../../guides/compose/) needs.
 - Adds `[target.jvm]` first when `kargo.toml` has no `[target]` section, because such a project is implicitly JVM and would stop building for the JVM once any other `[target.*]` table exists.
 - Without `--lib` or `--app`, picks an application when the sources declare a `main` function (or the manifest sets `main-class` or a `[[bin]]`), and a library otherwise.
 - Creates only missing files and never overwrites one: `src-<target>/.gitkeep` when `src-<target>/` does not exist, and for Android `android/AndroidManifest.xml` plus, for an application, a launcher activity in `src-android/MainActivity.kt`.
@@ -922,7 +943,7 @@ kargo metadata --fingerprint
 | `--profile <name>` | Describe a custom profile's output directories and compiler arguments |
 | `--fingerprint` | Only print a hash of every `kargo.toml` and `kargo.lock`. It is the `fingerprint` of the document, and it changes when the metadata may have changed |
 
-The output has a `"version": 1` field and is described in [Machine-readable output](../machine-readable-output/#kargo-metadata). See [Editor integration](../../guides/editors/) for how editors use it.
+A JVM target lists its `@Preview` composables in `previews`, and every target the `Res` class of `composeResources/` in `compose-resources`. The output has a `"version": 1` field and is described in [Machine-readable output](../machine-readable-output/#kargo-metadata). See [Editor integration](../../guides/editors/) for how editors use it.
 
 ## `kargo lsp`
 

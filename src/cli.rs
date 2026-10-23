@@ -541,8 +541,9 @@ struct NewArgs {
     /// Targets to enable (comma-separated)
     #[arg(short, long = "target", value_enum, value_delimiter = ',', default_value = "jvm")]
     targets: Vec<TargetArg>,
-    /// Built-in frameworks to enable: compose, serialization, coroutines, ktor, lombok, spring-boot, benchmark
-    #[arg(short = 'w', long = "with", value_delimiter = ',', add = ArgValueCandidates::new(complete::frameworks))]
+    /// Built-in frameworks to enable: compose, serialization, coroutines, ktor, lombok, spring-boot, benchmark;
+    /// or compose-multiplatform, Compose on the jvm (desktop) and wasm (browser) targets with a shared App()
+    #[arg(short = 'w', long = "with", value_delimiter = ',', add = ArgValueCandidates::new(complete::new_frameworks))]
     frameworks: Vec<String>,
     /// Add a sample benchmark in benches/ (the same as `--with benchmark`)
     #[arg(long)]
@@ -673,6 +674,9 @@ enum Command {
         /// Rebuild and restart the program when its files change (Ctrl+C stops it)
         #[arg(long, conflicts_with = "debug")]
         watch: bool,
+        /// Like --watch, but a Compose Desktop app keeps running and reloads the changed code in place
+        #[arg(long, conflicts_with = "debug")]
+        hot_reload: bool,
         #[command(flatten)]
         watch_args: WatchArgs,
         #[command(flatten)]
@@ -812,6 +816,34 @@ enum Command {
         open: bool,
         #[command(flatten)]
         packages: PackageArgs,
+    },
+    /// Render the @Preview composables of a Compose Desktop app to PNG files
+    Preview {
+        /// Previews to render, by function or qualified name (default: all)
+        names: Vec<String>,
+        /// List the previews instead of rendering them
+        #[arg(long)]
+        list: bool,
+        /// Write the PNG files here (default: target/preview)
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+        /// Width of the image, in density-independent pixels
+        #[arg(long, default_value_t = 800)]
+        width: u32,
+        /// Height of the image, in density-independent pixels
+        #[arg(long, default_value_t = 600)]
+        height: u32,
+        /// Pixels per density-independent pixel (2 for a high-density image)
+        #[arg(long, default_value_t = 1.0)]
+        density: f32,
+        /// Build with the release profile
+        #[arg(short, long, conflicts_with = "profile")]
+        release: bool,
+        /// Build with a custom profile from kargo.toml
+        #[arg(long, value_name = "NAME", conflicts_with = "release")]
+        profile: Option<String>,
+        #[command(flatten)]
+        package: OnePackageArg,
     },
     /// Format Kotlin sources with ktlint
     Fmt {
@@ -2072,11 +2104,12 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             package,
             env,
             watch,
+            hot_reload,
             watch_args,
             args,
         } => {
             set_message_format(message_format);
-            let watch = watch_options(watch, &watch_args)?;
+            let watch = watch_options(watch || hot_reload, &watch_args)?;
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             warn_manifest(shell, &project, project.package(index));
@@ -2099,6 +2132,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 native_agent,
                 flavors,
                 env: env.options(),
+                hot_reload,
             };
             let Some(watch) = watch else {
                 let code = ops::run::run(&ctx, &opts)?;
@@ -2243,6 +2277,29 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 let opts = DocOptions { targets: targets.clone(), open: std::mem::take(&mut open) };
                 ops::doc::doc(ctx, &opts)
             })?;
+            Ok(0)
+        }
+        Command::Preview { names, list, out_dir, width, height, density, release, profile, package } => {
+            let project = load_project(global)?;
+            let index = project.select_one(&package.selection(), "`kargo preview`")?;
+            let profile = profile_kind(release, profile.as_deref());
+            let ctx = context(config, &project, index, global, profile.clone())?;
+            if list {
+                let root = ctx.ws.root();
+                for p in ops::preview::list(&ctx)? {
+                    let file = p.file.strip_prefix(root).unwrap_or(&p.file);
+                    println!("{}	{}:{}", p.qualified_name(), file.display(), p.line);
+                }
+                return Ok(0);
+            }
+            if !density.is_finite() || density <= 0.0 || width == 0 || height == 0 {
+                bail!("`--width`, `--height` and `--density` must be greater than zero");
+            }
+            let opts = ops::preview::PreviewOptions { profile, names, out_dir, width, height, density };
+            for file in ops::preview::render(&ctx, &opts)? {
+                let shown = file.strip_prefix(ctx.ws.root()).unwrap_or(&file);
+                shell.status("Rendered", shown.display());
+            }
             Ok(0)
         }
         Command::Fmt { check, packages } => {

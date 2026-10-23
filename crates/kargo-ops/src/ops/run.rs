@@ -18,6 +18,7 @@ use super::build::{
     sources,
 };
 use super::context::BuildContext;
+use crate::compose::hot_reload::{Answer, HotReload};
 use crate::env::EnvOptions;
 use crate::warnings;
 use crate::web;
@@ -78,6 +79,9 @@ pub struct RunOptions {
     pub flavors: Vec<String>,
     /// The `.env` files the program's environment is read from (`--env-file`, `--no-env-file`).
     pub env: EnvOptions,
+    /// Start a Compose Desktop app with the hot reload agent (`--hot-reload`), so that
+    /// [`Running::replace`] reloads its classes instead of restarting it.
+    pub hot_reload: bool,
 }
 
 /// The JVM option that waits for a debugger to attach over JDWP on `port` of the loopback
@@ -156,6 +160,17 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
     if opts.native_agent && target != TargetKind::Jvm {
         bail!("`--native-agent` traces a JVM program for `native-image` and only works for the jvm target, not {target}");
     }
+    if opts.hot_reload {
+        if target != TargetKind::Jvm {
+            bail!("`--hot-reload` reloads a Compose Desktop app and only works for the jvm target, not {target}");
+        }
+        if !crate::compose::enabled(ctx.ws.manifest()) {
+            bail!("`--hot-reload` reloads the composables of a Compose Desktop app; enable Compose with `[frameworks] compose = true`");
+        }
+        if opts.native_agent {
+            bail!("`--hot-reload` runs the app on JetBrains Runtime, and `--native-agent` on GraalVM; use one of them");
+        }
+    }
     if *program != Program::Default && !matches!(target, TargetKind::Jvm | TargetKind::Native) {
         bail!("`kargo run {}` only works for the jvm and native targets, not {target}", program.flag());
     }
@@ -198,6 +213,8 @@ fn bin_hint(ctx: &BuildContext) -> String {
 pub struct Launch {
     cmd: Command,
     label: String,
+    /// Set when the program runs with the hot reload agent.
+    hot_reload: Option<HotReload>,
 }
 
 impl Launch {
@@ -241,18 +258,41 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
     let root = ctx.ws.root();
     let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
     let mut label;
+    let mut hot_reload = None;
     let mut cmd = match target {
         TargetKind::Jvm => {
             let jvm = results.jvm.context("JVM build produced no output")?;
-            let (main, classpath) = jvm_program(ctx, &jvm, &opts.program)?;
+            let (main, mut classpath) = jvm_program(ctx, &jvm, &opts.program)?;
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
+            let hot_reload_state = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("hot-reload");
+            if opts.hot_reload {
+                // The app reads its classes from a copy that changes only here, between builds: the
+                // compiler rewrites `classes/` while the app is running and loading classes lazily.
+                let live = crate::compose::hot_reload::sync_classes(&jvm.classes, &hot_reload_state)?;
+                for entry in classpath.iter_mut().filter(|e| **e == jvm.classes) {
+                    *entry = live.clone();
+                }
+            }
+            let mut enhanced_redefinition = false;
             let jdk = if opts.native_agent {
                 let graalvm = kargo_toolchain::graalvm::resolve(ctx.config, &ctx.ws.manifest().toolchain.graalvm)?;
                 kargo_toolchain::Jdk { home: graalvm.home, version: graalvm.version }
+            } else if opts.hot_reload {
+                let (jdk, jbr) = hot_reload_jdk(ctx)?;
+                enhanced_redefinition = jbr;
+                jdk
             } else {
                 ctx.jdk()?.clone()
             };
             let mut cmd = Command::new(jdk.java());
+            if enhanced_redefinition {
+                cmd.arg(kargo_toolchain::jbr::ENHANCED_REDEFINITION);
+            }
+            if opts.hot_reload {
+                let live = crate::compose::hot_reload::live_classes(&hot_reload_state);
+                cmd.args(HotReload::agent_args(ctx.config, &jdk, &hot_reload_state, &[live])?);
+                hot_reload = Some(hot_reload_state);
+            }
             if let Some(port) = opts.debug {
                 cmd.arg(jdwp_option(port));
                 note_debugger(ctx.shell(), port, "the program");
@@ -309,8 +349,9 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
         label.push(' ');
         label.push_str(&process::quote_for_display(arg));
     }
+    let hot_reload = hot_reload.map(|state| HotReload { state, command: process::describe(&cmd) });
     ctx.unlock()?;
-    Ok(Start::Process(Box::new(Launch { cmd, label })))
+    Ok(Start::Process(Box::new(Launch { cmd, label, hot_reload })))
 }
 
 /// Builds and runs; returns the program's exit code.
@@ -345,12 +386,36 @@ pub fn check_watchable(ctx: &BuildContext, opts: &RunOptions) -> Result<()> {
 #[derive(Default)]
 pub struct Running {
     child: Option<Child>,
+    /// The hot reload agent of the running program, if it has one.
+    hot_reload: Option<HotReload>,
 }
 
 impl Running {
-    /// Stops the program that is running, if any, and starts `launch` in its place.
+    /// Stops the program that is running, if any, and starts `launch` in its place. A program with
+    /// the hot reload agent and the same command line reloads the new classes instead, unless the agent
+    /// says the change needs a restart.
     pub fn replace(&mut self, launch: Launch, shell: &Shell) -> Result<()> {
+        let alive = self.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
+        if let (true, Some(running), Some(new)) = (alive, &self.hot_reload, &launch.hot_reload) {
+            if running == new {
+                match running.request() {
+                    Answer::Reloaded(0) => shell.status("Reloaded", "no loaded class changed"),
+                    Answer::Reloaded(n) => shell.status("Reloaded", format!("{n} class{}", if n == 1 { "" } else { "es" })),
+                    Answer::Restart(reason) => {
+                        shell.note(format!("restarting the app, as the change cannot be reloaded: {reason}"));
+                        return self.restart(launch, shell);
+                    }
+                }
+                return Ok(());
+            }
+            shell.note("restarting the app, as its command line changed");
+        }
+        self.restart(launch, shell)
+    }
+
+    fn restart(&mut self, launch: Launch, shell: &Shell) -> Result<()> {
         self.stop();
+        self.hot_reload = launch.hot_reload.clone();
         self.child = Some(launch.spawn(shell)?);
         Ok(())
     }
@@ -366,6 +431,24 @@ impl Running {
 impl Drop for Running {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// The JDK `--hot-reload` runs the app on: JetBrains Runtime of the project's Java version, whose
+/// enhanced class redefinition reloads new functions and fields too. Without one (offline, or no
+/// download for this platform) the project's JDK, which reloads changed function bodies only.
+/// Returns the JDK and whether it is JetBrains Runtime.
+fn hot_reload_jdk(ctx: &BuildContext) -> Result<(kargo_toolchain::Jdk, bool)> {
+    let jdk = ctx.jdk()?.clone();
+    match kargo_toolchain::jbr::resolve(ctx.config, jdk.version) {
+        Ok(jbr) => Ok((jbr, true)),
+        Err(e) => {
+            ctx.shell().warn(format!(
+                "hot reload runs on {} instead of JetBrains Runtime, so only changes inside function bodies reload: {e:#}",
+                jdk.home.display()
+            ));
+            Ok((jdk, false))
+        }
     }
 }
 

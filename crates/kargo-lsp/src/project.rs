@@ -812,6 +812,11 @@ pub fn runnables(metadata: &Value, kargo: &str, file: Option<&Path>) -> Vec<Valu
                 extra["debugArgs"] = json!(args(&["test", "-t", kind, "--debug"]));
             }
             add(format!("Test {name} ({kind})"), "test", Some(kind), args(&["test", "-t", kind]), extra);
+            for preview in target["previews"].as_array().into_iter().flatten() {
+                let preview_name = str_of(preview, "name");
+                let extra = json!({ "path": preview["path"], "line": preview["line"] });
+                add(format!("Preview {}", str_of(preview, "function")), "preview", Some(kind), args(&["preview", preview_name]), extra);
+            }
         }
         for bin in package["bins"].as_array().into_iter().flatten() {
             let bin_name = str_of(bin, "name");
@@ -1163,16 +1168,34 @@ mod tests {
 
     #[test]
     fn lists_runnables() {
-        let all = runnables(&sample(), "kargo", None);
+        let mut metadata = sample();
+        metadata["packages"][0]["targets"][0]["previews"] =
+            json!([{ "name": "a.AppPreview", "function": "AppPreview", "class": "a.MainKt", "path": "/p/src/Main.kt", "line": 9 }]);
+        let all = runnables(&metadata, "kargo", None);
         let labels: Vec<&str> = all.iter().map(|r| r["label"].as_str().unwrap()).collect();
-        assert_eq!(labels, ["Run app (jvm)", "Test app (jvm)", "Test app (wasm)", "Run app --bin tool", "Run example demo", "Task hello"]);
+        assert_eq!(
+            labels,
+            [
+                "Run app (jvm)",
+                "Test app (jvm)",
+                "Preview AppPreview",
+                "Test app (wasm)",
+                "Run app --bin tool",
+                "Run example demo",
+                "Task hello"
+            ]
+        );
+        let preview = &all[2];
+        assert_eq!((preview["kind"].as_str(), preview["line"].as_u64()), (Some("preview"), Some(9)));
+        assert_eq!(preview["args"], json!(["preview", "a.AppPreview"]));
+        let all: Vec<Value> = all.into_iter().filter(|r| r["kind"] != "preview").collect();
         assert_eq!(all[0]["args"], json!(["run", "-t", "jvm"]));
         assert_eq!(all[0]["debugArgs"], json!(["run", "-t", "jvm", "--debug"]));
         assert_eq!(all[0]["mainClass"], "a.MainKt");
         assert_eq!(all[0]["cwd"], "/p");
         assert_eq!(all[5]["args"], json!(["task", "hello"]));
         assert_eq!(all[5]["description"], "Say hi");
-        assert_eq!(runnables(&sample(), "kargo", Some(Path::new("/p/src/Main.kt"))).len(), 6);
+        assert_eq!(runnables(&metadata, "kargo", Some(Path::new("/p/src/Main.kt"))).len(), 7);
         assert!(runnables(&sample(), "kargo", Some(Path::new("/elsewhere/x.kt"))).is_empty());
     }
 

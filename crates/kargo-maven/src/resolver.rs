@@ -25,6 +25,11 @@ use super::version::{Version, VersionReq};
 /// Bumped whenever resolution semantics change, invalidating locked results.
 pub const RESOLVER_VERSION: &str = "5";
 
+/// Plain jars that Kotlin/Wasm libraries depend on for the files their page needs, not for code:
+/// Skiko's `skiko.mjs` and `skiko.wasm`, which Compose for Web draws with. They resolve on the Wasm
+/// targets like any library, and the build ships their contents next to the module.
+pub const WASM_RUNTIME_JARS: &[&str] = &["org.jetbrains.skiko:skiko-js-wasm-runtime"];
+
 /// An exclusion pattern; `*` matches anything.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Exclusion {
@@ -283,7 +288,8 @@ impl<'a> Resolver<'a> {
         if pom.is_none() {
             bail!("{module}:{version} was not found in any repository");
         }
-        if self.platform != Platform::Jvm {
+        let web_runtime = matches!(self.platform, Platform::Wasm(_)) && WASM_RUNTIME_JARS.contains(&module.to_string().as_str());
+        if self.platform != Platform::Jvm && !web_runtime {
             bail!("{module}:{version} is a JVM-only library and cannot be used for the {} target", self.platform);
         }
         self.info_from_pom(module, version)
@@ -1087,6 +1093,19 @@ mod tests {
         assert!(format!("{err:#}").contains("does not publish a variant"), "{err:#}");
 
         let err = Resolver::new(&client, Platform::Native("linux_x64".into())).resolve(&[req("k:dep", "1.0")]).unwrap_err();
+        assert!(format!("{err:#}").contains("JVM-only"), "{err:#}");
+    }
+
+    #[test]
+    fn wasm_resolves_the_skiko_runtime_jar_and_no_other_jvm_library() {
+        let repo = TestRepo::new();
+        repo.publish("org.jetbrains.skiko:skiko-js-wasm-runtime", "0.150.1", &[]);
+        repo.publish("k:dep", "1.0", &[]);
+        let client = repo.client();
+        let wasm = Platform::Wasm("js".into());
+        let res = Resolver::new(&client, wasm.clone()).resolve(&[req("org.jetbrains.skiko:skiko-js-wasm-runtime", "0.150.1")]).unwrap();
+        assert_eq!(file_names(&res), ["skiko-js-wasm-runtime-0.150.1.jar"]);
+        let err = Resolver::new(&client, wasm).resolve(&[req("k:dep", "1.0")]).unwrap_err();
         assert!(format!("{err:#}").contains("JVM-only"), "{err:#}");
     }
 

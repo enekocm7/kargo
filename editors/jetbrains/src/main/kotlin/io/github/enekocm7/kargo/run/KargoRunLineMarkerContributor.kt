@@ -1,5 +1,5 @@
 // Run and Debug icons in the gutter of `fun main`, test functions and test classes in a Kargo
-// package. Kargo's sources are not part of the IDE's Kotlin model, so declarations are recognized
+// package, and a Render icon on `@Preview` composables (`kargo preview`). Kargo's sources are not part of the IDE's Kotlin model, so declarations are recognized
 // from the PSI tree's tokens rather than from Kotlin's resolved PSI.
 
 package io.github.enekocm7.kargo.run
@@ -43,6 +43,13 @@ class KargoRunLineMarkerContributor : RunLineMarkerContributor() {
                 RunSpec.Test(file, packageDir, testFilter(element, declaration, method = element.text.removeSurrounding("`")))
             keyword != "fun" && TEST_ANNOTATION.containsMatchIn(declaration.text) && isInTests(file, packageDir) ->
                 RunSpec.Test(file, packageDir, testFilter(element, declaration, method = null))
+            keyword == "fun" && declaration.parent == element.containingFile &&
+                PREVIEW_ANNOTATION.containsMatchIn(declaration.text.substring(0, element.startOffsetInParent)) -> {
+                val packageName = PACKAGE.find(element.containingFile.text)?.groupValues?.get(1)
+                val spec = RunSpec.Preview(file, packageDir, listOfNotNull(packageName, element.text).joinToString("."))
+                val render = KargoRunAction(spec, DefaultRunExecutor.getRunExecutorInstance())
+                return Info(AllIcons.Actions.Preview, arrayOf<AnAction>(render)) { "Render ${spec.label()} with kargo preview" }
+            }
             else -> return null
         }
         val actions = arrayOf<AnAction>(
@@ -69,6 +76,7 @@ class KargoRunLineMarkerContributor : RunLineMarkerContributor() {
 
     companion object {
         private val TEST_ANNOTATION = Regex("""@(?:[\w.]+\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory)\b""")
+        private val PREVIEW_ANNOTATION = Regex("""@(?:[\w.]+\.)?Preview\b""")
         private val PACKAGE = Regex("""^\s*package\s+([\w.]+)""", RegexOption.MULTILINE)
         private val CLASS_TYPES = setOf("CLASS", "OBJECT_DECLARATION")
     }
@@ -78,9 +86,12 @@ class KargoRunLineMarkerContributor : RunLineMarkerContributor() {
 sealed class RunSpec(val file: VirtualFile, val packageDir: VirtualFile) {
     class Main(file: VirtualFile, packageDir: VirtualFile) : RunSpec(file, packageDir)
     class Test(file: VirtualFile, packageDir: VirtualFile, val filter: String) : RunSpec(file, packageDir)
+    /** A `@Preview` composable, by its qualified name. */
+    class Preview(file: VirtualFile, packageDir: VirtualFile, val name: String) : RunSpec(file, packageDir)
 
     fun label(): String = when (this) {
         is Main -> file.nameWithoutExtension
+        is Preview -> name.substringAfterLast('.')
         is Test -> filter.substringAfterLast('.').let { last -> if (last.firstOrNull()?.isUpperCase() == true) last else filter.split('.').takeLast(2).joinToString(".") }
     }
 
@@ -93,6 +104,7 @@ sealed class RunSpec(val file: VirtualFile, val packageDir: VirtualFile) {
     /** The `kargo` arguments, asking `kargo lsp` which program a source file is when it can tell. */
     fun args(project: Project): List<String> = when (this) {
         is Test -> listOfNotNull("test", target()?.let { "-t" }, target(), filter)
+        is Preview -> listOf("preview", name)
         is Main -> {
             val path = File(file.path).canonicalPath
             val runnables = runCatching { KargoLsp.runnables(project, file).get(5, TimeUnit.SECONDS) }.getOrDefault(emptyList())

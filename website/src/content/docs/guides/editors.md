@@ -116,6 +116,7 @@ A green arrow in the gutter runs:
 | A top-level `fun main` | The program: `kargo run -t <target>`, `--bin <name>` for a [`[[bin]]`](../multiple-programs/), `--example <name>` in `examples/` |
 | A function annotated with `@Test` (or `@ParameterizedTest`, `@RepeatedTest`, `@TestFactory`) | That test: `kargo test <package.Class.method>` |
 | A test class | Its tests: `kargo test <package.Class>` |
+| A top-level function annotated with `@Preview` | A render icon instead: [`kargo preview <package.function>`](../compose/#previews), which writes the PNG to `target/preview/` |
 
 The target comes from the directory: `src-wasm/` and `tests-wasm/` run on Wasm, and so on. Tests in `tests/` run on every enabled target.
 
@@ -135,7 +136,7 @@ Compiler errors and file locations in the output are links to the source.
 
 ### The Kargo tool window
 
-*View → Tool Windows → Kargo* lists what the project can run, from [`kargo/runnables`](#runnables): each target's program, `[[bin]]` and example, each target's tests, and the [tasks](../tasks-and-plugins/) in `kargo.toml`. Double-click an entry to run it, or select it and use *Debug* in the toolbar. *Refresh* lists them again after you change `kargo.toml`.
+*View → Tool Windows → Kargo* lists what the project can run, from [`kargo/runnables`](#runnables): each target's program, `[[bin]]` and example, each target's tests, the [Compose previews](../compose/#previews), and the [tasks](../tasks-and-plugins/) in `kargo.toml`. Double-click an entry to run it, or select it and use *Debug* in the toolbar. *Refresh* lists them again after you change `kargo.toml`.
 
 ### Kargo actions
 
@@ -920,12 +921,13 @@ The `kargo/runnables` request lists what can be run in the project, with the com
 | Field | Meaning |
 |---|---|
 | `label` | A name to show |
-| `kind` | `run` (a program), `test` (a target's tests) or `task` (a [task](../tasks-and-plugins/)) |
+| `kind` | `run` (a program), `test` (a target's tests), `preview` (a Compose [`@Preview`](../compose/#previews), run with `kargo preview`) or `task` (a [task](../tasks-and-plugins/)) |
 | `package`, `target` | The package, and the target of `run -t` and `test -t` entries (`null` otherwise) |
 | `cwd`, `program`, `args` | Run `program` with `args` in `cwd`. `program` is the `kargo` running the server |
 | `debugArgs` | JVM programs and tests only: the same command with [`--debug`](#debugging), which waits for a debugger on port 5005 |
 | `mainClass`, `entryPoint` | The JVM main class or Kotlin/Native entry function, when known |
-| `path` | The source file of a `[[bin]]` with a `path`, or of an example |
+| `path` | The source file of a `[[bin]]` with a `path`, of an example, or of a preview |
+| `line` | A preview's 1-based line |
 | `description` | A task's `description` |
 
 Programs are listed per target (`run -t <target>`), then each `[[bin]]` (`run --bin <name>`) and example (`run --example <name>`); tests per target (`test -t <target>`, append a filter to run one test); and tasks as `task <name>`. Kargo advertises `"experimental": { "kargo": { "runnables": true } }` in its capabilities so plugins can check for the request.

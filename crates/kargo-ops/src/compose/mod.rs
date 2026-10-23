@@ -8,6 +8,8 @@
 //! - `kargo run` passes the application's name and icon to the macOS Dock.
 //! - [`resources`]: `composeResources/` and the generated `Res` class.
 
+pub mod hot_reload;
+pub mod preview;
 pub mod resources;
 
 use std::io::Read;

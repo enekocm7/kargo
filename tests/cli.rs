@@ -796,6 +796,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "upgrade",
         "vendor",
         "generate",
+        "preview",
         "target",
         "info",
         "plugins",
@@ -3415,6 +3416,99 @@ fn desktop_packaging_checks_its_flags_first() {
         &manifest("app", &format!("[package.installer]\ntype = [\"{other_os}\"]\nnotarize = {{ keychain-profile = \"p\" }}\n")),
     );
     p.kargo().args(["package", "--format", "installer"]).assert().failure().stderr(predicate::str::contains("needs `signing-identity`"));
+}
+
+#[test]
+fn new_compose_multiplatform_project() {
+    let p = Project::new();
+    p.kargo().args(["new", "cmp", "--with", "compose-multiplatform", "--no-vcs"]).assert().success();
+    let root = p.path().join("cmp");
+    for file in ["src/App.kt", "src-jvm/Main.kt", "src-wasm/Main.kt"] {
+        assert!(root.join(file).is_file(), "{file} is missing");
+    }
+    let manifest = std::fs::read_to_string(root.join("kargo.toml")).unwrap();
+    assert!(manifest.contains("[target.wasm]\nenvironment = \"browser\"") && manifest.contains("compose = true"), "{manifest}");
+
+    // The template's preview is listed without building anything.
+    let out = p.kargo().current_dir(&root).args(["--offline", "preview", "--list"]).assert().success().get_output().stdout.clone();
+    let listed = String::from_utf8(out).unwrap();
+    assert!(listed.starts_with("com.example.cmp.AppPreview\t") && listed.trim_end().ends_with("Main.kt:18"), "{listed}");
+    p.kargo()
+        .current_dir(&root)
+        .args(["--offline", "preview", "Nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no preview is named `Nope`"));
+}
+
+#[test]
+fn preview_and_hot_reload_need_compose() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "")).file("src/Main.kt", "fun main() {}\n");
+    p.kargo().args(["--offline", "preview", "--list"]).assert().failure().stderr(predicate::str::contains("enable Compose"));
+    p.kargo()
+        .args(["--offline", "run", "--hot-reload"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--hot-reload` reloads the composables of a Compose Desktop app; enable Compose"));
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.native]\n[frameworks]\ncompose = true\n"));
+    p.kargo()
+        .args(["--offline", "run", "--hot-reload", "-t", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only works for the jvm target"));
+}
+
+#[test]
+fn target_add_sets_up_compose_targets() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("ui", "[frameworks]\ncompose = true\n")).file("src/Main.kt", "fun main() {}\n");
+    p.kargo().args(["target", "add", "wasm", "native"]).assert().success().stderr(predicate::str::contains("will not build").not());
+    let manifest = std::fs::read_to_string(p.path().join("kargo.toml")).unwrap();
+    assert!(manifest.contains("[target.wasm]\nenvironment = \"browser\""), "{manifest}");
+    assert!(manifest.contains("platforms = [\"ios_arm64\", \"ios_simulator_arm64\"]\nkind = \"framework\""), "{manifest}");
+}
+
+#[test]
+fn compose_for_web_needs_a_browser() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"js\"\n[frameworks]\ncompose = true\n"))
+        .file("src/Main.kt", "fun main() {}\n");
+    p.kargo()
+        .args(["--offline", "metadata", "--no-deps"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Compose for Web draws on a browser canvas; set `environment = \"browser\"`"));
+}
+
+#[test]
+fn compose_compiler_options_reach_the_plugin() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("ui", "[frameworks]\ncompose = { stability-config = \"stability.conf\", strong-skipping = false, reports = true }\n"),
+    )
+    .file("src/Main.kt", "fun main() {}\n");
+    // The editor's project model works before the stability file exists.
+    let out = p.kargo().args(["--offline", "metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let plugins = metadata["packages"][0]["targets"][0]["compiler-plugins"].as_array().unwrap().clone();
+    let compose = plugins.iter().find(|p| p["id"] == "androidx.compose.compiler.plugins.kotlin").expect("the Compose compiler plugin");
+    let options: Vec<&str> = compose["options"].as_array().unwrap().iter().map(|o| o.as_str().unwrap()).collect();
+    let id = "plugin:androidx.compose.compiler.plugins.kotlin";
+    assert!(options[0].starts_with(&format!("{id}:stabilityConfigurationPath=")) && options[0].ends_with("/stability.conf"), "{options:?}");
+    assert_eq!(options[1], format!("{id}:featureFlag=-StrongSkipping"));
+    assert!(
+        options[2].starts_with(&format!("{id}:reportsDestination=")) && options[2].ends_with("target/compose/jvm/reports"),
+        "{options:?}"
+    );
+
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("stability.conf").and(predicate::str::contains("does not exist")));
 }
 
 #[test]

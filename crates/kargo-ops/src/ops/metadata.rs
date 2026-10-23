@@ -235,28 +235,38 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
     let setup = ctx.setup(kind)?;
     out["compiler-args"] = json!(common_kotlin_args(m, ws.profile(&ctx.profile)?, &setup.contributions.compiler_args));
     out["compiler-plugins"] = compiler_plugins(ctx, &setup, opts)?;
+    // The `Res` class of `composeResources/`, written now so that editors see it before a build.
+    let dir = super::build::compose_resources_out(ws, &ctx.profile, kind);
+    out["compose-resources"] = match crate::compose::resources::generate(ws.root(), m, &dir)? {
+        Some(generated) => json!({
+            "package": crate::compose::resources::package(m),
+            "source-root": path(generated.source.parent().unwrap_or(&dir)),
+            "resource-root": path(&generated.resources),
+        }),
+        None => Value::Null,
+    };
     match kind {
         TargetKind::Jvm => {
             let jvm = m.targets.jvm.as_ref().expect("the JVM target is enabled");
             // The default `jvm-target` is lowered to an older JDK, as the build does.
             let jdk = if opts.no_deps { None } else { ctx.jdk().ok() };
             let jvm_target = jdk.and_then(|jdk| jvm.target_for(jdk.version).ok()).unwrap_or_else(|| jvm.jvm_target.clone());
+            let kotlin_files = existing_sources(ctx, kind, false, &["kt", "java"])?.kotlin_files();
             let main_class = match &jvm.main_class {
                 Some(main) => Some(main.clone()),
-                None => find_jvm_main_class(&existing_sources(ctx, kind, false, &["kt", "java"])?.kotlin_files(), "").ok(),
+                None => find_jvm_main_class(&kotlin_files, "").ok(),
+            };
+            // The `@Preview` composables `kargo preview` renders.
+            out["previews"] = if crate::compose::enabled(m) {
+                json!(crate::compose::preview::find(&kotlin_files)
+                    .iter()
+                    .map(|p| json!({ "name": p.qualified_name(), "function": p.function, "class": p.class, "path": path(&p.file), "line": p.line }))
+                    .collect::<Vec<_>>())
+            } else {
+                json!([])
             };
             let output = ws.output_dir(&ctx.profile, kind);
             out["resource-roots"] = json!(roots(&with_generated(vec![ws.resources()], GeneratedKind::Resources)));
-            // The `Res` class of `composeResources/`, written now so that editors see it before a build.
-            let dir = crate::compose::resources::output_dir(&ws.output_dir(&ctx.profile, kind));
-            out["compose-resources"] = match crate::compose::resources::generate(ws.root(), m, &dir)? {
-                Some(generated) => json!({
-                    "package": crate::compose::resources::package(m),
-                    "source-root": path(generated.source.parent().unwrap_or(&dir)),
-                    "resource-root": path(&generated.resources),
-                }),
-                None => Value::Null,
-            };
             out["test-resource-roots"] = json!(roots(&[ws.test_resources()]));
             out["classes-dir"] = json!(path(&output.join("classes")));
             out["test-classes-dir"] = json!(path(&output.join("test-classes")));
