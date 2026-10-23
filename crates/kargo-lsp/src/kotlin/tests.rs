@@ -3735,3 +3735,269 @@ fn completes_lambda_parameter_names() {
     let labels = completes("fun main() {\n    run { $0 }\n}\n");
     assert!(!labels.iter().any(|l| l.ends_with("->")), "{labels:?}");
 }
+
+mod refactoring {
+    //! The refactorings of [`super::super::refactor`]: each test applies an action's edit and
+    //! compares the text.
+
+    use std::collections::BTreeMap;
+    use std::ops::Range;
+
+    use super::*;
+
+    /// A fixture of `files`, and the selection of its cursor file, from `$0` to `$1` (empty at
+    /// `$0` without a `$1`).
+    fn selected(files: &[(&str, &str)]) -> (Fixture, Range<usize>) {
+        let mut end = None;
+        let owned: Vec<(String, String)> = files
+            .iter()
+            .map(|(path, text)| match (text.find("$0"), text.find("$1")) {
+                (Some(start), Some(at)) => {
+                    end = Some(if start < at { at - 2 } else { at });
+                    (path.to_string(), text.replacen("$1", "", 1))
+                }
+                _ => (path.to_string(), text.to_string()),
+            })
+            .collect();
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+        let f = fixture(&refs);
+        let (_, start) = f.cursor();
+        (f, start..end.unwrap_or(start))
+    }
+
+    fn actions(files: &[(&str, &str)]) -> (Fixture, Vec<Value>) {
+        let (f, range) = selected(files);
+        let (unit, _) = f.cursor();
+        let manifests = vec![PathBuf::from("/project/kargo.toml")];
+        let request = actions::Request {
+            unit,
+            range,
+            only: vec!["refactor".into()],
+            diagnostics: Vec::new(),
+            roots: &[],
+            manifests: &manifests,
+            document_changes: true,
+            create_files: true,
+        };
+        let found = actions::code_actions(&f.an(), &request);
+        (f, found)
+    }
+
+    fn titles(files: &[(&str, &str)]) -> Vec<String> {
+        actions(files).1.iter().map(|a| a["title"].as_str().unwrap().to_owned()).collect()
+    }
+
+    /// The files the refactoring titled `title` changes or creates, by path in the project,
+    /// with its edit applied.
+    fn refactored(files: &[(&str, &str)], title: &str) -> BTreeMap<String, String> {
+        let (f, found) = actions(files);
+        let action = found.iter().find(|a| a["title"] == title).unwrap_or_else(|| panic!("no `{title}` in {found:#?}"));
+        assert!(action["kind"].as_str().unwrap().starts_with("refactor."), "{action}");
+        let mut out = BTreeMap::new();
+        for change in action["edit"]["documentChanges"].as_array().expect("documentChanges") {
+            if change["kind"] == "create" {
+                continue;
+            }
+            let uri = change["textDocument"]["uri"].as_str().unwrap();
+            let original =
+                f.proj.units.iter().find(|u| crate::text::path_to_uri(&u.path) == uri).map(|u| u.text.clone()).unwrap_or_default();
+            let path = uri.split("/project/").nth(1).unwrap().to_owned();
+            // An editor rejects edits of one file that overlap or insert at the same place.
+            let mut spans: Vec<(usize, usize)> = change["edits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| (crate::text::offset(&original, &e["range"]["start"]), crate::text::offset(&original, &e["range"]["end"])))
+                .collect();
+            spans.sort();
+            assert!(spans.windows(2).all(|w| w[0].1 <= w[1].0 && w[0] != w[1]), "overlapping edits of {path}: {spans:?}");
+            out.insert(path, apply_edits(&original, change["edits"].as_array().unwrap()));
+        }
+        out
+    }
+
+    /// The cursor file after the refactoring titled `title`.
+    fn main_after(files: &[(&str, &str)], title: &str) -> String {
+        let path = files.iter().find(|(_, t)| t.contains("$0")).unwrap().0;
+        refactored(files, title).remove(path).expect("the cursor file changes")
+    }
+
+    #[test]
+    fn extracts_a_variable() {
+        let main = "fun main() {\n    val items = listOf(1, 2, 3)\n    println($0items.size$1 * 2 + 1)\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", main)], "Extract variable"),
+            "fun main() {\n    val items = listOf(1, 2, 3)\n    val size: Int = items.size\n    println(size * 2 + 1)\n}\n"
+        );
+
+        // Every equal expression of the block, on request.
+        let area = "fun area(w: Int, h: Int): Int {\n    println(w * h)\n    return $0w * h$1 + 1\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", area)], "Extract variable (replace all 2 occurrences)"),
+            "fun area(w: Int, h: Int): Int {\n    val int: Int = w * h\n    println(int)\n    return int + 1\n}\n"
+        );
+        assert_eq!(
+            main_after(&[("src/Main.kt", area)], "Extract variable"),
+            "fun area(w: Int, h: Int): Int {\n    println(w * h)\n    val int: Int = w * h\n    return int + 1\n}\n"
+        );
+
+        // From the condition of an `if`, which always runs; inside a lambda, into the lambda.
+        let condition = "fun main(x: Int) {\n    if ($0x * 2$1 > 3) println(x)\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", condition)], "Extract variable"),
+            "fun main(x: Int) {\n    val int: Int = x * 2\n    if (int > 3) println(x)\n}\n"
+        );
+        let lambda = "fun main() {\n    listOf(1).forEach { println($0it + 1$1) }\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", lambda)], "Extract variable"),
+            "fun main() {\n    listOf(1).forEach { val int: Int = it + 1; println(int) }\n}\n"
+        );
+
+        // Not part of a larger operand, nor code that may not run, nor a whole statement.
+        let none = |main: &str| !titles(&[("src/Main.kt", main)]).iter().any(|t| t.starts_with("Extract variable"));
+        assert!(none("fun main(x: Int) {\n    if (x > 3) println($0x * 2$1)\n}\n"));
+        assert!(none("fun main() {\n    val x = 1\n    println(x * $0x + 1$1)\n}\n"));
+        assert!(none("fun check(s: String) = s.isEmpty()\nfun main(flag: Boolean) {\n    val x = flag && $0check(\"a\")$1\n}\n"));
+        assert!(none("fun main() {\n    $0println(1)$1\n}\n"));
+        assert!(none("fun main() {\n    val x = $0unknown()$1\n}\n"));
+    }
+
+    #[test]
+    fn extracts_a_function() {
+        let main = "fun report(items: List<Int>) {\n    val prefix = \"total\"\n    $0val total = items.size\n    println(\"$prefix: $total\")$1\n    println(total * 2)\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", main)], "Extract function"),
+            "fun report(items: List<Int>) {\n    val prefix = \"total\"\n    val total = extracted(items, prefix)\n    println(total * 2)\n}\n\nprivate fun extracted(items: List<Int>, prefix: String): Int {\n    val total = items.size\n    println(\"$prefix: $total\")\n    return total\n}\n"
+        );
+
+        // A member stays a member, and nothing is returned when nothing is used after.
+        let class =
+            "class Greeter(val name: String) {\n    fun greet(times: Int) {\n        $0repeat(times) { println(name) }$1\n    }\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", class)], "Extract function"),
+            "class Greeter(val name: String) {\n    fun greet(times: Int) {\n        extracted(times)\n    }\n\n    private fun extracted(times: Int) {\n        repeat(times) { println(name) }\n    }\n}\n"
+        );
+
+        // Not with a `return`, nor with two results, nor assigning a local of the function.
+        let none = |main: &str| !titles(&[("src/Main.kt", main)]).iter().any(|t| t == "Extract function");
+        assert!(none("fun f(x: Int): Int {\n    $0if (x > 0) return 1$1\n    return 0\n}\n"));
+        assert!(none("fun f() {\n    $0val a = 1\n    val b = 2$1\n    println(a + b)\n}\n"));
+        assert!(none("fun f() {\n    var n = 0\n    $0n = 2$1\n    println(n)\n}\n"));
+    }
+
+    #[test]
+    fn inlines_a_variable() {
+        let main = "fun main() {\n    val sum$0 = 1 + 2\n    println(sum * 3)\n    println(\"$sum\")\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", main)], "Inline variable `sum`"),
+            "fun main() {\n    println((1 + 2) * 3)\n    println(\"${1 + 2}\")\n}\n"
+        );
+
+        // A call moves only to a single use that runs first in the next statement.
+        let next = "fun next(): Int = 1\n\nfun main() {\n    val n = next()\n    println(n$0)\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", next)], "Inline variable `n`"),
+            "fun next(): Int = 1\n\nfun main() {\n    println(next())\n}\n"
+        );
+        let none = |main: &str| !titles(&[("src/Main.kt", main)]).iter().any(|t| t.starts_with("Inline variable"));
+        assert!(none("fun next(): Int = 1\n\nfun main() {\n    val n$0 = next()\n    println(1)\n    println(n)\n}\n"));
+        assert!(none("fun next(): Int = 1\n\nfun main() {\n    val n$0 = next()\n    println(n + n)\n}\n"));
+        // Nor a `var`.
+        assert!(none("fun main() {\n    var n$0 = 1\n    println(n)\n}\n"));
+    }
+
+    #[test]
+    fn inlines_a_function() {
+        let main = "fun square(x: Int) = x * x\n\nfun main() {\n    println(squ$0are(3) + 1)\n    println(square(2 + 1))\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", main)], "Inline function `square`"),
+            "fun main() {\n    println(3 * 3 + 1)\n    println((2 + 1) * (2 + 1))\n}\n"
+        );
+
+        // In another package, with the imports the body needs.
+        let lib = "package lib\n\nval suffix = \"!\"\n\nfun gre$0et(name: String): String {\n    return \"Hello, \" + name + suffix\n}\n";
+        let app = "package app\n\nimport lib.greet\n\nfun main() {\n    println(greet(\"Ana\").length)\n}\n";
+        let files = refactored(&[("src/lib/Greet.kt", lib), ("src/app/Main.kt", app)], "Inline function `greet`");
+        assert_eq!(files["src/lib/Greet.kt"], "package lib\n\nval suffix = \"!\"\n");
+        assert_eq!(
+            files["src/app/Main.kt"],
+            "package app\n\nimport lib.suffix\n\nfun main() {\n    println((\"Hello, \" + \"Ana\" + suffix).length)\n}\n"
+        );
+
+        // A `Unit` function of one statement, where it is called as a statement.
+        let log = "fun log(message: String) {\n    println(message)\n}\n\nfun main() {\n    lo$0g(\"a\")\n}\n";
+        assert_eq!(main_after(&[("src/Main.kt", log)], "Inline function `log`"), "fun main() {\n    println(\"a\")\n}\n");
+
+        // Not used as a value (`::square`), nor with an argument whose side effects would repeat.
+        let none = |main: &str| !titles(&[("src/Main.kt", main)]).iter().any(|t| t.starts_with("Inline function"));
+        assert!(none("fun square(x: Int) = x * x\n\nfun main() {\n    println(listOf(1).map(::squ$0are))\n}\n"));
+        assert!(none("fun next(): Int = 1\nfun square(x: Int) = x * x\n\nfun main() {\n    println(squ$0are(next()))\n}\n"));
+    }
+
+    #[test]
+    fn changes_a_signature() {
+        let main = "fun describe(name: String, ag$0e: Int) = \"$name is $age\"\n\nfun main() {\n    println(describe(\"Ana\", 30))\n    println(describe(name = \"Bo\", age = 4))\n}\n";
+        let found = titles(&[("src/Main.kt", main)]);
+        assert!(
+            found.contains(&"Move parameter `age` left".to_owned()) && !found.iter().any(|t| t.starts_with("Remove parameter")),
+            "{found:?}"
+        );
+        assert_eq!(
+            main_after(&[("src/Main.kt", main)], "Move parameter `age` left"),
+            "fun describe(age: Int, name: String) = \"$name is $age\"\n\nfun main() {\n    println(describe(30, \"Ana\"))\n    println(describe(name = \"Bo\", age = 4))\n}\n"
+        );
+        // A positional argument before a named one gets its name.
+        let mixed =
+            "fun describe(name: String, ag$0e: Int) = \"$name is $age\"\n\nfun main() {\n    println(describe(\"Ana\", age = 30))\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", mixed)], "Move parameter `age` left"),
+            "fun describe(age: Int, name: String) = \"$name is $age\"\n\nfun main() {\n    println(describe(name = \"Ana\", age = 30))\n}\n"
+        );
+
+        // Overrides change with the function, and a parameter no body uses goes.
+        let shapes = "interface Shape {\n    fun draw(scale: Int, colo$0r: String)\n}\n\nclass Square : Shape {\n    override fun draw(scale: Int, color: String) {\n        println(scale)\n    }\n}\n\nfun main() {\n    Square().draw(2, \"red\")\n}\n";
+        assert_eq!(
+            main_after(&[("src/Main.kt", shapes)], "Remove parameter `color`"),
+            "interface Shape {\n    fun draw(scale: Int)\n}\n\nclass Square : Shape {\n    override fun draw(scale: Int) {\n        println(scale)\n    }\n}\n\nfun main() {\n    Square().draw(2)\n}\n"
+        );
+
+        // Not when an argument it would drop has side effects, nor for a callable reference.
+        let none = |main: &str, prefix: &str| !titles(&[("src/Main.kt", main)]).iter().any(|t| t.starts_with(prefix));
+        assert!(none(
+            "fun next() = \"\"\nfun log(message: String, le$0vel: String) = println(message)\n\nfun main() {\n    log(\"a\", next())\n}\n",
+            "Remove"
+        ));
+        assert!(none("fun add(a: Int, b$0: Int) = a + b\n\nfun main() {\n    println(listOf(1).fold(0, ::add))\n}\n", "Move"));
+    }
+
+    #[test]
+    fn moves_a_declaration() {
+        let util = "package app\n\nval greeting = \"Hi\"\n\nclass Gr$0eeter {\n    fun greet() = greeting\n}\n";
+        let main = "package app\n\nfun main() {\n    println(Greeter().greet())\n}\n";
+        let user = "package app.model\n\nclass User\n";
+        let other = "package other\n\nimport app.Greeter\n\nfun make(): Greeter = app.Greeter()\n";
+        let files = [("src/app/Util.kt", util), ("src/app/Main.kt", main), ("src/app/model/User.kt", user), ("src/other/Use.kt", other)];
+        let found = titles(&files);
+        assert!(found.contains(&"Move `Greeter` to package `other`".to_owned()), "{found:?}");
+        let moved = refactored(&files, "Move `Greeter` to package `app.model`");
+        assert_eq!(moved["src/app/Util.kt"], "package app\n\nval greeting = \"Hi\"\n");
+        assert_eq!(
+            moved["src/app/model/Greeter.kt"],
+            "package app.model\n\nimport app.greeting\n\nclass Greeter {\n    fun greet() = greeting\n}\n"
+        );
+        assert_eq!(
+            moved["src/app/Main.kt"],
+            "package app\n\nimport app.model.Greeter\n\nfun main() {\n    println(Greeter().greet())\n}\n"
+        );
+        assert_eq!(moved["src/other/Use.kt"], "package other\n\nimport app.model.Greeter\n\nfun make(): Greeter = app.model.Greeter()\n");
+
+        // To a file of its own.
+        let own = refactored(&files, "Move `Greeter` to `Greeter.kt`");
+        assert_eq!(own["src/app/Greeter.kt"], "package app\n\nclass Greeter {\n    fun greet() = greeting\n}\n");
+        assert_eq!(own.len(), 2, "{own:?}");
+
+        // Not what uses a private declaration of its file.
+        let private = "package app\n\nprivate val secret = 1\n\nfun sh$0ow() = secret\n";
+        assert!(!titles(&[("src/app/Util.kt", private), ("src/app/model/User.kt", user)]).iter().any(|t| t.starts_with("Move")));
+    }
+}

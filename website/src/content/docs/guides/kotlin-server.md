@@ -28,6 +28,7 @@ IntelliJ IDEA and Android Studio don't use it. The [Kargo plugin](../editors/#in
 | Selection | Expand the selection from an identifier to its dotted call chain, the brackets around it, the statement, the declarations around it (function, class) and the file |
 | Formatting | The whole file, formatted by ktlint with the project's `.editorconfig` and `[fmt]` settings, as `kargo fmt` does. See [Formatting](#formatting) |
 | Code actions | Import an unresolved name, organize imports, add the dependency an import needs, implement abstract members, add the branches a `when` is missing, add missing `actual` declarations, and quick fixes for `kargo check` errors. See [Code actions](#code-actions) |
+| Refactorings | Extract a variable or a function, inline a variable or a function, move or remove a parameter, and move a declaration to another package or a file of its own. See [Refactorings](#refactorings) |
 | Diagnostics as you type | Unclosed or unmatched brackets, unterminated strings and comments, a `class`, `interface` or `typealias` without a name (errors), unused imports and local variables that are never used (warnings, shown greyed out), and [operators](#operators) that can't work. Decided from the file and the project's declarations, so they appear between saves |
 | Errors | From [check on save](../editors/#check-on-save), which is on with this server: `kargo check` runs when you save a file and its errors for every target appear in the editor |
 
@@ -253,6 +254,37 @@ class Users : Repo<User> {
 
 Imports, the implemented members and the `actual` declarations come from the server's own analysis, so they work in every target's code. The quick fixes for compiler messages need [check on save](../editors/#check-on-save), which is on with this server.
 
+### Refactorings
+
+The server also offers refactorings, which editors list under *Refactor...* (`refactor.*` code actions). Each one is a single edit across files, so your editor's undo takes it back at once.
+
+| Refactoring | Offered on | Does |
+|---|---|---|
+| Extract variable | A selected expression inside a block or lambda (`refactor.extract`) | Declares `val <name> = <expression>` before its statement, with the type when the server knows it fully (and the imports it needs), and puts the name in its place. The name comes from what the expression calls or reads (`user.name` gives `name`, `getUser()` gives `user`), else from its type. *Replace all N occurrences* also replaces the equal expressions of the block, when they read the same names and nothing between them calls or assigns anything |
+| Extract function | Selected whole statements in a function's body (`refactor.extract`) | Moves them to a `private fun extracted(...)` after that function, in the same class or file and with its receiver and `suspend`. The locals they read become its parameters, and the one local they declare that the code after them uses becomes its result: `val total = extracted(items, prefix)` |
+| Inline variable `<name>` | A local `val`, where it is declared or used (`refactor.inline`) | Puts its initializer in place of every use, in parentheses where precedence needs them and as `${...}` in a string template, and removes the declaration |
+| Inline function `<name>` | A top-level function whose body is one expression (`= expr`, or `{ return expr }`), where it is declared or called (`refactor.inline`) | Puts the body in place of every call, with the arguments in place of the parameters, adds the imports the body needs where it is called, and removes the function and its imports. A `Unit` function whose body is one statement is inlined where it is called as a statement |
+| Move parameter `<name>` left / right | A parameter of a function (`refactor.rewrite`) | Swaps it with its neighbor in the function, its overrides and its `expect`/`actual` counterparts, and in every call. A positional argument that would end up before a named one gets its name |
+| Remove parameter `<name>` | A parameter that no body of the function or its overrides uses (`refactor.rewrite`) | Removes it from the declarations and its argument from every call |
+| Move `<name>` to package `<package>` | The header of a top-level class, object, interface, function, property or type alias (`refactor.move`), for each other package of its source set (the first 12 by name) | Moves it to that package's directory, into `<Name>.kt` for a class or type alias and into a file of the same name as its own otherwise (appended when that file exists), with the imports it needs. Imports of it and names qualified with its package change, and the files that used it without an import get one |
+| Move `<name>` to `<Name>.kt` | The header of a top-level class or type alias in a file with other declarations (`refactor.move`) | Moves it to a file of its own in the same directory and package |
+
+Selecting `items.size` in `println(items.size * 2)` and choosing *Extract variable* gives:
+
+```kotlin title="src/Main.kt"
+val size: Int = items.size
+println(size * 2)
+```
+
+A refactoring never changes what code does without telling you, so it is only offered when the server understands everything it rewrites:
+
+- Every name in the code it moves must resolve. Selected code that reads something the server can't resolve gets no *Extract*, and a declaration that uses a `private` declaration of its file is not moved.
+- Every use it rewrites must be one it knows how to change: a call with its arguments in parentheses, an import, a name qualified with a package. A function used as a value (`::square`), called with a trailing lambda in the place that changes, or named in a Java file of the project is not inlined or changed.
+- Side effects stay where they were. An expression is extracted only where it always runs, once: not from the right of `&&`, `||` or `?:`, a branch of `if` or `when`, or a loop. One with calls also needs nothing else with side effects to run before it in its statement. A variable whose initializer calls something is inlined only into its one use in the next statement. An argument with calls is inlined only into a body that uses it once, unconditionally and in the same order; a parameter is removed, and two arguments swapped, only when that drops or reorders no call.
+- Extract function refuses statements that `return`, `break` or `continue` out of themselves, assign a local of the function, declare more than one local that is used after them, or read a local that a check before them may smart cast.
+
+Renaming is not one of them: use your editor's *Rename*, which also renames files, packages and `kargo.toml` entry points (see the table above).
+
 ## How it reads your project
 
 The server reads your project the way `kargo build` compiles it, from [`kargo metadata`](../editors/#importing-a-project): every package of a [workspace](../workspaces/), with the source, test and test-fixture roots of each target and its examples. It writes no files: no `workspace.json`, no `kls-classpath`.
@@ -337,6 +369,6 @@ The server reads declarations and infers types as far as completion and navigati
 - Delegates: a type argument that only the expected type decides (`val x by viewModels()` without a declared type) stays unknown, so completion after `x.` is empty; write `viewModels<Foo>()` or `val x: Foo by viewModels()`. Renaming a `getValue` is refused like any operator function.
 - The cases of a `when` over a `sealed` type are its direct subclasses in your project, and in the file that declares it when it comes from a library. A branch counts as covering a case when it names it, so a branch on a nested sealed class (`is Shape.Round` for `Circle` and `Oval`) leaves them offered.
 - Overloads are chosen by the arguments' types (subtypes, nullability, named and default arguments, and the parameter count of lambdas); when an argument's type is unknown and several overloads fit, go to definition lists them all. A type argument is not inferred from the expected type of a call (`foo(emptyList())`), so completion may miss members of such expressions. A `when` or `try` whose branches have nothing in common but `Any` completes as `Any`.
-- Its [code actions](#code-actions) are the ones listed there; it has no other quick fixes or refactorings. Semantic highlighting leaves keywords, literals and comments to the editor's own grammar. [Formatting](#formatting) is ktlint's: whole files only.
+- Its [code actions](#code-actions) and [refactorings](#refactorings) are the ones listed there; it has no other quick fixes, and refactorings such as adding a parameter, moving to a package that doesn't exist yet, or converting between expression and block bodies are not there yet. Semantic highlighting leaves keywords, literals and comments to the editor's own grammar. [Formatting](#formatting) is ktlint's: whole files only.
 
 For the full analysis of the Kotlin compiler, use IntelliJ IDEA with the Kargo plugin, or run JetBrains' Kotlin LSP behind `kargo lsp` with `--server kotlin-lsp`. See [Choosing the Kotlin server](../editors/#choosing-the-kotlin-server).
