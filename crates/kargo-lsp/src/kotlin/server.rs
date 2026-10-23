@@ -87,6 +87,15 @@ enum Event {
         original: String,
         outcome: anyhow::Result<Option<String>>,
     },
+    /// The dependencies of the Kargo script at `path`, declared as `declared`, resolved against the
+    /// libraries of generation `generation`: `index` holds those libraries with the script's own, or
+    /// is `None` when they could not be resolved, and the script then sees the project's alone.
+    Scripted {
+        path: PathBuf,
+        declared: Vec<String>,
+        generation: u64,
+        index: Option<Arc<Index>>,
+    },
     /// How far a search for references or a rename has come, for the editor's `$/progress`.
     Searching {
         token: Value,
@@ -186,13 +195,39 @@ pub struct Model {
 }
 
 impl Model {
-    /// The origin of a file at `path`.
+    /// The origin of a file at `path`. A `.kts` script is never a source of the project, even under
+    /// a source root: Kargo does not compile scripts, so the script is loose.
     pub fn origin(&self, path: &Path) -> Origin {
+        if is_script_path(path) {
+            return Origin::Loose;
+        }
         if let Some((_, set)) = self.files.iter().find(|(p, _)| p == path) {
             return Origin::Source(set.clone());
         }
         self.roots.iter().find(|(root, _)| path.starts_with(root)).map_or(Origin::Loose, |(_, set)| Origin::Source(set.clone()))
     }
+}
+
+/// Whether `path` is a Kotlin script that the server analyzes. Gradle's build scripts
+/// (`build.gradle.kts`, `settings.gradle.kts`) belong to the Kotlin plugin, not to Kargo.
+pub fn is_script_path(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "kts") && !path.to_string_lossy().ends_with(".gradle.kts")
+}
+
+/// Whether the server analyzes the document at `path`, whose text is `text`: a `.kt` file, or a
+/// Kargo script (see [`crate::script::is_kargo_script`]). A project's other `.kts` files are its
+/// build scripts, which Kargo does not run.
+fn is_kotlin_document(path: &Path, text: &str) -> bool {
+    path.extension().is_some_and(|e| e == "kt") || (is_script_path(path) && crate::script::is_kargo_script(path, text))
+}
+
+/// The dependencies of a Kargo script and the libraries they resolve to. A script without
+/// dependencies has none, and sees the project's libraries alone.
+struct ScriptLibraries {
+    /// What the script declares (see [`kargo_ops::script::declared_dependencies`]).
+    declared: Vec<String>,
+    /// The project's libraries with the script's dependencies, once they are resolved.
+    index: Option<Arc<Index>>,
 }
 
 /// The package a file at `path` belongs in by its directory under its source root: `app.model`
@@ -1085,6 +1120,10 @@ struct State {
     /// Open documents: URI to path.
     open: HashMap<String, PathBuf>,
     lib: Arc<Index>,
+    /// Bumped whenever `lib` is replaced, so the scripts' libraries built on the old one are dropped.
+    libraries_generation: u64,
+    /// The open Kargo scripts that declare dependencies, by path.
+    scripts: HashMap<PathBuf, ScriptLibraries>,
     proj: Option<Snapshot>,
     /// The classified identifiers of each file (see [`semantic`]) at the generation they were computed.
     classified: HashMap<PathBuf, (u64, Arc<Vec<semantic::Classified>>)>,
@@ -1165,6 +1204,8 @@ impl State {
             files: HashMap::new(),
             open: HashMap::new(),
             lib: Arc::new(Index::new(true, Vec::new())),
+            libraries_generation: 0,
+            scripts: HashMap::new(),
             proj: None,
             classified: HashMap::new(),
             load_generation: 0,
@@ -1222,8 +1263,18 @@ impl State {
             Event::Libraries { generation, units, jdk } if generation == self.load_generation => {
                 self.libraries_loaded = true;
                 self.lib = Arc::new(Index::new(true, units).with_jdk(jdk));
+                self.libraries_generation += 1;
+                self.resolve_scripts();
                 self.changed();
                 self.report_loading("Indexing the dependencies");
+            }
+            Event::Scripted { path, declared, generation, index } => {
+                // Dropped when the script changed its dependencies or the libraries changed since.
+                let current = self.scripts.get_mut(&path).filter(|s| s.declared == declared);
+                if let Some(script) = current.filter(|_| generation == self.libraries_generation) {
+                    script.index = index;
+                    self.generation += 1;
+                }
             }
             Event::Loaded { generation } if generation == self.load_generation => self.end_loading(),
             Event::Fetching { generation, modules } => {
@@ -1381,13 +1432,14 @@ impl State {
                 }
                 "textDocument/didOpen" => {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
-                    if let Some(path) = file_path(uri).filter(|_| uri.ends_with(".kt")) {
-                        let text = params["textDocument"]["text"].as_str().unwrap_or_default().to_owned();
+                    let text = params["textDocument"]["text"].as_str().unwrap_or_default().to_owned();
+                    if let Some(path) = file_path(uri).filter(|path| is_kotlin_document(path, &text)) {
                         self.open.insert(uri.to_owned(), path.clone());
                         if let Some(version) = params["textDocument"]["version"].as_i64() {
                             self.versions.insert(path.clone(), version);
                         }
-                        self.set_file(path, text);
+                        self.set_file(path.clone(), text);
+                        self.script_declarations(&path);
                         self.publish_diagnostics(uri)?;
                     }
                 }
@@ -1405,7 +1457,8 @@ impl State {
                         if let Some(version) = params["textDocument"]["version"].as_i64() {
                             self.versions.insert(path.clone(), version);
                         }
-                        self.set_file(path, text);
+                        self.set_file(path.clone(), text);
+                        self.script_declarations(&path);
                         self.publish_diagnostics(uri)?;
                     }
                 }
@@ -1418,6 +1471,7 @@ impl State {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
                     if let Some(path) = self.open.remove(uri) {
                         self.versions.remove(&path);
+                        self.scripts.remove(&path);
                         self.send(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": [] })))?;
                         // Back to what is on disk, or gone.
                         match std::fs::read_to_string(&path) {
@@ -1497,7 +1551,9 @@ impl State {
     /// `$/progress` when it sent a `workDoneToken`.
     fn search(&mut self, id: Value, method: &str, params: &Value) -> anyhow::Result<()> {
         let (proj, ids) = self.snapshot();
-        let (lib, packages, tx, generation) = (Arc::clone(&self.lib), self.model.packages.clone(), self.tx.clone(), self.generation);
+        let document = file_path(params["textDocument"]["uri"].as_str().unwrap_or_default());
+        let (lib, packages, tx, generation) =
+            (self.libraries_for(document.as_deref()), self.model.packages.clone(), self.tx.clone(), self.generation);
         let cancel = Arc::new(AtomicBool::new(false));
         self.searches.insert(id.to_string(), Arc::clone(&cancel));
         let token = Some(params["workDoneToken"].clone()).filter(|t| !t.is_null());
@@ -1547,7 +1603,7 @@ impl State {
         // Operators and deprecated usages need the project's declarations.
         let (proj, ids) = self.snapshot();
         if let Some(&id) = ids.get(&path) {
-            let lib = Arc::clone(&self.lib);
+            let lib = self.libraries_for(Some(&path));
             let packages = self.model.packages.clone();
             let an = Analyzer::new(&lib, &proj, &packages);
             let u = UnitId { lib: false, unit: id };
@@ -1590,6 +1646,65 @@ impl State {
         } else {
             self.changed();
         }
+    }
+
+    /// The libraries the file at `path` sees: the project's, and those of a Kargo script's own
+    /// dependencies on top of them once they are resolved.
+    fn libraries_for(&self, path: Option<&Path>) -> Arc<Index> {
+        path.and_then(|p| self.scripts.get(p)).and_then(|s| s.index.clone()).unwrap_or_else(|| Arc::clone(&self.lib))
+    }
+
+    /// Follows the dependencies the script at `path` declares, which changed with its text: a
+    /// script without dependencies is forgotten, and the others are resolved again unless their
+    /// dependencies are the same.
+    fn script_declarations(&mut self, path: &Path) {
+        if !is_script_path(path) {
+            return;
+        }
+        let Some(text) = self.files.get(path).map(|unit| unit.text.clone()) else { return };
+        let declared = kargo_ops::script::declared_dependencies(&text);
+        if declared.is_empty() {
+            if self.scripts.remove(path).is_some() {
+                self.generation += 1;
+            }
+            return;
+        }
+        if self.scripts.get(path).is_some_and(|s| s.declared == declared) {
+            return;
+        }
+        self.scripts.insert(path.to_owned(), ScriptLibraries { declared: declared.clone(), index: None });
+        self.resolve_script(path, &text, declared);
+    }
+
+    /// Resolves the dependencies of every open script again, against the libraries that just changed.
+    fn resolve_scripts(&mut self) {
+        let scripts: Vec<(PathBuf, Vec<String>)> = self.scripts.iter().map(|(p, s)| (p.clone(), s.declared.clone())).collect();
+        for (path, declared) in scripts {
+            if let Some(text) = self.files.get(&path).map(|unit| unit.text.clone()) {
+                self.resolve_script(&path, &text, declared);
+            }
+        }
+    }
+
+    /// Resolves the dependencies of the script at `path` on a worker thread, with the project's
+    /// libraries as they are now. Until the libraries are loaded there is nothing to add them to,
+    /// so [`State::resolve_scripts`] does it when they are.
+    fn resolve_script(&self, path: &Path, text: &str, declared: Vec<String>) {
+        if !self.libraries_loaded {
+            return;
+        }
+        let (config, tx, cache) = (self.config.clone(), self.tx.clone(), Arc::clone(&self.cache));
+        let (generation, base, jdk) = (self.libraries_generation, self.lib.units.clone(), self.lib.jdk.clone());
+        let (fetch, path, text) = (self.load_options.fetch_sources, path.to_owned(), text.to_owned());
+        thread::spawn(move || {
+            let index = kargo_ops::script::dependency_metadata(&config, &text, fetch).ok().map(|meta| {
+                let mut units = base;
+                units.extend(library::units(&config, &cache, &dependency_jars(&meta)));
+                units.extend(library::compiled_units(&config, &cache, &dependency_compiled(&meta)));
+                Arc::new(Index::new(true, units).with_jdk(jdk))
+            });
+            let _ = tx.send(Event::Scripted { path, declared, generation, index });
+        });
     }
 
     /// Whether the editor does not tell the server about changed files, so the server looks.
@@ -1697,11 +1812,11 @@ impl State {
             _ => {}
         }
         let (proj, ids) = self.snapshot();
-        let lib = Arc::clone(&self.lib);
+        let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+        let lib = self.libraries_for(file_path(uri).as_deref());
         let packages = self.model.packages.clone();
         let an = Analyzer::new(&lib, &proj, &packages);
         let generation = self.generation;
-        let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
         // A Java file is read for its declarations; this server answers requests for Kotlin files only.
         let unit = file_path(uri)
             .and_then(|p| ids.get(&p).copied())
@@ -2377,6 +2492,124 @@ local = \"{url}\"
         send(jsonrpc::request("999", "shutdown", Value::Null));
         send(jsonrpc::notification("exit", Value::Null));
         server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn resolves_a_scripts_dependencies_for_the_script_alone() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        publish(
+            repo.path(),
+            "g",
+            "lib",
+            "1.0",
+            &[(
+                "g/Greeter.kt",
+                "package g
+
+class Greeter {
+    fun greet(): String = \"hi\"
+}
+",
+            )],
+        );
+        publish(repo.path(), "org.jetbrains.kotlin", "kotlin-stdlib", kargo_manifest::DEFAULT_KOTLIN_VERSION, &[]);
+        // Maven Central is mirrored to the repository, so the script's dependency resolves offline.
+        let url = format!("file:///{}", repo.path().display().to_string().replace('\\', "/").trim_start_matches('/'));
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[mirrors]
+\"*\" = \"{url}\"
+"
+            ),
+        )
+        .unwrap();
+        let settings = kargo_util::settings::Settings::load(home.path(), None).unwrap();
+        let config = Config::new(home.path().to_path_buf(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet))
+            .with_settings(settings)
+            .unwrap()
+            .with_offline(true);
+
+        // A script outside any project: its folder has no kargo.toml.
+        let script = "@file:DependsOn(\"g:lib:1.0\")
+val greeter = g.Greeter().
+";
+        let uri = text::path_to_uri(&dir.path().join("run.kts"));
+        let (server_in, mut input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let mut output = BufReader::new(output);
+        let server = thread::spawn(move || serve(config, BufReader::new(server_in), server_out));
+        let mut send = |message: Value| jsonrpc::write(&mut input, &message).unwrap();
+        send(jsonrpc::request("1", "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} })));
+        send(jsonrpc::notification("initialized", json!({})));
+        send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": script } }),
+        ));
+
+        // The dependency resolves in the background, so the completion is asked again until it has.
+        let position = json!({ "line": 1, "character": 26 });
+        let mut id = 2;
+        let labels = loop {
+            send(jsonrpc::request(
+                &id.to_string(),
+                "textDocument/completion",
+                json!({ "textDocument": { "uri": uri }, "position": position }),
+            ));
+            let reply = loop {
+                let message = jsonrpc::read(&mut output).unwrap().expect("a message");
+                if message["id"].as_str() == Some(id.to_string().as_str()) && message.get("method").is_none() {
+                    break message;
+                }
+            };
+            let labels: Vec<String> =
+                reply["result"]["items"].as_array().into_iter().flatten().filter_map(|i| i["label"].as_str().map(str::to_owned)).collect();
+            if labels.iter().any(|l| l.starts_with("greet")) || id > 200 {
+                break labels;
+            }
+            id += 1;
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert!(labels.iter().any(|l| l.starts_with("greet")), "{labels:?}");
+
+        send(jsonrpc::request("999", "shutdown", Value::Null));
+        send(jsonrpc::notification("exit", Value::Null));
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn scripts_are_loose_documents_and_gradle_scripts_are_not_kotlin() {
+        // A `.kts` under a source root is not compiled by Kargo, so it is loose too.
+        let model = Model {
+            roots: vec![(PathBuf::from("/p/src"), SourceSet { package: 0, kind: SetKind::Main, target: None })],
+            ..Model::default()
+        };
+        assert_eq!(model.origin(Path::new("/p/src/run.kts")), Origin::Loose);
+        assert!(matches!(model.origin(Path::new("/p/src/Main.kt")), Origin::Source(_)));
+        assert!(is_script_path(Path::new("/p/fetch.kts")));
+        assert!(!is_script_path(Path::new("/p/build.gradle.kts")));
+        assert!(!is_script_path(Path::new("/p/settings.gradle.kts")));
+        // Outside a project a script is one; inside it, only one whose shebang runs `kargo script`.
+        assert!(is_kotlin_document(Path::new("/p/fetch.kts"), "println(1)"));
+        assert!(is_kotlin_document(Path::new("/p/Main.kt"), "fun main() {}"));
+        assert!(!is_kotlin_document(Path::new("/p/build.gradle.kts"), "plugins {}"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("kargo.toml"),
+            "[package]
+name = \"app\"
+version = \"0.1.0\"
+",
+        )
+        .unwrap();
+        assert!(!is_kotlin_document(&dir.path().join("build.kts"), "println(1)"));
+        assert!(is_kotlin_document(
+            &dir.path().join("run.kts"),
+            "#!/usr/bin/env -S kargo script
+println(1)"
+        ));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 
 use kargo_compiler::mainclass::find_entry_point_in;
 use kargo_compiler::{ResolvedPlugin, compiler_jvm_options, plugin_args};
@@ -211,9 +212,61 @@ fn line_span(text: &str, line: usize) -> Range<usize> {
 /// The repositories a `.kts` script declares, after Maven Central, for the language server's
 /// version completion. A script that does not parse declares none.
 pub fn declared_repositories(text: &str) -> Vec<Repository> {
-    let settings =
-        script::parse_kts(text).and_then(|parsed| script::settings_from_annotations(text, &parsed.annotations)).unwrap_or_default();
+    let settings = settings_of(text).unwrap_or_default();
     repositories(&settings)
+}
+
+/// The settings of a `.kts` script's annotations, which an error from a malformed one fails.
+fn settings_of(text: &str) -> Result<Settings> {
+    let parsed = script::parse_kts(text)?;
+    script::settings_from_annotations(text, &parsed.annotations)
+}
+
+/// What a `.kts` script declares for its dependencies, for the language server to compare when the
+/// script changes: its `@file:DependsOn` coordinates, then its `@file:Repository` URLs. Empty for a
+/// script that declares neither, or that does not parse (its problems say why).
+pub fn declared_dependencies(text: &str) -> Vec<String> {
+    let Ok(settings) = settings_of(text) else { return Vec::new() };
+    let coordinates = settings.dependencies.iter().map(ToString::to_string);
+    coordinates
+        .chain(settings.repositories.iter().filter(|url| url.as_str() != "mavenCentral").map(|url| format!("repository {url}")))
+        .collect()
+}
+
+/// The libraries a `.kts` script's `@file:DependsOn` declarations resolve to, for the language server.
+/// They are listed as `kargo metadata` lists a package's dependencies (one JVM target whose `compile`
+/// scope holds every resolved file, with the sources jar of its module when one is available), so the
+/// server reads them as it reads a project's. Sources jars are downloaded as `kargo fetch --sources`
+/// does when `fetch_sources` is set, or read from the cache when it is not or the network is not
+/// reachable. A script without dependencies gets an empty list.
+pub fn dependency_metadata(config: &Config, text: &str, fetch_sources: bool) -> Result<Value> {
+    let settings = settings_of(text).context("invalid script header")?;
+    let mut entries = Vec::new();
+    if !settings.dependencies.is_empty() {
+        let client = MavenClient::new(config, repositories(&settings));
+        let roots: Vec<DependencyRequest> = settings
+            .dependencies
+            .iter()
+            .map(|d| DependencyRequest::new(ModuleId::new(&d.group, &d.artifact), Some(d.version.clone())))
+            .collect();
+        let resolution = Resolver::new(&client, Platform::Jvm).resolve(&roots).context("failed to resolve the script's dependencies")?;
+        for node in &resolution.nodes {
+            let sources = if fetch_sources {
+                client.fetch_sources(&node.module, &node.version).ok().flatten()
+            } else {
+                client.cached_sources(&node.module, &node.version, &node.files)
+            };
+            for file in &node.files {
+                entries.push(json!({
+                    "module": node.module.to_string(),
+                    "version": node.version,
+                    "path": file.display().to_string(),
+                    "sources": sources.as_ref().map(|path| path.display().to_string()),
+                }));
+            }
+        }
+    }
+    Ok(json!({ "packages": [{ "targets": [{ "kind": "jvm", "dependencies": [{ "compile": entries, "test": [] }] }] }] }))
 }
 
 /// Maven Central, then the script's own repositories in declaration order.
@@ -529,6 +582,41 @@ mod tests {
         let repos = declared_repositories("@file:Repository(\"https://jitpack.io/\")\n@file:Repository(\"mavenCentral\")\n");
         let urls: Vec<&str> = repos.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(urls, [kargo_maven::repo::MAVEN_CENTRAL, "https://jitpack.io"]);
+    }
+
+    #[test]
+    fn declares_dependencies_for_the_language_server() {
+        let text = "@file:DependsOn(\"g:a:1\")
+@file:Repository(\"https://jitpack.io\")
+@file:Repository(\"mavenCentral\")
+println(1)
+";
+        assert_eq!(declared_dependencies(text), ["g:a:1", "repository https://jitpack.io"]);
+        assert!(
+            declared_dependencies(
+                "println(1)
+"
+            )
+            .is_empty()
+        );
+        assert!(
+            declared_dependencies(
+                "@file:DependsOn(\"g:a\")
+"
+            )
+            .is_empty(),
+            "a script that does not parse declares none"
+        );
+        // A script without dependencies resolves to an empty list, without the network.
+        let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let meta = dependency_metadata(
+            &config,
+            "println(1)
+",
+            false,
+        )
+        .unwrap();
+        assert_eq!(meta["packages"][0]["targets"][0]["dependencies"][0]["compile"], json!([]));
     }
 
     #[test]
