@@ -17,6 +17,7 @@ pub mod local;
 pub mod metadata;
 pub mod new;
 pub mod packaging;
+pub mod preview;
 pub mod publish;
 pub mod run;
 pub mod self_update;

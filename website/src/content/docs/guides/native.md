@@ -59,7 +59,7 @@ Apple targets can only be built on macOS. `kargo run` runs the build for the hos
 | `static` | A static C library (`.a`) plus a C header in `include/` |
 | `framework` | An Apple framework for Swift and Objective-C (Apple platforms only); `kargo build --xcframework` combines them |
 
-See [Calling Kotlin from C](../c-interop/#calling-kotlin-from-c) and [from Swift](../c-interop/#calling-kotlin-from-swift-and-objective-c).
+See [Calling Kotlin from C](../c-interop/#calling-kotlin-from-c) and [from Swift](../c-interop/#calling-kotlin-from-swift-and-objective-c). With `[frameworks] compose`, an iOS framework is a Compose for iOS UI; see [Compose](../compose/#ios).
 
 ## Several executables
 

@@ -38,6 +38,8 @@ On Unix, a program is first sent SIGTERM and given five seconds to exit, so a se
 
 `--watch` starts JVM, Native and Wasm programs the same way (Wasm programs run on Node.js). It does not run Android apps, which run inside Gradle, or Wasm browser apps, which `kargo run` serves until Ctrl+C. `--watch` conflicts with `--debug`, because a debugger would have to attach again after every restart.
 
+For a Compose Desktop app, `kargo run --hot-reload` watches the same way but does not restart the app: it swaps the changed classes into the running one, which keeps its state. See [Hot reload](../compose/#hot-reload).
+
 ## Rerun tests on change
 
 `kargo test --watch [filter]` compiles and runs the tests, then runs them again after every change. It takes the same options as [`kargo test`](../../reference/commands/#kargo-test-t), except `--list` and `--debug`. A failing test does not stop watching:

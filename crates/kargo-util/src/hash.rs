@@ -29,6 +29,10 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
     hash_reader::<Sha256>(File::open(path)?)
 }
 
+pub fn sha512_file(path: &Path) -> io::Result<String> {
+    hash_reader::<Sha512>(File::open(path)?)
+}
+
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }

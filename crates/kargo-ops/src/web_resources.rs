@@ -7,6 +7,9 @@
 //! init script in [`WEB_INIT_PROPERTY`]), so a Maven dependency's zip is fetched only when its POM
 //! says there is one. The zips are pinned in `kargo.lock` like any other artifact.
 //!
+//! A runtime jar in the resolution, such as Skiko's `skiko-js-wasm-runtime` that Compose for Web
+//! draws with, ships its files the same way: everything in the jar but `META-INF/`.
+//!
 //! Every file lands next to the app module under its own name (a directory keeps its name and
 //! contents). The app's own `resources/` wins over a dependency's file; two dependencies shipping
 //! the same name is an error.
@@ -70,6 +73,7 @@ pub fn dependencies(ctx: &BuildContext, dev: bool) -> Result<Vec<Shipment>> {
     let setup = ctx.setup(TargetKind::Wasm)?;
     let resolution = wasm_resolution(ctx, &setup, dev)?;
     shipments.extend(published(ctx, &resolution, dev)?);
+    shipments.extend(runtime_jars(&resolution)?);
     // Both lists are breadth-first, nearest first; path dependencies may use Maven libraries, never the reverse.
     shipments.reverse();
     Ok(shipments)
@@ -186,6 +190,33 @@ fn published(ctx: &BuildContext, resolution: &Resolution, dev: bool) -> Result<V
         shipments.push(from_archive(owner, zip, w.init.clone())?);
     }
     Ok(shipments)
+}
+
+/// The files of the runtime jars in `resolution`: a Wasm library is a klib, so a jar there holds
+/// files for the page, like Skiko's `skiko.mjs` and `skiko.wasm`.
+fn runtime_jars(resolution: &Resolution) -> Result<Vec<Shipment>> {
+    let mut shipments = Vec::new();
+    for node in &resolution.nodes {
+        for jar in node.files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("jar"))) {
+            let mut shipment = from_archive(format!("{}:{}", node.module, node.version), jar, None)?;
+            shipment.files.retain(|f| !f.name.starts_with("META-INF/"));
+            shipments.push(shipment);
+        }
+    }
+    Ok(shipments)
+}
+
+/// What a directory ships, under the same relative paths: the processed `composeResources/` of a Compose app.
+pub fn from_dir(owner: &str, dir: &Path) -> Shipment {
+    let mut files: Vec<WebFile> = crate::wasm_output::all_files(dir)
+        .into_iter()
+        .map(|file| {
+            let relative = file.strip_prefix(dir).unwrap_or(&file);
+            WebFile { name: process::slash(relative), source: Source::File(file.clone()) }
+        })
+        .collect();
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    Shipment { owner: owner.to_owned(), files, init: None }
 }
 
 /// A property of the POM of `module:version`, if the POM is there and sets it.
@@ -316,6 +347,38 @@ mod tests {
         let reserved = [shipment("a", &["index.html"], None)];
         let err = plan(&reserved, &[], &["index.html".to_owned()]).unwrap_err().to_string();
         assert!(err.contains("a ships `index.html`, which is a file of the app's own build"), "{err}");
+    }
+
+    #[test]
+    fn runtime_jars_ship_everything_but_their_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("skiko-js-wasm-runtime-0.150.1.jar");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        for (name, contents) in [("META-INF/MANIFEST.MF", "Manifest-Version: 1.0"), ("skiko.mjs", "export {}"), ("skiko.wasm", "wasm")] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let klib = dir.path().join("skiko-wasm-js-0.150.1.klib");
+        let node = |artifact: &str, file: &Path| ResolvedNode {
+            module: ModuleId::new("org.jetbrains.skiko", artifact),
+            version: "0.150.1".into(),
+            files: vec![file.to_path_buf()],
+            dependencies: Vec::new(),
+        };
+        let resolution = Resolution { roots: Vec::new(), nodes: vec![node("skiko-wasm-js", &klib), node("skiko-js-wasm-runtime", &jar)] };
+        let shipments = runtime_jars(&resolution).unwrap();
+        assert_eq!(shipments.len(), 1, "a klib ships nothing");
+        assert_eq!(shipments[0].owner, "org.jetbrains.skiko:skiko-js-wasm-runtime:0.150.1");
+        let files: Vec<&str> = shipments[0].files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(files, ["skiko.mjs", "skiko.wasm"]);
+
+        // The processed `composeResources/` of a Compose app keep their paths.
+        let resources = dir.path().join("resources");
+        std::fs::create_dir_all(resources.join("composeResources/app.res/values")).unwrap();
+        std::fs::write(resources.join("composeResources/app.res/values/strings.cvr"), "string|a|Yg==\n").unwrap();
+        let shipment = from_dir("the app's composeResources/", &resources);
+        assert_eq!(shipment.files[0].name, "composeResources/app.res/values/strings.cvr");
     }
 
     #[test]

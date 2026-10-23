@@ -38,6 +38,34 @@ impl NewOptions {
         self.frameworks.iter().any(|f| f == framework)
     }
 
+    /// The options with the presets of `--with` replaced by what they stand for: `compose-multiplatform`
+    /// is Compose on the JVM (desktop) and Wasm (browser) targets, besides the targets already given.
+    pub fn with_presets(&self) -> NewOptions {
+        let mut opts = self.clone();
+        if let Some(i) = opts.frameworks.iter().position(|f| f == COMPOSE_MULTIPLATFORM) {
+            opts.frameworks.remove(i);
+            opts.frameworks.retain(|f| f != COMPOSE_MULTIPLATFORM);
+            if !opts.has("compose") {
+                opts.frameworks.insert(i, "compose".to_owned());
+            }
+            for target in [TargetKind::Jvm, TargetKind::Wasm] {
+                if !opts.targets.contains(&target) {
+                    opts.targets.push(target);
+                }
+            }
+            opts.targets.sort_by_key(|t| TargetKind::ALL.iter().position(|a| a == t));
+        }
+        opts
+    }
+
+    /// Whether the project shares a Compose `App()` in `src/` between targets, each with its own entry
+    /// point in `src-<target>/`, rather than the single-target templates (a desktop `main`, an activity).
+    fn compose_multiplatform(&self) -> bool {
+        self.has("compose")
+            && (self.targets.iter().any(|t| matches!(t, TargetKind::Wasm | TargetKind::Native))
+                || (self.targets.contains(&TargetKind::Jvm) && self.targets.contains(&TargetKind::Android)))
+    }
+
     /// The Kotlin package of the generated code, e.g. `com.example.my_app`.
     /// Segments that are Kotlin or Java keywords get a `_` suffix (`class` becomes `class_`).
     pub fn package(&self) -> String {
@@ -54,8 +82,8 @@ impl NewOptions {
             bail!("at least one target is required");
         }
         for f in &self.frameworks {
-            if !FRAMEWORK_NAMES.contains(&f.as_str()) {
-                bail!("unknown framework `{f}` (available: {})", FRAMEWORK_NAMES.join(", "));
+            if !FRAMEWORK_NAMES.contains(&f.as_str()) && !PRESETS.contains(&f.as_str()) {
+                bail!("unknown framework `{f}` (available: {}, and the preset {})", FRAMEWORK_NAMES.join(", "), PRESETS.join(", "));
             }
         }
         let jvm_only = ["spring-boot", "lombok"];
@@ -65,8 +93,8 @@ impl NewOptions {
                 bail!("`{f}` only supports the jvm and android targets");
             }
         }
-        if self.has("compose") && self.targets.iter().any(|t| matches!(t, TargetKind::Wasm | TargetKind::Native)) {
-            bail!("`compose` is supported on the jvm (desktop) and android targets");
+        if self.has("compose") && self.lib && self.targets.iter().any(|t| matches!(t, TargetKind::Wasm | TargetKind::Native)) {
+            bail!("the Compose templates of the wasm and native targets are apps (a web page, an iOS framework); drop --lib");
         }
         if self.has("spring-boot") && self.has("ktor") {
             bail!("pick either `spring-boot` or `ktor`, not both");
@@ -80,6 +108,12 @@ impl NewOptions {
         Ok(())
     }
 }
+
+/// The `--with` value that sets up Compose Multiplatform: see [`NewOptions::with_presets`].
+pub const COMPOSE_MULTIPLATFORM: &str = "compose-multiplatform";
+
+/// The values of `--with` that stand for frameworks and targets together.
+pub const PRESETS: &[&str] = &[COMPOSE_MULTIPLATFORM];
 
 /// Kotlin hard keywords plus Java keywords and literals: none of them can be a
 /// package segment in the generated Kotlin (or, with Lombok and Android, Java) code.
@@ -183,6 +217,18 @@ pub fn target_section(target: TargetKind, lib: bool, namespace: &str) -> String 
     }
 }
 
+/// [`target_section`], or with Compose the tables its templates need: Compose for Web draws on a
+/// page, and Compose for iOS is a framework for an Xcode project.
+pub fn compose_target_section(target: TargetKind, lib: bool, namespace: &str, compose: bool) -> String {
+    match target {
+        TargetKind::Wasm if compose => "[target.wasm]\nenvironment = \"browser\"\n".to_owned(),
+        TargetKind::Native if compose => {
+            "[target.native]\nplatforms = [\"ios_arm64\", \"ios_simulator_arm64\"]\nkind = \"framework\"\n".to_owned()
+        }
+        _ => target_section(target, lib, namespace),
+    }
+}
+
 pub fn manifest(opts: &NewOptions) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "[package]");
@@ -198,7 +244,8 @@ pub fn manifest(opts: &NewOptions) -> String {
     let jvm_only = opts.targets == [TargetKind::Jvm];
     if !jvm_only {
         for &target in &opts.targets {
-            let _ = write!(s, "\n{}", target_section(target, opts.lib, &opts.package()));
+            let section = compose_target_section(target, opts.lib, &opts.package(), opts.has("compose"));
+            let _ = write!(s, "\n{section}");
         }
     }
     if !opts.frameworks.is_empty() {
@@ -229,6 +276,117 @@ fn gitignore() -> String {
 /// Whether `src/Main.kt` comes from a framework's own template rather than the plain one.
 fn framework_main(opts: &NewOptions) -> bool {
     opts.has("spring-boot") || opts.has("ktor") || (opts.has("compose") && opts.targets.contains(&TargetKind::Jvm))
+}
+
+/// The files of a Compose Multiplatform project: the `App()` composable in `src/App.kt`, which every
+/// target shows, and the entry point of each target in `src-<target>/`.
+fn compose_multiplatform_files(opts: &NewOptions) -> Vec<TemplateFile> {
+    let pkg = opts.package();
+    let mut files = vec![file(
+        "src/App.kt",
+        format!(
+            r#"package {pkg}
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+
+fun greeting(name: String) = "Hello, $name!"
+
+/** The app's UI, shared by every target. */
+@Composable
+fun App() {{
+    MaterialTheme {{
+        var clicks by remember {{ mutableStateOf(0) }}
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {{
+            Text(greeting("Compose"))
+            Button(onClick = {{ clicks++ }}) {{ Text("Clicked $clicks times") }}
+        }}
+    }}
+}}
+"#
+        ),
+    )];
+    if opts.targets.contains(&TargetKind::Jvm) {
+        files.push(file(
+            "src-jvm/Main.kt",
+            format!(
+                r#"package {pkg}
+
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.application
+
+fun main() =
+    application {{
+        Window(onCloseRequest = ::exitApplication, title = "{name}") {{
+            App()
+        }}
+    }}
+
+// `kargo preview` renders this into target/preview/.
+@Preview
+@Composable
+fun AppPreview() {{
+    App()
+}}
+"#,
+                name = opts.name
+            ),
+        ));
+    }
+    if opts.targets.contains(&TargetKind::Wasm) {
+        files.push(file(
+            "src-wasm/Main.kt",
+            format!(
+                r#"package {pkg}
+
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.window.ComposeViewport
+import kotlinx.browser.document
+
+// `kargo run -t wasm` serves the page at http://127.0.0.1:8080/.
+@OptIn(ExperimentalComposeUiApi::class)
+fun main() {{
+    ComposeViewport(document.body!!) {{
+        App()
+    }}
+}}
+"#
+            ),
+        ));
+    }
+    if opts.targets.contains(&TargetKind::Native) {
+        files.push(file(
+            "src-native/MainViewController.kt",
+            format!(
+                r#"package {pkg}
+
+import androidx.compose.ui.window.ComposeUIViewController
+import platform.UIKit.UIViewController
+
+// Swift shows it with `MainViewControllerKt.MainViewController()`; see the iOS section of the Compose guide.
+fun MainViewController(): UIViewController = ComposeUIViewController {{ App() }}
+"#
+            ),
+        ));
+    }
+    files
 }
 
 /// The Ktor template's `resources/logback.xml`. Without a configuration Logback logs everything at
@@ -443,7 +601,23 @@ pub(crate) fn android_files(opts: &NewOptions, use_greeting: bool) -> Vec<Templa
             name = opts.name
         ),
     ));
-    let activity = if opts.has("compose") {
+    let activity = if opts.compose_multiplatform() {
+        format!(
+            r#"package {pkg}
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+
+class MainActivity : ComponentActivity() {{
+    override fun onCreate(savedInstanceState: Bundle?) {{
+        super.onCreate(savedInstanceState)
+        setContent {{ App() }}
+    }}
+}}
+"#
+        )
+    } else if opts.has("compose") {
         format!(
             r#"package {pkg}
 
@@ -486,17 +660,22 @@ class MainActivity : Activity() {{
 
 /// All files of a new project.
 pub fn template(opts: &NewOptions) -> Result<Vec<TemplateFile>> {
+    let opts = &opts.with_presets();
     opts.validate()?;
     let mut files = vec![file(MANIFEST_NAME, manifest(opts)), file(".gitignore", gitignore())];
 
     let android_only = opts.targets == [TargetKind::Android];
-    let mut main = main_source(opts);
-    if android_only && !opts.lib {
-        // Android apps start from an Activity, not `main`.
-        let lib_opts = NewOptions { lib: true, ..opts.clone() };
-        main = main_source(&lib_opts);
+    if opts.compose_multiplatform() {
+        files.extend(compose_multiplatform_files(opts));
+    } else {
+        let mut main = main_source(opts);
+        if android_only && !opts.lib {
+            // Android apps start from an Activity, not `main`.
+            let lib_opts = NewOptions { lib: true, ..opts.clone() };
+            main = main_source(&lib_opts);
+        }
+        files.push(file("src/Main.kt", main));
     }
-    files.push(file("src/Main.kt", main));
     if opts.has("serialization") && !framework_main(opts) {
         files.push(file("src/Greeting.kt", serializable_source(opts)));
     }
@@ -758,8 +937,42 @@ class SampleBench"
         assert!(template(&NewOptions { group: "com..x".into(), ..opts("a") }).is_err());
         assert!(template(&NewOptions { frameworks: vec!["rails".into()], ..opts("a") }).is_err());
         assert!(template(&NewOptions { frameworks: vec!["spring-boot".into()], targets: vec![TargetKind::Native], ..opts("a") }).is_err());
-        assert!(template(&NewOptions { frameworks: vec!["compose".into()], targets: vec![TargetKind::Wasm], ..opts("a") }).is_err());
+        let compose_lib = NewOptions { frameworks: vec!["compose".into()], targets: vec![TargetKind::Wasm], lib: true, ..opts("a") };
+        assert!(template(&compose_lib).is_err());
         assert!(template(&NewOptions { targets: vec![], ..opts("a") }).is_err());
+    }
+
+    #[test]
+    fn compose_multiplatform_preset() {
+        let o = NewOptions { frameworks: vec![COMPOSE_MULTIPLATFORM.into()], ..opts("cmp") };
+        let files = template(&o).unwrap();
+        let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string().replace('\\', "/")).collect();
+        for path in ["src/App.kt", "src-jvm/Main.kt", "src-wasm/Main.kt", "tests/GreetingTest.kt"] {
+            assert!(paths.iter().any(|p| p == path), "{path} is missing from {paths:?}");
+        }
+        assert!(!paths.iter().any(|p| p == "src/Main.kt"), "{paths:?}");
+        let m = Manifest::parse(&files[0].contents).unwrap();
+        assert_eq!(m.targets.enabled(), [TargetKind::Jvm, TargetKind::Wasm]);
+        assert_eq!(m.targets.wasm.unwrap().environment, kargo_manifest::WasmEnvironment::Browser);
+        assert!(m.frameworks.compose.is_some());
+        let contents = |path: &str| &files.iter().find(|f| f.path == Path::new(path)).unwrap().contents;
+        assert!(contents("src/App.kt").contains("fun App()"));
+        assert!(contents("src-jvm/Main.kt").contains("@Preview") && contents("src-jvm/Main.kt").contains("App()"));
+        assert!(contents("src-wasm/Main.kt").contains("ComposeViewport(document.body!!)"));
+
+        // The preset adds to the targets asked for; Native becomes an iOS framework, Android shows App().
+        let all = NewOptions { targets: vec![TargetKind::Android, TargetKind::Native], ..o.clone() };
+        let files = template(&all).unwrap();
+        let m = Manifest::parse(&files[0].contents).unwrap();
+        assert_eq!(m.targets.enabled(), [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Native, TargetKind::Android]);
+        let native = m.targets.native.unwrap();
+        assert_eq!(
+            (native.platforms, native.kind),
+            (vec!["ios_arm64".to_owned(), "ios_simulator_arm64".to_owned()], kargo_manifest::NativeKind::Framework)
+        );
+        let activity = &files.iter().find(|f| f.path == Path::new("src-android/MainActivity.kt")).unwrap().contents;
+        assert!(activity.contains("setContent { App() }"), "{activity}");
+        assert!(files.iter().any(|f| f.path == Path::new("src-native/MainViewController.kt")));
     }
 
     #[test]

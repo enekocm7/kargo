@@ -429,7 +429,12 @@ impl<'a> BuildContext<'a> {
 
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {
         let manifest = self.ws.manifest();
-        let contributions = builtins::contributions(manifest, target, self.ws.root())?;
+        let mut contributions = builtins::contributions(manifest, target, self.ws.root())?;
+        if let Some(compose) = &manifest.frameworks.compose
+            && let Some(plugin) = contributions.plugins.iter_mut().find(|p| p.id.as_deref() == Some(builtins::COMPOSE_PLUGIN_ID))
+        {
+            plugin.options.extend(builtins::compose_compiler_options(compose, self.ws.root(), &self.ws.work_dir("compose"), target));
+        }
         let user = with_profile_dependencies(manifest.dependencies_for(target), &self.ws.profile(&self.profile)?.dependencies);
         let mut all = merge_deps(&user, &contributions.dependencies);
         let mut dev_all = merge_deps(&manifest.dev_dependencies, &contributions.dev_dependencies);

@@ -703,7 +703,12 @@
                 "version": { "type": "string", "default": "1.12.1" },
                 "material3": { "description": "Add Material 3.", "type": "boolean", "default": true },
                 "resources-package": { "description": "The package of the `Res` class generated from composeResources/. Default: <group>.<name>.generated.resources.", "type": "string", "examples": ["com.example.app.res"] },
-                "public-resources": { "description": "Make `Res` and its accessors public instead of internal.", "type": "boolean", "default": false }
+                "public-resources": { "description": "Make `Res` and its accessors public instead of internal.", "type": "boolean", "default": false },
+                "stability-config": { "description": "Stability configuration files of the Compose compiler, relative to the package.", "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "examples": ["compose-stability.conf"] },
+                "strong-skipping": { "description": "Strong skipping mode of the Compose compiler.", "type": "boolean", "default": true },
+                "feature-flags": { "description": "Compose compiler feature flags; prefix one with `-` to disable it.", "type": "array", "items": { "type": "string", "enum": ["StrongSkipping", "-StrongSkipping", "IntrinsicRemember", "-IntrinsicRemember", "OptimizeNonSkippingGroups", "-OptimizeNonSkippingGroups", "PausableComposition", "-PausableComposition"] } },
+                "metrics": { "description": "Write the Compose compiler's metrics to target/compose/<target>/metrics.", "type": "boolean", "default": false },
+                "reports": { "description": "Write the Compose compiler's stability reports to target/compose/<target>/reports.", "type": "boolean", "default": false }
               }
             },
             { "$ref": "#/definitions/inherit" }

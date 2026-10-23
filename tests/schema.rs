@@ -7,8 +7,8 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use kargo_manifest::{
-    BENCH_TIME_UNITS, BUILTIN_GENERATORS, BenchMode, GeneratedKind, Hook, InstallerType, Manifest, PackageManager, TargetKind, TaskShell,
-    WorkspaceManifest,
+    BENCH_TIME_UNITS, BUILTIN_GENERATORS, BenchMode, COMPOSE_FEATURE_FLAGS, GeneratedKind, Hook, InstallerType, Manifest, PackageManager,
+    TargetKind, TaskShell, WorkspaceManifest,
 };
 
 fn schema() -> Value {
@@ -228,6 +228,12 @@ fn schema_enums_match_kargo() {
     assert_eq!(enum_values(&generate["builtin"]), names(BUILTIN_GENERATORS.to_vec()));
     assert_eq!(enum_values(&generate["shell"]), names(TaskShell::ALL.iter().map(|s| s.as_str()).collect()));
     assert_eq!(enum_values(&generate["targets"]["items"]), names(TargetKind::ALL.iter().map(|t| t.as_str()).collect()));
+    let compose = root["definitions"]["frameworks"]["properties"]["compose"]["anyOf"]
+        .as_array()
+        .and_then(|any| any.iter().find(|n| n.get("properties").is_some()))
+        .expect("the options of [frameworks.compose]");
+    let flags: Vec<String> = COMPOSE_FEATURE_FLAGS.iter().flat_map(|f| [f.to_string(), format!("-{f}")]).collect();
+    assert_eq!(enum_values(&compose["properties"]["feature-flags"]["items"]), flags);
     let mut targets = property_names(&props["target"]);
     let mut expected: Vec<&str> = TargetKind::ALL.iter().map(|t| t.as_str()).collect();
     targets.sort();

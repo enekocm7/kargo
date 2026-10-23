@@ -666,7 +666,7 @@ local = "maven-local"
 [frameworks]
 serialization = true      # or { version, formats = ["json", "cbor", "protobuf", "properties", "hocon", "core"] }
 coroutines = true         # or a version string: "1.11.0"
-compose = true            # or { version, material3 = true, resources-package, public-resources = false }
+compose = true            # or { version, material3 = true, resources-package, public-resources = false, stability-config, strong-skipping = true, feature-flags = [], metrics = false, reports = false }
 ktor = { server = "netty", client = "cio", server-plugins = [], client-plugins = [], json = true, version = "3.6.0" }
 spring-boot = true        # or { version, starters = ["web"], jpa = false }
 lombok = true             # or { version, config = "lombok.config" }
@@ -676,6 +676,20 @@ benchmark = true          # or { version = "0.5.0" }
 Each can also be `false`. Default versions: serialization 1.11.0, coroutines 1.11.0, Compose 1.12.1 (Material 3 1.9.0), Ktor 3.6.0, Spring Boot 4.1.1, Lombok 1.18.48, kotlinx-benchmark 0.5.0 (with JMH 1.37).
 
 For Compose, `resources-package` is the package of the `Res` class generated from `composeResources/` (default `<group>.<name>.generated.resources`, in lower case), and `public-resources = true` makes `Res` and its accessors `public` instead of `internal`. See [Compose resources](../../guides/compose/#resources).
+
+The other Compose keys are options of the Compose compiler, on the JVM and Android targets:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `stability-config` | none | A stability configuration file, or a list of them, relative to the package |
+| `strong-skipping` | `true` | Strong skipping mode |
+| `feature-flags` | `[]` | `StrongSkipping`, `IntrinsicRemember`, `OptimizeNonSkippingGroups`, `PausableComposition`; a leading `-` disables one. Don't combine `StrongSkipping` with `strong-skipping` |
+| `metrics` | `false` | Write the compiler's metrics to `target/compose/<target>/metrics/` |
+| `reports` | `false` | Write the compiler's stability reports to `target/compose/<target>/reports/` |
+
+See [Compose compiler options](../../guides/compose/#compiler-options).
+
+Compose works on the jvm (desktop) and android targets, on wasm with `environment = "browser"`, and on native with iOS `platforms` (`ios_arm64`, `ios_simulator_arm64`, `ios_x64`) and `kind = "framework"`. Other Wasm environments and Native platforms are errors. See [Compose](../../guides/compose/).
 
 See [Built-in frameworks](../../guides/frameworks/).
 

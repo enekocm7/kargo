@@ -863,6 +863,25 @@ pub struct ComposeConfig {
     pub resources_package: Option<String>,
     /// Make `Res` and its accessors `public` instead of `internal`, so other modules can use them.
     pub public_resources: Option<bool>,
+    /// Stability configuration files of the Compose compiler, relative to the package.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub stability_config: Vec<String>,
+    /// Strong skipping mode (default true, the Compose compiler's own default).
+    pub strong_skipping: Option<bool>,
+    /// Compose compiler feature flags such as `OptimizeNonSkippingGroups`; a leading `-` disables one.
+    #[serde(default)]
+    pub feature_flags: Vec<String>,
+    /// Write the Compose compiler's metrics to `target/compose/<target>/metrics`.
+    pub metrics: Option<bool>,
+    /// Write the Compose compiler's stability reports to `target/compose/<target>/reports`.
+    pub reports: Option<bool>,
+}
+
+/// The feature flags of the Compose compiler that `[frameworks.compose] feature-flags` accepts.
+pub const COMPOSE_FEATURE_FLAGS: &[&str] = &["StrongSkipping", "IntrinsicRemember", "OptimizeNonSkippingGroups", "PausableComposition"];
+
+fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    OneOrMany::deserialize(deserializer).map(OneOrMany::into_vec)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -1875,6 +1894,27 @@ impl RawManifest {
                 }))
         {
             bail!("[frameworks.compose] `resources-package` must be a Kotlin package name such as \"com.example.res\", got `{package}`");
+        }
+        if let Some(compose) = &frameworks.compose {
+            for flag in &compose.feature_flags {
+                let name = flag.strip_prefix('-').unwrap_or(flag);
+                if !COMPOSE_FEATURE_FLAGS.contains(&name) {
+                    bail!(
+                        "[frameworks.compose] `feature-flags` has unknown flag `{flag}` (expected {}, optionally prefixed with `-` to disable it)",
+                        COMPOSE_FEATURE_FLAGS.join(", ")
+                    );
+                }
+                if name == "StrongSkipping" && compose.strong_skipping.is_some() {
+                    bail!(
+                        "[frameworks.compose] sets both `strong-skipping` and the `StrongSkipping` feature flag; keep only `strong-skipping`"
+                    );
+                }
+            }
+            if let Some(empty) = compose.stability_config.iter().find(|p| p.trim().is_empty()) {
+                bail!(
+                    "[frameworks.compose] `stability-config` has an empty path `{empty}`; list the stability configuration files relative to the package"
+                );
+            }
         }
         // Compose Multiplatform depends on androidx artifacts hosted by Google.
         if frameworks.compose.is_some() && !repositories.iter().any(|r| r.url == kargo_maven::repo::GOOGLE) {

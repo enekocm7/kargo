@@ -10,7 +10,7 @@ use super::local::{self, LocalTarget};
 use crate::env::{EnvOptions, build_config_package, build_config_source};
 use crate::native_interop;
 use crate::warnings;
-use crate::workspace::ProfileKind;
+use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::jar::{JarManifest, manifest_matches, write_jar};
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::ksp::KspRun;
@@ -137,22 +137,34 @@ fn add_generated_source(sources: &mut SourceSet, path: PathBuf) {
     }
 }
 
-/// Generates the `Res` class of `composeResources/` for the JVM target and adds it to the main
-/// sources; [`compose_resources_dir`] holds the files it reads. (Android's comes from `gradle.rs`.)
+/// Generates the `Res` class of `composeResources/` for the JVM, Wasm and Native targets and adds it
+/// to the main sources; [`compose_resources_dir`] holds the files it reads. (Android's comes from `gradle.rs`.)
 fn add_compose_resources(ctx: &BuildContext, target: TargetKind, sources: &mut SourceSet) -> Result<()> {
-    if target != TargetKind::Jvm {
+    if target == TargetKind::Android {
         return Ok(());
     }
-    let out = crate::compose::resources::output_dir(&ctx.ws.output_dir(&ctx.profile, target));
+    let out = compose_resources_out(ctx.ws, &ctx.profile, target);
     if let Some(generated) = crate::compose::resources::generate(ctx.ws.root(), ctx.ws.manifest(), &out)? {
-        add_generated_source(sources, generated.source);
+        // `Res` only uses the common API of the resources runtime, and code in `src/` reads it, so it
+        // goes in the common fragment even when the target has sources of its own.
+        sources.common.push(generated.source);
     }
     Ok(())
 }
 
-/// The resources that the generated `Res` class reads, once [`sources`] wrote them.
-pub fn compose_resources_dir(ctx: &BuildContext) -> PathBuf {
-    crate::compose::resources::output_dir(&ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm)).join("resources")
+/// The resources that the generated `Res` class of `target` reads, once [`sources`] wrote them.
+pub fn compose_resources_dir(ctx: &BuildContext, target: TargetKind) -> PathBuf {
+    compose_resources_out(ctx.ws, &ctx.profile, target).join("resources")
+}
+
+/// Where the `Res` class of `target` and its resources are generated: under the target's output
+/// directory, except on Wasm, whose output directory is emptied before each compilation
+/// (`target/<profile>/wasm-generated/compose-resources` there).
+pub fn compose_resources_out(ws: &Workspace, profile: &ProfileKind, target: TargetKind) -> PathBuf {
+    match target {
+        TargetKind::Wasm => ws.profile_dir(profile).join("wasm-generated").join("compose-resources"),
+        _ => crate::compose::resources::output_dir(&ws.output_dir(profile, target)),
+    }
 }
 
 /// Writes the `BuildConfig` object of `[env] expose` into the build directory and adds it to the
@@ -434,6 +446,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let manifest = ctx.ws.manifest();
     let jvm = jvm_settings(ctx)?;
     let setup = ctx.setup(TargetKind::Jvm)?;
+    crate::builtins::check_compose_stability_config(manifest, ctx.ws.root())?;
     // On a cold cache the JDK, the compiler and the dependencies all download at once.
     let (toolchain, classpaths) = super::join(
         || -> Result<_> { Ok((ctx.jvm_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
@@ -453,7 +466,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"])?;
     let mut resources = vec![ctx.ws.resources()];
     resources.extend(crate::generate::resource_dirs(ctx.ws, &ctx.profile, TargetKind::Jvm));
-    let compose_resources = compose_resources_dir(ctx);
+    let compose_resources = compose_resources_dir(ctx, TargetKind::Jvm);
     if compose_resources.is_dir() {
         resources.push(compose_resources);
     }
@@ -567,10 +580,16 @@ pub fn wasm_resolution(ctx: &BuildContext, setup: &TargetSetup, include_dev: boo
 }
 
 /// Every klib the Wasm sources compile against: path dependencies first, then Maven libraries.
+/// A jar in the resolution is not a klib but files for the page, such as Skiko's runtime (see
+/// [`crate::web_resources`]), so it is left out.
 pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Vec<PathBuf>> {
     let mut libraries = local::artifacts(ctx, LocalTarget::Wasm, &ALL_SCOPES, include_dev)?;
-    libraries.extend(wasm_resolution(ctx, setup, include_dev)?.files());
+    libraries.extend(wasm_resolution(ctx, setup, include_dev)?.files().into_iter().filter(|f| !is_jar(f)));
     Ok(libraries)
+}
+
+fn is_jar(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jar"))
 }
 
 pub(crate) const ALL_SCOPES: [Scope; 3] = [Scope::Compile, Scope::Runtime, Scope::Provided];
@@ -941,7 +960,21 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     for b in built {
         builds.extend(b?);
     }
+    install_ios_compose_resources(ctx)?;
     Ok(builds)
+}
+
+/// Copies the processed `composeResources/` of a Compose iOS framework to
+/// `target/<profile>/native/compose-resources`, the folder the app bundle needs under that name:
+/// Compose for iOS reads its resources from `compose-resources/` in the app's main bundle.
+fn install_ios_compose_resources(ctx: &BuildContext) -> Result<()> {
+    let dest = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join("compose-resources");
+    let generated = compose_resources_dir(ctx, TargetKind::Native);
+    kargo_util::fs::remove_dir_all_if_exists(&dest)?;
+    if crate::compose::enabled(ctx.ws.manifest()) && generated.is_dir() {
+        kargo_util::fs::copy_dir(&generated, &dest)?;
+    }
+    Ok(())
 }
 
 /// The slice of an XCFramework a Konan target's framework goes into: the devices or the

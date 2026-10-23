@@ -654,6 +654,20 @@ fn framework_toggles() {
     assert!(parse_err(&with("coroutines = 3")).contains("coroutines"));
     assert!(parse_err(&with("ktor = true")).contains("server"));
     assert!(Manifest::parse(&with("compose = { colour = 1 }")).is_err());
+    let options = parse(&with(
+        "compose = { stability-config = [\"a.conf\", \"b.conf\"], strong-skipping = false, feature-flags = [\"-IntrinsicRemember\"], metrics = true }",
+    ));
+    let compose = options.frameworks.compose.as_ref().unwrap();
+    assert_eq!(compose.stability_config, ["a.conf", "b.conf"]);
+    assert_eq!((compose.strong_skipping, compose.metrics, compose.reports), (Some(false), Some(true), None));
+    assert_eq!(compose.feature_flags, ["-IntrinsicRemember"]);
+    let one = parse(&with("compose = { stability-config = \"stability.conf\" }"));
+    assert_eq!(one.frameworks.compose.as_ref().unwrap().stability_config, ["stability.conf"]);
+    assert!(parse_err(&with("compose = { feature-flags = [\"Turbo\"] }")).contains("unknown flag `Turbo`"));
+    assert!(
+        parse_err(&with("compose = { strong-skipping = true, feature-flags = [\"-StrongSkipping\"] }"))
+            .contains("keep only `strong-skipping`")
+    );
 }
 
 #[test]

@@ -7,6 +7,7 @@ pub mod browser;
 pub mod download;
 pub mod graalvm;
 pub mod gradle;
+pub mod jbr;
 pub mod jdk;
 pub mod jdks;
 pub mod kotlin;

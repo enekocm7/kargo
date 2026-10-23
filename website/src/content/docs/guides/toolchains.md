@@ -36,6 +36,7 @@ With `--offline` or `--locked`, Kargo never chooses and downloads a JDK by itsel
 | JDK (pinned `[toolchain] jdk = "21"`) | The same commands | Yes, on first use. Not with `--offline` |
 | GraalVM (`[toolchain] graalvm`) | `package --format native-image`, `run --native-agent` | Yes, when pinned. With `system`, Kargo looks on `GRAALVM_HOME`, `JAVA_HOME` and `PATH` |
 | GraalVM reachability metadata | `package --format native-image` | Yes |
+| JetBrains Runtime | `run --hot-reload` | Yes, the JBR of the project's Java version, into `~/.kargo/toolchains/jbr/`. Offline, the app runs on the project's JDK instead. See [Hot reload](../compose/#hot-reload) |
 | Kotlin/Native | Builds of the `native` target | Yes |
 | Gradle | Builds of the `android` target without a `gradlew` | Yes |
 | Kotlin LSP, kotlin-language-server | `lsp --server kotlin-lsp`, `lsp --server kls` | Yes |

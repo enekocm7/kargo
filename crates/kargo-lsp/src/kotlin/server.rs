@@ -224,6 +224,7 @@ pub fn model_from_metadata(meta: &Value) -> Model {
         direct.push(deps);
         model.manifests.push(package["manifest"].as_str().map(PathBuf::from).unwrap_or_default());
         let mut platforms = Platforms::NONE;
+        let mut has_res = false;
         for target in package["targets"].as_array().into_iter().flatten() {
             let kind = target["kind"].as_str().unwrap_or_default().to_owned();
             platforms = platforms.union(Platforms::of_target(&kind));
@@ -264,8 +265,11 @@ pub fn model_from_metadata(meta: &Value) -> Model {
                     model.roots.push((PathBuf::from(dir), set));
                 }
             }
-            // The generated `Res` class of Compose resources, which code in `src/` uses.
-            if let Some(dir) = target["compose-resources"]["source-root"].as_str() {
+            // The generated `Res` class of Compose resources, which code in `src/` uses. Every target has the
+            // same one, so the first is enough.
+            if let Some(dir) = target["compose-resources"]["source-root"].as_str()
+                && !std::mem::replace(&mut has_res, true)
+            {
                 let set = SourceSet { package: pi, kind: SetKind::Main, target: None };
                 model.roots.push((PathBuf::from(dir), set));
             }

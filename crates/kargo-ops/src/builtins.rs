@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use kargo_manifest::{Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{ComposeConfig, Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::ModuleId;
 
 pub const COROUTINES_VERSION: &str = "1.11.0";
@@ -113,6 +113,62 @@ pub fn compose_desktop_classifier() -> Result<&'static str> {
     })
 }
 
+/// The id of the Compose compiler plugin, the prefix of its `-P` options.
+pub const COMPOSE_PLUGIN_ID: &str = "androidx.compose.compiler.plugins.kotlin";
+
+/// The Compose compiler options of `[frameworks.compose]` for `target`: its stability configuration
+/// files (relative to `project_dir`), feature flags, and metrics and reports under `out_dir/<target>`.
+pub fn compose_compiler_options(compose: &ComposeConfig, project_dir: &Path, out_dir: &Path, target: TargetKind) -> Vec<(String, String)> {
+    let mut options = Vec::new();
+    for file in &compose.stability_config {
+        options.push(("stabilityConfigurationPath".to_owned(), kargo_util::process::slash(&project_dir.join(file))));
+    }
+    if let Some(strong) = compose.strong_skipping {
+        options.push(("featureFlag".to_owned(), if strong { "StrongSkipping" } else { "-StrongSkipping" }.to_owned()));
+    }
+    for flag in &compose.feature_flags {
+        options.push(("featureFlag".to_owned(), flag.clone()));
+    }
+    for (enabled, key, dir) in [(compose.metrics, "metricsDestination", "metrics"), (compose.reports, "reportsDestination", "reports")] {
+        if enabled.unwrap_or(false) {
+            options.push((key.to_owned(), kargo_util::process::slash(&out_dir.join(target.as_str()).join(dir))));
+        }
+    }
+    options
+}
+
+/// Fails unless every stability configuration file of `[frameworks.compose]` exists. Checked before
+/// compiling rather than in [`compose_compiler_options`], so `kargo metadata` works without them.
+pub fn check_compose_stability_config(manifest: &Manifest, project_dir: &Path) -> Result<()> {
+    for file in manifest.frameworks.compose.iter().flat_map(|c| &c.stability_config) {
+        let path = project_dir.join(file);
+        if !path.is_file() {
+            bail!(
+                "the Compose stability configuration file `{}` of [frameworks.compose] `stability-config` does not exist; create it or remove it from the list",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The Kotlin/Native platforms Compose Multiplatform builds iOS apps for.
+pub const COMPOSE_IOS_PLATFORMS: [&str; 3] = ["ios_arm64", "ios_simulator_arm64", "ios_x64"];
+
+/// The Compose libraries of the Wasm and iOS targets, which resolve to their platform's variant:
+/// the runtime, foundation and UI, Material 3 unless disabled, and the resources runtime of `Res`.
+fn multiplatform_compose(c: &mut Contributions, compose: &ComposeConfig, version: &str, project_dir: &Path) {
+    for module in ["org.jetbrains.compose.runtime:runtime", "org.jetbrains.compose.foundation:foundation", "org.jetbrains.compose.ui:ui"] {
+        c.dependencies.push(dep(module, Some(version)));
+    }
+    if compose.material3.unwrap_or(true) {
+        c.dependencies.push(dep("org.jetbrains.compose.material3:material3", Some(COMPOSE_MATERIAL3_VERSION)));
+    }
+    if crate::compose::resources::present(project_dir) {
+        c.dependencies.push(dep(crate::compose::resources::RUNTIME, Some(version)));
+    }
+}
+
 /// The group of Jackson's Kotlin module in the Spring Boot BOM of version `spring`: Spring Boot 4
 /// moved to Jackson 3 (`tools.jackson`), earlier versions manage the `com.fasterxml.jackson` one.
 pub fn spring_jackson_group(spring: &str) -> &'static str {
@@ -178,7 +234,7 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
     }
 
     if let Some(compose) = &fw.compose {
-        c.plugins.push(PluginSpec::kotlin("kotlin-compose-compiler-plugin-embeddable", "androidx.compose.compiler.plugins.kotlin"));
+        c.plugins.push(PluginSpec::kotlin("kotlin-compose-compiler-plugin-embeddable", COMPOSE_PLUGIN_ID));
         let v = compose.version.as_deref().unwrap_or(COMPOSE_VERSION);
         match target {
             TargetKind::Jvm => {
@@ -195,11 +251,29 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
                     c.dependencies.push(dep(crate::compose::resources::RUNTIME, Some(v)));
                 }
             }
-            TargetKind::Wasm => bail!(
-                "Compose for Web (Wasm) needs the Compose Gradle plugin's resource pipeline and is not supported by Kargo's direct Wasm backend; use the JVM (desktop) or Android target for Compose"
-            ),
+            TargetKind::Wasm => {
+                let env = manifest.targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
+                if env != WasmEnvironment::Browser {
+                    bail!(
+                        "Compose for Web draws on a browser canvas; set `environment = \"browser\"` in [target.wasm] (it is `{}`)",
+                        env.as_str()
+                    );
+                }
+                multiplatform_compose(&mut c, compose, v, project_dir);
+            }
             TargetKind::Native => {
-                bail!("Compose is not available for Kotlin/Native console targets; use the JVM (desktop) or Android target")
+                let native = manifest.targets.native.as_ref();
+                let platforms = native.map(|n| n.platforms.clone()).unwrap_or_default();
+                if let Some(other) = platforms.iter().find(|p| !COMPOSE_IOS_PLATFORMS.contains(&p.as_str())) {
+                    bail!(
+                        "Compose on Kotlin/Native builds iOS apps, so [target.native] `platforms` can only list {}; `{other}` is not one",
+                        COMPOSE_IOS_PLATFORMS.join(", ")
+                    );
+                }
+                if native.is_some_and(|n| n.kind != kargo_manifest::NativeKind::Framework) {
+                    bail!("Compose for iOS is built as a framework for an Xcode project; set `kind = \"framework\"` in [target.native]");
+                }
+                multiplatform_compose(&mut c, compose, v, project_dir);
             }
             TargetKind::Android => {}
         }
@@ -425,6 +499,66 @@ mod tests {
         assert!(coords(&c.dependencies).contains(&"org.jetbrains.kotlinx:kotlinx-serialization-cbor".to_owned()));
         let bad = manifest("[frameworks]\nserialization = { formats = [\"xml\"] }\n");
         assert!(contributions(&bad, TargetKind::Jvm, Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn compose_for_web_and_ios() {
+        let web = manifest("[target.wasm]\nenvironment = \"browser\"\n[frameworks]\ncompose = { material3 = false }\n");
+        let c = contributions(&web, TargetKind::Wasm, Path::new(".")).unwrap();
+        let deps = coords(&c.dependencies);
+        for module in
+            ["org.jetbrains.compose.runtime:runtime", "org.jetbrains.compose.foundation:foundation", "org.jetbrains.compose.ui:ui"]
+        {
+            assert!(deps.contains(&module.to_owned()), "{deps:?}");
+        }
+        assert!(!deps.iter().any(|d| d.contains("material3")), "material3 = false");
+        assert_eq!(c.plugins[0].id.as_deref(), Some(COMPOSE_PLUGIN_ID));
+        let node = manifest("[target.wasm]\nenvironment = \"js\"\n[frameworks]\ncompose = true\n");
+        let err = contributions(&node, TargetKind::Wasm, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("environment = \"browser\""), "{err}");
+
+        let ios = manifest(
+            "[target.native]\nplatforms = [\"ios_arm64\", \"ios_simulator_arm64\"]\nkind = \"framework\"\n[frameworks]\ncompose = true\n",
+        );
+        let deps = coords(&contributions(&ios, TargetKind::Native, Path::new(".")).unwrap().dependencies);
+        assert!(deps.contains(&"org.jetbrains.compose.material3:material3".to_owned()), "{deps:?}");
+        let linux = manifest("[target.native]\nplatforms = [\"linux_x64\"]\n[frameworks]\ncompose = true\n");
+        let err = contributions(&linux, TargetKind::Native, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("`linux_x64` is not one"), "{err}");
+        let executable = manifest("[target.native]\nplatforms = [\"ios_arm64\"]\n[frameworks]\ncompose = true\n");
+        let err = contributions(&executable, TargetKind::Native, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("kind = \"framework\""), "{err}");
+    }
+
+    #[test]
+    fn compose_compiler_options_from_the_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("target/compose");
+        let m = manifest("[frameworks]\ncompose = true\n");
+        let compose = m.frameworks.compose.as_ref().unwrap();
+        assert!(compose_compiler_options(compose, dir.path(), &out, TargetKind::Jvm).is_empty(), "none by default");
+
+        std::fs::write(dir.path().join("stability.conf"), "java.time.*\n").unwrap();
+        let m = manifest(
+            "[frameworks]\ncompose = { stability-config = \"stability.conf\", strong-skipping = false, feature-flags = [\"OptimizeNonSkippingGroups\"], metrics = true, reports = true }\n",
+        );
+        let options = compose_compiler_options(m.frameworks.compose.as_ref().unwrap(), dir.path(), &out, TargetKind::Jvm);
+        check_compose_stability_config(&m, dir.path()).unwrap();
+        let slash = |p: &Path| kargo_util::process::slash(p);
+        assert_eq!(
+            options,
+            [
+                ("stabilityConfigurationPath".to_owned(), slash(&dir.path().join("stability.conf"))),
+                ("featureFlag".to_owned(), "-StrongSkipping".to_owned()),
+                ("featureFlag".to_owned(), "OptimizeNonSkippingGroups".to_owned()),
+                ("metricsDestination".to_owned(), slash(&out.join("jvm/metrics"))),
+                ("reportsDestination".to_owned(), slash(&out.join("jvm/reports"))),
+            ]
+        );
+
+        let missing = manifest("[frameworks]\ncompose = { stability-config = [\"stability.conf\", \"missing.conf\"] }\n");
+        let err = check_compose_stability_config(&missing, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("missing.conf"), "{err}");
     }
 
     #[test]

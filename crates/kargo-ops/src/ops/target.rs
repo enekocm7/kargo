@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::new::{NewOptions, android_files, target_section};
+use super::new::{NewOptions, android_files, compose_target_section, target_section};
 use crate::workspace::Workspace;
 use kargo_manifest::edit::ManifestEditor;
 use kargo_manifest::{Manifest, TargetKind};
@@ -117,8 +117,9 @@ pub fn edit(
         editor.add_target(TargetKind::Jvm, &target_section(TargetKind::Jvm, lib, &opts.package()))?;
         materialized_jvm = true;
     }
+    let compose = manifest.frameworks.compose.is_some();
     for &target in &new_targets {
-        editor.add_target(target, &target_section(target, lib, &opts.package()))?;
+        editor.add_target(target, &compose_target_section(target, lib, &opts.package(), compose))?;
     }
     let manifest = ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     Ok(Some(TargetEdit { targets: new_targets, lib, materialized_jvm, manifest }))

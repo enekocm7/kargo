@@ -1497,6 +1497,154 @@ fn compose_compiles() {
     t.kargo("ui").arg("build").assert().success();
 }
 
+#[test]
+fn compose_compiler_options() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["ui", "--with", "compose"]);
+    let path = t.dir.path().join("ui/kargo.toml");
+    let manifest = std::fs::read_to_string(&path).unwrap();
+    assert!(manifest.contains("compose = true"), "{manifest}");
+    let options = r#"compose = { stability-config = "stability.conf", feature-flags = ["OptimizeNonSkippingGroups"], metrics = true, reports = true }"#;
+    std::fs::write(&path, manifest.replace("compose = true", options)).unwrap();
+    t.write("ui/stability.conf", "java.time.*\n");
+    t.kargo("ui").arg("build").assert().success();
+    let files = |dir: &str| -> Vec<String> {
+        std::fs::read_dir(t.dir.path().join("ui/target/compose/jvm").join(dir))
+            .unwrap_or_else(|e| panic!("target/compose/jvm/{dir}: {e}"))
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    let metrics = files("metrics");
+    assert!(metrics.iter().any(|f| f.ends_with("-module.json")), "{metrics:?}");
+    let reports = files("reports");
+    assert!(reports.iter().any(|f| f.ends_with("-composables.txt")), "{reports:?}");
+}
+
+/// Adds a string resource to a `compose-multiplatform` project's shared `App()`.
+fn use_a_compose_string(t: &E2e, project: &str) {
+    t.write(&format!("{project}/composeResources/values/strings.xml"), "<resources><string name=\"title\">From Res</string></resources>\n");
+    let app = t.dir.path().join(project).join("src/App.kt");
+    let source = std::fs::read_to_string(&app).unwrap();
+    let source = source
+        .replace(
+            "import androidx.compose.ui.Modifier\n",
+            &format!("import androidx.compose.ui.Modifier\nimport com.example.{project}.generated.resources.*\nimport org.jetbrains.compose.resources.stringResource\n"),
+        )
+        .replace("            Text(greeting(\"Compose\"))\n", "            Text(greeting(\"Compose\"))\n            Text(stringResource(Res.string.title))\n");
+    std::fs::write(app, source).unwrap();
+}
+
+#[test]
+fn compose_for_web() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["web", "--with", "compose-multiplatform"]);
+    use_a_compose_string(&t, "web");
+    t.kargo("web").args(["build", "-t", "wasm"]).assert().success();
+    let out = t.dir.path().join("web/target/debug/wasm");
+    for file in
+        ["web.mjs", "web.wasm", "skiko.mjs", "skiko.wasm", "composeResources/com.example.web.generated.resources/values/strings.cvr"]
+    {
+        assert!(out.join(file).is_file(), "{file} is missing from {}", out.display());
+    }
+    let page = std::fs::read_to_string(out.join("index.html")).unwrap();
+    assert!(page.contains("overflow: hidden") && !page.contains("is running"), "{page}");
+}
+
+#[test]
+fn compose_preview_renders_png() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["ui", "--with", "compose-multiplatform"]);
+    use_a_compose_string(&t, "ui");
+    t.kargo("ui").args(["preview", "--width", "320", "--height", "200", "--density", "2"]).assert().success();
+    let png = std::fs::read(t.dir.path().join("ui/target/preview/com.example.ui.AppPreview.png")).unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    // The IHDR chunk: the size in pixels is the size in dp times the density.
+    let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    assert_eq!((size(16), size(20)), (640, 400));
+}
+
+/// Needs a display, since the app opens a window: set KARGO_E2E_GUI=1 where there is one.
+#[test]
+fn compose_hot_reload() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_GUI").is_none() {
+        eprintln!("skipping: set KARGO_E2E_GUI=1 (opens a window)");
+        return;
+    }
+    use std::io::BufRead;
+    let t = E2e::new();
+    t.create(&["hot", "--with", "compose-multiplatform"]);
+    let app = t.dir.path().join("hot/src/App.kt");
+    let source = std::fs::read_to_string(&app).unwrap().replace(
+        "        var clicks by remember { mutableStateOf(0) }\n",
+        // The app exits once `stop` exists: on Windows, killing `kargo` would leave the app running.
+        "        var clicks by remember { mutableStateOf(0) }\n        androidx.compose.runtime.SideEffect { println(\"ui: \" + greeting(\"Compose\")) }\n        \
+         androidx.compose.runtime.LaunchedEffect(Unit) {\n            while (!java.io.File(\"stop\").exists()) kotlinx.coroutines.delay(100)\n            \
+         kotlin.system.exitProcess(0)\n        }\n",
+    );
+    std::fs::write(&app, &source).unwrap();
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("kargo"))
+        .current_dir(t.dir.path().join("hot"))
+        .args(["run", "--hot-reload"])
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    for stream in [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stream).lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        });
+    }
+    let wait_for = |needle: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            if let Ok(line) = rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                if line.contains(needle) {
+                    return seen;
+                }
+                seen.push(line);
+            }
+        }
+        panic!("`{needle}` never appeared:\n{}", seen.join("\n"));
+    };
+    wait_for("ui: Hello, Compose!");
+    std::fs::write(&app, source.replace("\"Hello, $name!\"", "shout(\"Hot, $name!\")\n\nfun shout(s: String) = s.uppercase()")).unwrap();
+    let before = wait_for("ui: HOT, COMPOSE!");
+    let after = wait_for("Reloaded");
+    std::fs::write(t.dir.path().join("hot/stop"), "").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(!before.iter().chain(&after).any(|l| l.contains("Running")), "the app reloaded without a restart:\n{before:?}\n{after:?}");
+}
+
+/// Needs macOS with Xcode for the iOS frameworks.
+#[test]
+fn compose_for_ios() {
+    require_e2e!();
+    require_native!();
+    if !cfg!(target_os = "macos") {
+        eprintln!("skipping: Compose for iOS builds on macOS");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["ios", "--with", "compose-multiplatform", "-t", "native"]);
+    use_a_compose_string(&t, "ios");
+    t.kargo("ios").args(["build", "-t", "native"]).assert().success();
+    let out = t.dir.path().join("ios/target/debug/native");
+    assert!(out.join("ios_arm64/ios.framework").is_dir(), "no framework in {}", out.display());
+    assert!(out.join("compose-resources/composeResources/com.example.ios.generated.resources/values/strings.cvr").is_file());
+}
+
 // Kotlin/Native links slowly, so each link gets its own test and they run in parallel.
 
 #[test]

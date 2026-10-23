@@ -111,6 +111,6 @@ class KargoProjectStep(private val base: NewProjectWizardBaseStep) : AbstractNew
 
     companion object {
         val TARGETS = listOf("jvm", "wasm", "native", "android")
-        val FRAMEWORKS = listOf("serialization", "coroutines", "compose", "ktor", "lombok", "spring-boot")
+        val FRAMEWORKS = listOf("serialization", "coroutines", "compose", "compose-multiplatform", "ktor", "lombok", "spring-boot")
     }
 }
