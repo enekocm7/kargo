@@ -474,6 +474,27 @@ fn picks_overloads_by_nullability_and_function_types() {
 }
 
 #[test]
+fn picks_overloads_by_type_arguments_and_their_variance() {
+    let decls = "class Source<out T>(val value: T)\nclass Box<T>(val value: T)\nfun take(list: List<String>): Int = 0\nfun take(list: List<Int>): Long = 0\n";
+    let f = overloads(decls, "val r = take(listOf(1))\n    r$0");
+    assert!(f.hover().contains("Long"), "{}", f.hover());
+    let f = overloads(decls, "val r = take(listOf(\"a\"))\n    r$0");
+    assert!(f.hover().contains("Int"), "{}", f.hover());
+
+    // `out`: a `Source<String>` is a `Source<CharSequence>`, but not a `Source<Int>`.
+    let decls = "class Source<out T>(val value: T)\nfun give(s: Source<CharSequence>): Int = 0\nfun give(s: Source<Int>): Long = 0\n";
+    let f = overloads(decls, "val r = give(Source(\"a\"))\n    r$0");
+    assert!(f.hover().contains("Int"), "{}", f.hover());
+
+    // Invariant: a `Box<String>` is not a `Box<CharSequence>`.
+    let decls = "class Box<T>(val value: T)\nfun keep(b: Box<CharSequence>): Int = 0\nfun keep(b: Box<String>): Long = 0\n";
+    let f = overloads(decls, "val r = keep(Box(\"a\"))\n    r$0");
+    assert!(f.hover().contains("Long"), "{}", f.hover());
+    let f = overloads(decls, "val r = keep(Box<CharSequence>(\"a\"))\n    r$0");
+    assert!(f.hover().contains("Int"), "{}", f.hover());
+}
+
+#[test]
 fn keeps_every_overload_when_the_arguments_are_unknown() {
     let f = overloads("fun log(message: String) {}\nfun log(base: Base) {}\n", "lo$0g(unknown)");
     let (u, tok) = f.token();
@@ -1549,6 +1570,21 @@ fn annotations_against_the_real_spring_web_sources() {
 }
 
 #[test]
+fn smart_casts_to_unrelated_types_keep_both_types() {
+    let decl = "interface Named {\n    fun name(): String\n}\nopen class Shape\nclass Circle : Shape(), Named {\n    override fun name() = \"c\"\n    val radius = 1\n}\n";
+    let labels = |body: &str| fixture(&[("src/Main.kt", &format!("{decl}{body}"))]).labels();
+    // A shape that is also named: the members of both, and not of the class it could be.
+    let l = labels("fun f(shape: Shape) {\n    if (shape is Named) shape.$0\n}\n");
+    assert!(has(&l, "name") && has(&l, "toString") && !has(&l, "radius"), "{l:?}");
+    // A type parameter checked against a class that is not its bound.
+    let l = labels("fun <T : Comparable<T>> f(x: T) {\n    if (x is CharSequence) x.$0\n}\n");
+    assert!(has(&l, "length") && has(&l, "compareTo"), "{l:?}");
+    // A subtype narrows to itself, as before.
+    let l = labels("fun f(shape: Shape) {\n    if (shape is Circle) shape.$0\n}\n");
+    assert!(has(&l, "radius") && has(&l, "name"), "{l:?}");
+}
+
+#[test]
 fn follows_smart_casts() {
     let decls = "open class Shape\nclass Circle(val radius: Int) : Shape()\nclass Square(val side: Int) : Shape()\n";
     let at = |body: &str| fixture(&[("src/Main.kt", &format!("{decls}{body}"))]).labels();
@@ -1683,6 +1719,85 @@ fn uses_upper_bounds_of_type_parameters() {
     assert!(offers("class Box<T : CharSequence>(val v: T) {\n    fun f() = v.$0\n}\n", "length"));
     assert!(!offers("fun <T> f(x: T) {\n    x.$0\n}\n", "length"));
     assert!(offers("fun <T : Comparable<T>> f(x: T) {\n    x.$0\n}\n", "compareTo"));
+}
+
+#[test]
+fn offers_the_members_of_every_generic_upper_bound() {
+    let labels = completes("fun <T> f(x: T) where T : CharSequence, T : Comparable<T> {\n    x.$0\n}\n");
+    assert!(has(&labels, "length") && has(&labels, "compareTo"), "{labels:?}");
+    let labels = completes("fun <T : CharSequence> f(x: T) where T : Comparable<T> {\n    x.$0\n}\n");
+    assert!(has(&labels, "length") && has(&labels, "compareTo"), "a bound and a where clause: {labels:?}");
+    let labels = completes("fun <T> f(x: T) where T : CharSequence, T : Comparable<T> {\n    x.compareTo(x).$0\n}\n");
+    assert!(has(&labels, "toString"), "{labels:?}");
+}
+
+#[test]
+fn projects_star_and_declaration_site_variance() {
+    // A star projection reads as `Any?`: its members are the ones of `Any`.
+    let labels = completes("fun f(l: List<*>) {\n    l.first()?.$0\n}\n");
+    assert!(has(&labels, "hashCode") && !has(&labels, "length"), "{labels:?}");
+    assert!(offers("fun f(l: List<out CharSequence>) {\n    l.first().$0\n}\n", "length"));
+    assert!(offers("class Source<out T>(val value: T)\nfun f(s: Source<String>) {\n    s.value.$0\n}\n", "length"));
+    assert!(offers("class Source<out T>(val value: T)\nfun f(s: Source<*>) {\n    s.value?.$0\n}\n", "hashCode"));
+    assert!(!offers("class Source<out T>(val value: T)\nfun f(s: Source<*>) {\n    s.value?.$0\n}\n", "length"));
+}
+
+#[test]
+fn binds_type_parameters_from_generic_receivers() {
+    let decl = "fun <T : Comparable<T>> List<T>.best(): T = first()\nfun <T> T.keep(): T = this\n";
+    assert!(offers(&format!("{decl}fun f() {{\n    listOf(\"a\").best().$0\n}}\n"), "length"));
+    assert!(offers(&format!("{decl}fun f() {{\n    \"a\".keep().$0\n}}\n"), "length"));
+    assert!(offers("fun f() {\n    \"a\".also { it.$0 }\n}\n", "length"));
+}
+
+#[test]
+fn self_referential_bounds_resolve_without_recursion() {
+    let decl = "abstract class Builder<B : Builder<B>> {\n    fun name(): String = \"\"\n}\n";
+    assert!(offers(&format!("{decl}fun <B : Builder<B>> f(b: B) {{\n    b.$0\n}}\n"), "name"));
+    assert!(offers("fun <E : Enum<E>> f(e: E) {\n    e.$0\n}\n", "ordinal"));
+    assert!(offers("fun <T : Comparable<T>> f(x: T) {\n    x.$0\n}\n", "compareTo"));
+}
+
+#[test]
+fn expands_generic_type_aliases() {
+    let decl = "typealias Pairs<T> = List<Pair<T, T>>\n";
+    assert!(offers(&format!("{decl}fun f(p: Pairs<String>) {{\n    p.first().first.$0\n}}\n"), "length"));
+    assert!(offers(&format!("{decl}fun f(p: Pairs<String>) {{\n    p.first().second.$0\n}}\n"), "length"));
+}
+
+#[test]
+fn offers_the_members_and_underlying_type_of_value_classes() {
+    let decl = "@JvmInline\nvalue class UserId(val raw: String) {\n    fun shout() = raw.uppercase()\n}\n";
+    assert!(offers(&format!("{decl}fun f(id: UserId) {{\n    id.$0\n}}\n"), "shout"));
+    assert!(offers(&format!("{decl}fun f(id: UserId) {{\n    id.raw.$0\n}}\n"), "length"));
+}
+
+#[test]
+fn infers_reified_type_parameters_from_explicit_arguments() {
+    let decl = "inline fun <reified T> make(): T = TODO()\n";
+    assert!(offers(&format!("{decl}fun f() {{\n    make<String>().$0\n}}\n"), "length"));
+}
+
+#[test]
+fn infers_type_arguments_of_nested_calls() {
+    assert!(offers("fun f() {\n    mapOf(\"a\" to \"x\").values.first().$0\n}\n", "length"));
+    assert!(offers("fun f() {\n    mapOf(\"a\" to \"x\").entries.first().$0\n}\n", "key"));
+    assert!(offers("fun f() {\n    listOf(\"a\", \"b\").map { it.length }.first().$0\n}\n", "plus"));
+    assert!(offers("fun f() {\n    listOf(1, 2).first().$0\n}\n", "toInt"));
+    assert!(offers("fun f() {\n    listOf(1, \"a\").first().$0\n}\n", "toString"));
+    // Builder inference: the element is what the body adds to the receiver.
+    assert!(offers("fun f() {\n    buildList {\n        add(\"x\")\n    }.first().$0\n}\n", "length"));
+    assert!(offers("fun f() {\n    buildList {\n        add(1)\n    }.first().$0\n}\n", "toInt"));
+    assert!(offers("fun f() {\n    buildList<String> {\n        add(\"x\")\n    }.first().$0\n}\n", "length"));
+}
+
+#[test]
+fn keeps_nullable_type_arguments() {
+    let decl = "fun <T> keep(x: T?): T? = x\n";
+    assert!(offers(&format!("{decl}fun f(s: String?) {{\n    keep(s)?.$0\n}}\n"), "length"));
+    assert!(offers("fun f(m: Map<String, String>) {\n    m[\"a\"]?.$0\n}\n", "length"));
+    assert!(offers("fun f(m: Map<String, String>) {\n    m.get(\"a\")?.$0\n}\n", "length"));
+    assert!(offers("fun f(m: Map<String, String?>) {\n    m[\"a\"]?.$0\n}\n", "length"));
 }
 
 #[test]

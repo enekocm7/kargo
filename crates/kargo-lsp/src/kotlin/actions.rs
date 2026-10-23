@@ -890,6 +890,11 @@ pub(super) fn collect_imports(an: &Analyzer, ty: &Ty, target: Ctx, imports: &mut
                 collect_imports(an, t, target, imports);
             }
         }
+        Ty::Inter(parts) => {
+            for t in parts {
+                collect_imports(an, t, target, imports);
+            }
+        }
         Ty::Static(_) | Ty::Package(_) => {}
     }
 }

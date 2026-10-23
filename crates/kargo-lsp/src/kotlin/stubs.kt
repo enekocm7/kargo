@@ -387,6 +387,8 @@ public open class LinkedHashMap<K, V>() : HashMap<K, V>()
 
 /** Returns a new read-only list of given elements. */
 public fun <T> listOf(vararg elements: T): List<T>
+/** Returns a new read-only list built by [builderAction], which adds its elements to the receiver. */
+public inline fun <E> buildList(builderAction: MutableList<E>.() -> Unit): List<E>
 /** Returns a new [MutableList] with the given elements. */
 public fun <T> mutableListOf(vararg elements: T): MutableList<T>
 /** Returns an empty read-only list. */
@@ -413,11 +415,11 @@ public inline fun <T, R> Iterable<T>.map(transform: (T) -> R): List<R>
 /** Returns a list containing only elements matching the given [predicate]. */
 public inline fun <T> Iterable<T>.filter(predicate: (T) -> Boolean): List<T>
 /** Returns the first element. */
-public fun <T> List<T>.first(): T
-/** Returns the first element, or `null` if the list is empty. */
-public fun <T> List<T>.firstOrNull(): T?
+public fun <T> Iterable<T>.first(): T
+/** Returns the first element, or `null` if the collection is empty. */
+public fun <T> Iterable<T>.firstOrNull(): T?
 /** Returns the last element. */
-public fun <T> List<T>.last(): T
+public fun <T> Iterable<T>.last(): T
 /** Creates a string from all the elements separated using [separator]. */
 public fun <T> Iterable<T>.joinToString(separator: CharSequence = ", ", prefix: CharSequence = "", postfix: CharSequence = ""): String
 /** Returns `true` if the collection is not empty. */

@@ -454,6 +454,7 @@ fn type_text(an: &Analyzer, ty: &Ty, at: Ctx) -> Option<(String, BTreeSet<String
             Ty::Func { receiver, params, ret } => {
                 receiver.iter().chain(ret.iter()).any(|t| clashes(an, t, at)) || params.iter().flatten().any(|t| clashes(an, t, at))
             }
+            Ty::Inter(parts) => parts.iter().any(|t| clashes(an, t, at)),
             Ty::Static(_) | Ty::Package(_) => true,
         }
     }

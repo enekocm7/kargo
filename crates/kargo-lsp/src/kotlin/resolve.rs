@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use super::index::{Index, Origin, Platforms, SetKind, SourceSet, SymId, Unit, UnitId, default_imports};
 use super::java;
 use super::lexer::{HARD_KEYWORDS, Lexed, Tok};
-use super::syntax::{self, Decl, DeclId, File, InitKind, Kind, ScopeKind, TypeRef};
+use super::syntax::{self, Decl, DeclId, File, InitKind, Kind, ScopeKind, TypeRef, Variance};
 
 /// A type, as far as Kargo knows it; unknown parts are `None`.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +23,8 @@ pub enum Ty {
     Class { sym: SymId, args: Vec<Option<Ty>>, nullable: bool },
     /// A function type.
     Func { receiver: Option<Box<Ty>>, params: Vec<Option<Ty>>, ret: Option<Box<Ty>> },
+    /// A type with several upper bounds (`where T : A, T : B`): an instance of each of them.
+    Inter(Vec<Ty>),
     /// A class itself, as in `Foo.bar`: its companion, nested classes and enum entries.
     Static(SymId),
     /// A package in a qualified name: `kotlin.collections.`.
@@ -281,15 +283,24 @@ impl<'a> Analyzer<'a> {
             if let Some(t) = subst.get(&tr.name) {
                 return Some(nullable(t.clone(), tr.nullable));
             }
-            if let Some((owner, bound)) = self.type_param_bound(ctx, &tr.name) {
+            if let Some((owner, bounds)) = self.type_param_bound(ctx, &tr.name) {
                 // A generic upper bound stands for the type parameter: `fun <T : CharSequence> f(x: T)`.
-                let bound = bound?;
                 let owner_ctx = Ctx { unit: ctx.unit, decl: Some(owner) };
-                let ty = if bound.name == tr.name || bound.args.iter().any(|a| a.name == tr.name) {
-                    // `T : Comparable<T>`: the class, without the type argument that refers back.
-                    self.instance(self.resolve_type(owner_ctx, &bound.name)?)
-                } else {
-                    self.ty_of_ref(bound, owner_ctx, subst)?
+                let mut tys: Vec<Ty> = bounds
+                    .into_iter()
+                    .filter_map(|bound| {
+                        if bound.name == tr.name || bound.args.iter().any(|a| a.name == tr.name) {
+                            // `T : Comparable<T>`: the class, without the type argument that refers back.
+                            Some(self.instance(self.resolve_type(owner_ctx, &bound.name)?))
+                        } else {
+                            self.ty_of_ref(bound, owner_ctx, subst)
+                        }
+                    })
+                    .collect();
+                let ty = match tys.len() {
+                    0 => return None,
+                    1 => tys.pop()?,
+                    _ => Ty::Inter(tys),
                 };
                 return Some(nullable(ty, tr.nullable));
             }
@@ -304,18 +315,23 @@ impl<'a> Analyzer<'a> {
                 return Some(nullable(t, tr.nullable));
             }
         }
-        let args = tr.args.iter().map(|a| self.ty_of_ref(a, ctx, subst)).collect();
+        // A star projection (`List<*>`) stands for `Any?`, the type its members see.
+        let args = tr
+            .args
+            .iter()
+            .map(|a| if a.name == "*" { self.std_ty("kotlin.Any").map(|any| nullable(any, true)) } else { self.ty_of_ref(a, ctx, subst) })
+            .collect();
         Some(Ty::Class { sym, args, nullable: tr.nullable })
     }
 
-    /// The declaration that declares the type parameter `name` visible in `ctx`, and its upper bound.
-    fn type_param_bound(&self, ctx: Ctx, name: &str) -> Option<(DeclId, Option<&'a TypeRef>)> {
+    /// The declaration that declares the type parameter `name` visible in `ctx`, and its upper bounds.
+    fn type_param_bound(&self, ctx: Ctx, name: &str) -> Option<(DeclId, Vec<&'a TypeRef>)> {
         let file = self.file(ctx.unit);
         let mut d = ctx.decl;
         while let Some(id) = d {
             let decl = &file.decls[id];
             if let Some(t) = decl.type_params.iter().find(|t| t.name == name) {
-                return Some((id, t.bound.as_ref()));
+                return Some((id, t.bound.iter().chain(&t.extra).collect()));
             }
             d = decl.parent;
         }
@@ -467,6 +483,17 @@ impl<'a> Analyzer<'a> {
 
     /// The class `s` and its supertypes, each with the type arguments it has there.
     pub fn closure(&self, ty: &Ty) -> Vec<(SymId, Subst)> {
+        if let Ty::Inter(parts) = ty {
+            let mut out: Vec<(SymId, Subst)> = Vec::new();
+            for part in parts {
+                for (sym, subst) in self.closure(part) {
+                    if !out.iter().any(|(s, _)| *s == sym) {
+                        out.push((sym, subst));
+                    }
+                }
+            }
+            return out;
+        }
         let (start, args) = match ty {
             Ty::Class { sym, args, .. } => (*sym, args.clone()),
             Ty::Func { .. } => match self.std_class("kotlin.Function") {
@@ -568,7 +595,7 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
-            Ty::Class { .. } | Ty::Func { .. } => {
+            Ty::Class { .. } | Ty::Func { .. } | Ty::Inter(_) => {
                 let closure = self.closure(ty);
                 // A Java member is shown only when Kotlin declares or offers no member of that name:
                 // Kotlin's `lines()` is an extension that wins over Java's.
@@ -703,7 +730,7 @@ impl<'a> Analyzer<'a> {
             subst.entry(pattern.name.clone()).or_insert_with(|| strip_nullable(actual.clone()));
             return;
         }
-        if pattern.args.is_empty() || !matches!(actual, Ty::Class { .. }) {
+        if pattern.args.is_empty() || !matches!(actual, Ty::Class { .. } | Ty::Inter(_)) {
             return;
         }
         let simple = pattern.simple_name();
@@ -1396,6 +1423,17 @@ impl<'a> Analyzer<'a> {
                 if skip_lambdas {
                     continue;
                 }
+                if let Some(func) = &pty.func {
+                    // `buildList { add(x) }`: the element of the receiver is what the body adds.
+                    if let Some(recv) = &func.receiver
+                        && let [elem] = recv.args.as_slice()
+                        && all.contains(&elem.name)
+                        && !subst.contains_key(&elem.name)
+                        && let Some(t) = self.builder_element(u, arg.start)
+                    {
+                        subst.insert(elem.name.clone(), t);
+                    }
+                }
                 // `map { ... }`: the lambda's result binds the function type's return type.
                 if let Some(func) = &pty.func
                     && all.contains(&func.ret.name)
@@ -1410,6 +1448,30 @@ impl<'a> Analyzer<'a> {
                 self.unify(pty, &actual, &all, subst);
             }
         }
+    }
+
+    /// Builder inference: the element type that the lambda whose `{` is `brace` gives its
+    /// `MutableList` receiver, from the first `add(x)` call on that receiver in the body.
+    fn builder_element(&self, u: UnitId, brace: usize) -> Option<Ty> {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let src = &self.unit(u).text;
+        let close = lx.matching[brace].filter(|&c| c > brace)?;
+        for i in brace + 1..close {
+            if !lx.is(src, i, "add") || lx.kind(i + 1) != Some(Tok::LParen) || matches!(lx.kind(i - 1), Some(Tok::Dot | Tok::SafeDot)) {
+                continue;
+            }
+            // Only `add(x)` on the receiver itself: a single argument, not a named or lambda one.
+            let (args, _) = self.call_args(u, i + 1, close);
+            if let [arg] = args.as_slice()
+                && !arg.lambda
+                && arg.name.is_none()
+                && let Some(ty) = self.infer(u, arg.start, arg.end)
+            {
+                return Some(ty);
+            }
+        }
+        None
     }
 
     /// The type of the last expression of the lambda whose `{` is `brace`.
@@ -2199,8 +2261,42 @@ impl<'a> Analyzer<'a> {
             after.into_iter().filter(|(from, block, _)| *from <= i && block.is_none_or(|b| open.contains(&b))).map(|(f, _, t)| (f, t)),
         );
         let narrowed = found.iter().filter_map(|(from, t)| t.as_ref().map(|t| (*from, t))).max_by_key(|(from, _)| *from);
-        let ty = narrowed.map_or(declared, |(_, t)| t.clone());
+        let ty = match narrowed {
+            Some((_, checked)) => self.narrow(declared, checked.clone()),
+            None => declared,
+        };
         if found.iter().any(|(_, t)| t.is_none()) { strip_nullable(ty) } else { ty }
+    }
+
+    /// The type of a value declared as `declared` and checked to be `checked`: the checked type
+    /// when it is a subtype of the declared one, the declared one when that is the narrower, and
+    /// both otherwise. `if (x is CharSequence)` on a `T : Comparable<T>` gives both bounds.
+    fn narrow(&self, declared: Ty, checked: Ty) -> Ty {
+        if self.is_subtype(&checked, &declared) {
+            checked
+        } else if self.is_subtype(&declared, &checked) {
+            declared
+        } else {
+            let mut parts = match declared {
+                Ty::Inter(parts) => parts,
+                t => vec![t],
+            };
+            parts.push(checked);
+            Ty::Inter(parts)
+        }
+    }
+
+    /// Whether the type `sub` is `sup`, or one of its subtypes: its classes include the classes of
+    /// `sup`. Type arguments are not compared here.
+    pub fn is_subtype(&self, sub: &Ty, sup: &Ty) -> bool {
+        match sup {
+            Ty::Inter(parts) => parts.iter().all(|p| self.is_subtype(sub, p)),
+            Ty::Class { sym, .. } => {
+                let want = self.fq(*sym);
+                self.closure(sub).iter().any(|(s, _)| self.fq(*s) == want)
+            }
+            _ => sub == sup,
+        }
     }
 
     /// The class named by the type that starts at token `j` after `is` or `as`, and the token
@@ -2308,7 +2404,8 @@ impl<'a> Analyzer<'a> {
             if std::mem::replace(&mut used[pi], true) && !param.vararg {
                 return None;
             }
-            let Some(pty) = param.ty.as_ref().and_then(|t| self.ty_of_ref(t, ctx, &m.subst)) else { continue };
+            let Some(written) = param.ty.as_ref() else { continue };
+            let Some(pty) = self.ty_of_ref(written, ctx, &m.subst) else { continue };
             if arg.lambda {
                 match &pty {
                     Ty::Func { params: fp, .. } => {
@@ -2325,6 +2422,9 @@ impl<'a> Analyzer<'a> {
                 }
             } else if let Some(at) = ty {
                 score += self.type_fit(at, &pty)?;
+                if !self.args_fit(at, &pty, written) {
+                    return None;
+                }
             }
         }
         for (i, &p) in params.iter().enumerate() {
@@ -2333,6 +2433,35 @@ impl<'a> Analyzer<'a> {
             }
         }
         Some(score)
+    }
+
+    /// Whether the type arguments of `arg` fit those of the parameter `param`, written as `written`:
+    /// each by the variance of the class's type parameter, or the projection the parameter gives,
+    /// so `List<String>` fits `List<out CharSequence>` and not `MutableList<CharSequence>`. Unknown
+    /// arguments fit, and so does a star projection.
+    fn args_fit(&self, arg: &Ty, param: &Ty, written: &TypeRef) -> bool {
+        let (Ty::Class { sym: p, args: pargs, .. }, Ty::Class { .. }) = (param, arg) else { return true };
+        let decl = self.decl(*p);
+        if written.args.len() != pargs.len() || decl.type_params.len() != pargs.len() {
+            return true;
+        }
+        let want = self.fq(*p);
+        let Some((_, subst)) = self.closure(arg).into_iter().find(|(s, _)| self.fq(*s) == want) else { return true };
+        decl.type_params.iter().zip(&written.args).zip(pargs).all(|((tp, written), parg)| {
+            let (Some(parg), Some(aarg)) = (parg, subst.get(&tp.name)) else { return true };
+            if written.name == "*" {
+                return true;
+            }
+            match if written.projection != Variance::Invariant { written.projection } else { tp.variance } {
+                Variance::Out => self.is_subtype(aarg, parg),
+                Variance::In => self.is_subtype(parg, aarg),
+                Variance::Invariant => {
+                    self.is_subtype(aarg, parg)
+                        && self.is_subtype(parg, aarg)
+                        && matches!(aarg, Ty::Class { nullable: true, .. }) == matches!(parg, Ty::Class { nullable: true, .. })
+                }
+            }
+        })
     }
 
     /// The number of parameters a lambda declares, or `None` when it has the implicit `it`.
@@ -2353,7 +2482,7 @@ impl<'a> Analyzer<'a> {
         match (arg, param) {
             (Ty::Func { params: a, .. }, Ty::Func { params: b, .. }) => (a.len() == b.len()).then_some(8),
             (Ty::Class { .. }, Ty::Func { .. }) => None,
-            (Ty::Func { .. } | Ty::Class { .. }, Ty::Class { sym: p, nullable: pn, .. }) => {
+            (Ty::Func { .. } | Ty::Class { .. } | Ty::Inter(_), Ty::Class { sym: p, nullable: pn, .. }) => {
                 if let Ty::Class { nullable: true, .. } = arg
                     && !pn
                 {
