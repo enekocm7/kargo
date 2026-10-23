@@ -14,10 +14,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::lexer::{Lexed, Tok, Token};
-use super::syntax::{Decl, File, FuncType, Import, InitKind, Kind, Scope, ScopeKind, TypeParam, TypeRef};
+use super::syntax::{Decl, File, FuncType, Import, InitKind, Kind, Scope, ScopeKind, TypeParam, TypeRef, Variance};
 
 /// Bump when the syntax tree or its parser changes in a way the version of Kargo does not show.
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 6;
 const MAGIC: &[u8; 4] = b"KPF\0";
 /// The name of the blob in a directory of library sources.
 const FILE_NAME: &str = ".kargo-parsed";
@@ -91,6 +91,14 @@ impl Writer {
         }
     }
 
+    fn variance(&mut self, v: Variance) {
+        self.u(match v {
+            Variance::Invariant => 0,
+            Variance::Out => 1,
+            Variance::In => 2,
+        });
+    }
+
     fn b(&mut self, v: bool) {
         self.out.push(v as u8);
     }
@@ -131,11 +139,12 @@ impl Writer {
     }
 
     fn type_ref(&mut self, t: &TypeRef) {
-        let TypeRef { name, args, nullable, non_null, func, span } = t;
+        let TypeRef { name, args, nullable, non_null, projection, func, span } = t;
         self.s(name);
         self.list(args, Self::type_ref);
         self.b(*nullable);
         self.b(*non_null);
+        self.variance(*projection);
         self.opt(func, |w, f| {
             let FuncType { receiver, params, names, ret, suspend } = &**f;
             w.opt(receiver, Self::type_ref);
@@ -184,9 +193,11 @@ impl Writer {
         self.b(*mutable);
         self.b(*hidden);
         self.list(type_params, |w, p| {
-            let TypeParam { name, bound, span } = p;
+            let TypeParam { name, bound, extra, variance, span } = p;
             w.s(name);
             w.opt(bound, Self::type_ref);
+            w.list(extra, Self::type_ref);
+            w.variance(*variance);
             w.range(span);
         });
         self.opt(receiver, Self::type_ref);
@@ -339,6 +350,15 @@ impl Reader<'_> {
         }
     }
 
+    fn variance(&mut self) -> Option<Variance> {
+        Some(match self.u()? {
+            0 => Variance::Invariant,
+            1 => Variance::Out,
+            2 => Variance::In,
+            _ => return None,
+        })
+    }
+
     fn b(&mut self) -> Option<bool> {
         Some(self.byte()? != 0)
     }
@@ -385,6 +405,7 @@ impl Reader<'_> {
             args: self.list(Self::type_ref)?,
             nullable: self.b()?,
             non_null: self.b()?,
+            projection: self.variance()?,
             func: self.opt(|r| {
                 Some(Box::new(FuncType {
                     receiver: r.opt(Self::type_ref)?,
@@ -406,7 +427,13 @@ impl Reader<'_> {
         let modifiers = self.strings()?;
         let mutable = self.b()?;
         let hidden = self.b()?;
-        let type_params = self.list(|r| Some(TypeParam { name: r.s()?, bound: r.opt(Self::type_ref)?, span: r.range()? }))?;
+        let type_params = self.list(|r| {
+            let name = r.s()?;
+            let bound = r.opt(Self::type_ref)?;
+            let extra = r.list(Self::type_ref)?;
+            let variance = r.variance()?;
+            Some(TypeParam { name, bound, extra, variance, span: r.range()? })
+        })?;
         let receiver = self.opt(Self::type_ref)?;
         let params = self.usizes()?;
         let ty = self.opt(Self::type_ref)?;

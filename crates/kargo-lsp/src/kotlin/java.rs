@@ -19,7 +19,7 @@
 use std::ops::Range;
 
 use super::lexer::{self, Lexed, Tok, Token};
-use super::syntax::{Decl, DeclId, File, Import, Kind, Scope, ScopeKind, TypeParam, TypeRef};
+use super::syntax::{Decl, DeclId, File, Import, Kind, Scope, ScopeKind, TypeParam, TypeRef, Variance};
 
 /// Java classes that Kotlin names differently: the platform types of the JVM, which Kotlin maps
 /// to its own classes (`java.util.List` is Kotlin's `MutableList`, and so on).
@@ -678,7 +678,10 @@ impl Parser<'_> {
             Tok::Question => {
                 // A wildcard: its bound, or `*` without one.
                 if self.is(i + 1, "extends") || self.is(i + 1, "super") {
-                    self.ty(i + 2)?
+                    let projection = if self.is(i + 1, "extends") { Variance::Out } else { Variance::In };
+                    let (mut bound, k) = self.ty(i + 2)?;
+                    bound.projection = projection;
+                    (bound, k)
                 } else {
                     let end = self.lx.tokens[i].end;
                     (TypeRef { name: "*".into(), span: start..end, ..TypeRef::default() }, i + 1)
@@ -782,7 +785,7 @@ impl Parser<'_> {
                     }
                 }
             }
-            out.push(TypeParam { name, bound, span });
+            out.push(TypeParam { name, bound, extra: Vec::new(), variance: Variance::Invariant, span });
             if self.kind(i) == Some(Tok::Comma) {
                 i += 1;
             }

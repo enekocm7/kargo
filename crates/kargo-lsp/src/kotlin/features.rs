@@ -879,6 +879,7 @@ pub fn fully_known(ty: &Ty) -> bool {
                 && params.iter().all(|p| p.as_ref().is_some_and(fully_known))
                 && ret.as_deref().is_some_and(fully_known)
         }
+        Ty::Inter(parts) => parts.iter().all(fully_known),
         _ => true,
     }
 }
@@ -918,6 +919,7 @@ pub fn display_ty(an: &Analyzer, ty: &Ty) -> String {
             let recv = receiver.as_ref().map(|t| format!("{}.", display_ty(an, t))).unwrap_or_default();
             format!("{recv}({}) -> {r}", p.join(", "))
         }
+        Ty::Inter(parts) => parts.iter().map(|t| display_ty(an, t)).collect::<Vec<_>>().join(" & "),
         Ty::Static(s) => an.decl(*s).name.clone(),
         Ty::Package(p) => p.clone(),
     }

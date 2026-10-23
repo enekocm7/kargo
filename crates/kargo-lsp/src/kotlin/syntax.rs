@@ -63,6 +63,17 @@ impl Kind {
     }
 }
 
+/// The variance of a type parameter (`class List<out E>`) or of a type argument (`List<out Number>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Variance {
+    #[default]
+    Invariant,
+    /// `out`: a subtype of the argument is a subtype of the type.
+    Out,
+    /// `in`: a supertype of the argument is a subtype of the type.
+    In,
+}
+
 /// A type as written.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TypeRef {
@@ -73,6 +84,8 @@ pub struct TypeRef {
     pub nullable: bool,
     /// `T & Any`: a type parameter that is not nullable, whatever its bound.
     pub non_null: bool,
+    /// The use-site projection of a type argument: `out` in `List<out Number>`.
+    pub projection: Variance,
     /// For a function type.
     pub func: Option<Box<FuncType>>,
     pub span: Range<usize>,
@@ -144,6 +157,10 @@ pub fn normalize(text: &str) -> String {
 pub struct TypeParam {
     pub name: String,
     pub bound: Option<TypeRef>,
+    /// The further upper bounds, from a `where` clause: `where T : A, T : B` gives `B` here.
+    pub extra: Vec<TypeRef>,
+    /// `out T` or `in T` in the declaration.
+    pub variance: Variance,
     pub span: Range<usize>,
 }
 
@@ -1285,7 +1302,7 @@ impl Parser<'_> {
     }
 
     /// Gives the type parameters of `decl` the bounds of its `where` clause; a parameter keeps the
-    /// first bound it has.
+    /// first bound it has, and the others are its extra bounds.
     fn apply_where(&mut self, decl: DeclId, bounds: Vec<(String, TypeRef)>) {
         apply_bounds(&mut self.decls[decl].type_params, bounds);
     }
@@ -1872,11 +1889,20 @@ impl Parser<'_> {
     fn type_params(&self, lt: usize) -> (Vec<TypeParam>, usize) {
         let mut out = Vec::new();
         let mut j = lt + 1;
+        // The `in` or `out` before the name of the parameter being read.
+        let mut variance = Variance::Invariant;
         while let Some(kind) = self.kind(j) {
             match kind {
                 Tok::Gt => return (out, j + 1),
                 Tok::At => j = self.skip_annotation(j).0,
-                Tok::Ident if matches!(self.raw(j), "in" | "out" | "reified") && self.kind(j + 1) == Some(Tok::Ident) => j += 1,
+                Tok::Ident if matches!(self.raw(j), "in" | "out" | "reified") && self.kind(j + 1) == Some(Tok::Ident) => {
+                    variance = match self.raw(j) {
+                        "in" => Variance::In,
+                        "out" => Variance::Out,
+                        _ => variance,
+                    };
+                    j += 1;
+                }
                 Tok::Ident => {
                     let name = self.text(j).to_owned();
                     let span = self.lx.tokens[j].span();
@@ -1888,7 +1914,7 @@ impl Parser<'_> {
                         bound = Some(ty);
                         j = k;
                     }
-                    out.push(TypeParam { name, bound, span });
+                    out.push(TypeParam { name, bound, extra: Vec::new(), variance: std::mem::take(&mut variance), span });
                 }
                 Tok::Comma => j += 1,
                 _ => return (out, j),
@@ -1901,10 +1927,13 @@ impl Parser<'_> {
         let mut args = Vec::new();
         let mut j = lt + 1;
         loop {
+            let mut projection = Variance::Invariant;
             while self.kind(j) == Some(Tok::Ident) && matches!(self.raw(j), "in" | "out") && self.kind(j + 1) != Some(Tok::Comma) {
+                projection = if self.raw(j) == "in" { Variance::In } else { Variance::Out };
                 j += 1;
             }
-            let (ty, k) = self.parse_type(j)?;
+            let (mut ty, k) = self.parse_type(j)?;
+            ty.projection = projection;
             args.push(ty);
             j = k;
             match self.kind(j)? {
@@ -2027,10 +2056,11 @@ impl Parser<'_> {
 
 fn apply_bounds(type_params: &mut [TypeParam], bounds: Vec<(String, TypeRef)>) {
     for (name, ty) in bounds {
-        if let Some(p) = type_params.iter_mut().find(|p| p.name == name)
-            && p.bound.is_none()
-        {
-            p.bound = Some(ty);
+        if let Some(p) = type_params.iter_mut().find(|p| p.name == name) {
+            match &p.bound {
+                Some(_) => p.extra.push(ty),
+                None => p.bound = Some(ty),
+            }
         }
     }
 }
@@ -2325,6 +2355,7 @@ fun run(items: List<String>, block: String.(Int) -> Unit, cb: (a: Int) -> String
         let f = parse(src);
         let func = &f.decls[f.top[0]];
         assert_eq!(func.type_params[0].bound.as_ref().unwrap().name, "Comparable");
+        assert_eq!(func.type_params[0].extra.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Any"]);
         assert_eq!(func.type_params[1].bound.as_ref().unwrap().name, "List");
         assert_eq!(func.ty.as_ref().unwrap().name, "Int");
         assert!(f.scopes[func.body.unwrap()].range.end > src.find("return 1").unwrap());
