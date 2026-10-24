@@ -1,8 +1,8 @@
-//! npm packages for Kotlin/Wasm: libraries such as kotlinx-datetime import npm
+//! npm packages for Kotlin/Wasm and Kotlin/JS: libraries such as kotlinx-datetime import npm
 //! packages (`@js-joda/core`) at runtime. Kargo reads them from the klibs, adds
-//! the project's own `[target.wasm.npm-dependencies]` and installs them with
+//! the project's own `[target.wasm.npm-dependencies]` (or `[target.js.npm-dependencies]`) and installs them with
 //! npm, pnpm or bun into a `node_modules` that Node.js finds from the compiled
-//! `.mjs` files (a browser gets an import map, see `wasm_output`). The project's own
+//! `.mjs` files (a browser gets an import map, see `wasm_output`). The Wasm target's own
 //! packages also get Kotlin declarations generated from their TypeScript ones ([`declarations`]).
 //!
 //! Packages are installed with their lifecycle scripts off (`--ignore-scripts`): the names and
@@ -20,7 +20,7 @@ use crate::dts;
 use crate::ops::context::BuildContext;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::wasm::npm_dependencies;
-use kargo_manifest::{Manifest, PackageManager};
+use kargo_manifest::{Manifest, PackageManager, TargetKind};
 use kargo_maven::Version;
 use kargo_util::fs::{collect_files, remove_dir_all_if_exists};
 use kargo_util::process::{self, find_on_path};
@@ -33,39 +33,48 @@ const LOCKFILES: [(&str, PackageManager); 4] = [
     ("bun.lockb", PackageManager::Bun),
 ];
 
-/// The npm packages the project needs, as `name -> version`: those its Wasm
-/// `libraries` ask for, and `[target.wasm.npm-dependencies]`, which wins on a conflict.
-pub fn dependencies(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+/// The npm settings of `target` (Wasm or JS): its own `npm-dependencies` and its `package-manager`.
+fn settings(manifest: &Manifest, target: TargetKind) -> (Option<&BTreeMap<String, String>>, Option<PackageManager>) {
+    match target {
+        TargetKind::Wasm => manifest.targets.wasm.as_ref().map_or((None, None), |w| (Some(&w.npm_dependencies), w.package_manager)),
+        TargetKind::Js => manifest.targets.js.as_ref().map_or((None, None), |j| (Some(&j.npm_dependencies), j.package_manager)),
+        _ => (None, None),
+    }
+}
+
+/// The npm packages the project needs on `target`, as `name -> version`: those its
+/// `libraries` ask for, and `[target.<target>.npm-dependencies]`, which wins on a conflict.
+pub fn dependencies(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     let mut deps = npm_dependencies(libraries)?;
-    if let Some(wasm) = &ctx.ws.manifest().targets.wasm {
-        deps.extend(wasm.npm_dependencies.clone());
+    if let (Some(own), _) = settings(ctx.ws.manifest(), target) {
+        deps.extend(own.clone());
     }
     Ok(deps)
 }
 
-/// Installs the npm packages that `libraries` need into `dir/node_modules` and
+/// Installs the npm packages that `libraries` need on `target` into `dir/node_modules` and
 /// returns that directory, or `None` when no package is needed.
 ///
 /// Node.js resolves bare imports by walking up from the importing module, so
 /// any `.mjs` below `dir` sees them. Nothing is installed when `dir` already
 /// holds exactly these packages installed by the same package manager.
-pub fn install(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<Option<PathBuf>> {
-    let deps = dependencies(ctx, libraries)?;
+pub fn install(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], dir: &Path) -> Result<Option<PathBuf>> {
+    let deps = dependencies(ctx, target, libraries)?;
     if deps.is_empty() {
         return Ok(None);
     }
-    let (manager, exe) = find_package_manager(ctx, &deps)?;
+    let (manager, exe) = find_package_manager(ctx, target, &deps)?;
     install_into(ctx, &deps, dir, manager, exe).map(Some)
 }
 
 /// `kargo fetch`: installs the packages [`install`] would, so an offline build finds them. Without
 /// npm, pnpm or bun the build could not install them either, so this warns instead of failing.
-pub fn fetch(ctx: &BuildContext, libraries: &[PathBuf], dir: &Path) -> Result<()> {
-    let deps = dependencies(ctx, libraries)?;
+pub fn fetch(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], dir: &Path) -> Result<()> {
+    let deps = dependencies(ctx, target, libraries)?;
     if deps.is_empty() {
         return Ok(());
     }
-    match find_package_manager(ctx, &deps) {
+    match find_package_manager(ctx, target, &deps) {
         Ok((manager, exe)) => install_into(ctx, &deps, dir, manager, exe).map(|_| ()),
         Err(e) => {
             ctx.shell().warn(format!("the npm packages were not fetched: {e:#}"));
@@ -103,7 +112,7 @@ pub fn declarations(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<Vec<Pat
         return Ok(Vec::new());
     }
     let profile_dir = ctx.ws.profile_dir(&ctx.profile);
-    let Some(node_modules) = install(ctx, libraries, &profile_dir)? else { return Ok(Vec::new()) };
+    let Some(node_modules) = install(ctx, TargetKind::Wasm, libraries, &profile_dir)? else { return Ok(Vec::new()) };
     let types: BTreeMap<String, String> = packages
         .iter()
         .filter(|p| !p.starts_with("@types/") && !dts::has_declarations(&node_modules, p))
@@ -120,7 +129,7 @@ pub fn declarations(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<Vec<Pat
     let mut roots = vec![node_modules];
     if !types.is_empty() {
         // Apart from the packages the program runs with: a missing `@types` package only costs its declarations.
-        let fetched = find_package_manager(ctx, &types)
+        let fetched = find_package_manager(ctx, TargetKind::Wasm, &types)
             .and_then(|(manager, exe)| install_into(ctx, &types, &profile_dir.join("npm-types"), manager, exe));
         match fetched {
             Ok(dir) => roots.push(dir),
@@ -195,18 +204,20 @@ fn install_into(ctx: &BuildContext, deps: &BTreeMap<String, String>, dir: &Path,
     Ok(node_modules)
 }
 
-/// The configured package manager, or else the first of npm, pnpm and bun on `PATH`.
-fn find_package_manager(ctx: &BuildContext, deps: &BTreeMap<String, String>) -> Result<(PackageManager, PathBuf)> {
-    let preferred = ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.package_manager);
-    if let Some(manager) = preferred {
+/// The package manager configured for `target`, or else the first of npm, pnpm and bun on `PATH`.
+fn find_package_manager(ctx: &BuildContext, target: TargetKind, deps: &BTreeMap<String, String>) -> Result<(PackageManager, PathBuf)> {
+    if let (_, Some(manager)) = settings(ctx.ws.manifest(), target) {
         let exe = find_on_path(manager.as_str()).with_context(|| {
-            format!("[target.wasm] package-manager is `{manager}`, but `{manager}` is not on PATH; install it or choose npm, pnpm or bun")
+            format!(
+                "[target.{target}] package-manager is `{manager}`, but `{manager}` is not on PATH; install it or choose npm, pnpm or bun"
+            )
         })?;
         return Ok((manager, exe));
     }
     PackageManager::ALL.into_iter().find_map(|m| find_on_path(m.as_str()).map(|exe| (m, exe))).with_context(|| {
         format!(
-            "your Wasm dependencies need the npm packages {}; install Node.js (it includes npm), pnpm or bun and put it on PATH",
+            "your {} dependencies need the npm packages {}; install Node.js (it includes npm), pnpm or bun and put it on PATH",
+            if target == TargetKind::Js { "Kotlin/JS" } else { "Wasm" },
             package_list(deps)
         )
     })
@@ -236,7 +247,7 @@ fn install_args(manager: PackageManager, offline: bool) -> Vec<&'static str> {
 fn package_json(deps: &BTreeMap<String, String>) -> String {
     let package = serde_json::json!({
         "private": true,
-        "description": "Generated by Kargo: the npm packages the project's Kotlin/Wasm libraries depend on.",
+        "description": "Generated by Kargo: the npm packages the project's Kotlin libraries depend on.",
         "dependencies": deps,
     });
     format!("{}\n", serde_json::to_string_pretty(&package).expect("a JSON value serializes"))

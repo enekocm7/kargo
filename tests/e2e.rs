@@ -877,6 +877,138 @@ fn wasm_browser_app_gets_the_web_resources_of_its_libraries() {
     );
 }
 
+/// A Kotlin/JS project (`name`) with the given `[target.js]` body.
+fn js_project(t: &E2e, name: &str, js: &str) {
+    t.create(&[name, "--target", "js"]);
+    t.write(&format!("{name}/kargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[target.js]\n{js}"));
+}
+
+#[test]
+fn js_node_program_runs_and_tests() {
+    require_e2e!();
+    if which("node").is_none() {
+        eprintln!("skipping: Node.js not installed");
+        return;
+    }
+    let t = E2e::new();
+    js_project(&t, "jsapp", "");
+    t.write(
+        "jsapp/src/Main.kt",
+        "package com.example.jsapp\n\nfun greeting(name: String) = \"Hello, $name!\"\n\nfun main(args: Array<String>) = println(greeting(\"JS\") + \" args=\" + args.toList())\n",
+    );
+    t.kargo("jsapp")
+        .args(["run", "--", "a", "b c"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Compiling jsapp v0.1.0 (js)"))
+        .stdout(predicate::str::contains("Hello, JS! args=[a, b c]"));
+    assert!(t.dir.path().join("jsapp/target/debug/js/jsapp.mjs").is_file());
+    t.kargo("jsapp")
+        .arg("test")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Running Kotlin/JS tests (Node.js)"))
+        .stdout(predicate::str::contains("test com.example.jsapp.GreetingTest.greetsByName ... ok"));
+
+    // Failures, ignored tests, filters and reports come through as on the other targets.
+    t.write(
+        "jsapp/tests/MoreTest.kt",
+        "package com.example.jsapp\n\nimport kotlin.test.*\n\nclass MoreTest {\n    @Test fun talks() { println(\"hello from a test\") }\n    @Test fun fails() = assertEquals(3, 1 + 1, \"math\")\n    @Test @Ignore fun skipped() {}\n}\n",
+    );
+    t.kargo("jsapp").args(["test", "--report", "junit"]).assert().failure().code(101).stdout(
+        predicate::str::contains("hello from a test")
+            .and(predicate::str::contains("MoreTest.fails ... FAILED"))
+            .and(predicate::str::contains("MoreTest.skipped ... ignored"))
+            .and(predicate::str::contains("test result: FAILED. 2 passed; 1 failed; 1 ignored")),
+    );
+    let report = std::fs::read_to_string(t.dir.path().join("jsapp/target/debug/js/test-reports/TEST-js.xml")).unwrap();
+    assert!(report.contains("MoreTest") && report.contains("<failure"), "{report}");
+    t.kargo("jsapp")
+        .args(["test", "GreetingTest"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("GreetingTest.greetsByName ... ok").and(predicate::str::contains("MoreTest").not()));
+    t.kargo("jsapp").args(["check", "--tests"]).assert().success();
+}
+
+#[test]
+fn js_and_jvm_share_common_code() {
+    require_e2e!();
+    if which("node").is_none() {
+        eprintln!("skipping: Node.js not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["jsmpp", "--target", "jvm,js"]);
+    t.write("jsmpp/src/Platform.kt", "package com.example.jsmpp\n\nexpect fun platform(): String\n");
+    t.write("jsmpp/src-jvm/Platform.kt", "package com.example.jsmpp\n\nactual fun platform() = \"jvm\"\n");
+    t.write("jsmpp/src-js/Platform.kt", "package com.example.jsmpp\n\nactual fun platform() = \"js\"\n");
+    t.write(
+        "jsmpp/src/Main.kt",
+        "package com.example.jsmpp\n\nfun greeting(n: String) = \"Hello, $n!\"\n\nfun main() = println(greeting(platform()))\n",
+    );
+    t.kargo("jsmpp").arg("run").assert().success().stdout(predicate::str::contains("Hello, jvm!"));
+    t.kargo("jsmpp").args(["run", "-t", "js"]).assert().success().stdout(predicate::str::contains("Hello, js!"));
+    t.kargo("jsmpp").args(["test", "-t", "js"]).assert().success().stdout(predicate::str::contains("GreetingTest.greetsByName ... ok"));
+}
+
+#[test]
+fn js_browser_tests_run_in_a_headless_browser() {
+    require_e2e!();
+    if kargo_toolchain::browser::browser().is_err() {
+        eprintln!("skipping: no browser installed");
+        return;
+    }
+    let t = E2e::new();
+    js_project(&t, "jsweb", "environment = \"browser\"\n");
+    t.write(
+        "jsweb/src/Main.kt",
+        "package com.example.jsweb\n\nimport kotlinx.browser.document\n\nfun greeting(name: String) = \"Hello, $name!\"\n\nfun main() {\n    document.body?.append(greeting(\"page\"))\n}\n",
+    );
+    t.write(
+        "jsweb/tests/PageTest.kt",
+        "package com.example.jsweb\n\nimport kotlinx.browser.document\nimport kotlin.test.*\n\nclass PageTest {\n    @Test fun hasADocument() = assertNotNull(document.body)\n}\n",
+    );
+    t.kargo("jsweb")
+        .arg("test")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Running Kotlin/JS tests (headless browser)"))
+        .stdout(predicate::str::contains("test com.example.jsweb.PageTest.hasADocument ... ok"))
+        .stdout(predicate::str::contains("test com.example.jsweb.GreetingTest.greetsByName ... ok"));
+    t.kargo("jsweb").arg("build").assert().success();
+    let page = std::fs::read_to_string(t.dir.path().join("jsweb/target/debug/js/index.html")).unwrap();
+    assert!(page.contains("<script type=\"module\" src=\"./jsweb.mjs\"></script>"), "{page}");
+}
+
+#[test]
+fn js_library_builds_an_npm_package() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["jsgreeter", "--lib", "--target", "js"]);
+    t.write(
+        "jsgreeter/kargo.toml",
+        "[package]\nname = \"jsgreeter\"\nversion = \"0.3.0\"\n\n[target.js]\nkind = \"library\"\nmodule-kind = \"commonjs\"\nnpm-name = \"@acme/greeter\"\n",
+    );
+    t.write(
+        "jsgreeter/src/Greeter.kt",
+        "package com.example.greeter\n\n@OptIn(ExperimentalJsExport::class)\n@JsExport\nfun greet(name: String): String = \"Hello, $name!\"\n",
+    );
+    t.kargo("jsgreeter").args(["build", "--release"]).assert().success();
+    let out = t.dir.path().join("jsgreeter/target/release/js");
+    let declarations = std::fs::read_to_string(out.join("jsgreeter.d.ts")).unwrap();
+    assert!(declarations.contains("function greet(name: string): string;"), "{declarations}");
+    let package: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("package.json")).unwrap()).unwrap();
+    assert_eq!((package["name"].as_str(), package["type"].as_str()), (Some("@acme/greeter"), Some("commonjs")));
+    assert_eq!(package["main"], "./jsgreeter.js");
+    t.kargo("jsgreeter").args(["run", "-t", "js"]).assert().failure().stderr(predicate::str::contains("has no program to run"));
+    if which("node").is_some() {
+        let script = "console.log(require('./target/release/js/jsgreeter.js').com.example.greeter.greet('npm'))";
+        let output = StdCommand::new("node").args(["-e", script]).current_dir(t.dir.path().join("jsgreeter")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Hello, npm!", "{}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
 #[test]
 fn wasm_library_builds_an_npm_package() {
     require_e2e!();

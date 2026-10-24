@@ -285,6 +285,8 @@ pub struct Package {
     pub target_dependencies: BTreeMap<TargetKind, Vec<Dependency>>,
     /// npm packages of the Wasm target (`[target.wasm.npm-dependencies]`).
     pub npm_dependencies: Vec<(String, String)>,
+    /// npm packages of the JS target (`[target.js.npm-dependencies]`).
+    pub js_npm_dependencies: Vec<(String, String)>,
     pub repositories: Vec<Repository>,
     pub frameworks: Frameworks,
     pub plugins: Vec<CompilerPlugin>,
@@ -361,11 +363,13 @@ impl Package {
             sections.push(dependency_section(&format!("target.{}.dependencies", target.as_str()), deps));
         }
 
-        let mut npm = Section::new("target.wasm.npm-dependencies");
-        for (name, version) in &self.npm_dependencies {
-            npm.row(name, Value::str(version));
+        for (target, packages) in [("wasm", &self.npm_dependencies), ("js", &self.js_npm_dependencies)] {
+            let mut npm = Section::new(format!("target.{target}.npm-dependencies"));
+            for (name, version) in packages {
+                npm.row(name, Value::str(version));
+            }
+            sections.push(npm);
         }
-        sections.push(npm);
 
         let mut repositories = Section::new("repositories");
         for repo in &self.repositories {

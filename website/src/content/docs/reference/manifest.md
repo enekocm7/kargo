@@ -236,7 +236,7 @@ jvm-args = ["-Xmx1g"]
 | Key | Default | Meaning |
 |---|---|---|
 | `fail-fast` | `true` | Stop at the first target whose tests fail or don't compile. `false` tests every target and prints a result per target, like `kargo test --no-fail-fast` |
-| `timeout` | none | How long the whole test run may take, such as `"30s"`, `"5m"` or `"1h"`, counted from when the tests start running. The run is stopped and fails when it passes. Applies to the JVM, Native and Wasm targets, not Android |
+| `timeout` | none | How long the whole test run may take, such as `"30s"`, `"5m"` or `"1h"`, counted from when the tests start running. The run is stopped and fails when it passes. Applies to the JVM, Native, Wasm and JS targets, not Android |
 | `test-timeout` | none | How long one JVM test may take, such as `"30s"`. A test that runs longer fails, and the run goes on. Applies to tests run by JUnit Jupiter |
 | `jvm-args` | `[]` | JVM arguments for the test process, after `[target.jvm] jvm-args` and the profile's [`jvm-args`](#profilename) |
 
@@ -353,6 +353,33 @@ web-init = "web/init.mjs" # a library's script that runs before a dependent app'
 | `web-init` | none | A script of a library, relative to the package, that the page Kargo generates for a dependent browser app imports before the app module, after the init scripts of the libraries it depends on. It is shipped like `web-resources`. Same requirements as `web-resources` |
 
 With `optimize = true`, as in the [release profile](#profilename), a Wasm build removes code nothing reaches, runs `wasm-opt` and reports the size of the output.
+
+### `[target.js]`
+
+```toml
+[target.js]
+environment = "node"      # "node" (default) or "browser"
+kind = "application"      # "application" (default) or "library"
+module-kind = "es"        # "es" (default), "commonjs" or "umd"
+module-name = "hello"     # name of the compiled files; default: the package name
+npm-name = "@acme/hello"  # npm package name of a library; default: the lowercase package name
+package-manager = "pnpm"  # "npm", "pnpm" or "bun"; default: the first one found on PATH
+
+[target.js.npm-dependencies]
+"left-pad" = "1.3.0"      # npm packages besides those your Kotlin/JS libraries ask for
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `environment` | `"node"` | `"node"` for Node.js, `"browser"` for web pages (`kargo run` serves them and `kargo test` uses a headless browser, as for Wasm). See [JavaScript](../../guides/js/#setup) |
+| `kind` | `"application"` | `"application"` for a program with a `main`, `"library"` for an npm package of `@JsExport` declarations with TypeScript declarations and a `package.json` |
+| `module-kind` | `"es"` | The JavaScript module the compiler writes: `"es"` (`<name>.mjs`), `"commonjs"` or `"umd"` (`<name>.js`). A `browser` application can't use `"commonjs"`. See [Module kinds](../../guides/js/#module-kinds) |
+| `module-name` | the package name | Name of the compiled module's files. Letters, digits, `-`, `_` and `.` |
+| `npm-name` | the lowercase package name | `name` in the `package.json` of a library. May be scoped (`@scope/name`); only valid with `kind = "library"` |
+| `package-manager` | first of `npm`, `pnpm`, `bun` on `PATH` | The tool that installs the [npm packages](../../guides/js/#npm-packages) the JS target needs |
+| `npm-dependencies` | none | A table of npm packages (`name = "version"`) to install in addition to those the klibs ask for. Your version wins on a conflict |
+
+With `optimize = true`, as in the [release profile](#profilename), the JS module is linked with dead code elimination and without a source map.
 
 ### `[target.native]`
 
@@ -577,7 +604,7 @@ A step does exactly one of `run`, `tool` and `builtin`.
 | `main-class` | The class `tool` runs. Default: the `Main-Class` of the jar's manifest |
 | `args` | The arguments of `tool` (or more arguments for `protoc`). `$NAME` and `${NAME}` are replaced with the step's variables, such as `$KARGO_GEN_DIR` |
 | `builtin` | `build-config` or `protobuf` |
-| `targets` | The targets that compile the output: `jvm`, `wasm`, `native`, `android`. Default: all of them; for `protobuf`, `jvm` and `android` |
+| `targets` | The targets that compile the output: `jvm`, `wasm`, `js`, `native`, `android`. Default: all of them; for `protobuf`, `jvm` and `android` |
 | `kind` | `sources` (default), `test-sources` or `resources`. `resources` needs the `jvm` or `android` target |
 | `roots` | The directories of the output, relative to it, that hold the sources or resources, such as `src/main/kotlin` for a tool that writes a whole Gradle project. Default: the whole output directory |
 | `after` | Names of steps that run before this one. Steps without such a link run at the same time |
@@ -689,7 +716,7 @@ The other Compose keys are options of the Compose compiler, on the JVM and Andro
 
 See [Compose compiler options](../../guides/compose/#compiler-options).
 
-Compose works on the jvm (desktop) and android targets, on wasm with `environment = "browser"`, and on native with iOS `platforms` (`ios_arm64`, `ios_simulator_arm64`, `ios_x64`) and `kind = "framework"`. Other Wasm environments and Native platforms are errors. See [Compose](../../guides/compose/).
+Compose works on the jvm (desktop) and android targets, on wasm with `environment = "browser"`, and on native with iOS `platforms` (`ios_arm64`, `ios_simulator_arm64`, `ios_x64`) and `kind = "framework"`. Other Wasm environments and Native platforms are errors, and so is the js target (Compose for Web runs on Kotlin/Wasm). See [Compose](../../guides/compose/).
 
 See [Built-in frameworks](../../guides/frameworks/).
 
@@ -758,7 +785,7 @@ Names are letters, digits and `_`, and don't start with a digit. Two keys are no
 | Key | Meaning |
 |---|---|
 | `env-files` | More `.env` files, relative to the package root, read after the standard `.env` files and before `--env-file`. A missing one is an error |
-| `expose` | Variables compiled into a generated `BuildConfig` object in the package, one `const val` for each one that is set. Only in `[env]`. Unset ones become a nullable `null` property. Applies to the JVM, Native and Wasm (Node.js) targets, not Android or Wasm browser apps |
+| `expose` | Variables compiled into a generated `BuildConfig` object in the package, one `const val` for each one that is set. Only in `[env]`. Unset ones become a nullable `null` property. Applies to the JVM, Native, and Wasm and JS (Node.js) targets, not Android or browser apps |
 
 `.env` files and the precedence between sources are described in [Environment variables](../../guides/environment/).
 
@@ -856,7 +883,7 @@ $ kargo run --profile staging
 |---|---|---|---|---|
 | `inherits` | not allowed | not allowed | `"dev"` | The profile this one starts from: `dev`, `release` or another custom profile. Keys it does not set come from there, through any number of steps |
 | `debug` | `true` | `false` | inherited | Include debug information |
-| `optimize` | `false` | `true` | inherited | Optimize (mainly affects Native and Wasm; for Wasm it removes dead code, see [Release builds](../../guides/wasm/#release-builds)) |
+| `optimize` | `false` | `true` | inherited | Optimize (mainly affects Native, Wasm and JS; for Wasm and JS it removes dead code, see [Release builds](../../guides/wasm/#release-builds)) |
 | `compiler-args` | `[]` | `[]` | inherited | Extra compiler arguments for this profile |
 | `jvm-args` | `[]` | `[]` | inherited | JVM options for `kargo run`, `kargo test` and `kargo bench`, after `[target.jvm] jvm-args` (`kargo test` puts `[test] jvm-args` last, `kargo bench` puts `[bench] jvm-args` last) |
 | `env` | `{}` | `{}` | inherited | `[profile.<name>.env]`: variables that replace the inherited ones of the same name, and an `env-files` list added to the inherited list. Same format as `[env]`, but without `expose` |

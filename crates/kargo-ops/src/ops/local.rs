@@ -1,11 +1,11 @@
 //! Path dependencies: builds the packages a package depends on through `path` and returns
-//! the artifacts it compiles and runs against (jars for the JVM, klibs for Wasm and Native).
+//! the artifacts it compiles and runs against (jars for the JVM, klibs for Wasm, JS and Native).
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use super::build::{build_jvm, compile_wasm, native_klib};
+use super::build::{build_jvm, compile_js, compile_wasm, native_klib};
 use super::context::BuildContext;
 use crate::workspace::Workspace;
 use kargo_manifest::{Scope, TargetKind};
@@ -16,6 +16,7 @@ use kargo_util::fs::collect_files;
 pub enum LocalTarget<'a> {
     Jvm,
     Wasm,
+    Js,
     /// A Kotlin/Native platform such as `linux_x64`.
     Native(&'a str),
 }
@@ -25,6 +26,7 @@ impl LocalTarget<'_> {
         match self {
             LocalTarget::Jvm => TargetKind::Jvm,
             LocalTarget::Wasm => TargetKind::Wasm,
+            LocalTarget::Js => TargetKind::Js,
             LocalTarget::Native(_) => TargetKind::Native,
         }
     }
@@ -53,6 +55,7 @@ pub fn artifacts(ctx: &BuildContext, target: LocalTarget, scopes: &[Scope], dev:
             match target {
                 LocalTarget::Jvm => Ok(Some(build_jvm(&child)?.jar)),
                 LocalTarget::Wasm => Ok(compile_wasm(&child, false)?.map(|w| w.klib)),
+                LocalTarget::Js => Ok(compile_js(&child, false)?.map(|j| j.klib)),
                 LocalTarget::Native(konan) => native_klib(&child, konan),
             }
         })?;

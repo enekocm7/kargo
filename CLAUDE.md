@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Kargo is **Cargo for Kotlin**: a build tool and package manager written in Rust that builds Kotlin projects for the JVM, WebAssembly, Kotlin/Native and Android from a single `kargo.toml`.
+Kargo is **Cargo for Kotlin**: a build tool and package manager written in Rust that builds Kotlin projects for the JVM, WebAssembly, JavaScript, Kotlin/Native and Android from a single `kargo.toml`.
 
 @AGENTS.md
 

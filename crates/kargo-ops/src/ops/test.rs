@@ -12,8 +12,9 @@ use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, hook_env, jvm_classpaths, jvm_javac_args, jvm_processor_path,
-    native_cinterop, native_libraries, native_platforms, prepare_wasm, run_jvm_ksp, select_targets, sources, wasm_libraries,
+    BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, hook_env, js_libraries, js_work_dir, jvm_classpaths,
+    jvm_javac_args, jvm_processor_path, native_cinterop, native_libraries, native_platforms, prepare_js, prepare_wasm, run_jvm_ksp,
+    select_targets, sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::{JUNIT_MIN_JDK, JUNIT_VERSION};
@@ -21,13 +22,14 @@ use crate::env::EnvOptions;
 use crate::warnings;
 use crate::web::{self, PageEvent, Site};
 use kargo_compiler::jar::{JarManifest, write_jar};
+use kargo_compiler::js::JsCompilation;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::testreport::{self, CaseOutcome, TestEvent};
 use kargo_compiler::wasm::{WasmCompilation, npm_dependencies};
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
 use kargo_compiler::{diagnostics, junit};
-use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Hook, JsEnvironment, JsModuleKind, NativeKind, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::Platform;
 use kargo_toolchain::browser::{self, Browser};
 use kargo_toolchain::native::Host;
@@ -95,7 +97,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     }
     note_jvm_only_options(ctx, &targets, opts);
     // Fails before anything compiles when a required variable is not set, unless only Android or
-    // Wasm browser tests run, which get no environment.
+    // browser tests run, which get no environment.
     if targets.iter().any(|&target| ctx.program_env_applies(target)) {
         let env = ctx.project_env(&opts.env)?;
         warnings::emit(ctx.shell(), ctx.project, ctx.ws, env.tracked_secret_warnings(ctx.ws.root()));
@@ -110,6 +112,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let prepared = super::parallel_targets(&targets, |target| match target {
         TargetKind::Jvm => test_jvm(ctx, opts),
         TargetKind::Wasm => test_wasm(ctx, opts),
+        TargetKind::Js => test_js(ctx, opts),
         TargetKind::Native => test_native(ctx, opts),
         TargetKind::Android => Ok(TestRun::Android),
     });
@@ -128,7 +131,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
             TestRun::Done(passed) => Ok(passed),
             TestRun::Junit(cmd) => run_junit(ctx, cmd, opts, deadline),
             TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts, deadline),
-            TestRun::Browser(run) => run_in_browser(ctx, run, opts, deadline),
+            TestRun::Browser(run) => run_in_browser(ctx, run, target, opts, deadline),
             TestRun::Android => test_android(ctx, opts),
         });
         let outcome = match passed {
@@ -226,14 +229,16 @@ enum TestRun {
     Junit(Command),
     /// A test executable reporting TeamCity messages, with its label.
     Reported(Command, &'static str),
-    /// Kotlin/Wasm tests in a headless browser, which reports TeamCity messages to Kargo.
+    /// Kotlin/Wasm or Kotlin/JS tests in a headless browser, which reports TeamCity messages to Kargo.
     Browser(BrowserRun),
     /// Gradle compiles and runs Android tests in one step.
     Android,
 }
 
-/// Kotlin/Wasm tests that run in a browser.
+/// Kotlin/Wasm or Kotlin/JS tests that run in a browser.
 struct BrowserRun {
+    /// What `kargo test` calls them: `Wasm tests (headless browser)`.
+    label: &'static str,
     browser: Browser,
     /// The test page and the module it loads, and the npm packages it imports.
     site: Site,
@@ -883,11 +888,11 @@ const SETTLE: Duration = Duration::from_millis(400);
 
 /// Runs the tests in a headless browser: serves the test page, starts the browser on it and
 /// turns the console output the page reports into the usual test report.
-fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
+fn run_in_browser(ctx: &BuildContext, run: BrowserRun, target: TargetKind, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
     let started = Instant::now();
     let (events_tx, events) = mpsc::channel();
     let server = web::Server::start(web::bind(0)?, run.site, Some(events_tx))?;
-    let label = "Wasm tests (headless browser)";
+    let label = run.label;
     ctx.shell().status("Running", label);
     let mut cmd = run.browser.headless_command(&format!("{}index.html", server.url()), &run.profile);
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
@@ -901,7 +906,7 @@ fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions, deadl
     let reporter = std::thread::spawn(move || {
         testreport::report_with(BufReader::new(ChannelReader::new(lines)), human_out(), |event| {
             if json {
-                emit_report_event(&package, TargetKind::Wasm, event);
+                emit_report_event(&package, target, event);
             }
         })
     });
@@ -931,7 +936,7 @@ fn run_in_browser(ctx: &BuildContext, run: BrowserRun, opts: &TestOptions, deadl
     }
     let timed_out = outcome.is_err() && deadline.is_some_and(|deadline| Instant::now() >= deadline);
     let abnormal = if timed_out { Some(timed_out_message(ctx)) } else { outcome.err() };
-    finish_reported(ctx, summary, label, TargetKind::Wasm, opts, Ending { abnormal, timed_out, elapsed: started.elapsed() })
+    finish_reported(ctx, summary, label, target, opts, Ending { abnormal, timed_out, elapsed: started.elapsed() })
 }
 
 /// What a test page has reported so far.
@@ -1059,20 +1064,6 @@ impl Read for ChannelReader {
     }
 }
 
-fn file_url(path: &Path) -> String {
-    let s: String = process::slash(path)
-        .chars()
-        .map(|c| match c {
-            ' ' => "%20".to_owned(),
-            '%' => "%25".to_owned(),
-            '#' => "%23".to_owned(),
-            '?' => "%3F".to_owned(),
-            other => other.to_string(),
-        })
-        .collect();
-    if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
-}
-
 fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
@@ -1113,7 +1104,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     // that need more get their own `node_modules` next to the test module.
     let node_modules =
         if main_node_modules.is_none() || npm_dependencies(&unit.libraries)? != npm_dependencies(&wasm_libraries(ctx, &setup, false)?)? {
-            crate::npm::install(ctx, &unit.libraries, &unit.output)?
+            crate::npm::install(ctx, TargetKind::Wasm, &unit.libraries, &unit.output)?
         } else {
             main_node_modules
         };
@@ -1128,7 +1119,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     }
     let mut cmd = Command::new(kargo_toolchain::node()?);
     cmd.arg("-e")
-        .arg(format!("import({:?}).then(m => m.startUnitTests())", file_url(&unit.module_path())))
+        .arg(format!("import({:?}).then(m => m.startUnitTests())", process::file_url(&unit.module_path())))
         .current_dir(ctx.ws.root())
         .envs(ctx.project_env(&opts.env)?.for_child());
     Ok(TestRun::Reported(cmd, "Wasm tests (Node.js)"))
@@ -1156,7 +1147,86 @@ fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation,
         site = site.mount("node_modules", node_modules);
     }
     let profile = unit.output.join(format!(".browser-profile-{}", std::process::id()));
-    Ok(TestRun::Browser(BrowserRun { browser, site, profile }))
+    Ok(TestRun::Browser(BrowserRun { label: "Wasm tests (headless browser)", browser, site, profile }))
+}
+
+/// Compiles the Kotlin/JS tests into an ES module below the main module and prepares to run them on
+/// Node.js or in a headless browser, with the runner of [`crate::js_output`].
+fn test_js(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
+    let manifest = ctx.ws.manifest();
+    let js = manifest.targets.js.as_ref().context("the JS target is not enabled")?;
+    let tests = sources(ctx, TargetKind::Js, true, &["kt"])?;
+    if tests.kotlin_files().is_empty() {
+        return Ok(no_tests(ctx, TargetKind::Js));
+    }
+    super::local::test_fixtures_unsupported(ctx, TargetKind::Js)?;
+    // Tests link against the main klib as a friend module, so the program's `main` does not run.
+    let main = prepare_js(ctx)?;
+    let setup = ctx.setup(TargetKind::Js)?;
+    let libraries = js_libraries(ctx, &setup, true)?;
+    let jdk = ctx.compiler_jdk()?;
+    let compiler = ctx.kotlin_compiler()?;
+    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    let profile = ctx.ws.profile(&ctx.profile)?;
+    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let name = format!("{}-test", js.module_name(&manifest.package));
+    let main_node_modules = main.as_ref().and_then(|m| m.node_modules.clone());
+    // Below the main module, so Node.js finds its npm packages from here too.
+    let output = ctx.ws.output_dir(&ctx.profile, TargetKind::Js).join("test");
+    let unit = JsCompilation {
+        name: &name,
+        environment: js.environment,
+        // Whatever the program is, the runner imports the tests as an ES module.
+        module_kind: JsModuleKind::Es,
+        sources: tests,
+        libraries,
+        friends: main.map(|m| vec![m.klib]).unwrap_or_default(),
+        plugins: &plugins,
+        kotlin_args: &kotlin_args,
+        output: output.clone(),
+        work: js_work_dir(ctx, &name),
+        root: ctx.ws.root().to_path_buf(),
+        debug: true,
+        optimize: false,
+        declarations: false,
+        main_args: false,
+    };
+    unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Js), &|| compiling(ctx, TargetKind::Js, ", tests"))?;
+    // The main npm packages are one level up; dev-dependencies that need more get their own.
+    let node_modules =
+        if main_node_modules.is_none() || npm_dependencies(&unit.libraries)? != npm_dependencies(&js_libraries(ctx, &setup, false)?)? {
+            crate::npm::install(ctx, TargetKind::Js, &unit.libraries, &output)?
+        } else {
+            main_node_modules
+        };
+    let browser = js.environment == JsEnvironment::Browser;
+    let imports = match (&node_modules, browser) {
+        (Some(node_modules), true) => crate::wasm_output::import_map(node_modules),
+        _ => Default::default(),
+    };
+    crate::js_output::write_test_files(&output, &name, browser, opts.filter.as_deref(), &imports)?;
+    if opts.no_run {
+        return Ok(TestRun::Done(true));
+    }
+    if browser {
+        let browser = browser::browser()?;
+        let mut site = Site::new(&output);
+        if let Some(node_modules) = node_modules {
+            site = site.mount("node_modules", node_modules);
+        }
+        let profile = output.join(format!(".browser-profile-{}", std::process::id()));
+        return Ok(TestRun::Browser(BrowserRun { label: "Kotlin/JS tests (headless browser)", browser, site, profile }));
+    }
+    let quoted = |s: &str| serde_json::to_string(s).expect("a string serializes");
+    let script = format!(
+        "import({}).then(r => r.run(() => import({}), {{ filter: {} }})).then(failed => {{ process.exitCode = failed ? 1 : 0 }})",
+        quoted(&process::file_url(&output.join(crate::js_output::TEST_RUNNER))),
+        quoted(&process::file_url(&unit.module_path())),
+        quoted(opts.filter.as_deref().unwrap_or_default()),
+    );
+    let mut cmd = Command::new(kargo_toolchain::node()?);
+    cmd.arg("--enable-source-maps").arg("-e").arg(script).current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child());
+    Ok(TestRun::Reported(cmd, "Kotlin/JS tests (Node.js)"))
 }
 
 fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
@@ -1263,7 +1333,7 @@ fn list(ctx: &BuildContext, opts: &TestOptions, format: ListFormat) -> Result<()
     let listed = super::parallel_targets(&targets, |target| match target {
         TargetKind::Jvm => list_jvm(ctx, opts),
         TargetKind::Native => list_native(ctx, opts),
-        TargetKind::Wasm | TargetKind::Android => {
+        TargetKind::Wasm | TargetKind::Js | TargetKind::Android => {
             ctx.shell().note(format!("`--list` does not list {target} tests yet"));
             Ok(Vec::new())
         }
@@ -1583,14 +1653,5 @@ mod tests {
         let mut quick = Command::new("true").spawn().unwrap();
         let (status, timed_out) = wait_until(&mut quick, Some(Instant::now() + Duration::from_secs(30))).unwrap();
         assert_eq!((status.success(), timed_out), (true, false));
-    }
-
-    #[test]
-    fn file_urls() {
-        assert_eq!(file_url(Path::new("/tmp/x.mjs")), "file:///tmp/x.mjs");
-        assert_eq!(file_url(Path::new("/tmp/a b#.mjs")), "file:///tmp/a%20b%23.mjs");
-        if cfg!(windows) {
-            assert_eq!(file_url(Path::new(r"C:\a\b.mjs")), "file:///C:/a/b.mjs");
-        }
     }
 }

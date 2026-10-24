@@ -62,13 +62,13 @@ Gradle builds are programs, so `kargo import` reads their declarative parts and 
 | In the Gradle build | In `kargo.toml` |
 |---|---|
 | `kotlin("jvm")` | A JVM project |
-| `kotlin("multiplatform")` with `jvm()`, `wasmJs`, `wasmWasi` and the Native presets (`linuxX64()`, `macosArm64()`, ...) | `[target.jvm]`, `[target.wasm]` and `[target.native]` with `platforms`. A target with `binaries.executable()` is an application, one without it a library |
+| `kotlin("multiplatform")` with `jvm()`, `wasmJs`, `wasmWasi`, `js` and the Native presets (`linuxX64()`, `macosArm64()`, ...) | `[target.jvm]`, `[target.wasm]`, `[target.js]` and `[target.native]` with `platforms`. A target with `binaries.executable()` is an application, one without it a library. `js { browser() }` sets `environment = "browser"`, and the JS module kind follows `useEsModules()` and `useCommonJs()` (`umd`, Gradle's default, otherwise) |
 | `com.android.application`, `com.android.library` with `android { ... }` | `[target.android]`: `namespace`, `application-id`, the SDK versions, `version-code`, `version-name`, `minify` |
 | `implementation`, `api`, `compileOnly`, `runtimeOnly`, `testImplementation`, `ksp`, `annotationProcessor` | `[dependencies]`, `exported = true` for `api`, `scope`, `[dev-dependencies]` |
 | `platform("g:a:v")` | `bom = true` |
 | `project(":core")` | `core = { path = "../core" }`, and `include(...)` of `settings.gradle` makes the projects a workspace |
 | `kotlin("test")`, `kotlin("stdlib")`, JUnit | Left out: Kargo adds them |
-| Dependencies of source sets (`commonMain.dependencies { }`, `val jvmMain by getting { dependencies { } }`) | `[dependencies]`, `[target.<target>.dependencies]`; `npm("name", "version")` of Wasm becomes `[target.wasm.npm-dependencies]`. A dependency of a test source set goes to `[dev-dependencies]` for every target |
+| Dependencies of source sets (`commonMain.dependencies { }`, `val jvmMain by getting { dependencies { } }`) | `[dependencies]`, `[target.<target>.dependencies]`; `npm("name", "version")` of Wasm becomes `[target.wasm.npm-dependencies]`, and of JS `[target.js.npm-dependencies]`. A dependency of a test source set goes to `[dev-dependencies]` for every target |
 | `org.springframework.boot`, `io.ktor.plugin`, `org.jetbrains.compose`, `kotlin("plugin.serialization")`, `plugin.spring`, `plugin.jpa`, `io.freefair.lombok` and the matching libraries | `[frameworks]` |
 | `kotlinOptions` / `compilerOptions`: `jvmTarget`, `freeCompilerArgs`, `allWarningsAsErrors`, `optIn`, `languageVersion`, `apiVersion` | `[kotlin]` and `[target.jvm] jvm-target` |
 | `jvmToolchain(21)`, `java.toolchain.languageVersion` | `jvm-target` and `[toolchain] jdk` |
@@ -90,6 +90,7 @@ A multi-project build keeps what `allprojects { }`, `subprojects { }` and `proje
 | `src/commonMain`, `src/commonTest` | `src/`, `tests/` |
 | `src/jvmMain`, `src/jvmTest` | `src-jvm/`, `tests-jvm/` |
 | `src/wasmJsMain`, `src/wasmJsTest` | `src-wasm/`, `tests-wasm/` |
+| `src/jsMain`, `src/jsTest` | `src-js/`, `tests-js/` |
 | `src/nativeMain`, `src/linuxX64Main`, `src/iosMain`, ... | `src-native/`, `tests-native/` |
 | `src/androidMain`, or `src/main` of an Android module | `src-android/` (`src/` for a module with only the Android target), `android/AndroidManifest.xml`, `android/res/`, `android/assets/` |
 | `<sourceDirectory>`, `sourceSets { main { kotlin.srcDir(...) } }` | `src/` |
@@ -106,7 +107,7 @@ After the import, `kargo import` lists what it translated and, with a link to th
 - Dependencies written as `files(...)`, with a variable Kargo could not read, or from a catalog entry that doesn't exist.
 - Source sets and Android variants (`debug`, `release`, product flavors, instrumented tests) that have no place in Kargo's layout.
 - A parent POM that could not be read. Make it reachable and import again.
-- Kotlin/JS targets and other things Kargo does not build.
+- Projects that apply the standalone Kotlin/JS plugin (`kotlin("js")`), and other things Kargo does not build or translate.
 
 Credentials of private repositories are not copied. Name the environment variables that hold them in `username-env` and `password-env` of the [`[repositories]`](../../reference/manifest/#repositories) entry.
 

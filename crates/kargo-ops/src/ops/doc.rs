@@ -191,6 +191,7 @@ fn classpath(ctx: &BuildContext, target: TargetKind) -> Result<(&'static str, Ve
     Ok(match target {
         TargetKind::Jvm => ("jvm", jvm_compile_classpath(ctx, &jvm_classpaths(ctx, &setup)?)?),
         TargetKind::Wasm => ("wasm", wasm_libraries(ctx, &setup, false)?),
+        TargetKind::Js => ("js", super::build::js_libraries(ctx, &setup, false)?),
         TargetKind::Native => {
             // The API is the same on every platform, so the first one is enough.
             let platform = native_platforms(ctx)?.into_iter().next().context("[target.native] lists no platforms")?;

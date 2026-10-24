@@ -30,9 +30,9 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `GRAALVM_HOME` | GraalVM to use when `[toolchain] graalvm` is `system` (the default): for `kargo package --format native-image` and `kargo run --native-agent`. Without it, a `JAVA_HOME` or `PATH` that has `native-image` |
 | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android SDK location |
 | `BROWSER` | Browser that `kargo doc --open` and `kargo run --open` start (default: the system's default browser) |
-| `KARGO_BROWSER` | Browser that runs [Wasm browser tests](../../guides/wasm/#testing-in-a-browser): the path of an executable, or a command on `PATH`. Default: Chrome, Chromium, Edge, Brave or Firefox, whichever Kargo finds first |
+| `KARGO_BROWSER` | Browser that runs [Wasm](../../guides/wasm/#testing-in-a-browser) and [JS](../../guides/js/#browser-apps) browser tests: the path of an executable, or a command on `PATH`. Default: Chrome, Chromium, Edge, Brave or Firefox, whichever Kargo finds first |
 | `KARGO_BROWSER_ARGS` | Extra arguments for that browser, separated by spaces, e.g. `--no-sandbox` for Chrome in a container |
-| `KARGO_BROWSER_TIMEOUT` | Seconds a browser running Wasm tests may stay silent before they count as hung (default `120`) |
+| `KARGO_BROWSER_TIMEOUT` | Seconds a browser running Wasm or JS tests may stay silent before they count as hung (default `120`) |
 | Names in `username-env` / `password-env` | Repository credentials, for downloads and for `kargo publish` |
 | `KARGO_MAVEN_LOCAL` | The local Maven repository that `kargo publish --local` writes and `"maven-local"` in `[repositories]` reads (default `~/.m2/repository`) |
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | The two parts of a Central Portal user token, for [publishing to Maven Central](../../guides/publishing/#maven-central) |

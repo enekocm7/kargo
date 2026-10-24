@@ -179,6 +179,11 @@ kotlin {
         browser()
         binaries.executable()
     }
+    js {
+        nodejs()
+        useEsModules()
+        binaries.executable()
+    }
     linuxX64 {
         binaries {
             executable {
@@ -207,6 +212,9 @@ kotlin {
                 implementation(npm("left-pad", "1.3.0"))
             }
         }
+        jsMain.dependencies {
+            implementation(npm("chalk", "5.3.0"))
+        }
     }
 }
 "#;
@@ -220,13 +228,15 @@ kotlin {
         ("src/jvmMain/kotlin/B.kt", ""),
         ("src/jvmTest/kotlin/BTest.kt", ""),
         ("src/wasmJsMain/kotlin/C.kt", ""),
+        ("src/jsMain/kotlin/J.kt", ""),
+        ("src/jsTest/kotlin/JTest.kt", ""),
         ("src/linuxX64Main/kotlin/D.kt", ""),
         ("src/iosMain/kotlin/E.kt", ""),
     ]);
     let imported = read(dir.path()).unwrap();
     let package = &imported.packages[0];
     let kinds: Vec<_> = package.targets.iter().map(|t| t.kind).collect();
-    assert_eq!(kinds, [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Native]);
+    assert_eq!(kinds, [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Js, TargetKind::Native]);
     let text = manifest_of(package, None);
     assert!(text.contains("[target.jvm]\njvm-target = \"17\""), "{text}");
     assert!(text.contains("[target.wasm]\nenvironment = \"browser\""), "{text}");
@@ -235,6 +245,8 @@ kotlin {
     assert!(text.contains("\"com.squareup.okio:okio\" = \"3.9.0\""), "{text}");
     assert!(text.contains("[target.jvm.dependencies]\n\"com.squareup.okhttp3:okhttp\" = \"4.12.0\""), "{text}");
     assert!(text.contains("[target.wasm.npm-dependencies]\nleft-pad = \"1.3.0\""), "{text}");
+    assert!(text.contains("[target.js]\nenvironment = \"node\"\n"), "an ES module is Kargo's default: {text}");
+    assert!(text.contains("[target.js.npm-dependencies]\nchalk = \"5.3.0\""), "{text}");
     let moves = moves(package);
     for expected in [
         "src/commonMain/kotlin -> src",
@@ -242,6 +254,8 @@ kotlin {
         "src/jvmMain/kotlin -> src-jvm",
         "src/jvmTest/kotlin -> tests-jvm",
         "src/wasmJsMain/kotlin -> src-wasm",
+        "src/jsMain/kotlin -> src-js",
+        "src/jsTest/kotlin -> tests-js",
         "src/linuxX64Main/kotlin -> src-native",
         "src/iosMain/kotlin -> src-native",
         "src/commonMain/resources -> resources",

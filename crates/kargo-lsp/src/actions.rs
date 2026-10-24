@@ -444,7 +444,7 @@ mod tests {
         );
         let found = actions(&valid, "[target.jvm]");
         let titles: Vec<&str> = found.iter().filter(|a| a["kind"] == "refactor").map(|a| a["title"].as_str().unwrap()).collect();
-        assert_eq!(titles, ["Add the `wasm` target", "Add the `native` target", "Add the `android` target"]);
+        assert_eq!(titles, ["Add the `wasm` target", "Add the `js` target", "Add the `native` target", "Add the `android` target"]);
         assert_eq!(found.iter().find(|a| a["title"] == "Add the `wasm` target").unwrap()["command"]["arguments"][0]["target"], "wasm");
 
         let found = actions(text, "\"io.ktor");

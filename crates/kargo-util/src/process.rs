@@ -215,6 +215,21 @@ pub fn slash(path: &Path) -> String {
     if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
 }
 
+/// The `file://` URL of an absolute path, as Node.js and browsers read it (`file:///C:/a/b.mjs`).
+pub fn file_url(path: &Path) -> String {
+    let s: String = slash(path)
+        .chars()
+        .map(|c| match c {
+            ' ' => "%20".to_owned(),
+            '%' => "%25".to_owned(),
+            '#' => "%23".to_owned(),
+            '?' => "%3F".to_owned(),
+            other => other.to_string(),
+        })
+        .collect();
+    if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
+}
+
 /// Finds a POSIX shell (`sh` or `bash`) to run scripts with. On Windows this
 /// skips the WSL launcher and falls back to the shell bundled with Git for
 /// Windows, which is usually not on `PATH`.
@@ -279,6 +294,15 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_urls() {
+        assert_eq!(file_url(Path::new("/tmp/x.mjs")), "file:///tmp/x.mjs");
+        assert_eq!(file_url(Path::new("/tmp/a b#.mjs")), "file:///tmp/a%20b%23.mjs");
+        if cfg!(windows) {
+            assert_eq!(file_url(Path::new(r"C:\a\b.mjs")), "file:///C:/a/b.mjs");
+        }
+    }
 
     #[test]
     fn signals_are_named() {

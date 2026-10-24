@@ -69,10 +69,10 @@ const STUBS_FORMAT: &str = "1";
 pub type UnitCache = Arc<Mutex<HashMap<(PathBuf, Platforms, Platforms), Arc<Unit>>>>;
 
 /// The sources jars of the standard library and `kotlin-test` at `version` for the platforms of
-/// the project: the JVM's for JVM and Android targets, and the Wasm ones (`wasm` is the platform
-/// of the Wasm target, `js` or `wasi`) for Wasm. Native code has no sources of its own in
-/// Kargo's view, so it takes the Wasm standard library, whose folders shared with Native hold
-/// its common code. Downloads them unless offline.
+/// the project: the JVM's for JVM and Android targets, the Wasm ones (`wasm` is the platform
+/// of the Wasm target, `js` or `wasi`) for Wasm and the Kotlin/JS ones for JS. Native code has no
+/// sources of its own in Kargo's view, so it takes the Wasm standard library, whose folders shared
+/// with Native hold its common code. Downloads them unless offline.
 pub fn stdlib_jars(
     config: &Config,
     version: &str,
@@ -89,6 +89,10 @@ pub fn stdlib_jars(
         let environment = wasm.unwrap_or("js");
         modules.push((format!("kotlin-stdlib-wasm-{environment}"), Platforms::ALL, Platforms::NONE));
         modules.push((format!("kotlin-test-wasm-{environment}"), Platforms::NONE, Platforms::ALL));
+    }
+    if platforms.intersects(Platforms::JS) {
+        modules.push(("kotlin-stdlib-js".into(), Platforms::ALL, Platforms::NONE));
+        modules.push(("kotlin-test-js".into(), Platforms::NONE, Platforms::ALL));
     }
     let client = MavenClient::new(config, repositories);
     modules
@@ -214,16 +218,16 @@ fn merge<'a>(listed: impl IntoIterator<Item = (&'a SourcesJar, &'a Path, &'a [Pa
 
 /// The platforms of a top-level folder of a sources jar. The standard library's sources, and
 /// those of multiplatform libraries, have a folder per source set, named as Gradle names them:
-/// `commonMain`, `jvmMain`, `wasmJsMain`, `nativeWasmMain`, and so on. Common code is on every
-/// platform, except `commonNonJvm` code, which is on Wasm and Native. Any other folder is on
-/// every platform too, so nothing is hidden from it.
+/// `commonMain`, `jvmMain`, `wasmJsMain`, `jsMain`, `nativeWasmMain`, and so on. Common code is on
+/// every platform, except `commonNonJvm` code, which is on Wasm, JS and Native. Any other folder is
+/// on every platform too, so nothing is hidden from it.
 pub fn folder_platforms(folder: &str) -> Platforms {
     let set = match folder.strip_suffix("Main").or_else(|| folder.strip_suffix("Test")) {
         Some(set) => set.to_ascii_lowercase(),
         None => return Platforms::ALL,
     };
     if set.contains("nonjvm") {
-        return Platforms::WASM.union(Platforms::NATIVE);
+        return Platforms::WASM.union(Platforms::JS).union(Platforms::NATIVE);
     }
     let mut platforms = Platforms::NONE;
     if set.starts_with("jvm") || set.starts_with("jdk") {
@@ -231,6 +235,10 @@ pub fn folder_platforms(folder: &str) -> Platforms {
     }
     if set.contains("wasm") || set.starts_with("web") {
         platforms = platforms.union(Platforms::WASM);
+    }
+    // `jsMain`, `jsAndWasmShared`, and `webMain`, shared by JS and Wasm.
+    if set.starts_with("js") || set.starts_with("web") {
+        platforms = platforms.union(Platforms::JS);
     }
     if set.contains("native") {
         platforms = platforms.union(Platforms::NATIVE);
@@ -387,8 +395,10 @@ mod tests {
         assert_eq!(folder_platforms("jdk8Main"), Platforms::JVM);
         assert_eq!(folder_platforms("wasmCommonMain"), Platforms::WASM);
         assert_eq!(folder_platforms("wasmJsMain"), Platforms::WASM);
-        assert_eq!(folder_platforms("webMain"), Platforms::WASM);
-        assert_eq!(folder_platforms("commonNonJvmMain"), Platforms::WASM.union(Platforms::NATIVE));
+        assert_eq!(folder_platforms("webMain"), Platforms::WASM.union(Platforms::JS));
+        assert_eq!(folder_platforms("jsMain"), Platforms::JS);
+        assert_eq!(folder_platforms("jsAndWasmSharedMain"), Platforms::WASM.union(Platforms::JS));
+        assert_eq!(folder_platforms("commonNonJvmMain"), Platforms::WASM.union(Platforms::JS).union(Platforms::NATIVE));
         assert_eq!(folder_platforms("nativeWasmMain"), Platforms::WASM.union(Platforms::NATIVE));
         assert_eq!(folder_platforms("nativeWasmWasiMain"), Platforms::WASM.union(Platforms::NATIVE));
         assert_eq!(folder_platforms("kotlin"), Platforms::ALL, "a folder that isn't a source set");

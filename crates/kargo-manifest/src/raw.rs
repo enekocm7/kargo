@@ -242,6 +242,7 @@ struct RawKotlin {
 struct RawTargets {
     jvm: Option<RawJvm>,
     wasm: Option<RawWasm>,
+    js: Option<RawJs>,
     native: Option<RawNative>,
     android: Option<toml::Table>,
 }
@@ -273,6 +274,21 @@ struct RawWasm {
     #[serde(default)]
     web_resources: Vec<PathBuf>,
     web_init: Option<PathBuf>,
+    #[serde(default)]
+    dependencies: toml::Table,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawJs {
+    environment: Option<String>,
+    kind: Option<String>,
+    module_kind: Option<String>,
+    module_name: Option<String>,
+    npm_name: Option<String>,
+    package_manager: Option<String>,
+    #[serde(default)]
+    npm_dependencies: BTreeMap<String, String>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -1713,13 +1729,13 @@ impl RawManifest {
                                 );
                             }
                             if let Some(name) = &w.module_name {
-                                validate_module_name(name)?;
+                                validate_module_name("wasm", name)?;
                             }
                             if let Some(name) = &w.npm_name {
                                 if kind != WasmKind::Library {
                                     bail!("[target.wasm] `npm-name` names the package of a library; set kind = \"library\" or remove it");
                                 }
-                                validate_npm_name(name)?;
+                                validate_npm_name("wasm", name)?;
                             }
                             for (name, version) in &w.npm_dependencies {
                                 if name.trim().is_empty() || version.trim().is_empty() {
@@ -1745,6 +1761,57 @@ impl RawManifest {
                                 web_resources: w.web_resources,
                                 web_init: w.web_init,
                                 dependencies: deps.parse(&w.dependencies, "target.wasm.dependencies", false, Some(TargetKind::Wasm))?,
+                            })
+                        })
+                        .transpose()?,
+                    js: raw
+                        .js
+                        .map(|j| -> Result<JsTarget> {
+                            let environment = match j.environment.as_deref() {
+                                None | Some("node") | Some("nodejs") => JsEnvironment::Node,
+                                Some("browser") => JsEnvironment::Browser,
+                                Some(other) => bail!("unknown js environment `{other}` (expected `node` or `browser`)"),
+                            };
+                            let kind = match j.kind.as_deref() {
+                                None | Some("application") | Some("app") => JsKind::Application,
+                                Some("library") | Some("lib") => JsKind::Library,
+                                Some(other) => bail!("unknown js kind `{other}` (expected `application` or `library`)"),
+                            };
+                            let module_kind = match j.module_kind.as_deref() {
+                                None | Some("es") | Some("esm") => JsModuleKind::Es,
+                                Some("commonjs") | Some("cjs") => JsModuleKind::CommonJs,
+                                Some("umd") => JsModuleKind::Umd,
+                                Some(other) => bail!("unknown js module-kind `{other}` (expected `es`, `commonjs` or `umd`)"),
+                            };
+                            if environment == JsEnvironment::Browser && kind == JsKind::Application && module_kind == JsModuleKind::CommonJs
+                            {
+                                bail!(
+                                    "[target.js] a browser cannot load a CommonJS module; set module-kind = \"es\" or \"umd\" for environment = \"browser\""
+                                );
+                            }
+                            if let Some(name) = &j.module_name {
+                                validate_module_name("js", name)?;
+                            }
+                            if let Some(name) = &j.npm_name {
+                                if kind != JsKind::Library {
+                                    bail!("[target.js] `npm-name` names the package of a library; set kind = \"library\" or remove it");
+                                }
+                                validate_npm_name("js", name)?;
+                            }
+                            for (name, version) in &j.npm_dependencies {
+                                if name.trim().is_empty() || version.trim().is_empty() {
+                                    bail!("[target.js.npm-dependencies] needs a package name and a version for every entry");
+                                }
+                            }
+                            Ok(JsTarget {
+                                environment,
+                                kind,
+                                module_kind,
+                                module_name: j.module_name,
+                                npm_name: j.npm_name,
+                                package_manager: j.package_manager.as_deref().map(str::parse).transpose()?,
+                                npm_dependencies: j.npm_dependencies,
+                                dependencies: deps.parse(&j.dependencies, "target.js.dependencies", false, Some(TargetKind::Js))?,
                             })
                         })
                         .transpose()?,

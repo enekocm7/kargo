@@ -27,7 +27,7 @@ $ kargo build --message-format json 2>/dev/null
 
 Each line is one JSON object; its `reason` says what it is.
 
-A `compiler-message` is one diagnostic from the Kotlin compiler (JVM, Wasm or Native) or `javac`:
+A `compiler-message` is one diagnostic from the Kotlin compiler (JVM, Wasm, JS or Native) or `javac`:
 
 | Field | Meaning |
 |---|---|
@@ -37,7 +37,7 @@ A `compiler-message` is one diagnostic from the Kotlin compiler (JVM, Wasm or Na
 | `line` | 1-based line, or `null` |
 | `column` | 1-based column, or `null` (javac reports none) |
 | `rendered` | The diagnostic as the compiler printed it, with the source line and a caret |
-| `target` | The target being compiled: `jvm`, `wasm` or `native`. A source in `src/` is compiled for every target, so the same error can come once per target |
+| `target` | The target being compiled: `jvm`, `wasm`, `js` or `native`. A source in `src/` is compiled for every target, so the same error can come once per target |
 
 With [`warnings-as-errors`](../manifest/#kotlin), the compiler's `warnings found and -Werror specified` summary is the last `compiler-message`, after the diagnostics it counts. Kargo's own [warnings](../warnings/), such as a target without sources, are plain text on stderr, not JSON messages.
 
@@ -68,7 +68,7 @@ $ kargo test --list --format json 2>/dev/null
 
 A parameterized test or test factory is listed once; its invocations only exist when it runs, and their `parent-id` is its `id`. Kargo finds `file` and `line` by looking for the class and function in the test sources, so tests generated at run time (Kotest specs, dynamic tests) point at their class at best.
 
-Wasm and Android tests are not listed yet: `kargo test --list` notes that and prints nothing for them. A filter (`kargo test --list MathTest`) lists only the tests it would run.
+Wasm, JS and Android tests are not listed yet: `kargo test --list` notes that and prints nothing for them. A filter (`kargo test --list MathTest`) lists only the tests it would run.
 
 ## Test results
 
@@ -95,7 +95,7 @@ An ignored test gets a `test-finished` message without a `test-started` one. On 
 
 Each target ends with a `test-summary` message: the `passed`, `failed` and `ignored` counts and `success`. The exit code is the same as without the flag.
 
-With `--message-format json`, stdout holds only JSON messages: the human-readable report (`test MathTest.adds ... ok`, JUnit's tree, the result table) moves to stderr. Native and Wasm results come from the test runner's TeamCity messages as each test ends; Android results come from Gradle's JUnit XML once all tests have run, so there are no `test-started` messages.
+With `--message-format json`, stdout holds only JSON messages: the human-readable report (`test MathTest.adds ... ok`, JUnit's tree, the result table) moves to stderr. Native, Wasm and JS results come from the test runner's TeamCity messages as each test ends; Android results come from Gradle's JUnit XML once all tests have run, so there are no `test-started` messages.
 
 ## `kargo metadata`
 
@@ -224,7 +224,7 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 
 | Field | Targets | Meaning |
 |---|---|---|
-| `kind` | all | `jvm`, `wasm`, `native` or `android` |
+| `kind` | all | `jvm`, `wasm`, `js`, `native` or `android` |
 | `source-roots`, `test-roots` | all | `src/` and `src-<target>/`, then the output of `kind = "sources"` steps; `tests/`, `tests-<target>/`, the test fixtures `test-fixtures/` and `test-fixtures-<target>/` and the benchmarks `benches/` and `benches-<target>/`, then the output of `kind = "test-sources"` steps, whether they exist or not |
 | `generated-roots` | all | The output directories of the `[[generate]]` steps the target compiles, each with its `name`, `kind` (`sources`, `test-sources` or `resources`), `dir` and whether the files are `common` to every target. They are in `source-roots`, `test-roots` and `resource-roots` too, so an editor that reads those lists sees generated code. They exist after a build or `kargo generate`; `kargo metadata` runs no step |
 | `test-fixture-roots` | all | `test-fixtures/` and `test-fixtures-<target>/` ([test fixtures](../../guides/workspaces/#test-fixtures)), which `test-roots` includes too |
@@ -237,14 +237,15 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `previews` | JVM | The `@Preview` composables `kargo preview` renders, each with its qualified `name`, `function`, JVM `class`, `path` and 1-based `line`. Empty without `[frameworks] compose` |
 | `jvm-target`, `main-class`, `jvm-args`, `javac-args` | JVM | The bytecode version the build uses, the main class (`[target.jvm] main-class`, or the single `main` in the sources, else `null`), and the extra JVM and javac options |
 | `environment`, `wasm-kind`, `module-name` | Wasm | `[target.wasm]` settings |
-| `npm` | Wasm | The npm packages the program needs, from the klibs of its dependencies and `[target.wasm.npm-dependencies]`: each with its `name`, `version` and `directory`, where `kargo build` installs it (`target/<profile>/node_modules/<name>`) whether or not it is installed yet. `test` is `true` for a package only the tests need: `kargo test` installs those into `target/<profile>/wasm/test/node_modules`, and only when they differ from the program's packages. The packages of a path dependency are missing, since their klibs aren't built to be read. `null` with `--no-deps` |
+| `environment`, `js-kind`, `module-kind`, `module-name` | JS | `[target.js]` settings |
+| `npm` | Wasm, JS | The npm packages the program needs, from the klibs of its dependencies and `[target.wasm.npm-dependencies]`: each with its `name`, `version` and `directory`, where `kargo build` installs it (`target/<profile>/node_modules/<name>`) whether or not it is installed yet. `test` is `true` for a package only the tests need: `kargo test` installs those into `target/<profile>/wasm/test/node_modules`, and only when they differ from the program's packages. The JS target lists its packages the same way, from `[target.js.npm-dependencies]`, installed in `target/<profile>/js/node_modules` (`js/test/node_modules` for the tests'). The packages of a path dependency are missing, since their klibs aren't built to be read. `null` with `--no-deps` |
 | `npm-declarations` | Wasm | Where the build writes the [Kotlin declarations](../../guides/wasm/#kotlin-declarations-for-npm-packages) of `[target.wasm.npm-dependencies]` (`target/<profile>/generated/npm`), whether or not they exist yet; editors load the Kotlin files under it as a Wasm library. `null` without npm dependencies, also with `--no-deps` |
 | `native-kind`, `platforms`, `entry-point` | Native | `[target.native]` settings. `host` in `platforms` becomes the host's platform, and the entry point is detected as the build does |
-| `dependencies` | all | One entry per platform (`jvm`, `wasm-js`, `native-linux_x64`, ...). `null` with `--no-deps`, and for Android, whose dependencies Gradle resolves |
+| `dependencies` | all | One entry per platform (`jvm`, `wasm-js`, `js`, `native-linux_x64`, ...). `null` with `--no-deps`, and for Android, whose dependencies Gradle resolves |
 
 Each platform in `dependencies` has three lists:
 
-| List | JVM | Wasm, Native |
+| List | JVM | Wasm, JS, Native |
 |---|---|---|
 | `compile` | Compiles the main sources: `compile` and `provided` dependencies | Every library the main sources compile and link against |
 | `runtime` | Runs the program: `compile` and `runtime` dependencies | The same as `compile` |
@@ -312,8 +313,8 @@ At the root of a [workspace](../../guides/workspaces/), it describes the workspa
 | Field | Meaning |
 |---|---|
 | `package` | The package's name |
-| `target` | `jvm`, `wasm` or `native` |
-| `platform` | `jvm`, `wasm-<environment>` (`wasm-js`, `wasm-wasi`) or `native-<platform>`, the platform whose libraries are listed |
+| `target` | `jvm`, `wasm`, `js` or `native` |
+| `platform` | `jvm`, `wasm-<environment>` (`wasm-js`, `wasm-wasi`), `js` or `native-<platform>`, the platform whose libraries are listed |
 | `scope` | `compile`, `runtime` or `test` |
 | `classpath` | The jars or klibs, in the order the compiler gets them: path dependencies, then Maven artifacts |
 

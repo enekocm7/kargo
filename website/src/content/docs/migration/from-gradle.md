@@ -121,6 +121,7 @@ For Kotlin Multiplatform:
 | `src/commonMain/kotlin` | `src/` |
 | `src/jvmMain/kotlin` | `src-jvm/` |
 | `src/wasmJsMain/kotlin` | `src-wasm/` |
+| `src/jsMain/kotlin` | `src-js/` |
 | `src/nativeMain/kotlin`, `src/linuxX64Main/kotlin`, ... | `src-native/` |
 | `src/androidMain/kotlin` | `src-android/` |
 | `src/commonTest/kotlin` | `tests/` |
@@ -157,6 +158,10 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `XCFramework()` + `assembleXCFramework` | `kargo build --xcframework` |
 | A CMake or `exec` task that builds bundled C code | `[target.native.c-sources]` |
 | `wasmWasi()` | `[target.wasm] environment = "wasi"` |
+| `js { nodejs() }`, `js { browser() }` (`js(IR)`) | `[target.js] environment = "node"` or `"browser"`; see [JavaScript](../../guides/js/) |
+| `useEsModules()`, `useCommonJs()`, the default UMD | `[target.js] module-kind = "es"` (Kargo's default), `"commonjs"`, `"umd"` |
+| `binaries.library()` with `generateTypeScriptDefinitions()` | `[target.js] kind = "library"` (declarations included) |
+| `jsMain.dependencies { implementation(npm("x", "1.0")) }` | `[target.js.npm-dependencies] x = "1.0"` |
 | `com.android.application` + `android { ... }` | `[target.android]` |
 | `signingConfigs { create("release") { ... } }` | `[target.android.signing.release]`, with passwords in `store-password-env` / `key-password-env` |
 | `buildTypes { release { isMinifyEnabled = true; proguardFiles(...) } }` | `[target.android] minify = true`, `proguard-files = [...]` |

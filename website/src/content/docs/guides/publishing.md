@@ -115,12 +115,13 @@ A package that is a program, with a `main` function or a `main-class`, also gets
 
 ### Multiplatform libraries
 
-With Wasm or Native targets, or several targets, Kargo publishes the library the way the Kotlin Gradle Plugin does:
+With Wasm, JS or Native targets, or several targets, Kargo publishes the library the way the Kotlin Gradle Plugin does:
 
 ```text
 com/example/mathlib/1.0.0/          # root module: .module, .pom, common sources
 com/example/mathlib-jvm/1.0.0/      # mathlib-jvm-1.0.0.jar
 com/example/mathlib-wasm-js/1.0.0/  # mathlib-wasm-js-1.0.0.klib
+com/example/mathlib-js/1.0.0/       # mathlib-js-1.0.0.klib (Kotlin/JS)
 com/example/mathlib-linuxx64/1.0.0/ # mathlib-linuxx64-1.0.0.klib, cinterop klibs
 ```
 
@@ -129,7 +130,7 @@ Consumers depend on the root module, `com.example:mathlib`. Its [Gradle module m
 Native platforms are published for the `platforms` of `[target.native]`, and each one has to be built on a machine that can compile for it (Apple targets on macOS).
 
 :::caution
-Kargo doesn't publish the common metadata variant yet. Gradle multiplatform projects can use a Kargo-published library from their platform source sets (`jvmMain`, `wasmJsMain`, ...), but not from `commonMain`. The Android target is not published.
+Kargo doesn't publish the common metadata variant yet. Gradle multiplatform projects can use a Kargo-published library from their platform source sets (`jvmMain`, `wasmJsMain`, `jsMain`, ...), but not from `commonMain`. The Android target is not published.
 :::
 
 ### Sources and javadoc

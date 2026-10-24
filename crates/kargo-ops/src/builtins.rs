@@ -6,12 +6,12 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use kargo_manifest::{ComposeConfig, Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{ComposeConfig, Dependency, JsEnvironment, Manifest, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::ModuleId;
 
 pub const COROUTINES_VERSION: &str = "1.11.0";
 /// The browser APIs of Kotlin/Wasm (`kotlinx.browser`, `org.w3c.dom`), which the standard library
-/// doesn't contain. Added for `environment = "browser"`.
+/// doesn't contain. Added for `environment = "browser"` of Wasm and JS.
 pub const KOTLINX_BROWSER_VERSION: &str = "0.5.0";
 pub const SERIALIZATION_VERSION: &str = "1.11.0";
 pub const COMPOSE_VERSION: &str = "1.12.1";
@@ -203,6 +203,14 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
                 c.dependencies.push(dep(&format!("org.jetbrains.kotlinx:kotlinx-browser-{suffix}"), Some(KOTLINX_BROWSER_VERSION)));
             }
         }
+        TargetKind::Js => {
+            c.dependencies.push(dep("org.jetbrains.kotlin:kotlin-stdlib-js", Some(kotlin)));
+            c.dev_dependencies.push(dep("org.jetbrains.kotlin:kotlin-test-js", Some(kotlin)));
+            // As on Wasm, `document` and `window` (`kotlinx.browser`) are no longer in the standard library.
+            if manifest.targets.js.as_ref().is_some_and(|j| j.environment == JsEnvironment::Browser) {
+                c.dependencies.push(dep("org.jetbrains.kotlinx:kotlinx-browser", Some(KOTLINX_BROWSER_VERSION)));
+            }
+        }
         TargetKind::Native | TargetKind::Android => {}
     }
 
@@ -260,6 +268,9 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
                     );
                 }
                 multiplatform_compose(&mut c, compose, v, project_dir);
+            }
+            TargetKind::Js => {
+                bail!("Compose for Web runs on Kotlin/Wasm; build it with [target.wasm] environment = \"browser\" instead of [target.js]")
             }
             TargetKind::Native => {
                 let native = manifest.targets.native.as_ref();
@@ -489,6 +500,26 @@ mod tests {
         let js = manifest("[target.wasm]\nenvironment = \"js\"\n");
         let c = contributions(&js, TargetKind::Wasm, Path::new(".")).unwrap();
         assert_eq!(coords(&c.dependencies), ["org.jetbrains.kotlin:kotlin-stdlib-wasm-js"]);
+    }
+
+    #[test]
+    fn js_gets_its_standard_library_and_frameworks() {
+        let m = manifest("[target.js]\n[frameworks]\ncoroutines = true\nserialization = true\nktor = { client = \"js\" }\n");
+        let c = contributions(&m, TargetKind::Js, Path::new(".")).unwrap();
+        let deps = coords(&c.dependencies);
+        assert_eq!(deps[0], "org.jetbrains.kotlin:kotlin-stdlib-js");
+        for expected in
+            ["org.jetbrains.kotlinx:kotlinx-coroutines-core", "org.jetbrains.kotlinx:kotlinx-serialization-json", "io.ktor:ktor-client-js"]
+        {
+            assert!(deps.contains(&expected.to_owned()), "missing {expected}: {deps:?}");
+        }
+        assert_eq!(coords(&c.dev_dependencies), ["org.jetbrains.kotlin:kotlin-test-js"]);
+        assert_eq!(c.plugins[0].artifact, "kotlin-serialization-compiler-plugin-embeddable");
+        let compose = manifest("[target.js]\n[frameworks]\ncompose = true\n");
+        let err = contributions(&compose, TargetKind::Js, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("[target.wasm]"), "{err}");
+        let server = manifest("[target.js]\n[frameworks]\nktor = { server = \"cio\" }\n");
+        assert!(contributions(&server, TargetKind::Js, Path::new(".")).is_err(), "the Ktor server does not run on Kotlin/JS");
     }
 
     #[test]

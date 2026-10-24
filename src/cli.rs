@@ -148,6 +148,7 @@ impl From<ImportSource> for ops::import::Build {
 enum TargetArg {
     Jvm,
     Wasm,
+    Js,
     Native,
     Android,
 }
@@ -157,6 +158,7 @@ impl From<TargetArg> for TargetKind {
         match t {
             TargetArg::Jvm => TargetKind::Jvm,
             TargetArg::Wasm => TargetKind::Wasm,
+            TargetArg::Js => TargetKind::Js,
             TargetArg::Native => TargetKind::Native,
             TargetArg::Android => TargetKind::Android,
         }
@@ -643,7 +645,7 @@ enum Command {
         /// Run with a custom profile from kargo.toml (`[profile.<name>]`)
         #[arg(long, value_name = "NAME", conflicts_with = "release")]
         profile: Option<String>,
-        /// Target to run (defaults to jvm, then native, wasm, android)
+        /// Target to run (defaults to jvm, then native, wasm, js, android)
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
         /// Run this main instead: a JVM class (com.example.ToolKt) or a native entry function (com.example.main)
@@ -655,10 +657,10 @@ enum Command {
         /// Run examples/<NAME>.kt
         #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::examples))]
         example: Option<String>,
-        /// Port to serve a Wasm browser app on (default 8080; 0 picks a free one)
+        /// Port to serve a Wasm or JS browser app on (default 8080; 0 picks a free one)
         #[arg(long, value_name = "PORT")]
         port: Option<u16>,
-        /// Open the served page of a Wasm browser app in your browser
+        /// Open the served page of a Wasm or JS browser app in your browser
         #[arg(long)]
         open: bool,
         /// Start the JVM suspended, waiting for a debugger on this port (default 5005)
@@ -959,7 +961,7 @@ enum Command {
         #[command(flatten)]
         package: OnePackageArg,
     },
-    /// Enable, disable or list the project's targets (jvm, wasm, native, android)
+    /// Enable, disable or list the project's targets (jvm, wasm, js, native, android)
     Target {
         #[command(subcommand)]
         command: TargetCommand,
@@ -1245,12 +1247,12 @@ classpath or klib path of every target and scope. The `version` field is the for
         fingerprint: bool,
     },
     /// Print the resolved classpath of a target, for editors, scripts and tools
-    #[command(long_about = "Print the resolved classpath (JVM) or klib path (Wasm, Native) of a target.
+    #[command(long_about = "Print the resolved classpath (JVM) or klib path (Wasm, JS, Native) of a target.
 
 Prints the jars the build compiles with, in order: path dependencies (built if needed), then the
 resolved Maven artifacts, including the Kotlin stdlib and what frameworks add. The package's own
 classes are not part of it. Resolution respects kargo.lock, --locked and --offline. Without
---target, the JVM target is used, or the package's only Wasm or Native target.")]
+--target, the JVM target is used, or the package's only Wasm, JS or Native target.")]
     Classpath {
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,

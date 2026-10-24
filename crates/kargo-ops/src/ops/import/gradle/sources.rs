@@ -10,7 +10,7 @@ use crate::ops::import::model::DirMove;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetKind {
     Supported,
-    /// Kotlin/JS, and Android's instrumented tests.
+    /// Android's instrumented tests.
     Unsupported,
 }
 
@@ -47,7 +47,7 @@ pub fn classify(set: &str, jvm_targets: &[String]) -> Option<SetInfo> {
         "jvm" => (Some(TargetKind::Jvm), SetKind::Supported),
         name if jvm_targets.iter().any(|t| t == name) => (Some(TargetKind::Jvm), SetKind::Supported),
         "android" => (Some(TargetKind::Android), SetKind::Supported),
-        "js" => (None, SetKind::Unsupported),
+        "js" => (Some(TargetKind::Js), SetKind::Supported),
         name if name.starts_with("wasm") => (Some(TargetKind::Wasm), SetKind::Supported),
         name if NATIVE_PREFIXES
             .iter()
@@ -129,7 +129,7 @@ pub fn multiplatform_moves(root: &Path, dir: &Path, jvm_targets: &[String]) -> M
             continue;
         };
         if info.kind == SetKind::Unsupported {
-            layout.left.push(format!("the source set `src/{set}` (Kotlin/JS and Android instrumented tests are not supported)"));
+            layout.left.push(format!("the source set `src/{set}` (Android instrumented tests are not supported)"));
             continue;
         }
         let from = format!("src/{set}");
@@ -137,7 +137,7 @@ pub fn multiplatform_moves(root: &Path, dir: &Path, jvm_targets: &[String]) -> M
         layout.moves.push(mv(dir, &format!("{from}/kotlin"), &to));
         layout.moves.push(mv(dir, &format!("{from}/java"), &to));
         match (info.test, info.target) {
-            (false, None | Some(TargetKind::Jvm | TargetKind::Wasm)) => {
+            (false, None | Some(TargetKind::Jvm | TargetKind::Wasm | TargetKind::Js)) => {
                 layout.moves.push(mv(dir, &format!("{from}/resources"), "resources"))
             }
             (true, None | Some(TargetKind::Jvm)) => layout.moves.push(mv(dir, &format!("{from}/resources"), "test-resources")),
@@ -169,13 +169,14 @@ mod tests {
         assert_eq!(c("jvmMain"), Some((Some(TargetKind::Jvm), false, true)));
         assert_eq!(c("desktopTest"), Some((Some(TargetKind::Jvm), true, true)));
         assert_eq!(c("wasmJsMain"), Some((Some(TargetKind::Wasm), false, true)));
+        assert_eq!(c("jsMain"), Some((Some(TargetKind::Js), false, true)));
+        assert_eq!(c("jsTest"), Some((Some(TargetKind::Js), true, true)));
         assert_eq!(c("linuxX64Main"), Some((Some(TargetKind::Native), false, true)));
         assert_eq!(c("iosMain"), Some((Some(TargetKind::Native), false, true)));
         assert_eq!(c("nativeTest"), Some((Some(TargetKind::Native), true, true)));
         assert_eq!(c("androidMain"), Some((Some(TargetKind::Android), false, true)));
         assert_eq!(c("androidUnitTest"), Some((Some(TargetKind::Android), true, true)));
         assert_eq!(c("androidInstrumentedTest"), Some((Some(TargetKind::Android), true, false)));
-        assert_eq!(c("jsMain"), Some((None, false, false)));
         assert_eq!(c("jvmAndNativeMain"), None);
         assert_eq!(c("main"), None);
     }
@@ -193,7 +194,8 @@ mod tests {
         assert!(has("src/jvmMain/kotlin", "src-jvm"));
         assert!(has("src/wasmJsMain/kotlin", "src-wasm"));
         assert!(has("src/linuxX64Main/kotlin", "src-native"));
+        assert!(has("src/jsMain/kotlin", "src-js"));
         assert_eq!(layout.merged_native, ["linuxX64Main"]);
-        assert_eq!(layout.left.len(), 2, "{:?}", layout.left);
+        assert_eq!(layout.left.len(), 1, "only `jvmAndNativeMain` has no place: {:?}", layout.left);
     }
 }

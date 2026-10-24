@@ -43,13 +43,13 @@ impl ClasspathScope {
 #[derive(Debug)]
 pub struct Classpath {
     pub target: TargetKind,
-    /// `jvm`, `wasm-<environment>` or `native-<platform>`.
+    /// `jvm`, `wasm-<environment>`, `js` or `native-<platform>`.
     pub platform: String,
     pub entries: Vec<PathBuf>,
 }
 
 /// The target `kargo classpath` describes when none is given: the JVM if it is enabled,
-/// otherwise the package's only Wasm or Native target.
+/// otherwise the package's only Wasm, JS or Native target.
 pub fn default_target(ctx: &BuildContext) -> Result<TargetKind> {
     let enabled = ctx.ws.manifest().targets.enabled();
     if enabled.contains(&TargetKind::Jvm) {
@@ -58,7 +58,7 @@ pub fn default_target(ctx: &BuildContext) -> Result<TargetKind> {
     let candidates: Vec<TargetKind> = enabled.into_iter().filter(|t| *t != TargetKind::Android).collect();
     match candidates.as_slice() {
         [only] => Ok(*only),
-        [] => bail!("`{}` has no JVM, Wasm or Native target; the Android classpath is computed by Gradle", ctx.ws.name()),
+        [] => bail!("`{}` has no JVM, Wasm, JS or Native target; the Android classpath is computed by Gradle", ctx.ws.name()),
         _ => bail!("`{}` has several targets; choose one with `--target`", ctx.ws.name()),
     }
 }
@@ -92,6 +92,10 @@ pub fn classpath(ctx: &BuildContext, target: Option<TargetKind>, scope: Classpat
             let setup = ctx.setup(target)?;
             let env = ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
             Classpath { target, platform: format!("wasm-{}", env.platform()), entries: wasm_libraries(ctx, &setup, test)? }
+        }
+        TargetKind::Js => {
+            let setup = ctx.setup(target)?;
+            Classpath { target, platform: "js".to_owned(), entries: super::build::js_libraries(ctx, &setup, test)? }
         }
         TargetKind::Native => {
             let setup = ctx.setup(target)?;

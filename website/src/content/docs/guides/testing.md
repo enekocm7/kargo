@@ -51,7 +51,7 @@ kargo test --profile staging # with a custom profile: its jvm-args reach the tes
 
 `kargo test` exits with status `101` if a test fails, so it works in scripts and CI.
 
-Native and Wasm test lines show how long each test took, as in `test MathTest.adds ... ok (12ms)`, and their result line ends with the total time of the run (`finished in 1.50s`). The JVM report ends with the launcher's own total instead. With `--message-format json` each test's `duration-ms` is in its [result message](../../reference/machine-readable-output/#test-results), and `--report junit` writes the time of every test.
+Native, Wasm and JS test lines show how long each test took, as in `test MathTest.adds ... ok (12ms)`, and their result line ends with the total time of the run (`finished in 1.50s`). The JVM report ends with the launcher's own total instead. With `--message-format json` each test's `duration-ms` is in its [result message](../../reference/machine-readable-output/#test-results), and `--report junit` writes the time of every test.
 
 With several targets enabled, the tests of every target compile at the same time; they then run one target after another, so each target's results stay together. See [Build performance](../build-performance/).
 
@@ -108,6 +108,7 @@ $ kargo test --report junit
 |---|---|
 | JVM | Written by the JUnit console launcher: one `TEST-<engine>.xml` per test engine, such as `TEST-junit-jupiter.xml` |
 | Wasm | `TEST-wasm.xml`, built from the test runner's results |
+| JS | `TEST-js.xml`, built from the test runner's results |
 | Native | `TEST-native.xml`, built from the test runner's results |
 | Android | Gradle's `TEST-<class>.xml` files, copied from `target/android/build/test-results` |
 
@@ -163,7 +164,7 @@ timeout = "5m"         # the whole test run
 test-timeout = "30s"   # each JVM test
 ```
 
-`timeout` limits the whole run. When it passes, Kargo kills the test process and fails with `JVM tests timed out after 5m; the whole test run is limited by [test] timeout`. The clock starts when the tests start running, so compiling them doesn't count. It applies to the JVM, Native and Wasm targets; Android tests run under Gradle, which Kargo doesn't limit.
+`timeout` limits the whole run. When it passes, Kargo kills the test process and fails with `JVM tests timed out after 5m; the whole test run is limited by [test] timeout`. The clock starts when the tests start running, so compiling them doesn't count. It applies to the JVM, Native, Wasm and JS targets; Android tests run under Gradle, which Kargo doesn't limit.
 
 `test-timeout` limits each JVM test with JUnit Jupiter's `junit.jupiter.execution.timeout.default`. A test that runs longer fails, and the rest of the run goes on. It applies to tests run by JUnit Jupiter, which includes `kotlin.test` on the JVM. Other targets have no per-test limit, and Kargo says so when they run.
 
@@ -208,7 +209,7 @@ jvm: com.example.app.MathTest.adds
 
 A filter narrows the list the way it narrows a run. `--format json` prints one JSON object per test instead, with its id, class, name, display name, source file and line, for editors and other tools; see [Test discovery](../../reference/machine-readable-output/#test-discovery).
 
-JVM and Native tests can be listed. Wasm and Android tests can't be listed yet; `--list` says so and moves on.
+JVM and Native tests can be listed. Wasm, JS and Android tests can't be listed yet; `--list` says so and moves on.
 
 ## Test results as JSON
 
@@ -241,10 +242,11 @@ Editors that use the [`kargo dap`](../editors/#debug-adapter) debug adapter do t
 |---|---|---|
 | JVM | JUnit 6 on the JUnit Platform | `kotlin-test-junit5`, `junit-jupiter` |
 | Wasm | Node.js, or a headless browser with `environment = "browser"` | `kotlin-test-wasm-js` / `kotlin-test-wasm-wasi` |
+| JS | Node.js, or a headless browser with `environment = "browser"`, through Kargo's own runner | `kotlin-test-js` |
 | Native | the native test binary | built into Kotlin/Native |
 | Android | Gradle local unit tests (`testDebugUnitTest`) | `kotlin-test-junit`, `junit` |
 
-Test filters are not supported on Wasm; all tests run.
+Test filters are not supported on Wasm; all tests run. They work on JS. See [JavaScript](../js/#run-and-test-with-nodejs).
 
 JVM tests run on JUnit 6, which needs JDK 17 or newer, because `kargo test` starts its launcher on the project's JDK. If the JDK that builds your project is older, pin a newer one with [`[toolchain] jdk`](../toolchains/).
 

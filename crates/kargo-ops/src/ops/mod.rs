@@ -287,6 +287,7 @@ pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Con
             let res = ctx.resolve(key, Platform::Wasm(env.platform().to_owned()), &setup.requests(&all_scopes, test), &setup.boms)?;
             Ok(vec![(format!("wasm-{}", env.platform()), res)])
         }
+        TargetKind::Js => Ok(vec![("js".to_owned(), build::js_resolution(ctx, &setup, test)?)]),
         TargetKind::Native => native_platforms(ctx)?
             .into_iter()
             .map(|p| {
@@ -301,7 +302,7 @@ pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Con
 
 /// `kargo fetch`: downloads what later builds need so they can run offline: the compiler and
 /// dependencies, the JDK that `[toolchain] jdk` pins, the JUnit launcher and the libraries of `benches/` (JVM), the npm packages
-/// (Wasm, when npm, pnpm or bun is on `PATH`) and, with `tools`, the Dokka, ktlint and detekt
+/// (Wasm and JS, when npm, pnpm or bun is on `PATH`) and, with `tools`, the Dokka, ktlint and detekt
 /// jars that `kargo doc`, `fmt` and `lint` run.
 pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<()> {
     let targets = select_targets(ctx, targets)?;
@@ -337,12 +338,30 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 let (main, test) = (main?.files(), test?.files());
                 // Where `kargo build` and `kargo test` install them (see `npm::install`): the main packages
                 // next to the build, and the test ones in the test output when they differ.
-                crate::npm::fetch(ctx, &main, &ctx.ws.profile_dir(&ctx.profile))?;
+                crate::npm::fetch(ctx, target, &main, &ctx.ws.profile_dir(&ctx.profile))?;
                 let test_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test");
-                if crate::npm::dependencies(ctx, &test)? != crate::npm::dependencies(ctx, &main)? {
-                    crate::npm::fetch(ctx, &test, &test_dir)?;
+                if crate::npm::dependencies(ctx, target, &test)? != crate::npm::dependencies(ctx, target, &main)? {
+                    crate::npm::fetch(ctx, target, &test, &test_dir)?;
                 }
                 crate::web_resources::fetch(ctx)?;
+            }
+            TargetKind::Js => {
+                let setup = ctx.setup(target)?;
+                let (compiler, (main, test)) = join(
+                    || -> Result<()> {
+                        lock_tools(ctx, target)?;
+                        fetch_pinned_jdk(ctx)
+                    },
+                    || join(|| build::js_resolution(ctx, &setup, false), || build::js_resolution(ctx, &setup, true)),
+                );
+                compiler?;
+                let (main, test) = (main?.files(), test?.files());
+                // Where `kargo build` and `kargo test` install them: next to the module and the test module.
+                let dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Js);
+                crate::npm::fetch(ctx, target, &main, &dir)?;
+                if crate::npm::dependencies(ctx, target, &test)? != crate::npm::dependencies(ctx, target, &main)? {
+                    crate::npm::fetch(ctx, target, &test, &dir.join("test"))?;
+                }
             }
             TargetKind::Native => {
                 let setup = ctx.setup(target)?;
@@ -370,7 +389,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
 }
 
 /// Downloads and locks in `kargo.lock` what builds of `target` run besides the project's dependencies: the
-/// Kotlin compiler (JVM and Wasm), the frameworks' compiler plugins and, on the JVM, the JUnit console
+/// Kotlin compiler (JVM, Wasm and JS), the frameworks' compiler plugins and, on the JVM, the JUnit console
 /// launcher, KSP when a processor needs it and what `kargo bench` runs. `kargo fetch` and `kargo update` call it.
 pub(crate) fn lock_tools(ctx: &BuildContext, target: TargetKind) -> Result<()> {
     let setup = ctx.setup(target)?;

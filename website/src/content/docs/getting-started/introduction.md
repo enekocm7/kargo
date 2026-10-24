@@ -32,7 +32,7 @@ That is a complete project. There is no `build.gradle.kts`, no `settings.gradle.
 
 ## How it works
 
-For the JVM, Wasm and Native targets **Kargo does not use Gradle**. It downloads the Kotlin compiler (`kotlin-compiler-embeddable`) and Kotlin/Native (`kotlin-native-prebuilt`) from Maven Central and calls them directly. That keeps builds fast and keeps everything in one config file.
+For the JVM, Wasm, JS and Native targets **Kargo does not use Gradle**. It downloads the Kotlin compiler (`kotlin-compiler-embeddable`) and Kotlin/Native (`kotlin-native-prebuilt`) from Maven Central and calls them directly. That keeps builds fast and keeps everything in one config file.
 
 **Android** is the one exception. Android builds need the Android Gradle Plugin, so Kargo generates a Gradle project under `target/android` from your `kargo.toml` and runs it for you. You still never edit Gradle files.
 

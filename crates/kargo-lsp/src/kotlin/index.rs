@@ -42,7 +42,8 @@ impl Platforms {
     pub const JVM: Self = Self(1);
     pub const WASM: Self = Self(2);
     pub const NATIVE: Self = Self(4);
-    pub const ALL: Self = Self(7);
+    pub const JS: Self = Self(8);
+    pub const ALL: Self = Self(15);
 
     /// The platforms of a target kind as `kargo metadata` names it. An unknown kind stands for
     /// every platform, so nothing is hidden from it.
@@ -50,6 +51,7 @@ impl Platforms {
         match kind {
             "jvm" | "android" => Self::JVM,
             "wasm" => Self::WASM,
+            "js" => Self::JS,
             "native" => Self::NATIVE,
             _ => Self::ALL,
         }

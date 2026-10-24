@@ -448,6 +448,7 @@ fn is_stdlib_module(module: &str) -> bool {
         || artifact == "kotlin-test"
         || artifact.starts_with("kotlin-stdlib-")
         || artifact.starts_with("kotlin-test-wasm-")
+        || artifact == "kotlin-test-js"
 }
 
 /// The dependencies in `meta` without a sources jar in the cache, whose compiled jars and klibs
@@ -2192,7 +2193,10 @@ mod tests {
                     ],
                     "examples": [{ "name": "demo", "path": "/p/examples/demo.kt" }],
                 },
-                { "name": "lib", "path-dependencies": [{ "package": "core" }], "targets": [{ "kind": "native", "source-roots": ["/p/lib/src", "/p/lib/src-native"], "test-roots": [] }] },
+                { "name": "lib", "path-dependencies": [{ "package": "core" }], "targets": [
+                    { "kind": "native", "source-roots": ["/p/lib/src", "/p/lib/src-native"], "test-roots": [] },
+                    { "kind": "js", "source-roots": ["/p/lib/src", "/p/lib/src-js"], "test-roots": ["/p/lib/tests", "/p/lib/tests-js"] },
+                ] },
                 { "name": "core", "targets": [] },
             ],
         });
@@ -2202,7 +2206,10 @@ mod tests {
         // Loaded as a library, not as sources of the project.
         assert_eq!(model.npm_declarations, [PathBuf::from("/p/target/debug/generated/npm")]);
         assert_eq!(model.origin(Path::new("/p/target/debug/generated/npm/express/Default.kt")), Origin::Loose);
-        assert_eq!(model.packages.platforms, [Platforms::JVM.union(Platforms::WASM), Platforms::NATIVE, Platforms::NONE]);
+        assert_eq!(
+            model.packages.platforms,
+            [Platforms::JVM.union(Platforms::WASM), Platforms::NATIVE.union(Platforms::JS), Platforms::NONE]
+        );
         assert_eq!(model.packages.visible, [vec![0, 1, 2], vec![1, 2], vec![2]]);
         let set = |path: &str| match model.origin(Path::new(path)) {
             Origin::Source(s) => (s.package, s.kind, s.target),
@@ -2215,6 +2222,8 @@ mod tests {
         assert_eq!(set("/p/examples/demo.kt"), (0, SetKind::Example, None));
         assert_eq!(set("/p/target/debug/jvm/generated/compose-resources/kotlin/Res.kt"), (0, SetKind::Main, None));
         assert_eq!(set("/p/lib/src-native/N.kt"), (1, SetKind::Main, Some("native".into())));
+        assert_eq!(set("/p/lib/src-js/J.kt"), (1, SetKind::Main, Some("js".into())));
+        assert_eq!(set("/p/lib/tests-js/JT.kt"), (1, SetKind::Test, Some("js".into())));
         // What `[[generate]]` steps write: shared by every target, or the target's own.
         assert_eq!(set("/p/target/generated/debug/config/BuildConfig.kt"), (0, SetKind::Main, None));
         assert_eq!(set("/p/target/generated/debug/protos/Person.kt"), (0, SetKind::Main, Some("jvm".into())));

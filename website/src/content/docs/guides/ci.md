@@ -16,7 +16,7 @@ kargo init-ci            # add --junit for the test report step
 It runs `fmt --check`, `lint`, `check --tests --locked`, `build --locked`, `test --locked` and `package --release --locked`, and reads `kargo.toml` for the setup around them:
 
 - `actions/setup-java` only when a package does not set `[toolchain] jdk`. With `--locked`, Kargo doesn't download a JDK for a project on the system JDK by itself, so the job needs one on `PATH` or a pinned one.
-- `actions/setup-node` when a package has a Wasm target.
+- `actions/setup-node` when a package has a Wasm or JS target.
 - An `ubuntu-latest`, `macos-latest` and `windows-latest` matrix when a package has a Kotlin/Native target.
 - `--junit` runs `kargo test --report junit` and publishes the reports (see [Test results](#test-results)).
 
@@ -180,9 +180,9 @@ Kotlin/Native also downloads several hundred megabytes of LLVM and sysroots for 
 
 Jobs on one runner that share `~/.kargo` can run in parallel. Kargo locks each toolchain while it installs it, so when two jobs need the same JDK, the second waits for the first instead of deleting or repeating its download. See [Parallel installs and retries](../toolchains/#parallel-installs-and-retries).
 
-### Wasm
+### Wasm and JS
 
-Add Node.js so Wasm tests can run. It also provides npm, which Kargo uses to install [npm packages](../wasm/#npm-packages) for Wasm dependencies (pnpm and bun work too):
+Add Node.js so Wasm and JS tests can run. It also provides npm, which Kargo uses to install [npm packages](../wasm/#npm-packages) for Wasm dependencies (pnpm and bun work too):
 
 ```yaml
       - uses: actions/setup-node@v4
@@ -190,7 +190,7 @@ Add Node.js so Wasm tests can run. It also provides npm, which Kargo uses to ins
           node-version: 22
 ```
 
-Tests of a Wasm project with `environment = "browser"` run in a headless browser instead. GitHub's `ubuntu-latest`, `macos-latest` and `windows-latest` runners come with Chrome, which Kargo finds. On a container image, install a browser and pass the flags it needs through `KARGO_BROWSER_ARGS`, for example `--no-sandbox` when running as root. See [Testing in a browser](../wasm/#testing-in-a-browser).
+Tests of a Wasm or JS project with `environment = "browser"` run in a headless browser instead. GitHub's `ubuntu-latest`, `macos-latest` and `windows-latest` runners come with Chrome, which Kargo finds. On a container image, install a browser and pass the flags it needs through `KARGO_BROWSER_ARGS`, for example `--no-sandbox` when running as root. See [Testing in a browser](../wasm/#testing-in-a-browser).
 
 For release builds, Binaryen's `wasm-opt` makes the Wasm module much smaller; `npm install -g binaryen` puts it on `PATH` (see [Release builds](../wasm/#release-builds)).
 

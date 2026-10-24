@@ -54,7 +54,7 @@ These work with every command.
 
 **Exit codes:** `0` on success, `101` when a build or test fails or Kargo reports an error (as in Cargo). `kargo run` exits with your program's exit code (`128 + n` when a signal `n` killed it on Linux and macOS). See [Continuous integration](../../guides/ci/).
 
-Targets are `jvm`, `wasm`, `native` and `android`.
+Targets are `jvm`, `wasm`, `js`, `native` and `android`.
 
 ## Package selection
 
@@ -159,7 +159,7 @@ kargo init-ci [--system github] [--junit] [--force]
 ```console
 $ kargo init-ci
      Created .github/workflows/ci.yml
-        note: left out actions/setup-node: no Wasm target
+        note: left out actions/setup-node: no Wasm or JS target
         note: left out OS matrix: no Kotlin/Native target (the job runs on ubuntu-latest)
 ```
 
@@ -190,7 +190,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
-For Wasm, a release build removes dead code, runs `wasm-opt` when it is installed and prints the size of the module. A `kind = "library"` project also gets a `package.json` and TypeScript declarations. See [WebAssembly](../../guides/wasm/).
+For Wasm, a release build removes dead code, runs `wasm-opt` when it is installed and prints the size of the module. A `kind = "library"` project also gets a `package.json` and TypeScript declarations. See [WebAssembly](../../guides/wasm/). For JS, a release build removes dead code, and a library gets a `package.json` and TypeScript declarations too. See [JavaScript](../../guides/js/).
 
 ```sh
 kargo build
@@ -242,6 +242,7 @@ What each target skips:
 |---|---|---|
 | JVM | Compiles Kotlin and Java, but writes no jar and no `lib/`. Kotlin has no analysis-only mode on the JVM, so the classes go to the same place as `kargo build`'s, and a later build reuses them. | `target/<profile>/jvm/classes` |
 | Wasm | Produces only the klib; skips linking the `.mjs`/`.wasm` module | `target/<profile>/check/wasm` |
+| JS | Produces only the klib; skips linking the JavaScript module | `target/<profile>/check/js` |
 | Native | Produces a klib for each platform; skips code generation and linking | `target/<profile>/check/native/<platform>` |
 | Android | Runs Gradle's `compileDebugSources` (`compileReleaseSources` with `--release`), plus `compileDebugUnitTestSources` with `--tests`. Skips dexing and APK/AAR packaging | `target/android/build` |
 
@@ -264,20 +265,20 @@ kargo run -e 'println(1 + 1)'
 | `-e, --expr <code>` | Run this Kotlin code as `kargo script -e` does. Every other word is then an argument |
 | `-r, --release` | Use the release profile |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
-| `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `android` |
+| `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `js`, `android` |
 | `-p, --package <name>` | The package to run; required at the root of a workspace with several members |
 | `--main <name>` | Run another `main`: a JVM class such as `com.example.tools.MigrateKt`, or on Native an entry function such as `com.example.tools.main`. `--entry-point` is an alias |
 | `--bin <name>` | Run the [`[[bin]]`](../manifest/#bin) with this name |
 | `--example <name>` | Compile and run `examples/<name>.kt` against the project and its dev-dependencies |
-| `--port <port>` | Wasm browser apps: the port to serve on (default `8080`; `0` picks a free one) |
-| `--open` | Wasm browser apps: open the served page in your browser |
+| `--port <port>` | Wasm and JS browser apps: the port to serve on (default `8080`; `0` picks a free one) |
+| `--open` | Wasm and JS browser apps: open the served page in your browser |
 | `--debug[=<port>]` | JVM: start the program suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`; `0` lets the JVM pick and print one). See [Debugging](../../guides/editors/#debugging) |
 | `--native-agent` | JVM: run on GraalVM (`[toolchain] graalvm`) with its tracing agent, which records the reflection, resources and proxies the program uses as `native-image` configuration in `native-image/`. Later runs add to it. See [Native executables](../../guides/distributing/#native-executables) |
 | `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `--flavor <name>` | Android: install this [product flavor](../../guides/android/#product-flavors) (repeatable, one per dimension; default: the first flavor of each dimension). Needs `-t android` |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
-| `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for Android or Wasm browser apps. See [Watch mode](../../guides/watch/) |
+| `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for Android or browser apps. See [Watch mode](../../guides/watch/) |
 | `--hot-reload` | Like `--watch`, but a Compose Desktop app keeps running: the classes a build changed are swapped into it and the UI recomposes. Runs on JetBrains Runtime, which Kargo downloads. Needs `[frameworks] compose` and the jvm target; conflicts with `--debug`. See [Hot reload](../../guides/compose/#hot-reload) |
 | `--clear` | With `--watch`: clear the terminal before each run |
 | `--ignore <glob>` | With `--watch`: leave out the files matching this gitignore-style pattern, on top of `.gitignore`. Repeatable |
@@ -288,7 +289,7 @@ kargo run -e 'println(1 + 1)'
 
 The `Running` line quotes arguments that contain spaces or shell characters, so you can copy it: ``Running `java com.example.MainKt add "buy milk"` `` shows that `buy milk` is one argument.
 
-`--port` and `--open` only apply to a Wasm browser app; `kargo run` rejects them for any other target. A Wasm project with `kind = "library"` has no program, so `kargo run` rejects it too.
+`--port` and `--open` only apply to a Wasm or JS browser app; `kargo run` rejects them for any other target. A Wasm or JS project with `kind = "library"` has no program, so `kargo run` rejects it too.
 
 ### Running a single file
 
@@ -307,6 +308,7 @@ How each target runs:
 |---|---|
 | JVM | `java -cp ... <main-class>` with `jvm-args` |
 | Wasm | `node target/<profile>/wasm/<name>.mjs`; the arguments reach `main(args)` (see [Program arguments](../../guides/wasm/#program-arguments)). With `environment = "browser"` it serves `target/<profile>/wasm/` on `127.0.0.1` until you press Ctrl+C (see [Browser apps](../../guides/wasm/#browser-apps)) |
+| JS | `node target/<profile>/js/<name>.mjs` (`.js` for CommonJS and UMD), with `--enable-source-maps` in dev builds; the arguments reach `main(args)`. With `environment = "browser"` it serves `target/<profile>/js/` like a Wasm browser app (see [JavaScript](../../guides/js/#browser-apps)) |
 | Native | the executable built for the host platform |
 | Android | installs on the connected device with Gradle, then launches it with `adb` |
 
@@ -362,7 +364,7 @@ kargo test [filter] [options]
 
 By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
-Wasm tests run on Node.js, or with `environment = "browser"` in a headless browser: Chrome, Edge, Chromium, Brave or Firefox, found on `PATH` or named by `KARGO_BROWSER`. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser).
+Wasm tests run on Node.js, or with `environment = "browser"` in a headless browser: Chrome, Edge, Chromium, Brave or Firefox, found on `PATH` or named by `KARGO_BROWSER`. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser). JS tests run the same way, on Node.js or in a headless browser, with a runner of Kargo's own; see [JavaScript](../../guides/js/#run-and-test-with-nodejs).
 
 ## `kargo bench`
 
@@ -603,7 +605,7 @@ note: run `kargo build --target wasm` to build it
 
 | Option | Meaning |
 |---|---|
-| `<target>...` | `jvm`, `wasm`, `native` or `android`; space- or comma-separated |
+| `<target>...` | `jvm`, `wasm`, `js`, `native` or `android`; space- or comma-separated |
 | `--lib` | `add`: a Native or Android library (`kind = "library"`) |
 | `--app` | `add`: a Native executable or an Android application |
 | `--format json` | `list`: print JSON (`enabled` with each target's settings, and `available`) |
@@ -611,7 +613,7 @@ note: run `kargo build --target wasm` to build it
 
 `kargo target add`:
 
-- Writes the defaults of `kargo new`: `environment = "js"` for Wasm, `platforms = ["host"]` and a `kind` for Native, and `namespace`, `kind` and `min-sdk = 24` for Android (the namespace is the package's `group` plus its name). With `[frameworks] compose`, Wasm gets `environment = "browser"` and Native the iOS platforms with `kind = "framework"`, as [Compose](../../guides/compose/) needs.
+- Writes the defaults of `kargo new`: `environment = "js"` for Wasm, `environment = "node"` for JS, `platforms = ["host"]` and a `kind` for Native, and `namespace`, `kind` and `min-sdk = 24` for Android (the namespace is the package's `group` plus its name). With `[frameworks] compose`, Wasm gets `environment = "browser"` and Native the iOS platforms with `kind = "framework"`, as [Compose](../../guides/compose/) needs.
 - Adds `[target.jvm]` first when `kargo.toml` has no `[target]` section, because such a project is implicitly JVM and would stop building for the JVM once any other `[target.*]` table exists.
 - Without `--lib` or `--app`, picks an application when the sources declare a `main` function (or the manifest sets `main-class` or a `[[bin]]`), and a library otherwise.
 - Creates only missing files and never overwrites one: `src-<target>/.gitkeep` when `src-<target>/` does not exist, and for Android `android/AndroidManifest.xml` plus, for an application, a launcher activity in `src-android/MainActivity.kt`.
@@ -637,7 +639,7 @@ Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`, each with
 
 ## `kargo classpath`
 
-Print the resolved classpath (JVM) or klib path (Wasm, Native) of a target: the jars on disk, where `kargo tree` shows coordinates. Use it to point any tool, script or editor at a project's libraries.
+Print the resolved classpath (JVM) or klib path (Wasm, JS, Native) of a target: the jars on disk, where `kargo tree` shows coordinates. Use it to point any tool, script or editor at a project's libraries.
 
 ```console
 $ kargo classpath --format lines
@@ -650,7 +652,7 @@ The entries are the ones the build compiles with, in the same order: path depend
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-t, --target <target>` | `jvm` | Which target. Without it, the JVM target, or the package's only Wasm or Native target. A Native target prints the klibs of its first platform; Android's classpath comes from Gradle (`kargo android -- dependencies`) |
+| `-t, --target <target>` | `jvm` | Which target. Without it, the JVM target, or the package's only Wasm, JS or Native target. A Native target prints the klibs of its first platform; Android's classpath comes from Gradle (`kargo android -- dependencies`) |
 | `-s, --scope <scope>` | `compile` | `compile` (what the main code compiles against), `runtime` (what it runs with) or `test` (what the tests compile and run against, dev-dependencies included) |
 | `--format <fmt>` | `path` | `path`: one line joined with the platform's path separator (`:`, or `;` on Windows), ready for `-cp`. `lines`: one entry per line. `json`: an object with `package`, `target`, `platform`, `scope` and `classpath` |
 | `-p, --package <name>` | current package | Which package |
@@ -694,7 +696,7 @@ Build a library with the release profile and publish it to a Maven repository: t
 kargo publish [--repository <name> | --local] [--dry-run]
 ```
 
-Every target except Android is published: a JVM-only library as one Maven module (`<name>.jar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-wasm-js`, `<name>-linuxx64`, ...). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first.
+Every target except Android is published: a JVM-only library as one Maven module (`<name>.jar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-wasm-js`, `<name>-js`, `<name>-linuxx64`, ...). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first.
 
 | Option | Meaning |
 |---|---|
@@ -746,7 +748,7 @@ kargo uninstall <name>... [--root <dir>]
 
 ## `kargo fetch`
 
-Download all dependencies and toolchains so later builds can run offline, and lock them in `kargo.lock`. For each enabled target this is the Kotlin compiler, its plugins and the dependencies; the compiler, the plugins and the JUnit launcher are pinned as [build tools](../lockfile/#build-tools). The JVM and Wasm targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs and, in a package with `benches/`, the libraries and the harness generator of [`kargo bench`](#kargo-bench) (locked as `jvm/bench` and `jvm/bench-tools`), and the Wasm target gets the [npm packages](../../guides/wasm/#npm-packages) of its Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
+Download all dependencies and toolchains so later builds can run offline, and lock them in `kargo.lock`. For each enabled target this is the Kotlin compiler, its plugins and the dependencies; the compiler, the plugins and the JUnit launcher are pinned as [build tools](../lockfile/#build-tools). The JVM, Wasm and JS targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs and, in a package with `benches/`, the libraries and the harness generator of [`kargo bench`](#kargo-bench) (locked as `jvm/bench` and `jvm/bench-tools`), and the Wasm and JS targets get the [npm packages](../../guides/wasm/#npm-packages) of their Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
 
 | Option | Meaning |
 |---|---|
@@ -948,7 +950,7 @@ Print project information: package, targets, path dependencies, repositories and
 
 ## `kargo metadata`
 
-Print a JSON description of the whole project for editors, language servers and other tools: every package with its source, test and resource roots (the output directories of `[[generate]]` steps included), the steps themselves, output directories, compiler arguments and plugins, entry points, tasks, and the resolved classpath (JVM) or klib path (Wasm, Native) of every target and scope. Resolving may download dependencies and update `kargo.lock`, as `kargo tree` does.
+Print a JSON description of the whole project for editors, language servers and other tools: every package with its source, test and resource roots (the output directories of `[[generate]]` steps included), the steps themselves, output directories, compiler arguments and plugins, entry points, tasks, and the resolved classpath (JVM) or klib path (Wasm, JS, Native) of every target and scope. Resolving may download dependencies and update `kargo.lock`, as `kargo tree` does.
 
 ```sh
 kargo metadata

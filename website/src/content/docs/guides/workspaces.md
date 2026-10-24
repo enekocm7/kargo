@@ -89,7 +89,7 @@ geometry = { path = "../geometry", exported = true }
 - If `calc` declares `mathlib` with `scope = "runtime"`, everything `mathlib` brings is `runtime` too; with `scope = "provided"`, `calc` gets only what `mathlib` exports, as `provided`.
 - `mathlib`'s `[dev-dependencies]` are only for `mathlib`'s own tests.
 
-Wasm and Native compile against klibs, which need every library they reach, so `exported` only matters for the JVM (and for Android and publishing). When `mathlib` is [published](../publishing/), its exported dependencies get the POM scope `compile`, and the others `runtime`.
+Wasm, JS and Native compile against klibs, which need every library they reach, so `exported` only matters for the JVM (and for Android and publishing). When `mathlib` is [published](../publishing/), its exported dependencies get the POM scope `compile`, and the others `runtime`.
 
 If `calc` declares a module that `mathlib` also declares, `calc`'s declaration is used. `mathlib`'s `[repositories]` are searched as well, so you don't have to repeat them.
 

@@ -280,10 +280,18 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             out["environment"] = json!(wasm.environment.as_str());
             out["wasm-kind"] = json!(wasm.kind.as_str());
             out["module-name"] = json!(wasm.module_name(&m.package));
-            out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, &setup)?) };
+            out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, kind, &setup)?) };
             // The Kotlin declarations generated for `[target.wasm.npm-dependencies]`, once a build wrote them.
             out["npm-declarations"] =
                 if wasm.npm_dependencies.is_empty() { Value::Null } else { json!(path(&npm::declarations_dir(ws, &ctx.profile))) };
+        }
+        TargetKind::Js => {
+            let js = m.targets.js.as_ref().expect("the JS target is enabled");
+            out["environment"] = json!(js.environment.as_str());
+            out["js-kind"] = json!(js.kind.as_str());
+            out["module-kind"] = json!(js.module_kind.as_str());
+            out["module-name"] = json!(js.module_name(&m.package));
+            out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, kind, &setup)?) };
         }
         TargetKind::Native => {
             let native = m.targets.native.as_ref().expect("the Native target is enabled");
@@ -318,7 +326,7 @@ fn compiler_plugins(ctx: &BuildContext, setup: &TargetSetup, opts: &MetadataOpti
         .collect())
 }
 
-/// The classpaths (JVM) or klib paths (Wasm, Native) of a target, one entry per platform.
+/// The classpaths (JVM) or klib paths (Wasm, JS, Native) of a target, one entry per platform.
 /// Path dependencies are listed by package name: editors map them to that package's roots.
 fn dependencies(ctx: &BuildContext, kind: TargetKind, setup: &TargetSetup) -> Result<Vec<Value>> {
     let locals = |scopes: &[Scope], dev: bool| -> Result<Vec<Value>> {
@@ -360,6 +368,11 @@ fn dependencies(ctx: &BuildContext, kind: TargetKind, setup: &TargetSetup) -> Re
                 entries(locals(&ALL_SCOPES, true)?, &test),
             )]
         }
+        TargetKind::Js => {
+            let main = super::build::js_resolution(ctx, setup, false)?;
+            let test = super::build::js_resolution(ctx, setup, true)?;
+            vec![klib_entry("js", entries(locals(&ALL_SCOPES, false)?, &main), entries(locals(&ALL_SCOPES, true)?, &test))]
+        }
         TargetKind::Native => native_platforms(ctx)?
             .iter()
             .map(|p| -> Result<Value> {
@@ -381,15 +394,21 @@ fn klib_entry(platform: &str, main: Vec<Value>, test: Vec<Value>) -> Value {
     json!({ "platform": platform, "compile": main, "runtime": main, "test": test })
 }
 
-/// The npm packages of the Wasm target: the ones its klibs and `[target.wasm.npm-dependencies]` need, and
-/// where `kargo build` and `kargo test` install them. Path dependencies are not built to read their klibs
+/// The npm packages of the Wasm or JS target: the ones its klibs and `[target.<target>.npm-dependencies]` need,
+/// and where `kargo build` and `kargo test` install them. Path dependencies are not built to read their klibs
 /// here, so their packages are missing.
-fn npm_packages(ctx: &BuildContext, setup: &TargetSetup) -> Result<Vec<Value>> {
-    let main = npm::dependencies(ctx, &wasm_resolution(ctx, setup, false)?.files())?;
-    let test = npm::dependencies(ctx, &wasm_resolution(ctx, setup, true)?.files())?;
-    let main_dir = ctx.ws.profile_dir(&ctx.profile).join("node_modules");
-    let test_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test").join("node_modules");
-    Ok(npm_listing(&main, &test, &main_dir, &test_dir))
+fn npm_packages(ctx: &BuildContext, target: TargetKind, setup: &TargetSetup) -> Result<Vec<Value>> {
+    let (main, test, main_dir) = if target == TargetKind::Js {
+        let main = super::build::js_resolution(ctx, setup, false)?.files();
+        let test = super::build::js_resolution(ctx, setup, true)?.files();
+        (main, test, ctx.ws.output_dir(&ctx.profile, target))
+    } else {
+        (wasm_resolution(ctx, setup, false)?.files(), wasm_resolution(ctx, setup, true)?.files(), ctx.ws.profile_dir(&ctx.profile))
+    };
+    let main = npm::dependencies(ctx, target, &main)?;
+    let test = npm::dependencies(ctx, target, &test)?;
+    let test_dir = ctx.ws.output_dir(&ctx.profile, target).join("test").join("node_modules");
+    Ok(npm_listing(&main, &test, &main_dir.join("node_modules"), &test_dir))
 }
 
 /// The packages of the program, installed in `main_dir`, and of its tests. `kargo test` installs every
