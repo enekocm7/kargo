@@ -90,6 +90,8 @@ KARGO_E2E=1 KARGO_E2E_GUI=1 cargo test --test e2e compose_hot_reload   # Compose
 
 The default `cargo test` must never need network access or a JDK. The e2e tests are gated behind `KARGO_E2E`.
 
+**Agents don't run the e2e tests themselves.** A full run takes many minutes, downloads compilers, JDKs and frameworks, and can stall the session. When a change needs them, ask the user to run them, and give the exact command (with the test names when only some are relevant, and the PowerShell form `$env:KARGO_E2E = "1"; cargo test --test e2e <names>` on Windows), then fix what their output shows.
+
 ## Code conventions
 
 Match the surrounding code. In particular:
@@ -192,6 +194,6 @@ Fix any build error (bad frontmatter, a sidebar slug that doesn't match a file) 
 
 Before reporting a task as done:
 
-1. `cargo fmt --all` and `cargo test --workspace` pass (run the e2e tests too when you touched compiler drivers, frameworks or toolchains).
+1. `cargo fmt --all` and `cargo test --workspace` pass (when you touched compiler drivers, frameworks or toolchains, ask the user to run the e2e tests, as described under Build, test, format).
 2. The docs are updated per the section above, and `bun run build` in `website/` passes if you touched `website/`.
 3. Your summary lists which docs pages you changed or created, or states why none were needed.
