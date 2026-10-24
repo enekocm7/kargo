@@ -185,12 +185,13 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
 | `-j, --jobs <n>` | How many workspace members build at the same time (default: the number of CPUs) |
+| `--size-report` | Print Binaryen per-function metrics for a Wasm release build |
 
 [Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts (unless you pass `--keep-going`), and the error names the member and the target, such as ``could not build `core` (jvm)``.
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
-For Wasm, a release build removes dead code, runs `wasm-opt` when it is installed and prints the size of the module. A `kind = "library"` project also gets a `package.json` and TypeScript declarations. See [WebAssembly](../../guides/wasm/). For JS, a release build removes dead code, and a library gets a `package.json` and TypeScript declarations too. See [JavaScript](../../guides/js/).
+For Wasm, a release build removes dead code, downloads pinned Binaryen on demand, and reports raw, gzip and Brotli sizes. Optional size budgets can fail the build, and `--size-report` asks Binaryen for per-function metrics. See [WebAssembly](../../guides/wasm/). A `kind = "library"` project also gets a `package.json` and TypeScript declarations.
 
 ```sh
 kargo build

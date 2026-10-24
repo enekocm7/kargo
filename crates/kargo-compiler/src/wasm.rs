@@ -43,8 +43,13 @@ pub struct WasmCompilation<'a> {
     /// Directory receiving `<name>.klib` and the linked `<name>.mjs`/`.wasm`.
     pub output: PathBuf,
     pub debug: bool,
+    /// Include compiler debug information even in an optimized profile.
+    pub debug_info: bool,
     /// Remove code nothing reaches (`-Xir-dce`), which makes the module a lot smaller.
     pub optimize: bool,
+    /// Explicit override for Kotlin/Wasm runtime array range checks.
+    pub array_range_checks: Option<bool>,
+    pub debugger_custom_formatters: bool,
     /// Write TypeScript declarations (`<name>.d.mts`) for the `@JsExport` functions.
     pub declarations: bool,
     /// Pass the program arguments to `main(args)`, which Kotlin/Wasm itself
@@ -207,7 +212,7 @@ impl WasmCompilation<'_> {
             "-Xir-produce-js".to_owned(),
             format!("-Xinclude={}", slash(&self.klib_path())),
         ]);
-        if self.debug {
+        if self.debug || self.debug_info {
             args.push("-Xwasm-debug-info".to_owned());
         }
         if self.optimize {
@@ -215,6 +220,14 @@ impl WasmCompilation<'_> {
         }
         if self.declarations {
             args.push("-Xgenerate-dts".to_owned());
+        }
+        if let Some(enabled) = self.array_range_checks {
+            args.push(format!("-Xwasm-enable-array-range-checks={enabled}"));
+        } else if self.optimize {
+            args.push("-Xwasm-enable-array-range-checks=false".to_owned());
+        }
+        if self.debugger_custom_formatters {
+            args.push("-Xwasm-debugger-custom-formatters".to_owned());
         }
         args
     }
@@ -429,7 +442,10 @@ mod tests {
             kotlin_args: &[],
             output: "out".into(),
             debug: true,
+            debug_info: false,
             optimize: false,
+            array_range_checks: None,
+            debugger_custom_formatters: false,
             declarations: false,
             main_args: false,
         };
@@ -461,7 +477,10 @@ mod tests {
             kotlin_args: &[],
             output: "out".into(),
             debug: false,
+            debug_info: false,
             optimize: true,
+            array_range_checks: None,
+            debugger_custom_formatters: false,
             declarations: true,
             main_args: false,
         };
@@ -469,12 +488,38 @@ mod tests {
         assert!(unit.base_args("2.4.21").contains(&"-Xwasm-target=wasm-js".to_owned()));
         let link = unit.link_args("2.4.21");
         assert!(link.contains(&"-Xir-dce".to_owned()), "release links drop dead code: {link:?}");
+        assert!(link.contains(&"-Xwasm-enable-array-range-checks=false".to_owned()));
         assert!(link.contains(&"-Xgenerate-dts".to_owned()));
         assert!(!link.contains(&"-Xwasm-debug-info".to_owned()));
         // Only the link step removes code and writes declarations.
         let klib = unit.klib_args("2.4.21", None);
         assert!(!klib.contains(&"-Xir-dce".to_owned()) && !klib.contains(&"-Xgenerate-dts".to_owned()));
         assert!(unit.declarations_path().ends_with("out/lib.d.mts") || unit.declarations_path().ends_with("out\\lib.d.mts"));
+    }
+
+    #[test]
+    fn release_wasm_options_can_be_overridden() {
+        let unit = WasmCompilation {
+            name: "lib",
+            environment: WasmEnvironment::Js,
+            sources: SourceSet::default(),
+            libraries: vec![],
+            friends: vec![],
+            plugins: &[],
+            kotlin_args: &[],
+            output: "out".into(),
+            debug: false,
+            debug_info: true,
+            optimize: true,
+            array_range_checks: Some(true),
+            debugger_custom_formatters: true,
+            declarations: false,
+            main_args: false,
+        };
+        let args = unit.link_args("2.4.21");
+        assert!(args.contains(&"-Xwasm-debug-info".to_owned()));
+        assert!(args.contains(&"-Xwasm-enable-array-range-checks=true".to_owned()));
+        assert!(args.contains(&"-Xwasm-debugger-custom-formatters".to_owned()));
     }
 
     fn program(dir: &Path, files: &[(&str, &str)], environment: WasmEnvironment, main_args: bool) -> MainArgs {
@@ -496,7 +541,10 @@ mod tests {
             kotlin_args: &[],
             output: dir.join("out"),
             debug: false,
+            debug_info: false,
             optimize: false,
+            array_range_checks: None,
+            debugger_custom_formatters: false,
             declarations: false,
             main_args,
         };

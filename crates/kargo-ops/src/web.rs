@@ -216,6 +216,7 @@ struct Request {
     method: String,
     target: String,
     host: Option<String>,
+    accept_encoding: Option<String>,
     body: Vec<u8>,
 }
 
@@ -228,7 +229,7 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
     let mut parts = line.split_whitespace();
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else { return Ok(None) };
     let (method, target) = (method.to_owned(), target.to_owned());
-    let (mut length, mut host) = (0usize, None);
+    let (mut length, mut host, mut accept_encoding) = (0usize, None, None);
     for _ in 0..MAX_HEADERS {
         line.clear();
         if reader.read_line(&mut line)? == 0 || line.trim_end().is_empty() {
@@ -238,13 +239,14 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
             match name.trim().to_ascii_lowercase().as_str() {
                 "content-length" => length = value.trim().parse().unwrap_or(0),
                 "host" => host = Some(value.trim().to_owned()),
+                "accept-encoding" => accept_encoding = Some(value.trim().to_ascii_lowercase()),
                 _ => {}
             }
         }
     }
     let mut body = vec![0; length.min(MAX_BODY)];
     reader.read_exact(&mut body)?;
-    Ok(Some(Request { method, target, host, body }))
+    Ok(Some(Request { method, target, host, accept_encoding, body }))
 }
 
 fn handle(mut stream: TcpStream, site: &Site, events: Option<&Sender<PageEvent>>, shared: &Shared, port: u16) -> io::Result<()> {
@@ -277,8 +279,8 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
     match request.method.as_str() {
         "GET" | "HEAD" => {
             let head = request.method == "HEAD";
-            match read_file(site, &request.target) {
-                Some((file, body)) => respond(stream, "200 OK", content_type(&file), &body, head),
+            match read_file(site, &request.target, request.accept_encoding.as_deref()) {
+                Some((file, body, encoding)) => respond_encoding(stream, "200 OK", content_type(&file), &body, head, encoding),
                 None => respond(stream, "404 Not Found", "text/plain", b"not found", head),
             }
         }
@@ -306,20 +308,47 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
 }
 
 /// The file a GET request names (`index.html` for a directory) and its contents.
-fn read_file(site: &Site, target: &str) -> Option<(PathBuf, Vec<u8>)> {
+fn read_file(site: &Site, target: &str, accept_encoding: Option<&str>) -> Option<(PathBuf, Vec<u8>, Option<&'static str>)> {
     let mut file = site.resolve(target)?;
     if file.is_dir() {
         file.push("index.html");
     }
+    if let Some(encodings) = accept_encoding {
+        for (encoding, suffix) in [("br", "br"), ("gzip", "gz")] {
+            if encodings.split(',').any(|item| {
+                let mut parts = item.trim().split(';');
+                parts.next() == Some(encoding)
+                    && !parts.any(|p| p.trim().eq_ignore_ascii_case("q=0") || p.trim().eq_ignore_ascii_case("q=0.0"))
+            }) {
+                let compressed = file.with_file_name(format!("{}.{}", file.file_name()?.to_string_lossy(), suffix));
+                if let Ok(body) = std::fs::read(compressed) {
+                    return Some((file, body, Some(if encoding == "br" { "br" } else { "gzip" })));
+                }
+            }
+        }
+    }
     let body = std::fs::read(&file).ok()?;
-    Some((file, body))
+    Some((file, body, None))
 }
 
 fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8], head_only: bool) -> io::Result<()> {
+    respond_encoding(stream, status, content_type, body, head_only, None)
+}
+
+fn respond_encoding(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    encoding: Option<&str>,
+) -> io::Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{}{}Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len(),
+        encoding.map(|e| format!("Content-Encoding: {e}\r\n")).unwrap_or_default(),
+        encoding.map(|_| "Vary: Accept-Encoding\r\n").unwrap_or_default(),
     )?;
     if !head_only {
         stream.write_all(body)?;
@@ -382,6 +411,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("modules/pkg")).unwrap();
         std::fs::write(dir.join("root/index.html"), "<h1>home</h1>").unwrap();
         std::fs::write(dir.join("root/app.wasm"), [0, 0x61, 0x73, 0x6d]).unwrap();
+        std::fs::write(dir.join("root/app.wasm.br"), [1, 2, 3]).unwrap();
         std::fs::write(dir.join("root/app.mjs"), "export {}").unwrap();
         std::fs::write(dir.join("root/sub/index.html"), "<h1>sub</h1>").unwrap();
         std::fs::write(dir.join("root/with space.txt"), "spaced").unwrap();
@@ -402,6 +432,22 @@ mod tests {
         assert!(home.contains("Content-Type: text/html; charset=utf-8") && home.ends_with("<h1>home</h1>"), "{home}");
         assert!(get(&server, "/sub/").ends_with("<h1>sub</h1>"));
         assert!(get(&server, "/app.wasm").contains("Content-Type: application/wasm"));
+        let compressed = exchange(
+            server.port(),
+            &format!("GET /app.wasm HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAccept-Encoding: br, gzip\r\n\r\n", server.port()),
+        );
+        assert!(
+            compressed.contains("Content-Type: application/wasm")
+                && compressed.contains("Content-Encoding: br")
+                && compressed.contains("Vary: Accept-Encoding")
+                && compressed.ends_with("\u{1}\u{2}\u{3}"),
+            "{compressed:?}"
+        );
+        let refused = exchange(
+            server.port(),
+            &format!("GET /app.wasm HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAccept-Encoding: br;q=0, gzip;q=0\r\n\r\n", server.port()),
+        );
+        assert!(!refused.contains("Content-Encoding:") && refused.ends_with("\0asm"), "{refused:?}");
         assert!(get(&server, "/app.mjs").contains("Content-Type: text/javascript"));
         assert!(get(&server, "/with%20space.txt?x=1").ends_with("spaced"));
         assert!(get(&server, "/node_modules/pkg/index.js").ends_with("export default 1"));

@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::ops::build::WasmBuild;
 use crate::ops::context::BuildContext;
-use kargo_manifest::{WasmEnvironment, WasmKind, WasmOpt};
+use kargo_manifest::{WasmCompression, WasmEnvironment, WasmKind, WasmOpt, WasmOptLevel};
 use kargo_util::process::{self, find_on_path};
 
 /// Records which files were copied from `resources/`, so a deleted one does not linger.
@@ -23,9 +23,18 @@ const OPTIMIZED_MARKER: &str = ".kargo-wasm-opt";
 /// Everything a finished Wasm build adds around the compiled module: the page of a
 /// browser app, the `package.json` of a library, and for release builds `wasm-opt`
 /// and the size report.
-pub fn finish(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
+pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> Result<()> {
     if ctx.ws.profile(&ctx.profile)?.optimize {
-        optimize(ctx, build)?;
+        optimize(ctx, build, size_report)?;
+        if !ctx.ws.manifest().targets.wasm.as_ref().unwrap().debug_info {
+            minify_glue(build)?;
+            for file in all_files(&build.dir).into_iter().filter(|p| p.extension().is_some_and(|e| e == "map")) {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+    }
+    if ctx.ws.manifest().targets.wasm.as_ref().is_some_and(|w| w.content_hash) {
+        hash_assets(build)?;
     }
     if build.kind == WasmKind::Library {
         let manifest = ctx.ws.manifest();
@@ -38,9 +47,91 @@ pub fn finish(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
         assemble_site(ctx, build)?;
     }
     if ctx.ws.profile(&ctx.profile)?.optimize {
-        report_size(ctx, build);
+        compress_assets(ctx, build)?;
+        report_size(ctx, build, size_report)?;
     }
     Ok(())
+}
+
+fn minify_glue(build: &WasmBuild) -> Result<()> {
+    let session = minify_js::Session::new();
+    for file in all_files(&build.dir).into_iter().filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("mjs" | "js"))) {
+        let source = std::fs::read(&file)?;
+        let mut minified = Vec::new();
+        minify_js::minify(&session, minify_js::TopLevelMode::Module, &source, &mut minified)
+            .map_err(|e| anyhow::anyhow!("failed to minify {}: {e:?}", file.display()))?;
+        std::fs::write(file, minified)?;
+    }
+    Ok(())
+}
+
+fn hash_assets(build: &mut WasmBuild) -> Result<()> {
+    let old_stem = build.name.clone();
+    let wasm_path = build.dir.join(format!("{old_stem}.wasm"));
+    let wasm = std::fs::read(&wasm_path)?;
+    let mut contents = wasm;
+    if let Ok(glue) = std::fs::read(build.dir.join(format!("{old_stem}.mjs"))) {
+        contents.push(0);
+        contents.extend(glue);
+    }
+    let hash = &kargo_util::hash::sha256_bytes(&contents)[..12];
+    let new_stem = format!("{old_stem}.{hash}");
+    let new_wasm = build.dir.join(format!("{new_stem}.wasm"));
+    let old_module = build.dir.join(format!("{old_stem}.mjs"));
+    let new_module = build.dir.join(format!("{new_stem}.mjs"));
+    let old_declarations = build.dir.join(format!("{old_stem}.d.mts"));
+    let new_declarations = build.dir.join(format!("{new_stem}.d.mts"));
+    if old_module.is_file() {
+        let glue = std::fs::read_to_string(&old_module)?.replace(&format!("{old_stem}.wasm"), &format!("{new_stem}.wasm"));
+        std::fs::write(&new_module, glue)?;
+        std::fs::remove_file(&old_module)?;
+    }
+    if old_declarations.is_file() {
+        std::fs::rename(old_declarations, new_declarations)?;
+    }
+    std::fs::rename(&wasm_path, &new_wasm)?;
+    build.name = new_stem;
+    build.module = new_module;
+    Ok(())
+}
+
+fn compress_assets(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
+    let wasm = ctx.ws.manifest().targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    let mut files = all_files(&build.dir)
+        .into_iter()
+        .filter(|file| matches!(file.extension().and_then(|e| e.to_str()), Some("wasm" | "mjs" | "js")))
+        .collect::<Vec<_>>();
+    files.sort();
+    for file in files {
+        if !file.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&file)?;
+        for kind in &wasm.compress {
+            let (suffix, compressed) = match kind {
+                WasmCompression::Gzip => ("gz", gzip(&bytes)?),
+                WasmCompression::Brotli => ("br", brotli(&bytes)?),
+            };
+            let dest = file.with_file_name(format!("{}.{}", file.file_name().unwrap().to_string_lossy(), suffix));
+            std::fs::write(dest, compressed)?;
+        }
+    }
+    Ok(())
+}
+
+fn gzip(data: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(data)?;
+    Ok(encoder.finish()?)
+}
+
+fn brotli(data: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = brotli::CompressorWriter::new(&mut out, 4096, 11, 22);
+        encoder.write_all(data)?;
+    }
+    Ok(out)
 }
 
 // --- The page ---------------------------------------------------------------------------------
@@ -357,8 +448,9 @@ const WASM_OPT_ARGS: [&str; 8] = [
 ];
 
 /// Runs Binaryen's `wasm-opt` over the module when there is one to run.
-fn optimize(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
+fn optimize(ctx: &BuildContext, build: &WasmBuild, size_report: bool) -> Result<()> {
     let wasm = ctx.ws.manifest().targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    let target = wasm;
     let exe = match &wasm.wasm_opt {
         WasmOpt::Off => return Ok(()),
         WasmOpt::Path(path) => {
@@ -370,18 +462,19 @@ fn optimize(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
         }
         WasmOpt::Auto => match find_on_path("wasm-opt") {
             Some(exe) => exe,
-            None => {
-                ctx.shell().note(
-                    "install Binaryen (https://github.com/WebAssembly/binaryen) and put `wasm-opt` on PATH to make the release module smaller; \
-                     [target.wasm] wasm-opt = false hides this note",
-                );
-                return Ok(());
-            }
+            None => kargo_toolchain::binaryen::ensure(ctx.config)?,
         },
     };
     let file = build.dir.join(format!("{}.wasm", build.name));
     let marker = build.dir.join(OPTIMIZED_MARKER);
-    let key = format!("{}\n{}", exe.display(), WASM_OPT_ARGS.join(" "));
+    let level = match target.opt_level {
+        WasmOptLevel::Size => "-Oz",
+        WasmOptLevel::Balanced => "-O2",
+        WasmOptLevel::Speed => "-O3",
+    };
+    let mut flags = WASM_OPT_ARGS.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    flags.extend(target.wasm_opt_flags.iter().cloned());
+    let key = format!("{}\n{}\n{}\n{}\n{}", exe.display(), flags.join(" "), level, target.debug_info, size_report || target.size_report);
     if std::fs::read_to_string(&marker).is_ok_and(|done| done == key) {
         return Ok(());
     }
@@ -389,9 +482,26 @@ fn optimize(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
     let optimized = build.dir.join(format!("{}.wasm.opt", build.name));
     ctx.shell().status("Optimizing", format!("{}.wasm with wasm-opt", build.name));
     let mut cmd = Command::new(&exe);
-    cmd.args(WASM_OPT_ARGS).arg("-O3").arg("-o").arg(&optimized).arg(&file);
+    cmd.args(&flags).arg(level);
+    if size_report || target.size_report {
+        cmd.arg("--metrics").arg("--func-metrics");
+    }
+    if !target.debug_info {
+        cmd.arg("--strip-debug");
+    }
+    if target.debug_info {
+        cmd.arg(format!("--output-source-map={}", build.dir.join(format!("{}.wasm.map", build.name)).display()));
+        cmd.arg(format!("--output-source-map-url={}.wasm.map", build.name));
+    }
+    cmd.arg("-o").arg(&optimized).arg(&file);
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let output = cmd.output().with_context(|| format!("failed to start {}", exe.display()))?;
+    if size_report || target.size_report {
+        let metrics = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        if !metrics.trim().is_empty() {
+            ctx.shell().status("Wasm metrics", metrics.trim());
+        }
+    }
     if !output.status.success() {
         let _ = std::fs::remove_file(&optimized);
         let log = format!("{}\n{}", String::from_utf8_lossy(&output.stdout).trim(), String::from_utf8_lossy(&output.stderr).trim());
@@ -411,24 +521,46 @@ fn optimize(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
 // --- Size report ------------------------------------------------------------------------------
 
 /// Prints how big the release module and the whole output are.
-fn report_size(ctx: &BuildContext, build: &WasmBuild) {
+fn report_size(ctx: &BuildContext, build: &WasmBuild, _size_report: bool) -> Result<()> {
     let file = build.dir.join(format!("{}.wasm", build.name));
-    let Ok(wasm) = std::fs::read(&file) else { return };
+    let Ok(wasm) = std::fs::read(&file) else { return Ok(()) };
+    let gz = gzipped_size(&wasm);
+    let br = brotli(&wasm)?.len() as u64;
+    let options = ctx.ws.manifest().targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    let raw = wasm.len() as u64;
     let files = deliverables(&build.dir);
     let total: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
     let shown = build.dir.strip_prefix(ctx.ws.root()).unwrap_or(&build.dir);
     ctx.shell().status(
         "Size",
         format!(
-            "{}.wasm {} ({} gzipped), {} files {} in {}",
+            "{}.wasm {} ({} gzip, {} brotli), {} files {} in {}",
             build.name,
-            human_size(wasm.len() as u64),
-            human_size(gzipped_size(&wasm)),
+            human_size(raw),
+            human_size(gz),
+            human_size(br),
             files.len(),
             human_size(total),
             shown.display()
         ),
     );
+    if kargo_compiler::diagnostics::is_json() {
+        kargo_compiler::diagnostics::emit(&serde_json::json!({
+            "reason": "wasm-size", "target": "wasm", "path": file, "bytes": raw, "gzip_bytes": gz, "brotli_bytes": br,
+            "max_size": options.max_size, "max_gzip_size": options.max_gzip_size
+        }));
+    }
+    if let Some(limit) = options.max_size
+        && raw > limit
+    {
+        bail!("Wasm size budget exceeded: {} is larger than max-size {}", human_size(raw), human_size(limit));
+    }
+    if let Some(limit) = options.max_gzip_size
+        && gz > limit
+    {
+        bail!("gzipped Wasm size budget exceeded: {} is larger than max-gzip-size {}", human_size(gz), human_size(limit));
+    }
+    Ok(())
 }
 
 /// Every file below `dir`, sorted.
@@ -648,6 +780,64 @@ mod tests {
         assert_eq!(human_size(27_879), "27.2 KiB");
         assert_eq!(human_size(1_572_864), "1.5 MiB");
         assert!(gzipped_size(&[0u8; 10_000]) < 100);
+    }
+
+    #[test]
+    fn hash_renames_module_and_rewrites_the_wasm_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.wasm"), b"wasm bytes").unwrap();
+        std::fs::write(dir.path().join("app.mjs"), "fetch('app.wasm')").unwrap();
+        let mut build = WasmBuild {
+            module: dir.path().join("app.mjs"),
+            klib: dir.path().join("app.klib"),
+            environment: WasmEnvironment::Js,
+            kind: WasmKind::Application,
+            name: "app".to_owned(),
+            dir: dir.path().to_path_buf(),
+            libraries: vec![],
+            node_modules: None,
+        };
+        hash_assets(&mut build).unwrap();
+        let mut contents = b"wasm bytes".to_vec();
+        contents.push(0);
+        contents.extend(b"fetch('app.wasm')");
+        assert_eq!(build.name, format!("app.{}", &kargo_util::hash::sha256_bytes(&contents)[..12]));
+        assert!(build.dir.join(format!("{}.wasm", build.name)).is_file());
+        assert_eq!(std::fs::read_to_string(build.module).unwrap(), format!("fetch('{}.wasm')", build.name));
+    }
+
+    #[test]
+    fn gzip_and_brotli_round_trip() {
+        let data = b"repeated repeated repeated wasm glue";
+        let compressed_gz = gzip(data).unwrap();
+        let mut gz = flate2::read::GzDecoder::new(compressed_gz.as_slice());
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut gz, &mut decoded).unwrap();
+        assert_eq!(decoded, data);
+        let compressed = brotli(data).unwrap();
+        let mut decoder = brotli::Decompressor::new(compressed.as_slice(), 4096);
+        decoded.clear();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn generated_javascript_is_minified() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.mjs"), "export function greet ( name ) { return name + '!' ; }\n").unwrap();
+        let build = WasmBuild {
+            module: dir.path().join("app.mjs"),
+            klib: dir.path().join("app.klib"),
+            environment: WasmEnvironment::Js,
+            kind: WasmKind::Application,
+            name: "app".to_owned(),
+            dir: dir.path().to_path_buf(),
+            libraries: vec![],
+            node_modules: None,
+        };
+        minify_glue(&build).unwrap();
+        let code = std::fs::read_to_string(build.module).unwrap();
+        assert!(!code.contains("return name + '!' ;"), "{code}");
     }
 
     #[test]

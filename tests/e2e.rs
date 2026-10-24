@@ -1113,6 +1113,48 @@ fn wasm_release_runs_wasm_opt_when_it_is_installed() {
     }
 }
 
+#[test]
+fn wasm_release_uses_pinned_binaryen_and_supports_budgets_compression_and_hashes() {
+    require_e2e!();
+    let t = E2e::new();
+    let home = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let java_home =
+        std::env::var_os("JAVA_HOME").map(PathBuf::from).or_else(|| which("java").and_then(|p| p.parent()?.parent().map(PathBuf::from)));
+    wasm_project(
+        &t,
+        "optimized",
+        "environment = \"browser\"\nopt-level = \"size\"\ncompress = [\"gzip\", \"brotli\"]\ncontent-hash = true\nmax-size = \"1 B\"\n",
+    );
+    let mut command = t.kargo("optimized");
+    command
+        .args(["build", "--release", "--size-report", "--message-format", "json"])
+        .env("KARGO_HOME", home.path())
+        .env("KARGO_AUTO_INSTALL", "1")
+        .env("PATH", empty_path.path());
+    if let Some(java_home) = java_home {
+        command.env("JAVA_HOME", java_home);
+    } else {
+        command.env_remove("JAVA_HOME");
+    }
+    command
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Downloading binaryen-version_133-"))
+        .stderr(predicate::str::contains("Optimizing optimized.wasm with wasm-opt"))
+        .stderr(predicate::str::contains("Wasm size budget exceeded"))
+        .stdout(predicate::str::contains("\"reason\":\"wasm-size\"").and(predicate::str::contains("\"gzip_bytes\"")));
+    let out = t.dir.path().join("optimized/target/release/wasm");
+    let wasm = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "wasm")).unwrap();
+    let stem = wasm.file_stem().unwrap().to_string_lossy();
+    assert!(stem.starts_with("optimized."), "{stem}");
+    for suffix in ["wasm.gz", "wasm.br", "mjs.gz", "mjs.br"] {
+        assert!(out.join(format!("{stem}.{suffix}")).is_file(), "missing {stem}.{suffix}");
+    }
+    let page = std::fs::read_to_string(out.join("index.html")).unwrap();
+    assert!(page.contains(&format!("{stem}.mjs")), "the page loads the content-addressed module: {page}");
+}
+
 /// `kargo run --port 0` on a project, stopped when dropped.
 struct Served {
     child: std::process::Child,
