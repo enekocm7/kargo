@@ -1241,13 +1241,29 @@ impl fmt::Display for GraalvmRequest {
     }
 }
 
-/// `[package.jlink]`, `[package.native-image]` and `[package.installer]`: how `kargo package
+/// `[package.jlink]`, `[package.optimize]`, `[package.native-image]` and `[package.installer]`: how `kargo package
 /// --format` builds runtime images, native executables and installers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackagingSettings {
     pub jlink: JlinkSettings,
+    pub optimize: OptimizeSettings,
     pub native_image: NativeImageSettings,
     pub installer: InstallerSettings,
+}
+
+/// `[package.optimize]`: R8's JVM class-file shrinking and obfuscation settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptimizeSettings {
+    pub shrink: bool,
+    pub optimize: bool,
+    pub obfuscate: bool,
+    pub rules: PathBuf,
+}
+
+impl Default for OptimizeSettings {
+    fn default() -> Self {
+        Self { shrink: true, optimize: true, obfuscate: true, rules: PathBuf::from("proguard-rules.pro") }
+    }
 }
 
 /// `[package.jlink]`: the runtime image of `--format jlink` (and of installers).

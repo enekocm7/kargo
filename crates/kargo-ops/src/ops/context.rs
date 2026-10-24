@@ -14,7 +14,7 @@ use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
 use kargo_manifest::{Dependency, JsEnvironment, Manifest, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::resolver::ResolvedNode;
-use kargo_maven::{Artifact, DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
+use kargo_maven::{Artifact, DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Repository, Resolution, Resolver};
 use kargo_toolchain::jdks::JdkNeeds;
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
@@ -665,13 +665,25 @@ impl<'a> BuildContext<'a> {
         self.locked_tool_file(Artifact::new(ModuleId::new(group, artifact), version))
     }
 
+    /// R8 is published only to Google's Maven repository, so use a dedicated client while still
+    /// recording the verified artifact in the project's lockfile.
+    pub fn r8_jar(&self, version: &str) -> Result<PathBuf> {
+        let client = MavenClient::new(self.config, vec![Repository::new("google", "https://dl.google.com/dl/android/maven2")]);
+        let artifact = Artifact::new(ModuleId::new("com.android.tools", "r8"), version);
+        self.locked_tool_file_from(&client, artifact)
+    }
+
     /// Fetches `artifact` and pins it in `kargo.lock` under the tool key of its artifact name.
     fn locked_tool_file(&self, artifact: Artifact) -> Result<PathBuf> {
+        self.locked_tool_file_from(&self.client, artifact)
+    }
+
+    fn locked_tool_file_from(&self, client: &MavenClient, artifact: Artifact) -> Result<PathBuf> {
         let key = self.tool_key(&artifact.module.artifact);
-        let rel = self.client.artifact_path(&artifact)?;
+        let rel = client.artifact_path(&artifact)?;
         let inputs = [format!("{}:{} {rel}", artifact.module, artifact.version)];
         let locked = self.lock_files_at(&key, &inputs, || {
-            let file = self.client.fetch_verified(&rel)?;
+            let file = client.fetch_verified(&rel)?;
             let node = ResolvedNode {
                 module: artifact.module.clone(),
                 version: artifact.version.clone(),

@@ -377,6 +377,8 @@ java -jar target/debug/jvm/notes-0.1.0-all.jar
 
 A plain `kargo package` jar carries Skiko's library for the OS it was built on only. `--platforms` sets the platforms whose libraries it carries: `all`, or a list of `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`, `linux-x64` and `linux-arm64`. Skiko loads the right one at startup. The jar needs a Java runtime on the machine that runs it, and each platform adds about 10 MB to it.
 
+Release desktop jars are shrunk and obfuscated with R8. Add reflection keep rules to [`proguard-rules.pro`](../../reference/manifest/#packageoptimize) when the app or its dependencies load classes by name.
+
 ## Android
 
 The same `compose = true` turns on Jetpack Compose for the [Android target](../android/). `kargo new app -t android -w compose` creates a Compose `MainActivity`. `composeResources/` and `Res` work there too.

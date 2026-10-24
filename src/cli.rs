@@ -731,6 +731,9 @@ enum Command {
         /// Rerun only the JVM test classes that failed in the last run
         #[arg(long, conflicts_with_all = ["list", "no_run"])]
         failed: bool,
+        /// Run JVM tests against the R8-optimized package jar
+        #[arg(long, conflicts_with_all = ["list", "no_run"])]
+        against_min: bool,
         /// Also write test reports: `junit` writes JUnit XML to target/<profile>/<target>/test-reports
         #[arg(long, value_enum, value_name = "FORMAT")]
         report: Option<ReportArg>,
@@ -992,7 +995,7 @@ enum Command {
         /// Also download the sources jars of the dependencies, for editors
         #[arg(long)]
         sources: bool,
-        /// Also download the tools of `kargo doc` (Dokka), `kargo fmt` (ktlint) and `kargo lint` (detekt)
+        /// Also download the tools of `kargo doc` (Dokka), `kargo fmt` (ktlint), `kargo lint` (detekt) and R8 for JVM packaging
         #[arg(long)]
         tools: bool,
         #[command(flatten)]
@@ -1087,6 +1090,9 @@ OS by default, with Skiko's native library next to the app so macOS signs and no
         /// Build the self-contained <name>-<version>-all.jar even for a library (no main function)
         #[arg(long)]
         fat: bool,
+        /// Shrink and obfuscate the packaged JVM jar with R8 (also on by default for --release)
+        #[arg(long)]
+        optimize: bool,
         /// What to build for the JVM: jar (default), jlink, native-image or installer (default with --desktop)
         #[arg(long, value_enum, value_name = "FORMAT")]
         format: Option<PackageFormatArg>,
@@ -1096,6 +1102,18 @@ OS by default, with Skiko's native library next to the app so macOS signs and no
         /// With --desktop --format jar: the platforms whose Skiko natives the jar carries (all, or e.g. windows-x64,macos-arm64)
         #[arg(long, value_name = "PLATFORMS", value_delimiter = ',', requires = "desktop")]
         platforms: Vec<String>,
+        /// How to print compiler and package reports
+        #[arg(long, value_enum, default_value_t, value_name = "FMT")]
+        message_format: MessageFormatArg,
+        #[command(flatten)]
+        package: OnePackageArg,
+    },
+    /// Retrace an obfuscated JVM stack trace with an R8 mapping file
+    Retrace {
+        /// The mapping.txt written by `kargo package --optimize`
+        mapping: PathBuf,
+        /// Stack trace file (reads stdin when omitted)
+        stack_trace: Option<PathBuf>,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -2269,6 +2287,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             include_tag,
             exclude_tag,
             failed,
+            against_min,
             report,
             debug,
             list,
@@ -2293,6 +2312,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 include_tags: include_tag,
                 exclude_tags: exclude_tag,
                 failed,
+                against_min,
                 env: env.options(),
             };
             let Some(watch) = watch else {
@@ -2718,15 +2738,49 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, profile, target, bin, fat, format, desktop, platforms, package } => {
+        Command::Package { release, profile, target, bin, fat, optimize, format, desktop, platforms, message_format, package } => {
+            set_message_format(message_format);
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
             let ctx = context(config, &project, index, global, profile_kind(release, profile.as_deref()))?;
-            let opts = ops::PackageOptions { target: target.map(Into::into), bin, fat, format: format.map(Into::into), desktop, platforms };
-            for file in ops::package(&ctx, &opts)? {
-                println!("{}", file.display());
+            let opts = ops::PackageOptions {
+                target: target.map(Into::into),
+                bin,
+                fat,
+                optimize,
+                format: format.map(Into::into),
+                desktop,
+                platforms,
+            };
+            let files = match ops::package(&ctx, &opts) {
+                Ok(files) => files,
+                Err(error) => {
+                    if message_format == MessageFormatArg::Json {
+                        kargo_compiler::diagnostics::emit(&serde_json::json!({ "reason": "package-finished", "success": false }));
+                    }
+                    return Err(error);
+                }
+            };
+            for file in files {
+                if message_format == MessageFormatArg::Json {
+                    kargo_compiler::diagnostics::emit(
+                        &serde_json::json!({ "reason": "package-artifact", "file": file.display().to_string() }),
+                    );
+                } else {
+                    println!("{}", file.display());
+                }
             }
+            if message_format == MessageFormatArg::Json {
+                kargo_compiler::diagnostics::emit(&serde_json::json!({ "reason": "package-finished", "success": true }));
+            }
+            Ok(0)
+        }
+        Command::Retrace { mapping, stack_trace, package } => {
+            let project = load_project(global)?;
+            let index = project.select_one(&package.selection(), "`kargo retrace`")?;
+            let ctx = context(config, &project, index, global, ProfileKind::Dev)?;
+            ops::packaging::retrace(&ctx, &mapping, stack_trace.as_deref())?;
             Ok(0)
         }
         Command::Publish { repository, local, dry_run, packages } => {
@@ -3397,6 +3451,16 @@ mod tests {
         assert!(Cli::try_parse_from(["kargo", "run", "--main", "A", "--bin", "b"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "package", "--bin", "migrate"]).unwrap();
         assert!(matches!(cli.command, Command::Package { bin: Some(ref b), .. } if b == "migrate"));
+        let cli = Cli::try_parse_from(["kargo", "package", "--optimize"]).unwrap();
+        assert!(matches!(cli.command, Command::Package { optimize: true, .. }));
+        let cli = Cli::try_parse_from(["kargo", "package", "--message-format", "json"]).unwrap();
+        assert!(matches!(cli.command, Command::Package { message_format: MessageFormatArg::Json, .. }));
+        let cli = Cli::try_parse_from(["kargo", "retrace", "mapping.txt", "crash.txt"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Retrace { ref mapping, ref stack_trace, .. } if mapping == Path::new("mapping.txt") && stack_trace.as_deref() == Some(Path::new("crash.txt")))
+        );
+        let cli = Cli::try_parse_from(["kargo", "test", "--against-min"]).unwrap();
+        assert!(matches!(cli.command, Command::Test { against_min: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "package", "--fat"]).unwrap();
         assert!(matches!(cli.command, Command::Package { fat: true, bin: None, format: None, desktop: false, .. }));
         let cli = Cli::try_parse_from(["kargo", "package", "--desktop", "--format", "jar", "--platforms", "all,linux-x64"]).unwrap();
