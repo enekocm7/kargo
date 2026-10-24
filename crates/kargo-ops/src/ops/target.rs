@@ -267,6 +267,14 @@ pub fn list(ws: &Workspace) -> Result<(Vec<TargetInfo>, Vec<TargetKind>)> {
         let settings = vec![("environment", wasm.environment.as_str().to_owned()), ("kind", wasm.kind.as_str().to_owned())];
         enabled.push(TargetInfo { target: TargetKind::Wasm, implicit: false, settings });
     }
+    if let Some(js) = &targets.js {
+        let settings = vec![
+            ("environment", js.environment.as_str().to_owned()),
+            ("kind", js.kind.as_str().to_owned()),
+            ("module-kind", js.module_kind.as_str().to_owned()),
+        ];
+        enabled.push(TargetInfo { target: TargetKind::Js, implicit: false, settings });
+    }
     if let Some(native) = &targets.native {
         let settings = vec![("platforms", native.platforms.join(", ")), ("kind", native.kind.as_str().to_owned())];
         enabled.push(TargetInfo { target: TargetKind::Native, implicit: false, settings });

@@ -14,9 +14,8 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result, bail};
 
 use super::build::{
-    BuildOptions, BuildResults, JvmBuild, WasmBuild, announce, bin_main_class, build, compiling, find_bin, finished, hook_env,
-    jvm_classpaths, jvm_javac_args, jvm_processor_path, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries,
-    sources,
+    BuildOptions, BuildResults, JvmBuild, announce, bin_main_class, build, compiling, find_bin, finished, hook_env, jvm_classpaths,
+    jvm_javac_args, jvm_processor_path, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries, sources,
 };
 use super::context::BuildContext;
 use crate::compose::hot_reload::{Answer, HotReload};
@@ -28,7 +27,7 @@ use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::mainclass::find_entry_point_in;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::{SourceSet, common_kotlin_args};
-use kargo_manifest::{Hook, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
+use kargo_manifest::{Hook, JsEnvironment, JsKind, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
 use kargo_maven::Platform;
 use kargo_toolchain::native::Host;
 use kargo_util::fs::join_paths;
@@ -147,10 +146,10 @@ pub fn note_debugger(shell: &kargo_util::shell::Shell, port: u16, what: &str) {
     shell.note(format!("{what} waits for a debugger: attach one over JDWP to 127.0.0.1 on {port}"));
 }
 
-/// The port `kargo run` serves a Wasm browser app on unless told otherwise.
+/// The port `kargo run` serves a Wasm or JS browser app on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 8080;
 
-/// Picks the target to run: explicit, else JVM, Native, Wasm, Android in that order.
+/// Picks the target to run: explicit, else JVM, Native, Wasm, JS, Android in that order.
 pub fn runnable_target(enabled: &[TargetKind], requested: Option<TargetKind>) -> Result<TargetKind> {
     if let Some(t) = requested {
         if !enabled.contains(&t) {
@@ -158,7 +157,7 @@ pub fn runnable_target(enabled: &[TargetKind], requested: Option<TargetKind>) ->
         }
         return Ok(t);
     }
-    [TargetKind::Jvm, TargetKind::Native, TargetKind::Wasm, TargetKind::Android]
+    [TargetKind::Jvm, TargetKind::Native, TargetKind::Wasm, TargetKind::Js, TargetKind::Android]
         .into_iter()
         .find(|t| enabled.contains(t))
         .context("no runnable target is enabled")
@@ -187,8 +186,17 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
              build it with `kargo build` and publish target/<profile>/wasm"
         );
     }
-    if (opts.port.is_some() || opts.open) && !wasm.is_some_and(|w| w.environment == WasmEnvironment::Browser) {
-        bail!("`--port` and `--open` serve a Wasm browser app; they need `-t wasm` with [target.wasm] environment = \"browser\"");
+    let js = ctx.ws.manifest().targets.js.as_ref().filter(|_| target == TargetKind::Js);
+    if js.is_some_and(|j| j.kind == JsKind::Library) {
+        bail!(
+            "[target.js] kind = \"library\" builds an npm package and has no program to run; \
+             build it with `kargo build` and publish target/<profile>/js"
+        );
+    }
+    if (opts.port.is_some() || opts.open) && !is_browser_app(ctx, target) {
+        bail!(
+            "`--port` and `--open` serve a browser app; they need `-t wasm` or `-t js` with environment = \"browser\" in its [target.wasm] or [target.js]"
+        );
     }
     if !opts.flavors.is_empty() && target != TargetKind::Android {
         bail!("`--flavor` picks an Android product flavor and needs `-t android`, not {target}");
@@ -367,11 +375,26 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
             if wasm.environment == WasmEnvironment::Browser {
-                return Ok(Start::Finished(serve_wasm_app(ctx, &wasm, opts)?));
+                return Ok(Start::Finished(serve_app(ctx, &wasm.dir, wasm.node_modules.as_deref(), opts)?));
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             cmd.arg(&wasm.module);
             label = format!("node {}", rel(&wasm.module));
+            cmd
+        }
+        TargetKind::Js => {
+            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
+            let js = results.js.context("there are no Kotlin/JS sources to run")?;
+            if js.environment == JsEnvironment::Browser {
+                return Ok(Start::Finished(serve_app(ctx, &js.dir, js.node_modules.as_deref(), opts)?));
+            }
+            let mut cmd = Command::new(kargo_toolchain::node()?);
+            // Stack traces point into the Kotlin sources when the build has source maps.
+            if ctx.ws.profile(&ctx.profile)?.debug {
+                cmd.arg("--enable-source-maps");
+            }
+            cmd.arg(&js.module);
+            label = format!("node {}", rel(&js.module));
             cmd
         }
         TargetKind::Native => {
@@ -414,11 +437,10 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
 /// in the foreground themselves. Then checks the rest of the options as [`start`] does.
 pub fn check_watchable(ctx: &BuildContext, opts: &RunOptions) -> Result<()> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
-    let browser = ctx.ws.manifest().targets.wasm.as_ref().is_some_and(|w| w.environment == WasmEnvironment::Browser);
     if target == TargetKind::Android {
         bail!("`--watch` does not run Android apps: the app runs inside Gradle; use `kargo run -t android` instead");
     }
-    if target == TargetKind::Wasm && browser {
+    if is_browser_app(ctx, target) {
         bail!("`--watch` does not serve browser apps yet; `kargo run` serves one until Ctrl+C");
     }
     validate(ctx, target, opts)
@@ -528,17 +550,27 @@ fn signal_and_wait(child: &mut Child, timeout: Duration) -> bool {
     false
 }
 
-/// Serves a Wasm browser app until the process is stopped (Ctrl+C).
-fn serve_wasm_app(ctx: &BuildContext, wasm: &WasmBuild, opts: &RunOptions) -> Result<i32> {
+/// Whether `target` is a Wasm or JS app that runs in a browser, which `kargo run` serves.
+fn is_browser_app(ctx: &BuildContext, target: TargetKind) -> bool {
+    let targets = &ctx.ws.manifest().targets;
+    match target {
+        TargetKind::Wasm => targets.wasm.as_ref().is_some_and(|w| w.environment == WasmEnvironment::Browser),
+        TargetKind::Js => targets.js.as_ref().is_some_and(|j| j.environment == JsEnvironment::Browser),
+        _ => false,
+    }
+}
+
+/// Serves the browser app in `dir`, with the npm packages of `node_modules`, until the process is stopped (Ctrl+C).
+fn serve_app(ctx: &BuildContext, dir: &Path, node_modules: Option<&Path>, opts: &RunOptions) -> Result<i32> {
     let listener = web::bind(opts.port.unwrap_or(DEFAULT_PORT))?;
-    let mut site = web::Site::new(&wasm.dir);
-    if let Some(node_modules) = &wasm.node_modules {
+    let mut site = web::Site::new(dir);
+    if let Some(node_modules) = node_modules {
         site = site.mount("node_modules", node_modules);
     }
     // Other `kargo` commands may build while the page is being served.
     ctx.unlock()?;
     let server = web::Server::start(listener, site, None)?;
-    let dir = wasm.dir.strip_prefix(ctx.ws.root()).unwrap_or(&wasm.dir);
+    let dir = dir.strip_prefix(ctx.ws.root()).unwrap_or(dir);
     ctx.shell().status("Serving", format!("{} at {} (press Ctrl+C to stop)", dir.display(), server.url()));
     if opts.open {
         web::open_in_browser(std::ffi::OsStr::new(&server.url()))?;

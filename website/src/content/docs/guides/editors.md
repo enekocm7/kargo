@@ -19,7 +19,7 @@ Kargo gives editors what they need to understand a project without reading `karg
 | Emacs | The [Emacs package](#emacs) in `editors/emacs` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/), through Eglot or lsp-mode | Commands through `compile` with errors you can jump to, test and class runs with a results buffer, build errors in Flymake, and debugging with Dape |
 | Other LSP clients | `kargo lsp` | `kargo lsp` with [Kargo's Kotlin server](../kotlin-server/) | Programs and tests in the terminal, or a JDWP debugger attached to `--debug` |
 
-Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/` and `src-native/` included, with each target's standard library, the JDK's sources, your `.java` files and your dependencies: from their sources jars once you fetch them, else from their compiled classes and klibs (see [Libraries](../kotlin-server/#libraries)). The npm packages of a Wasm target come from the [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) Kargo generates for them. Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
+Every editor gets `kargo.toml` support, [runnables](#runnables) and [check on save](#check-on-save). Kargo's Kotlin server reads the code of every target, `src-wasm/`, `src-js/` and `src-native/` included, with each target's standard library, the JDK's sources, your `.java` files and your dependencies: from their sources jars once you fetch them, else from their compiled classes and klibs (see [Libraries](../kotlin-server/#libraries)). The npm packages of a Wasm target come from the [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) Kargo generates for them. Android code is handled by Android Studio, through the Gradle project Kargo generates in `target/android` (see [Android](../android/)).
 
 ## IntelliJ IDEA and Android Studio
 
@@ -54,7 +54,7 @@ The plugin looks for `kargo` on your `PATH`, then in `~/.kargo/bin` (where the [
 |---|---|
 | Name, Location | The directory, and the package name |
 | Library | `--lib` |
-| Targets | `--target jvm,wasm,native,android` |
+| Targets | `--target jvm,wasm,js,native,android` |
 | Frameworks | `--with compose,ktor,...` (see [Built-in frameworks](../frameworks/)) |
 | Group | `--group` |
 | Kotlin version | `--kotlin` (empty: the version Kargo pins) |
@@ -89,7 +89,7 @@ Reopen a JVM project and its Maven libraries resolve: completion, go to definiti
 
 **Kotlin/Native.** A Native module is analyzed as Kotlin/Native. Its libraries are the klibs of `[target.native.dependencies]`, plus the standard library and the platform libraries (`posix`, `windows`, ...) of the Kotlin/Native distribution Kargo downloaded. A library that is published only as Native klibs, such as a binding to a C library, resolves like any other. When the target builds for several Native platforms, the IDE analyzes the first.
 
-**Several targets.** A package with more than one target gets a module for `src/` and `tests/` (`<name>.common`) and one per target (`<name>.jvm`, `<name>.native`, `<name>.wasm`) for `src-<target>/`, which refines the common one, so `expect` and `actual` declarations find each other. Common code is analyzed like the package's first target (JVM, then Native, then Wasm), with that target's libraries; `kargo check` still compiles it for every target. Android code isn't imported: Gradle owns it, see [Android](#android).
+**Several targets.** A package with more than one target gets a module for `src/` and `tests/` (`<name>.common`) and one per target (`<name>.jvm`, `<name>.native`, `<name>.wasm`) for `src-<target>/`, which refines the common one, so `expect` and `actual` declarations find each other. Common code is analyzed like the package's first target (JVM, then Native, then Wasm), with that target's libraries; `kargo check` still compiles it for every target. Android code isn't imported: Gradle owns it, see [Android](#android). Kotlin/JS code (`src-js/`) isn't imported yet either; open it with `kargo lsp` in another editor for now.
 
 The import runs again, without any action, when a `kargo.toml` or `kargo.lock` changes (including when `kargo add` or `kargo update` rewrites them), when a `src*`, `tests*` or `resources` directory appears or goes away, and after *Build*, *Run*, *Test* or a fetch, which can install npm packages without changing either file. *Tools → Kargo → Fetch Dependencies and Sources* imports once more to pick up the sources jars. To import by hand, use *Tools → Kargo → Reload Kargo Project*. If `kargo.toml` and `kargo.lock` are as they were at the last import, the check takes a moment and the IDE doesn't index anything.
 

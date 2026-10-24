@@ -206,7 +206,7 @@ Since 2.3.0, KSP versions no longer follow Kotlin versions, so one KSP release w
 
 As with `processor`, KSP processors and their dependencies never reach the compile or runtime classpath, are not packaged, and are pinned in `kargo.lock` (under `jvm/ksp`, and `jvm/test-ksp` when you have test-only processors). Processors in `[dependencies]` or `[target.jvm.dependencies]` run for the main and test sources; a processor in `[dev-dependencies]` runs for the tests only. On Android, the scope maps to the Gradle KSP plugin's `ksp(...)` and `kspTest(...)` configurations.
 
-KSP processes JVM and Android code. Wasm and Native ignore `ksp` dependencies.
+KSP processes JVM and Android code. Wasm, JS and Native ignore `ksp` dependencies.
 
 :::note[What about kapt?]
 Kargo doesn't support kapt. It is in maintenance mode, slow (it generates Java stubs for all your Kotlin code first) and the libraries that needed it now ship KSP processors. A Java-only processor that runs on Java sources works with [`scope = "processor"`](#annotation-processors).
@@ -290,7 +290,7 @@ kargo add --path ../mathlib
 mathlib = { path = "../mathlib" }
 ```
 
-Its jar (or klib, for Wasm and Native) ends up on your classpaths, with its own Maven dependencies: the ones it marks `exported = true` to compile against, and the others at runtime only, like Gradle's `api` and `implementation`. To build several packages together with one `kargo.lock`, make them members of a workspace. See [Workspaces and path dependencies](../workspaces/).
+Its jar (or klib, for Wasm, JS and Native) ends up on your classpaths, with its own Maven dependencies: the ones it marks `exported = true` to compile against, and the others at runtime only, like Gradle's `api` and `implementation`. To build several packages together with one `kargo.lock`, make them members of a workspace. See [Workspaces and path dependencies](../workspaces/).
 
 ## Repositories
 

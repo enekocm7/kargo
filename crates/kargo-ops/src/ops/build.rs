@@ -12,13 +12,17 @@ use crate::native_interop;
 use crate::warnings;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::jar::{JarManifest, manifest_matches, write_jar};
+use kargo_compiler::js::JsCompilation;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::ksp::KspRun;
 use kargo_compiler::mainclass::{find_entry_point_in, find_jvm_main_class, find_single_entry_point};
 use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
-use kargo_manifest::{Bin, Cinterop, GeneratedKind, Hook, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment, WasmKind};
+use kargo_manifest::{
+    Bin, Cinterop, GeneratedKind, Hook, JsEnvironment, JsKind, JsModuleKind, Manifest, NativeKind, Scope, TargetKind, WasmEnvironment,
+    WasmKind,
+};
 use kargo_maven::{ModuleId, Platform, Resolution};
 use kargo_toolchain::native::{buildable_on_host, resolve_platform};
 use kargo_util::fs::collect_files;
@@ -69,6 +73,24 @@ pub struct WasmBuild {
 }
 
 #[derive(Debug, Clone)]
+pub struct JsBuild {
+    /// The linked module: `<name>.mjs`, or `<name>.js` for CommonJS and UMD.
+    pub module: PathBuf,
+    pub klib: PathBuf,
+    pub environment: JsEnvironment,
+    pub kind: JsKind,
+    pub module_kind: JsModuleKind,
+    /// The module's name: `module-name`, else the package name. It names the files in `dir`.
+    pub name: String,
+    /// The output directory (`target/<profile>/js`).
+    pub dir: PathBuf,
+    /// The klibs the module was compiled against.
+    pub libraries: Vec<PathBuf>,
+    /// The `node_modules` holding the npm packages the module imports, once installed.
+    pub node_modules: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NativeBuild {
     pub konan_target: String,
     pub artifact: PathBuf,
@@ -81,6 +103,7 @@ pub struct NativeBuild {
 pub struct BuildResults {
     pub jvm: Option<JvmBuild>,
     pub wasm: Option<WasmBuild>,
+    pub js: Option<JsBuild>,
     pub native: Vec<NativeBuild>,
     pub android: Option<PathBuf>,
 }
@@ -238,6 +261,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         match target {
             TargetKind::Jvm => r.jvm = Some(build_jvm(ctx)?),
             TargetKind::Wasm => r.wasm = build_wasm(ctx)?,
+            TargetKind::Js => r.js = build_js(ctx)?,
             TargetKind::Native => r.native = build_native(ctx)?,
             TargetKind::Android => r.android = Some(crate::gradle::build(ctx)?),
         }
@@ -246,6 +270,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     for r in super::collect_targets(ctx, "build", opts.keep_going, targets.iter().copied().zip(built))? {
         results.jvm = results.jvm.or(r.jvm);
         results.wasm = results.wasm.or(r.wasm);
+        results.js = results.js.or(r.js);
         results.native.extend(r.native);
         results.android = results.android.or(r.android);
     }
@@ -607,7 +632,7 @@ pub fn prepare_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     let Some(mut build) = compile_wasm(ctx, true)? else { return Ok(None) };
     // Outside the Wasm output directory, which is wiped on every recompile;
     // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
-    build.node_modules = crate::npm::install(ctx, &build.libraries, &ctx.ws.profile_dir(&ctx.profile))?;
+    build.node_modules = crate::npm::install(ctx, TargetKind::Wasm, &build.libraries, &ctx.ws.profile_dir(&ctx.profile))?;
     Ok(Some(build))
 }
 
@@ -685,6 +710,90 @@ pub(crate) fn npm_opt_in(ctx: &BuildContext, kotlin_args: &mut Vec<String>) {
     if manifest.targets.wasm.as_ref().is_some_and(|w| !w.npm_dependencies.is_empty()) {
         kotlin_args.extend(crate::npm::interop_opt_in(manifest));
     }
+}
+
+/// The resolved Maven klibs of the Kotlin/JS target.
+pub fn js_resolution(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Resolution> {
+    let key = if include_dev { "js/test" } else { "js/main" };
+    ctx.resolve(key, Platform::Js, &setup.requests(&ALL_SCOPES, include_dev), &setup.boms)
+}
+
+/// Every klib the Kotlin/JS sources compile against: path dependencies first, then Maven libraries.
+pub fn js_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Vec<PathBuf>> {
+    let mut libraries = local::artifacts(ctx, LocalTarget::Js, &ALL_SCOPES, include_dev)?;
+    libraries.extend(js_resolution(ctx, setup, include_dev)?.files());
+    Ok(libraries)
+}
+
+/// Where the Kotlin/JS compilation `name` keeps its klib and links its module before copying it to the
+/// output directory (see [`kargo_compiler::js`]): `target/<profile>/js-build/<name>`.
+pub fn js_work_dir(ctx: &BuildContext, name: &str) -> PathBuf {
+    ctx.ws.profile_dir(&ctx.profile).join("js-build").join(name)
+}
+
+/// Compiles the Kotlin/JS target and adds what surrounds the module: the page of a browser app and
+/// the `package.json` of a library.
+pub fn build_js(ctx: &BuildContext) -> Result<Option<JsBuild>> {
+    let Some(build) = prepare_js(ctx)? else { return Ok(None) };
+    crate::js_output::finish(ctx, &build)?;
+    Ok(Some(build))
+}
+
+/// Compiles the Kotlin/JS target and installs the npm packages it imports (enough to run its tests).
+pub fn prepare_js(ctx: &BuildContext) -> Result<Option<JsBuild>> {
+    let Some(mut build) = compile_js(ctx, true)? else { return Ok(None) };
+    // Next to the module, where Node.js finds them; linking leaves the directory's other files alone.
+    build.node_modules = crate::npm::install(ctx, TargetKind::Js, &build.libraries, &build.dir)?;
+    Ok(Some(build))
+}
+
+/// Compiles and links the Kotlin/JS target without installing npm packages (enough for a path dependency).
+/// `main_args` passes the program arguments to `main(args)`; off for a path dependency.
+pub fn compile_js(ctx: &BuildContext, main_args: bool) -> Result<Option<JsBuild>> {
+    let manifest = ctx.ws.manifest();
+    let js = manifest.targets.js.as_ref().context("the JS target is not enabled")?;
+    let setup = ctx.setup(TargetKind::Js)?;
+    let (toolchain, libraries) = super::join(
+        || -> Result<_> { Ok((ctx.compiler_jdk()?, ctx.kotlin_compiler()?, ctx.plugin_jars(&setup.contributions.plugins)?)) },
+        || js_libraries(ctx, &setup, false),
+    );
+    let (jdk, compiler, plugins) = toolchain?;
+    let libraries = libraries?;
+    let profile = ctx.ws.profile(&ctx.profile)?;
+    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let name = js.module_name(&manifest.package);
+    let unit = JsCompilation {
+        name,
+        environment: js.environment,
+        module_kind: js.module_kind,
+        sources: sources(ctx, TargetKind::Js, false, &["kt"])?,
+        libraries,
+        friends: Vec::new(),
+        plugins: &plugins,
+        kotlin_args: &kotlin_args,
+        output: ctx.ws.output_dir(&ctx.profile, TargetKind::Js),
+        work: js_work_dir(ctx, name),
+        root: ctx.ws.root().to_path_buf(),
+        debug: profile.debug,
+        optimize: profile.optimize,
+        declarations: js.kind == JsKind::Library,
+        main_args,
+    };
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Js);
+    if unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| compiling(ctx, TargetKind::Js, ""))? == Outcome::Empty {
+        return Ok(None);
+    }
+    Ok(Some(JsBuild {
+        module: unit.module_path(),
+        klib: unit.klib_path(),
+        environment: js.environment,
+        kind: js.kind,
+        module_kind: js.module_kind,
+        name: unit.name.to_owned(),
+        dir: unit.output.clone(),
+        libraries: unit.libraries,
+        node_modules: None,
+    }))
 }
 
 pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {

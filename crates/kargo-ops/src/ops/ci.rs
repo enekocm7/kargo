@@ -60,7 +60,7 @@ impl CiPlan {
         for package in project.packages() {
             let manifest = package.manifest();
             plan.setup_java |= manifest.toolchain.jdk == JdkRequest::System;
-            plan.setup_node |= manifest.targets.is_enabled(TargetKind::Wasm);
+            plan.setup_node |= manifest.targets.is_enabled(TargetKind::Wasm) || manifest.targets.is_enabled(TargetKind::Js);
             plan.os_matrix |= manifest.targets.is_enabled(TargetKind::Native);
         }
         plan
@@ -73,7 +73,7 @@ impl CiPlan {
             out.push("actions/setup-java: every package pins a JDK with `[toolchain] jdk`".to_owned());
         }
         if !self.setup_node {
-            out.push("actions/setup-node: no Wasm target".to_owned());
+            out.push("actions/setup-node: no Wasm or JS target".to_owned());
         }
         if !self.os_matrix {
             out.push("OS matrix: no Kotlin/Native target (the job runs on ubuntu-latest)".to_owned());

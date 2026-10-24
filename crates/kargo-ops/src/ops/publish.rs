@@ -12,8 +12,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use super::build::{
-    build_jvm, compile_wasm, finished, hook_env, jvm_classpaths, native_cinterop, native_cinterop_defs, native_klib, native_platforms,
-    native_resolution, warn_about_sources, wasm_resolution,
+    build_jvm, compile_js, compile_wasm, finished, hook_env, jvm_classpaths, native_cinterop, native_cinterop_defs, native_klib,
+    native_platforms, native_resolution, warn_about_sources, wasm_resolution,
 };
 use super::context::{BuildContext, TargetSetup};
 use crate::env::EnvOptions;
@@ -287,6 +287,7 @@ fn targets_per_platform(targets: &[TargetKind], kinds: &[PlatformKind]) -> Vec<T
         .map(|k| match k {
             PlatformKind::Jvm { .. } => TargetKind::Jvm,
             PlatformKind::Wasm { .. } => TargetKind::Wasm,
+            PlatformKind::Js => TargetKind::Js,
             PlatformKind::Native { .. } => TargetKind::Native,
         })
         .filter(|t| targets.contains(t))
@@ -298,6 +299,7 @@ fn platform_source_root(kind: &PlatformKind) -> &'static str {
     match kind {
         PlatformKind::Jvm { .. } => "jvmMain",
         PlatformKind::Wasm { .. } => "wasmMain",
+        PlatformKind::Js => "jsMain",
         PlatformKind::Native { .. } => "nativeMain",
     }
 }
@@ -352,6 +354,21 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
                     main_class: None,
                     web_resources,
+                });
+            }
+            TargetKind::Js => {
+                let build =
+                    compile_js(ctx, false)?.context("there are no Kotlin/JS sources to publish; add them under `src/` or `src-js/`")?;
+                let resolution = super::build::js_resolution(ctx, &setup, false)?;
+                platforms.push(PlatformPublication {
+                    kind: PlatformKind::Js,
+                    artifact: build.klib,
+                    extra: Vec::new(),
+                    sources: None,
+                    javadoc: None,
+                    dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
+                    main_class: None,
+                    web_resources: None,
                 });
             }
             TargetKind::Native => {
@@ -468,6 +485,7 @@ fn platform_kind_of(ctx: &BuildContext, target: TargetKind) -> Option<PlatformKi
     match target {
         TargetKind::Jvm => Some(PlatformKind::Jvm { jvm_version: None }),
         TargetKind::Wasm => manifest.targets.wasm.as_ref().map(|w| PlatformKind::Wasm { environment: w.environment.platform().to_owned() }),
+        TargetKind::Js => manifest.targets.js.is_some().then_some(PlatformKind::Js),
         TargetKind::Native => native_platforms(ctx).ok()?.into_iter().next().map(|konan_target| PlatformKind::Native { konan_target }),
         TargetKind::Android => None,
     }

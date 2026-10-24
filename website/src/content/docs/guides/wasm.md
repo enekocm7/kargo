@@ -3,7 +3,7 @@ title: WebAssembly
 description: Compile Kotlin to WebAssembly for Node.js, browsers or WASI, serve browser apps, and publish Wasm libraries as npm packages.
 ---
 
-Kargo compiles Kotlin to WebAssembly with the Kotlin/Wasm compiler. No Gradle and no npm project are involved. Kargo only runs npm, pnpm or bun when a project needs [npm packages](#npm-packages), and Binaryen's `wasm-opt` if you have it for [release builds](#release-builds).
+Kargo compiles Kotlin to WebAssembly with the Kotlin/Wasm compiler. To compile to plain JavaScript instead, with Kotlin/JS, see [JavaScript](../js/). No Gradle and no npm project are involved. Kargo only runs npm, pnpm or bun when a project needs [npm packages](#npm-packages), and Binaryen's `wasm-opt` if you have it for [release builds](#release-builds).
 
 ## Setup
 
@@ -226,7 +226,7 @@ A package without TypeScript declarations gets none, with a warning; declare wha
 
 Node.js finds packages in `node_modules` by itself; a browser needs to be told where they are. For a `browser` app Kargo adds an [import map](https://developer.mozilla.org/docs/Web/HTML/Element/script/type/importmap) to the page, which maps each installed package to its ES module (the `exports`, `module` or `main` entry of its `package.json`), and serves `node_modules` at `/node_modules/`. `kargo run` and `kargo test` both do this, and the page you put in `resources/index.html` gets the import map too, unless it has one of its own.
 
-This works for packages that ship ES modules, such as `@js-joda/core`. A package that only ships CommonJS can't run in a browser without a bundler; bundle it yourself, or use a `js` target and a bundler of your choice.
+This works for packages that ship ES modules, such as `@js-joda/core`. A package that only ships CommonJS can't run in a browser without a bundler; bundle it yourself, or use the `js` environment and a bundler of your choice.
 
 ### Choosing npm, pnpm or bun
 

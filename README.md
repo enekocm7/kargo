@@ -1,7 +1,7 @@
 # Kargo
 [![Crates.io](https://img.shields.io/crates/v/kargo-cli.svg)](https://crates.io/crates/kargo-cli)
 
-**Kargo is Cargo for Kotlin**: one `kargo.toml`, one CLI, to create, build, run and test Kotlin projects for the **JVM**, **WebAssembly**, **Kotlin/Native** and **Android**, with Maven dependencies, a lockfile, built-in frameworks, tasks and plugins.
+**Kargo is Cargo for Kotlin**: one `kargo.toml`, one CLI, to create, build, run and test Kotlin projects for the **JVM**, **WebAssembly**, **JavaScript**, **Kotlin/Native** and **Android**, with Maven dependencies, a lockfile, built-in frameworks, tasks and plugins.
 
 ```console
 $ kargo new hello && cd hello
@@ -30,9 +30,9 @@ The scripts download the archive for your platform from the [GitHub release](htt
 
 ## How it works
 
-* **No Gradle for JVM, Wasm and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo also downloads a JDK when you have none (or the one `[toolchain] jdk = "21"` pins), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`).
+* **No Gradle for JVM, Wasm, JS and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo also downloads a JDK when you have none (or the one `[toolchain] jdk = "21"` pins), so beyond Kargo itself you only need Node.js, and only to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`). `[target.js]` compiles the same code to JavaScript with Kotlin/JS, for Node.js and browsers, as a program or an npm library (ES, CommonJS or UMD modules with TypeScript declarations).
 * **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
-* **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact, and of the tools the build runs: the Kotlin compiler, compiler plugins, the JUnit launcher, KSP, Dokka, ktlint and detekt. Checksums are verified against the repository's `.sha256` (else `.sha1`) files on download and before a cached artifact is first locked (`--require-checksums` fails on artifacts with neither), and every artifact a build uses is checked against the lockfile, so a corrupt cached file fails the build instead of being used. npm packages for Wasm install with `--ignore-scripts`. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
+* **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact, and of the tools the build runs: the Kotlin compiler, compiler plugins, the JUnit launcher, KSP, Dokka, ktlint and detekt. Checksums are verified against the repository's `.sha256` (else `.sha1`) files on download and before a cached artifact is first locked (`--require-checksums` fails on artifacts with neither), and every artifact a build uses is checked against the lockfile, so a corrupt cached file fails the build instead of being used. npm packages for Wasm and JS install with `--ignore-scripts`. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
 * **Incremental:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, only the affected Kotlin/JVM files are recompiled, in a warm compiler daemon, so an edit rebuilds in well under a second.
 * **Android** is built by the Android Gradle Plugin. Kargo generates the Gradle project under `target/android` from `kargo.toml`, so you never edit Gradle files, and downloads the Gradle version that plugin needs (a project `gradlew` wins; `gradle-version` pins another).
 
@@ -40,13 +40,13 @@ The scripts download the archive for your platform from the [GitHub release](htt
 
 | Command | Description |
 |---|---|
-| `kargo new <dir> [--lib] [-t jvm,wasm,native,android] [-w compose,ktor,...] [--bench] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace; `-w compose-multiplatform` shares a Compose `App()` between the desktop and the browser |
+| `kargo new <dir> [--lib] [-t jvm,wasm,js,native,android] [-w compose,ktor,...] [--bench] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace; `-w compose-multiplatform` shares a Compose `App()` between the desktop and the browser |
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo import [dir] [--dry-run] [--no-build] [--from maven\|gradle]` | Convert a Maven or Gradle project: write the `kargo.toml` (a workspace for several modules), move the sources into Kargo's layout (`git mv` in a git repository), report what could not be translated and build the result; `--dry-run` prints the plan and changes nothing (see [importing a project](https://enekocm7.github.io/kargo/guides/importing/)) |
-| `kargo init-ci [--system github] [--junit] [--force]` | Write `.github/workflows/ci.yml` from `kargo.toml`: the steps of the CI guide, `setup-java` unless `[toolchain] jdk` is set, `setup-node` for Wasm and an OS matrix for Kotlin/Native (see [continuous integration](https://enekocm7.github.io/kargo/guides/ci/)) |
+| `kargo init-ci [--system github] [--junit] [--force]` | Write `.github/workflows/ci.yml` from `kargo.toml`: the steps of the CI guide, `setup-java` unless `[toolchain] jdk` is set, `setup-node` for Wasm and JS and an OS matrix for Kotlin/Native (see [continuous integration](https://enekocm7.github.io/kargo/guides/ci/)) |
 | `kargo build [--release \| --profile <name>] [-t <target>] [--keep-going] [--xcframework] [-j <n>] [--message-format json]` | Compile all (or selected) targets; `--keep-going` builds every target (and every workspace member whose dependencies built) and reports each failure; `--xcframework` combines Apple frameworks into an XCFramework; `-j` sets how many workspace members build at once; `--message-format json` prints compiler diagnostics as JSON |
 | `kargo check [--tests] [--release \| --profile <name>] [-t <target>] [--keep-going]` | Type-check without packaging or linking |
-| `kargo run [<file>.kt \| <file>.kts \| -e <code>] [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--native-agent] [--flavor <name>] [--env-file <path>] [--no-env-file] [--watch \| --hot-reload [--clear] [--ignore <glob>]] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; a `.kt` file path compiles that file against the project it is in and runs it without adding it to the build, while a script, a `.kt` file with a front matter or one outside any project runs as `kargo script` runs it (`-e` too); for a Wasm browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--native-agent` runs it on GraalVM with the tracing agent, recording ``kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`` configuration in `native-image/`; `--flavor` picks the Android product flavor to install; `--watch` rebuilds and restarts the program when its files change (a failed build leaves the running one alone), see [watch mode](https://enekocm7.github.io/kargo/guides/watch/); `--hot-reload` keeps a Compose Desktop app running and swaps the changed code into it, see [hot reload](https://enekocm7.github.io/kargo/guides/compose/#hot-reload) |
+| `kargo run [<file>.kt \| <file>.kts \| -e <code>] [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--native-agent] [--flavor <name>] [--env-file <path>] [--no-env-file] [--watch \| --hot-reload [--clear] [--ignore <glob>]] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; a `.kt` file path compiles that file against the project it is in and runs it without adding it to the build, while a script, a `.kt` file with a front matter or one outside any project runs as `kargo script` runs it (`-e` too); for a Wasm or JS browser app it serves the page on `127.0.0.1` (`--port`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--native-agent` runs it on GraalVM with the tracing agent, recording ``kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`` configuration in `native-image/`; `--flavor` picks the Android product flavor to install; `--watch` rebuilds and restarts the program when its files change (a failed build leaves the running one alone), see [watch mode](https://enekocm7.github.io/kargo/guides/watch/); `--hot-reload` keeps a Compose Desktop app running and swaps the changed code into it, see [hot reload](https://enekocm7.github.io/kargo/guides/compose/#hot-reload) |
 | `kargo script <file> [args]...` / `kargo script -e <code> [args]...` | Run a single Kotlin file without a project: a `.kts` script with `@file:DependsOn` and other `@file:` annotations, or a `.kt` file with a `/* kargo ... */` front matter; dependencies resolve and cache like a project's, and a second run of an unchanged script starts without compiling; `-e` runs code from the command line; `--` separates arguments that start with `-` |
 | `kargo test [filter] [--no-run] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [--env-file <path>] [--no-env-file] [-t <target>] [--watch [--clear] [--ignore <glob>]]` | Compile and run tests; `--watch` runs them again on every change; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
 | `kargo bench [filter] [--no-run] [--save <name>] [--baseline <name>] [--format json] [--warmup <NxT>] [--iterations <NxT>] [--forks <n>] [--mode <mode>] [--time-unit <unit>] [--env-file <path>] [--no-env-file] [--profile <name>]` | Run the JVM benchmarks in `benches/` with JMH (kotlinx-benchmark annotations), always optimized (the `release` profile, or `[profile.bench]`); `--save` stores the results as a baseline in `target/bench/`, `--baseline` compares with one (`1.20 ms -> 1.05 ms (-12.5%, p < 0.05)`); `--format json` prints JMH's JSON results |
@@ -118,12 +118,12 @@ In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` 
 kargo.toml
 kargo.lock
 src/                 common sources (.kt, and .java on the JVM)
-src-jvm/             target-specific sources: src-wasm/, src-native/, src-android/
+src-jvm/             target-specific sources: src-wasm/, src-js/, src-native/, src-android/
 tests/               common tests (kotlin.test)
 tests-jvm/ ...       target-specific tests
 test-fixtures/       test helpers the tests of dependent packages can use (`test-fixtures = true`)
 benches/             common benchmarks for kargo bench (JVM); benches-jvm/ for JVM-only ones
-resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm browser app
+resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm or JS browser app
 composeResources/    Compose images, fonts, strings and files, read through the generated Res class
 android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
@@ -186,6 +186,17 @@ environment = "js"          # or "browser" (serves a page, tests in a headless b
 
 # [target.wasm.npm-dependencies]
 # "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for; Kotlin gets declarations from their .d.ts
+
+[target.js]                 # Kotlin/JS (the IR compiler)
+environment = "node"        # or "browser" (serves a page, tests in a headless browser)
+# kind = "library"          # an npm package of @JsExport declarations: package.json, the module, .d.ts
+# module-kind = "es"        # es (<name>.mjs, default), commonjs or umd (<name>.js)
+# module-name = "hello"     # name of the compiled files; default: the package name
+# npm-name = "@acme/hello"  # npm name of a library; default: the lowercase package name
+# package-manager = "pnpm"  # npm, pnpm or bun; default: first on PATH
+
+# [target.js.npm-dependencies]
+# "left-pad" = "1.3.0"      # npm packages besides those your Kotlin/JS libraries ask for; declare them with @JsModule
 
 [target.native]
 platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...
@@ -329,7 +340,7 @@ serialization = true
 release-notes = "./tools/notes.sh"
 ```
 
-A path dependency is built for the consumer's target: a jar for the JVM, a klib for Wasm and Native, and for Android a Gradle subproject (an Android library) or the JVM jar. It brings its own Maven dependencies: the `exported = true` ones (its API) to compile against, the others at runtime only. Test helpers in a package's `test-fixtures/` reach the tests of packages that depend on it with `test-fixtures = true`. `kargo new <dir>` inside a workspace adds the member, and `kargo new --workspace` creates one. Packages built together use one Kotlin version and one JDK.
+A path dependency is built for the consumer's target: a jar for the JVM, a klib for Wasm, JS and Native, and for Android a Gradle subproject (an Android library) or the JVM jar. It brings its own Maven dependencies: the `exported = true` ones (its API) to compile against, the others at runtime only. Test helpers in a package's `test-fixtures/` reach the tests of packages that depend on it with `test-fixtures = true`. `kargo new <dir>` inside a workspace adds the member, and `kargo new --workspace` creates one. Packages built together use one Kotlin version and one JDK.
 
 ### Toolchains
 
@@ -436,7 +447,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
 | `GRAALVM_HOME` | GraalVM for native images when `[toolchain] graalvm` is `system` (the default) |
 | `BROWSER` | Browser for `kargo doc --open` and `kargo run --open` |
-| `KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT` | Browser, extra arguments and silence timeout (seconds) for Wasm browser tests |
+| `KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT` | Browser, extra arguments and silence timeout (seconds) for Wasm and JS browser tests |
 | `KARGO_MAVEN_LOCAL` | The local Maven repository for `kargo publish --local` and `"maven-local"` (default `~/.m2/repository`) |
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | Central Portal user token for `kargo publish` to Maven Central (`KARGO_MAVEN_CENTRAL_URL` overrides the Portal) |
 | `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API `kargo lsp` completes coordinates from |
@@ -453,14 +464,14 @@ Kargo is a Cargo workspace:
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver, uploads and the Maven Central Portal |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, JetBrains Runtime for Compose hot reload, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
-| `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
+| `kargo-compiler` | JVM/Wasm/JS/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, `[[generate]]` steps (`generate.rs`), Android/Gradle, project warnings, publications and signing, npm packages and their Kotlin declarations, Compose Desktop and Compose resources, `kargo self` (`ops/self_update.rs`), `kargo import` (`ops/import/`), commands |
 | `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, Kargo's own Kotlin server (`kotlin/`: lexer, declaration parser, Java declarations and the JDK's sources, libraries without sources from class files, Kotlin metadata and klibs, index, resolver, completion, hover, signature help, navigation, implementations, call and type hierarchies, rename (also KDoc, labels, packages, files and `kargo.toml` entry points), KDoc links (navigation, hints) and generated KDoc, semantic tokens, inlay hints, folding and selection ranges, formatting, code actions, refactorings), project import for other Kotlin language servers, runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |
 | `kargo` | The CLI binary |
 
 ```bash
 cargo test --workspace                       # unit + CLI integration tests (offline)
-KARGO_E2E=1 cargo test --test e2e            # end-to-end: JVM, Wasm, Spring, Ktor, Compose, pinned JDK
+KARGO_E2E=1 cargo test --test e2e            # end-to-end: JVM, Wasm, JS, Spring, Ktor, Compose, pinned JDK
 KARGO_E2E=1 KARGO_E2E_NATIVE=1 KARGO_E2E_ANDROID=1 cargo test --test e2e
 KARGO_E2E=1 KARGO_E2E_GUI=1 cargo test --test e2e compose_hot_reload   # Compose hot reload; opens a window
 ```

@@ -1,9 +1,9 @@
 ---
 title: Multiplatform projects
-description: Share Kotlin code between the JVM, WebAssembly and Kotlin/Native with expect/actual.
+description: Share Kotlin code between the JVM, WebAssembly, JavaScript and Kotlin/Native with expect/actual.
 ---
 
-A Kargo project can target several platforms at once. Code in `src/` is compiled for all of them; code in `src-<target>/` only for one.
+A Kargo project can target several platforms at once: `jvm`, `wasm`, `js`, `native` and `android`. Code in `src/` is compiled for all of them; code in `src-<target>/` only for one.
 
 ## Create a multiplatform project
 
@@ -80,7 +80,7 @@ actual fun platformName(): String = "Kotlin/Native on ${Platform.osFamily}"
 
 ```console
 $ kargo build                 # all targets
-$ kargo run                   # the first of: jvm, native, wasm, android
+$ kargo run                   # the first of: jvm, native, wasm, js, android
 Hello from the JVM (Java 21.0.5)!
 $ kargo run -t native
 Hello from Kotlin/Native on LINUX!
@@ -96,6 +96,30 @@ $ kargo test --no-fail-fast   # keep testing the other targets when one fails
 :::tip
 `environment = "js"` runs the Wasm target on Node.js. For a web front end use `environment = "browser"`: `kargo run -t wasm` then serves a page instead, and `kargo test -t wasm` runs the tests in a headless browser. See [WebAssembly](../wasm/#browser-apps).
 :::
+
+## JavaScript next to WebAssembly
+
+`[target.js]` compiles the same common code to JavaScript with Kotlin/JS, for consumers that can't use Wasm. Its own code goes in `src-js/` and `tests-js/`, and its own dependencies in `[target.js.dependencies]`:
+
+```toml title="kargo.toml"
+[target.jvm]
+
+[target.js]
+environment = "node"
+```
+
+```kotlin title="src-js/Platform.kt"
+package com.example.hello
+
+actual fun platformName(): String = "Kotlin/JS"
+```
+
+```console
+$ kargo run -t js
+Hello from Kotlin/JS!
+```
+
+Wasm and JS are separate targets in Kargo, as in Gradle (`wasmJs()` and `js()`), so a project that enables both writes an `actual` for each. See [JavaScript](../js/).
 
 ## Dependencies
 
@@ -118,5 +142,5 @@ Using a JVM-only library in `src/` fails to compile on the other targets. That's
 - Prefer multiplatform libraries ([klibs.io](https://klibs.io) lists them) over `java.*` APIs in common code. For example, use `kotlinx-datetime` instead of `java.time`, and `okio` or `kotlinx-io` for files.
 - Tests in `tests/` run on every target, which is a cheap way to catch platform differences.
 - `kargo doc` documents `src/` as common code and shows which platforms each declaration is available on. See [API documentation](../documentation/).
-- In an editor, `kargo lsp` treats `src/` and each `src-<target>/` as separate source sets, so `expect` and `actual` declarations link up and common code only sees common code and the libraries every target has. [Kargo's own Kotlin server](../kotlin-server/#how-it-reads-your-project) reads the code of every target; with JetBrains' Kotlin LSP, common code is analyzed as JVM code and Wasm and Native code gets no Kotlin code intelligence yet. See [Multiplatform projects](../editors/#multiplatform-projects).
+- In an editor, `kargo lsp` treats `src/` and each `src-<target>/` as separate source sets, so `expect` and `actual` declarations link up and common code only sees common code and the libraries every target has. [Kargo's own Kotlin server](../kotlin-server/#how-it-reads-your-project) reads the code of every target; with JetBrains' Kotlin LSP, common code is analyzed as JVM code and Wasm, JS and Native code gets no Kotlin code intelligence yet. See [Multiplatform projects](../editors/#multiplatform-projects).
 - `kargo publish` publishes a multiplatform library the way the Kotlin Gradle Plugin does, with one module per platform, so Gradle and Kargo projects pick the right artifact. See [Publishing a library](../publishing/#multiplatform-libraries).

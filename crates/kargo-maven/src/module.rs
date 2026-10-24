@@ -127,6 +127,8 @@ pub enum Platform {
     Jvm,
     /// Kotlin/Wasm with the `js` or `wasi` environment.
     Wasm(String),
+    /// Kotlin/JS with the IR compiler.
+    Js,
     /// Kotlin/Native with a Konan target name such as `mingw_x64`.
     Native(String),
 }
@@ -136,6 +138,7 @@ impl fmt::Display for Platform {
         match self {
             Platform::Jvm => f.write_str("jvm"),
             Platform::Wasm(env) => write!(f, "wasm-{env}"),
+            Platform::Js => f.write_str("js"),
             Platform::Native(target) => write!(f, "native-{target}"),
         }
     }
@@ -146,7 +149,7 @@ impl Platform {
     pub fn library_extension(&self) -> &'static str {
         match self {
             Platform::Jvm => "jar",
-            Platform::Wasm(_) | Platform::Native(_) => "klib",
+            Platform::Wasm(_) | Platform::Js | Platform::Native(_) => "klib",
         }
     }
 }
@@ -193,6 +196,20 @@ fn score(variant: &Variant, platform: &Platform) -> Option<u32> {
                 return None;
             }
             if attr(variant, "org.jetbrains.kotlin.wasm.target").is_some_and(|t| t != env) {
+                return None;
+            }
+            match usage {
+                Some("kotlin-runtime") => Some(3),
+                Some("kotlin-api") => Some(2),
+                _ => None,
+            }
+        }
+        Platform::Js => {
+            if platform_type != Some("js") {
+                return None;
+            }
+            // Libraries built for the old (pre-IR) compiler ship `.js` files Kotlin 2 cannot read.
+            if attr(variant, "org.jetbrains.kotlin.js.compiler").is_some_and(|c| c != "ir") {
                 return None;
             }
             match usage {
@@ -249,6 +266,9 @@ mod tests {
         {"name": "jvmSourcesElements", "attributes": {"org.gradle.category": "documentation", "org.gradle.docstype": "sources"}},
         {"name": "wasmJsApiElements", "attributes": {"org.gradle.usage": "kotlin-api", "org.jetbrains.kotlin.platform.type": "wasm", "org.jetbrains.kotlin.wasm.target": "js"},
          "files": [{"name": "lib-wasm-js.klib", "url": "lib-wasm-js-1.0.klib"}]},
+        {"name": "jsLegacyRuntimeElements", "attributes": {"org.gradle.usage": "kotlin-runtime", "org.jetbrains.kotlin.platform.type": "js", "org.jetbrains.kotlin.js.compiler": "legacy"}},
+        {"name": "jsIrApiElements", "attributes": {"org.gradle.usage": "kotlin-api", "org.jetbrains.kotlin.platform.type": "js", "org.jetbrains.kotlin.js.compiler": "ir"}},
+        {"name": "jsIrRuntimeElements", "attributes": {"org.gradle.usage": "kotlin-runtime", "org.jetbrains.kotlin.platform.type": "js", "org.jetbrains.kotlin.js.compiler": "ir"}},
         {"name": "mingwX64ApiElements", "attributes": {"org.gradle.usage": "kotlin-api", "org.jetbrains.kotlin.platform.type": "native", "org.jetbrains.kotlin.native.target": "mingw_x64"}},
         {"name": "linuxX64ApiElements", "attributes": {"org.gradle.usage": "kotlin-api", "org.jetbrains.kotlin.platform.type": "native", "org.jetbrains.kotlin.native.target": "linux_x64"}}
       ]
@@ -287,6 +307,7 @@ mod tests {
         let meta = ModuleMetadata::parse(KMP).unwrap();
         assert_eq!(select_variant(&meta, &id(), &Platform::Wasm("js".into())).unwrap().name, "wasmJsApiElements");
         assert!(select_variant(&meta, &id(), &Platform::Wasm("wasi".into())).is_none());
+        assert_eq!(select_variant(&meta, &id(), &Platform::Js).unwrap().name, "jsIrRuntimeElements", "never the legacy compiler's");
         assert_eq!(select_variant(&meta, &id(), &Platform::Native("linux_x64".into())).unwrap().name, "linuxX64ApiElements");
         assert!(select_variant(&meta, &id(), &Platform::Native("macos_arm64".into())).is_none());
     }

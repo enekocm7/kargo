@@ -12,14 +12,15 @@ my-app/
 ├── src/                 common sources (.kt, plus .java on the JVM)
 ├── src-jvm/             JVM-only sources
 ├── src-wasm/            Wasm-only sources
+├── src-js/              Kotlin/JS-only sources
 ├── src-native/          Kotlin/Native-only sources
 ├── src-android/         Android-only sources
 ├── tests/               common tests (kotlin.test)
-├── tests-jvm/           JVM-only tests (likewise tests-wasm/, tests-native/, tests-android/)
+├── tests-jvm/           JVM-only tests (likewise tests-wasm/, tests-js/, tests-native/, tests-android/)
 ├── test-fixtures/       test helpers shared with the tests of packages that depend on this one (JVM)
 ├── benches/             common benchmarks, run with kargo bench (JVM)
 ├── benches-jvm/         JVM-only benchmarks
-├── resources/           JVM resources, put on the classpath and in the jar; also the files of a Wasm browser app
+├── resources/           JVM resources, put on the classpath and in the jar; also the files of a Wasm or JS browser app
 ├── test-resources/      resources for JVM tests
 ├── composeResources/    Compose images, fonts, strings and files, read through the generated Res class
 ├── android/             AndroidManifest.xml, res/, assets/
@@ -120,7 +121,7 @@ class GreeterTest {
 ### Good to know
 
 - **A full JDK is required.** If the JDK has no `javac` (a JRE-only install, for example), the build fails and tells you to install a full JDK. Pin one with `[toolchain] jdk = "21"` and Kargo downloads a Temurin JDK, which includes `javac`.
-- **Java is for the JVM and Android.** The Wasm and Native targets only compile `.kt` files and ignore `.java` files. In a multiplatform project, keep Java in `src-jvm/` so that common code in `src/` doesn't depend on it. On Android, the generated Gradle project compiles the Java files in `src/` and `src-android/`.
+- **Java is for the JVM and Android.** The Wasm, JS and Native targets only compile `.kt` files and ignore `.java` files. In a multiplatform project, keep Java in `src-jvm/` so that common code in `src/` doesn't depend on it. On Android, the generated Gradle project compiles the Java files in `src/` and `src-android/`.
 - **Annotation processing is off by default.** `javac` runs with `-proc:none`. Declare a processor with `scope = "processor"` (see [Annotation processors](../../guides/dependencies/#annotation-processors)) or turn on the `lombok` [framework](../../guides/frameworks/), and Kargo runs it for the main and test sources. These processors only see Java sources; for processors that read Kotlin code, use [KSP](../../guides/dependencies/#kotlin-symbol-processing-ksp) (`scope = "ksp"`).
 - **Extra `javac` options** go in `[target.jvm] javac-args`, e.g. `javac-args = ["-Xlint:all"]`. The `--release` flag comes from `jvm-target`.
 - **Java-only projects work.** The Kotlin compiler step is skipped when there are no `.kt` files. But `kargo new` always creates Kotlin templates, and you must set `main-class` yourself.
@@ -139,6 +140,8 @@ target/
 │   │   └── my-app-0.1.0.jar
 │   ├── wasm/                     the module (.mjs, .wasm); for a browser app also index.html and resources/, for a library package.json and .d.mts
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
+│   ├── js/                       the module (.mjs or .js) and its node_modules/; for a browser app also index.html and resources/, for a library package.json and .d.ts; test/ for the tests
+│   ├── js-build/                 Kotlin/JS klibs and the module before it is copied to js/
 │   ├── npm-types/                @types packages for npm dependencies without TypeScript declarations
 │   ├── generated/npm/            Kotlin declarations generated for [target.wasm.npm-dependencies]
 │   ├── native/                   one directory per platform; cinterop/ holds C bindings, c/ the compiled C sources, include/ the C header of a shared or static library, bin/ the [[bin]] executables

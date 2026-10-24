@@ -3,11 +3,12 @@
 //! - JVM: compiles into the same `classes` directory as `kargo build` (kotlinc has
 //!   no analysis-only mode), so a later build reuses the result; no jar, no `lib/`.
 //! - Wasm: produces only the klib and skips linking the `.mjs`/`.wasm` module.
+//! - JS: produces only the klib and skips linking the JavaScript module.
 //! - Native: produces a klib (`-produce library`) and skips code generation and linking.
 //!
 //! - Android: runs Gradle's `compile<Variant>Sources`, skipping dexing and packaging.
 //!
-//! Wasm and Native outputs go to `target/<profile>/check/<target>`, apart from the
+//! Wasm, JS and Native outputs go to `target/<profile>/check/<target>`, apart from the
 //! build outputs.
 
 use std::path::PathBuf;
@@ -16,16 +17,17 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, add_npm_declarations, announce, compile_jvm, finished, hook_env, native_cinterop, native_cinterop_defs, native_libraries,
-    native_platforms, native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
+    BuildOptions, add_npm_declarations, announce, compile_jvm, finished, hook_env, js_libraries, native_cinterop, native_cinterop_defs,
+    native_libraries, native_platforms, native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
 use crate::env::EnvOptions;
 use kargo_compiler::common_kotlin_args;
+use kargo_compiler::js::JsCompilation;
 use kargo_compiler::native::NativeCompilation;
 use kargo_compiler::wasm::WasmCompilation;
-use kargo_manifest::{Hook, NativeKind, TargetKind};
+use kargo_manifest::{Hook, JsModuleKind, NativeKind, TargetKind};
 
 const CHECKING: &str = "Checking";
 
@@ -53,6 +55,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     let checked = super::parallel_targets(&targets, |target| match target {
         TargetKind::Jvm => check_jvm(ctx, opts.tests),
         TargetKind::Wasm => check_wasm(ctx, opts.tests),
+        TargetKind::Js => check_js(ctx, opts.tests),
         TargetKind::Native => check_native(ctx, opts.tests),
         TargetKind::Android => crate::gradle::check(ctx, opts.tests),
     });
@@ -121,6 +124,57 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         main_args: false,
     };
     unit.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ", tests"))?;
+    Ok(())
+}
+
+fn check_js(ctx: &BuildContext, tests: bool) -> Result<()> {
+    let manifest = ctx.ws.manifest();
+    let js = manifest.targets.js.as_ref().context("the JS target is not enabled")?;
+    let jdk = ctx.compiler_jdk()?;
+    let setup = ctx.setup(TargetKind::Js)?;
+    let compiler = ctx.kotlin_compiler()?;
+    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    let profile = ctx.ws.profile(&ctx.profile)?;
+    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let out = check_dir(ctx, TargetKind::Js);
+    let fp_dir = out.join(".fingerprint");
+
+    let name = js.module_name(&manifest.package);
+    let main = JsCompilation {
+        name,
+        environment: js.environment,
+        module_kind: js.module_kind,
+        sources: sources(ctx, TargetKind::Js, false, &["kt"])?,
+        libraries: js_libraries(ctx, &setup, false)?,
+        friends: Vec::new(),
+        plugins: &plugins,
+        kotlin_args: &kotlin_args,
+        output: out.clone(),
+        work: out.join(name),
+        root: ctx.ws.root().to_path_buf(),
+        debug: profile.debug,
+        optimize: false,
+        declarations: false,
+        main_args: false,
+    };
+    main.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Js, ""))?;
+
+    let test_sources = sources(ctx, TargetKind::Js, true, &["kt"])?;
+    if !tests || test_sources.kotlin_files().is_empty() {
+        return Ok(());
+    }
+    let main_klib = main.klib_path();
+    let name = format!("{name}-test");
+    let unit = JsCompilation {
+        name: &name,
+        module_kind: JsModuleKind::Es,
+        sources: test_sources,
+        libraries: js_libraries(ctx, &setup, true)?,
+        friends: if main_klib.is_file() { vec![main_klib] } else { Vec::new() },
+        work: out.join(&name),
+        ..main
+    };
+    unit.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Js, ", tests"))?;
     Ok(())
 }
 

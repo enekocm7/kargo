@@ -82,17 +82,20 @@ fn jvm_target_major(target: &str) -> u32 {
 pub enum TargetKind {
     Jvm,
     Wasm,
+    /// Kotlin/JS (the IR backend), for Node.js and browsers.
+    Js,
     Native,
     Android,
 }
 
 impl TargetKind {
-    pub const ALL: [TargetKind; 4] = [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Native, TargetKind::Android];
+    pub const ALL: [TargetKind; 5] = [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Js, TargetKind::Native, TargetKind::Android];
 
     pub fn as_str(self) -> &'static str {
         match self {
             TargetKind::Jvm => "jvm",
             TargetKind::Wasm => "wasm",
+            TargetKind::Js => "js",
             TargetKind::Native => "native",
             TargetKind::Android => "android",
         }
@@ -117,9 +120,10 @@ impl FromStr for TargetKind {
         match s {
             "jvm" => Ok(TargetKind::Jvm),
             "wasm" | "wasm-js" | "wasmjs" => Ok(TargetKind::Wasm),
+            "js" | "javascript" => Ok(TargetKind::Js),
             "native" => Ok(TargetKind::Native),
             "android" => Ok(TargetKind::Android),
-            other => bail!("unknown target `{other}` (expected one of: jvm, wasm, native, android)"),
+            other => bail!("unknown target `{other}` (expected one of: jvm, wasm, js, native, android)"),
         }
     }
 }
@@ -390,7 +394,7 @@ impl FromStr for PackageManager {
             "npm" => Ok(PackageManager::Npm),
             "pnpm" => Ok(PackageManager::Pnpm),
             "bun" => Ok(PackageManager::Bun),
-            other => bail!("unknown wasm package-manager `{other}` (expected `npm`, `pnpm` or `bun`)"),
+            other => bail!("unknown package-manager `{other}` (expected `npm`, `pnpm` or `bun`)"),
         }
     }
 }
@@ -418,6 +422,87 @@ pub struct WasmTarget {
 }
 
 impl WasmTarget {
+    /// The name of the compiled module and its files: `module-name`, else the package name.
+    pub fn module_name<'a>(&'a self, package: &'a Package) -> &'a str {
+        self.module_name.as_deref().unwrap_or(&package.name)
+    }
+
+    /// The name of the npm package a library publishes: `npm-name`, else the lowercase package name.
+    pub fn npm_package_name(&self, package: &Package) -> String {
+        self.npm_name.clone().unwrap_or_else(|| package.name.to_ascii_lowercase())
+    }
+}
+
+/// Where a Kotlin/JS program runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JsEnvironment {
+    /// Node.js (the default).
+    #[default]
+    Node,
+    /// A web browser: Kargo adds an HTML page, serves it for `kargo run` and runs tests in a headless browser.
+    Browser,
+}
+
+impl JsEnvironment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JsEnvironment::Node => "node",
+            JsEnvironment::Browser => "browser",
+        }
+    }
+}
+
+/// What a Kotlin/JS build produces; the same choices as Wasm.
+pub type JsKind = WasmKind;
+
+/// The kind of JavaScript module the Kotlin/JS compiler writes (`-module-kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JsModuleKind {
+    /// An ES module, `<name>.mjs` (the default).
+    #[default]
+    Es,
+    /// A CommonJS module for `require`, `<name>.js`.
+    CommonJs,
+    /// A UMD module, `<name>.js`, which works with `require`, AMD and a plain `<script>` tag.
+    Umd,
+}
+
+impl JsModuleKind {
+    /// The name written in `module-kind` and passed to `-module-kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JsModuleKind::Es => "es",
+            JsModuleKind::CommonJs => "commonjs",
+            JsModuleKind::Umd => "umd",
+        }
+    }
+
+    /// The extension of the files the compiler writes for this kind of module.
+    pub fn extension(self) -> &'static str {
+        match self {
+            JsModuleKind::Es => "mjs",
+            JsModuleKind::CommonJs | JsModuleKind::Umd => "js",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsTarget {
+    pub environment: JsEnvironment,
+    pub kind: JsKind,
+    pub module_kind: JsModuleKind,
+    /// Name of the output files (`<module-name>.mjs`); `None` uses the package name.
+    pub module_name: Option<String>,
+    /// The npm package name of a library; `None` uses the package name.
+    pub npm_name: Option<String>,
+    /// `None` picks the first of npm, pnpm and bun found on `PATH`.
+    pub package_manager: Option<PackageManager>,
+    /// npm packages the project needs besides those its Kotlin/JS libraries ask for, by name.
+    pub npm_dependencies: BTreeMap<String, String>,
+    pub dependencies: Vec<Dependency>,
+}
+
+impl JsTarget {
     /// The name of the compiled module and its files: `module-name`, else the package name.
     pub fn module_name<'a>(&'a self, package: &'a Package) -> &'a str {
         self.module_name.as_deref().unwrap_or(&package.name)
@@ -662,6 +747,7 @@ pub struct AndroidTarget {
 pub struct Targets {
     pub jvm: Option<JvmTarget>,
     pub wasm: Option<WasmTarget>,
+    pub js: Option<JsTarget>,
     pub native: Option<NativeTarget>,
     pub android: Option<AndroidTarget>,
 }
@@ -674,6 +760,9 @@ impl Targets {
         }
         if self.wasm.is_some() {
             out.push(TargetKind::Wasm);
+        }
+        if self.js.is_some() {
+            out.push(TargetKind::Js);
         }
         if self.native.is_some() {
             out.push(TargetKind::Native);
@@ -693,6 +782,7 @@ impl Targets {
         match kind {
             TargetKind::Jvm => self.jvm.as_ref().map(|t| t.dependencies.as_slice()),
             TargetKind::Wasm => self.wasm.as_ref().map(|t| t.dependencies.as_slice()),
+            TargetKind::Js => self.js.as_ref().map(|t| t.dependencies.as_slice()),
             TargetKind::Native => self.native.as_ref().map(|t| t.dependencies.as_slice()),
             TargetKind::Android => self.android.as_ref().map(|t| t.dependencies.as_slice()),
         }
@@ -1938,16 +2028,16 @@ pub fn validate_package_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// A Wasm module name becomes file names and an import path, so it stays portable.
-fn validate_module_name(name: &str) -> Result<()> {
+/// A Wasm or JS module name (of `[target.<target>]`) becomes file names and an import path, so it stays portable.
+fn validate_module_name(target: &str, name: &str) -> Result<()> {
     if name.is_empty() || name.starts_with('.') || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
-        bail!("invalid [target.wasm] module-name `{name}` (use letters, digits, `-`, `_` and `.`, not starting with `.`)");
+        bail!("invalid [target.{target}] module-name `{name}` (use letters, digits, `-`, `_` and `.`, not starting with `.`)");
     }
     Ok(())
 }
 
 /// npm package names: lowercase, URL-safe, optionally scoped (`@scope/name`).
-fn validate_npm_name(name: &str) -> Result<()> {
+fn validate_npm_name(target: &str, name: &str) -> Result<()> {
     let part_ok = |part: &str| {
         !part.is_empty()
             && !part.starts_with(['.', '_'])
@@ -1959,7 +2049,7 @@ fn validate_npm_name(name: &str) -> Result<()> {
     };
     if !valid || name.len() > 214 {
         bail!(
-            "invalid [target.wasm] npm-name `{name}` (use lowercase letters, digits, `-`, `.`, `_` and `~`, optionally scoped like `@scope/name`)"
+            "invalid [target.{target}] npm-name `{name}` (use lowercase letters, digits, `-`, `.`, `_` and `~`, optionally scoped like `@scope/name`)"
         );
     }
     Ok(())

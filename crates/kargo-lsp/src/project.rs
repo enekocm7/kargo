@@ -797,6 +797,7 @@ pub fn runnables(metadata: &Value, kargo: &str, file: Option<&Path>) -> Vec<Valu
                 "jvm" => !target["main-class"].is_null(),
                 "native" => !target["entry-point"].is_null(),
                 "wasm" => target["wasm-kind"] == "application",
+                "js" => target["js-kind"] == "application",
                 "android" => true,
                 _ => false,
             };
@@ -1197,6 +1198,21 @@ mod tests {
         assert_eq!(all[5]["description"], "Say hi");
         assert_eq!(runnables(&metadata, "kargo", Some(Path::new("/p/src/Main.kt"))).len(), 7);
         assert!(runnables(&sample(), "kargo", Some(Path::new("/elsewhere/x.kt"))).is_empty());
+    }
+
+    #[test]
+    fn runs_js_applications_but_not_libraries() {
+        let mut metadata = sample();
+        let targets = metadata["packages"][0]["targets"].as_array_mut().unwrap();
+        targets.clear();
+        targets.push(json!({ "kind": "js", "js-kind": "application" }));
+        let labels = |metadata: &Value| {
+            runnables(metadata, "kargo", None).iter().map(|r| r["label"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+        };
+        let all = labels(&metadata);
+        assert_eq!(all[..2], ["Run app (js)".to_owned(), "Test app (js)".to_owned()]);
+        metadata["packages"][0]["targets"][0]["js-kind"] = json!("library");
+        assert_eq!(labels(&metadata)[0], "Test app (js)", "a library has nothing to run");
     }
 
     #[test]

@@ -61,7 +61,7 @@ pub fn missing_sources(ws: &Workspace, targets: &[TargetKind]) -> Vec<String> {
         .filter_map(|&target| {
             let (kinds, extensions): (&str, &[&str]) = match target {
                 TargetKind::Jvm => ("Kotlin or Java", &["kt", "java"]),
-                TargetKind::Wasm | TargetKind::Native => ("Kotlin", &["kt"]),
+                TargetKind::Wasm | TargetKind::Js | TargetKind::Native => ("Kotlin", &["kt"]),
                 // Gradle reports an Android project without sources itself.
                 TargetKind::Android => return None,
             };

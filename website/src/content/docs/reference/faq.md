@@ -7,7 +7,7 @@ description: Answers to common questions and fixes for common errors.
 
 ### Does Kargo replace Gradle?
 
-For JVM, Wasm and Native projects, yes: Kargo calls the Kotlin compilers directly and Gradle is not involved. Android builds still use the Android Gradle Plugin, but Kargo generates and runs that Gradle project for you.
+For JVM, Wasm, JS and Native projects, yes: Kargo calls the Kotlin compilers directly and Gradle is not involved. Android builds still use the Android Gradle Plugin, but Kargo generates and runs that Gradle project for you.
 
 ### Can I use any Maven library?
 
@@ -23,7 +23,7 @@ IntelliJ IDEA and Android Studio are the best supported editors for Kotlin. Thei
 
 ### Can I use Java?
 
-Yes, on the JVM and Android. `.java` files next to your Kotlin files are compiled together with them, and Kotlin and Java can call each other. Java isn't compiled for Wasm or Native. See [Java interop](../../getting-started/project-layout/#java-interop).
+Yes, on the JVM and Android. `.java` files next to your Kotlin files are compiled together with them, and Kotlin and Java can call each other. Java isn't compiled for Wasm, JS or Native. See [Java interop](../../getting-started/project-layout/#java-interop).
 
 ### How do I install a Kotlin tool I wrote, so it runs from anywhere?
 

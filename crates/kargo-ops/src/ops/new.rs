@@ -206,6 +206,7 @@ pub fn target_section(target: TargetKind, lib: bool, namespace: &str) -> String 
     match target {
         TargetKind::Jvm => "[target.jvm]\n".to_owned(),
         TargetKind::Wasm => "[target.wasm]\nenvironment = \"js\"\n".to_owned(),
+        TargetKind::Js => "[target.js]\nenvironment = \"node\"\n".to_owned(),
         TargetKind::Native => {
             let kind = if lib { "library" } else { "executable" };
             format!("[target.native]\nplatforms = [\"host\"]\nkind = \"{kind}\"\n")

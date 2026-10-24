@@ -36,7 +36,7 @@ Arguments after `--` go to the program on every start: `kargo run --watch -- --p
 
 On Unix, a program is first sent SIGTERM and given five seconds to exit, so a server can close its sockets and run its shutdown hooks. Only then is it killed. On Windows it is terminated at once.
 
-`--watch` starts JVM, Native and Wasm programs the same way (Wasm programs run on Node.js). It does not run Android apps, which run inside Gradle, or Wasm browser apps, which `kargo run` serves until Ctrl+C. `--watch` conflicts with `--debug`, because a debugger would have to attach again after every restart.
+`--watch` starts JVM, Native, Wasm and JS programs the same way (Wasm and JS programs run on Node.js). It does not run Android apps, which run inside Gradle, or Wasm and JS browser apps, which `kargo run` serves until Ctrl+C. `--watch` conflicts with `--debug`, because a debugger would have to attach again after every restart.
 
 For a Compose Desktop app, `kargo run --hot-reload` watches the same way but does not restart the app: it swaps the changed classes into the running one, which keeps its state. See [Hot reload](../compose/#hot-reload).
 
@@ -101,7 +101,7 @@ Saving often comes as a burst of writes. Kargo waits until the files have been s
 
 ## Limits
 
-- **Android and Wasm browser apps** are not restarted. Run them with `kargo run` again after a change.
+- **Android apps and browser apps** are not restarted. Run them with `kargo run` again after a change.
 - **Windows and native programs:** Windows does not let a running executable be replaced. While a native program runs, the next build that links it fails with the linker's error, and the running program keeps running. Stop watching with Ctrl+C, then start `kargo run --watch` again. This is not tested on every setup; if you hit it, report it.
 - **Changes are seen up to half a second late**, because of the polling. Every watched file is read once when watching starts, so a large `resources/` folder makes the start slower.
 - **A program that writes into a watched directory** restarts itself: each file it writes is a change. Write such files somewhere else, or leave them out with `--ignore`.

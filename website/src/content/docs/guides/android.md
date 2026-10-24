@@ -221,7 +221,7 @@ AndroidX and other Android libraries come from Google's Maven repository, which 
 
 ## Sharing code with other targets
 
-Android is just another target. Common code in `src/` is shared with JVM, Wasm and Native, and `src-android/` holds `actual` implementations. See [Multiplatform projects](../multiplatform/).
+Android is just another target. Common code in `src/` is shared with JVM, Wasm, JS and Native, and `src-android/` holds `actual` implementations. See [Multiplatform projects](../multiplatform/).
 
 Code can also live in other packages of a [workspace](../workspaces/#android-members): an Android app can depend on path members. An Android library among them (`kind = "library"`) becomes a Gradle subproject of the app's generated build, and a package without `[target.android]` comes in as the JVM jar Kargo builds for it:
 

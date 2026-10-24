@@ -220,6 +220,10 @@ fn schema_enums_match_kargo() {
         enum_values(&props["target"]["properties"]["wasm"]["properties"]["package-manager"]),
         names(PackageManager::ALL.iter().map(|p| p.as_str()).collect())
     );
+    assert_eq!(
+        enum_values(&props["target"]["properties"]["js"]["properties"]["package-manager"]),
+        names(PackageManager::ALL.iter().map(|p| p.as_str()).collect())
+    );
     assert_eq!(enum_values(&root["definitions"]["installer-type"]), names(InstallerType::ALL.iter().map(|t| t.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["mode"]), names(BenchMode::ALL.iter().map(|m| m.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["time-unit"]), names(BENCH_TIME_UNITS.to_vec()));

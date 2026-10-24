@@ -453,6 +453,57 @@ fn wasm_target_option_errors() {
 }
 
 #[test]
+fn js_target_options() {
+    let js = |extra: &str| parse(&format!("{MINIMAL}\n{extra}\n")).targets.js.unwrap();
+    let default = js("[target.js]");
+    assert_eq!(default.environment, JsEnvironment::Node);
+    assert_eq!(default.kind, JsKind::Application);
+    assert_eq!(default.module_kind, JsModuleKind::Es);
+    assert_eq!(default.module_kind.extension(), "mjs");
+    assert_eq!(default.module_name(&parse(MINIMAL).package), "hello");
+    assert_eq!(parse(&format!("{MINIMAL}\n[target.js]\n")).targets.enabled(), [TargetKind::Js]);
+
+    let library = js(r#"
+[target.js]
+environment = "browser"
+kind = "library"
+module-kind = "umd"
+module-name = "hello.core"
+npm-name = "@acme/hello"
+package-manager = "pnpm"
+
+[target.js.npm-dependencies]
+"left-pad" = "^1.3.0"
+
+[target.js.dependencies]
+"org.example:dom" = "1.0"
+"#);
+    assert_eq!((library.environment, library.kind, library.module_kind), (JsEnvironment::Browser, JsKind::Library, JsModuleKind::Umd));
+    assert_eq!(library.module_kind.extension(), "js");
+    assert_eq!(library.module_name(&parse(MINIMAL).package), "hello.core");
+    assert_eq!(library.npm_package_name(&parse(MINIMAL).package), "@acme/hello");
+    assert_eq!(library.package_manager, Some(PackageManager::Pnpm));
+    assert_eq!(library.npm_dependencies["left-pad"], "^1.3.0");
+    assert_eq!(library.dependencies[0].module.to_string(), "org.example:dom");
+    assert_eq!(js("[target.js]\nmodule-kind = \"commonjs\"").module_kind, JsModuleKind::CommonJs);
+}
+
+#[test]
+fn js_target_option_errors() {
+    let with = |t: &str| format!("{MINIMAL}\n[target.js]\n{t}\n");
+    assert!(parse_err(&with("environment = \"deno\"")).contains("unknown js environment `deno` (expected `node` or `browser`)"));
+    assert!(parse_err(&with("kind = \"plugin\"")).contains("unknown js kind `plugin`"));
+    assert!(parse_err(&with("module-kind = \"amd\"")).contains("unknown js module-kind `amd` (expected `es`, `commonjs` or `umd`)"));
+    assert!(parse_err(&with("environment = \"browser\"\nmodule-kind = \"commonjs\"")).contains("cannot load a CommonJS module"));
+    assert!(parse_err(&with("module-name = \"a/b\"")).contains("invalid [target.js] module-name `a/b`"));
+    assert!(parse_err(&with("npm-name = \"hello\"")).contains("set kind = \"library\""));
+    assert!(parse_err(&with("kind = \"library\"\nnpm-name = \"Hello\"")).contains("invalid [target.js] npm-name `Hello`"));
+    assert!(parse_err(&with("package-manager = \"yarn\"")).contains("unknown package-manager `yarn`"));
+    assert!(parse_err(&with("[target.js.npm-dependencies]\nleft-pad = \"\"")).contains("needs a package name and a version"));
+    assert!(parse_err(&with("wasm-opt = false")).contains("unknown field"));
+}
+
+#[test]
 fn wasm_web_resources() {
     let with = |t: &str| format!("{MINIMAL}\n[target.wasm]\n{t}\n");
     let library = parse(&with(
@@ -805,6 +856,8 @@ fn load_reports_path() {
 #[test]
 fn parses_enums() {
     assert_eq!("wasm-js".parse::<TargetKind>().unwrap(), TargetKind::Wasm);
+    assert_eq!("js".parse::<TargetKind>().unwrap(), TargetKind::Js);
+    assert_eq!(TargetKind::Js.source_dir_name(), "src-js");
     assert!("ios".parse::<TargetKind>().is_err());
     assert_eq!("compile-only".parse::<Scope>().unwrap(), Scope::Provided);
     assert_eq!("post-package".parse::<Hook>().unwrap(), Hook::PostPackage);

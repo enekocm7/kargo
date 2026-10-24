@@ -28,26 +28,30 @@ pub enum PlatformKind {
     Jvm { jvm_version: Option<u32> },
     /// Kotlin/Wasm for the `js` or `wasi` environment.
     Wasm { environment: String },
+    /// Kotlin/JS with the IR compiler.
+    Js,
     /// Kotlin/Native for a Konan target such as `linux_x64`.
     Native { konan_target: String },
 }
 
 impl PlatformKind {
     /// The suffix of the platform's module, as the Kotlin Gradle Plugin names it: `jvm`,
-    /// `wasm-js`, `wasm-wasi`, `linuxx64`, `iossimulatorarm64`.
+    /// `wasm-js`, `wasm-wasi`, `js`, `linuxx64`, `iossimulatorarm64`.
     pub fn module_suffix(&self) -> String {
         match self {
             PlatformKind::Jvm { .. } => "jvm".to_owned(),
             PlatformKind::Wasm { environment } => format!("wasm-{environment}"),
+            PlatformKind::Js => "js".to_owned(),
             PlatformKind::Native { konan_target } => konan_target.replace('_', "").to_ascii_lowercase(),
         }
     }
 
-    /// The Kotlin target name the variants are named after: `jvm`, `wasmJs`, `linuxX64`.
+    /// The Kotlin target name the variants are named after: `jvm`, `wasmJs`, `js`, `linuxX64`.
     fn target_name(&self) -> String {
         match self {
             PlatformKind::Jvm { .. } => "jvm".to_owned(),
             PlatformKind::Wasm { environment } => format!("wasm{}", capitalize(environment)),
+            PlatformKind::Js => "js".to_owned(),
             PlatformKind::Native { konan_target } => {
                 let mut parts = konan_target.split('_');
                 let first = parts.next().unwrap_or_default().to_owned();
@@ -60,7 +64,7 @@ impl PlatformKind {
     pub fn extension(&self) -> &'static str {
         match self {
             PlatformKind::Jvm { .. } => "jar",
-            PlatformKind::Wasm { .. } | PlatformKind::Native { .. } => "klib",
+            PlatformKind::Wasm { .. } | PlatformKind::Js | PlatformKind::Native { .. } => "klib",
         }
     }
 
@@ -81,6 +85,11 @@ impl PlatformKind {
                 attrs.insert("org.jetbrains.kotlin.platform.type".into(), json!("wasm"));
                 attrs.insert("org.jetbrains.kotlin.wasm.target".into(), json!(environment));
             }
+            PlatformKind::Js => {
+                attrs.insert("org.gradle.jvm.environment".into(), json!("non-jvm"));
+                attrs.insert("org.jetbrains.kotlin.js.compiler".into(), json!("ir"));
+                attrs.insert("org.jetbrains.kotlin.platform.type".into(), json!("js"));
+            }
             PlatformKind::Native { konan_target } => {
                 attrs.insert("org.gradle.jvm.environment".into(), json!("non-jvm"));
                 attrs.insert("org.jetbrains.kotlin.native.target".into(), json!(konan_target));
@@ -94,7 +103,9 @@ impl PlatformKind {
     fn usages(&self) -> Vec<(&'static str, &'static str, bool)> {
         match self {
             PlatformKind::Jvm { .. } => vec![("ApiElements", "java-api", false), ("RuntimeElements", "java-runtime", true)],
-            PlatformKind::Wasm { .. } => vec![("ApiElements", "kotlin-api", false), ("RuntimeElements", "kotlin-runtime", true)],
+            PlatformKind::Wasm { .. } | PlatformKind::Js => {
+                vec![("ApiElements", "kotlin-api", false), ("RuntimeElements", "kotlin-runtime", true)]
+            }
             // A klib is linked with everything it uses, so the API variant carries all dependencies.
             PlatformKind::Native { .. } => vec![("ApiElements", "kotlin-api", true)],
         }

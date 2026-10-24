@@ -53,6 +53,7 @@ export default defineConfig({
 						{ label: 'Installing tools', slug: 'guides/installing-tools' },
 						{ label: 'Multiplatform projects', slug: 'guides/multiplatform' },
 						{ label: 'WebAssembly', slug: 'guides/wasm' },
+						{ label: 'JavaScript (Kotlin/JS)', slug: 'guides/js' },
 						{ label: 'Kotlin/Native', slug: 'guides/native' },
 						{ label: 'C interop', slug: 'guides/c-interop' },
 						{ label: 'Android', slug: 'guides/android' },

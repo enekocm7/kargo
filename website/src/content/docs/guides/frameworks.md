@@ -20,15 +20,15 @@ kargo new myapp -w ktor,serialization       # when creating a project
 
 Each framework adds what it needs for every target that supports it. Use `kargo tree` to see exactly what was added.
 
-| Framework | JVM | Wasm | Native | Android |
-|---|:-:|:-:|:-:|:-:|
-| `serialization` | ✓ | ✓ | ✓ | ✓ |
-| `coroutines` | ✓ | ✓ | ✓ | ✓ |
-| `ktor` | ✓ | client | ✓ (CIO) | client |
-| `compose` | desktop | | | Jetpack Compose |
-| `spring-boot` | ✓ | | | |
-| `lombok` | ✓ | | | ✓ |
-| `benchmark` | ✓ | | | |
+| Framework | JVM | Wasm | JS | Native | Android |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `serialization` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `coroutines` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `ktor` | ✓ | client | client | ✓ (CIO) | client |
+| `compose` | desktop | | | | Jetpack Compose |
+| `spring-boot` | ✓ | | | | |
+| `lombok` | ✓ | | | | ✓ |
+| `benchmark` | ✓ | | | | |
 
 ## kotlinx.serialization
 
@@ -153,6 +153,6 @@ Frameworks combine. A few rules apply:
 
 - Pick `spring-boot` **or** `ktor` for a server, not both.
 - `spring-boot` projects are applications, so they can't be created with `--lib`.
-- `spring-boot`, `lombok` and `compose` can't be used in projects that enable the Wasm or Native targets for that code.
+- `spring-boot`, `lombok` and `compose` can't be used in projects that enable the Wasm or Native targets for that code, and none of them works on the JS target (Compose for Web runs on Wasm).
 
 Something not covered here? Any compiler plugin can be added by hand; see [Tasks and plugins](../tasks-and-plugins/#compiler-plugins).

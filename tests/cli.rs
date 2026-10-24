@@ -954,7 +954,7 @@ fn completions() {
     );
     assert!(complete(&["g"]).contains("gen\tgenerate sources"));
     assert_eq!(values(&complete(&["task", "l"])), ["lint"]);
-    assert_eq!(values(&complete(&["build", "-t", ""])), ["jvm", "wasm", "native", "android"]);
+    assert_eq!(values(&complete(&["build", "-t", ""])), ["jvm", "wasm", "js", "native", "android"]);
     assert!(values(&complete(&["toolchain", ""])).contains(&"install".to_string()));
     assert!(values(&complete(&["add", "--framework", "spr"])).contains(&"spring-boot".to_string()));
 }
@@ -1895,11 +1895,24 @@ fn run_rejects_bins_on_targets_without_them() {
 #[test]
 fn run_serving_options_need_a_wasm_browser_app() {
     let p = Project::new();
-    p.file("kargo.toml", &manifest("web", "[target.jvm]\n[target.wasm]\nenvironment = \"js\"\n"));
-    let message = "`--port` and `--open` serve a Wasm browser app; they need `-t wasm` with [target.wasm] environment = \"browser\"";
-    // The JVM program, and a Wasm program for Node.js, have nothing to serve.
+    p.file("kargo.toml", &manifest("web", "[target.jvm]\n[target.wasm]\nenvironment = \"js\"\n[target.js]\n"));
+    let message = "`--port` and `--open` serve a browser app; they need `-t wasm` or `-t js` with environment = \"browser\"";
+    // The JVM program, and Wasm and JS programs for Node.js, have nothing to serve.
     p.kargo().args(["run", "--port", "9000"]).assert().failure().code(101).stderr(predicate::str::contains(message));
     p.kargo().args(["run", "-t", "wasm", "--open"]).assert().failure().code(101).stderr(predicate::str::contains(message));
+    p.kargo().args(["run", "-t", "js", "--open"]).assert().failure().code(101).stderr(predicate::str::contains(message));
+}
+
+#[test]
+fn run_rejects_js_libraries() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("greeter", "[target.js]\nkind = \"library\"\n"));
+    p.kargo()
+        .args(["run", "-t", "js"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("[target.js] kind = \"library\" builds an npm package and has no program to run"));
 }
 
 #[test]
@@ -2337,14 +2350,67 @@ fn target_list_shows_enabled_and_available_targets() {
         .stdout(predicate::str::contains("jvm      jvm-target"))
         .stdout(predicate::str::contains("(implicit: kargo.toml has no [target] section)"))
         .stdout(predicate::str::contains("Available targets"))
-        .stdout(predicate::str::contains("    wasm\n    native\n    android\n"));
+        .stdout(predicate::str::contains("    wasm\n    js\n    native\n    android\n"));
     p.file("kargo.toml", &manifest("multi", "\n[target.wasm]\nenvironment = \"browser\"\n"));
     let out = p.kargo().args(["target", "ls", "--format", "json"]).assert().success().get_output().stdout.clone();
     let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(json["enabled"][0]["name"], "wasm");
     assert_eq!(json["enabled"][0]["implicit"], false);
     assert_eq!(json["enabled"][0]["settings"]["environment"], "browser");
-    assert_eq!(json["available"], serde_json::json!(["jvm", "native", "android"]));
+    assert_eq!(json["available"], serde_json::json!(["jvm", "js", "native", "android"]));
+}
+
+#[test]
+fn target_add_js_writes_a_node_target() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n"));
+    p.kargo().args(["target", "add", "js"]).assert().success();
+    let text = p.read("kargo.toml");
+    assert!(text.contains("[target.js]\nenvironment = \"node\"\n"), "{text}");
+    p.kargo()
+        .args(["target", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("js       environment node, kind application, module-kind es"));
+}
+
+#[test]
+fn metadata_describes_the_js_target() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "web",
+            "[target.jvm]\n[target.js]\nenvironment = \"browser\"\nkind = \"library\"\nmodule-kind = \"umd\"\nmodule-name = \"web.core\"\n",
+        ),
+    );
+    p.file("src-js/Dom.kt", "fun dom() = 1\n");
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let js = json["packages"][0]["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "js").unwrap().clone();
+    assert_eq!(js["environment"], "browser");
+    assert_eq!(js["js-kind"], "library");
+    assert_eq!(js["module-kind"], "umd");
+    assert_eq!(js["module-name"], "web.core");
+    let roots: Vec<String> = js["source-roots"].as_array().unwrap().iter().map(|r| r.as_str().unwrap().replace('\\', "/")).collect();
+    assert!(roots.iter().any(|r| r.ends_with("/src-js")), "{roots:?}");
+}
+
+#[test]
+fn js_target_options_are_validated() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", "[target.js]\nenvironment = \"deno\"\n"));
+    p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("expected `node` or `browser`"));
+    p.file("kargo.toml", &manifest("web", "[target.js]\nenvironment = \"browser\"\nmodule-kind = \"commonjs\"\n"));
+    p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("a browser cannot load a CommonJS module"));
+    p.file("kargo.toml", &manifest("web", "[target.js]\n[frameworks]\ncompose = true\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("Compose for Web runs on Kotlin/Wasm"));
 }
 
 #[test]
@@ -4571,7 +4637,7 @@ fn init_ci_writes_a_workflow_for_a_jvm_project() {
         .assert()
         .success()
         .stderr(predicate::str::contains("ci.yml"))
-        .stderr(predicate::str::contains("actions/setup-node: no Wasm target"));
+        .stderr(predicate::str::contains("actions/setup-node: no Wasm or JS target"));
     let workflow = std::fs::read_to_string(app.join(".github/workflows/ci.yml")).unwrap();
     assert!(workflow.contains("actions/setup-java@v4") && workflow.contains("setup-kargo@"));
     assert!(workflow.contains("kargo test --locked\n") && workflow.contains("kargo package --release --locked"));

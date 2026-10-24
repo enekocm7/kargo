@@ -12,7 +12,7 @@ use crate::env::{EnvOptions, ProjectEnv};
 use crate::lockfile::Lockfile;
 use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
-use kargo_manifest::{Dependency, Manifest, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Dependency, JsEnvironment, Manifest, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::resolver::ResolvedNode;
 use kargo_maven::{Artifact, DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Resolution, Resolver};
 use kargo_toolchain::jdks::JdkNeeds;
@@ -368,11 +368,12 @@ impl<'a> BuildContext<'a> {
     }
 
     /// Whether the programs of `target` start with the project environment. Android installs an
-    /// app that gets no environment, and a Wasm browser app runs in a browser, which can't read it.
+    /// app that gets no environment, and a Wasm or JS browser app runs in a browser, which can't read it.
     pub fn program_env_applies(&self, target: TargetKind) -> bool {
         match target {
             TargetKind::Jvm | TargetKind::Native => true,
             TargetKind::Wasm => self.ws.manifest().targets.wasm.as_ref().is_none_or(|w| w.environment != WasmEnvironment::Browser),
+            TargetKind::Js => self.ws.manifest().targets.js.as_ref().is_none_or(|j| j.environment != JsEnvironment::Browser),
             TargetKind::Android => false,
         }
     }

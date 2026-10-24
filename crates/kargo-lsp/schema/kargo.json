@@ -194,6 +194,21 @@
             "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the Wasm target only." }
           }
         },
+        "js": {
+          "description": "Build for JavaScript with Kotlin/JS (the IR compiler), for Node.js and browsers.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "environment": { "description": "`node` for Node.js, `browser` for web pages.", "enum": ["node", "nodejs", "browser"], "default": "node" },
+            "kind": { "description": "`application` for a program with a `main`, `library` for an npm package of @JsExport declarations.", "enum": ["application", "app", "library", "lib"], "default": "application" },
+            "module-kind": { "description": "The JavaScript module the compiler writes: `es` (`<name>.mjs`), `commonjs` or `umd` (`<name>.js`).", "enum": ["es", "esm", "commonjs", "cjs", "umd"], "default": "es" },
+            "module-name": { "description": "Name of the compiled module's files (`<name>.mjs`). Default: the package name.", "type": "string" },
+            "npm-name": { "description": "`name` in the package.json of a library. Default: the lowercase package name.", "type": "string" },
+            "package-manager": { "description": "The tool that installs npm packages. Default: the first of npm, pnpm, bun on PATH.", "enum": ["npm", "pnpm", "bun"] },
+            "npm-dependencies": { "description": "npm packages (`name = \"version\"`) to install besides those the klibs ask for.", "type": "object", "additionalProperties": { "type": "string" } },
+            "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the JS target only." }
+          }
+        },
         "native": {
           "description": "Build for Kotlin/Native.",
           "type": "object",
@@ -429,7 +444,7 @@
           "targets": {
             "description": "The targets that compile the output. Default: every target (for protobuf, jvm and android).",
             "type": "array",
-            "items": { "type": "string", "enum": ["jvm", "wasm", "native", "android"] }
+            "items": { "type": "string", "enum": ["jvm", "wasm", "js", "native", "android"] }
           },
           "kind": { "description": "What the step writes: main `sources` (the default), `resources` or `test-sources`.", "type": "string", "enum": ["sources", "resources", "test-sources"], "default": "sources" },
           "roots": {

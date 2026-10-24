@@ -400,8 +400,10 @@ impl Build {
 
         if kind == Kind::Js {
             self.manual(
-                format!("`{label}` is a Kotlin/JS project; Kargo builds the JVM, Wasm, Native and Android targets"),
-                "guides/wasm/",
+                format!(
+                    "`{label}` applies the Kotlin/JS plugin, which Kargo does not translate; write a [target.js] section, or move to `kotlin(\"multiplatform\")` with `js()` and import again"
+                ),
+                "guides/js/",
             );
             return Ok(None);
         }
@@ -647,7 +649,13 @@ impl Build {
                 "guides/dependencies/#kotlin-symbol-processing-ksp",
             );
         }
-        package.npm_dependencies = collected.npm;
+        for (target, name, version) in collected.npm {
+            if target == Some(TargetKind::Js) {
+                package.js_npm_dependencies.push((name, version));
+            } else {
+                package.npm_dependencies.push((name, version));
+            }
+        }
 
         // Frameworks.
         let spring = has("org.springframework.boot");
@@ -898,7 +906,7 @@ impl Build {
         let mut native_framework = false;
         let mut entry_point: Option<String> = None;
         let mut android = false;
-        let mut js = false;
+        let mut js: Option<WasmFound> = None;
         let mut unsupported: Vec<String> = Vec::new();
         let mut cocoapods = false;
         for stmt in stmts.iter().filter(|s| s.name().as_deref() == Some("kotlin")) {
@@ -915,7 +923,19 @@ impl Build {
                         }
                     }
                     "androidTarget" | "android" => android = true,
-                    "js" => js = true,
+                    "js" => {
+                        let mut found = WasmFound::default();
+                        dsl::walk(target.block.as_deref().unwrap_or_default(), &mut |inner, _| match inner.name().as_deref() {
+                            Some("browser") => found.browser = true,
+                            Some("nodejs") => found.node = true,
+                            Some("executable") => found.executable = true,
+                            Some("outputModuleName" | "moduleName") => found.module = found.module.take().or_else(|| value_of(vars, inner)),
+                            Some("useEsModules") => found.es_modules = true,
+                            Some("useCommonJs") => found.common_js = true,
+                            _ => {}
+                        });
+                        js = Some(found);
+                    }
                     "wasmJs" => {
                         let mut found = WasmFound::default();
                         dsl::walk(target.block.as_deref().unwrap_or_default(), &mut |inner, _| match inner.name().as_deref() {
@@ -977,6 +997,36 @@ impl Build {
             wasm_target.set("environment", Value::str("wasi"));
             targets.push(wasm_target);
         }
+        if let Some(found) = &js {
+            let mut js_target = TargetSettings::new(TargetKind::Js);
+            js_target.set("environment", Value::str(if found.browser { "browser" } else { "node" }));
+            if !found.executable {
+                js_target.set("kind", Value::str("library"));
+            }
+            // Gradle writes UMD modules unless told otherwise; Kargo's default is an ES module.
+            let module_kind = if found.es_modules {
+                None
+            } else if found.common_js && !(found.browser && found.executable) {
+                Some("commonjs")
+            } else {
+                Some("umd")
+            };
+            if let Some(kind) = module_kind {
+                js_target.set("module-kind", Value::str(kind));
+            }
+            if let Some(module) = &found.module
+                && module.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                js_target.set("module-name", Value::str(module));
+            }
+            if found.browser && found.node {
+                self.manual(
+                    format!("`{label}` targets js for both the browser and Node.js; the JS target is set up for the browser"),
+                    "guides/js/",
+                );
+            }
+            targets.push(js_target);
+        }
         if !platforms.is_empty() {
             let mut native = TargetSettings::new(TargetKind::Native);
             native.set("platforms", Value::strings(&platforms));
@@ -998,9 +1048,6 @@ impl Build {
             let _ = uses_library;
             targets.push(self.android_target(stmts, vars, uses, name, package));
         }
-        if js {
-            self.manual(format!("`{label}` has a Kotlin/JS target, which Kargo does not build"), "guides/wasm/");
-        }
         for preset in unsupported {
             self.manual(format!("`{label}` targets {preset}, which Kargo does not build"), "guides/native/");
         }
@@ -1020,12 +1067,17 @@ impl Build {
     }
 }
 
+/// What the `wasmJs` or `js` block of a multiplatform build sets.
 #[derive(Debug, Default)]
 struct WasmFound {
     browser: bool,
     node: bool,
     executable: bool,
     module: Option<String>,
+    /// `useEsModules()` (`js` only).
+    es_modules: bool,
+    /// `useCommonJs()` (`js` only).
+    common_js: bool,
 }
 
 fn kind_of(uses: &[PluginUse]) -> Option<Kind> {
@@ -1092,7 +1144,8 @@ struct Collected {
     notes: Vec<String>,
     kapt: bool,
     compose: bool,
-    npm: Vec<(String, String)>,
+    /// npm packages, with the target of the source set that declares them.
+    npm: Vec<(Option<TargetKind>, String, String)>,
 }
 
 /// Reads every `dependencies {}` block: the project's own, and the ones of the source sets of a
@@ -1205,7 +1258,7 @@ fn declarations(ctx: &Context, block: &[Stmt], default: Placement, out: &mut Col
                         out.deps.push((placement, dep, Some(path)));
                     }
                     Notation::Compose => out.compose = true,
-                    Notation::Npm(name, version) => out.npm.push((name, version)),
+                    Notation::Npm(name, version) => out.npm.push((placement.target, name, version)),
                     Notation::Unsupported(what) => out.notes.push(format!("the dependency {what} (in `{}`) could not be translated", name)),
                 }
             }
