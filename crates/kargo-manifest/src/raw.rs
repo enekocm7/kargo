@@ -138,6 +138,8 @@ struct RawPackage {
     #[serde(default)]
     jlink: RawJlink,
     #[serde(default)]
+    optimize: RawOptimize,
+    #[serde(default)]
     native_image: RawNativeImage,
     #[serde(default)]
     installer: RawInstaller,
@@ -149,6 +151,15 @@ struct RawJlink {
     #[serde(default)]
     modules: Vec<String>,
     jdeps: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawOptimize {
+    shrink: Option<bool>,
+    optimize: Option<bool>,
+    obfuscate: Option<bool>,
+    rules: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2072,6 +2083,7 @@ impl RawManifest {
         };
         let packaging = PackagingSettings {
             jlink: self.package.jlink.validate()?,
+            optimize: self.package.optimize.validate()?,
             native_image: self.package.native_image.validate(),
             installer: self.package.installer.validate()?,
         };
@@ -2699,6 +2711,17 @@ impl RawJlink {
             bail!("[package.jlink] `jdeps = false` needs `modules`: the JDK modules to put in the runtime image, e.g. [\"java.base\"]");
         }
         Ok(JlinkSettings { modules: self.modules, jdeps })
+    }
+}
+
+impl RawOptimize {
+    fn validate(self) -> Result<OptimizeSettings> {
+        Ok(OptimizeSettings {
+            shrink: self.shrink.unwrap_or(true),
+            optimize: self.optimize.unwrap_or(true),
+            obfuscate: self.obfuscate.unwrap_or(true),
+            rules: self.rules.unwrap_or_else(|| PathBuf::from("proguard-rules.pro")),
+        })
     }
 }
 

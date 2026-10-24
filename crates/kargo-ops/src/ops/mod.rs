@@ -38,7 +38,7 @@ use self::build::{build_jvm, jvm_classpaths, native_platforms, native_resolution
 use self::context::BuildContext;
 pub use self::packaging::PackageFormat;
 use crate::env::EnvOptions;
-use crate::workspace::Workspace;
+use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_manifest::{Hook, JdkRequest, Scope, TargetKind};
 use kargo_maven::{Platform, Resolution};
@@ -302,8 +302,8 @@ pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Con
 
 /// `kargo fetch`: downloads what later builds need so they can run offline: the compiler and
 /// dependencies, the JDK that `[toolchain] jdk` pins, the JUnit launcher and the libraries of `benches/` (JVM), the npm packages
-/// (Wasm and JS, when npm, pnpm or bun is on `PATH`) and, with `tools`, the Dokka, ktlint and detekt
-/// jars that `kargo doc`, `fmt` and `lint` run.
+/// (Wasm and JS, when npm, pnpm or bun is on `PATH`) and, with `tools`, the Dokka, ktlint, detekt
+/// and R8 jars that `kargo doc`, `fmt`, `lint` and optimized packaging run.
 pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<()> {
     let targets = select_targets(ctx, targets)?;
     let fetched = parallel_map(&targets, |&target| -> Result<()> {
@@ -384,6 +384,9 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
         dokka?;
         ktlint?;
         detekt?;
+        if targets.contains(&TargetKind::Jvm) {
+            ctx.r8_jar(packaging::R8_VERSION)?;
+        }
     }
     Ok(())
 }
@@ -449,6 +452,8 @@ pub struct PackageOptions {
     pub bin: Option<String>,
     /// Build the self-contained jar even for a library.
     pub fat: bool,
+    /// Shrink and obfuscate the resulting JVM application jar.
+    pub optimize: bool,
     /// `--format`; `None` is a jar, or an installer with `desktop`.
     pub format: Option<PackageFormat>,
     /// `--desktop`: package a Compose Desktop application.
@@ -501,8 +506,18 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
             bail!("`--fat` builds a jar and does not apply to `--format {}`", format.as_str());
         }
     }
+    if opts.optimize && (target != TargetKind::Jvm || format != PackageFormat::Jar) {
+        bail!("`--optimize` shrinks JVM jars and needs `--format jar` on the jvm target");
+    }
     match target {
-        TargetKind::Jvm => package_jvm(ctx, opts.bin.as_deref(), opts.fat, format, &platforms),
+        TargetKind::Jvm => package_jvm(
+            ctx,
+            opts.bin.as_deref(),
+            opts.fat,
+            opts.optimize || (ctx.profile == ProfileKind::Release && format == PackageFormat::Jar),
+            format,
+            &platforms,
+        ),
         TargetKind::Android => {
             if opts.bin.is_some() || opts.fat {
                 bail!("`--bin` and `--fat` build JVM jars and do not apply to `kargo package -t android`");
@@ -526,7 +541,14 @@ fn package_android(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: PackageFormat, platforms: &[&str]) -> Result<Vec<PathBuf>> {
+fn package_jvm(
+    ctx: &BuildContext,
+    bin: Option<&str>,
+    fat: bool,
+    optimize: bool,
+    format: PackageFormat,
+    platforms: &[&str],
+) -> Result<Vec<PathBuf>> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
         bail!("`kargo package` creates an executable jar and needs the JVM target; use `kargo build` for other targets");
     }
@@ -553,7 +575,8 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: Package
         };
         Ok(packaging::App { name, main_class, jvm: &jvm, dir: ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("package") })
     };
-    let files = match format {
+    let package_main_class = bin_main.clone().or_else(|| jvm.main_class.clone());
+    let mut files = match format {
         PackageFormat::Jar if bin.is_none() && !fat && platforms.is_empty() && jvm.main_class.is_none() => {
             vec![publish::package_library(ctx, &jvm)?]
         }
@@ -562,6 +585,12 @@ fn package_jvm(ctx: &BuildContext, bin: Option<&str>, fat: bool, format: Package
         PackageFormat::NativeImage => vec![packaging::native_image(ctx, &app(bin_main)?)?],
         PackageFormat::Installer => packaging::installer(ctx, &app(bin_main)?)?,
     };
+    if optimize {
+        if format != PackageFormat::Jar {
+            bail!("`--optimize` applies to JVM jars; use `--format jar`");
+        }
+        files[0] = packaging::optimize_jar(ctx, &files[0], name, package_main_class.as_deref())?;
+    }
     let mut env = env;
     env.push(("KARGO_PACKAGE".to_owned(), files[0].to_string_lossy().into_owned()));
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;

@@ -12,6 +12,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
@@ -417,6 +418,30 @@ fn multiple_entry_points() {
         .stderr(predicate::str::contains("Compiling multi v0.1.0 (jvm, example hello)"))
         .stdout(predicate::str::contains("example api"));
     t.kargo("multi").args(["run", "--example", "bye"]).assert().success().stdout(predicate::str::contains("bye"));
+}
+
+#[test]
+fn release_package_runs_the_r8_optimized_jar() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["optimized"]);
+    t.write("optimized/src/Main.kt", "package sample\nfun main() = println(\"optimized app\")\n");
+    t.write("optimized/kargo.toml", "[package]\nname = \"optimized\"\nversion = \"0.1.0\"\n[target.jvm]\nmain-class = \"sample.MainKt\"\n");
+
+    let output = t.kargo("optimized").args(["package", "--release"]).assert().success().get_output().stdout.clone();
+    let jar = String::from_utf8(output).unwrap();
+    let jar = PathBuf::from(jar.trim());
+    assert!(jar.file_name().unwrap().to_string_lossy().ends_with("-min.jar"), "{}", jar.display());
+    let out = StdCommand::new("java").arg("-jar").arg(&jar).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("optimized app"));
+    let mapping = jar.with_file_name("optimized-0.1.0-mapping.txt");
+    assert!(mapping.is_file(), "{}", mapping.display());
+
+    t.create(&["against-min"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("against-min/kargo.toml")).unwrap();
+    t.write("against-min/kargo.toml", &format!("{manifest}\n[package.optimize]\nobfuscate = false\n"));
+    t.kargo("against-min").args(["test", "-t", "jvm", "--against-min"]).assert().success();
 }
 
 #[test]

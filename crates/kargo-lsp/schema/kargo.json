@@ -30,6 +30,17 @@
             "jdeps": { "description": "Ask jdeps which JDK modules the program uses. `false` uses only `modules`.", "type": "boolean", "default": true }
           }
         },
+        "optimize": {
+          "description": "R8 shrinking, optimization and obfuscation for JVM jars. Enabled by --release or kargo package --optimize.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "shrink": { "description": "Remove unreachable classes and members.", "type": "boolean", "default": true },
+            "optimize": { "description": "Apply bytecode optimizations.", "type": "boolean", "default": true },
+            "obfuscate": { "description": "Rename classes and members.", "type": "boolean", "default": true },
+            "rules": { "description": "ProGuard-compatible rules file. Defaults to proguard-rules.pro when that file exists.", "type": "string", "default": "proguard-rules.pro", "examples": ["packaging/proguard-rules.pro"] }
+          }
+        },
         "native-image": {
           "description": "Options for `kargo package --format native-image` (GraalVM).",
           "type": "object",

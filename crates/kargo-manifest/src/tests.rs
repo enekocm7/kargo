@@ -1720,6 +1720,12 @@ fn packaging_tables() {
 [package.jlink]
 modules = ["java.naming", "jdk.crypto.ec"]
 
+[package.optimize]
+shrink = false
+optimize = true
+obfuscate = false
+rules = "config/keep.pro"
+
 [package.native-image]
 args = ["--enable-url-protocols=https"]
 static = true
@@ -1742,6 +1748,10 @@ category = "Development"
 "#
     ));
     assert_eq!(m.packaging.jlink.modules, ["java.naming", "jdk.crypto.ec"]);
+    assert_eq!(
+        m.packaging.optimize,
+        OptimizeSettings { shrink: false, optimize: true, obfuscate: false, rules: PathBuf::from("config/keep.pro") }
+    );
     let native = &m.packaging.native_image;
     assert!(native.static_link && !native.metadata_repository);
     assert_eq!(native.initialize_at_build_time, ["kotlinx.serialization"]);

@@ -347,6 +347,7 @@ kargo test [filter] [options]
 | `--include-tag <tag>` | Only run JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
 | `--exclude-tag <tag>` | Skip JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
 | `--failed` | Rerun only the JVM test classes that failed in the last run. Conflicts with `--list` and `--no-run`. See [Rerunning failures](../../guides/testing/#rerunning-failures) |
+| `--against-min` | Run JVM tests with the R8-optimized jar on the runtime classpath; useful for finding missing keep rules |
 | `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
 | `--debug[=<port>]` | Start the JVM tests suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`). Needs `-t jvm` in a project with several targets. See [Debugging tests](../../guides/testing/#debugging-tests) |
 | `--list` | Compile the tests and print them (`<target>: <Class>.<name>`) instead of running them. JVM and Native only. See [Listing tests](../../guides/testing/#listing-tests) |
@@ -685,8 +686,18 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
 | `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library (JVM) |
 | `--format <format>` | `jar` (default), `jlink`, `native-image` or `installer` (JVM) |
+| `--optimize` | Shrink and obfuscate the JVM jar with R8; also enabled automatically with `--release` |
+| `--message-format json` | Print compiler diagnostics, optimization reports and package paths as JSON lines |
 | `--desktop` | Package the [Compose Desktop](../../guides/compose/#distributing) application: an installer for this OS unless `--format` says otherwise, with the JDK modules, options and Skiko native library Compose needs. Needs `[frameworks] compose` |
 | `--platforms <list>` | With `--desktop --format jar`: the platforms whose Skiko natives the jar carries instead of only the host's, so it runs on each of them. `all`, or some of `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`, `linux-x64`, `linux-arm64` |
+
+## `kargo retrace`
+
+```sh
+kargo retrace target/release/jvm/app-0.1.0-mapping.txt crash.txt
+```
+
+Uses the mapping file produced by optimized packaging to restore obfuscated stack frames. If the stack trace path is omitted, Kargo reads it from stdin.
 
 ## `kargo publish`
 
@@ -754,7 +765,7 @@ Download all dependencies and toolchains so later builds can run offline, and lo
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
 | `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. Libraries that publish none are skipped. Sources jars are not recorded in `kargo.lock` |
-| `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint) and [`kargo lint`](../../guides/formatting-and-linting/) (detekt), so they work with `--offline` and `--locked` |
+| `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint), [`kargo lint`](../../guides/formatting-and-linting/) (detekt) and R8 for JVM optimization |
 | `-p, --package <name>`, `--workspace` | Which packages to fetch for |
 
 ```console

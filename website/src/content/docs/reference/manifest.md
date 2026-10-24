@@ -57,6 +57,27 @@ jdeps = true
 | `modules` | `[]` | JDK modules to add to the ones `jdeps` finds, such as modules the program only loads through reflection or a service loader |
 | `jdeps` | `true` | Ask `jdeps` which modules the program and its dependencies use. `false` puts only `modules` in the runtime, so it then needs at least one |
 
+### `[package.optimize]`
+
+R8 settings for shrinking JVM jars. `kargo package --release` enables this automatically; pass `--optimize` to enable it with another profile. The minimized jar, mapping and removed-code report are written under `target/<profile>/jvm/`.
+
+```toml
+[package.optimize]
+shrink = true
+optimize = true
+obfuscate = true
+rules = "proguard-rules.pro"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `shrink` | `true` | Remove unreachable classes and members |
+| `optimize` | `true` | Apply bytecode optimizations |
+| `obfuscate` | `true` | Rename classes and members |
+| `rules` | `"proguard-rules.pro"` | ProGuard-compatible rules file; an absent default file is ignored |
+
+R8 is downloaded from Google's Maven repository and pinned with a checksum in `kargo.lock`. Kargo preserves the selected `[[bin]]` or package main entry point, and keeps public library APIs and Kotlin metadata for library jars. See [JVM shrinking](../../guides/publishing/#jvm-shrinking-and-obfuscation).
+
 ### `[package.native-image]`
 
 Options for `kargo package --format native-image`. See [Native executables](../../guides/distributing/#native-executables).

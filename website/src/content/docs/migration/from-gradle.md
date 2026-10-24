@@ -199,6 +199,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | Other compiler plugins | `[plugins.<name>] maven = "...", id = "..."` |
 | `jvmToolchain(21)` | `[toolchain] jdk = "21"` |
 | `org.beryx.jlink` + `./gradlew jlink` | `kargo package --format jlink`, with `[package.jlink] modules` for extra modules |
+| ProGuard or R8 plugin for a JVM jar | `[package.optimize]` and `kargo package --release` (or `kargo package --optimize`), with `proguard-rules.pro` for keep rules |
 | `org.graalvm.buildtools.native` + `./gradlew nativeCompile` | `kargo package --format native-image`, with `[toolchain] graalvm` and `[package.native-image]` |
 | `-Pagent` / `nativeCompile` with the tracing agent | `kargo run --native-agent` |
 | `org.beryx.jlink`'s `jpackage` task | `kargo package --format installer`, with `[package.installer]` |
