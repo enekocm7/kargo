@@ -448,10 +448,10 @@ fn run_a_single_file() {
     assert!(!jvm.join("classes/MigrateKt.class").exists(), "the file is not part of the project's build");
     // Outside a project, and for scripts, the file runs as `kargo script` runs it.
     t.write("loose/hello.kt", "fun main(args: Array<String>) = println(\"hello \" + args.joinToString())\n");
-    t.kargo("loose").args(["run", "hello.kt", "world"]).assert().success().stdout("hello world\n");
+    t.kargo("loose").args(["run", "hello.kt", "world"]).assert().success().stdout(predicate::str::diff("hello world\n").normalize());
     t.write("loose/twice.main.kts", "println(\"twice ${args.joinToString()}\")\n");
-    t.kargo("loose").args(["run", "twice.main.kts", "x"]).assert().success().stdout("twice x\n");
-    t.kargo("loose").args(["run", "-e", "println(1 + 1)"]).assert().success().stdout("2\n");
+    t.kargo("loose").args(["run", "twice.main.kts", "x"]).assert().success().stdout(predicate::str::diff("twice x\n").normalize());
+    t.kargo("loose").args(["run", "-e", "println(1 + 1)"]).assert().success().stdout(predicate::str::diff("2\n").normalize());
 }
 
 #[test]
@@ -2418,13 +2418,17 @@ fn scripts_run_with_their_arguments_and_are_cached() {
         "fetch.kts",
         "#!/usr/bin/env -S kargo script\n@file:DependsOn(\"org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2\")\n\nimport kotlinx.coroutines.runBlocking\nimport kotlinx.coroutines.delay\n\nrunBlocking { delay(1) }\nprintln(\"hello ${args.joinToString(\"|\")}\")\n",
     );
-    e.kargo("").args(["script", "fetch.kts", "world", "--flag"]).assert().success().stdout("hello world|--flag\n");
+    e.kargo("")
+        .args(["script", "fetch.kts", "world", "--flag"])
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("hello world|--flag\n").normalize());
     // The second run starts the classes the first one compiled, so it does not compile again.
     e.kargo("")
         .args(["script", "fetch.kts", "again"])
         .assert()
         .success()
-        .stdout("hello again\n")
+        .stdout(predicate::str::diff("hello again\n").normalize())
         .stderr(predicate::str::contains("Compiling").not());
 }
 
@@ -2433,9 +2437,14 @@ fn scripts_report_failures_like_programs() {
     require_e2e!();
     let e = E2e::new();
     e.write("boom.kts", "println(\"before\")\nthrow IllegalStateException(\"boom\")\n");
-    e.kargo("").args(["script", "boom.kts"]).assert().code(1).stdout("before\n").stderr(predicate::str::contains("boom"));
+    e.kargo("")
+        .args(["script", "boom.kts"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::diff("before\n").normalize())
+        .stderr(predicate::str::contains("boom"));
     // The cached classes throw the same way.
-    e.kargo("").args(["script", "boom.kts"]).assert().code(1).stdout("before\n");
+    e.kargo("").args(["script", "boom.kts"]).assert().code(1).stdout(predicate::str::diff("before\n").normalize());
     e.write("bad.kts", "println(undefinedThing)\n");
     e.kargo("").args(["script", "bad.kts"]).assert().code(101).stderr(predicate::str::contains("unresolved reference"));
 }
@@ -2448,10 +2457,14 @@ fn kotlin_files_with_front_matter_and_expressions() {
         "tool.kt",
         "/* kargo\n[dependencies]\n\"com.github.ajalt.clikt:clikt\" = \"5.0.0\"\n*/\nfun main(args: Array<String>) {\n    println(\"kt \" + args.joinToString())\n}\n",
     );
-    e.kargo("").args(["script", "tool.kt", "a", "b"]).assert().success().stdout("kt a, b\n");
-    e.kargo("").args(["script", "tool.kt", "a", "b"]).assert().success().stdout("kt a, b\n");
-    e.kargo("").args(["script", "-e", "println(1 + 1)"]).assert().success().stdout("2\n");
-    e.kargo("").args(["script", "-e", "println(args.joinToString(\"|\"))", "--", "--a", "b"]).assert().success().stdout("--a|b\n");
+    e.kargo("").args(["script", "tool.kt", "a", "b"]).assert().success().stdout(predicate::str::diff("kt a, b\n").normalize());
+    e.kargo("").args(["script", "tool.kt", "a", "b"]).assert().success().stdout(predicate::str::diff("kt a, b\n").normalize());
+    e.kargo("").args(["script", "-e", "println(1 + 1)"]).assert().success().stdout(predicate::str::diff("2\n").normalize());
+    e.kargo("")
+        .args(["script", "-e", "println(args.joinToString(\"|\"))", "--", "--a", "b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("--a|b\n").normalize());
     e.write("no-main.kt", "/* kargo\n*/\nval x = 1\n");
     e.kargo("").args(["script", "no-main.kt"]).assert().code(101).stderr(predicate::str::contains("no `main` function found"));
 }
@@ -2464,9 +2477,9 @@ fn script_annotations_set_kotlin_jdk_and_frameworks() {
         "settings.kts",
         "@file:Kotlin(\"2.4.21\")\n@file:Jdk(\"system\")\n@file:Framework(\"coroutines\")\nimport kotlinx.coroutines.*\nprintln(runBlocking { async { 6 * 7 }.await() })\n",
     );
-    e.kargo("").args(["script", "settings.kts"]).assert().success().stdout("42\n");
+    e.kargo("").args(["script", "settings.kts"]).assert().success().stdout(predicate::str::diff("42\n").normalize());
     e.write("dotted.main.kts", "println(\"dotted\")\n");
-    e.kargo("").args(["script", "dotted.main.kts"]).assert().success().stdout("dotted\n");
+    e.kargo("").args(["script", "dotted.main.kts"]).assert().success().stdout(predicate::str::diff("dotted\n").normalize());
 }
 
 #[cfg(unix)]
@@ -2491,8 +2504,18 @@ fn scripts_exit_when_they_return_even_with_threads_left_running() {
     let e = E2e::new();
     e.write("leftover.kts", "Thread { Thread.sleep(600_000) }.start()\nprintln(\"done\")\n");
     // Without the explicit exit, the thread would keep the first run, and then the cached one, alive for ten minutes.
-    e.kargo("").args(["script", "leftover.kts"]).timeout(std::time::Duration::from_secs(300)).assert().success().stdout("done\n");
-    e.kargo("").args(["script", "leftover.kts"]).timeout(std::time::Duration::from_secs(60)).assert().success().stdout("done\n");
+    e.kargo("")
+        .args(["script", "leftover.kts"])
+        .timeout(std::time::Duration::from_secs(300))
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("done\n").normalize());
+    e.kargo("")
+        .args(["script", "leftover.kts"])
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("done\n").normalize());
 }
 
 #[test]
