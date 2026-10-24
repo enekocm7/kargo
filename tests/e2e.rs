@@ -420,6 +420,41 @@ fn multiple_entry_points() {
 }
 
 #[test]
+fn run_a_single_file() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["proj"]);
+    t.write("proj/src/Api.kt", "package proj\nobject Api { const val NAME = \"api\" }\n");
+    t.write(
+        "proj/tools/migrate.kt",
+        "fun main(args: Array<String>) = println(\"migrate \" + proj.Api.NAME + \" \" + args.joinToString())\n",
+    );
+    // Inside a project the file sees the project's code, but is not part of its build.
+    t.kargo("proj")
+        .args(["run", "tools/migrate.kt", "up", "--", "--fast"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("(jvm, tools"))
+        .stdout(predicate::str::contains("migrate api up, --fast"));
+    // An unchanged file is not compiled again.
+    t.kargo("proj")
+        .args(["run", "tools/migrate.kt", "down"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Compiling").not())
+        .stdout(predicate::str::contains("migrate api down"));
+    let jvm = t.dir.path().join("proj/target/debug/jvm");
+    assert!(jvm.join("files/migrate/MigrateKt.class").is_file());
+    assert!(!jvm.join("classes/MigrateKt.class").exists(), "the file is not part of the project's build");
+    // Outside a project, and for scripts, the file runs as `kargo script` runs it.
+    t.write("loose/hello.kt", "fun main(args: Array<String>) = println(\"hello \" + args.joinToString())\n");
+    t.kargo("loose").args(["run", "hello.kt", "world"]).assert().success().stdout("hello world\n");
+    t.write("loose/twice.main.kts", "println(\"twice ${args.joinToString()}\")\n");
+    t.kargo("loose").args(["run", "twice.main.kts", "x"]).assert().success().stdout("twice x\n");
+    t.kargo("loose").args(["run", "-e", "println(1 + 1)"]).assert().success().stdout("2\n");
+}
+
+#[test]
 fn compile_errors_are_reported() {
     require_e2e!();
     let t = E2e::new();

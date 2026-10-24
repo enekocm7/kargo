@@ -1818,6 +1818,62 @@ fn run_selects_bins_and_examples_before_compiling() {
 }
 
 #[test]
+fn run_file_in_a_project_is_checked_before_compiling() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tools", "[target.jvm]\n[target.wasm]\n"));
+    p.file("tools/Migrate.kt", "fun main(args: Array<String>) {}\n");
+    p.kargo()
+        .args(["run", "tools/Migrate.kt", "--bin", "x"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--bin` picks a program of the project; `kargo run tools/Migrate.kt` runs that file instead"));
+    p.kargo()
+        .args(["run", "tools/Migrate.kt", "--watch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--watch` reruns the project's program"));
+    // The file is compiled against the project it is in, wherever `kargo run` runs.
+    p.kargo()
+        .current_dir(p.path().join("tools"))
+        .args(["run", "Migrate.kt", "-t", "wasm"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`kargo run <file>` only works for the jvm and native targets, not wasm"));
+    // A word that is not an existing Kotlin file stays a program argument.
+    p.kargo()
+        .args(["run", "Missing.kt", "-t", "wasm", "--main", "x.MainKt"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`kargo run --main` only works"));
+}
+
+#[test]
+fn run_file_delegates_scripts_to_kargo_script() {
+    let p = Project::new();
+    p.file("plugin.kts", "@file:Framework(\"serialization\")\nprintln(1)\n");
+    let message = "needs the Kotlin compiler plugin";
+    p.kargo().args(["script", "plugin.kts"]).assert().failure().code(101).stderr(predicate::str::contains(message));
+    p.kargo().args(["run", "plugin.kts"]).assert().failure().code(101).stderr(predicate::str::contains(message));
+    p.kargo()
+        .args(["run", "plugin.kts", "--release"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--release` applies to a project's program, but plugin.kts runs on its own like `kargo script`"));
+    p.kargo()
+        .args(["run", "-e", "println(1)", "--debug"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--debug` applies to a project's program, but `-e` code runs on its own"));
+    // A .kt file with a front matter declares its own dependencies, so it runs on its own even in a project.
+    p.file("kargo.toml", &manifest("tools", ""));
+    p.file("Fetch.kt", "/* kargo\n[dependencies]\n\"org.example:lib\" = 1\n*/\nfun main() {}\n");
+    p.kargo().args(["run", "Fetch.kt"]).assert().failure().code(101).stderr(predicate::str::contains("invalid front matter in Fetch.kt"));
+}
+
+#[test]
 fn run_rejects_bins_on_targets_without_them() {
     let p = Project::new();
     p.file(

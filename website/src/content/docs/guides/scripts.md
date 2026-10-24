@@ -93,6 +93,12 @@ With `--offline`, a script that has run before works from the cache without the 
 Compiler messages give the line numbers of your file. The path they show is Kargo's copy of the script under the cache directory, because Kargo removes the annotations from that copy before compiling it.
 :::
 
+## Run a file with `kargo run`
+
+`kargo run <file>` runs a script the same way: `kargo run fetch.main.kts world` is `kargo script fetch.main.kts world`, and `kargo run -e 'println(1 + 1)'` is `kargo script -e`. A `.kt` file runs the same way too when it has a front matter or lies outside any project.
+
+A `.kt` file without a front matter inside a project is different: `kargo run tools/migrate.kt` compiles it against the project's code and dependencies instead, without adding it to the build. See [Run a single file](../multiple-programs/#run-a-single-file).
+
 ## Editors
 
 The [language server](../editors/#language-server) treats a `.kts` file as a Kargo script when it lies outside any project, or when its shebang runs `kargo script`. A `.kts` file inside a project is a build script that Kargo does not run, so the server leaves it alone unless its shebang says otherwise. In Zed, a folder with only scripts needs a setting to start the server; see [Kargo scripts in Zed](../editors/#kargo-scripts-in-zed).

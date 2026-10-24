@@ -3,13 +3,14 @@ title: Several programs in one project
 description: Run another main with --main, declare named programs with [[bin]], and keep runnable examples in examples/.
 ---
 
-A project often holds more than one program: the app, a migration tool, a seed script, a few examples. Kargo has three ways to run them, all through `kargo run`:
+A project often holds more than one program: the app, a migration tool, a seed script, a few examples. Kargo has four ways to run them, all through `kargo run`:
 
 | You want to | Use |
 |---|---|
 | Run some other `main` once | `kargo run --main <class>` |
 | Give programs a name and keep them in the build | a `[[bin]]` table and `kargo run --bin <name>` |
 | Ship small programs that show how to use your code | `examples/<name>.kt` and `kargo run --example <name>` |
+| Run a one-off file kept anywhere in the project | `kargo run <path>.kt` |
 
 ## Run another `main`
 
@@ -147,6 +148,29 @@ Examples work like Cargo's:
 - They see your public API only, not `internal` declarations.
 - On the JVM, each one goes to `target/<profile>/jvm/examples/<name>/`. On Kotlin/Native, the main sources become a library the example links against, in `target/<profile>/native/<platform>/examples/`. There, an example's `main` must not be in a package where your main sources also declare a `main`; the default package (no `package` line) is the usual choice.
 - `kargo fmt` and `kargo lint` check `examples/` too.
+
+## Run a single file
+
+`kargo run` also takes the path of a `.kt` file with a `main`. The file can live anywhere under the project, such as a `tools/` directory next to `src/`:
+
+```kotlin title="tools/migrate.kt"
+import com.example.app.Database
+
+fun main(args: Array<String>) {
+    Database.migrate(args.firstOrNull() ?: "up")
+}
+```
+
+```console
+$ kargo run tools/migrate.kt down
+   Compiling app v0.1.0 (jvm, tools/migrate.kt)
+    Finished `dev` profile in 2.1s
+     Running `java MigrateKt down`
+```
+
+Like an example, the file is compiled on its own against the main classes, the dependencies and the dev-dependencies, into `target/<profile>/jvm/files/<name>/`. It is not part of the project's build, so `kargo build` and `kargo package` leave it out, and an unchanged file is not compiled again. The project is the one the file belongs to, so `kargo run ../app/tools/migrate.kt` works from anywhere.
+
+The first word after `run` is a file only when it ends in `.kt` or `.kts` and exists; every other word is an argument for the program. A `.kts` script, and a `.kt` file with a `/* kargo ... */` front matter, run as [`kargo script`](../scripts/) runs them instead, with their own dependencies.
 
 ## Targets
 

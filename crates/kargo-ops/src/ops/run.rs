@@ -1,5 +1,6 @@
 //! `kargo run`: builds and runs the program, a `[[bin]]` (`--bin`), another
-//! `main` (`--main`) or an example from `examples/` (`--example`).
+//! `main` (`--main`), an example from `examples/` (`--example`) or any `.kt` file
+//! (`kargo run <file>`), compiled against the project.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -46,6 +47,9 @@ pub enum Program {
     Bin(String),
     /// `--example`: `examples/<name>.kt`.
     Example(String),
+    /// `kargo run <file>`: a `.kt` file anywhere, compiled against the project like an example
+    /// but not part of its build.
+    File(PathBuf),
 }
 
 impl Program {
@@ -55,8 +59,46 @@ impl Program {
             Program::Main(_) => "--main",
             Program::Bin(_) => "--bin",
             Program::Example(_) => "--example",
+            Program::File(_) => "<file>",
         }
     }
+}
+
+/// A single source file `kargo run` compiles into its own program: an example or a file.
+struct SingleFile {
+    /// Names the program's output directory, module and Kotlin/Native executable.
+    name: String,
+    file: PathBuf,
+    /// The directory of `target/<profile>/<target>` the program is compiled into.
+    dir: &'static str,
+    /// Shown after the target in the `Compiling` line.
+    what: String,
+}
+
+/// The single file of `--example` and `kargo run <file>`; `None` for the other programs.
+fn single_file(ctx: &BuildContext, program: &Program) -> Result<Option<SingleFile>> {
+    Ok(match program {
+        Program::Example(name) => {
+            let file = example_file(ctx, name)?;
+            Some(SingleFile { name: name.clone(), file, dir: "examples", what: format!("example {name}") })
+        }
+        Program::File(file) => {
+            if !file.is_file() {
+                bail!("{} does not exist", file.display());
+            }
+            let shown = file.strip_prefix(ctx.ws.root()).unwrap_or(file).display().to_string();
+            Some(SingleFile { name: file_program_name(file), file: file.clone(), dir: "files", what: shown })
+        }
+        _ => None,
+    })
+}
+
+/// The name of the program compiled from `file`: its stem, with anything but letters, digits,
+/// `-` and `_` replaced, since it names a directory, a module and an executable.
+fn file_program_name(file: &Path) -> String {
+    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let name: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    if name.is_empty() { "main".to_owned() } else { name }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -184,8 +226,8 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
                 bail!("[[bin]] `{name}` has no JVM main class; set `main` or `path` in kargo.toml");
             }
         }
-        Program::Example(name) => {
-            example_file(ctx, name)?;
+        Program::Example(_) | Program::File(_) => {
+            single_file(ctx, program)?;
         }
         Program::Main(_) | Program::Default => {}
     }
@@ -247,8 +289,8 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
     } else {
         Vec::new()
     };
-    // `--main` and `--example` on Kotlin/Native link their own executable instead of the project's.
-    let separate_native = target == TargetKind::Native && matches!(opts.program, Program::Main(_) | Program::Example(_));
+    // `--main`, `--example` and a file on Kotlin/Native link their own executable instead of the project's.
+    let separate_native = target == TargetKind::Native && matches!(opts.program, Program::Main(_) | Program::Example(_) | Program::File(_));
     let results = if separate_native {
         BuildResults::default()
     } else {
@@ -519,21 +561,22 @@ fn jvm_program(ctx: &BuildContext, jvm: &JvmBuild, program: &Program) -> Result<
         },
         Program::Main(main) => main.clone(),
         Program::Bin(name) => bin_main_class(ctx.ws.root(), find_bin(ctx.ws.manifest(), name)?)?,
-        Program::Example(name) => {
-            let file = example_file(ctx, name)?;
-            let main = find_entry_point_in(&file, false)?.jvm_class;
-            let (classes, example_classpath) = compile_jvm_example(ctx, name, &file, &jvm.classes)?;
+        Program::Example(_) | Program::File(_) => {
+            let single = single_file(ctx, program)?.expect("an example or a file");
+            let main = find_entry_point_in(&single.file, false)?.jvm_class;
+            let (classes, single_classpath) = compile_jvm_single(ctx, &single, &jvm.classes)?;
             classpath = vec![classes];
-            classpath.extend(example_classpath);
+            classpath.extend(single_classpath);
             main
         }
     };
     Ok((main, classpath))
 }
 
-/// Compiles `examples/<name>.kt` against the main classes and the dev-dependencies into
-/// `target/<profile>/jvm/examples/<name>`. Returns the output and the classpath it needs.
-fn compile_jvm_example(ctx: &BuildContext, name: &str, file: &Path, main_classes: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
+/// Compiles an example or a file against the main classes and the dev-dependencies into
+/// `target/<profile>/jvm/<examples|files>/<name>`. Returns the output and the classpath it needs.
+fn compile_jvm_single(ctx: &BuildContext, single: &SingleFile, main_classes: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
+    let SingleFile { name, file, dir, what } = single;
     let manifest = ctx.ws.manifest();
     let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
     let setup = ctx.setup(TargetKind::Jvm)?;
@@ -552,9 +595,9 @@ fn compile_jvm_example(ctx: &BuildContext, name: &str, file: &Path, main_classes
 
     let mut classpath = vec![main_classes.to_path_buf()];
     classpath.extend(dev_cp);
-    let output = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("examples").join(name);
-    // Each example is its own module, so examples may each declare `fun main` in the same package.
-    let module = format!("{}-example-{name}", manifest.package.name);
+    let output = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(dir).join(name);
+    // Each example or file is its own module, so they may each declare `fun main` in the same package.
+    let module = format!("{}-{}-{name}", manifest.package.name, dir.trim_end_matches('s'));
     let unit = JvmCompilation {
         name: &module,
         sources: SourceSet::new(Vec::new(), vec![file.to_path_buf()], TargetKind::Jvm.as_str()),
@@ -569,7 +612,7 @@ fn compile_jvm_example(ctx: &BuildContext, name: &str, file: &Path, main_classes
         resources: Vec::new(),
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
-    unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, "Compiling", TargetKind::Jvm, &format!(", example {name}")))?;
+    unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, "Compiling", TargetKind::Jvm, &format!(", {what}")))?;
     Ok((output, classpath))
 }
 
@@ -597,7 +640,8 @@ fn native_artifact(ctx: &BuildContext, results: &BuildResults, program: &Program
 }
 
 /// Links a host executable outside `kargo build`: the main sources with another entry
-/// function (`--main`), or an example linked against the main sources as a library (`--example`).
+/// function (`--main`), or an example or a file linked against the main sources as a library
+/// (`--example`, `kargo run <file>`).
 fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf> {
     let start = Instant::now();
     super::build::prepare_native_hooks(ctx, &[TargetKind::Native])?;
@@ -608,12 +652,12 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     let host = Host::current()?.konan_target.to_owned();
     let setup = ctx.setup(TargetKind::Native)?;
     let main_sources = sources(ctx, TargetKind::Native, false, &["kt"])?;
-    let example = match program {
-        Program::Example(name) => {
-            let file = example_file(ctx, name)?;
-            Some((name.as_str(), find_entry_point_in(&file, true)?.native_entry(), file))
+    let example = match single_file(ctx, program)? {
+        Some(single) => {
+            let entry = find_entry_point_in(&single.file, true)?.native_entry();
+            Some((single, entry))
         }
-        _ => None,
+        None => None,
     };
     native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
@@ -652,13 +696,14 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
             exe.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
             exe.artifact()
         }
-        (_, Some((name, entry, file))) => {
-            let fp_dir = ctx.fingerprint_dir(TargetKind::Native).join("examples");
+        (_, Some((single, entry))) => {
+            let SingleFile { name, file, dir, what } = single;
+            let fp_dir = ctx.fingerprint_dir(TargetKind::Native).join(dir);
             std::fs::create_dir_all(&fp_dir)?;
             let mut libraries = libraries;
             // The main sources become a klib the example links against, as any user of the library would.
             if !main_sources.kotlin_files().is_empty() {
-                let lib_dir = Path::new("examples").join("lib");
+                let lib_dir = Path::new(dir).join("lib");
                 let lib = unit(&manifest.package.name, NativeKind::Library, main_sources, libraries.clone(), None, lib_dir);
                 let what = format!(", {host}");
                 let lib_fp_dir = fp_dir.join("lib");
@@ -667,12 +712,12 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
                 libraries.push(lib.artifact());
             }
             let sources = SourceSet::new(Vec::new(), vec![file], TargetKind::Native.as_str());
-            let exe = unit(name, NativeKind::Executable, sources, libraries, Some(entry), PathBuf::from("examples"));
-            let what = format!(", {host}, example {name}");
+            let exe = unit(&name, NativeKind::Executable, sources, libraries, Some(entry), PathBuf::from(dir));
+            let what = format!(", {host}, {what}");
             exe.compile(ctx.shell(), toolchain, &fp_dir, &|| compiling(ctx, TargetKind::Native, &what))?;
             exe.artifact()
         }
-        _ => unreachable!("only `--main` and `--example` link a separate executable"),
+        _ => unreachable!("only `--main`, `--example` and a file link a separate executable"),
     };
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
     finished(ctx, start);
@@ -690,6 +735,12 @@ mod tests {
         assert_eq!(runnable_target(&[TargetKind::Wasm, TargetKind::Jvm], Some(TargetKind::Wasm)).unwrap(), TargetKind::Wasm);
         assert!(runnable_target(&[TargetKind::Jvm], Some(TargetKind::Native)).is_err());
         assert!(runnable_target(&[], None).is_err());
+    }
+
+    #[test]
+    fn file_program_names() {
+        assert_eq!(file_program_name(Path::new("tools/migrate.kt")), "migrate");
+        assert_eq!(file_program_name(Path::new("my tool.main.kt")), "my_tool_main");
     }
 
     #[test]
