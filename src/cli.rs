@@ -497,6 +497,9 @@ struct BuildArgs {
     /// How to print compiler diagnostics
     #[arg(long, value_enum, default_value_t, value_name = "FMT")]
     message_format: MessageFormatArg,
+    /// Print Binaryen's per-function size metrics for Wasm release builds
+    #[arg(long)]
+    size_report: bool,
 }
 
 impl BuildArgs {
@@ -504,6 +507,7 @@ impl BuildArgs {
         BuildOptions {
             targets: self.targets.iter().map(|t| (*t).into()).collect(),
             profile: profile_kind(self.release, self.profile.as_deref()),
+            size_report: self.size_report,
             ..Default::default()
         }
     }

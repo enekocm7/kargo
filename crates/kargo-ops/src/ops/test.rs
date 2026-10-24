@@ -1107,7 +1107,10 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test"),
         debug: true,
+        debug_info: false,
         optimize: false,
+        array_range_checks: wasm.wasm_enable_array_range_checks,
+        debugger_custom_formatters: wasm.wasm_debugger_custom_formatters,
         declarations: false,
         main_args: false,
     };

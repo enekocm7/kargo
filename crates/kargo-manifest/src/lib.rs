@@ -359,6 +359,22 @@ pub enum WasmOpt {
     Path(PathBuf),
 }
 
+/// Binaryen optimization preset used for release modules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WasmOptLevel {
+    Size,
+    #[default]
+    Balanced,
+    Speed,
+}
+
+/// Precompressed representations emitted alongside web assets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmCompression {
+    Gzip,
+    Brotli,
+}
+
 /// The tool that installs the npm packages Wasm libraries need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
@@ -412,6 +428,16 @@ pub struct WasmTarget {
     /// npm packages the project needs besides those its Wasm libraries ask for, by name.
     pub npm_dependencies: BTreeMap<String, String>,
     pub wasm_opt: WasmOpt,
+    pub opt_level: WasmOptLevel,
+    pub wasm_opt_flags: Vec<String>,
+    pub debug_info: bool,
+    pub compress: Vec<WasmCompression>,
+    pub content_hash: bool,
+    pub max_size: Option<u64>,
+    pub max_gzip_size: Option<u64>,
+    pub size_report: bool,
+    pub wasm_enable_array_range_checks: Option<bool>,
+    pub wasm_debugger_custom_formatters: bool,
     /// Files and directories of a library, relative to the package, that every browser app depending
     /// on it gets next to its module, under their own names.
     pub web_resources: Vec<PathBuf>,
