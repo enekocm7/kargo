@@ -685,6 +685,12 @@ enum Command {
         watch_args: WatchArgs,
         #[command(flatten)]
         env: EnvArgs,
+        /// Run this Kotlin code as a script, like `kargo script -e`
+        #[arg(short, long, value_name = "CODE", conflicts_with_all = ["main", "bin", "example"])]
+        expr: Option<String>,
+        /// A .kt or .kts file to run, then arguments for the program; a first word that is not an existing .kt or .kts file is an argument too
+        #[arg(value_name = "FILE")]
+        words: Vec<String>,
         /// Arguments for the program
         #[arg(last = true)]
         args: Vec<String>,
@@ -1726,6 +1732,35 @@ fn reload(global: &GlobalArgs, shell: &Shell) -> Option<Project> {
     load_project(global).map_err(|err| report_error(shell, &err)).ok()
 }
 
+/// Splits the words `kargo run` got before `--` into the file to run and the program's arguments.
+/// The first word is the file when it names an existing `.kt` or `.kts` file; otherwise every word
+/// is an argument, as are the words after `--`.
+fn split_run_words(mut words: Vec<String>, args: Vec<String>) -> (Option<PathBuf>, Vec<String>) {
+    let is_file = words.first().is_some_and(|w| {
+        let path = Path::new(w);
+        matches!(path.extension().and_then(|e| e.to_str()), Some("kt" | "kts")) && path.is_file()
+    });
+    let file = is_file.then(|| PathBuf::from(words.remove(0)));
+    words.extend(args);
+    (file, words)
+}
+
+/// Whether `kargo run <file>` compiles the file against a project: a `.kt` file without a
+/// `/* kargo ... */` front matter, with a `kargo.toml` above it (or `--manifest-path`). Scripts and
+/// other files run on their own, as `kargo script` runs them.
+fn compiled_in_project(file: &Path, manifest_path: Option<&Path>) -> bool {
+    if file.extension().is_none_or(|e| e != "kt") {
+        return false;
+    }
+    // An unreadable file or a broken front matter is reported by `kargo script`.
+    let Ok(text) = std::fs::read_to_string(file) else { return false };
+    if !matches!(kargo_manifest::script::parse_kt_front_matter(&text), Ok(None)) {
+        return false;
+    }
+    let dir = kargo_util::fs::dunce_canonicalize(file).parent().map(Path::to_path_buf).unwrap_or_default();
+    manifest_path.is_some() || Workspace::find_manifest(&dir).is_ok()
+}
+
 /// The `--watch` options of `run` and `test`; `--clear` and `--ignore` have no effect without `--watch`.
 fn watch_options(watch: bool, args: &WatchArgs) -> Result<Option<WatchOptions>> {
     if !watch && (args.clear || !args.ignore.is_empty()) {
@@ -2116,19 +2151,70 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             watch,
             hot_reload,
             watch_args,
+            expr,
+            words,
             args,
         } => {
             set_message_format(message_format);
             let watch = watch_options(watch || hot_reload, &watch_args)?;
-            let project = load_project(global)?;
+            let (file, args) = if expr.is_some() { (None, [words, args].concat()) } else { split_run_words(words, args) };
+            if let Some(file) = &file
+                && let Some(flag) = [(main.is_some(), "--main"), (bin.is_some(), "--bin"), (example.is_some(), "--example")]
+                    .into_iter()
+                    .find_map(|(given, flag)| given.then_some(flag))
+            {
+                bail!("`{flag}` picks a program of the project; `kargo run {}` runs that file instead, so use one of them", file.display());
+            }
+            // A script, or a file with no project or with its own front matter, runs as `kargo script` runs it.
+            let script = match (expr, &file) {
+                (Some(code), _) => Some(kargo_ops::script::Source::Expression(code)),
+                (None, Some(file)) if !compiled_in_project(file, global.manifest_path.as_deref()) => {
+                    Some(kargo_ops::script::Source::File(file.clone()))
+                }
+                _ => None,
+            };
+            if let Some(source) = script {
+                let given = [
+                    (release, "--release"),
+                    (profile.is_some(), "--profile"),
+                    (target.is_some_and(|t| !matches!(t, TargetArg::Jvm)), "--target"),
+                    (port.is_some(), "--port"),
+                    (open, "--open"),
+                    (debug.is_some(), "--debug"),
+                    (native_agent, "--native-agent"),
+                    (!flavors.is_empty(), "--flavor"),
+                    (package.package.is_some(), "--package"),
+                    (watch.is_some(), if hot_reload { "--hot-reload" } else { "--watch" }),
+                    (!env.env_file.is_empty(), "--env-file"),
+                    (env.no_env_file, "--no-env-file"),
+                ];
+                if let Some((_, flag)) = given.into_iter().find(|(given, _)| *given) {
+                    let what = match &source {
+                        kargo_ops::script::Source::File(file) => file.display().to_string(),
+                        kargo_ops::script::Source::Expression(_) => "`-e` code".to_owned(),
+                    };
+                    bail!("`{flag}` applies to a project's program, but {what} runs on its own like `kargo script`");
+                }
+                return kargo_ops::script::run(config, &source, &args);
+            }
+            if file.is_some() && watch.is_some() {
+                bail!("`--watch` reruns the project's program when the project changes; it does not run a single file");
+            }
+            let file = file.map(|f| kargo_util::fs::dunce_canonicalize(&f));
+            let project = match &file {
+                // The project is the one the file is in, wherever `kargo run` runs.
+                Some(file) => Project::discover(file.parent().unwrap_or(Path::new(".")), global.manifest_path.as_deref())?,
+                None => load_project(global)?,
+            };
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             warn_manifest(shell, &project, project.package(index));
             let profile = profile_kind(release, profile.as_deref());
             let ctx = context(config, &project, index, global, profile.clone())?;
-            let program = match (main, bin, example) {
-                (Some(main), _, _) => Program::Main(main),
-                (_, Some(bin), _) => Program::Bin(bin),
-                (_, _, Some(example)) => Program::Example(example),
+            let program = match (file, main, bin, example) {
+                (Some(file), ..) => Program::File(file),
+                (_, Some(main), _, _) => Program::Main(main),
+                (_, _, Some(bin), _) => Program::Bin(bin),
+                (_, _, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
             let opts = RunOptions {
@@ -3298,6 +3384,14 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "run", "--bin", "migrate", "--", "up"]).unwrap();
         assert!(matches!(cli.command, Command::Run { bin: Some(ref b), ref args, .. } if b == "migrate" && args == &["up"]));
         assert!(Cli::try_parse_from(["kargo", "run", "--bin", "a", "--example", "b"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "run", "Tool.kt", "up", "--release", "--", "--flag"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run { release: true, ref words, ref args, .. } if words == &["Tool.kt", "up"] && args == &["--flag"]
+        ));
+        let cli = Cli::try_parse_from(["kargo", "run", "-e", "println(1)", "x"]).unwrap();
+        assert!(matches!(cli.command, Command::Run { expr: Some(ref e), ref words, .. } if e == "println(1)" && words == &["x"]));
+        assert!(Cli::try_parse_from(["kargo", "run", "-e", "1", "--main", "A"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "run", "--main", "A", "--bin", "b"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "package", "--bin", "migrate"]).unwrap();
         assert!(matches!(cli.command, Command::Package { bin: Some(ref b), .. } if b == "migrate"));
@@ -3429,6 +3523,28 @@ mod tests {
         assert!(matches!(cli.command, Command::Add { ref path, dev: true, .. } if path.as_deref() == Some(Path::new("../lib"))));
         assert!(Cli::try_parse_from(["kargo", "add", "--path", "../lib", "g:a"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "add", "--path", "../lib", "--bom"]).is_err());
+    }
+
+    #[test]
+    fn run_words_start_with_an_existing_kotlin_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Tool.kt");
+        std::fs::write(&file, "fun main() {}").unwrap();
+        let file = file.to_string_lossy().into_owned();
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let (found, args) = split_run_words(words(&[&file, "up"]), words(&["--flag"]));
+        assert_eq!(found.as_deref(), Some(Path::new(&file)));
+        assert_eq!(args, ["up", "--flag"]);
+        // Any other word, a missing file included, is an argument as before.
+        let missing = dir.path().join("Missing.kt").to_string_lossy().into_owned();
+        let (found, args) = split_run_words(words(&[&missing, "x"]), Vec::new());
+        assert_eq!((found, args), (None, words(&[&missing, "x"])));
+        let (found, args) = split_run_words(words(&["somearg"]), words(&["y"]));
+        assert_eq!((found, args), (None, words(&["somearg", "y"])));
+        // A file after `--` is an argument.
+        let (found, args) = split_run_words(Vec::new(), words(&[&file]));
+        assert_eq!((found, args), (None, words(&[&file])));
     }
 
     #[test]

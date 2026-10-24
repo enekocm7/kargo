@@ -249,10 +249,19 @@ What each target skips:
 
 ## `kargo run` (`r`)
 
-Build and run the program. Arguments after `--` go to the program.
+Build and run the program, or a single Kotlin file. Arguments after `--` go to the program.
+
+```sh
+kargo run -- --verbose               # the project's program
+kargo run tools/migrate.kt up        # one .kt file with a main, compiled against the project
+kargo run fetch.main.kts https://example.com   # a script, as `kargo script` runs it
+kargo run -e 'println(1 + 1)'
+```
 
 | Option | Meaning |
 |---|---|
+| `<file>` | Run this `.kt` or `.kts` file instead of the project's program; the words after it go to the program. See [Running a single file](#running-a-single-file) |
+| `-e, --expr <code>` | Run this Kotlin code as `kargo script -e` does. Every other word is then an argument |
 | `-r, --release` | Use the release profile |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Target to run. Default: the first enabled of `jvm`, `native`, `wasm`, `android` |
@@ -275,11 +284,22 @@ Build and run the program. Arguments after `--` go to the program.
 
 `--clear` and `--ignore` need `--watch`.
 
-`--main`, `--bin` and `--example` exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
+`--main`, `--bin`, `--example` and a file exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
 
 The `Running` line quotes arguments that contain spaces or shell characters, so you can copy it: ``Running `java com.example.MainKt add "buy milk"` `` shows that `buy milk` is one argument.
 
 `--port` and `--open` only apply to a Wasm browser app; `kargo run` rejects them for any other target. A Wasm project with `kind = "library"` has no program, so `kargo run` rejects it too.
+
+### Running a single file
+
+`kargo run <file>` runs one Kotlin file, wherever it is:
+
+- **A `.kt` file in a project** (a `kargo.toml` in its directory or above it, wherever you run `kargo run`) is compiled like an `--example`: against the project's classes, dependencies and dev-dependencies, with its toolchain, frameworks and profile. It needs a `main`. It is not part of the project's build: its classes go to `target/<profile>/jvm/files/<name>/`, and an unchanged file is not compiled again. `--release`, `--target` (`jvm` or `native`), `--debug`, `--env-file` and `-p` apply; `--watch` does not.
+- **A `.kts` script**, **a `.kt` file with a `/* kargo ... */` front matter**, and **a `.kt` file outside any project** run as [`kargo script`](#kargo-script) runs them: with their own dependencies, Kotlin version and JDK, cached in `~/.kargo/cache/scripts`. The project's options, such as `--release` or `--debug`, are errors there.
+
+The first word after `run` is the file only when it ends in `.kt` or `.kts` and the file exists. Any other word, and every word after `--`, is an argument for the program, so `kargo run deploy` passes `deploy` to the project's program. Use `--` before arguments that start with `-`: `kargo run tools/migrate.kt -- --dry-run`.
+
+The exit codes are those of `kargo run`: `101` when the file does not compile, the program's own code otherwise.
 
 How each target runs:
 
