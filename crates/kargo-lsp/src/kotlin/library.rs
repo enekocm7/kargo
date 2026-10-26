@@ -307,14 +307,67 @@ fn library_units(config: &Config, cache: &UnitCache, library: &CompiledLibrary) 
     Ok(units)
 }
 
-/// Where the sources of `jar` are extracted, extracting them the first time.
+/// Where the sources of `jar` are extracted, extracting them the first time. The extraction must
+/// have every Kotlin and Java file of the jar.
 fn extract(config: &Config, jar: &Path) -> Result<PathBuf> {
-    cached_dir(config, jar, "", |staging| kargo_toolchain::archive::extract_zip(jar, staging))
+    cached_dir(config, jar, "", |staging| {
+        kargo_toolchain::archive::extract_zip(jar, staging)?;
+        let expected = jar_source_files(jar)?;
+        let found = source_files(staging);
+        anyhow::ensure!(found >= expected, "extracted {found} of the {expected} source files of {}", jar.display());
+        Ok(())
+    })
+}
+
+/// The number of Kotlin and Java files in the jar at `path`. Names that differ only in case count
+/// once, as they are one file on Windows and macOS.
+fn jar_source_files(path: &Path) -> Result<usize> {
+    let file = std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let zip = zip::ZipArchive::new(file).with_context(|| format!("{} is not a valid zip archive", path.display()))?;
+    let names: BTreeSet<String> = zip
+        .file_names()
+        .filter_map(|name| name.ok())
+        .filter(|name| name.ends_with(".kt") || name.ends_with(".java"))
+        .map(|name| name.trim_start_matches("./").to_lowercase())
+        .collect();
+    Ok(names.len())
+}
+
+/// The number of Kotlin and Java files under `dir`.
+fn source_files(dir: &Path) -> usize {
+    kargo_util::fs::collect_files(dir, &["kt", "java"]).len()
+}
+
+/// Bumped when what [`cached_dir`] writes changes, so that directories made before are made again.
+const CACHE_FORMAT: &str = "2";
+
+/// The file that marks a directory under `~/.kargo/cache/lsp-sources` complete.
+const MARKER: &str = ".kargo-complete";
+
+/// The marker of a complete directory under `~/.kargo/cache/lsp-sources`: the cache format and the
+/// number of Kotlin and Java files it holds.
+fn marker_text(files: usize) -> String {
+    format!("format {CACHE_FORMAT}\nfiles {files}\n")
+}
+
+/// Whether `dir` was filled completely: its marker is of this format and it still holds the files
+/// the marker counts. An empty marker is from before the count was kept, and a directory with
+/// files missing was cut short or damaged; both are made again.
+fn is_complete(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(MARKER)) else { return false };
+    let files = text.lines().find_map(|line| line.strip_prefix("files ")).and_then(|n| n.trim().parse::<usize>().ok());
+    text.lines().next() == Some(format!("format {CACHE_FORMAT}").as_str()) && files == Some(source_files(dir))
 }
 
 /// A directory under `~/.kargo/cache/lsp-sources` for what is made from `source` (a jar, a
-/// klib or an unpacked klib), filled by `fill` the first time.
+/// klib or an unpacked klib), filled by `fill` the first time. `fill` writes into a staging
+/// directory of its own, so loads running at once in one `kargo lsp` (one per workspace folder)
+/// or in several never write into the same one; the finished directory is renamed into place.
+/// A directory that is there but not complete (see [`is_complete`]) is replaced.
 fn cached_dir(config: &Config, source: &Path, suffix: &str, fill: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAGING: AtomicU64 = AtomicU64::new(0);
+
     let stem = if source.is_dir() { source.file_name() } else { source.file_stem() };
     let stem = stem.map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "sources".into());
     let mut fp = kargo_util::hash::Fingerprint::new();
@@ -322,26 +375,32 @@ fn cached_dir(config: &Config, source: &Path, suffix: &str, fill: impl FnOnce(&P
     let linkdata = source.join("default").join("linkdata");
     fp.file_stamp(if linkdata.is_dir() { &linkdata } else { source });
     let hash = fp.finish();
-    let dir = config.home().join("cache").join("lsp-sources").join(format!("{stem}-{}{suffix}", &hash[..12]));
-    let marker = dir.join(".kargo-complete");
-    if marker.is_file() {
+    let name = format!("{stem}-{}{suffix}", &hash[..12]);
+    let root = config.home().join("cache").join("lsp-sources");
+    let dir = root.join(&name);
+    if is_complete(&dir) {
         return Ok(dir);
     }
-    let staging = dir.with_extension(format!("tmp-{}", std::process::id()));
-    let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
+    let staging = root.join(format!(".{name}.tmp-{}-{}", std::process::id(), STAGING.fetch_add(1, Ordering::Relaxed)));
+    kargo_util::fs::remove_dir_all_if_exists(&staging)?;
     std::fs::create_dir_all(&staging).with_context(|| format!("failed to create {}", staging.display()))?;
-    if let Err(e) = fill(&staging) {
-        let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
-        return Err(e);
-    }
-    std::fs::write(staging.join(".kargo-complete"), "")?;
-    if kargo_util::fs::rename_with_retries(&staging, &dir).is_err() {
-        // Another `kargo lsp` extracted it first.
-        let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
-        if !marker.is_file() {
-            anyhow::bail!("failed to prepare {}", source.display());
+    let result = (|| -> Result<()> {
+        fill(&staging)?;
+        std::fs::write(staging.join(MARKER), marker_text(source_files(&staging)))
+            .with_context(|| format!("failed to write {}", staging.join(MARKER).display()))?;
+        if kargo_util::fs::rename_with_retries(&staging, &dir).is_ok() || is_complete(&dir) {
+            // Placed, or another load placed it first.
+            return Ok(());
         }
-    }
+        // A rename never replaces a directory: take out the incomplete one and try again.
+        kargo_util::fs::remove_dir_all_if_exists(&dir)?;
+        if kargo_util::fs::rename_with_retries(&staging, &dir).is_ok() || is_complete(&dir) {
+            return Ok(());
+        }
+        anyhow::bail!("failed to move {} to {}", staging.display(), dir.display())
+    })();
+    let _ = kargo_util::fs::remove_dir_all_if_exists(&staging);
+    result.with_context(|| format!("failed to prepare {}", source.display()))?;
     Ok(dir)
 }
 
@@ -498,5 +557,63 @@ mod tests {
         );
         assert_eq!(again.len(), 2);
         assert!(again.iter().all(|u| !u.file.decls.is_empty()));
+    }
+
+    /// A sources jar of `count` Kotlin files, and a Kargo home to extract it into.
+    fn sources_jar(dir: &Path, count: usize) -> (PathBuf, Config) {
+        use std::io::Write;
+
+        let jar = dir.join("lib-1.0-sources.jar");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        for i in 0..count {
+            zip.start_file(format!("commonMain/p/F{i}.kt"), zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(format!("package p\n\nclass F{i}\n").as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let config = Config::new(dir.join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        (jar, config)
+    }
+
+    #[test]
+    fn an_incomplete_extraction_is_made_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jar, config) = sources_jar(dir.path(), 5);
+        let extracted = extract(&config, &jar).unwrap();
+        assert_eq!(source_files(&extracted), 5);
+        assert!(is_complete(&extracted));
+
+        // A file lost after the extraction.
+        std::fs::remove_file(extracted.join("commonMain/p/F3.kt")).unwrap();
+        assert!(!is_complete(&extracted));
+        assert_eq!(source_files(&extract(&config, &jar).unwrap()), 5);
+
+        // A partial directory with the empty marker of earlier versions.
+        std::fs::remove_file(extracted.join("commonMain/p/F1.kt")).unwrap();
+        std::fs::write(extracted.join(MARKER), "").unwrap();
+        assert_eq!(source_files(&extract(&config, &jar).unwrap()), 5);
+
+        // A partial directory without a marker, which a rename can't replace.
+        std::fs::remove_file(extracted.join("commonMain/p/F2.kt")).unwrap();
+        std::fs::remove_file(extracted.join(MARKER)).unwrap();
+        assert_eq!(source_files(&extract(&config, &jar).unwrap()), 5);
+        assert!(is_complete(&extracted));
+
+        // No staging directory is left behind.
+        let names: Vec<_> = std::fs::read_dir(extracted.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, [extracted.file_name().unwrap().to_owned()]);
+    }
+
+    #[test]
+    fn loads_at_once_in_one_process_extract_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jar, config) = sources_jar(dir.path(), 200);
+        let dirs: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8).map(|_| scope.spawn(|| extract(&config, &jar).unwrap())).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for extracted in dirs {
+            assert_eq!(source_files(&extracted), 200);
+            assert!(is_complete(&extracted));
+        }
     }
 }
