@@ -285,7 +285,7 @@ Kargo finds the workspace of a member by looking for a `[workspace]` in the pare
 
 ### The build graph
 
-Members build in dependency order: a member starts once the members it depends on have finished, and independent members build at the same time. `-j` (`--jobs`) sets how many members build at once; the default is the number of CPUs for `build` and `check`, and 1 for `test`, so test output doesn't interleave:
+Members build in dependency order: a member starts once the members it depends on have finished, and independent members build at the same time. `-j` (`--jobs`), `KARGO_JOBS` or `[workspace.build] jobs` sets how many members build at once; the default is `auto`, the number of CPUs within the free memory, for `build` and `check`, and 1 for `test`, so test output doesn't interleave (see [Limiting parallelism](../build-performance/#limiting-parallelism)):
 
 ```console
 $ kargo build -j 4

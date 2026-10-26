@@ -118,7 +118,7 @@ pub fn ensure_all(ctx: &BuildContext, targets: &[TargetKind]) -> Result<()> {
         return Ok(());
     }
     for level in plan(manifest, &[], targets)? {
-        let results = crate::ops::parallel_map(&level, |g| {
+        let results = crate::ops::parallel_jobs(&level, |g| {
             let key = format!("{}/generate/{}/{}", ctx.ws.name(), ctx.profile.name(), g.name);
             ctx.built_artifact(key, || run_step(ctx, g, false).map(|_| None)).map(|_| ())
         });
@@ -139,7 +139,7 @@ pub fn generate(ctx: &BuildContext, opts: &GenerateOptions) -> Result<Vec<StepRe
     let mut reports = Vec::new();
     for level in levels {
         let results =
-            crate::ops::parallel_map(&level, |g| run_step(ctx, g, opts.force).map(|ran| StepReport { name: g.name.clone(), ran }));
+            crate::ops::parallel_jobs(&level, |g| run_step(ctx, g, opts.force).map(|ran| StepReport { name: g.name.clone(), ran }));
         for result in results {
             reports.push(result?);
         }

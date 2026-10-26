@@ -178,4 +178,9 @@ directory = "vendor"
 
 [toolchain]
 auto-install = false
+
+[build]
+jobs = 4
 ```
+
+`[build] jobs` is not about the network: it sets how many members and targets build at the same time on this machine (a number, or `"auto"`), below `-j`, `KARGO_JOBS` and the project's `[build] jobs`. See [Limiting parallelism](../build-performance/#limiting-parallelism).

@@ -29,6 +29,7 @@ use kargo_ops::warnings;
 use kargo_ops::workspace::{ProfileKind, Project, Selection, Workspace};
 use kargo_toolchain::ServerKind;
 use kargo_util::config::Config;
+use kargo_util::jobs::Jobs;
 use kargo_util::shell::{Shell, Verbosity};
 
 use crate::complete::{self, ShellArg};
@@ -514,9 +515,8 @@ struct BuildArgs {
     targets: Vec<TargetArg>,
     #[command(flatten)]
     packages: PackageArgs,
-    /// How many workspace members to build at the same time (default: the number of CPUs; 1 for `kargo test`)
-    #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
-    jobs: Option<u32>,
+    #[command(flatten)]
+    jobs: JobsArg,
     /// How to print compiler diagnostics
     #[arg(long, value_enum, default_value_t, value_name = "FMT")]
     message_format: MessageFormatArg,
@@ -534,6 +534,14 @@ impl BuildArgs {
             ..Default::default()
         }
     }
+}
+
+/// `-j/--jobs`, of every command that builds.
+#[derive(Debug, Clone, Copy, Args)]
+struct JobsArg {
+    /// How many packages and targets to build at the same time, or `auto` (0) for the CPUs within the free memory
+    #[arg(short, long, value_name = "N", env = kargo_util::jobs::ENV, value_parser = Jobs::parse)]
+    jobs: Option<Jobs>,
 }
 
 /// Options of `--watch` and of `kargo watch`.
@@ -701,6 +709,8 @@ enum Command {
         flavors: Vec<String>,
         #[command(flatten)]
         package: OnePackageArg,
+        #[command(flatten)]
+        jobs: JobsArg,
         /// How to print compiler diagnostics
         #[arg(long, value_enum, default_value_t, value_name = "FMT")]
         message_format: MessageFormatArg,
@@ -858,6 +868,8 @@ enum Command {
         open: bool,
         #[command(flatten)]
         packages: PackageArgs,
+        #[command(flatten)]
+        jobs: JobsArg,
     },
     /// Render the @Preview composables of a Compose Desktop app to PNG files
     Preview {
@@ -894,6 +906,8 @@ enum Command {
         check: bool,
         #[command(flatten)]
         packages: PackageArgs,
+        #[command(flatten)]
+        jobs: JobsArg,
     },
     /// Analyze Kotlin sources with detekt
     Lint {
@@ -902,6 +916,8 @@ enum Command {
         create_baseline: bool,
         #[command(flatten)]
         packages: PackageArgs,
+        #[command(flatten)]
+        jobs: JobsArg,
     },
     /// Add dependencies or built-in frameworks to kargo.toml
     Add {
@@ -1044,7 +1060,7 @@ Exits with 101 when an advisory at or above the --deny severity (default: [audit
     Fetch {
         #[arg(short, long = "target", value_enum)]
         targets: Vec<TargetArg>,
-        /// Also download the sources jars of the dependencies, for editors
+        /// Also download the sources jars of the dependencies (or their Javadoc jars where they have none), for editors
         #[arg(long)]
         sources: bool,
         /// Also download the tools of `kargo doc` (Dokka), `kargo fmt` (ktlint), `kargo lint` (detekt) and R8 for JVM packaging
@@ -1159,6 +1175,8 @@ OS by default, with Skiko's native library next to the app so macOS signs and no
         message_format: MessageFormatArg,
         #[command(flatten)]
         package: OnePackageArg,
+        #[command(flatten)]
+        jobs: JobsArg,
     },
     /// Retrace an obfuscated JVM stack trace with an R8 mapping file
     Retrace {
@@ -1694,10 +1712,28 @@ fn for_each_package<T>(
     Ok(results)
 }
 
+/// How many packages and targets build at the same time: `--jobs` or `KARGO_JOBS` (`flag`), else
+/// `[build] jobs` of kargo.toml (`[workspace.build]` in a workspace), else `[build] jobs` of
+/// config.toml; `None` when none of them sets it. Also sets the limit of the targets and Native
+/// platforms a package builds at the same time ([`kargo_util::jobs::set`]), `auto` without one.
+fn resolve_jobs(config: &Config, project: &Project, flag: Option<Jobs>) -> Option<Jobs> {
+    let manifest = match project.workspace_manifest() {
+        Some(workspace) => workspace.build.jobs,
+        None => project.packages().iter().find(|p| p.root() == project.root()).and_then(|p| p.manifest().build.jobs),
+    };
+    let jobs = flag.or(manifest).or(config.settings().jobs());
+    kargo_util::jobs::set(jobs.unwrap_or(Jobs::Auto));
+    jobs
+}
+
 /// What [`build_packages`] does besides running the operation.
 #[derive(Clone, Copy)]
 struct Packages {
-    jobs: Option<u32>,
+    /// `--jobs` (or `KARGO_JOBS`).
+    jobs: Option<Jobs>,
+    /// Without a number of jobs from the flag, the environment, kargo.toml or config.toml, build
+    /// one package at a time instead of [`kargo_util::jobs::auto`], so the output of each stays together.
+    one_by_default: bool,
     /// Order packages after the ones their tests use too.
     dev: bool,
     /// With `--keep-going` / `--no-fail-fast`, the verb of the summary ("build"): a failed package
@@ -1725,7 +1761,12 @@ fn build_packages<T: Send>(
     for &index in &order {
         warn_manifest(config.shell(), project, project.package(index));
     }
-    let jobs = packages.jobs.map_or_else(kargo_ops::ops::default_jobs, |j| j as usize);
+    let jobs = match resolve_jobs(config, project, packages.jobs) {
+        Some(jobs) => jobs.count(),
+        None if packages.one_by_default => 1,
+        None => kargo_ops::ops::default_jobs(),
+    };
+    config.shell().verbose("Jobs", format!("{jobs} packages at a time, {} targets each", kargo_util::jobs::limit()));
     let keep_going = packages.keep_going.is_some();
     let results = kargo_ops::ops::build_graph(project, &order, packages.dev, jobs, keep_going, |index| op(&ctx.for_package(index)));
     let name = |k: usize| project.package(order[k]).name().to_owned();
@@ -1849,7 +1890,7 @@ fn run_tests(config: &Config, project: &Project, global: &GlobalArgs, build: &Bu
         &build.packages.selection(),
         global,
         opts.build.profile.clone(),
-        Packages { jobs: build.jobs.or(Some(1)), dev: true, keep_going: opts.no_fail_fast.then_some("test") },
+        Packages { jobs: build.jobs.jobs, one_by_default: true, dev: true, keep_going: opts.no_fail_fast.then_some("test") },
         |ctx| ops::test::test(ctx, opts),
     )?;
     Ok(passed.iter().all(|ok| *ok))
@@ -2064,7 +2105,7 @@ fn import_project(
         &Selection::default(),
         global,
         ProfileKind::Dev,
-        Packages { jobs: None, dev: false, keep_going: None },
+        Packages { jobs: None, one_by_default: false, dev: false, keep_going: None },
         |ctx| ops::build::build(ctx, &opts),
     )
     .context("the project was imported, but `kargo build` failed; fix what it reports, or see the items above that need manual work")?;
@@ -2184,7 +2225,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 &build.packages.selection(),
                 global,
                 opts.profile.clone(),
-                Packages { jobs: build.jobs, dev: false, keep_going: keep_going.then_some("build") },
+                Packages { jobs: build.jobs.jobs, one_by_default: false, dev: false, keep_going: keep_going.then_some("build") },
                 |ctx| ops::build::build(ctx, &opts),
             );
             build_finished(build.message_format, results.map(|_| ()))?;
@@ -2200,7 +2241,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 &build.packages.selection(),
                 global,
                 opts.build.profile.clone(),
-                Packages { jobs: build.jobs, dev: tests, keep_going: keep_going.then_some("check") },
+                Packages { jobs: build.jobs.jobs, one_by_default: false, dev: tests, keep_going: keep_going.then_some("check") },
                 |ctx| ops::check::check(ctx, &opts),
             );
             build_finished(build.message_format, results.map(|_| ()))?;
@@ -2220,6 +2261,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             flavors,
             message_format,
             package,
+            jobs,
             env,
             watch,
             hot_reload,
@@ -2281,6 +2323,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             };
             let index = project.select_one(&package.selection(), "`kargo run`")?;
             warn_manifest(shell, &project, project.package(index));
+            resolve_jobs(config, &project, jobs.jobs);
             let profile = profile_kind(release, profile.as_deref());
             let ctx = context(config, &project, index, global, profile.clone())?;
             let program = match (file, main, bin, example) {
@@ -2413,7 +2456,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 &build.packages.selection(),
                 global,
                 opts.build.profile.clone(),
-                Packages { jobs: build.jobs.or(Some(1)), dev: true, keep_going: None },
+                Packages { jobs: build.jobs.jobs, one_by_default: true, dev: true, keep_going: None },
                 |ctx| ops::bench::bench(ctx, &opts),
             )?;
             Ok(0)
@@ -2439,13 +2482,14 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             ops::env::show(shell, &project, index, profile, &env.options(), show_values, check)?;
             Ok(0)
         }
-        Command::Doc { targets, open, packages } => {
+        Command::Doc { targets, open, packages, jobs } => {
             let project = load_project(global)?;
             let targets: Vec<TargetKind> = targets.into_iter().map(Into::into).collect();
-            let mut open = open;
-            for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+            let open = std::sync::atomic::AtomicBool::new(open);
+            let one_by_one = Packages { jobs: jobs.jobs, one_by_default: true, dev: false, keep_going: None };
+            build_packages(config, &project, &packages.selection(), global, ProfileKind::Dev, one_by_one, |ctx| {
                 // Only the first package's documentation opens in the browser.
-                let opts = DocOptions { targets: targets.clone(), open: std::mem::take(&mut open) };
+                let opts = DocOptions { targets: targets.clone(), open: open.swap(false, std::sync::atomic::Ordering::Relaxed) };
                 ops::doc::doc(ctx, &opts)
             })?;
             Ok(0)
@@ -2473,9 +2517,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Fmt { check, packages } => {
+        Command::Fmt { check, packages, jobs } => {
             let project = load_project(global)?;
-            let ok = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+            let one_by_one = Packages { jobs: jobs.jobs, one_by_default: true, dev: false, keep_going: None };
+            let ok = build_packages(config, &project, &packages.selection(), global, ProfileKind::Dev, one_by_one, |ctx| {
                 ops::fmt::fmt(ctx, &FmtOptions { check })
             })?;
             if ok.iter().all(|ok| *ok) {
@@ -2488,9 +2533,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 Ok(FAILURE)
             }
         }
-        Command::Lint { create_baseline, packages } => {
+        Command::Lint { create_baseline, packages, jobs } => {
             let project = load_project(global)?;
-            let ok = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+            let one_by_one = Packages { jobs: jobs.jobs, one_by_default: true, dev: false, keep_going: None };
+            let ok = build_packages(config, &project, &packages.selection(), global, ProfileKind::Dev, one_by_one, |ctx| {
                 ops::lint::lint(ctx, &LintOptions { create_baseline })
             })?;
             if ok.iter().all(|ok| *ok) {
@@ -2595,14 +2641,19 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let found = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 ops::fetch(ctx, &targets, tools)?;
                 if !sources {
-                    return Ok(0);
+                    return Ok(ops::metadata::FetchedDocs::default());
                 }
                 let selected = ops::build::select_targets(ctx, &targets)?;
                 ops::metadata::fetch_sources(ctx, &selected)
             })?;
             if sources {
-                let found: usize = found.iter().sum();
-                shell.status("Fetched", format!("{found} sources jar{}", if found == 1 { "" } else { "s" }));
+                let found = found.into_iter().fold(ops::metadata::FetchedDocs::default(), |a, b| a + b);
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                let mut message = format!("{} sources jar{}", found.sources, plural(found.sources));
+                if found.javadoc > 0 {
+                    message.push_str(&format!(" and {} javadoc jar{}", found.javadoc, plural(found.javadoc)));
+                }
+                shell.status("Fetched", message);
             }
             Ok(0)
         }
@@ -2848,11 +2899,12 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, profile, target, bin, fat, optimize, format, desktop, platforms, message_format, package } => {
+        Command::Package { release, profile, target, bin, fat, optimize, format, desktop, platforms, message_format, package, jobs } => {
             set_message_format(message_format);
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
             warn_manifest(shell, &project, project.package(index));
+            resolve_jobs(config, &project, jobs.jobs);
             let ctx = context(config, &project, index, global, profile_kind(release, profile.as_deref()))?;
             let opts = ops::PackageOptions {
                 target: target.map(Into::into),

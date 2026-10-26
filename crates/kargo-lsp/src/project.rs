@@ -33,14 +33,15 @@ pub fn metadata(config: &Config, root: &Path, no_deps: bool) -> Result<Value> {
 }
 
 /// Downloads the sources jars of `modules` (`group:artifact` and version) from the project's
-/// repositories, in parallel, as `kargo fetch --sources` does. Returns, per module, whether it
-/// now has one in the cache (`false` when no repository publishes one), or why the download failed.
+/// repositories, or their Javadoc jars where they have none, in parallel, as `kargo fetch
+/// --sources` does. Returns, per module, whether it now has one in the cache (`false` when no
+/// repository publishes either), or why the download failed.
 pub fn fetch_sources(config: &Config, root: &Path, modules: &[(String, String)]) -> Result<Vec<Result<bool>>> {
     let project = Project::discover(root, None)?;
     let ctx = BuildContext::new(config, &project, project.members()[0], ProfileKind::Dev)?;
     Ok(kargo_maven::par_map_io(modules, |(module, version)| {
         let module: kargo_maven::ModuleId = module.parse()?;
-        Ok(ctx.client.fetch_sources(&module, version)?.is_some())
+        Ok(kargo_ops::ops::metadata::fetch_docs(&ctx.client, &module, version)? != Default::default())
     }))
 }
 

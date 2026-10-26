@@ -187,6 +187,21 @@ error: this project needs kargo >=0.3 (`[toolchain] kargo` in kargo.toml), but t
 
 See [Managing JDKs](../../guides/toolchains/) and [GraalVM](../../guides/toolchains/#graalvm).
 
+## `[build]`
+
+How the commands that build run. Every key is optional.
+
+```toml
+[build]
+jobs = 2
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `jobs` | `"auto"` | How many workspace members, and targets and Native platforms of each, build at the same time: a number, or `"auto"` (also `0`) for the number of CPUs within the free memory. `-j` and `KARGO_JOBS` override it, and it overrides `[build] jobs` of `config.toml`. `kargo test`, `bench`, `doc`, `fmt` and `lint` handle one member at a time when no number of jobs is set |
+
+In a workspace, write it as `[workspace.build]` in the root `kargo.toml`; a member's own `[build]` applies only when the member builds on its own. See [Limiting parallelism](../../guides/build-performance/#limiting-parallelism).
+
 ## `[doc]`
 
 Options for `kargo doc`. Every key is optional.
@@ -920,6 +935,9 @@ hooks = ["post-build"]
 
 [workspace.tasks]
 release-notes = "./tools/notes.sh"   # `kargo release-notes` at the root
+
+[workspace.build]
+jobs = 2                             # members and targets built at the same time
 ```
 
 | Key | Meaning |
@@ -933,6 +951,7 @@ release-notes = "./tools/notes.sh"   # `kargo release-notes` at the root
 | `[workspace.frameworks]` | `[frameworks]` entries members inherit with `name = { workspace = true }` |
 | `[workspace.plugins]` | `[plugins]` entries members inherit with `name = { workspace = true }`. A relative `command` stays relative to the workspace root |
 | `[workspace.tasks]` | Tasks that run at the workspace root. Members inherit them with `name = { workspace = true }`, which runs them in the member's directory |
+| `[workspace.build]` | [`[build]`](#build) for the whole workspace: `jobs` |
 
 A member inherits a key with `{ workspace = true }` (or the dotted `key.workspace = true`), and nothing else in the same entry, except for `[dependencies]` entries, which may add `scope`, `exported` and `test-fixtures`:
 

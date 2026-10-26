@@ -1043,7 +1043,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     };
     let bundle_id = native.bundle_id.clone().or_else(|| manifest.package.group.as_ref().map(|g| format!("{g}.{own_name}")));
     // Each platform is a separate Kotlin/Native compiler process.
-    let built = super::parallel_map(&platforms, |konan_target| -> Result<Vec<NativeBuild>> {
+    let built = super::parallel_jobs(&platforms, |konan_target| -> Result<Vec<NativeBuild>> {
         let mut libraries = native_libraries(ctx, &setup, konan_target, false)?;
         libraries.extend(native_cinterop(ctx, konan_target)?);
         let link = native_interop::native_link(ctx, konan_target)?;

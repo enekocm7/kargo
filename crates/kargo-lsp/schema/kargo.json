@@ -549,6 +549,7 @@
       },
       "additionalProperties": { "$ref": "#/definitions/profile" }
     },
+    "build": { "$ref": "#/definitions/build" },
     "doc": {
       "description": "Options for `kargo doc` (Dokka).",
       "type": "object",
@@ -678,7 +679,8 @@
         "dependencies": { "$ref": "#/definitions/dependencies", "description": "Entries members inherit with `name = { workspace = true }`." },
         "frameworks": { "$ref": "#/definitions/frameworks", "description": "Entries members inherit with `name = { workspace = true }` in [frameworks]." },
         "plugins": { "$ref": "#/definitions/plugins", "description": "Entries members inherit with `name = { workspace = true }` in [plugins]." },
-        "tasks": { "$ref": "#/definitions/tasks", "description": "Tasks run at the workspace root with `kargo <task>`; members inherit them with `name = { workspace = true }` in [tasks]." }
+        "tasks": { "$ref": "#/definitions/tasks", "description": "Tasks run at the workspace root with `kargo <task>`; members inherit them with `name = { workspace = true }` in [tasks]." },
+        "build": { "$ref": "#/definitions/build", "description": "[build] for the whole workspace." }
       }
     }
   },
@@ -687,6 +689,19 @@
     { "required": ["workspace"], "maxProperties": 1 }
   ],
   "definitions": {
+    "build": {
+      "description": "How the commands that build run.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jobs": {
+          "description": "How many workspace members, and targets of each, build at the same time: a number, or \"auto\" (also 0) for the number of CPUs within the free memory. `-j` and KARGO_JOBS override it.",
+          "default": "auto",
+          "anyOf": [{ "type": "integer", "minimum": 0 }, { "const": "auto" }],
+          "examples": [2, "auto"]
+        }
+      }
+    },
     "staticLibraries": {
       "description": "Static libraries (file names such as `libfoo.a`) found in `library-paths` and embedded in the output.",
       "type": "array",

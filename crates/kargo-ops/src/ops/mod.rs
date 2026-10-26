@@ -47,31 +47,57 @@ use kargo_util::fs::remove_dir_all_if_exists;
 use kargo_util::shell::Shell;
 
 /// Runs `f` on every item on its own thread and returns the results in item order.
-/// A single item runs inline. Used to build independent targets (and Native platforms)
-/// at the same time: their compilers are separate processes or daemon requests. The threads
-/// keep the target that `--message-format json` messages are tagged with.
+/// A single item runs inline. Used for work that waits on the network, such as fetching. The
+/// threads keep the target that `--message-format json` messages are tagged with.
 pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    if items.len() <= 1 {
+    parallel_limited(items, usize::MAX, f)
+}
+
+/// [`parallel_map`] on at most [`kargo_util::jobs::limit`] threads (`--jobs`), taking the items in
+/// order. Used to build independent targets (and Native platforms) at the same time: their
+/// compilers are separate processes or daemon requests. With one job the items run in order.
+pub fn parallel_jobs<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    parallel_limited(items, kargo_util::jobs::limit(), f)
+}
+
+fn parallel_limited<T: Sync, R: Send>(items: &[T], limit: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = limit.clamp(1, items.len().max(1));
+    if threads == 1 {
         return items.iter().map(&f).collect();
     }
     let f = &f;
     let target = kargo_compiler::diagnostics::current_target();
     let target = target.as_deref();
-    std::thread::scope(|s| {
-        let handles: Vec<_> =
-            items.iter().map(|item| s.spawn(move || kargo_compiler::diagnostics::with_target(target, || f(item)))).collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))).collect()
-    })
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let next = &next;
+    let mut results: Vec<(usize, R)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { return done };
+                        done.push((i, kargo_compiler::diagnostics::with_target(target, || f(item))));
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))).collect()
+    });
+    results.sort_by_key(|(i, _)| *i);
+    results.into_iter().map(|(_, r)| r).collect()
 }
 
-/// [`parallel_map`] over targets, with each target's compiler messages tagged with its name.
+/// [`parallel_jobs`] over targets, with each target's compiler messages tagged with its name.
 pub fn parallel_targets<R: Send>(targets: &[TargetKind], f: impl Fn(TargetKind) -> R + Sync) -> Vec<R> {
-    parallel_map(targets, |&target| kargo_compiler::diagnostics::with_target(Some(target.as_str()), || f(target)))
+    parallel_jobs(targets, |&target| kargo_compiler::diagnostics::with_target(Some(target.as_str()), || f(target)))
 }
 
-/// The default number of packages built at the same time: the number of CPUs.
+/// The default number of packages built at the same time: [`kargo_util::jobs::auto`], the number
+/// of CPUs within the free memory.
 pub fn default_jobs() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    kargo_util::jobs::auto()
 }
 
 /// Runs `f` for each package of `order` (which [`Project::dependency_order`] sorted), on up to
@@ -641,6 +667,28 @@ mod tests {
 
     use super::*;
     use crate::workspace::Project;
+
+    #[test]
+    fn limited_parallel_map_keeps_the_item_order_and_the_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..12).collect();
+        for limit in [1, 3] {
+            let (running, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let started = Mutex::new(Vec::new());
+            let out = parallel_limited(&items, limit, |&i| {
+                most.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                started.lock().unwrap().push(i);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                running.fetch_sub(1, Ordering::SeqCst);
+                i * 2
+            });
+            assert_eq!(out, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+            assert!(most.load(Ordering::SeqCst) <= limit);
+            if limit == 1 {
+                assert_eq!(started.into_inner().unwrap(), items, "one job runs the items in order");
+            }
+        }
+    }
 
     /// `a` <- `b` <- `d`, and `c` on its own.
     fn project() -> (tempfile::TempDir, Project) {

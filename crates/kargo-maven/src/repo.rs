@@ -929,17 +929,36 @@ impl MavenClient {
     /// repository publishes one. Sources jars are for editors; they are not locked. Offline,
     /// one that is neither cached nor in a repository on disk counts as missing.
     pub fn fetch_sources(&self, module: &ModuleId, version: &str) -> Result<Option<PathBuf>> {
-        let artifact = Artifact::new(module.clone(), version).with_classifier(Some("sources".to_owned()));
+        self.fetch_classified(module, version, "sources")
+    }
+
+    /// The sources jar of `module:version` if it is already in the cache, without any network
+    /// access. `files` are the module's downloaded artifacts, whose names give a SNAPSHOT's build.
+    pub fn cached_sources(&self, module: &ModuleId, version: &str, files: &[PathBuf]) -> Option<PathBuf> {
+        self.cached_classified(module, version, files, "sources")
+    }
+
+    /// Downloads the Javadoc jar (`-javadoc.jar`) of `module:version`, or returns `None` when no
+    /// repository publishes one. Like sources jars, Javadoc jars are for editors and not locked.
+    pub fn fetch_javadoc(&self, module: &ModuleId, version: &str) -> Result<Option<PathBuf>> {
+        self.fetch_classified(module, version, "javadoc")
+    }
+
+    /// The Javadoc jar of `module:version` if it is already in the cache, as for [`Self::cached_sources`].
+    pub fn cached_javadoc(&self, module: &ModuleId, version: &str, files: &[PathBuf]) -> Option<PathBuf> {
+        self.cached_classified(module, version, files, "javadoc")
+    }
+
+    fn fetch_classified(&self, module: &ModuleId, version: &str, classifier: &str) -> Result<Option<PathBuf>> {
+        let artifact = Artifact::new(module.clone(), version).with_classifier(Some(classifier.to_owned()));
         match self.fetch(&self.artifact_path(&artifact)?) {
             Err(_) if self.offline => Ok(None),
             result => result,
         }
     }
 
-    /// The sources jar of `module:version` if it is already in the cache, without any network
-    /// access. `files` are the module's downloaded artifacts, whose names give a SNAPSHOT's build.
-    pub fn cached_sources(&self, module: &ModuleId, version: &str, files: &[PathBuf]) -> Option<PathBuf> {
-        let artifact = Artifact::new(module.clone(), version).with_classifier(Some("sources".to_owned()));
+    fn cached_classified(&self, module: &ModuleId, version: &str, files: &[PathBuf], classifier: &str) -> Option<PathBuf> {
+        let artifact = Artifact::new(module.clone(), version).with_classifier(Some(classifier.to_owned()));
         let builds = files.iter().filter_map(|f| {
             let stamp = super::snapshot::build_stamp(f.file_name()?.to_str()?, &module.artifact, version)?;
             Some(format!("{}-{stamp}", version.strip_suffix("-SNAPSHOT")?))
@@ -1160,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_sources_jars() {
+    fn finds_sources_and_javadoc_jars() {
         let repo = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let write = |rel: &str| {
@@ -1178,6 +1197,13 @@ mod tests {
         assert!(fetched.ends_with("lib-1.0-sources.jar"));
         assert_eq!(client.cached_sources(&lib, "1.0", &[]), Some(fetched));
         assert_eq!(client.fetch_sources(&ModuleId::new("com.acme", "other"), "1.0").unwrap(), None);
+        // A Javadoc jar is found the same way, apart from the sources jar.
+        assert_eq!(client.fetch_javadoc(&ModuleId::new("com.acme", "other"), "1.0").unwrap(), None);
+        write("com/acme/lib/1.0/lib-1.0-javadoc.jar");
+        assert_eq!(client.cached_javadoc(&lib, "1.0", &[]), None);
+        let javadoc = client.fetch_javadoc(&lib, "1.0").unwrap().unwrap();
+        assert!(javadoc.ends_with("lib-1.0-javadoc.jar"));
+        assert_eq!(client.cached_javadoc(&lib, "1.0", &[]), Some(javadoc));
 
         // A SNAPSHOT's sources belong to the build its jar came from.
         let rel = "com/acme/lib/2.0-SNAPSHOT/lib-2.0-20240101.120000-1-sources.jar";

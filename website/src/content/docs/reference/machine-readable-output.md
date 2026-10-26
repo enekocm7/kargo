@@ -253,7 +253,7 @@ Each platform in `dependencies` has three lists:
 | `runtime` | Runs the program: `compile` and `runtime` dependencies | The same as `compile` |
 | `test` | Compiles and runs the tests: all of the above plus `[dev-dependencies]` | `compile` plus `[dev-dependencies]` |
 
-The entries are in classpath order. A path dependency is `{ "package": "<name>", "scope": "..." }`; use that package's roots. A Maven artifact has its `module`, the resolved `version`, the downloaded file's `path`, and its `sources` jar if that is in Kargo's cache, else `null`. [`kargo fetch --sources`](../commands/#kargo-fetch) downloads the sources jars.
+The entries are in classpath order. A path dependency is `{ "package": "<name>", "scope": "..." }`; use that package's roots. A Maven artifact has its `module`, the resolved `version`, the downloaded file's `path`, its `sources` jar if that is in Kargo's cache, else `null`, and, for an artifact without a sources jar, its `javadoc` jar if that is in the cache, else `null`. [`kargo fetch --sources`](../commands/#kargo-fetch) downloads the sources jars, and the Javadoc jars of libraries without one.
 
 ## `kargo info --format json`
 

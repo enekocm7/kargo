@@ -43,6 +43,7 @@ impl Project {
         cmd.current_dir(self.path())
             .env("KARGO_HOME", self.home.path())
             .env_remove("KARGO_TARGET_DIR")
+            .env_remove("KARGO_JOBS")
             .env("NO_COLOR", "1")
             .env("KARGO_AUTO_INSTALL", "0");
         cmd

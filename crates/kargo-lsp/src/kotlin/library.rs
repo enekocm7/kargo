@@ -2,7 +2,8 @@
 //! the project's Kotlin version, from their sources jars (downloaded like any artifact and
 //! cached), the sources jars of dependencies that are already in the cache (`kargo fetch
 //! --sources`), and the compiled jars and klibs of the dependencies without one (see
-//! [`super::compiled`]). Each jar is extracted (or its stubs generated) once under
+//! [`super::compiled`]), documented from their Javadoc jars when they have one (see
+//! [`super::javadoc`]). Each jar is extracted (or its stubs generated) once under
 //! `~/.kargo/cache/lsp-sources`, so go to definition opens real files. Without the standard
 //! library's sources (offline, before the first download), a small built-in outline of it
 //! stands in.
@@ -24,6 +25,7 @@ use kargo_util::config::Config;
 
 use super::compiled;
 use super::index::{Origin, Platforms, Unit};
+use super::javadoc;
 use super::parsed::{self, Blob};
 
 /// The built-in outline of the standard library, split into files at `// file:` lines.
@@ -53,6 +55,8 @@ pub struct CompiledLibrary {
     /// its sources already give Native code, left out of its stubs (see
     /// [`compiled::native_stdlib_stubs`]).
     pub known: Option<Arc<BTreeSet<String>>>,
+    /// Its Javadoc jar, whose documentation goes into the stubs (see [`super::javadoc`]).
+    pub javadoc: Option<PathBuf>,
 }
 
 impl CompiledLibrary {
@@ -262,11 +266,17 @@ fn library_units(config: &Config, cache: &UnitCache, library: &CompiledLibrary) 
         }
         suffix = format!("{suffix}-{}", &fp.finish()[..12]);
     }
+    if let Some(javadoc) = &library.javadoc {
+        // Stubs documented from a Javadoc jar are kept apart from the ones made without it.
+        suffix = format!("{suffix}-doc{}", &kargo_util::hash::Fingerprint::new().file_stamp(javadoc).finish()[..12]);
+    }
     let dir = cached_dir(config, &library.path, &suffix, |staging| {
+        // The pages are read only when the stubs are generated; a jar that can't be read just documents nothing.
+        let docs = library.javadoc.as_deref().and_then(|jar| javadoc::Docs::read(jar).ok());
         let stubs = match &library.known {
             Some(known) => compiled::native_stdlib_stubs(&library.path, known)?,
-            None if klib => compiled::klib_stubs(&library.path)?,
-            None => compiled::jar_stubs(&library.path)?,
+            None if klib => compiled::klib_stubs(&library.path, docs.as_ref())?,
+            None => compiled::jar_stubs(&library.path, docs.as_ref())?,
         };
         for (rel, text) in stubs {
             let path = staging.join(rel);
