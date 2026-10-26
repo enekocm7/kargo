@@ -44,17 +44,90 @@ pub struct Credentials {
     pub password: String,
 }
 
+/// Which groups a repository serves: `include-groups` and `exclude-groups` in `[repositories]`. A group
+/// that some repository includes is asked of that repository only, so a private group is never looked
+/// up on (or taken from) a public repository. A pattern is a group (`com.corp`), or a group and every
+/// group below it (`com.corp.*`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Content {
+    pub include_groups: Vec<String>,
+    pub exclude_groups: Vec<String>,
+}
+
+impl Content {
+    /// Whether the repository serves every group.
+    pub fn is_unrestricted(&self) -> bool {
+        self.include_groups.is_empty() && self.exclude_groups.is_empty()
+    }
+
+    /// Whether the repository includes `group` explicitly, which keeps every other repository from serving it.
+    pub fn claims(&self, group: &str) -> bool {
+        self.include_groups.iter().any(|p| group_matches(p, group)) && !self.excludes(group)
+    }
+
+    fn excludes(&self, group: &str) -> bool {
+        self.exclude_groups.iter().any(|p| group_matches(p, group))
+    }
+
+    /// The rules of one repository that two declared repositories became (both reached through one mirror):
+    /// it serves what either of them served.
+    fn union(&self, other: &Content) -> Content {
+        let include_groups = if self.include_groups.is_empty() || other.include_groups.is_empty() {
+            Vec::new()
+        } else {
+            self.include_groups.iter().chain(&other.include_groups).cloned().collect()
+        };
+        let exclude_groups = self.exclude_groups.iter().filter(|p| other.exclude_groups.contains(p)).cloned().collect();
+        Content { include_groups, exclude_groups }
+    }
+}
+
+/// Whether the group pattern `pattern` (`com.corp`, or `com.corp.*` for it and the groups below it) matches `group`.
+pub fn group_matches(pattern: &str, group: &str) -> bool {
+    match pattern.strip_suffix(".*") {
+        Some(prefix) => group.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')),
+        None => pattern == group,
+    }
+}
+
+/// Checks a group pattern of `include-groups` or `exclude-groups`.
+pub fn validate_group_pattern(pattern: &str) -> Result<()> {
+    let group = pattern.strip_suffix(".*").unwrap_or(pattern);
+    if group.split('.').any(|seg| seg.is_empty() || seg.contains(|c: char| c.is_whitespace() || "*/\\:".contains(c))) {
+        bail!("`{pattern}` is not a group pattern; write a group such as \"com.corp\", or \"com.corp.*\" for it and the groups below it");
+    }
+    Ok(())
+}
+
+/// The group of the module a repository-relative artifact path (`com/acme/lib/1.0/lib-1.0.jar`) belongs to.
+fn group_of_path(rel: &str) -> Option<String> {
+    let segments: Vec<&str> = rel.split('/').collect();
+    (segments.len() >= 4).then(|| segments[..segments.len() - 3].join("."))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repository {
     pub name: String,
     pub url: String,
     pub credentials: Option<Credentials>,
+    pub content: Content,
 }
 
 impl Repository {
     pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
         let url = url.into();
-        Self { name: name.into(), url: url.trim_end_matches('/').to_owned(), credentials: None }
+        Self { name: name.into(), url: url.trim_end_matches('/').to_owned(), credentials: None, content: Content::default() }
+    }
+
+    /// Whether credentials sent to this repository would cross the network unencrypted: an `http://` URL
+    /// that is not on this machine.
+    pub fn sends_credentials_in_clear(&self) -> bool {
+        let Some(rest) = self.url.strip_prefix("http://") else { return false };
+        let host = rest.split('/').next().unwrap_or(rest);
+        let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+        let host =
+            if host.starts_with('[') { host.split(']').next().map_or(host, |h| &h[1..]) } else { host.split(':').next().unwrap_or(host) };
+        self.credentials.is_some() && !matches!(host, "localhost" | "127.0.0.1" | "::1")
     }
 
     pub fn maven_central() -> Self {
@@ -102,7 +175,8 @@ pub fn vendor_repository(dir: &Path) -> Repository {
 
 /// The repositories Kargo actually contacts for `declared`: only the vendored one in a `--vendored`
 /// build, else each remote repository replaced by its mirror from `[mirrors]` (with the mirror's
-/// credentials), and repositories that end up at the same URL merged. Repositories on disk are kept.
+/// credentials), and repositories that end up at the same URL merged (serving the groups of both).
+/// Repositories on disk are kept.
 pub fn effective_repositories(config: &Config, declared: &[Repository]) -> Vec<Repository> {
     if let Some(dir) = config.vendor_dir() {
         return vec![vendor_repository(dir)];
@@ -110,8 +184,9 @@ pub fn effective_repositories(config: &Config, declared: &[Repository]) -> Vec<R
     let mut out: Vec<Repository> = Vec::new();
     for repo in declared {
         let repo = mirrored(config, repo);
-        if !out.iter().any(|r| r.url == repo.url) {
-            out.push(repo);
+        match out.iter_mut().find(|r| r.url == repo.url) {
+            Some(existing) => existing.content = existing.content.union(&repo.content),
+            None => out.push(repo),
         }
     }
     out
@@ -211,6 +286,10 @@ pub struct MavenClient {
     repairing: Mutex<()>,
     /// Hosts that could not be reached during this run; requests to them fail at once.
     unreachable: Mutex<HashSet<String>>,
+    /// Refuse to send credentials over plain `http://` instead of warning (`--locked`).
+    locked: bool,
+    /// Repositories already warned about during this run for sending credentials over plain `http://`.
+    warned_in_clear: Mutex<HashSet<String>>,
 }
 
 impl MavenClient {
@@ -242,7 +321,24 @@ impl MavenClient {
             served: Mutex::new(BTreeMap::new()),
             repairing: Mutex::new(()),
             unreachable: Mutex::new(HashSet::new()),
+            locked: config.locked(),
+            warned_in_clear: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Whether `repo` may be asked for a module of `group`: a repository that includes groups serves only
+    /// those, and a group one repository includes is served by no repository that does not include it.
+    fn serves(&self, repo: &Repository, group: &str) -> bool {
+        if repo.content.include_groups.is_empty() {
+            !repo.content.excludes(group) && !self.repos.iter().any(|r| r.content.claims(group))
+        } else {
+            repo.content.claims(group)
+        }
+    }
+
+    /// Whether `repo` may be asked for the repository-relative path `rel` (see [`MavenClient::serves`]).
+    fn serves_path(&self, repo: &Repository, rel: &str) -> bool {
+        group_of_path(rel).is_none_or(|group| self.serves(repo, &group))
     }
 
     pub fn shell(&self) -> &Shell {
@@ -286,15 +382,19 @@ impl MavenClient {
 
     /// The repositories that may hold the file at cache path `rel` (a plain repository path, or one in a
     /// repository's directory, as `kargo.lock` lists it), each with the cache-relative path of its copy.
+    /// Repositories whose `include-groups` or `exclude-groups` rule the path out are left out.
     fn candidates<'a>(&'a self, rel: &'a str) -> Vec<(&'a Repository, String)> {
-        match split_scope(rel) {
+        let mut candidates: Vec<(&Repository, String)> = match split_scope(rel) {
             (None, plain) => self.repos.iter().map(|r| (r, self.key_for(r, plain))).collect(),
             // A vendored build has one repository, which holds every file under its plain path.
             (Some(_), _) if self.repos.iter().all(|r| self.shared.contains(&r.url)) => {
                 self.repos.iter().map(|r| (r, rel.to_owned())).collect()
             }
             (Some(scope), _) => self.repos.iter().filter(|r| r.cache_dir_name() == scope).map(|r| (r, rel.to_owned())).collect(),
-        }
+        };
+        let plain = plain_rel(rel);
+        candidates.retain(|(repo, _)| self.serves_path(repo, plain));
+        candidates
     }
 
     /// The cached copy of the repository-relative path `rel` from any of the repositories, if there is one.
@@ -393,8 +493,14 @@ impl MavenClient {
 
     fn fetch_required_with(&self, rel: &str, pinned: bool) -> Result<PathBuf> {
         self.fetch_with(rel, pinned)?.with_context(|| {
-            let names: Vec<_> = self.repos.iter().map(|r| r.name.as_str()).collect();
-            format!("could not find `{rel}` in any repository ({})", names.join(", "))
+            let plain = plain_rel(rel);
+            let names: Vec<_> = self.repos.iter().filter(|r| self.serves_path(r, plain)).map(|r| r.name.as_str()).collect();
+            match group_of_path(plain) {
+                Some(group) if names.is_empty() => format!(
+                    "could not find `{rel}`: no repository serves the group `{group}`; check `include-groups` and `exclude-groups` in [repositories]"
+                ),
+                _ => format!("could not find `{rel}` in any repository ({})", names.join(", ")),
+            }
         })
     }
 
@@ -594,7 +700,7 @@ impl MavenClient {
         let mut attempt = 0;
         let response = loop {
             let mut request = self.agent.get(url);
-            if let Some(creds) = &repo.credentials {
+            if let Some(creds) = self.credentials_for(repo)? {
                 request = request.header("Authorization", basic_auth(creds));
             }
             let result = request.call();
@@ -634,6 +740,27 @@ impl MavenClient {
         }
     }
 
+    /// The credentials to send to `repo`. Credentials over plain `http://` (to another machine) are an error
+    /// with `--locked`, and otherwise warned about once per repository.
+    fn credentials_for<'a>(&self, repo: &'a Repository) -> Result<Option<&'a Credentials>> {
+        if repo.sends_credentials_in_clear() {
+            if self.locked {
+                bail!(
+                    "refusing to send the credentials of repository `{}` over unencrypted http ({}) with --locked; use an https:// URL",
+                    repo.name,
+                    repo.url
+                );
+            }
+            if self.warned_in_clear.lock().expect("lock poisoned").insert(repo.name.clone()) {
+                self.shell.warn(format!(
+                    "the credentials of repository `{}` are sent over unencrypted http ({}); use an https:// URL",
+                    repo.name, repo.url
+                ));
+            }
+        }
+        Ok(repo.credentials.as_ref())
+    }
+
     /// Reads `rel` straight from `repo`, bypassing the cache (for metadata that is about to change).
     pub fn read_text_from(&self, repo: &Repository, rel: &str) -> Result<Option<String>> {
         validate_rel_path(rel)?;
@@ -667,7 +794,7 @@ impl MavenClient {
         let mut attempt = 0;
         loop {
             let mut request = self.agent.put(&url);
-            if let Some(creds) = &repo.credentials {
+            if let Some(creds) = self.credentials_for(repo)? {
                 request = request.header("Authorization", basic_auth(creds));
             }
             let result = request.send(data);
@@ -728,7 +855,7 @@ impl MavenClient {
     pub fn versions(&self, module: &ModuleId) -> Result<Vec<Version>> {
         let mut versions: Vec<Version> = Vec::new();
         let rel = format!("{}/maven-metadata.xml", module.repo_dir());
-        for repo in &self.repos {
+        for repo in self.repos.iter().filter(|r| self.serves(r, &module.group)) {
             let cached = self.cache.join(module.repo_dir()).join(format!("maven-metadata-{}.xml", sanitize(&repo.name)));
             let Some(xml) = self.repo_metadata(repo, &rel, &cached, module) else { continue };
             for v in parse_metadata_versions(&xml) {
@@ -788,7 +915,7 @@ impl MavenClient {
             if let Some(build) = pinned {
                 return Ok(artifact.repo_path_for_build(&build));
             }
-            for repo in &self.repos {
+            for repo in self.repos.iter().filter(|r| self.serves(r, &artifact.module.group)) {
                 let Some(meta) = self.snapshot_metadata(repo, &artifact.module, &artifact.version)? else { continue };
                 if let Some(build) = meta.file_version(&artifact.version, artifact.classifier.as_deref(), &artifact.extension) {
                     return Ok(artifact.repo_path_for_build(&build));
@@ -1272,6 +1399,92 @@ mod tests {
         let snapshot = "com/acme/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-1.jar";
         assert!(client.key_for(central, snapshot).starts_with('@'));
         assert_eq!(plain_rel(&client.key_for(corp, snapshot)), snapshot);
+    }
+
+    #[test]
+    fn group_patterns() {
+        assert!(group_matches("com.corp", "com.corp"));
+        assert!(!group_matches("com.corp", "com.corp.lib"));
+        assert!(group_matches("com.corp.*", "com.corp"));
+        assert!(group_matches("com.corp.*", "com.corp.lib.x"));
+        assert!(!group_matches("com.corp.*", "com.corporate"));
+        for good in ["com.corp", "com.corp.*", "io.github.me-1"] {
+            assert!(validate_group_pattern(good).is_ok(), "{good}");
+        }
+        for bad in ["", "com..corp", "com.*.corp", "*", "com/corp", "com.corp.", " com"] {
+            assert!(validate_group_pattern(bad).is_err(), "{bad}");
+        }
+        assert_eq!(group_of_path("com/corp/lib/1.0/lib-1.0.jar").as_deref(), Some("com.corp"));
+        assert_eq!(group_of_path("lib/1.0/lib-1.0.jar"), None);
+    }
+
+    #[test]
+    fn a_group_one_repository_includes_is_asked_of_no_other() {
+        let write = |dir: &Path, rel: &str, content: &str| {
+            std::fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(rel), content).unwrap();
+        };
+        let metadata = |versions: &[&str]| {
+            let versions: String = versions.iter().map(|v| format!("<version>{v}</version>")).collect();
+            format!("<metadata><versioning><versions>{versions}</versions></versioning></metadata>")
+        };
+        // A public repository with a higher version of the private library, and one of its own.
+        let public = tempfile::tempdir().unwrap();
+        write(public.path(), "com/corp/lib/9.0/lib-9.0.pom", "evil");
+        write(public.path(), "com/corp/lib/1.0/lib-1.0.pom", "evil");
+        write(public.path(), "com/corp/lib/maven-metadata.xml", &metadata(&["1.0", "9.0"]));
+        write(public.path(), "org/acme/lib/1.0/lib-1.0.pom", "public");
+        write(public.path(), "org/shady/lib/1.0/lib-1.0.pom", "shady");
+        let corp = tempfile::tempdir().unwrap();
+        write(corp.path(), "com/corp/lib/1.0/lib-1.0.pom", "private");
+        write(corp.path(), "com/corp/lib/maven-metadata.xml", &metadata(&["1.0"]));
+        write(corp.path(), "org/acme/lib/1.0/lib-1.0.pom", "corp copy");
+
+        let home = tempfile::tempdir().unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let mut public_repo = Repository::new("public", format!("file://{}", public.path().display()));
+        public_repo.content.exclude_groups = vec!["org.shady".to_owned()];
+        let mut corp_repo = Repository::new("corp", format!("file://{}", corp.path().display()));
+        corp_repo.content.include_groups = vec!["com.corp.*".to_owned()];
+        let client = MavenClient::new(&config, vec![public_repo, corp_repo]);
+
+        let read = |rel: &str| std::fs::read_to_string(client.fetch_required(rel).unwrap()).unwrap();
+        assert_eq!(read("com/corp/lib/1.0/lib-1.0.pom"), "private");
+        assert!(client.fetch("com/corp/lib/9.0/lib-9.0.pom").unwrap().is_none());
+        let versions: Vec<_> = client.versions(&ModuleId::new("com.corp", "lib")).unwrap().iter().map(|v| v.to_string()).collect();
+        assert_eq!(versions, ["1.0"]);
+        // Other groups come from the repositories without `include-groups` only.
+        assert_eq!(read("org/acme/lib/1.0/lib-1.0.pom"), "public");
+        let err = format!("{:#}", client.fetch_required("org/shady/lib/1.0/lib-1.0.pom").unwrap_err());
+        assert!(err.contains("no repository serves the group `org.shady`"), "{err}");
+    }
+
+    #[test]
+    fn mirrored_repositories_serve_the_groups_of_both() {
+        let mut a = Content { include_groups: vec!["com.corp".to_owned()], exclude_groups: vec!["x".to_owned(), "y".to_owned()] };
+        let b = Content { include_groups: Vec::new(), exclude_groups: vec!["y".to_owned()] };
+        assert_eq!(a.union(&b), Content { include_groups: Vec::new(), exclude_groups: vec!["y".to_owned()] });
+        a.exclude_groups.clear();
+        let c = Content { include_groups: vec!["org.corp".to_owned()], exclude_groups: Vec::new() };
+        assert_eq!(a.union(&c).include_groups, ["com.corp", "org.corp"]);
+    }
+
+    #[test]
+    fn credentials_over_plain_http_are_refused_with_locked() {
+        let creds = Some(Credentials { username: "u".to_owned(), password: "p".to_owned() });
+        let mut repo = Repository::new("corp", "http://repo.corp.example/maven");
+        assert!(!repo.sends_credentials_in_clear(), "no credentials");
+        repo.credentials = creds.clone();
+        assert!(repo.sends_credentials_in_clear());
+        for url in ["https://repo.corp.example/maven", "http://localhost:8080/m2", "http://127.0.0.1/m2", "http://[::1]:80/m2"] {
+            assert!(!Repository { credentials: creds.clone(), ..Repository::new("x", url) }.sends_credentials_in_clear(), "{url}");
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_locked(true);
+        let client = MavenClient::new(&config, vec![repo]);
+        let err = format!("{:#}", client.fetch("com/corp/lib/1.0/lib-1.0.pom").unwrap_err());
+        assert!(err.contains("refusing to send the credentials of repository `corp` over unencrypted http"), "{err}");
     }
 
     #[test]

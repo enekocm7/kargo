@@ -499,19 +499,35 @@
     "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of every target." },
     "dev-dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies used only to compile and run tests." },
     "repositories": {
-      "description": "Maven repositories besides Maven Central: a URL, \"maven-local\", or a table with credentials.",
+      "description": "Maven repositories besides Maven Central: a URL, \"maven-local\", or a table with credentials and the groups it serves. `maven-central` and `google` without a `url` configure the built-in repositories.",
       "type": "object",
+      "properties": {
+        "defaults": {
+          "description": "Use Maven Central (and Google Maven for Android and Compose) before the repositories listed here. `false` uses only the listed ones.",
+          "type": "boolean",
+          "default": true
+        }
+      },
       "additionalProperties": {
         "anyOf": [
           { "type": "string", "examples": ["https://jitpack.io", "maven-local"] },
           {
             "type": "object",
             "additionalProperties": false,
-            "required": ["url"],
             "properties": {
-              "url": { "description": "An http(s):// or file: URL, or \"maven-local\".", "type": "string" },
+              "url": { "description": "An http(s):// or file: URL, or \"maven-local\". Required except for `maven-central` and `google`.", "type": "string" },
               "username-env": { "description": "Environment variable holding the user name.", "type": "string" },
-              "password-env": { "description": "Environment variable holding the password or token.", "type": "string" }
+              "password-env": { "description": "Environment variable holding the password or token.", "type": "string" },
+              "include-groups": {
+                "description": "Groups only this repository serves: no other repository is asked for them, and this one is asked for nothing else. \"com.corp\", or \"com.corp.*\" for it and the groups below it.",
+                "type": "array",
+                "items": { "type": "string", "examples": ["com.corp.*"] }
+              },
+              "exclude-groups": {
+                "description": "Groups this repository is never asked for. \"com.corp\", or \"com.corp.*\" for it and the groups below it.",
+                "type": "array",
+                "items": { "type": "string", "examples": ["com.corp.*"] }
+              }
             }
           }
         ]

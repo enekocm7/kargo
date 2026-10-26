@@ -531,6 +531,10 @@ impl<'a> BuildContext<'a> {
         // The declared repositories, so a mirror or `--vendored` keeps the lock.
         for repo in self.client.declared_repositories() {
             fp.str(&repo.url);
+            // Only rules change the fingerprint, so the locks of projects without them stay valid.
+            if !repo.content.is_unrestricted() {
+                fp.str(&format!("{:?}", repo.content));
+            }
         }
         fp.finish()
     }
@@ -623,6 +627,10 @@ impl<'a> BuildContext<'a> {
         fp.str("--repos");
         for repo in self.client.declared_repositories() {
             fp.str(&repo.url);
+            // Only rules change the fingerprint, so the locks of projects without them stay valid.
+            if !repo.content.is_unrestricted() {
+                fp.str(&format!("{:?}", repo.content));
+            }
         }
         let fingerprint = fp.finish();
         if !self.config.refresh() {

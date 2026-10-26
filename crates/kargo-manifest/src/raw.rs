@@ -10,6 +10,7 @@ use toml::Value;
 
 use super::*;
 use kargo_maven::Repository;
+use kargo_maven::repo::Content;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -1224,9 +1225,13 @@ struct DetailedDependency {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawRepository {
-    url: String,
+    url: Option<String>,
     username_env: Option<String>,
     password_env: Option<String>,
+    #[serde(default)]
+    include_groups: Vec<String>,
+    #[serde(default)]
+    exclude_groups: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1988,27 +1993,58 @@ impl RawManifest {
             }
         };
 
-        let mut repositories = vec![Repository::maven_central()];
-        if targets.android.is_some() {
-            repositories.push(Repository::google());
+        // `defaults = false` leaves out Maven Central and Google, for builds that go through a mirror.
+        let default_repositories = match self.repositories.get("defaults") {
+            None => true,
+            Some(Value::Boolean(defaults)) => *defaults,
+            Some(_) => bail!("[repositories] `defaults` must be true or false"),
+        };
+        let mut repositories = Vec::new();
+        if default_repositories {
+            repositories.push(Repository::maven_central());
+            if targets.android.is_some() {
+                repositories.push(Repository::google());
+            }
         }
-        for (name, value) in &self.repositories {
+        for (name, value) in self.repositories.iter().filter(|(name, _)| *name != "defaults") {
             let raw: RawRepository = match value {
-                Value::String(url) => RawRepository { url: url.clone(), username_env: None, password_env: None },
+                Value::String(url) => RawRepository {
+                    url: Some(url.clone()),
+                    username_env: None,
+                    password_env: None,
+                    include_groups: Vec::new(),
+                    exclude_groups: Vec::new(),
+                },
                 Value::Table(_) => value.clone().try_into().with_context(|| format!("invalid repository `{name}`"))?,
                 _ => bail!("invalid repository `{name}`: expected a URL or a table"),
             };
-            let url = raw.url.trim();
-            let mut repo = if url == kargo_maven::repo::MAVEN_LOCAL {
-                Repository { name: name.clone(), ..Repository::maven_local()? }
-            } else if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("file:") {
-                Repository::new(name.clone(), url)
-            } else {
-                bail!("repository `{name}` must have an http(s):// or file: URL, or be \"maven-local\", got `{url}`");
+            let mut repo = match raw.url.as_deref().map(str::trim) {
+                // The built-in repositories are configured by name.
+                None if name == "maven-central" => Repository::maven_central(),
+                None if name == "google" => Repository::google(),
+                None => bail!("repository `{name}` needs a `url`"),
+                Some(kargo_maven::repo::MAVEN_LOCAL) => Repository { name: name.clone(), ..Repository::maven_local()? },
+                Some(url) if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("file:") => {
+                    Repository::new(name.clone(), url)
+                }
+                Some(url) => bail!("repository `{name}` must have an http(s):// or file: URL, or be \"maven-local\", got `{url}`"),
             };
             repo.credentials = credentials_from_env(name, raw.username_env.as_deref(), raw.password_env.as_deref())?;
-            if !repositories.iter().any(|r| r.url == repo.url) {
-                repositories.push(repo);
+            for pattern in raw.include_groups.iter().chain(&raw.exclude_groups) {
+                kargo_maven::repo::validate_group_pattern(pattern).with_context(|| format!("invalid repository `{name}`"))?;
+            }
+            repo.content = Content { include_groups: raw.include_groups, exclude_groups: raw.exclude_groups };
+            // A repository declared again (such as `maven-central`, to exclude groups from it) keeps its place.
+            match repositories.iter_mut().find(|r| r.url == repo.url) {
+                Some(existing) => {
+                    if repo.credentials.is_some() {
+                        existing.credentials = repo.credentials;
+                    }
+                    if !repo.content.is_unrestricted() {
+                        existing.content = repo.content;
+                    }
+                }
+                None => repositories.push(repo),
             }
         }
 
@@ -2071,7 +2107,7 @@ impl RawManifest {
             }
         }
         // Compose Multiplatform depends on androidx artifacts hosted by Google.
-        if frameworks.compose.is_some() && !repositories.iter().any(|r| r.url == kargo_maven::repo::GOOGLE) {
+        if default_repositories && frameworks.compose.is_some() && !repositories.iter().any(|r| r.url == kargo_maven::repo::GOOGLE) {
             repositories.insert(1, Repository::google());
         }
         if let Some(ktor) = &frameworks.ktor

@@ -30,6 +30,8 @@ use crate::ops::test::{emit_report_event, emit_summary, human_out};
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::testreport::{self, TestSummary};
 use kargo_manifest::{AndroidConfig, AndroidTarget, BuildConfigValue, Dependency, GeneratedKind, Manifest, Scope, TargetKind};
+use kargo_maven::Repository;
+use kargo_maven::repo::Content;
 use kargo_toolchain::gradle::{self as toolchain_gradle, AgpGradle};
 use kargo_toolchain::{GradleDistribution, Jdk};
 use kargo_util::config::Config;
@@ -127,6 +129,8 @@ pub fn settings_gradle(manifest: &Manifest, settings: &Settings) -> String {
 /// One repository of `settings.gradle.kts` (`name` and `url`): its mirror from `[mirrors]` when there
 /// is one (with the environment variables of `[mirrors.credentials]`), else `builtin` (such as
 /// `google()`) for a repository Gradle knows, or a `maven` block with the repository's own credentials.
+/// Its `exclude-groups` become a `content` block, and its `include-groups` an `exclusiveContent` block, so
+/// that Gradle asks no other repository for those groups either.
 fn gradle_repository(
     out: &mut String,
     seen: &mut Vec<String>,
@@ -134,6 +138,7 @@ fn gradle_repository(
     repo: (&str, &str),
     builtin: Option<&str>,
     has_credentials: bool,
+    content: &Content,
 ) {
     let (name, url) = repo;
     let mirror = if url.contains("://") && !url.starts_with("file:") { settings.repository_mirror(name, url) } else { None };
@@ -142,25 +147,66 @@ fn gradle_repository(
         return;
     }
     seen.push(url.to_owned());
-    if let (None, Some(builtin)) = (mirror, builtin) {
-        let _ = writeln!(out, "        {builtin}");
-        return;
+    let mut excludes = String::new();
+    if !content.exclude_groups.is_empty() {
+        excludes.push_str("content {\n");
+        for pattern in &content.exclude_groups {
+            let _ = writeln!(excludes, "    {}", group_filter("exclude", pattern));
+        }
+        excludes.push_str("}\n");
     }
-    let _ = write!(out, "        maven {{\n            url = uri({})\n", kts_string(url));
-    let env = |user: &str, password: &str| {
-        format!(
-            "            credentials {{\n                username = providers.environmentVariable({}).orNull\n                password = providers.environmentVariable({}).orNull\n            }}\n",
-            kts_string(user),
-            kts_string(password)
-        )
-    };
-    if has_credentials && mirror.is_none() {
-        let suffix = name.to_uppercase().replace('-', "_");
-        out.push_str(&env(&format!("KARGO_REPO_USER_{suffix}"), &format!("KARGO_REPO_PASSWORD_{suffix}")));
-    } else if let Some(creds) = settings.credentials_env(url) {
-        out.push_str(&env(&creds.username_env, &creds.password_env));
+    let mut block = String::new();
+    match (mirror, builtin) {
+        (None, Some(builtin)) if excludes.is_empty() => {
+            let _ = writeln!(block, "{builtin}");
+        }
+        (None, Some(builtin)) => {
+            let _ = write!(block, "{} {{\n{}}}\n", builtin.trim_end_matches("()"), indent(&excludes, 4));
+        }
+        _ => {
+            let _ = writeln!(block, "maven {{\n    url = uri({})", kts_string(url));
+            let env = |user: &str, password: &str| {
+                format!(
+                    "    credentials {{\n        username = providers.environmentVariable({}).orNull\n        password = providers.environmentVariable({}).orNull\n    }}\n",
+                    kts_string(user),
+                    kts_string(password)
+                )
+            };
+            if has_credentials && mirror.is_none() {
+                let suffix = name.to_uppercase().replace('-', "_");
+                block.push_str(&env(&format!("KARGO_REPO_USER_{suffix}"), &format!("KARGO_REPO_PASSWORD_{suffix}")));
+            } else if let Some(creds) = settings.credentials_env(url) {
+                block.push_str(&env(&creds.username_env, &creds.password_env));
+            }
+            block.push_str(&indent(&excludes, 4));
+            block.push_str("}\n");
+        }
     }
-    out.push_str("        }\n");
+    if !content.include_groups.is_empty() {
+        let mut filter = String::new();
+        for pattern in &content.include_groups {
+            let _ = writeln!(filter, "{}", group_filter("include", pattern));
+        }
+        block = format!(
+            "exclusiveContent {{\n    forRepository {{\n{}    }}\n    filter {{\n{}    }}\n}}\n",
+            indent(&block, 8),
+            indent(&filter, 8)
+        );
+    }
+    out.push_str(&indent(&block, 8));
+}
+
+/// The Gradle call that includes or excludes (`verb`) the groups of a group pattern (`com.corp`, or `com.corp.*`).
+fn group_filter(verb: &str, pattern: &str) -> String {
+    match pattern.strip_suffix(".*") {
+        Some(group) => format!("{verb}GroupByRegex({})", kts_string(&format!(r"{}(\..*)?", group.replace('.', r"\.")))),
+        None => format!("{verb}Group({})", kts_string(pattern)),
+    }
+}
+
+/// `text` with every line indented by `width` spaces.
+fn indent(text: &str, width: usize) -> String {
+    text.lines().map(|line| format!("{:width$}{line}\n", "")).collect()
 }
 
 /// Renders `settings.gradle.kts`: the root project named after `manifest`'s package, and the
@@ -172,18 +218,24 @@ pub fn settings_gradle_with(manifest: &Manifest, modules: &[(&str, &Manifest)], 
     let portal = ("gradle-plugin-portal", GRADLE_PLUGIN_PORTAL);
     let mut plugin_repos = String::new();
     let mut seen = Vec::new();
-    gradle_repository(&mut plugin_repos, &mut seen, settings, google, Some("google()"), false);
-    gradle_repository(&mut plugin_repos, &mut seen, settings, central, Some("mavenCentral()"), false);
-    gradle_repository(&mut plugin_repos, &mut seen, settings, portal, Some("gradlePluginPortal()"), false);
+    let all = Content::default();
+    gradle_repository(&mut plugin_repos, &mut seen, settings, google, Some("google()"), false, &all);
+    gradle_repository(&mut plugin_repos, &mut seen, settings, central, Some("mavenCentral()"), false, &all);
+    gradle_repository(&mut plugin_repos, &mut seen, settings, portal, Some("gradlePluginPortal()"), false, &all);
     let mut repos = String::new();
     let mut seen = Vec::new();
-    gradle_repository(&mut repos, &mut seen, settings, google, Some("google()"), false);
-    gradle_repository(&mut repos, &mut seen, settings, central, Some("mavenCentral()"), false);
-    for repo in manifest.repositories.iter().chain(modules.iter().flat_map(|(_, m)| &m.repositories)) {
+    let declared: Vec<&Repository> = manifest.repositories.iter().chain(modules.iter().flat_map(|(_, m)| &m.repositories)).collect();
+    // Google and Maven Central first, when the packages use them (`[repositories] defaults = false` leaves them out).
+    for (builtin, call) in [(google, "google()"), (central, "mavenCentral()")] {
+        if let Some(repo) = declared.iter().find(|r| r.url == builtin.1) {
+            gradle_repository(&mut repos, &mut seen, settings, builtin, Some(call), false, &repo.content);
+        }
+    }
+    for repo in declared {
         if repo.url == kargo_maven::repo::MAVEN_CENTRAL || repo.url == kargo_maven::repo::GOOGLE {
             continue;
         }
-        gradle_repository(&mut repos, &mut seen, settings, (&repo.name, &repo.url), None, repo.credentials.is_some());
+        gradle_repository(&mut repos, &mut seen, settings, (&repo.name, &repo.url), None, repo.credentials.is_some(), &repo.content);
     }
     let mut includes = String::new();
     for (name, _) in modules {
@@ -1576,6 +1628,35 @@ mod tests {
         let settings = settings_gradle(ws.manifest(), &google_only);
         assert!(settings.contains("url = uri(\"https://nexus/google\")") && settings.contains("mavenCentral()"), "{settings}");
         assert!(!settings.contains("google()"), "{settings}");
+    }
+
+    #[test]
+    fn settings_keep_the_content_rules() {
+        let (_d, ws) = workspace(
+            "kind = \"library\"\n[repositories.corp]\nurl = \"https://nexus.corp/maven\"\ninclude-groups = [\"com.corp\", \"com.corp.*\"]\n\
+             [repositories.maven-central]\nexclude-groups = [\"com.corp.*\"]\n",
+        );
+        let settings = settings_gradle(ws.manifest(), &Settings::default());
+        let expected = r#"        exclusiveContent {
+            forRepository {
+                maven {
+                    url = uri("https://nexus.corp/maven")
+                }
+            }
+            filter {
+                includeGroup("com.corp")
+                includeGroupByRegex("com\\.corp(\\..*)?")
+            }
+        }
+"#;
+        assert!(settings.contains(expected), "{settings}");
+        assert!(settings.contains("        mavenCentral {\n            content {\n                excludeGroupByRegex("), "{settings}");
+
+        let (_d, ws) = workspace("kind = \"library\"\n[repositories]\ndefaults = false\nmirror = \"https://mirror.corp/maven\"\n");
+        let settings = settings_gradle(ws.manifest(), &Settings::default());
+        let dependencies = settings.split("dependencyResolutionManagement").nth(1).unwrap();
+        assert!(!dependencies.contains("google()") && !dependencies.contains("mavenCentral()"), "{settings}");
+        assert!(dependencies.contains("url = uri(\"https://mirror.corp/maven\")"), "{settings}");
     }
 
     #[test]

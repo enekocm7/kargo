@@ -721,7 +721,33 @@ jitpack = "https://jitpack.io"
 company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
 ```
 
-Maven Central is always used. Google Maven is added automatically for Android and Compose.
+Maven Central is used first, and Google Maven is added automatically for Android and Compose. Your repositories come after them, in the order you write them.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `<name>` | | A repository: its URL (`https://`, `http://` or `file:`), `"maven-local"`, or a table with the keys below |
+| `<name>.url` | | The URL. Leave it out for `maven-central` and `google` to configure the built-in repository |
+| `<name>.username-env`, `<name>.password-env` | none | Environment variables holding the user name and password (or token), sent with HTTP Basic authentication |
+| `<name>.include-groups` | all groups | Groups this repository serves. No other repository is asked for them |
+| `<name>.exclude-groups` | none | Groups this repository is never asked for |
+| `defaults` | `true` | `false` leaves out Maven Central and Google Maven, so only the repositories you list are used |
+
+A group pattern is a group, `"com.corp"`, or a group and every group below it, `"com.corp.*"` (which also matches `com.corp`). Use them to keep private libraries private:
+
+```toml
+[repositories.corp]
+url = "https://nexus.corp/maven"
+username-env = "NEXUS_USER"
+password-env = "NEXUS_PASSWORD"
+include-groups = ["com.corp.*"]      # only from here, and never asked of Maven Central
+
+[repositories.maven-central]
+exclude-groups = ["com.example.unwanted"]
+```
+
+A group that a repository lists in `include-groups` is looked up in that repository only, so its coordinates never reach a public repository, and a higher version published there can't replace yours (dependency confusion). Changing these keys re-resolves `kargo.lock`. See [Choosing which repository serves a library](../../guides/dependencies/#choosing-which-repository-serves-a-library).
+
+Credentials sent over plain `http://` to another machine are a warning, and an error with `--locked`. Use `https://`.
 
 The value `"maven-local"` stands for the local Maven repository, `~/.m2/repository` (or `$KARGO_MAVEN_LOCAL`), where `kargo publish --local`, `mvn install` and Gradle's `publishToMavenLocal` put libraries:
 

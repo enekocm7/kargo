@@ -294,7 +294,7 @@ Its jar (or klib, for Wasm, JS and Native) ends up on your classpaths, with its 
 
 ## Repositories
 
-Maven Central is always used. Google's Maven repository is added automatically for Android and Compose. Add others in `[repositories]`:
+Maven Central is used first, and Google's Maven repository is added automatically for Android and Compose. Add others in `[repositories]`; they are asked after those, in the order you write them:
 
 ```toml title="kargo.toml"
 [repositories]
@@ -315,6 +315,40 @@ Credentials are never written in `kargo.toml`; Kargo reads them from the named e
 To send every repository through a company mirror, or build from a copy of the dependencies kept in the project, see [Offline and corporate builds](../offline-and-mirrors/).
 
 `maven-local` holds what `kargo publish --local`, `mvn install` and Gradle's `publishToMavenLocal` install, so a library you publish locally can be used by your other projects right away. See [Publishing a library](../publishing/).
+
+Credentials go over `https://`. A repository with credentials on a plain `http://` URL (other than `localhost`) gets a warning, and `--locked` refuses to send them.
+
+### Choosing which repository serves a library
+
+By default every repository is asked for every library, in order, and the version lists of all of them are merged. For a private library that is a risk: its coordinates are first looked up on Maven Central, and if someone publishes a higher version of `com.corp:internal-lib` on a public repository, version ranges, `latest` and `kargo add` pick it (*dependency confusion*). Tell Kargo which repository owns which groups:
+
+```toml title="kargo.toml"
+[repositories.corp]
+url = "https://nexus.corp/maven"
+username-env = "NEXUS_USER"
+password-env = "NEXUS_PASSWORD"
+include-groups = ["com.corp.*"]
+
+[repositories.maven-central]
+exclude-groups = ["com.corp.*"]
+```
+
+- **`include-groups`** makes the repository the only one asked for those groups, and asks it for nothing else. Versions of `com.corp` libraries then come from `corp` alone, whatever a public repository publishes.
+- **`exclude-groups`** keeps a repository from being asked for those groups. With `include-groups` on `corp`, the `exclude-groups` on `maven-central` above changes nothing; it is useful on its own to keep a group away from one repository.
+- `"com.corp"` matches that group only; `"com.corp.*"` matches `com.corp` and every group below it, such as `com.corp.tools`.
+- `maven-central` and `google` without a `url` configure the built-in repositories. They keep their place at the front.
+
+The same rules go into the Gradle build Kargo generates for [Android](../android/) (`exclusiveContent` and `content` blocks), so they hold there too.
+
+To leave out Maven Central and Google Maven altogether, for example when a company mirror serves everything, set `defaults = false`:
+
+```toml title="kargo.toml"
+[repositories]
+defaults = false
+corp = "https://artifactory.corp/maven-virtual"
+```
+
+Only the repositories you list are used then, also for Compose and Android, so the mirror must have the libraries they need. A built-in one can be listed again by name, `google = {}`. To redirect repositories for every project on a machine instead, use [`[mirrors]`](../offline-and-mirrors/#repository-mirrors). Android's Gradle build still gets its own plugins from Google, Maven Central and the Gradle Plugin Portal, or their mirrors.
 
 ## SNAPSHOT versions
 
