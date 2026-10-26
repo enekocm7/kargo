@@ -260,6 +260,45 @@ fn es_modules_classes_and_missing_types() {
 }
 
 #[test]
+fn a_package_with_only_subpath_exports_gets_a_kotlin_package_per_subpath() {
+    // Like `cubing`: no `"."` entry, so `import "cubing"` fails and each subpath is a module.
+    let (dir, out) = generated(&["cubing"], |nm| {
+        write(
+            nm,
+            "cubing/package.json",
+            r#"{"name":"cubing","exports":{
+                "./alg":{"types":"./dist/lib/cubing/alg/index.d.ts","import":"./dist/lib/cubing/alg/index.js"},
+                "./scramble":{"types":"./dist/lib/cubing/scramble/index.d.ts","import":"./dist/lib/cubing/scramble/index.js"},
+                "./untyped":"./dist/untyped.js",
+                "./package.json":"./package.json"
+            }}"#,
+        );
+        write(nm, "cubing/dist/lib/cubing/alg/index.d.ts", "export { Alg, experimentalAppendMove } from '../chunks/alg';\n");
+        write(
+            nm,
+            "cubing/dist/lib/cubing/chunks/alg.d.ts",
+            "export declare class Alg {\n    constructor(alg?: string);\n    toString(): string;\n}\nexport declare function experimentalAppendMove(alg: Alg, move: string): Alg;\n",
+        );
+        write(
+            nm,
+            "cubing/dist/lib/cubing/scramble/index.d.ts",
+            "import { Alg } from '../chunks/alg';\ndeclare function randomScrambleForEvent(eventID: string): Promise<Alg>;\nexport { randomScrambleForEvent };\n",
+        );
+    });
+    assert!(out.untyped.is_empty());
+    assert!(has_declarations(&dir.path().join("node_modules"), "cubing"));
+    let alg = read(&dir, "cubing/alg/Exports.kt");
+    assert!(alg.contains("@file:JsModule(\"cubing/alg\")\n\npackage cubing.alg"), "{alg}");
+    assert!(alg.contains("external class Alg : JsAny {\n    constructor(alg: String = definedExternally)"), "{alg}");
+    assert!(alg.contains("external fun experimentalAppendMove(alg: cubing.alg.Alg, move: String): cubing.alg.Alg"), "{alg}");
+    let scramble = read(&dir, "cubing/scramble/Exports.kt");
+    assert!(scramble.contains("@file:JsModule(\"cubing/scramble\")\n\npackage cubing.scramble"), "{scramble}");
+    assert!(scramble.contains("external fun randomScrambleForEvent(eventID: String): Promise<cubing.alg.Alg>"), "{scramble}");
+    // Nothing is bound to the package root, which cannot be imported.
+    assert!(!dir.path().join("out/cubing/Exports.kt").exists());
+}
+
+#[test]
 fn a_package_with_its_own_types_wins_over_types_packages() {
     let dir = tempfile::tempdir().unwrap();
     let nm = dir.path().join("node_modules");

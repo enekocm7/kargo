@@ -223,8 +223,8 @@ impl Members {
 enum ClassImport {
     /// The module's default export.
     Default(String),
-    /// A named export of the module.
-    Named,
+    /// A named export of the JavaScript module `.1`, generated into the Kotlin package `.0`.
+    Named(String, String),
 }
 
 /// The generated Kotlin, by Kotlin package: its declarations and the JS module of its exports.
@@ -292,30 +292,14 @@ impl<'a> Generator<'a> {
     /// Declarations in the Kotlin package `pkg` for the JavaScript module imported as `npm`, whose
     /// declarations are `module`; its default export is named `default_name`.
     pub fn module(&mut self, pkg: &str, npm: &str, default_name: &str, module: ScopeId) {
+        // Classes first, so that references to them use the class.
+        self.classes(pkg, npm, module);
         let pkg = pkg.to_owned();
         self.root = pkg.clone();
         self.out.packages.entry(pkg.clone()).or_default().npm = npm.to_owned();
         let default = self.prog.default_export(module);
         let names = self.prog.export_names(module);
         let exports: Vec<(String, Option<Ent>)> = names.into_iter().map(|n| (n.clone(), self.prog.export(module, &n))).collect();
-
-        // Classes first, so that references to them use the class.
-        if let Some(Ent::Decls(decls)) = &default {
-            for &d in decls {
-                if self.is_class(d) {
-                    self.classes.insert(d, ClassImport::Default(npm.to_owned()));
-                }
-            }
-        }
-        for (_, ent) in &exports {
-            if let Some(Ent::Decls(decls)) = ent {
-                for &d in decls {
-                    if self.is_class(d) {
-                        self.classes.entry(d).or_insert(ClassImport::Named);
-                    }
-                }
-            }
-        }
 
         if let Some(Ent::Decls(decls)) = default {
             for d in decls {
@@ -337,6 +321,28 @@ impl<'a> Generator<'a> {
             self.export_type(&pkg, &name, &decls);
         }
         self.drain();
+    }
+
+    /// Records the classes the JavaScript module `npm` exports, generated into the Kotlin package
+    /// `pkg`, so that references to them use the class. [`Generator::module`] does it for its
+    /// module; call it for every module first when one module's types refer to another's classes.
+    pub fn classes(&mut self, pkg: &str, npm: &str, module: ScopeId) {
+        if let Some(Ent::Decls(decls)) = self.prog.default_export(module) {
+            for d in decls {
+                if self.is_class(d) {
+                    self.classes.insert(d, ClassImport::Default(npm.to_owned()));
+                }
+            }
+        }
+        for name in self.prog.export_names(module) {
+            if let Some(Ent::Decls(decls)) = self.prog.export(module, &name) {
+                for d in decls {
+                    if self.is_class(d) {
+                        self.classes.entry(d).or_insert_with(|| ClassImport::Named(pkg.to_owned(), npm.to_owned()));
+                    }
+                }
+            }
+        }
     }
 
     pub fn finish(mut self) -> Output {
@@ -925,7 +931,14 @@ impl<'a> Generator<'a> {
             None if !self.locals.is_empty() => return None,
             None => {
                 let npm = package_of(&file).unwrap_or_else(|| "npm".to_owned());
-                (kotlin_package(&npm), npm)
+                match self.classes.get(&key) {
+                    // A class exported by a subpath of its package (`cubing/alg`) goes with that
+                    // subpath's exports, so that it is imported from the subpath.
+                    Some(ClassImport::Named(pkg, spec)) if spec.strip_prefix(npm.as_str()).is_some_and(|s| s.starts_with('/')) => {
+                        (pkg.clone(), spec.clone())
+                    }
+                    _ => (kotlin_package(&npm), npm),
+                }
             }
         };
         let mut parts = self.prog.namespaces(key);
@@ -966,7 +979,7 @@ impl<'a> Generator<'a> {
                 let _ = writeln!(text, "@JsModule(\"{npm}\")");
                 let _ = writeln!(text, "external class {simple} : JsAny {{");
             }
-            Some(ClassImport::Named) => {
+            Some(ClassImport::Named(..)) => {
                 let _ = writeln!(text, "external class {simple} : JsAny {{");
             }
             None => {
@@ -990,7 +1003,7 @@ impl<'a> Generator<'a> {
         let package = self.out.packages.entry(pkg.clone()).or_default();
         match class {
             Some(ClassImport::Default(_)) => package.default.push(text),
-            Some(ClassImport::Named) => package.exports.push(text),
+            Some(ClassImport::Named(..)) => package.exports.push(text),
             None => package.types.push(text),
         }
         if let Some(value) = members.index {
