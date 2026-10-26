@@ -700,6 +700,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "ureq",
  "walkdir",
  "zip",
 ]

@@ -64,6 +64,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [--format json]` | Show the dependency graph |
+| `kargo audit [-t <target>] [--deny low\|medium\|high\|critical\|none] [--tooling] [--fix] [--format json]` | Check every resolved Maven module and npm package against the [OSV](https://osv.dev) advisory database: a table by severity with the fixed version, the advisory link and the dependency path. Exits with 101 on advisories at or above `--deny` (default `high`) that `[audit] ignore` does not list; `--tooling` adds the compiler and other build tools, `--fix` raises the versions `kargo.toml` declares. The only command that contacts the advisory service; answers are cached for a day and `--offline` uses the cache |
 | `kargo package [--release \| --profile <name>] [-t jvm\|android] [--bin <name>] [--fat] [--optimize] [--format jar\|jlink\|native-image\|installer] [--message-format json] [--desktop [--platforms all]]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `--release` runs R8 to shrink and obfuscate the JVM jar (`--optimize` opts in for other profiles), writing a retrace mapping and usage report; JSON mode prints its report and artifact path as JSON lines. `--format jlink` builds the jars, a Java runtime trimmed by `jlink` and launchers, which run without an installed Java; `native-image` a GraalVM native executable; `installer` a `jpackage` installer (`.msi`, `.dmg`, `.deb`, ...) for the host OS, all into `target/<profile>/jvm/package/` (see [distributing applications](https://enekocm7.github.io/kargo/guides/distributing/)). `--desktop` packages a [Compose Desktop](https://enekocm7.github.io/kargo/guides/compose/) app: an installer with what Compose needs (signed and notarized on macOS), or with `--format jar --platforms all` a jar that runs on every OS. `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
 | `kargo retrace <mapping.txt> [stacktrace.txt]` | Retrace an R8-obfuscated JVM stack trace; reads stdin if no stack trace file is given |
 | `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
@@ -319,6 +320,12 @@ forks = 2                   # JVMs per benchmark (default 2; 0 runs in the launc
 mode = "avgt"               # thrpt, avgt, sample, ss or all (default avgt)
 time-unit = "us"            # ns, us, ms, s, m, h or d (default: whichever reads best)
 jvm-args = ["-Xmx2g"]       # extra JVM arguments for the benchmark JVMs
+
+[audit]                     # kargo audit (OSV advisories); every key is optional
+deny = "high"               # lowest severity that fails: low, medium, high, critical or none (default high)
+ignore = [                  # advisories that do not apply, each with a reason and an optional expiry
+    { id = "GHSA-xxxx-xxxx-xxxx", reason = "we never parse untrusted YAML", until = 2026-12-31 },
+]
 ```
 
 Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekocm7.github.io/kargo/schemas/kargo.json`: put `#:schema <url>` on the first line for Taplo-based editors (Even Better TOML, Zed, Helix), or map the URL to `kargo.toml` in your editor. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/).
@@ -444,6 +451,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 |---|---|
 | `KARGO_HOME` | Cache and toolchains (default `~/.kargo`) |
 | `KARGO_RELEASES_URL` | Where `kargo self update`, `install.sh` and `install.ps1` look for releases (default `https://github.com/enekocm7/kargo/releases`; a mirror, or a directory with `file://`) |
+| `KARGO_OSV_URL` | Where `kargo audit` reads security advisories (default `https://api.osv.dev`; another server with the OSV API) |
 | `KARGO_NO_UPDATE_CHECK` | Any non-empty value stops `kargo --version` from mentioning newer releases (it checks at most once a day, never offline or in CI) |
 | `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory |

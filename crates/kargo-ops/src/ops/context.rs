@@ -468,6 +468,24 @@ impl<'a> BuildContext<'a> {
         self.resolve_at(&self.tool_key(name), Platform::Jvm, roots, &[])
     }
 
+    /// The resolutions of the build's tools that `kargo.lock` holds for this package, by key: the Kotlin
+    /// compiler, `tools/*` (KSP, the JUnit launcher, compiler plugins, Dokka, ...), `generate/*` and the
+    /// benchmark generator. Only the tools some build already used are there.
+    pub fn locked_tools(&self) -> Vec<(String, crate::lockfile::LockedResolution)> {
+        let prefix = self.ws.lock_key("");
+        let lock = self.shared.lock.lock().expect("lock poisoned");
+        lock.resolutions
+            .iter()
+            .filter(|(key, _)| {
+                let own = key.strip_prefix(prefix.as_str()).unwrap_or("");
+                key.as_str() == COMPILER_KEY
+                    || (key.starts_with(prefix.as_str())
+                        && (own.starts_with("tools/") || own.starts_with("generate/") || own == "jvm/bench-tools"))
+            })
+            .map(|(key, locked)| (key.clone(), locked.clone()))
+            .collect()
+    }
+
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {
         let manifest = self.ws.manifest();
         let mut contributions = builtins::contributions(manifest, target, self.ws.root())?;

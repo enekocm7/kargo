@@ -11,6 +11,7 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 |---|---|
 | `KARGO_HOME` | Where Kargo keeps its cache, toolchains and `bin/` (default `~/.kargo`) |
 | `KARGO_RELEASES_URL` | Where [`kargo self update`](../commands/#kargo-self), `install.sh` and `install.ps1` look for releases (default `https://github.com/enekocm7/kargo/releases`): a mirror with the same layout, or a directory with `file://` |
+| `KARGO_OSV_URL` | Where [`kargo audit`](../commands/#kargo-audit) reads security advisories (default `https://api.osv.dev`): another server with the OSV API, such as a mirror |
 | `KARGO_NO_UPDATE_CHECK` | Any non-empty value stops `kargo --version` from looking for a newer release and mentioning it |
 | `KARGO_INSTALL_ROOT` | Same as `--root` of [`kargo install`](../commands/#kargo-install) and `kargo uninstall`: install below `<root>/bin` and `<root>/install` instead of `$KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory (default `target/` next to the project's or workspace's `kargo.toml`) |

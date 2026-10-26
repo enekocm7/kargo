@@ -35,7 +35,7 @@ pub struct UpgradeOptions {
 }
 
 /// Every dependency declared in the manifest, with the table it is declared in.
-fn declared(manifest: &Manifest) -> Vec<(DependencySection, &Dependency)> {
+pub(crate) fn declared(manifest: &Manifest) -> Vec<(DependencySection, &Dependency)> {
     let mut out: Vec<(DependencySection, &Dependency)> = Vec::new();
     out.extend(manifest.dependencies.iter().map(|d| (DependencySection::Main, d)));
     out.extend(manifest.dev_dependencies.iter().map(|d| (DependencySection::Dev, d)));

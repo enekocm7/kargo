@@ -52,6 +52,27 @@ A compatible version has the same major version as the current one (for `0.x`, t
 
 `kargo upgrade` changes what you declared in `kargo.toml`. To move versions in `kargo.lock` only, for example a transitive dependency, use `kargo update` (see [The lockfile](#the-lockfile)).
 
+## Security advisories
+
+`kargo audit` looks up every resolved dependency, transitive ones and the npm packages of Wasm and JS included, in the [OSV](https://osv.dev) database of security advisories:
+
+```console
+$ kargo audit
+    Auditing app v0.1.0 (42 packages, advisories from https://api.osv.dev)
+severity        package          version  advisory             fixed in
+critical (9.8)  com.acme:widget  1.2.0    GHSA-wwww-wwww-wwww  1.2.5
+...
+```
+
+Each advisory comes with its link and the path of dependencies that brings the package in, as `kargo tree` would show it. `kargo audit --fix` raises the versions you declare in `kargo.toml` to the ones that fix the advisories; for a transitive dependency, upgrade the library that brings it in, or declare the module at the fixed version yourself, which wins because the [highest version wins](#version-conflicts). An advisory that does not apply to you goes in [`[audit] ignore`](../../reference/manifest/#audit), with the reason:
+
+```toml title="kargo.toml"
+[audit]
+ignore = [{ id = "CVE-2024-1234", reason = "we never parse untrusted XML", until = 2026-12-31 }]
+```
+
+The audit fails (exit code `101`) on advisories of `high` severity or worse, which makes it a CI step (see [Security advisories in CI](../ci/#security-advisories)). It is the only command that sends your dependency list anywhere: the names and versions go to `api.osv.dev`, and the answers are cached for a day. See [`kargo audit`](../../reference/commands/#kargo-audit) for the options.
+
 ## Writing dependencies by hand
 
 All of these forms are valid in `[dependencies]`, `[dev-dependencies]` and `[target.<name>.dependencies]`:

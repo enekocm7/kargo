@@ -409,6 +409,29 @@ enum FormatArg {
     Json,
 }
 
+/// The lowest severity that makes `kargo audit` fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DenyArg {
+    Low,
+    Medium,
+    High,
+    Critical,
+    /// Report advisories without failing
+    None,
+}
+
+impl From<DenyArg> for kargo_manifest::DenyLevel {
+    fn from(arg: DenyArg) -> Self {
+        match arg {
+            DenyArg::Low => Self::Low,
+            DenyArg::Medium => Self::Medium,
+            DenyArg::High => Self::High,
+            DenyArg::Critical => Self::Critical,
+            DenyArg::None => Self::None,
+        }
+    }
+}
+
 /// The Kotlin language server behind `kargo lsp`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LspServerArg {
@@ -967,6 +990,31 @@ enum Command {
         dry_run: bool,
         #[command(flatten)]
         package: OnePackageArg,
+    },
+    /// Check the dependencies against known security advisories (OSV)
+    #[command(long_about = "Check the dependencies against known security advisories.
+
+Resolves the dependencies of every target (or the ones given with --target), with the npm packages of Wasm and Kotlin/JS, and looks each version up in the OSV database (https://osv.dev). This is the only command that contacts the advisory database. Answers are cached for a day under the Kargo home; --offline uses the cache, --refresh ignores it, and KARGO_OSV_URL points at another OSV server.
+
+Exits with 101 when an advisory at or above the --deny severity (default: [audit] deny, else high) affects a dependency and is not in [audit] ignore.")]
+    Audit {
+        /// Only audit these targets [default: every enabled one]
+        #[arg(short, long = "target", value_enum)]
+        targets: Vec<TargetArg>,
+        /// The lowest severity that fails the audit [default: `[audit] deny`, else high]
+        #[arg(long, value_enum)]
+        deny: Option<DenyArg>,
+        /// Also audit the build's tools that kargo.lock holds (Kotlin compiler, KSP, JUnit launcher, compiler plugins, `[[generate]]` tools) and the TypeScript compiler's npm packages
+        #[arg(long)]
+        tooling: bool,
+        /// Raise the versions kargo.toml declares to ones that fix the advisories, where they are compatible
+        #[arg(long)]
+        fix: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
+        /// Output format; `json` describes every advisory found, ignored ones included
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
     },
     /// Enable, disable or list the project's targets (jvm, wasm, js, native, android)
     Target {
@@ -2046,6 +2094,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
             | Command::Remove { .. }
             | Command::Update { .. }
             | Command::Upgrade { .. }
+            | Command::Audit { .. }
             | Command::Target { .. }
     );
     let result = run_command(cli.command, &global, &config, shell);
@@ -2660,6 +2709,63 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let clean = kargo_lsp::dap::run(config.clone(), kargo_lsp::dap::Options { adapter_path })?;
             Ok(if clean { 0 } else { 1 })
         }
+        Command::Audit { targets, deny, tooling, fix, packages, format } => {
+            let project = load_project(global)?;
+            let opts = ops::audit::AuditOptions { targets: targets.into_iter().map(Into::into).collect(), tooling };
+            let reports = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+                let report = ops::audit::audit(ctx, &opts)?;
+                let deny = deny.map(kargo_manifest::DenyLevel::from).or(ctx.ws.manifest().audit.deny).unwrap_or_default();
+                let fixed = if fix { ops::audit::fix(ctx, &report)? } else { 0 };
+                Ok((report, deny, fixed))
+            })?;
+            for (report, _, _) in &reports {
+                for note in &report.skipped {
+                    shell.note(note);
+                }
+                for f in report.findings.iter().filter(|f| f.ignored.is_some()) {
+                    let reason = f.ignored.as_ref().map(|i| i.reason.as_str()).unwrap_or_default();
+                    shell.note(format!("ignoring {} in {} {}: {reason}", f.advisory.id, f.subject.query.name, f.subject.query.version));
+                }
+            }
+            if format == FormatArg::Json {
+                let mut documents: Vec<serde_json::Value> = reports.iter().map(|(r, deny, _)| ops::audit::json(r, *deny)).collect();
+                // One package prints one object; a workspace prints one per member.
+                let output = if documents.len() == 1 { documents.remove(0) } else { serde_json::Value::Array(documents) };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                for (report, _, _) in &reports {
+                    print!("{}", ops::audit::render(report));
+                }
+            }
+            let fixed: usize = reports.iter().map(|(_, _, f)| f).sum();
+            if fixed > 0 {
+                shell.status(
+                    "Fixed",
+                    format!("{fixed} {} in kargo.toml; run `kargo audit` again to check the result", plural(fixed, "version")),
+                );
+            }
+            let audited: usize = reports.iter().map(|(r, _, _)| r.audited).sum();
+            let ignored: usize = reports.iter().map(|(r, _, _)| r.findings.iter().filter(|f| f.ignored.is_some()).count()).sum();
+            let reported: usize = reports.iter().map(|(r, _, _)| r.reported().count()).sum();
+            let denied: Vec<(usize, kargo_manifest::DenyLevel)> =
+                reports.iter().map(|(r, deny, _)| (r.denied(*deny).count(), *deny)).filter(|(n, _)| *n > 0).collect();
+            if let Some(&(_, deny)) = denied.first() {
+                let count: usize = denied.iter().map(|(n, _)| n).sum();
+                shell.error(format!(
+                    "{count} {} at or above the `{deny}` severity; upgrade the affected packages (`kargo audit --fix` raises the versions kargo.toml declares) or add the advisories to [audit] ignore with a reason",
+                    plural(count, "advisory")
+                ));
+                return Ok(FAILURE);
+            }
+            let ignored = if ignored > 0 { format!(" ({ignored} ignored)") } else { String::new() };
+            if reported > 0 {
+                let deny = reports.first().map(|(_, deny, _)| *deny).unwrap_or_default();
+                shell.warn(format!("{reported} {} below the `{deny}` severity{ignored}", plural(reported, "advisory")));
+            } else {
+                shell.status("Audited", format!("{audited} {}: no known advisories{ignored}", plural(audited, "package")));
+            }
+            Ok(0)
+        }
         Command::Outdated { names, pre, package } => {
             let ws = load_one(global, &package, "`kargo outdated`")?;
             let rows = ops::upgrade::outdated(config, &ws, &names, pre)?;
@@ -3174,6 +3280,15 @@ fn list_plugins(config: &Config, global: &GlobalArgs) {
 }
 
 /// The targets a tree is shown for: the one given, else every enabled target that has a resolution.
+/// `word`, made plural for every `count` but one (`advisory` -> `advisories`).
+fn plural(count: usize, word: &str) -> String {
+    match word.strip_suffix('y') {
+        _ if count == 1 => word.to_owned(),
+        Some(stem) => format!("{stem}ies"),
+        None => format!("{word}s"),
+    }
+}
+
 fn tree_targets(ctx: &BuildContext, target: Option<TargetArg>) -> Vec<TargetKind> {
     match target {
         Some(t) => vec![t.into()],

@@ -232,6 +232,23 @@ impl ManifestEditor {
         Ok(key)
     }
 
+    /// Changes the version of the npm package `name` in `[target.<kind>.npm-dependencies]` in place,
+    /// keeping its formatting and comments.
+    pub fn set_npm_dependency_version(&mut self, kind: TargetKind, name: &str, version: &str) -> Result<()> {
+        let item = self
+            .doc
+            .get_mut("target")
+            .and_then(|t| t.get_mut(kind.as_str()))
+            .and_then(|t| t.get_mut("npm-dependencies"))
+            .and_then(|t| t.get_mut(name))
+            .filter(|item| item.is_str());
+        let Some(item) = item else {
+            bail!("npm package `{name}` is not declared in [target.{kind}.npm-dependencies]");
+        };
+        replace_str(item, version);
+        Ok(())
+    }
+
     /// The targets with a `[target.<name>]` table, in manifest order. Empty when the manifest has no
     /// `[target]` section, which makes it an implicit JVM project.
     pub fn targets(&self) -> Vec<TargetKind> {
@@ -588,6 +605,20 @@ members = [\"app\"]
         assert!(out.contains("\"com.t:t\" = \"1.1\"   # pinned"), "{out}");
         assert!(out.contains("group = \"com.f\"\nversion = \"1.1\"\nscope = \"runtime\""), "{out}");
         crate::Manifest::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn sets_npm_versions_in_place() {
+        let text = format!(
+            "{BASE}\n[target.wasm]\nnpm-dependencies = {{ \"left-pad\" = \"1.0.0\" }}\n\n[target.js.npm-dependencies]\n\"@js-joda/core\" = \"^3.2.0\"  # dates\n"
+        );
+        let mut ed = ManifestEditor::from_str(Path::new("kargo.toml"), &text).unwrap();
+        ed.set_npm_dependency_version(TargetKind::Wasm, "left-pad", "1.3.0").unwrap();
+        ed.set_npm_dependency_version(TargetKind::Js, "@js-joda/core", "^3.2.1").unwrap();
+        assert!(ed.set_npm_dependency_version(TargetKind::Js, "nope", "1.0.0").unwrap_err().to_string().contains("not declared"));
+        let out = ed.contents();
+        assert!(out.contains("npm-dependencies = { \"left-pad\" = \"1.3.0\" }"), "{out}");
+        assert!(out.contains("\"@js-joda/core\" = \"^3.2.1\"  # dates"), "{out}");
     }
 
     #[test]

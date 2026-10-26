@@ -7,8 +7,8 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use kargo_manifest::{
-    BENCH_TIME_UNITS, BUILTIN_GENERATORS, BenchMode, COMPOSE_FEATURE_FLAGS, GeneratedKind, Hook, InstallerType, Manifest, PackageManager,
-    TargetKind, TaskShell, WorkspaceManifest,
+    BENCH_TIME_UNITS, BUILTIN_GENERATORS, BenchMode, COMPOSE_FEATURE_FLAGS, DenyLevel, GeneratedKind, Hook, InstallerType, Manifest,
+    PackageManager, TargetKind, TaskShell, WorkspaceManifest,
 };
 
 fn schema() -> Value {
@@ -227,6 +227,7 @@ fn schema_enums_match_kargo() {
     assert_eq!(enum_values(&root["definitions"]["installer-type"]), names(InstallerType::ALL.iter().map(|t| t.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["mode"]), names(BenchMode::ALL.iter().map(|m| m.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["time-unit"]), names(BENCH_TIME_UNITS.to_vec()));
+    assert_eq!(enum_values(&props["audit"]["properties"]["deny"]), names(DenyLevel::ALL.iter().map(|l| l.as_str()).collect()));
     let generate = &props["generate"]["items"]["properties"];
     assert_eq!(enum_values(&generate["kind"]), names(GeneratedKind::ALL.iter().map(|k| k.as_str()).collect()));
     assert_eq!(enum_values(&generate["builtin"]), names(BUILTIN_GENERATORS.to_vec()));

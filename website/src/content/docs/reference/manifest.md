@@ -290,6 +290,34 @@ A key you leave out is taken from the JMH annotation on the benchmark (`@Warmup`
 
 See [Benchmarking](../../guides/benchmarking/#settings).
 
+## `[audit]`
+
+Options for [`kargo audit`](../commands/#kargo-audit). Every key is optional.
+
+```toml
+[audit]
+deny = "medium"
+ignore = [
+    { id = "GHSA-xxxx-xxxx-xxxx", reason = "we never parse untrusted YAML" },
+    { id = "CVE-2024-1234", reason = "waiting for the 2.1 release", until = 2026-12-31 },
+]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `deny` | `"high"` | The lowest severity that makes `kargo audit` fail with exit code 101: `low`, `medium`, `high`, `critical`, or `none` to report without failing. `kargo audit --deny` overrides it |
+| `ignore` | `[]` | Advisories that do not apply to this project |
+
+Each `ignore` entry is a table:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `id` | yes | The advisory's id or any of its aliases, such as `GHSA-...` or `CVE-...` (case does not matter) |
+| `reason` | yes | Why the advisory does not apply; `kargo audit` prints it next to the advisory it ignores |
+| `until` | no | The last day the entry applies, as a TOML date (`2026-12-31`) or the same as a string. Afterwards the advisory is reported again, with a warning |
+
+An ignored advisory is left out of the report and of the exit code, but still in `--format json` (with its `ignored` reason). An entry that matches no advisory of the audited packages gets a note, so stale entries do not pile up.
+
 ## `[publish]`
 
 Options for `kargo publish`. Every key is optional.

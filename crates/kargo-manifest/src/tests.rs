@@ -1321,6 +1321,59 @@ fn test_section() {
 }
 
 #[test]
+fn audit_section() {
+    assert_eq!(parse(MINIMAL).audit, AuditSettings::default(), "nothing is set by default");
+    let audit = parse(&format!(
+        "{MINIMAL}
+[audit]
+deny = \"medium\"
+ignore = [
+    {{ id = \"GHSA-aaaa-bbbb-cccc\", reason = \"we never parse untrusted YAML\" }},
+    {{ id = \"CVE-2024-1234\", reason = \"fixed upstream soon\", until = 2026-12-31 }},
+    {{ id = \"CVE-2024-5678\", reason = \"r\", until = \"2027-01-15\" }},
+]
+"
+    ))
+    .audit;
+    assert_eq!(audit.deny, Some(DenyLevel::Medium));
+    assert_eq!(audit.ignore.len(), 3);
+    assert_eq!(audit.ignore[0].reason, "we never parse untrusted YAML");
+    assert_eq!(audit.ignore[1].until.as_deref(), Some("2026-12-31"));
+    assert_eq!(audit.ignore[2].until.as_deref(), Some("2027-01-15"));
+
+    let audit = |body: &str| {
+        parse_err(&format!(
+            "{MINIMAL}
+[audit]
+{body}
+"
+        ))
+    };
+    assert!(audit("deny = \"severe\"").contains("unknown severity `severe`"));
+    assert!(audit("ignore = [{ id = \"GHSA-x\" }]").contains("`GHSA-x` needs a `reason`"));
+    assert!(audit("ignore = [{ id = \"GHSA-x\", reason = \"  \" }]").contains("needs a `reason`"));
+    assert!(audit("ignore = [{ id = \"GHSA-x\", reason = \"r\", until = \"next year\" }]").contains("use a date"));
+    assert!(audit("ignore = [{ id = \"GHSA-x\", reason = \"r\", until = 2026-12-31T10:00:00Z }]").contains("use a date"));
+    assert!(audit("ignore = [\"GHSA-x\"]").contains("ignore"));
+    assert!(audit("fix = true").contains("unknown field"));
+}
+
+#[test]
+fn deny_levels() {
+    assert!(DenyLevel::High.denies(Some(Severity::Critical)));
+    assert!(DenyLevel::High.denies(Some(Severity::High)));
+    assert!(!DenyLevel::High.denies(Some(Severity::Medium)));
+    assert!(DenyLevel::Critical.denies(None), "an advisory without a severity is not taken as harmless");
+    assert!(!DenyLevel::None.denies(None));
+    assert!(!DenyLevel::None.denies(Some(Severity::Critical)));
+    assert_eq!(Severity::from_score(9.8), Some(Severity::Critical));
+    assert_eq!(Severity::from_score(7.0), Some(Severity::High));
+    assert_eq!(Severity::from_score(6.9), Some(Severity::Medium));
+    assert_eq!(Severity::from_score(0.1), Some(Severity::Low));
+    assert_eq!(Severity::from_score(0.0), None);
+}
+
+#[test]
 fn bench_section() {
     assert_eq!(parse(MINIMAL).bench, BenchSettings::default(), "nothing is set by default");
     let bench = parse(&format!(

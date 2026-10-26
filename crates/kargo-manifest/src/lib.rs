@@ -1658,6 +1658,121 @@ pub struct BenchSettings {
     pub jvm_args: Vec<String>,
 }
 
+/// How serious a security advisory is, from its CVSS score or the severity its database gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Severity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl Severity {
+    pub const ALL: [Severity; 4] = [Severity::Low, Severity::Medium, Severity::High, Severity::Critical];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Critical => "critical",
+        }
+    }
+
+    /// The severity of a CVSS base score: 0.1-3.9 low, 4.0-6.9 medium, 7.0-8.9 high, 9.0-10.0 critical
+    /// (`None` for 0, which CVSS calls "none").
+    pub fn from_score(score: f64) -> Option<Severity> {
+        match score {
+            s if s >= 9.0 => Some(Severity::Critical),
+            s if s >= 7.0 => Some(Severity::High),
+            s if s >= 4.0 => Some(Severity::Medium),
+            s if s > 0.0 => Some(Severity::Low),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The lowest severity that makes `kargo audit` fail (`[audit] deny`, `kargo audit --deny`), or
+/// `none` to report advisories without failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DenyLevel {
+    Low,
+    Medium,
+    #[default]
+    High,
+    Critical,
+    None,
+}
+
+impl DenyLevel {
+    pub const ALL: [DenyLevel; 5] = [DenyLevel::Low, DenyLevel::Medium, DenyLevel::High, DenyLevel::Critical, DenyLevel::None];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DenyLevel::Low => "low",
+            DenyLevel::Medium => "medium",
+            DenyLevel::High => "high",
+            DenyLevel::Critical => "critical",
+            DenyLevel::None => "none",
+        }
+    }
+
+    /// Whether an advisory of `severity` fails the audit. One without a known severity fails at
+    /// every level but `none`, since nothing says it is harmless.
+    pub fn denies(self, severity: Option<Severity>) -> bool {
+        let threshold = match self {
+            DenyLevel::Low => Severity::Low,
+            DenyLevel::Medium => Severity::Medium,
+            DenyLevel::High => Severity::High,
+            DenyLevel::Critical => Severity::Critical,
+            DenyLevel::None => return false,
+        };
+        severity.is_none_or(|s| s >= threshold)
+    }
+}
+
+impl fmt::Display for DenyLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DenyLevel {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        DenyLevel::ALL
+            .into_iter()
+            .find(|l| l.as_str() == s)
+            .with_context(|| format!("unknown severity `{s}` (expected one of: {})", DenyLevel::ALL.map(DenyLevel::as_str).join(", ")))
+    }
+}
+
+/// `[audit]`: settings of `kargo audit`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AuditSettings {
+    /// The lowest severity that fails the audit; `kargo audit --deny` overrides it. Unset means `high`.
+    pub deny: Option<DenyLevel>,
+    /// Advisories that do not apply to this project.
+    pub ignore: Vec<AuditIgnore>,
+}
+
+/// An advisory `kargo audit` does not report (`[audit] ignore`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditIgnore {
+    /// The advisory's id or one of its aliases, such as `GHSA-xxxx-xxxx-xxxx` or `CVE-2024-1234`.
+    pub id: String,
+    /// Why the advisory does not apply (required).
+    pub reason: String,
+    /// The last day the entry applies, as `YYYY-MM-DD`; afterwards the advisory is reported again.
+    pub until: Option<String>,
+}
+
 /// A named program from `[[bin]]`, run with `kargo run --bin <name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bin {
@@ -1836,6 +1951,7 @@ pub struct Manifest {
     pub lint: LintSettings,
     pub test: TestSettings,
     pub bench: BenchSettings,
+    pub audit: AuditSettings,
     pub publish: PublishSettings,
 }
 
