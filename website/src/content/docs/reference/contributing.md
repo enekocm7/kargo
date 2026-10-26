@@ -11,7 +11,7 @@ Kargo is a Cargo workspace of focused crates:
 
 | Crate | Responsibility |
 |---|---|
-| `kargo-util` | Terminal output, configuration (including `config.toml`: mirrors, proxy, CA bundle, vendoring), the HTTP agent, filesystem/hash/process helpers |
+| `kargo-util` | Terminal output, configuration (including `config.toml`: mirrors, proxy, CA bundle, vendoring, jobs), the number of parallel jobs, the HTTP agent, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, the resolver, uploads (`deploy.rs`) and the Maven Central Portal (`central.rs`) |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
 | `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, JetBrains Runtime for Compose hot reload, the Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |

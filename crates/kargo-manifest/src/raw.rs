@@ -54,6 +54,8 @@ pub(super) struct RawManifest {
     bench: RawBench,
     #[serde(default)]
     publish: RawPublish,
+    #[serde(default)]
+    build: RawBuild,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +73,20 @@ struct RawToolchain {
     jdk: Option<Value>,
     graalvm: Option<Value>,
     kargo: Option<String>,
+}
+
+/// `[build]` (and `[workspace.build]`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawBuild {
+    jobs: Option<Value>,
+}
+
+impl RawBuild {
+    fn validate(self, section: &str) -> Result<BuildSettings> {
+        let jobs = self.jobs.map(|v| kargo_util::jobs::from_toml(&format!("[{section}] `jobs`"), &v)).transpose()?;
+        Ok(BuildSettings { jobs })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2219,6 +2235,7 @@ impl RawManifest {
         let doc = self.doc.validate()?;
         let fmt = self.fmt.validate()?;
         let lint = self.lint.validate()?;
+        let build = self.build.validate("build")?;
 
         let publish = self.publish.validate(&repositories)?;
         for (key, url) in [("homepage", &self.package.homepage), ("repository", &self.package.repository)] {
@@ -2235,6 +2252,7 @@ impl RawManifest {
             packaging,
             doc,
             fmt,
+            build,
             lint,
             test: TestSettings {
                 fail_fast: self.test.fail_fast.unwrap_or(true),
@@ -2658,6 +2676,8 @@ struct RawWorkspace {
     plugins: toml::Table,
     #[serde(default)]
     tasks: toml::Table,
+    #[serde(default)]
+    build: RawBuild,
 }
 
 /// `[workspace.package]`: the `[package]` keys members can inherit. Deserialized to reject unknown
@@ -2741,6 +2761,7 @@ impl RawWorkspaceManifest {
             let _: RawPlugin = value.clone().try_into().with_context(|| format!("invalid plugin `{name}` in [workspace.plugins]"))?;
         }
         let tasks = parse_tasks(&raw.tasks).context("invalid [workspace.tasks]")?;
+        let build = raw.build.validate("workspace.build")?;
 
         let workspace = WorkspaceManifest {
             root: root.to_path_buf(),
@@ -2758,6 +2779,7 @@ impl RawWorkspaceManifest {
                 jvm_target,
             },
             tasks,
+            build,
             dependencies: raw.dependencies,
             package: raw.package,
             frameworks: raw.frameworks,

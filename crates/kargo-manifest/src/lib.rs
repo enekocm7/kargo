@@ -1493,6 +1493,14 @@ pub enum Notarization {
     KeychainProfile(String),
 }
 
+/// `[build]` (`[workspace.build]` in a workspace): how the build commands run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BuildSettings {
+    /// How many packages and targets build at the same time; `None` leaves it to `KARGO_JOBS`,
+    /// `config.toml` or the default.
+    pub jobs: Option<kargo_util::jobs::Jobs>,
+}
+
 /// `[doc]`: options for `kargo doc` (Dokka).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DocSettings {
@@ -1833,6 +1841,8 @@ pub struct Manifest {
     pub packaging: PackagingSettings,
     pub doc: DocSettings,
     pub fmt: FmtSettings,
+    /// `[build]`: settings of every command that builds.
+    pub build: BuildSettings,
     pub lint: LintSettings,
     pub test: TestSettings,
     pub bench: BenchSettings,
@@ -1906,6 +1916,8 @@ pub struct WorkspaceManifest {
     pub kotlin: WorkspaceKotlin,
     /// Tasks run at the workspace root (`[workspace.tasks]`); members may inherit them.
     pub tasks: BTreeMap<String, Task>,
+    /// `[workspace.build]`: what `[build]` is for a single package, for the whole workspace.
+    pub build: BuildSettings,
     /// Raw `[workspace.dependencies]` entries, inherited with `{ workspace = true }`.
     dependencies: toml::Table,
     /// Raw `[workspace.package]`, `[workspace.frameworks]`, `[workspace.plugins]` and

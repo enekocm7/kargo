@@ -1780,6 +1780,81 @@ fn build_keep_going_reports_every_failed_target() {
     }
 }
 
+/// A workspace of three independent members whose pre-build hook logs its start and end, a second apart.
+fn three_logging_members(workspace_extra: &str) -> Project {
+    let log = |line: &str| {
+        if cfg!(windows) {
+            format!("echo {line}>> %KARGO_WORKSPACE_DIR%\\log.txt")
+        } else {
+            format!("echo {line} >> \"$KARGO_WORKSPACE_DIR/log.txt\"")
+        }
+    };
+    let sleep = if cfg!(windows) { "ping -n 2 127.0.0.1 >NUL" } else { "sleep 1" };
+    let p = Project::new();
+    p.file("kargo.toml", &format!("[workspace]\nmembers = [\"a\", \"b\", \"c\"]\n{workspace_extra}"));
+    for name in ["a", "b", "c"] {
+        let run = format!("{} && {sleep} && {}", log(&format!("start-{name}")), log(&format!("end-{name}")));
+        p.file(&format!("{name}/kargo.toml"), &manifest(name, &format!("[tasks]\nlog = {{ run = '{run}', hooks = [\"pre-build\"] }}\n")));
+    }
+    p
+}
+
+fn logged_lines(p: &Project) -> Vec<String> {
+    let lines = p.read("log.txt").lines().map(|l| l.trim().to_owned()).collect();
+    std::fs::remove_file(p.path().join("log.txt")).unwrap();
+    lines
+}
+
+#[test]
+fn jobs_one_builds_workspace_members_one_after_another() {
+    let p = three_logging_members("");
+    // The builds fail offline after the hooks, which is all this test needs.
+    p.kargo().args(["--offline", "build", "--keep-going", "--jobs", "1"]).assert().failure().code(101);
+    assert_eq!(logged_lines(&p), ["start-a", "end-a", "start-b", "end-b", "start-c", "end-c"]);
+
+    p.kargo().args(["--offline", "build", "--keep-going", "-j", "3"]).assert().failure().code(101);
+    let lines = logged_lines(&p);
+    let first_end = lines.iter().position(|l| l.starts_with("end-")).unwrap();
+    assert!(first_end > 1, "three jobs start the members together: {lines:?}");
+}
+
+#[test]
+fn jobs_come_from_the_flag_then_the_environment_then_kargo_toml_then_config_toml() {
+    let p = three_logging_members("[workspace.build]\njobs = 2\n");
+    p.file(".kargo/config.toml", "[build]\njobs = 3\n");
+    let jobs = |args: &[&str], env: Option<&str>| {
+        let mut cmd = p.kargo();
+        cmd.args(["--offline", "-v", "build"]).args(args);
+        if let Some(env) = env {
+            cmd.env("KARGO_JOBS", env);
+        }
+        let out = cmd.assert().failure().get_output().stderr.clone();
+        let text = String::from_utf8(out).unwrap();
+        let line = text.lines().find(|l| l.trim_start().starts_with("Jobs")).unwrap_or_else(|| panic!("{text}"));
+        line.split_whitespace().nth(1).unwrap().parse::<usize>().unwrap()
+    };
+    assert_eq!(jobs(&[], None), 2, "kargo.toml before config.toml");
+    assert_eq!(jobs(&[], Some("1")), 1, "the environment before kargo.toml");
+    assert_eq!(jobs(&["-j", "3"], Some("1")), 3, "the flag before the environment");
+    assert!(jobs(&["--jobs", "auto"], None) >= 1);
+    p.file("kargo.toml", "[workspace]\nmembers = [\"a\", \"b\", \"c\"]\n");
+    assert_eq!(jobs(&[], None), 3, "config.toml without a [workspace.build]");
+
+    p.kargo()
+        .args(["build", "-j", "many"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("expected a number of jobs or `auto`"));
+    p.kargo().args(["build"]).env("KARGO_JOBS", "-2").assert().failure().stderr(predicate::str::contains("expected a number of jobs"));
+    p.file("kargo.toml", "[workspace]\nmembers = [\"a\", \"b\", \"c\"]\n[workspace.build]\njobs = true\n");
+    p.kargo()
+        .args(["build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[workspace.build] `jobs` must be a number of jobs or \"auto\""));
+}
+
 #[test]
 fn json_message_format_ends_with_build_finished() {
     let p = two_failing_targets();
@@ -3274,7 +3349,7 @@ opt-in = [\"kotlin.RequiresOptIn\"]
         .assert()
         .failure()
         .stderr(predicate::str::contains("package `nope` is not part of this project"));
-    p.kargo().args(["build", "-j", "0"]).assert().failure().stderr(predicate::str::contains("-j"));
+    p.kargo().args(["build", "-j", "none"]).assert().failure().stderr(predicate::str::contains("-j"));
     p.kargo().args(["run"]).assert().failure().stderr(predicate::str::contains("pick one with `-p <name>`").not());
 }
 

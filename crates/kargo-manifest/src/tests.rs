@@ -2052,3 +2052,18 @@ fn generate_steps_are_validated() {
     assert!(err("builtin = \"protobuf\"\nversion = \"[1,2)\"").contains("one exact version"));
     assert!(err("builtin = \"protobuf\"\ngrpc-java-version = \"1.0\"").contains("go with `grpc = true`"));
 }
+
+#[test]
+fn build_jobs() {
+    use kargo_util::jobs::Jobs;
+    assert_eq!(parse(MINIMAL).build.jobs, None);
+    assert_eq!(parse(&format!("{MINIMAL}[build]\njobs = 2\n")).build.jobs, Some(Jobs::Count(2)));
+    assert_eq!(parse(&format!("{MINIMAL}[build]\njobs = \"auto\"\n")).build.jobs, Some(Jobs::Auto));
+    assert_eq!(parse(&format!("{MINIMAL}[build]\njobs = 0\n")).build.jobs, Some(Jobs::Auto));
+    assert!(parse_err(&format!("{MINIMAL}[build]\njobs = -1\n")).contains("[build] `jobs` must be a number of jobs or \"auto\""));
+    assert!(parse_err(&format!("{MINIMAL}[build]\njobs = \"lots\"\n")).contains("expected a number of jobs or `auto`"));
+    assert!(parse_err(&format!("{MINIMAL}[build]\nworkers = 2\n")).contains("unknown field"));
+
+    let ws = WorkspaceManifest::parse("[workspace]\nmembers = []\n[workspace.build]\njobs = 3\n", Path::new("/ws")).unwrap();
+    assert_eq!(ws.build.jobs, Some(Jobs::Count(3)));
+}
