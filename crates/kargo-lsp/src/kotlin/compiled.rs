@@ -10,7 +10,9 @@
 //!
 //! Each package becomes one Kotlin file (and one Java file for its Java classes) with only
 //! what code outside the library can use: public and protected declarations, with no bodies
-//! and `...` for default values.
+//! and `...` for default values. When the library publishes a Javadoc jar, its documentation
+//! (see [`super::javadoc`]) becomes the declarations' doc comments, and gives Java parameters
+//! the names their class files don't keep.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
@@ -21,6 +23,7 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 
 use super::classfile::{self, ClassFile, JavaType};
+use super::javadoc::{self, Docs};
 use super::kmetadata::{self as km, ClassKind, Modality, Names, Visibility};
 
 /// A generated file: its path relative to the stub directory, and its text.
@@ -160,10 +163,14 @@ struct KotlinWriter<'a> {
     classes: &'a ClassMap,
     /// Type parameters in scope: id and name.
     type_params: Vec<(i32, String)>,
+    /// The library's Javadoc, if it publishes one.
+    docs: Option<&'a Docs>,
+    /// The class whose members are being written (`com.example.Outer.Inner`); `None` at the top level.
+    owner: Option<String>,
     out: String,
 }
 
-impl KotlinWriter<'_> {
+impl<'a> KotlinWriter<'a> {
     fn ty(&mut self, t: &km::Type, names: &Names) -> String {
         let mut out = self.ty_inner(t, names);
         if t.nullable && !out.ends_with('?') {
@@ -321,6 +328,27 @@ impl KotlinWriter<'_> {
         }
     }
 
+    /// The Javadoc of a declaration, as a doc comment.
+    fn javadoc(&mut self, doc: Option<&javadoc::Doc>, indent: &str) {
+        if let Some(doc) = doc.filter(|d| !d.is_empty()) {
+            self.out.push_str(&javadoc::comment(&doc.body(), indent, false));
+        }
+    }
+
+    /// The Javadoc of function `f`, found by its name and JVM parameter types.
+    fn function_javadoc(&self, f: &km::Function, names: &Names) -> Option<&'a javadoc::Doc> {
+        let docs = self.docs?;
+        let name = names.string(f.name);
+        let types: Vec<Option<String>> = jvm_params(f, names).iter().map(|d| d.as_deref().map(javadoc::descriptor_type)).collect();
+        let lookup = |types: &[Option<String>]| match &self.owner {
+            Some(owner) => docs.method(owner, name, types),
+            None => docs.top_function(&self.imports.package, name, types),
+        };
+        // Javadoc lists a suspend function's continuation as a parameter; Dokka's pages don't.
+        let member = lookup(&types).or_else(|| if f.is_suspend() { lookup(&types[..types.len() - 1]) } else { None })?;
+        Some(&member.doc)
+    }
+
     fn receiver(&mut self, receiver: &Option<km::Type>, names: &Names) -> String {
         match receiver {
             Some(r) => {
@@ -362,7 +390,11 @@ impl KotlinWriter<'_> {
         let receiver = self.receiver(&f.receiver, names);
         let params = self.params(&f.params, names);
         let ret = self.ty(&f.ret, names);
-        self.doc(&f.doc, indent);
+        if f.doc.is_some() {
+            self.doc(&f.doc, indent);
+        } else {
+            self.javadoc(self.function_javadoc(f, names), indent);
+        }
         self.out.push_str(&format!("{indent}{} fun {tps}{receiver}{name}{params}: {ret}\n", mods.join(" ")));
         self.type_params.truncate(depth);
     }
@@ -392,7 +424,16 @@ impl KotlinWriter<'_> {
         let tps = if tps.is_empty() { tps } else { format!("{tps} ") };
         let receiver = self.receiver(&p.receiver, names);
         let ty = self.ty(&p.ty, names);
-        self.doc(&p.doc, indent);
+        if p.doc.is_some() {
+            self.doc(&p.doc, indent);
+        } else if let Some(docs) = self.docs {
+            let name = names.string(p.name);
+            let doc = match &self.owner {
+                Some(owner) => docs.field(owner, name),
+                None => docs.top_property(&self.imports.package, name),
+            };
+            self.javadoc(doc, indent);
+        }
         self.out.push_str(&format!("{indent}{} {keyword} {tps}{receiver}{name}: {ty}\n", mods.join(" ")));
         self.type_params.truncate(depth);
     }
@@ -489,10 +530,16 @@ impl KotlinWriter<'_> {
         if indent.is_empty() {
             self.out.push('\n');
         }
-        self.doc(&c.doc, indent);
+        let fq = id.replace('/', ".");
+        if c.doc.is_some() {
+            self.doc(&c.doc, indent);
+        } else {
+            self.javadoc(self.docs.and_then(|d| d.class(&fq)), indent);
+        }
         self.out.push_str(&line);
         self.out.push_str(" {\n");
         let inner = format!("{indent}    ");
+        let outer = self.owner.replace(fq);
         if kind == ClassKind::EnumClass {
             let entries: Vec<String> = c.enum_entries.iter().filter_map(|&e| kotlin_name(names.string(e))).collect();
             self.out.push_str(&format!("{inner}{};\n", entries.join(", ")));
@@ -500,11 +547,18 @@ impl KotlinWriter<'_> {
         if has_constructor {
             for k in c.constructors.iter().filter(|k| k.is_secondary() && k.visibility().is_api() && !k.hidden) {
                 let params = self.params(&k.params, names);
-                self.doc(&k.doc, &inner);
+                if k.doc.is_some() {
+                    self.doc(&k.doc, &inner);
+                } else {
+                    let unknown = vec![None; k.params.len()];
+                    let doc = self.docs.zip(self.owner.as_deref()).and_then(|(d, o)| d.method(o, "<init>", &unknown));
+                    self.javadoc(doc.map(|m| &m.doc), &inner);
+                }
                 self.out.push_str(&format!("{inner}{} constructor{params}\n", Self::visibility(k.visibility())));
             }
         }
         self.members(&c.members, names, &inner, !interface);
+        self.owner = outer;
         for &n in &c.nested {
             let nested_id = format!("{id}.{}", names.string(n));
             if let Some((nested, nested_names)) = self.classes.get(&nested_id) {
@@ -518,10 +572,24 @@ impl KotlinWriter<'_> {
 }
 
 /// The Kotlin file of one package: its top-level classes and declarations.
-fn kotlin_file(package: &str, top: &[&str], members: &[(&km::Package, &Names)], classes: &ClassMap, comment: &str) -> String {
+fn kotlin_file(
+    package: &str,
+    top: &[&str],
+    members: &[(&km::Package, &Names)],
+    classes: &ClassMap,
+    docs: Option<&Docs>,
+    comment: &str,
+) -> String {
     let mut own: Vec<String> = top.iter().map(|id| split_class_id(id).1.to_owned()).collect();
     own.extend(members.iter().flat_map(|(p, names)| p.aliases.iter().map(|a| names.string(a.name).to_owned())));
-    let mut w = KotlinWriter { imports: Imports::new(package, own, KOTLIN_IMPLICIT), classes, type_params: Vec::new(), out: String::new() };
+    let mut w = KotlinWriter {
+        imports: Imports::new(package, own, KOTLIN_IMPLICIT),
+        classes,
+        type_params: Vec::new(),
+        docs,
+        owner: None,
+        out: String::new(),
+    };
     for (package, names) in members {
         w.members(package, names, "", false);
     }
@@ -609,7 +677,25 @@ fn split_internal(name: &str) -> (String, String) {
 struct JavaWriter<'a> {
     imports: Imports,
     classes: &'a HashMap<String, ClassFile>,
+    /// The library's Javadoc, if it publishes one.
+    docs: Option<&'a Docs>,
     out: String,
+}
+
+/// The simple name of a parameter type, as [`javadoc::simple_type`] gives it; `None` for a type
+/// variable, whose erasure isn't known here.
+fn java_simple_name(t: &JavaType) -> Option<String> {
+    match t {
+        JavaType::Primitive(p) => Some((*p).to_owned()),
+        JavaType::Var(_) => None,
+        JavaType::Array(inner) => java_simple_name(inner).map(|s| format!("{s}[]")),
+        JavaType::Class(name, _) => Some(name.rsplit(['/', '$']).next().unwrap_or(name).to_owned()),
+    }
+}
+
+/// The doc comment of a Java declaration, or nothing.
+fn java_doc(doc: Option<&javadoc::Doc>, indent: &str) -> String {
+    doc.filter(|d| !d.is_empty()).map(|d| javadoc::comment(&d.body(), indent, true)).unwrap_or_default()
 }
 
 impl JavaWriter<'_> {
@@ -703,6 +789,8 @@ impl JavaWriter<'_> {
             ),
         };
         let tps = self.type_params(&type_params);
+        let fq = class.name.replace(['/', '$'], ".");
+        let docs = self.docs;
         let mut line = format!("{indent}{} {keyword} {name}", mods.join(" "));
         if !tps.is_empty() {
             line.push_str(tps.trim_end());
@@ -723,6 +811,7 @@ impl JavaWriter<'_> {
         if !interfaces.is_empty() {
             line.push_str(&format!(" {} {}", if interface { "extends" } else { "implements" }, interfaces.join(", ")));
         }
+        self.out.push_str(&java_doc(docs.and_then(|d| d.class(&fq)), indent));
         self.out.push_str(&line);
         self.out.push_str(" {\n");
         let inner = format!("{indent}    ");
@@ -747,6 +836,7 @@ impl JavaWriter<'_> {
                 mods.push("final");
             }
             let ty = self.ty(&ty);
+            self.out.push_str(&java_doc(docs.and_then(|d| d.field(&fq, fname)), &inner));
             self.out.push_str(&format!("{inner}{} {ty} {fname};\n", mods.join(" ")));
         }
         let inner_class = nested && access & classfile::ACC_STATIC == 0 && !interface;
@@ -781,12 +871,22 @@ impl JavaWriter<'_> {
             let tps = self.type_params(&sig.type_params);
             let offset = m.params.len().saturating_sub(sig.types.len());
             let count = sig.types.len();
+            let types: Vec<Option<String>> = sig.types.iter().map(java_simple_name).collect();
+            let documented = docs.and_then(|d| d.method(&fq, if constructor { "<init>" } else { mname }, &types));
+            // Without `-parameters`, the class file has no names; the Javadoc has them.
+            let documented_name = |i: usize| documented.and_then(|m| m.names.get(i)).and_then(|n| java_name(n)).map(str::to_owned);
             let params: Vec<String> = sig
                 .types
                 .iter()
                 .enumerate()
                 .map(|(i, t)| {
-                    let pname = m.params.get(i + offset).and_then(|n| java_name(n)).map_or_else(|| format!("arg{i}"), str::to_owned);
+                    let pname = m
+                        .params
+                        .get(i + offset)
+                        .and_then(|n| java_name(n))
+                        .map(str::to_owned)
+                        .or_else(|| documented_name(i))
+                        .unwrap_or_else(|| format!("arg{i}"));
                     match t {
                         JavaType::Array(elem) if i + 1 == count && m.access & classfile::ACC_VARARGS != 0 => {
                             format!("{}... {pname}", self.ty(elem))
@@ -795,6 +895,7 @@ impl JavaWriter<'_> {
                     }
                 })
                 .collect();
+            self.out.push_str(&java_doc(documented.map(|m| &m.doc), &inner));
             if constructor {
                 self.out.push_str(&format!("{inner}{} {tps}{mname}({});\n", mods.join(" "), params.join(", ")));
             } else {
@@ -815,9 +916,9 @@ impl JavaWriter<'_> {
 }
 
 /// The Java file of one package: its top-level classes.
-fn java_file(package: &str, top: &[&str], classes: &HashMap<String, ClassFile>, comment: &str) -> String {
+fn java_file(package: &str, top: &[&str], classes: &HashMap<String, ClassFile>, docs: Option<&Docs>, comment: &str) -> String {
     let own: Vec<String> = top.iter().map(|name| split_internal(name).1).collect();
-    let mut w = JavaWriter { imports: Imports::new(package, own, &["java.lang"]), classes, out: String::new() };
+    let mut w = JavaWriter { imports: Imports::new(package, own, &["java.lang"]), classes, docs, out: String::new() };
     for name in top {
         if let Some(class) = classes.get(*name) {
             w.out.push('\n');
@@ -839,8 +940,8 @@ fn stub_path(package: &str, extension: &str) -> PathBuf {
 
 // ----- jars -----
 
-/// The stub files of a jar of compiled classes.
-pub fn jar_stubs(jar: &Path) -> Result<Vec<Stub>> {
+/// The stub files of a jar of compiled classes, documented from `docs`, its Javadoc.
+pub fn jar_stubs(jar: &Path, docs: Option<&Docs>) -> Result<Vec<Stub>> {
     let file = std::fs::File::open(jar).with_context(|| format!("failed to open {}", jar.display()))?;
     let mut zip = zip::ZipArchive::new(file).with_context(|| format!("failed to read {}", jar.display()))?;
     let mut raw: Vec<Vec<u8>> = Vec::new();
@@ -863,7 +964,7 @@ pub fn jar_stubs(jar: &Path) -> Result<Vec<Stub>> {
         "Declarations of {}, generated by Kargo from its compiled classes because it has no sources jar.",
         jar.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
     );
-    Ok(render_classes(parsed, &comment))
+    Ok(render_classes(parsed, &comment, docs))
 }
 
 /// The JVM descriptor of a Kotlin type in a parameter, or `None` when it can't be told without
@@ -1037,7 +1138,7 @@ fn hide_synthetic(members: &mut km::Package, class: &ClassFile, names: &Names) {
     }
 }
 
-pub(crate) fn render_classes(parsed: Vec<ClassFile>, comment: &str) -> Vec<Stub> {
+pub(crate) fn render_classes(parsed: Vec<ClassFile>, comment: &str, docs: Option<&Docs>) -> Vec<Stub> {
     let mut kotlin: ClassMap = HashMap::new();
     let mut facades: BTreeMap<String, Vec<(km::Package, Arc<Names>)>> = BTreeMap::new();
     let mut java: HashMap<String, ClassFile> = HashMap::new();
@@ -1086,10 +1187,10 @@ pub(crate) fn render_classes(parsed: Vec<ClassFile>, comment: &str) -> Vec<Stub>
             let mut out = Vec::new();
             let members: Vec<(&km::Package, &Names)> = facades.get(&package).into_iter().flatten().map(|(p, n)| (p, n.as_ref())).collect();
             if !kt.is_empty() || !members.is_empty() {
-                out.push((stub_path(&package, "kt"), kotlin_file(&package, &kt, &members, &kotlin, comment)));
+                out.push((stub_path(&package, "kt"), kotlin_file(&package, &kt, &members, &kotlin, docs, comment)));
             }
             if !jv.is_empty() {
-                out.push((stub_path(&package, "java"), java_file(&package, &jv, &java, comment)));
+                out.push((stub_path(&package, "java"), java_file(&package, &jv, &java, docs, comment)));
             }
             out
         })
@@ -1146,11 +1247,11 @@ pub fn is_interop_klib(klib: &Path) -> bool {
     manifest.is_some_and(|m| m.lines().any(|line| line.split_once('=').is_some_and(|(k, v)| k.trim() == "interop" && v.trim() == "true")))
 }
 
-/// The stub files of a klib.
-pub fn klib_stubs(klib: &Path) -> Result<Vec<Stub>> {
+/// The stub files of a klib, documented from `docs`, its Javadoc, where its metadata keeps no KDoc.
+pub fn klib_stubs(klib: &Path, docs: Option<&Docs>) -> Result<Vec<Stub>> {
     let name = klib.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let comment = format!("Declarations of {name}, generated by Kargo from its compiled metadata because it has no sources jar.");
-    klib_stubs_where(klib, &comment, |_, _| true)
+    klib_stubs_where(klib, &comment, docs, |_, _| true)
 }
 
 /// The stub files of the Kotlin/Native standard library's klib, with what the standard library's
@@ -1159,7 +1260,7 @@ pub fn klib_stubs(klib: &Path) -> Result<Vec<Stub>> {
 pub fn native_stdlib_stubs(klib: &Path, known: &BTreeSet<String>) -> Result<Vec<Stub>> {
     let comment = "Declarations of the Kotlin/Native standard library that its common sources don't have, \
                    generated by Kargo from its compiled metadata.";
-    klib_stubs_where(klib, comment, |package, name| {
+    klib_stubs_where(klib, comment, None, |package, name| {
         let internal = package.split('.').any(|segment| segment == "internal");
         let fq = if package.is_empty() { name.to_owned() } else { format!("{package}.{name}") };
         !internal && !known.contains(&fq)
@@ -1168,7 +1269,7 @@ pub fn native_stdlib_stubs(klib: &Path, known: &BTreeSet<String>) -> Result<Vec<
 
 /// The stub files of a klib, with the top-level declarations for which `keep(package, name)`
 /// holds.
-fn klib_stubs_where(klib: &Path, comment: &str, keep: impl Fn(&str, &str) -> bool + Sync) -> Result<Vec<Stub>> {
+fn klib_stubs_where(klib: &Path, comment: &str, docs: Option<&Docs>, keep: impl Fn(&str, &str) -> bool + Sync) -> Result<Vec<Stub>> {
     let fragments: Vec<(String, km::Fragment)> =
         klib_fragments(klib)?.into_par_iter().filter_map(|(package, bytes)| km::read_fragment(&bytes).ok().map(|f| (package, f))).collect();
     let mut classes: ClassMap = HashMap::new();
@@ -1208,7 +1309,7 @@ fn klib_stubs_where(klib: &Path, comment: &str, keep: impl Fn(&str, &str) -> boo
             if top.is_empty() && decls.iter().all(|(p, _)| p.functions.is_empty() && p.properties.is_empty() && p.aliases.is_empty()) {
                 return None;
             }
-            Some((stub_path(&package, "kt"), kotlin_file(&package, &top, &decls, &classes, comment)))
+            Some((stub_path(&package, "kt"), kotlin_file(&package, &top, &decls, &classes, docs, comment)))
         })
         .collect())
 }
@@ -1577,7 +1678,7 @@ mod tests {
 
     #[test]
     fn renders_kotlin_and_java_classes() {
-        let stubs: HashMap<PathBuf, String> = render_classes(testing::sample_classes(), "generated").into_iter().collect();
+        let stubs: HashMap<PathBuf, String> = render_classes(testing::sample_classes(), "generated", None).into_iter().collect();
         let kotlin = &stubs[&PathBuf::from("p/p.kt")];
         let expected = [
             "public fun String.shout(): String",
@@ -1610,13 +1711,44 @@ mod tests {
     }
 
     #[test]
+    fn documents_stubs_from_javadoc() {
+        let docs = javadoc::Docs::from_pages(&javadoc::testing::sample_pages());
+        let stubs: HashMap<PathBuf, String> = render_classes(testing::sample_classes(), "generated", Some(&docs)).into_iter().collect();
+        let java = &stubs[&PathBuf::from("p/p.java")];
+        let expected = [
+            "    public <T> void wrap(List<T> items);",
+            "     * Makes a thing holding `value`.",
+            "     * @param value the value, at least `0`",
+            "     * @throws IllegalArgumentException if `value &lt; 0`",
+            "         * Builds the thing.",
+            " * A thing written in Java, made with `of`.",
+        ];
+        for line in expected {
+            assert!(java.lines().any(|l| l == line), "`{line}` missing from:\n{java}");
+        }
+        let kotlin = &stubs[&PathBuf::from("p/p.kt")];
+        let expected = [
+            " * Greets people by name.",
+            "     * @param times how many times, from 1",
+            "     * val g = Greeter(\"Ann\")",
+            " * The string in upper case, with `\"!\"` after it.",
+        ];
+        for line in expected {
+            assert!(kotlin.lines().any(|l| l == line), "`{line}` missing from:\n{kotlin}");
+        }
+        // Without a Javadoc jar, Java parameters keep the names the class file gives.
+        let plain: HashMap<PathBuf, String> = render_classes(testing::sample_classes(), "generated", None).into_iter().collect();
+        assert!(!plain[&PathBuf::from("p/p.java")].contains("/**"));
+    }
+
+    #[test]
     fn renders_klib_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let klib = dir.path().join("example");
         let package = klib.join("default").join("linkdata").join("package_com.example");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(package.join("0_example.knm"), testing::sample_fragment()).unwrap();
-        let stubs = klib_stubs(&klib).unwrap();
+        let stubs = klib_stubs(&klib, None).unwrap();
         assert_eq!(stubs.len(), 1);
         let (path, text) = &stubs[0];
         assert_eq!(path, &PathBuf::from("com/example/com.example.kt"));

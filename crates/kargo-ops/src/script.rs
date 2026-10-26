@@ -256,12 +256,19 @@ pub fn dependency_metadata(config: &Config, text: &str, fetch_sources: bool) -> 
             } else {
                 client.cached_sources(&node.module, &node.version, &node.files)
             };
+            // Without sources, the Javadoc jar documents the library's compiled declarations.
+            let javadoc = match &sources {
+                Some(_) => None,
+                None if fetch_sources => client.fetch_javadoc(&node.module, &node.version).ok().flatten(),
+                None => client.cached_javadoc(&node.module, &node.version, &node.files),
+            };
             for file in &node.files {
                 entries.push(json!({
                     "module": node.module.to_string(),
                     "version": node.version,
                     "path": file.display().to_string(),
                     "sources": sources.as_ref().map(|path| path.display().to_string()),
+                    "javadoc": javadoc.as_ref().map(|path| path.display().to_string()),
                 }));
             }
         }

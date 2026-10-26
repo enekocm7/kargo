@@ -770,15 +770,17 @@ Download all dependencies and toolchains so later builds can run offline, and lo
 | Option | Meaning |
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
-| `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. Libraries that publish none are skipped. Sources jars are not recorded in `kargo.lock` |
+| `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. For a library that publishes none, download its `-javadoc.jar` instead, so editors still [show its documentation](../../guides/kotlin-server/#documentation-from-javadoc-jars). Libraries with neither are skipped. Sources and Javadoc jars are not recorded in `kargo.lock` |
 | `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint), [`kargo lint`](../../guides/formatting-and-linting/) (detekt) and R8 for JVM optimization |
 | `-p, --package <name>`, `--workspace` | Which packages to fetch for |
 
 ```console
 $ kargo fetch --sources
  Downloading kotlin-stdlib-2.4.21-sources.jar
-     Fetched 12 sources jars
+     Fetched 12 sources jars and 2 javadoc jars
 ```
+
+The count of javadoc jars is left out when there are none.
 
 ## `kargo generate`
 
