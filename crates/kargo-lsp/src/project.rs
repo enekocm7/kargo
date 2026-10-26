@@ -44,7 +44,7 @@ pub fn fetch_sources(config: &Config, root: &Path, modules: &[(String, String)])
     }))
 }
 
-/// Generates the Kotlin declarations of the npm packages of each package with a Wasm target, as
+/// Generates the Kotlin declarations of the npm packages of each package's Wasm and JS targets, as
 /// `kargo build` does (`kargo_ops::npm::declarations`): installs the packages if needed and writes
 /// the declarations where `kargo metadata` says (`npm-declarations`).
 pub fn npm_declarations(config: &Config, root: &Path) -> Result<()> {
@@ -52,15 +52,39 @@ pub fn npm_declarations(config: &Config, root: &Path) -> Result<()> {
     let first = BuildContext::new(config, &project, project.members()[0], ProfileKind::Dev)?;
     for i in 0..project.packages().len() {
         let ctx = first.for_package(i);
-        if ctx.ws.manifest().targets.wasm.as_ref().is_none_or(|w| w.npm_dependencies.is_empty()) {
-            continue;
+        let targets = &ctx.ws.manifest().targets;
+        if targets.wasm.as_ref().is_some_and(|w| !w.npm_dependencies.is_empty()) {
+            let setup = ctx.setup(TargetKind::Wasm)?;
+            // The npm packages Maven klibs ask for; path dependencies aren't built for theirs.
+            let libraries = wasm_resolution(&ctx, &setup, false)?.files();
+            kargo_ops::npm::declarations(&ctx, TargetKind::Wasm, &libraries)?;
         }
-        let setup = ctx.setup(TargetKind::Wasm)?;
-        // The npm packages Maven klibs ask for; path dependencies aren't built for theirs.
-        let libraries = wasm_resolution(&ctx, &setup, false)?.files();
-        kargo_ops::npm::declarations(&ctx, &libraries)?;
+        if targets.js.as_ref().is_some_and(|j| !j.npm_dependencies.is_empty()) {
+            let setup = ctx.setup(TargetKind::Js)?;
+            let libraries = kargo_ops::ops::build::js_resolution(&ctx, &setup, false)?.files();
+            kargo_ops::npm::declarations(&ctx, TargetKind::Js, &libraries)?;
+        }
     }
     Ok(())
+}
+
+/// Writes the Kotlin declarations of the TypeScript modules of each package's Wasm and JS targets, as
+/// `kargo build` does (`kargo_ops::js_sources::generate`), where `kargo metadata` says
+/// (`js-declarations`). Nothing is installed or run, so this is cheap enough for every save of a
+/// TypeScript file. Returns whether any file changed.
+pub fn js_declarations(root: &Path) -> Result<bool> {
+    let project = Project::discover(root, None)?;
+    let mut changed = false;
+    for ws in project.packages() {
+        let targets = &ws.manifest().targets;
+        for target in [TargetKind::Wasm, TargetKind::Js] {
+            let enabled = if target == TargetKind::Wasm { targets.wasm.is_some() } else { targets.js.is_some() };
+            if enabled {
+                changed |= !kargo_ops::js_sources::generate(ws, &ProfileKind::Dev, target)?.changed.is_empty();
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// The project's fingerprint (see `kargo metadata --fingerprint`).
@@ -387,6 +411,9 @@ fn roots(target: &Value, test: bool, part: Roots) -> Vec<(String, &'static str)>
     if part != Roots::Common {
         // The declarations of the Wasm target's npm packages are generated main code.
         if !test && let Some(dir) = target["npm-declarations"].as_str() {
+            out.push((dir.to_owned(), source_type));
+        }
+        if !test && let Some(dir) = target["js-declarations"].as_str() {
             out.push((dir.to_owned(), source_type));
         }
         out.extend(dirs(resources).into_iter().map(|dir| (dir, resource_type)));

@@ -126,6 +126,7 @@ test-fixtures/       test helpers the tests of dependent packages can use (`test
 benches/             common benchmarks for kargo bench (JVM); benches-jvm/ for JVM-only ones
 resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm or JS browser app
 composeResources/    Compose images, fonts, strings and files, read through the generated Res class
+js/                  your own JavaScript and TypeScript modules for Wasm and JS (`js-sources`); Kotlin gets declarations
 android/             AndroidManifest.xml, res/, assets/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
 c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
@@ -190,6 +191,7 @@ environment = "js"          # or "browser" (serves a page, tests in a headless b
 # wasm-opt = false          # release builds run wasm-opt from PATH if there is one; or the path of one
 # web-resources = ["web/raylib.mjs", "web/raylib.wasm"]  # a library's files, copied next to every browser app using it
 # web-init = "web/init.mjs" # a library's script the generated page imports before the app module
+# js-sources = ["js"]       # your own .js/.ts modules: copied or compiled with tsc to js/, declared in Kotlin as js.<path>
 
 # [target.wasm.npm-dependencies]
 # "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for; Kotlin gets declarations from their .d.ts
@@ -201,9 +203,10 @@ environment = "node"        # or "browser" (serves a page, tests in a headless b
 # module-name = "hello"     # name of the compiled files; default: the package name
 # npm-name = "@acme/hello"  # npm name of a library; default: the lowercase package name
 # package-manager = "pnpm"  # npm, pnpm or bun; default: first on PATH
+# js-sources = ["js"]       # your own .js/.ts modules, as for Wasm
 
 # [target.js.npm-dependencies]
-# "left-pad" = "1.3.0"      # npm packages besides those your Kotlin/JS libraries ask for; declare them with @JsModule
+# "left-pad" = "1.3.0"      # npm packages besides those your Kotlin/JS libraries ask for; Kotlin gets declarations from their .d.ts
 
 [target.native]
 platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...

@@ -1528,6 +1528,112 @@ fn wasm_calls_npm_packages_through_generated_declarations() {
 }
 
 #[test]
+fn kotlin_js_calls_npm_packages_through_generated_declarations() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["web", "--target", "js"]);
+    let manifest = t.dir.path().join("web/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text}\n[target.js.npm-dependencies]\nexpress = \"5.1.0\"\n")).unwrap();
+    t.write(
+        "web/src/Main.kt",
+        "import express.express\n\nfun main() {\n    val app = express()\n    println(\"env: \" + app.get(\"env\"))\n}\n",
+    );
+    t.kargo("web")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generating Kotlin declarations for npm packages express"))
+        .stderr(predicate::str::contains("warning").not())
+        .stdout(predicate::str::contains("env: development"));
+    assert!(t.dir.path().join("web/target/debug/generated/npm-js/express/Default.kt").is_file());
+}
+
+/// A Kotlin module that calls a function of its own TypeScript module, which calls back into an
+/// `@JsExport` Kotlin function through the module's `.d.mts`.
+fn typescript_interop(t: &E2e, name: &str, target: &str) {
+    t.create(&[name, "--target", target]);
+    t.write(
+        &format!("{name}/js/greeter.ts"),
+        "import { exclaim } from \"../{name}.mjs\";\n\n\
+         /** Greets `name`. */\nexport function greet(name: string, times: number): string {\n    \
+         return exclaim(`Hello, ${name}`) + \" x\" + times;\n}\n",
+    );
+    t.write(
+        &format!("{name}/src/Main.kt"),
+        "import js.greeter.greet\n\n@OptIn(kotlin.js.ExperimentalJsExport::class)\n@JsExport\nfun exclaim(text: String): String = \"$text!\"\n\n\
+         fun main() = println(greet(\"Kargo\", 2))\n",
+    );
+}
+
+#[test]
+fn wasm_and_typescript_call_each_other() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    typescript_interop(&t, "mixed", "wasm");
+    t.write("mixed/tests/GreeterTest.kt", "import js.greeter.greet\nimport kotlin.test.*\n\nclass GreeterTest {\n    @Test\n    fun greets() = assertEquals(\"Hello, test! x1\", greet(\"test\", 1))\n}\n");
+    t.kargo("mixed")
+        .arg("run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("TypeScript module (tsc"))
+        .stdout(predicate::str::contains("Hello, Kargo! x2"));
+    let out = t.dir.path().join("mixed/target/debug/wasm");
+    assert!(out.join("js/greeter.js").is_file() && out.join("mixed.d.mts").is_file());
+    assert!(t.dir.path().join("mixed/target/debug/generated/js-sources/js/greeter/Exports.kt").is_file());
+    t.kargo("mixed").arg("test").assert().success();
+    // Nothing changed: tsc does not run again.
+    t.kargo("mixed").arg("build").assert().success().stderr(predicate::str::contains("TypeScript").not());
+
+    // A type error is reported at its line, and fails the build.
+    t.write("mixed/js/greeter.ts", "export function greet(name: string, times: number): string {\n    return times;\n}\n");
+    t.kargo("mixed")
+        .args(["build", "--message-format", "json"])
+        .assert()
+        .code(101)
+        .stdout(predicate::str::contains("\"reason\":\"compiler-message\"").and(predicate::str::contains("greeter.ts")))
+        .stdout(predicate::str::contains("\"line\":2"));
+}
+
+#[test]
+fn kotlin_js_and_typescript_call_each_other() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    typescript_interop(&t, "mixedjs", "js");
+    t.kargo("mixedjs").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kargo! x2"));
+    assert!(t.dir.path().join("mixedjs/target/debug/generated/js-sources-js/js/greeter/Exports.kt").is_file());
+}
+
+#[test]
+fn wasm_browser_app_serves_its_typescript_modules() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    typescript_interop(&t, "page", "wasm");
+    let manifest = t.dir.path().join("page/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap().replace("environment = \"js\"", "environment = \"browser\"");
+    std::fs::write(&manifest, text).unwrap();
+    t.write("page/tests/GreeterTest.kt", "import js.greeter.greet\nimport kotlin.test.*\n\nclass GreeterTest {\n    @Test\n    fun greets() = assertEquals(\"Hello, page! x3\", greet(\"page\", 3))\n}\n");
+    t.kargo("page").arg("test").assert().success();
+    assert!(t.dir.path().join("page/target/debug/wasm/test/js/greeter.js").is_file());
+}
+
+#[test]
 fn fetch_prepares_an_offline_jvm_build() {
     require_e2e!();
     let t = E2e::new();

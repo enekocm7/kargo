@@ -297,6 +297,7 @@ struct RawWasm {
     #[serde(default)]
     web_resources: Vec<PathBuf>,
     web_init: Option<PathBuf>,
+    js_sources: Option<Vec<PathBuf>>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -312,6 +313,7 @@ struct RawJs {
     package_manager: Option<String>,
     #[serde(default)]
     npm_dependencies: BTreeMap<String, String>,
+    js_sources: Option<Vec<PathBuf>>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -594,6 +596,18 @@ fn validate_web_resources(kind: WasmKind, environment: WasmEnvironment, resource
         }
     }
     Ok(())
+}
+
+/// `js-sources` of `[target.<target>]`: directories inside the package, `js/` when not set. An empty
+/// list turns the convention off.
+fn js_sources(target: &str, dirs: Option<Vec<PathBuf>>) -> Result<Vec<PathBuf>> {
+    let Some(dirs) = dirs else { return Ok(vec![PathBuf::from(crate::DEFAULT_JS_SOURCES)]) };
+    for dir in &dirs {
+        if dir.as_os_str().is_empty() || dir.is_absolute() || dir.components().any(|c| c.as_os_str() == "..") {
+            bail!("[target.{target}] `js-sources` lists `{}`; use a directory inside the package", dir.display());
+        }
+    }
+    Ok(dirs)
 }
 
 fn validate_c_sources(c: RawCSources) -> Result<CSources> {
@@ -1803,6 +1817,14 @@ impl RawManifest {
                             let max_gzip_size = w.max_gzip_size.as_deref().map(|s| parse_size("[target.wasm] `max-gzip-size`", s)).transpose()?;
                             let package_manager = w.package_manager.as_deref().map(str::parse).transpose()?;
                             validate_web_resources(kind, environment, &w.web_resources, w.web_init.as_deref())?;
+                            let js_sources = match (environment, w.js_sources) {
+                                // WASI has no JavaScript host.
+                                (WasmEnvironment::Wasi, Some(dirs)) if !dirs.is_empty() => bail!(
+                                    "[target.wasm] `js-sources` are JavaScript modules, which need environment = \"js\" or \"browser\", not \"wasi\""
+                                ),
+                                (WasmEnvironment::Wasi, _) => Vec::new(),
+                                (_, dirs) => js_sources("wasm", dirs)?,
+                            };
                             Ok(WasmTarget {
                                 environment,
                                 kind,
@@ -1823,6 +1845,7 @@ impl RawManifest {
                                 wasm_debugger_custom_formatters: w.wasm_debugger_custom_formatters.unwrap_or(false),
                                 web_resources: w.web_resources,
                                 web_init: w.web_init,
+                                js_sources,
                                 dependencies: deps.parse(&w.dependencies, "target.wasm.dependencies", false, Some(TargetKind::Wasm))?,
                             })
                         })
@@ -1874,6 +1897,7 @@ impl RawManifest {
                                 npm_name: j.npm_name,
                                 package_manager: j.package_manager.as_deref().map(str::parse).transpose()?,
                                 npm_dependencies: j.npm_dependencies,
+                                js_sources: js_sources("js", j.js_sources)?,
                                 dependencies: deps.parse(&j.dependencies, "target.js.dependencies", false, Some(TargetKind::Js))?,
                             })
                         })

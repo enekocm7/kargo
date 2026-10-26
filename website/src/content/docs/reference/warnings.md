@@ -20,6 +20,8 @@ Warnings never change the exit code, and `-q` hides them. In a [workspace](../..
 |---|---|
 | [No sources](#no-sources) | `build`, `check`, `run`, `package` |
 | [Ignored Kotlin scripts](#ignored-kotlin-scripts) | `build`, `check`, `run`, `package`, `test` |
+| [JavaScript modules without types](#javascript-modules-without-types) | `build`, `check`, `run`, `package` |
+| [Exported functions without types](#exported-functions-without-types) | `build`, `check`, `run`, `test`, when the declarations of a TypeScript module change |
 | [Tasks hidden by built-in commands](#tasks-hidden-by-built-in-commands) | every command that works on a package: `build`, `check`, `run`, `test`, `package`, `doc`, `fmt`, `lint`, `fetch`, `tree` |
 | [Odd package versions](#odd-package-versions) | the same commands |
 | [`.env` file tracked by git](#env-file-tracked-by-git) | `run`, `test`, `task`, `env` |
@@ -47,6 +49,22 @@ warning: `src/script.kts` is ignored: Kargo does not compile or run Kotlin scrip
 Kargo compiles `.kt` and `.java` files. A `.kts` file in `src/`, `src-<target>/`, `tests/`, `tests-<target>/` or `examples/` is not compiled and not run, so its code silently does nothing. Move the code into a `.kt` file (a program needs a `fun main`), or delete the file if it is a Gradle build script left over from a [migration](../../migration/from-gradle/). To run a script on its own, without a project, use [`kargo script`](../../guides/scripts/).
 
 Kargo names the first five scripts and counts the rest. A `.kts` file under `resources/` or `test-resources/` is data and is not reported.
+
+## JavaScript modules without types
+
+```text
+warning: `js/legacy.js` has no TypeScript types, so Kotlin gets no declarations for it; write a .d.ts file next to it, or make it a .ts file
+```
+
+Kargo generates Kotlin declarations for the [JavaScript and TypeScript modules](../../guides/wasm/#your-own-javascript-and-typescript) in `js/` (or `js-sources`) from their TypeScript types. A `.js` or `.mjs` file has none unless a `.d.ts` (or `.d.mts`) file with the same name sits next to it, so Kotlin can only call it through `@JsModule` declarations you write yourself. Write the `.d.ts` file, or rename the module to `.ts` and add the types. Kargo names the first five modules and counts the rest. The Wasm and JS targets are checked, the JS target from Kotlin 2.2.20 on.
+
+## Exported functions without types
+
+```text
+warning: `add` in js/math.ts has a parameter or return type without an annotation, so Kotlin sees `JsAny?` there; write the types of exported functions out
+```
+
+Kargo reads the signatures of a TypeScript module's exports, not their bodies, so it can't infer what tsc would: a parameter or return type left to inference is `JsAny?` in the Kotlin declarations. Annotate the exported function (`export function add(a: number, b: number): number`). The warning is printed when the module's declarations change, not on every build.
 
 ## Tasks hidden by built-in commands
 

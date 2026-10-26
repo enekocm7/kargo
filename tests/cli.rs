@@ -805,6 +805,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "env",
         "metadata",
         "classpath",
+        "retrace",
         "ide",
         "lsp",
         "dap",
@@ -2609,6 +2610,54 @@ fn metadata_points_editors_at_the_declarations_of_npm_packages() {
 
     p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"js\"\n"));
     assert_eq!(metadata()["packages"][0]["targets"][0]["npm-declarations"], serde_json::Value::Null);
+}
+
+#[test]
+fn metadata_points_editors_at_the_declarations_of_js_sources_and_kotlin_js_npm_packages() {
+    let p = Project::new();
+    let toml = "[target.wasm]\nenvironment = \"browser\"\n\n[target.js]\n\n[target.js.npm-dependencies]\nleft-pad = \"1.3.0\"\n";
+    p.file("kargo.toml", &manifest("web", toml)).file("src/Main.kt", "fun main() {}\n");
+    let metadata = || -> serde_json::Value {
+        let out = p.kargo().args(["--offline", "metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let generated = |dir: &str| std::path::Path::new("target").join("debug").join("generated").join(dir);
+    let targets = metadata()["packages"][0]["targets"].clone();
+    let (wasm, js) = (&targets[0], &targets[1]);
+    assert_eq!((wasm["kind"].as_str(), js["kind"].as_str()), (Some("wasm"), Some("js")));
+    assert!(std::path::PathBuf::from(js["npm-declarations"].as_str().unwrap()).ends_with(generated("npm-js")), "{js}");
+    // No `js/` directory yet.
+    assert_eq!(wasm["js-sources"], serde_json::json!([]));
+    assert_eq!(wasm["js-declarations"], serde_json::Value::Null);
+
+    p.file("js/canvas.ts", "export function draw(): void {}\n");
+    let targets = metadata()["packages"][0]["targets"].clone();
+    for (target, dir) in [(&targets[0], "js-sources"), (&targets[1], "js-sources-js")] {
+        let sources = target["js-sources"].as_array().unwrap();
+        assert!(sources.len() == 1 && std::path::Path::new(sources[0].as_str().unwrap()).ends_with("js"), "{target}");
+        assert!(std::path::PathBuf::from(target["js-declarations"].as_str().unwrap()).ends_with(generated(dir)), "{target}");
+    }
+
+    // `js-sources = []` turns the convention off.
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\njs-sources = []\n"));
+    assert_eq!(metadata()["packages"][0]["targets"][0]["js-declarations"], serde_json::Value::Null);
+}
+
+#[test]
+fn js_sources_must_be_inside_the_package_and_need_javascript() {
+    let p = Project::new();
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\njs-sources = [\"../shared\"]\n"));
+    p.kargo()
+        .args(["--offline", "metadata", "--no-deps"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("use a directory inside the package"));
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"wasi\"\njs-sources = [\"web\"]\n"));
+    p.kargo().args(["--offline", "metadata", "--no-deps"]).assert().failure().stderr(predicates::str::contains("not \"wasi\""));
+    // WASI ignores the conventional `js/`.
+    p.file("kargo.toml", &manifest("web", "[target.wasm]\nenvironment = \"wasi\"\n")).file("js/a.ts", "export const a = 1;\n");
+    p.kargo().args(["--offline", "metadata", "--no-deps"]).assert().success();
 }
 
 #[test]

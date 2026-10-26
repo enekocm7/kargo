@@ -230,6 +230,7 @@ pub fn warn_about_sources(ctx: &BuildContext, targets: &[TargetKind]) {
         targets.iter().copied().filter(|&t| crate::generate::sources(ctx.ws, &ctx.profile, t, false, &["kt", "java"]).is_empty()).collect();
     let mut messages = warnings::missing_sources(ctx.ws, &bare);
     messages.extend(warnings::ignored_files(ctx.ws));
+    messages.extend(warnings::untyped_modules(ctx.ws, targets));
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, messages);
 }
 
@@ -636,6 +637,7 @@ pub fn prepare_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
     // Outside the Wasm output directory, which is wiped on every recompile;
     // Node.js still finds `target/<profile>/node_modules` from the `.mjs`.
     build.node_modules = crate::npm::install(ctx, TargetKind::Wasm, &build.libraries, &ctx.ws.profile_dir(&ctx.profile))?;
+    crate::js_sources::install(ctx, TargetKind::Wasm, &build.dir, &build.dir, build.node_modules.as_deref())?;
     Ok(Some(build))
 }
 
@@ -654,7 +656,7 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
     let profile = ctx.ws.profile(&ctx.profile)?;
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut srcs = sources(ctx, TargetKind::Wasm, false, &["kt"])?;
-    add_npm_declarations(ctx, &libraries, &mut srcs, &mut kotlin_args)?;
+    add_npm_declarations(ctx, TargetKind::Wasm, &libraries, &mut srcs, &mut kotlin_args)?;
     let unit = WasmCompilation {
         name: wasm.module_name(&manifest.package),
         environment: wasm.environment,
@@ -669,7 +671,8 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
         optimize: profile.optimize,
         array_range_checks: wasm.wasm_enable_array_range_checks,
         debugger_custom_formatters: wasm.wasm_debugger_custom_formatters,
-        declarations: wasm.kind == WasmKind::Library,
+        // An application's too, for the TypeScript modules and any other code that imports it.
+        declarations: true,
         main_args,
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Wasm);
@@ -689,14 +692,17 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
 }
 
 /// Adds the Kotlin declarations generated for the project's npm packages (see
-/// [`crate::npm::declarations`]) to the Wasm main `sources`, and the opt-in they need to `kotlin_args`.
+/// [`crate::npm::declarations`]) and its own TypeScript modules (see [`crate::js_sources::declarations`])
+/// to the main `sources` of `target` (Wasm or JS), and the opt-in they need to `kotlin_args`.
 pub(crate) fn add_npm_declarations(
     ctx: &BuildContext,
+    target: TargetKind,
     libraries: &[PathBuf],
     sources: &mut SourceSet,
     kotlin_args: &mut Vec<String>,
 ) -> Result<()> {
-    let generated = crate::npm::declarations(ctx, libraries)?;
+    let mut generated = crate::npm::declarations(ctx, target, libraries)?;
+    generated.extend(crate::js_sources::declarations(ctx, target)?);
     if generated.is_empty() {
         return Ok(());
     }
@@ -706,14 +712,20 @@ pub(crate) fn add_npm_declarations(
     } else {
         sources.common.extend(generated);
     }
-    npm_opt_in(ctx, kotlin_args);
+    npm_opt_in(ctx, target, kotlin_args);
     Ok(())
 }
 
-/// Adds the opt-in that calls into the npm declarations need, when the project has npm dependencies.
-pub(crate) fn npm_opt_in(ctx: &BuildContext, kotlin_args: &mut Vec<String>) {
+/// Adds the opt-in that calls into the npm declarations need, when the project has npm dependencies
+/// or TypeScript modules with declarations on `target`.
+pub(crate) fn npm_opt_in(ctx: &BuildContext, target: TargetKind, kotlin_args: &mut Vec<String>) {
     let manifest = ctx.ws.manifest();
-    if manifest.targets.wasm.as_ref().is_some_and(|w| !w.npm_dependencies.is_empty()) {
+    let npm = match target {
+        TargetKind::Wasm => manifest.targets.wasm.as_ref().is_some_and(|w| !w.npm_dependencies.is_empty()),
+        TargetKind::Js => manifest.targets.js.as_ref().is_some_and(|j| !j.npm_dependencies.is_empty()),
+        _ => false,
+    };
+    if (npm && crate::npm::declarations_supported(manifest, target)) || crate::js_sources::has_declarations(ctx.ws, target) {
         kotlin_args.extend(crate::npm::interop_opt_in(manifest));
     }
 }
@@ -750,6 +762,7 @@ pub fn prepare_js(ctx: &BuildContext) -> Result<Option<JsBuild>> {
     let Some(mut build) = compile_js(ctx, true)? else { return Ok(None) };
     // Next to the module, where Node.js finds them; linking leaves the directory's other files alone.
     build.node_modules = crate::npm::install(ctx, TargetKind::Js, &build.libraries, &build.dir)?;
+    crate::js_sources::install(ctx, TargetKind::Js, &build.dir, &build.dir, build.node_modules.as_deref())?;
     Ok(Some(build))
 }
 
@@ -766,13 +779,15 @@ pub fn compile_js(ctx: &BuildContext, main_args: bool) -> Result<Option<JsBuild>
     let (jdk, compiler, plugins) = toolchain?;
     let libraries = libraries?;
     let profile = ctx.ws.profile(&ctx.profile)?;
-    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut srcs = sources(ctx, TargetKind::Js, false, &["kt"])?;
+    add_npm_declarations(ctx, TargetKind::Js, &libraries, &mut srcs, &mut kotlin_args)?;
     let name = js.module_name(&manifest.package);
     let unit = JsCompilation {
         name,
         environment: js.environment,
         module_kind: js.module_kind,
-        sources: sources(ctx, TargetKind::Js, false, &["kt"])?,
+        sources: srcs,
         libraries,
         friends: Vec::new(),
         plugins: &plugins,
@@ -782,7 +797,8 @@ pub fn compile_js(ctx: &BuildContext, main_args: bool) -> Result<Option<JsBuild>
         root: ctx.ws.root().to_path_buf(),
         debug: profile.debug,
         optimize: profile.optimize,
-        declarations: js.kind == JsKind::Library,
+        // An application's too, for the TypeScript modules and any other code that imports it.
+        declarations: true,
         main_args,
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Js);

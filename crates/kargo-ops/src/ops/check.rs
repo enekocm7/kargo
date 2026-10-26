@@ -86,7 +86,7 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
 
     let libraries = wasm_libraries(ctx, &setup, false)?;
     let mut main_sources = sources(ctx, TargetKind::Wasm, false, &["kt"])?;
-    add_npm_declarations(ctx, &libraries, &mut main_sources, &mut kotlin_args)?;
+    add_npm_declarations(ctx, TargetKind::Wasm, &libraries, &mut main_sources, &mut kotlin_args)?;
     let main = WasmCompilation {
         name: wasm.module_name(&manifest.package),
         environment: wasm.environment,
@@ -105,6 +105,8 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         main_args: false,
     };
     main.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Wasm, ""))?;
+    let node_modules = Some(ctx.ws.profile_dir(&ctx.profile).join("node_modules")).filter(|d| d.is_dir());
+    crate::js_sources::check(ctx, TargetKind::Wasm, main.name, node_modules.as_deref())?;
 
     let test_sources = sources(ctx, TargetKind::Wasm, true, &["kt"])?;
     if !tests || test_sources.kotlin_files().is_empty() {
@@ -141,17 +143,20 @@ fn check_js(ctx: &BuildContext, tests: bool) -> Result<()> {
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(&ctx.profile)?;
-    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let out = check_dir(ctx, TargetKind::Js);
     let fp_dir = out.join(".fingerprint");
 
+    let libraries = js_libraries(ctx, &setup, false)?;
+    let mut main_sources = sources(ctx, TargetKind::Js, false, &["kt"])?;
+    add_npm_declarations(ctx, TargetKind::Js, &libraries, &mut main_sources, &mut kotlin_args)?;
     let name = js.module_name(&manifest.package);
     let main = JsCompilation {
         name,
         environment: js.environment,
         module_kind: js.module_kind,
-        sources: sources(ctx, TargetKind::Js, false, &["kt"])?,
-        libraries: js_libraries(ctx, &setup, false)?,
+        sources: main_sources,
+        libraries,
         friends: Vec::new(),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
@@ -164,6 +169,8 @@ fn check_js(ctx: &BuildContext, tests: bool) -> Result<()> {
         main_args: false,
     };
     main.check(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Js, ""))?;
+    let node_modules = Some(ctx.ws.output_dir(&ctx.profile, TargetKind::Js).join("node_modules")).filter(|d| d.is_dir());
+    crate::js_sources::check(ctx, TargetKind::Js, name, node_modules.as_deref())?;
 
     let test_sources = sources(ctx, TargetKind::Js, true, &["kt"])?;
     if !tests || test_sources.kotlin_files().is_empty() {

@@ -140,7 +140,7 @@ Kotlin/JS libraries that import npm packages at runtime list them in a `package.
 
 The packages go to `target/<profile>/js/node_modules`, next to the module, where Node.js finds them. For a browser app, the page gets an import map for them and `kargo run` serves them at `/node_modules/` (an ES module app only; a UMD page can't use an import map).
 
-For an npm package of your own, list it in `[target.js.npm-dependencies]` and declare what you use with `@JsModule`:
+For an npm package of your own, list it in `[target.js.npm-dependencies]`. Kargo generates Kotlin declarations for it from its TypeScript declarations, as it does [for Wasm](../wasm/#kotlin-declarations-for-npm-packages), so you call it like a Kotlin library:
 
 ```toml title="kargo.toml"
 [target.js.npm-dependencies]
@@ -148,8 +148,7 @@ left-pad = "1.3.0"
 ```
 
 ```kotlin title="src/Main.kt"
-@JsModule("left-pad")
-external fun leftPad(text: String, length: Int, ch: String): String
+import left_pad.leftPad
 
 fun main() = println("[" + leftPad("7", 3, "0") + "]")
 ```
@@ -157,12 +156,33 @@ fun main() = println("[" + leftPad("7", 3, "0") + "]")
 ```console
 $ kargo run
   Installing npm packages left-pad@1.3.0 (npm)
+  Generating Kotlin declarations for npm packages left-pad
    Compiling user v0.1.0 (js)
      Running `node target/debug/js/user.mjs`
 [007]
 ```
 
-Unlike on Wasm, Kargo doesn't generate Kotlin declarations from an npm package's TypeScript declarations for Kotlin/JS: write the `external` declarations you need, or use `dynamic`. The Kotlin docs cover [JavaScript interop](https://kotlinlang.org/docs/js-interop.html) and [`@JsModule`](https://kotlinlang.org/docs/js-modules.html).
+The declarations go to `target/<profile>/generated/npm-js/` (`@types` packages to `target/<profile>/npm-types-js/`), with the same Kotlin packages, names and [type mapping](../wasm/#kotlin-declarations-for-npm-packages) as on Wasm: they use the interop types `JsAny`, `JsString`, `JsArray` and `Promise`, which Kotlin/JS shares with Kotlin/Wasm since Kotlin 2.2.20, so code that calls an npm package compiles for both targets. Kargo passes the opt-in `kotlin.js.ExperimentalWasmJsInterop` they need. With an older Kotlin, Kargo warns and generates none.
+
+A package without TypeScript declarations gets none, with a warning: write the `external` declarations you need with `@JsModule`, or use `dynamic`. The Kotlin docs cover [JavaScript interop](https://kotlinlang.org/docs/js-interop.html) and [`@JsModule`](https://kotlinlang.org/docs/js-modules.html).
+
+## Your own JavaScript and TypeScript
+
+JavaScript and TypeScript modules in `js/` work as they do [on Wasm](../wasm/#your-own-javascript-and-typescript): Kargo copies the JavaScript, compiles the TypeScript with tsc into `target/<profile>/js/js/`, and generates Kotlin declarations for them into `target/<profile>/generated/js-sources-js/`, so `js/greeter.ts` is the Kotlin package `js.greeter`:
+
+```ts title="js/greeter.ts"
+export function greet(name: string): string {
+    return `Hello, ${name}!`;
+}
+```
+
+```kotlin title="src/Main.kt"
+import js.greeter.greet
+
+fun main() = println(greet("Kargo"))
+```
+
+Set `js-sources` in `[target.js]` to use other directories. The TypeScript is type-checked against the module's own `<name>.d.mts`, so it can import the `@JsExport` declarations of your Kotlin code (`import { exclaim } from "../app.mjs"`). With both targets enabled, Wasm and JS share `js/` and each gets its own copy of the modules and declarations. The modules are ES modules; use `module-kind = "es"` (the default) for a program that imports them.
 
 ## Multiplatform
 
@@ -191,8 +211,9 @@ Dependencies only the JS target uses go in `[target.js.dependencies]`. Kargo res
 |---|---|
 | `<name>.mjs` or `<name>.js` | The program or library, with the standard library and the other klibs linked in |
 | `<name>.mjs.map` | The source map (dev builds) |
-| `<name>.d.mts` or `<name>.d.ts` | TypeScript declarations (libraries only) |
+| `<name>.d.mts` or `<name>.d.ts` | TypeScript declarations of the `@JsExport` declarations |
 | `package.json` | The npm package (libraries only) |
+| `js/` | Your own [JavaScript and TypeScript modules](#your-own-javascript-and-typescript), TypeScript compiled |
 | `index.html` and your `resources/` | The page of a `browser` app |
 | `node_modules/` | The npm packages the module imports |
 | `test/` | The tests and their runner, after `kargo test` |
@@ -201,5 +222,4 @@ Dependencies only the JS target uses go in `[target.js.dependencies]`. Kargo res
 
 - `kargo test --list` doesn't list JS tests yet.
 - The whole program is linked into one file; there is no per-module output or incremental linking yet.
-- Kotlin declarations are not generated from TypeScript for JS (they are for [Wasm](../wasm/#kotlin-declarations-for-npm-packages)).
 - `kargo run` serves a browser app as it is; it doesn't rebuild or reload the page when the sources change.

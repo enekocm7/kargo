@@ -1094,7 +1094,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(&ctx.profile)?;
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
-    super::build::npm_opt_in(ctx, &mut kotlin_args);
+    super::build::npm_opt_in(ctx, TargetKind::Wasm, &mut kotlin_args);
     let name = format!("{}-test", wasm.module_name(&manifest.package));
     let main_node_modules = main.as_ref().and_then(|m| m.node_modules.clone());
     let unit = WasmCompilation {
@@ -1115,6 +1115,10 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         main_args: false,
     };
     unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Wasm), &|| compiling(ctx, TargetKind::Wasm, ", tests"))?;
+    // The main module's JavaScript and TypeScript modules, which the test module imports from its own directory.
+    let main_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm);
+    crate::js_sources::install(ctx, TargetKind::Wasm, &unit.output, &main_dir, main_node_modules.as_deref())?;
+    crate::js_sources::alias_module(ctx.ws, TargetKind::Wasm, &unit.output, wasm.module_name(&manifest.package), &name)?;
     // `prepare_wasm` installed the main npm packages one level up; dev-dependencies
     // that need more get their own `node_modules` next to the test module.
     let node_modules =
@@ -1183,7 +1187,8 @@ fn test_js(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(&ctx.profile)?;
-    let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
+    super::build::npm_opt_in(ctx, TargetKind::Js, &mut kotlin_args);
     let name = format!("{}-test", js.module_name(&manifest.package));
     let main_node_modules = main.as_ref().and_then(|m| m.node_modules.clone());
     // Below the main module, so Node.js finds its npm packages from here too.
@@ -1207,6 +1212,10 @@ fn test_js(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         main_args: false,
     };
     unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Js), &|| compiling(ctx, TargetKind::Js, ", tests"))?;
+    // The main module's JavaScript and TypeScript modules, which the test module imports from its own directory.
+    let main_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Js);
+    crate::js_sources::install(ctx, TargetKind::Js, &output, &main_dir, main_node_modules.as_deref())?;
+    crate::js_sources::alias_module(ctx.ws, TargetKind::Js, &output, js.module_name(&manifest.package), &name)?;
     // The main npm packages are one level up; dev-dependencies that need more get their own.
     let node_modules =
         if main_node_modules.is_none() || npm_dependencies(&unit.libraries)? != npm_dependencies(&js_libraries(ctx, &setup, false)?)? {

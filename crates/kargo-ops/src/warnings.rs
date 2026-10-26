@@ -1,6 +1,7 @@
 //! Warnings about projects that are valid but almost certainly not what the user meant:
 //! targets with no sources, Kotlin scripts that are never compiled, tasks that a built-in
-//! command hides, and package versions that do not look like versions.
+//! command hides, package versions that do not look like versions, and JavaScript modules
+//! that Kotlin gets no declarations for.
 //!
 //! Each check returns plain messages; [`emit`] prints them with `Shell::warn`.
 
@@ -95,6 +96,39 @@ pub fn ignored_files(ws: &Workspace) -> Vec<String> {
         .collect();
     if scripts.len() > LISTED_FILES {
         messages.push(format!("{} more Kotlin scripts (.kts) are ignored too", scripts.len() - LISTED_FILES));
+    }
+    messages
+}
+
+/// Warnings about the JavaScript modules of the Wasm and JS targets among `targets` (`js/`) that have
+/// no TypeScript types (a `.d.ts` or `.d.mts` next to them), so Kotlin gets no declarations for them.
+pub fn untyped_modules(ws: &Workspace, targets: &[TargetKind]) -> Vec<String> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for &target in targets.iter().filter(|t| matches!(t, TargetKind::Wasm | TargetKind::Js)) {
+        if crate::npm::declarations_supported(ws.manifest(), target) {
+            dirs.extend(crate::js_sources::dirs(ws, target).into_iter().filter(|d| !dirs.contains(d)).collect::<Vec<_>>());
+        }
+    }
+    let root = ws.root();
+    let untyped: Vec<String> = dirs
+        .iter()
+        .flat_map(|dir| collect_files(dir, &["js", "mjs"]))
+        .filter(|file| {
+            let name = file.to_string_lossy();
+            let stem = name.rsplit_once('.').map_or(&*name, |(stem, _)| stem);
+            !["d.ts", "d.mts"].iter().any(|ext| Path::new(&format!("{stem}.{ext}")).is_file())
+        })
+        .map(|file| slash(file.strip_prefix(root).unwrap_or(&file)))
+        .collect();
+    let mut messages: Vec<String> = untyped
+        .iter()
+        .take(LISTED_FILES)
+        .map(|file| {
+            format!("`{file}` has no TypeScript types, so Kotlin gets no declarations for it; write a .d.ts file next to it, or make it a .ts file")
+        })
+        .collect();
+    if untyped.len() > LISTED_FILES {
+        messages.push(format!("{} more JavaScript modules have no TypeScript types too", untyped.len() - LISTED_FILES));
     }
     messages
 }
@@ -202,6 +236,20 @@ mod tests {
         let messages = ignored_files(&ws);
         assert_eq!(messages.len(), LISTED_FILES + 1);
         assert_eq!(messages.last().unwrap(), "3 more Kotlin scripts (.kts) are ignored too");
+    }
+
+    #[test]
+    fn javascript_modules_without_types_are_named() {
+        let (dir, _) = project(&["src/Main.kt", "js/plain.js", "js/typed.mjs", "js/typed.d.mts", "js/main.ts"]);
+        std::fs::write(dir.path().join("kargo.toml"), "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n[target.wasm]\n").unwrap();
+        let ws = Workspace::load(&dir.path().join("kargo.toml")).unwrap();
+        assert_eq!(
+            untyped_modules(&ws, &[TargetKind::Wasm]),
+            [
+                "`js/plain.js` has no TypeScript types, so Kotlin gets no declarations for it; write a .d.ts file next to it, or make it a .ts file"
+            ]
+        );
+        assert!(untyped_modules(&ws, &[TargetKind::Jvm]).is_empty(), "only the web targets generate declarations");
     }
 
     #[test]

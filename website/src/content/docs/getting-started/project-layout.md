@@ -23,6 +23,7 @@ my-app/
 ├── resources/           JVM resources, put on the classpath and in the jar; also the files of a Wasm or JS browser app
 ├── test-resources/      resources for JVM tests
 ├── composeResources/    Compose images, fonts, strings and files, read through the generated Res class
+├── js/                  your own JavaScript and TypeScript modules for the Wasm and JS targets
 ├── android/             AndroidManifest.xml, res/, assets/
 ├── interop/             cinterop .def files for C libraries (Kotlin/Native)
 ├── c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
@@ -59,6 +60,10 @@ With `[frameworks] compose`, `composeResources/` holds the images, fonts, string
 Kargo compiles `.kt` files (and `.java` files on the JVM). Kotlin scripts (`.kts`) in a project are not compiled or run, and a target with no sources has nothing to build; `kargo build` prints a [warning](../../reference/warnings/) for both instead of staying silent.
 
 Code that a tool writes from other files, such as classes from `.proto` files or a `BuildConfig`, does not belong in `src/`. Declare a [`[[generate]]` step](../../guides/code-generation/) and Kargo writes the code to `target/generated/<profile>/<name>/` and compiles it with your sources.
+
+## JavaScript and TypeScript
+
+`js/` holds JavaScript and TypeScript modules for the Wasm and JS targets. Kargo puts them in `js/` next to the compiled module (compiling TypeScript with tsc) and generates Kotlin declarations for them, so `js/greeter.ts` is the Kotlin package `js.greeter`. Other directories can be set with `js-sources`. See [Your own JavaScript and TypeScript](../../guides/wasm/#your-own-javascript-and-typescript).
 
 ## Benchmarks
 
@@ -138,12 +143,14 @@ target/
 │   │   ├── generated/            sources Kargo writes: compose-resources/ (the Res class), env/ (BuildConfig), ksp/ (KSP output)
 │   │   ├── examples/             compiled examples, one directory each
 │   │   └── my-app-0.1.0.jar
-│   ├── wasm/                     the module (.mjs, .wasm); for a browser app also index.html and resources/, for a library package.json and .d.mts
+│   ├── wasm/                     the module (.mjs, .wasm, .d.mts) and js/ with your JavaScript modules; for a browser app also index.html and resources/, for a library package.json
 │   ├── node_modules/             npm packages of Wasm dependencies, if any
 │   ├── js/                       the module (.mjs or .js) and its node_modules/; for a browser app also index.html and resources/, for a library package.json and .d.ts; test/ for the tests
 │   ├── js-build/                 Kotlin/JS klibs and the module before it is copied to js/
-│   ├── npm-types/                @types packages for npm dependencies without TypeScript declarations
-│   ├── generated/npm/            Kotlin declarations generated for [target.wasm.npm-dependencies]
+│   ├── npm-types/                @types packages for npm dependencies without TypeScript declarations (npm-types-js/ for JS)
+│   ├── generated/npm/            Kotlin declarations generated for [target.wasm.npm-dependencies] (npm-js/ for [target.js.npm-dependencies])
+│   ├── generated/js-sources/     Kotlin declarations generated for the TypeScript modules of js/ (js-sources-js/ for JS)
+│   ├── ts/                       the TypeScript modules as tsc compiles them, per target
 │   ├── native/                   one directory per platform; cinterop/ holds C bindings, c/ the compiled C sources, include/ the C header of a shared or static library, bin/ the [[bin]] executables
 │   └── doc/                      API documentation from kargo doc
 ├── release/                      same layout, built with --release

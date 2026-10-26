@@ -179,7 +179,7 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, th
 - *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
 - The IDE analyzes each module for one platform. In a package with several targets, common code (`src/`) is analyzed like the first target, so completion there also offers that platform's APIs. *Tools → Kargo → Check* shows what fails on the other targets.
 - The npm packages of a [path dependency](../workspaces/#path-dependencies) are not described to the IDE: the import doesn't build a path dependency to read the npm packages in its klibs.
-- The [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) generated for `[target.wasm.npm-dependencies]` are not yet a source root of the Wasm module, so calls into npm packages show as unresolved in the IDE; they compile and run. `kargo lsp` with Kargo's own Kotlin server, in other editors, reads them.
+- The [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) generated for `npm-dependencies` and for your own [TypeScript modules](../wasm/#your-own-javascript-and-typescript) are not yet a source root of the Wasm and JS modules, so calls into them show as unresolved in the IDE; they compile and run. `kargo lsp` with Kargo's own Kotlin server, in other editors, reads them.
 - Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are handed to the IDE but it may not apply them, so it can report errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
 - The IDE reads libraries compiled by its own Kotlin version or one newer at most, see the note under [Project import](#project-import).
 

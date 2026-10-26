@@ -189,9 +189,16 @@ fn uninstall_removes_the_binary_and_with_purge_the_home() {
 #[test]
 fn version_flags_print_the_version_and_host() {
     let p = Project::new();
-    p.kargo().arg("--version").assert().success().stdout(predicate::str::starts_with("kargo 0.1.0\n"));
-    p.kargo().arg("-V").assert().success().stdout(predicate::str::starts_with("kargo 0.1.0\n"));
-    p.kargo().arg("-vV").assert().success().stdout(predicate::str::contains("release: 0.1.0")).stdout(predicate::str::contains("host: "));
+    // The version of this crate, which is the binary's.
+    let version = env!("CARGO_PKG_VERSION");
+    p.kargo().arg("--version").assert().success().stdout(predicate::str::starts_with(format!("kargo {version}\n")));
+    p.kargo().arg("-V").assert().success().stdout(predicate::str::starts_with(format!("kargo {version}\n")));
+    p.kargo()
+        .arg("-vV")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("release: {version}")))
+        .stdout(predicate::str::contains("host: "));
     // No notice when stderr is not a terminal, even when a newer release exists.
     let releases = tempfile::tempdir().unwrap();
     publish(&p, releases.path(), "99.0.0", "new", None);
