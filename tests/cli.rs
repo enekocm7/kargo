@@ -805,6 +805,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "env",
         "metadata",
         "classpath",
+        "retrace",
         "ide",
         "lsp",
         "dap",
