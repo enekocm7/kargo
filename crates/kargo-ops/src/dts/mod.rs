@@ -5,7 +5,8 @@
 //!
 //! The files are read as TypeScript would ([`program`]), parsed into declarations
 //! ([`parser`]), and turned into `external` declarations ([`kotlin`]): one Kotlin package per npm
-//! package, named after it (`express`, `@acme/my-lib` is `acme.my_lib`). Only signatures are read,
+//! package, named after it (`express`, `@acme/my-lib` is `acme.my_lib`), or one per subpath of a
+//! package whose `exports` map has no root (`cubing/alg` is `cubing.alg`). Only signatures are read,
 //! so a `.ts` file's function bodies are skipped and nothing is inferred from them.
 
 mod kotlin;
@@ -25,7 +26,7 @@ pub use kotlin::{function_name, kotlin_package};
 pub use program::types_name;
 
 /// Bumped whenever the generated Kotlin changes, so that declarations generated before are written again.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 
 /// What [`generate`] wrote.
 #[derive(Debug, Default)]
@@ -39,7 +40,7 @@ pub struct Generated {
 /// Whether the npm package installed in `node_modules` has TypeScript declarations, of its own
 /// or from `@types`.
 pub fn has_declarations(node_modules: &Path, package: &str) -> bool {
-    program::resolve_bare(node_modules, package).is_some()
+    program::resolve_bare(node_modules, package).is_some() || !program::subpaths(node_modules, package).is_empty()
 }
 
 /// Writes Kotlin declarations for the npm `packages` into `out` (replacing what is there),
@@ -50,14 +51,19 @@ pub fn generate(packages: &[String], roots: &[PathBuf], out: &Path) -> Result<Ge
     let mut generated = Generated::default();
     let mut found = Vec::new();
     for npm in packages.iter().filter(|p| !p.starts_with("@types/")) {
-        match prog.package(npm) {
-            Some(module) => found.push((npm, module)),
-            None => generated.untyped.push(npm.clone()),
+        let modules = prog.package_modules(npm);
+        if modules.is_empty() {
+            generated.untyped.push(npm.clone());
         }
+        found.extend(modules);
     }
     let mut generator = kotlin::Generator::new(&mut prog);
-    for (npm, module) in found {
-        generator.package(npm, module);
+    // Every module's classes first, so that one subpath's references to a class of another use the class.
+    for (spec, module) in &found {
+        generator.classes(&kotlin_package(spec), spec, *module);
+    }
+    for (spec, module) in found {
+        generator.package(&spec, module);
     }
     let output = generator.finish();
 

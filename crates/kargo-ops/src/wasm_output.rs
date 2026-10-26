@@ -322,8 +322,24 @@ pub fn import_map(node_modules: &Path) -> BTreeMap<String, String> {
         let entry = resolve_extension(&dir, esm_entry(&package).as_deref().unwrap_or("index.js"));
         imports.insert(name.clone(), format!("/node_modules/{name}/{entry}"));
         imports.insert(format!("{name}/"), format!("/node_modules/{name}/"));
+        for (sub, target) in subpath_entries(&package) {
+            imports.insert(format!("{name}/{sub}"), format!("/node_modules/{name}/{}", resolve_extension(&dir, &target)));
+        }
     }
     imports
+}
+
+/// The subpaths of a package's `exports` map (`./alg` of `cubing`) and the files a browser loads
+/// for them, since a subpath's module is rarely the file of the same name. Patterns are left out.
+fn subpath_entries(package: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(map) = package.get("exports").and_then(|e| e.as_object()) else { return Vec::new() };
+    map.iter()
+        .filter_map(|(key, value)| {
+            let sub = key.strip_prefix("./").filter(|s| !s.is_empty() && !s.contains('*'))?;
+            let target = condition_target(value)?;
+            Some((sub.to_owned(), target))
+        })
+        .collect()
 }
 
 /// The names of the packages in `node_modules`, scoped ones as `@scope/name`.
@@ -667,6 +683,11 @@ mod tests {
         write("left-pad/lib/index.js", "");
         write(".bin/left-pad", "");
         write(".kargo-package.json", "{}");
+        write(
+            "cubing/package.json",
+            r#"{"exports":{"./alg":{"types":"./dist/alg.d.ts","import":"./dist/alg.js"},"./scramble":"./dist/scramble","./*":"./dist/*.js"}}"#,
+        );
+        write("cubing/dist/scramble.js", "");
 
         let imports = import_map(modules);
         assert_eq!(
@@ -674,6 +695,10 @@ mod tests {
             map(&[
                 ("@js-joda/core", "/node_modules/@js-joda/core/dist/js-joda.esm.js"),
                 ("@js-joda/core/", "/node_modules/@js-joda/core/"),
+                ("cubing", "/node_modules/cubing/index.js"),
+                ("cubing/", "/node_modules/cubing/"),
+                ("cubing/alg", "/node_modules/cubing/dist/alg.js"),
+                ("cubing/scramble", "/node_modules/cubing/dist/scramble.js"),
                 ("left-pad", "/node_modules/left-pad/lib/index.js"),
                 ("left-pad/", "/node_modules/left-pad/"),
             ])

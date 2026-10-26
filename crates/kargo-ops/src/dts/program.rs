@@ -205,6 +205,25 @@ impl Program {
         Some(self.ambient.get(name).copied().unwrap_or(scope))
     }
 
+    /// The modules Kotlin code can import from the npm package `name`, with their specifiers: the
+    /// package itself, or each of its subpaths (`cubing/alg`, `cubing/scramble`) when its
+    /// `exports` map has no root entry.
+    pub fn package_modules(&mut self, name: &str) -> Vec<(String, ScopeId)> {
+        if let Some(module) = self.package(name) {
+            return vec![(name.to_owned(), module)];
+        }
+        let subpaths: Vec<String> =
+            self.roots.iter().find_map(|root| Some(subpaths(root, name)).filter(|s| !s.is_empty())).unwrap_or_default();
+        subpaths
+            .into_iter()
+            .filter_map(|sub| {
+                let spec = format!("{name}/{sub}");
+                let module = self.package(&spec)?;
+                Some((spec, module))
+            })
+            .collect()
+    }
+
     // ----- names -----
 
     fn enter(&mut self) -> bool {
@@ -426,7 +445,7 @@ pub fn resolve_bare(root: &Path, spec: &str) -> Option<PathBuf> {
             continue;
         }
         let found = match sub {
-            Some(sub) => resolve_file(&dir.join(sub)),
+            Some(sub) => subpath_entry(&dir, sub).or_else(|| resolve_file(&dir.join(sub))),
             None => package_entry(&dir),
         };
         if found.is_some() {
@@ -453,20 +472,31 @@ pub fn types_name(name: &str) -> String {
     }
 }
 
+/// The `package.json` of a package directory, or `null`.
+fn manifest(dir: &Path) -> serde_json::Value {
+    std::fs::read_to_string(dir.join("package.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// The subpaths of an `exports` map (`{"./alg": ..., "./scramble": ...}`), or `None` when
+/// `exports` describes the package root only (a path, or an object of conditions).
+fn subpath_exports(manifest: &serde_json::Value) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    manifest["exports"].as_object().filter(|map| map.keys().any(|k| k.starts_with('.')))
+}
+
 /// The declaration file a package directory points to: `types`/`typings`, the types of its
-/// `exports`, the `.d.ts` next to its `main`, or `index.d.ts`.
+/// `exports`, the `.d.ts` next to its `main`, or `index.d.ts`. A package whose `exports` lists
+/// subpaths but no `"."` has none: neither Node.js nor TypeScript let code import its root.
 pub fn package_entry(dir: &Path) -> Option<PathBuf> {
-    let manifest: serde_json::Value =
-        std::fs::read_to_string(dir.join("package.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let manifest = manifest(dir);
     let mut candidates: Vec<String> = Vec::new();
     for key in ["types", "typings"] {
         if let Some(s) = manifest[key].as_str() {
             candidates.push(s.to_owned());
         }
     }
-    let root_export = match &manifest["exports"] {
-        serde_json::Value::Object(map) if map.contains_key(".") => map.get(".").cloned().unwrap_or_default(),
-        other => other.clone(),
+    let root_export = match subpath_exports(&manifest) {
+        Some(map) => map.get(".").cloned()?,
+        None => manifest["exports"].clone(),
     };
     collect_types(&root_export, &mut candidates);
     if let Some(main) = manifest["main"].as_str() {
@@ -474,6 +504,73 @@ pub fn package_entry(dir: &Path) -> Option<PathBuf> {
     }
     candidates.push("index".to_owned());
     candidates.iter().find_map(|c| resolve_file(&dir.join(c)))
+}
+
+/// The declaration file of the subpath `sub` (`alg` for `cubing/alg`) of the package in `dir`,
+/// from its `exports` map: an exact entry (`./alg`) or a pattern (`./*`). `None` when the package
+/// has no `exports` map, so that the file at `dir/sub` is used instead.
+fn subpath_entry(dir: &Path, sub: &str) -> Option<PathBuf> {
+    let manifest = manifest(dir);
+    let map = subpath_exports(&manifest)?;
+    let key = format!("./{sub}");
+    let (entry, star) = match map.get(&key) {
+        Some(entry) => (entry, None),
+        None => map.iter().find_map(|(pattern, entry)| {
+            let (prefix, suffix) = pattern.split_once('*')?;
+            let middle = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
+            Some((entry, Some(middle)))
+        })?,
+    };
+    entry_types(entry).into_iter().find_map(|path| {
+        let path = match star {
+            Some(middle) => path.replace('*', middle),
+            None => path,
+        };
+        resolve_file(&dir.join(path))
+    })
+}
+
+/// The subpaths of the npm package `name` (`alg` and `scramble` for `cubing`) that have
+/// declarations, when its `exports` map has no root (`"."`) entry: each is a module of its own
+/// (`cubing/alg`). Patterns (`./*`) and `./package.json` are left out.
+pub fn subpaths(root: &Path, name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for dir in [root.join(name), root.join("@types").join(types_name(name))] {
+        let manifest = manifest(&dir);
+        let Some(map) = subpath_exports(&manifest) else { continue };
+        if map.contains_key(".") {
+            continue;
+        }
+        for key in map.keys() {
+            let Some(sub) = key.strip_prefix("./") else { continue };
+            if sub.is_empty() || sub.contains('*') || sub == "package.json" || out.iter().any(|s| s == sub) {
+                continue;
+            }
+            if subpath_entry(&dir, sub).is_some() {
+                out.push(sub.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The paths an `exports` entry offers for declarations: its `types` conditions, then the
+/// JavaScript files whose `.d.ts` may sit next to them.
+fn entry_types(entry: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_types(entry, &mut out);
+    collect_files(entry, &mut out);
+    out
+}
+
+/// The paths of an `exports` entry, in the order of its conditions.
+fn collect_files(entry: &serde_json::Value, out: &mut Vec<String>) {
+    match entry {
+        serde_json::Value::String(s) => out.push(s.clone()),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_files(item, out)),
+        serde_json::Value::Object(map) => map.values().for_each(|value| collect_files(value, out)),
+        _ => {}
+    }
 }
 
 /// The `types` conditions of an `exports` entry.
