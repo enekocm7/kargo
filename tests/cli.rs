@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{LocalRepo, Project, manifest, which};
+use common::{LocalRepo, OsvServer, Project, manifest, which};
 use predicates::prelude::*;
 
 #[test]
@@ -301,6 +301,158 @@ fn outdated_and_upgrade_edit_versions_in_kargo_toml() {
 
     p.kargo().args(["outdated"]).assert().success().stdout("").stderr(predicate::str::contains("newest version"));
     p.kargo().args(["upgrade", "com.acme:nope"]).assert().failure().stderr(predicate::str::contains("not declared"));
+}
+
+fn osv_advisory(id: &str, alias: &str, package: &str, fixed: &str, severity: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "modified": "2026-01-01T00:00:00Z",
+        "aliases": [alias],
+        "summary": format!("Bad things in {package}"),
+        "affected": [{
+            "package": { "ecosystem": "Maven", "name": package },
+            "ranges": [{ "type": "ECOSYSTEM", "events": [{ "introduced": "0" }, { "fixed": fixed }] }]
+        }],
+    })
+    .as_object()
+    .unwrap()
+    .clone()
+    .into_iter()
+    .chain(severity.as_object().unwrap().clone())
+    .collect()
+}
+
+#[test]
+fn audit_reports_advisories_from_osv_and_fails_ci() {
+    let repo = LocalRepo::new();
+    repo.publish("com.acme:widget", "1.2.0", &[])
+        .publish("com.acme:widget", "1.2.5", &[])
+        .publish("com.acme:app", "1.0", &[("com.acme:widget", "1.2.0")])
+        .publish("com.acme:direct", "1.0.0", &[])
+        .publish("com.acme:direct", "1.0.3", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    let critical = osv_advisory(
+        "GHSA-wwww-wwww-wwww",
+        "CVE-2026-1111",
+        "com.acme:widget",
+        "1.2.5",
+        serde_json::json!({ "severity": [{ "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }] }),
+    );
+    let moderate = osv_advisory(
+        "GHSA-dddd-dddd-dddd",
+        "CVE-2026-2222",
+        "com.acme:direct",
+        "1.0.3",
+        serde_json::json!({ "database_specific": { "severity": "MODERATE" } }),
+    );
+    let osv = OsvServer::start(vec![(critical, vec![("com.acme:widget", "1.2.0")]), (moderate, vec![("com.acme:direct", "1.0.0")])]);
+    let deps = format!(
+        "
+[dependencies]
+\"com.acme:app\" = \"1.0\"
+\"com.acme:direct\" = \"1.0.0\"  # keep me
+
+[repositories]
+local = \"{}\"
+",
+        repo.url()
+    );
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &deps));
+    let audit = || {
+        let mut cmd = p.kargo();
+        cmd.env("KARGO_OSV_URL", &osv.url).arg("audit");
+        cmd
+    };
+
+    // Offline with nothing cached, there is nothing to audit against.
+    audit().arg("--offline").assert().failure().stderr(predicate::str::contains("no cached advisories"));
+    assert_eq!(osv.requests(), 0);
+
+    let out = audit().assert().code(101).get_output().clone();
+    let (stdout, stderr) = (String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
+    assert!(stderr.contains("Auditing app v0.1.0 ("), "{stderr}");
+    assert!(stdout.contains("severity        package          version  advisory             fixed in"), "{stdout}");
+    assert!(stdout.contains("critical (9.8)  com.acme:widget  1.2.0    GHSA-wwww-wwww-wwww  1.2.5"), "{stdout}");
+    assert!(stdout.contains("medium          com.acme:direct  1.0.0    GHSA-dddd-dddd-dddd  1.0.3"), "{stdout}");
+    assert!(stdout.contains("GHSA-wwww-wwww-wwww: Bad things in com.acme:widget"), "{stdout}");
+    assert!(stdout.contains("  aliases:  CVE-2026-1111"), "{stdout}");
+    assert!(stdout.contains("  url:      https://osv.dev/vulnerability/GHSA-wwww-wwww-wwww"), "{stdout}");
+    assert!(stdout.contains("  path:     app v0.1.0 -> com.acme:app:1.0 -> com.acme:widget:1.2.0"), "{stdout}");
+    assert!(stdout.contains("  found in: jvm/compile, jvm/runtime, jvm/test"), "{stdout}");
+    assert!(stderr.contains("1 advisory at or above the `high` severity"), "{stderr}");
+
+    // The answers are cached: neither a second run nor an offline one asks OSV again.
+    let asked = osv.requests();
+    audit().arg("--deny").arg("critical").assert().code(101);
+    audit()
+        .args(["--offline", "--deny", "none"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("2 advisories below the `none` severity"));
+    assert_eq!(osv.requests(), asked);
+
+    let out = audit().args(["--format", "json"]).assert().code(101).get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["deny"], "high");
+    let first = &json["advisories"][0];
+    assert_eq!(
+        (first["id"].as_str(), first["ecosystem"].as_str(), first["severity"].as_str()),
+        (Some("GHSA-wwww-wwww-wwww"), Some("maven"), Some("critical"))
+    );
+    assert_eq!((first["fixed"].as_str(), first["denied"].as_bool()), (Some("1.2.5"), Some(true)));
+    assert_eq!(first["path"], serde_json::json!(["com.acme:app:1.0", "com.acme:widget:1.2.0"]));
+    assert_eq!(json["advisories"][1]["denied"], false);
+
+    // An ignored advisory (named by its alias) no longer fails the audit; `[audit] deny` lowers the bar.
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "{deps}
+[audit]
+ignore = [{{ id = \"CVE-2026-1111\", reason = \"we never call the widget parser\" }}]
+"
+            ),
+        ),
+    );
+    audit()
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ignoring GHSA-wwww-wwww-wwww in com.acme:widget 1.2.0: we never call the widget parser"))
+        .stderr(predicate::str::contains("1 advisory below the `high` severity (1 ignored)"));
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "{deps}
+[audit]
+deny = \"medium\"
+ignore = [{{ id = \"CVE-2026-1111\", reason = \"old\", until = 2020-01-01 }}]
+"
+            ),
+        ),
+    );
+    audit()
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("expired on 2020-01-01"))
+        .stderr(predicate::str::contains("2 advisories at or above the `medium` severity"));
+
+    // --fix raises what kargo.toml declares and says where the rest comes from.
+    p.file("kargo.toml", &manifest("app", &deps));
+    audit()
+        .arg("--fix")
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("Fixing com.acme:direct v1.0.0 -> v1.0.3 in [dependencies]"))
+        .stderr(predicate::str::contains("`com.acme:widget` 1.2.0 comes from `com.acme:app:1.0`"))
+        .stderr(predicate::str::contains("Fixed 1 version in kargo.toml"));
+    assert!(p.read("kargo.toml").contains("\"com.acme:direct\" = \"1.0.3\"  # keep me"));
 }
 
 #[test]
@@ -830,6 +982,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "script",
         "outdated",
         "upgrade",
+        "audit",
         "vendor",
         "generate",
         "preview",

@@ -53,6 +53,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     bench: RawBench,
     #[serde(default)]
+    audit: RawAudit,
+    #[serde(default)]
     publish: RawPublish,
     #[serde(default)]
     build: RawBuild,
@@ -128,6 +130,22 @@ struct RawBench {
     time_unit: Option<String>,
     #[serde(default)]
     jvm_args: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawAudit {
+    deny: Option<String>,
+    #[serde(default)]
+    ignore: Vec<RawAuditIgnore>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawAuditIgnore {
+    id: String,
+    reason: Option<String>,
+    until: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2268,6 +2286,7 @@ impl RawManifest {
                 time_unit: self.bench.time_unit.as_deref().map(|v| validate_time_unit("[bench] `time-unit`", v)).transpose()?,
                 jvm_args: self.bench.jvm_args,
             },
+            audit: validate_audit(self.audit)?,
             package: Package {
                 name: self.package.name,
                 version: self.package.version,
@@ -2307,6 +2326,39 @@ impl RawManifest {
 }
 
 /// Validates `[[bin]]`: unique names, and a `main`/`entry-point` or a `path`, not both.
+fn validate_audit(raw: RawAudit) -> Result<AuditSettings> {
+    let deny = raw.deny.as_deref().map(str::parse).transpose().context("invalid [audit] `deny`")?;
+    let mut ignore = Vec::new();
+    for entry in raw.ignore {
+        let id = entry.id.trim().to_owned();
+        if id.is_empty() {
+            bail!("an [audit] `ignore` entry has an empty `id`; name the advisory, such as \"GHSA-xxxx-xxxx-xxxx\" or \"CVE-2024-1234\"");
+        }
+        let reason = entry
+            .reason
+            .map(|r| r.trim().to_owned())
+            .filter(|r| !r.is_empty())
+            .with_context(|| format!("[audit] `ignore` entry `{id}` needs a `reason` that says why the advisory does not apply"))?;
+        let until = match entry.until {
+            None => None,
+            Some(Value::Datetime(d)) if d.date.is_some() && d.time.is_none() => Some(d.to_string()),
+            Some(Value::String(s)) if is_date(&s) => Some(s),
+            Some(other) => bail!("[audit] `ignore` entry `{id}` has `until = {other}`; use a date such as 2026-12-31"),
+        };
+        ignore.push(AuditIgnore { id, reason, until });
+    }
+    Ok(AuditSettings { deny, ignore })
+}
+
+/// Whether `s` is a date such as `2026-12-31`.
+fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() })
+        && matches!(s[5..7].parse::<u32>(), Ok(1..=12))
+        && matches!(s[8..10].parse::<u32>(), Ok(1..=31))
+}
+
 fn validate_bins(raw: Vec<RawBin>) -> Result<Vec<Bin>> {
     let mut bins: Vec<Bin> = Vec::new();
     for b in raw {

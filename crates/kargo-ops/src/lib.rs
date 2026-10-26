@@ -2,6 +2,7 @@
 //! plugins, Android/Gradle integration, warnings about suspicious projects and
 //! the high-level operations behind each CLI command.
 
+pub mod advisories;
 pub mod bench;
 pub mod builtins;
 pub mod compose;

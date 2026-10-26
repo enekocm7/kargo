@@ -1,6 +1,7 @@
 //! High-level operations behind each CLI command.
 
 pub mod add;
+pub mod audit;
 pub mod bench;
 pub mod build;
 pub mod check;

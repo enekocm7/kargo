@@ -604,6 +604,28 @@
         "jvm-args": { "description": "JVM arguments for the benchmark JVMs, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } }
       }
     },
+    "audit": {
+      "description": "Options for `kargo audit`, which checks the dependencies against the OSV advisory database.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deny": { "description": "The lowest severity that makes `kargo audit` fail (exit code 101); `none` reports advisories without failing. `--deny` overrides it. An advisory without a known severity fails at every level but none.", "enum": ["low", "medium", "high", "critical", "none"], "default": "high" },
+        "ignore": {
+          "description": "Advisories that do not apply to this project. `kargo audit` lists them as notes instead of reporting them.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "reason"],
+            "properties": {
+              "id": { "description": "The advisory's id or one of its aliases.", "type": "string", "examples": ["GHSA-xxxx-xxxx-xxxx", "CVE-2024-1234"] },
+              "reason": { "description": "Why the advisory does not apply (required).", "type": "string", "examples": ["we never parse untrusted input"] },
+              "until": { "description": "The last day the entry applies, as a TOML date or a YYYY-MM-DD string; afterwards the advisory is reported again.", "type": "string", "format": "date", "examples": ["2026-12-31"] }
+            }
+          }
+        }
+      }
+    },
     "publish": {
       "description": "Options for `kargo publish`.",
       "type": "object",

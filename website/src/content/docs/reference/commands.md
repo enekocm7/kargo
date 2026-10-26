@@ -21,7 +21,7 @@ Built-in commands:
     completions  Print a shell completion script
 ```
 
-The commands the short help leaves out (`outdated`, `upgrade`, `target`, `info`, `plugins`, `android`, `daemon`, `metadata`, `classpath`, `ide`, `lsp`, `dap`, `self` and `completions`) work as usual, and `kargo help <command>` shows each one's options. Shell completions offer them too.
+The commands the short help leaves out (`outdated`, `upgrade`, `audit`, `target`, `info`, `plugins`, `android`, `daemon`, `metadata`, `classpath`, `ide`, `lsp`, `dap`, `self` and `completions`) work as usual, and `kargo help <command>` shows each one's options. Shell completions offer them too.
 
 A command that doesn't exist suggests the closest built-in command, task or `kargo-*` plugin, as Cargo does:
 
@@ -62,7 +62,7 @@ In a [workspace](../../guides/workspaces/), commands apply to the default member
 
 | Option | Commands | Meaning |
 |---|---|---|
-| `-p, --package <name>` | `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch`, `publish` | Only this package (repeatable) |
+| `-p, --package <name>` | `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `audit`, `fetch`, `publish` | Only this package (repeatable) |
 | `--workspace` | the same | Every member of the workspace |
 | `--exclude <name>` | the same | Leave this member out (repeatable), with `--workspace` or at the workspace root |
 | `-p, --package <name>` | `run`, `package`, `install`, `add`, `remove`, `outdated`, `upgrade` | The one package to work on; required at the root of a workspace with several default members |
@@ -589,6 +589,58 @@ note: `org.jetbrains.kotlinx:kotlinx-datetime` 0.8.0 is available but not compat
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 Dependencies inherited with `workspace = true` are skipped; upgrade them in the workspace's `kargo.toml`. "Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). `kargo.lock` is re-resolved on the next build because the manifest changed.
+
+## `kargo audit`
+
+Check every dependency against the [OSV](https://osv.dev) database of known security advisories, and fail when one is serious enough.
+
+```sh
+kargo audit [options]
+```
+
+```console
+$ kargo audit
+    Auditing app v0.1.0 (42 packages, advisories from https://api.osv.dev)
+severity        package          version  advisory             fixed in
+critical (9.8)  com.acme:widget  1.2.0    GHSA-wwww-wwww-wwww  1.2.5
+medium          com.acme:direct  1.0.0    GHSA-dddd-dddd-dddd  1.0.3
+
+GHSA-wwww-wwww-wwww: Bad things in com.acme:widget
+  aliases:  CVE-2026-1111
+  url:      https://osv.dev/vulnerability/GHSA-wwww-wwww-wwww
+  path:     app v0.1.0 -> com.acme:app:1.0 -> com.acme:widget:1.2.0
+  found in: jvm/compile, jvm/runtime, jvm/test
+...
+error: 1 advisory at or above the `high` severity; upgrade the affected packages (`kargo audit --fix` raises the versions kargo.toml declares) or add the advisories to [audit] ignore with a reason
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-t, --target <target>` | every enabled target | Only these targets (repeatable) |
+| `--deny <severity>` | `[audit] deny`, else `high` | The lowest severity that fails the audit: `low`, `medium`, `high`, `critical`, or `none` to report without failing |
+| `--tooling` | | Also audit the build's tools (see below) |
+| `--fix` | | Raise the versions `kargo.toml` declares to ones that fix the advisories |
+| `--format <fmt>` | `text` | `text` or `json` |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | current package | Which packages to audit |
+
+What is audited:
+
+- **Maven modules**: the compile, runtime and test classpaths of the JVM and the main and test resolutions of Wasm, JS and every Native platform, resolved as a build would (with `--locked`, from `kargo.lock` only). The `path` line is the shortest chain of dependencies that brings the module in, as `kargo tree` shows it.
+- **npm packages** of Wasm and Kotlin/JS: every package installed in the target's `node_modules` (the ones the libraries ask for, `npm-dependencies` and what they pull in), with the library or package that asks for it in the path. A package that is not installed yet is audited at its declared version when that is exact, and skipped with a note when it is a range; build the target once to audit what it installs.
+- **The build's tools**, with `--tooling`: the Kotlin compiler, KSP, the JUnit launcher, compiler plugins, `[[generate]]` tools and the benchmark generator as `kargo.lock` holds them (run `kargo fetch --tools` or a build first, so they are locked), and the npm packages of the TypeScript compiler. They are marked `(build tooling)`.
+- Android dependencies are resolved by Gradle and are not audited.
+
+Severity comes from the advisory's CVSS v3 vector (the base score is shown next to it), else from the severity the advisory database gives (GitHub's `moderate` is `medium`). An advisory with neither is `unknown`, and fails at every `--deny` level but `none`. `fixed in` is the lowest version above yours that fixes the advisory, or `-` when no fix is published.
+
+Exit codes: 0 when nothing at or above `--deny` is found (advisories below it print a warning), 101 when something is. Advisories listed in [`[audit] ignore`](../manifest/#audit) are left out of the table and the exit code, and printed as notes with their reason; an entry past its `until` date stops applying, with a warning.
+
+`--format json` prints one object per package (an array for several): `package`, `database`, `deny`, `audited` (how many package versions were checked), `skipped` (notes about packages that could not be checked) and `advisories`, each with `id`, `aliases`, `summary`, `severity` (`null` when unknown), `score`, `url`, `ecosystem` (`maven` or `npm`), `package`, `version`, `fixed`, `path`, `resolutions`, `tooling`, `ignored` (`null`, or the `reason` and `until` of the entry) and `denied` (whether it fails the audit).
+
+`--fix` changes the version of each vulnerable dependency that `kargo.toml` declares to the lowest version that fixes all of its advisories, when that version is compatible with the declared one (the rule of [`kargo upgrade`](#kargo-upgrade)); a caret or tilde range of an npm package keeps its prefix. For a package that comes in through another dependency, it says which one to upgrade instead (or, for a Maven module, that declaring it at the fixed version overrides it, since the highest version wins). Inherited, BOM-managed and range versions are reported, not changed. The exit code is still the audit's; run `kargo audit` again to check the result.
+
+:::note
+`kargo audit` is the only command that contacts the advisory database. It sends the names and versions of your dependencies to `https://api.osv.dev` (or to `KARGO_OSV_URL`) and nothing else. The answers are cached under `~/.kargo/advisories` for a day; `--offline` audits from the cache whatever its age (and fails for a package that was never looked up), and `--refresh` ignores it.
+:::
 
 ## `kargo target`
 

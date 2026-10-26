@@ -552,7 +552,7 @@ fn build_time() -> String {
     rfc3339(seconds)
 }
 
-fn rfc3339(seconds: u64) -> String {
+pub(crate) fn rfc3339(seconds: u64) -> String {
     let days = (seconds / 86_400) as i64;
     let of_day = seconds % 86_400;
     // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).

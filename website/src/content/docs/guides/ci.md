@@ -120,6 +120,29 @@ To compare a change with the main branch, save a baseline on `main` and restore 
 
 `kargo bench` exits with `101` when a benchmark fails or throws, and `0` when one just got slower, so decide from `bench.json` (or the report on stderr) whether a slowdown fails the build.
 
+### Security advisories
+
+`kargo audit` checks every dependency against the [OSV](https://osv.dev) advisory database and exits with `101` when one has an advisory of `high` severity or worse (see [`kargo audit`](../../reference/commands/#kargo-audit)). Run it in a job of its own, so a new advisory fails that job and not your tests, and on a schedule as well, since advisories appear without any change on your side:
+
+```yaml title=".github/workflows/audit.yml"
+name: Audit
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"     # every Monday
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: enekocm7/kargo/setup-kargo@master
+      - run: kargo audit --locked --tooling
+```
+
+`--locked` audits exactly what `kargo.lock` pins. `--deny <severity>` (or [`[audit] deny`](../../reference/manifest/#audit)) moves the bar, and `--format json` gives the findings to other tools. An advisory that does not affect you goes in [`[audit] ignore`](../../reference/manifest/#audit) with a reason, and an `until` date so it is looked at again. This is the only step that contacts `api.osv.dev`; with `--offline` it audits from the advisories cached under `~/.kargo/advisories`.
+
 ### Several operating systems
 
 Kotlin/Native and Compose Desktop produce OS-specific output. Use a matrix:
@@ -226,6 +249,7 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 | `kargo test -j <n>` | Test `<n>` workspace members at the same time (one test JVM each) instead of one after another |
 | `kargo build --keep-going` | Build every target (and, in a workspace, every member whose dependencies built) and report all failures, not just the first |
 | `kargo test --report junit` | Write JUnit XML reports for the CI's test summary |
+| `kargo audit` | Fail on dependencies with known security advisories. See [Security advisories](#security-advisories) |
 | `[test] timeout` | Stop a hung test run and fail it, rather than waiting for the CI's own job limit. See [Timeouts](../testing/#timeouts) |
 | `kargo bench --format json` | JMH's results as JSON on stdout, for tracking performance. See [Benchmarks](#benchmarks) |
 | `kargo test --failed` | Rerun only the JVM test classes that failed in the last run, on a retry job |

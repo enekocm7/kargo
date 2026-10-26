@@ -2,7 +2,11 @@
 
 #![allow(dead_code)]
 
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use assert_cmd::Command;
 
@@ -141,6 +145,94 @@ fn pom(group: &str, artifact: &str, version: &str, deps: &[(&str, &str)]) -> Str
     format!(
         "<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><dependencies>{deps_xml}</dependencies></project>"
     )
+}
+
+/// A canned OSV server on a loopback port, for `kargo audit` (`KARGO_OSV_URL`): answers
+/// `/v1/querybatch` and `/v1/vulns/<id>` from `advisories`, each affecting the listed
+/// `(package, version)` pairs, and counts the requests.
+pub struct OsvServer {
+    pub url: String,
+    pub requests: Arc<AtomicUsize>,
+}
+
+impl OsvServer {
+    pub fn start(advisories: Vec<(serde_json::Value, Vec<(&str, &str)>)>) -> Self {
+        let advisories: Vec<(serde_json::Value, Vec<(String, String)>)> = advisories
+            .into_iter()
+            .map(|(v, affected)| (v, affected.into_iter().map(|(n, v)| (n.to_owned(), v.to_owned())).collect()))
+            .collect();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim_end().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = header.split_once(':')
+                        && k.eq_ignore_ascii_case("content-length")
+                    {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let (status, answer) = if path == "/v1/querybatch" {
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let results: Vec<serde_json::Value> = request["queries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|q| {
+                            let (name, version) = (q["package"]["name"].as_str().unwrap(), q["version"].as_str().unwrap());
+                            let vulns: Vec<serde_json::Value> = advisories
+                                .iter()
+                                .filter(|(_, affected)| affected.iter().any(|(n, v)| n == name && v == version))
+                                .map(|(v, _)| serde_json::json!({ "id": v["id"], "modified": v["modified"] }))
+                                .collect();
+                            if vulns.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "vulns": vulns }) }
+                        })
+                        .collect();
+                    (200, serde_json::json!({ "results": results }).to_string())
+                } else if let Some(id) = path.strip_prefix("/v1/vulns/") {
+                    match advisories.iter().find(|(v, _)| v["id"] == id) {
+                        Some((v, _)) => (200, v.to_string()),
+                        None => (404, "{}".to_owned()),
+                    }
+                } else {
+                    (404, "{}".to_owned())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{answer}",
+                    answer.len()
+                );
+            }
+        });
+        Self { url, requests }
+    }
+
+    pub fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
 }
 
 pub fn manifest(name: &str, extra: &str) -> String {
