@@ -6,7 +6,8 @@
 //! references and rename ([`features`]), implementations and the call and type hierarchies ([`hierarchy`]), semantic tokens ([`semantic`]), inlay hints ([`inlay`]), folding and selection ranges ([`ranges`]), code actions ([`actions`]) and refactorings ([`refactor`]) on top of a declaration parser ([`syntax`]) and a
 //! resolver with enough type inference for member access ([`resolve`]). Java declarations come
 //! from the JDK's sources ([`jdk`]) and from `.java` files ([`java`]). Libraries without a
-//! sources jar are read from their class files and klibs ([`compiled`]).
+//! sources jar are read from their class files and klibs ([`compiled`]), and documented from
+//! their Javadoc jars ([`javadoc`]).
 
 pub mod actions;
 pub mod classfile;
@@ -17,6 +18,7 @@ pub mod hierarchy;
 pub mod index;
 pub mod inlay;
 pub mod java;
+pub mod javadoc;
 pub mod jdk;
 pub mod kdoc;
 pub mod kmetadata;

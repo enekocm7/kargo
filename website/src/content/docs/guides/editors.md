@@ -1070,7 +1070,7 @@ Navigating into a library or stepping into it in a debugger needs its sources. D
 kargo fetch --sources
 ```
 
-`kargo metadata` then lists each library's sources jar next to its jar, in the `sources` field. Libraries that don't publish sources are skipped. [Kargo's own Kotlin server](../kotlin-server/#libraries) downloads them itself unless `fetchSources` is `false` in the editor's `initializationOptions`.
+`kargo metadata` then lists each library's sources jar next to its jar, in the `sources` field. For a library that doesn't publish sources, its Javadoc jar is downloaded instead and listed in the `javadoc` field, so [Kargo's own Kotlin server](../kotlin-server/#documentation-from-javadoc-jars) can still show its documentation. [Kargo's own Kotlin server](../kotlin-server/#libraries) downloads them itself unless `fetchSources` is `false` in the editor's `initializationOptions`.
 
 ## Check on save
 

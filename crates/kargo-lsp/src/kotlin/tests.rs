@@ -1045,7 +1045,21 @@ fn completes_the_java_members_of_kotlin_classes() {
 
 /// The stubs of the hand-made compiled library in [`super::compiled::testing`], as library units.
 fn compiled_library() -> Vec<Arc<Unit>> {
-    super::compiled::render_classes(super::compiled::testing::sample_classes(), "generated")
+    library_units(super::compiled::render_classes(super::compiled::testing::sample_classes(), "generated", None))
+}
+
+/// The same library documented from the Javadoc jar of [`super::javadoc::testing`]: standard
+/// doclet pages for its Java classes, Dokka's for its Kotlin ones.
+fn documented_library() -> Vec<Arc<Unit>> {
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("sample-1.0-javadoc.jar");
+    super::javadoc::testing::write_jar(&jar);
+    let docs = super::javadoc::Docs::read(&jar).unwrap();
+    library_units(super::compiled::render_classes(super::compiled::testing::sample_classes(), "generated", Some(&docs)))
+}
+
+fn library_units(stubs: Vec<super::compiled::Stub>) -> Vec<Arc<Unit>> {
+    stubs
         .into_iter()
         .map(|(rel, text)| {
             Arc::new(Unit::new(
@@ -1087,6 +1101,35 @@ fn completes_libraries_without_sources() {
         compiled_library(),
     );
     assert_eq!(f.definition(), Some(("p.kt".into(), "public fun greet(times: Int = ...): String".into())));
+}
+
+#[test]
+fn documents_libraries_without_sources_from_their_javadoc_jar() {
+    let hover = |main: &str| fixture_on(&[("src/Main.kt", main)], None, None, documented_library()).hover();
+
+    // Kotlin declarations, from Dokka's pages: the description, the tags and the sample.
+    let h = hover("import p.Greeter\n\nfun main() {\n    Greeter(\"a\").gre$0et()\n}\n");
+    for part in ["Greets the person times times.", "how many times, from 1", "the greeting", "println(g.greet(2))"] {
+        assert!(h.contains(part), "`{part}` missing from:\n{h}");
+    }
+    assert!(hover("import p.Gree$0ter\n").contains("Greets people by name."));
+    assert!(hover("import p.shout\n\nval s = \"a\".sho$0ut()\n").contains("The string in upper case"));
+
+    // Java classes, from the standard doclet's pages, with the parameter names the class file lacks.
+    let h = hover("import p.JavaThing\n\nval t = JavaThing.o$0f(1)\n");
+    for part in ["Makes a thing holding `value`.", "the value, at least `0`", "a new thing", "IllegalArgumentException", "`value < 0`"] {
+        assert!(h.contains(part), "`{part}` missing from:\n{h}");
+    }
+    let h = hover("import p.JavaThing\n\nfun f(t: JavaThing) {\n    t.wr$0ap(listOf(1))\n}\n");
+    assert!(h.contains("items") && !h.contains("arg0") && h.contains("thing.wrap(List.of(1, 2));"), "{h}");
+    assert!(hover("import p.JavaTh$0ing\n").contains("A thing written in Java"));
+    assert!(hover("import p.JavaThing\n\nval b: JavaThing.Buil$0der? = null\n").contains("Builds things."));
+
+    // Completion shows it too.
+    let f = fixture_on(&[("src/Main.kt", "import p.JavaThing\n\nfun main() {\n    JavaThing.$0\n}\n")], None, None, documented_library());
+    let item = f.items().into_iter().find(|i| i["label"] == "of").expect("`of` is offered");
+    let item = features::resolve_item(&f.an(), item);
+    assert!(item["documentation"]["value"].as_str().unwrap_or_default().contains("Makes a thing holding"), "{item}");
 }
 
 #[test]

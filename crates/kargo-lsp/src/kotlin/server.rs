@@ -512,7 +512,8 @@ fn dependency_compiled(meta: &Value) -> Vec<CompiledLibrary> {
                             let version = entry["version"].as_str().unwrap_or_default();
                             let name =
                                 if has_sources { format!("{artifact} {version} (cinterop)") } else { format!("{artifact} {version}") };
-                            CompiledLibrary { name, path, main: Platforms::NONE, test: Platforms::NONE, known: None }
+                            let javadoc = entry["javadoc"].as_str().map(PathBuf::from);
+                            CompiledLibrary { name, path, main: Platforms::NONE, test: Platforms::NONE, known: None, javadoc }
                         });
                         if main {
                             library.main = library.main.union(platforms);
@@ -555,6 +556,7 @@ fn platform_libraries(meta: &Value) -> Vec<CompiledLibrary> {
                 main: Platforms::NATIVE,
                 test: Platforms::NONE,
                 known: None,
+                javadoc: None,
             }
         })
         .collect();
@@ -592,11 +594,13 @@ fn native_stdlib(meta: &Value, stdlib: &[Arc<Unit>]) -> Option<CompiledLibrary> 
         main: Platforms::NATIVE,
         test: Platforms::NONE,
         known: Some(Arc::new(known)),
+        javadoc: None,
     })
 }
 
-/// The dependencies in `meta` without a sources jar in the cache, as `group:artifact` and version:
-/// the ones [`dependency_compiled`] reads from their compiled jars and klibs.
+/// The dependencies in `meta` without a sources jar or a Javadoc jar in the cache, as
+/// `group:artifact` and version: the ones [`dependency_compiled`] reads from their compiled jars
+/// and klibs with no documentation.
 fn missing_sources(meta: &Value) -> Vec<(String, String)> {
     let mut out: BTreeSet<(String, String)> = BTreeSet::new();
     for package in meta["packages"].as_array().into_iter().flatten() {
@@ -609,6 +613,7 @@ fn missing_sources(meta: &Value) -> Vec<(String, String)> {
                         continue;
                     };
                     if entry["sources"].is_null()
+                        && entry["javadoc"].is_null()
                         && !is_stdlib_module(module)
                         && Path::new(path).extension().is_some_and(|e| e == "jar" || e == "klib")
                     {
@@ -635,7 +640,8 @@ struct LoadOptions {
 
 /// Loads the project at `root` and its libraries, sending each as it is ready. Dependencies
 /// without a sources jar in the cache are read from their compiled jars first; then their
-/// sources jars are downloaded (as `kargo fetch --sources` does) and the libraries load again.
+/// sources jars, or Javadoc jars where they have none, are downloaded (as `kargo fetch --sources`
+/// does) and the libraries load again.
 fn load(config: Config, root: PathBuf, generation: u64, tx: Tx, cache: UnitCache, options: LoadOptions) {
     load_parts(config, root, generation, &tx, cache, options);
     let _ = tx.send(Event::Loaded { generation });
@@ -1320,7 +1326,7 @@ impl State {
                 self.progress = self.start_progress(generation, "sources", "Fetching dependency sources", message);
             }
             Event::Fetched { generation, found } if self.progress.as_ref().is_some_and(|p| p.generation == generation) => {
-                self.end_progress(Some(format!("{found} sources jar{}", if found == 1 { "" } else { "s" })));
+                self.end_progress(Some(format!("{found} sources or Javadoc jar{}", if found == 1 { "" } else { "s" })));
             }
             Event::Formatted { id, uri, original, outcome } => {
                 let current = self.open.get(&uri).and_then(|p| self.files.get(p)).map(|u| u.text.as_str());
@@ -2556,7 +2562,7 @@ local = \"{url}\"
         assert_eq!(progress[0]["title"], "Fetching dependency sources", "{progress:?}");
         // g:lib, kotlin-test-junit5 and junit-jupiter lack one; only g:lib publishes one.
         assert_eq!(progress[0]["message"], "3 libraries", "{progress:?}");
-        assert_eq!(progress.last().unwrap()["message"], "1 sources jar", "{progress:?}");
+        assert_eq!(progress.last().unwrap()["message"], "1 sources or Javadoc jar", "{progress:?}");
 
         // The library loads again, now from its sources, without a restart.
         let position = json!({ "line": 1, "character": 16 });

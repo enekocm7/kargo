@@ -455,27 +455,56 @@ fn npm_entries<'a>(packages: impl Iterator<Item = (&'a String, &'a String)>, dir
         .collect()
 }
 
-/// One entry per downloaded artifact, in classpath order, with its sources jar if it is cached.
+/// One entry per downloaded artifact, in classpath order, with its sources jar if it is cached,
+/// and its Javadoc jar if it is cached and there is no sources jar.
 fn maven_entries(ctx: &BuildContext, res: &Resolution) -> Vec<Value> {
     let mut out = Vec::new();
     for node in &res.nodes {
         let sources = ctx.client.cached_sources(&node.module, &node.version, &node.files);
+        let javadoc = match sources {
+            Some(_) => None,
+            None => ctx.client.cached_javadoc(&node.module, &node.version, &node.files),
+        };
         for file in &node.files {
             out.push(json!({
                 "module": node.module.to_string(),
                 "version": node.version,
                 "path": path(file),
                 "sources": sources.as_deref().map(path),
+                "javadoc": javadoc.as_deref().map(path),
             }));
         }
     }
     out
 }
 
+/// What `kargo fetch --sources` found: sources jars, and Javadoc jars of modules without one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FetchedDocs {
+    pub sources: usize,
+    pub javadoc: usize,
+}
+
+impl std::ops::Add for FetchedDocs {
+    type Output = FetchedDocs;
+    fn add(self, other: FetchedDocs) -> FetchedDocs {
+        FetchedDocs { sources: self.sources + other.sources, javadoc: self.javadoc + other.javadoc }
+    }
+}
+
+/// Downloads the sources jar of `module:version`, or its Javadoc jar when it publishes no sources
+/// jar. Returns which one it found, if any.
+pub fn fetch_docs(client: &kargo_maven::MavenClient, module: &kargo_maven::ModuleId, version: &str) -> Result<FetchedDocs> {
+    if client.fetch_sources(module, version)?.is_some() {
+        return Ok(FetchedDocs { sources: 1, javadoc: 0 });
+    }
+    Ok(FetchedDocs { sources: 0, javadoc: usize::from(client.fetch_javadoc(module, version)?.is_some()) })
+}
+
 /// `kargo fetch --sources`: downloads the sources jar of every resolved module of `targets`,
-/// for editors to navigate into libraries. Modules without one are skipped. Returns how many
-/// sources jars are now in the cache.
-pub fn fetch_sources(ctx: &BuildContext, targets: &[TargetKind]) -> Result<usize> {
+/// for editors to navigate into libraries, or its Javadoc jar when it has none, for their
+/// documentation. Modules with neither are skipped. Returns how many of each are now in the cache.
+pub fn fetch_sources(ctx: &BuildContext, targets: &[TargetKind]) -> Result<FetchedDocs> {
     let mut modules: Vec<(kargo_maven::ModuleId, String)> = Vec::new();
     for &target in targets.iter().filter(|t| **t != TargetKind::Android) {
         for configuration in [super::Configuration::Compile, super::Configuration::Runtime, super::Configuration::Test] {
@@ -488,12 +517,10 @@ pub fn fetch_sources(ctx: &BuildContext, targets: &[TargetKind]) -> Result<usize
             }
         }
     }
-    let fetched = kargo_maven::par_map_io(&modules, |(module, version)| ctx.client.fetch_sources(module, version));
-    let mut found = 0;
+    let fetched = kargo_maven::par_map_io(&modules, |(module, version)| fetch_docs(&ctx.client, module, version));
+    let mut found = FetchedDocs::default();
     for result in fetched {
-        if result?.is_some() {
-            found += 1;
-        }
+        found = found + result?;
     }
     Ok(found)
 }
@@ -507,13 +534,18 @@ mod tests {
 
     /// Writes a module with a POM and a jar (and a sources jar with `sources`) to a Maven repository.
     fn publish(repo: &Path, group: &str, artifact: &str, version: &str, sources: bool) {
+        publish_with(repo, group, artifact, version, if sources { &["sources"] } else { &[] });
+    }
+
+    /// Writes a module with a POM, a jar and a jar for each of `classifiers` to a Maven repository.
+    fn publish_with(repo: &Path, group: &str, artifact: &str, version: &str, classifiers: &[&str]) {
         let dir = repo.join(group.replace('.', "/")).join(artifact).join(version);
         std::fs::create_dir_all(&dir).unwrap();
         let pom = format!("<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version></project>");
         std::fs::write(dir.join(format!("{artifact}-{version}.pom")), pom).unwrap();
         std::fs::write(dir.join(format!("{artifact}-{version}.jar")), "jar").unwrap();
-        if sources {
-            std::fs::write(dir.join(format!("{artifact}-{version}-sources.jar")), "sources").unwrap();
+        for classifier in classifiers {
+            std::fs::write(dir.join(format!("{artifact}-{version}-{classifier}.jar")), *classifier).unwrap();
         }
     }
 
@@ -523,7 +555,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         publish(repo.path(), "g", "lib", "1.0", true);
-        publish(repo.path(), "g", "check", "1.0", false);
+        publish_with(repo.path(), "g", "check", "1.0", &["javadoc"]);
         for artifact in ["kotlin-stdlib", "kotlin-test-junit5"] {
             publish(repo.path(), "org.jetbrains.kotlin", artifact, kargo_manifest::DEFAULT_KOTLIN_VERSION, false);
         }
@@ -554,12 +586,16 @@ mod tests {
         assert!(lib["path"].as_str().unwrap().ends_with("lib-1.0.jar"), "{lib}");
         assert_eq!(lib["sources"], Value::Null, "sources are only listed once they are downloaded");
 
-        // Only g:lib publishes a sources jar.
-        assert_eq!(fetch_sources(&ctx, &[TargetKind::Jvm]).unwrap(), 1);
+        // Only g:lib publishes a sources jar; g:check has a Javadoc jar instead.
+        assert_eq!(fetch_sources(&ctx, &[TargetKind::Jvm]).unwrap(), FetchedDocs { sources: 1, javadoc: 1 });
         let doc = metadata(&ctx, &MetadataOptions::default()).unwrap();
         let jvm = &doc["packages"][0]["targets"][0]["dependencies"][0];
         let lib = jvm["runtime"].as_array().unwrap().iter().find(|e| e["module"] == "g:lib").unwrap();
         assert!(lib["sources"].as_str().unwrap().ends_with("lib-1.0-sources.jar"), "{lib}");
+        assert_eq!(lib["javadoc"], Value::Null, "a Javadoc jar is only listed for a module without sources");
+        let check = jvm["test"].as_array().unwrap().iter().find(|e| e["module"] == "g:check").unwrap();
+        assert_eq!(check["sources"], Value::Null);
+        assert!(check["javadoc"].as_str().unwrap().ends_with("check-1.0-javadoc.jar"), "{check}");
     }
 
     fn packages(list: &[(&str, &str)]) -> BTreeMap<String, String> {

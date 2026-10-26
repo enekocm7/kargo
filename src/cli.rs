@@ -996,7 +996,7 @@ enum Command {
     Fetch {
         #[arg(short, long = "target", value_enum)]
         targets: Vec<TargetArg>,
-        /// Also download the sources jars of the dependencies, for editors
+        /// Also download the sources jars of the dependencies (or their Javadoc jars where they have none), for editors
         #[arg(long)]
         sources: bool,
         /// Also download the tools of `kargo doc` (Dokka), `kargo fmt` (ktlint), `kargo lint` (detekt) and R8 for JVM packaging
@@ -2546,14 +2546,19 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let found = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 ops::fetch(ctx, &targets, tools)?;
                 if !sources {
-                    return Ok(0);
+                    return Ok(ops::metadata::FetchedDocs::default());
                 }
                 let selected = ops::build::select_targets(ctx, &targets)?;
                 ops::metadata::fetch_sources(ctx, &selected)
             })?;
             if sources {
-                let found: usize = found.iter().sum();
-                shell.status("Fetched", format!("{found} sources jar{}", if found == 1 { "" } else { "s" }));
+                let found = found.into_iter().fold(ops::metadata::FetchedDocs::default(), |a, b| a + b);
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                let mut message = format!("{} sources jar{}", found.sources, plural(found.sources));
+                if found.javadoc > 0 {
+                    message.push_str(&format!(" and {} javadoc jar{}", found.javadoc, plural(found.javadoc)));
+                }
+                shell.status("Fetched", message);
             }
             Ok(0)
         }
