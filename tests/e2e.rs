@@ -12,6 +12,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
@@ -417,6 +418,30 @@ fn multiple_entry_points() {
         .stderr(predicate::str::contains("Compiling multi v0.1.0 (jvm, example hello)"))
         .stdout(predicate::str::contains("example api"));
     t.kargo("multi").args(["run", "--example", "bye"]).assert().success().stdout(predicate::str::contains("bye"));
+}
+
+#[test]
+fn release_package_runs_the_r8_optimized_jar() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["optimized"]);
+    t.write("optimized/src/Main.kt", "package sample\nfun main() = println(\"optimized app\")\n");
+    t.write("optimized/kargo.toml", "[package]\nname = \"optimized\"\nversion = \"0.1.0\"\n[target.jvm]\nmain-class = \"sample.MainKt\"\n");
+
+    let output = t.kargo("optimized").args(["package", "--release"]).assert().success().get_output().stdout.clone();
+    let jar = String::from_utf8(output).unwrap();
+    let jar = PathBuf::from(jar.trim());
+    assert!(jar.file_name().unwrap().to_string_lossy().ends_with("-min.jar"), "{}", jar.display());
+    let out = StdCommand::new("java").arg("-jar").arg(&jar).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("optimized app"));
+    let mapping = jar.with_file_name("optimized-0.1.0-mapping.txt");
+    assert!(mapping.is_file(), "{}", mapping.display());
+
+    t.create(&["against-min"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("against-min/kargo.toml")).unwrap();
+    t.write("against-min/kargo.toml", &format!("{manifest}\n[package.optimize]\nobfuscate = false\n"));
+    t.kargo("against-min").args(["test", "-t", "jvm", "--against-min"]).assert().success();
 }
 
 #[test]
@@ -1086,6 +1111,48 @@ fn wasm_release_runs_wasm_opt_when_it_is_installed() {
     if which("node").is_some() {
         t.kargo("tiny").args(["run", "--release", "-t", "wasm"]).assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
     }
+}
+
+#[test]
+fn wasm_release_uses_pinned_binaryen_and_supports_budgets_compression_and_hashes() {
+    require_e2e!();
+    let t = E2e::new();
+    let home = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let java_home =
+        std::env::var_os("JAVA_HOME").map(PathBuf::from).or_else(|| which("java").and_then(|p| p.parent()?.parent().map(PathBuf::from)));
+    wasm_project(
+        &t,
+        "optimized",
+        "environment = \"browser\"\nopt-level = \"size\"\ncompress = [\"gzip\", \"brotli\"]\ncontent-hash = true\nmax-size = \"1 B\"\n",
+    );
+    let mut command = t.kargo("optimized");
+    command
+        .args(["build", "--release", "--size-report", "--message-format", "json"])
+        .env("KARGO_HOME", home.path())
+        .env("KARGO_AUTO_INSTALL", "1")
+        .env("PATH", empty_path.path());
+    if let Some(java_home) = java_home {
+        command.env("JAVA_HOME", java_home);
+    } else {
+        command.env_remove("JAVA_HOME");
+    }
+    command
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Downloading binaryen-version_133-"))
+        .stderr(predicate::str::contains("Optimizing optimized.wasm with wasm-opt"))
+        .stderr(predicate::str::contains("Wasm size budget exceeded"))
+        .stdout(predicate::str::contains("\"reason\":\"wasm-size\"").and(predicate::str::contains("\"gzip_bytes\"")));
+    let out = t.dir.path().join("optimized/target/release/wasm");
+    let wasm = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "wasm")).unwrap();
+    let stem = wasm.file_stem().unwrap().to_string_lossy();
+    assert!(stem.starts_with("optimized."), "{stem}");
+    for suffix in ["wasm.gz", "wasm.br", "mjs.gz", "mjs.br"] {
+        assert!(out.join(format!("{stem}.{suffix}")).is_file(), "missing {stem}.{suffix}");
+    }
+    let page = std::fs::read_to_string(out.join("index.html")).unwrap();
+    assert!(page.contains(&format!("{stem}.mjs")), "the page loads the content-addressed module: {page}");
 }
 
 /// `kargo run --port 0` on a project, stopped when dropped.

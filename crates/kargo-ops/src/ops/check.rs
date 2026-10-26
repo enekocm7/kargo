@@ -97,7 +97,10 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         kotlin_args: &kotlin_args,
         output: out.clone(),
         debug: profile.debug,
+        debug_info: wasm.debug_info,
         optimize: false,
+        array_range_checks: wasm.wasm_enable_array_range_checks,
+        debugger_custom_formatters: wasm.wasm_debugger_custom_formatters,
         declarations: false,
         main_args: false,
     };
@@ -121,7 +124,10 @@ fn check_wasm(ctx: &BuildContext, tests: bool) -> Result<()> {
         kotlin_args: &kotlin_args,
         output: out.join("test"),
         debug: true,
+        debug_info: false,
         optimize: false,
+        array_range_checks: wasm.wasm_enable_array_range_checks,
+        debugger_custom_formatters: wasm.wasm_debugger_custom_formatters,
         declarations: false,
         main_args: false,
     };

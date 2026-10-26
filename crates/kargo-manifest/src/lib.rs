@@ -359,6 +359,22 @@ pub enum WasmOpt {
     Path(PathBuf),
 }
 
+/// Binaryen optimization preset used for release modules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WasmOptLevel {
+    Size,
+    #[default]
+    Balanced,
+    Speed,
+}
+
+/// Precompressed representations emitted alongside web assets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmCompression {
+    Gzip,
+    Brotli,
+}
+
 /// The tool that installs the npm packages Wasm libraries need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
@@ -412,6 +428,16 @@ pub struct WasmTarget {
     /// npm packages the project needs besides those its Wasm libraries ask for, by name.
     pub npm_dependencies: BTreeMap<String, String>,
     pub wasm_opt: WasmOpt,
+    pub opt_level: WasmOptLevel,
+    pub wasm_opt_flags: Vec<String>,
+    pub debug_info: bool,
+    pub compress: Vec<WasmCompression>,
+    pub content_hash: bool,
+    pub max_size: Option<u64>,
+    pub max_gzip_size: Option<u64>,
+    pub size_report: bool,
+    pub wasm_enable_array_range_checks: Option<bool>,
+    pub wasm_debugger_custom_formatters: bool,
     /// Files and directories of a library, relative to the package, that every browser app depending
     /// on it gets next to its module, under their own names.
     pub web_resources: Vec<PathBuf>,
@@ -1249,13 +1275,29 @@ impl fmt::Display for GraalvmRequest {
     }
 }
 
-/// `[package.jlink]`, `[package.native-image]` and `[package.installer]`: how `kargo package
+/// `[package.jlink]`, `[package.optimize]`, `[package.native-image]` and `[package.installer]`: how `kargo package
 /// --format` builds runtime images, native executables and installers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackagingSettings {
     pub jlink: JlinkSettings,
+    pub optimize: OptimizeSettings,
     pub native_image: NativeImageSettings,
     pub installer: InstallerSettings,
+}
+
+/// `[package.optimize]`: R8's JVM class-file shrinking and obfuscation settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptimizeSettings {
+    pub shrink: bool,
+    pub optimize: bool,
+    pub obfuscate: bool,
+    pub rules: PathBuf,
+}
+
+impl Default for OptimizeSettings {
+    fn default() -> Self {
+        Self { shrink: true, optimize: true, obfuscate: true, rules: PathBuf::from("proguard-rules.pro") }
+    }
 }
 
 /// `[package.jlink]`: the runtime image of `--format jlink` (and of installers).

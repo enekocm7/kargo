@@ -127,6 +127,20 @@ com/example/mathlib-linuxx64/1.0.0/ # mathlib-linuxx64-1.0.0.klib, cinterop klib
 
 Consumers depend on the root module, `com.example:mathlib`. Its [Gradle module metadata](https://docs.gradle.org/current/userguide/publishing_gradle_module_metadata.html) (`.module`) sends each platform to its own module, so Kargo and Gradle pick the jar or klib that matches the target they build. Each platform module has its own sources jar (`commonMain/` and the platform's directory), javadoc jar, POM and `.module`. [cinterop](../native/#using-c-libraries) bindings are published next to the klib with the classifier `cinterop-<name>`. A Wasm library's [web resources](../wasm/#web-resources-from-libraries) go next to its klib as a zip with the classifier `web-resources`, announced by the `kargo.web-resources` and `kargo.web-init` properties of its POM.
 
+## JVM shrinking and obfuscation
+
+For JVM jars, `kargo package --release` runs R8 after building the jar. Use `kargo package --optimize` to opt in with another profile. R8 can shrink, optimize and obfuscate independently through [`[package.optimize]`](../../reference/manifest/#packageoptimize). It preserves the selected main class and Kotlin metadata, reads optional ProGuard-compatible rules from `proguard-rules.pro`, and writes the minimized jar plus mapping and usage files to `target/<profile>/jvm/`.
+
+```toml
+[package.optimize]
+shrink = true
+optimize = true
+obfuscate = true
+rules = "proguard-rules.pro"
+```
+
+Add keep rules for reflective entry points. The mapping file is needed to retrace obfuscated stack traces. Compose Desktop release jars use the same optimization.
+
 Native platforms are published for the `platforms` of `[target.native]`, and each one has to be built on a machine that can compile for it (Apple targets on macOS).
 
 :::caution

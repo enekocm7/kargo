@@ -21,7 +21,9 @@ anstream = "1.0.0"
 anstyle = "1.0.14"
 anyhow = "1"
 base64 = "0.23.1"
-clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+brotli = "8.0.2"
+minify-js = "0.6.0"
+clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 # Pinned exactly: dynamic completion is behind clap_complete's `unstable-dynamic` feature.
 clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
 dirs = "7.0.0"
@@ -30,19 +32,19 @@ hex = "0.4.3"
 ignore = "0.4.33"
 md5 = { package = "md-5", version = "0.11.0" }
 rayon = "1.12.0"
-roxmltree = "0.21.1"
+roxmltree = "0.21.2"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11.0"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 tar = "0.4.46"
 thiserror = "2"
 toml = { version = "1", features = ["preserve_order"] }
 toml_edit = "0.25"
-ureq = "3.4.2"
+ureq = "3.5.0"
 walkdir = "2.5.0"
-zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.0", default-features = false, features = ["deflate"] }
 
 assert_cmd = "2.2.2"
 predicates = "3.1.4"

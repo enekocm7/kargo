@@ -60,6 +60,8 @@ pub struct TestOptions {
     pub exclude_tags: Vec<String>,
     /// Only run the JVM test classes that failed in the last run (`--failed`).
     pub failed: bool,
+    /// Run JVM tests with the optimized jar on the runtime classpath.
+    pub against_min: bool,
 }
 
 /// How `kargo test --list` prints the tests.
@@ -92,6 +94,9 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     }
     let start = Instant::now();
     let targets = select_targets(ctx, &opts.build.targets)?;
+    if opts.against_min && targets != [TargetKind::Jvm] {
+        anyhow::bail!("`--against-min` runs JVM tests; select the JVM target with `-t jvm`");
+    }
     if opts.debug.is_some() && targets != [TargetKind::Jvm] {
         anyhow::bail!("`--debug` runs the JVM tests under a debugger; select the JVM target with `-t jvm`");
     }
@@ -280,9 +285,16 @@ fn wrote_reports(ctx: &BuildContext, dir: &Path) {
 
 fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let main = build_jvm(ctx)?;
-    let Some(JvmTestClasses { classes: test_classes, classpath }) = compile_jvm_tests(ctx, &main.classes, "Compiling")? else {
+    let Some(JvmTestClasses { classes: test_classes, mut classpath }) = compile_jvm_tests(ctx, &main.classes, "Compiling")? else {
         return Ok(no_tests(ctx, TargetKind::Jvm));
     };
+    if opts.against_min {
+        let files = super::package(ctx, &super::PackageOptions { optimize: true, ..Default::default() })?;
+        if classpath.first() == Some(&main.classes) {
+            classpath.remove(0);
+        }
+        classpath.insert(0, files[0].clone());
+    }
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
@@ -1095,7 +1107,10 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test"),
         debug: true,
+        debug_info: false,
         optimize: false,
+        array_range_checks: wasm.wasm_enable_array_range_checks,
+        debugger_custom_formatters: wasm.wasm_debugger_custom_formatters,
         declarations: false,
         main_args: false,
     };

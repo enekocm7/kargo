@@ -3,7 +3,7 @@ title: WebAssembly
 description: Compile Kotlin to WebAssembly for Node.js, browsers or WASI, serve browser apps, and publish Wasm libraries as npm packages.
 ---
 
-Kargo compiles Kotlin to WebAssembly with the Kotlin/Wasm compiler. To compile to plain JavaScript instead, with Kotlin/JS, see [JavaScript](../js/). No Gradle and no npm project are involved. Kargo only runs npm, pnpm or bun when a project needs [npm packages](#npm-packages), and Binaryen's `wasm-opt` if you have it for [release builds](#release-builds).
+Kargo compiles Kotlin to WebAssembly with the Kotlin/Wasm compiler. To compile to plain JavaScript instead, with Kotlin/JS, see [JavaScript](../js/). No Gradle and no npm project are involved. Kargo only runs npm, pnpm or bun when a project needs [npm packages](#npm-packages), and installs pinned Binaryen on demand for [release builds](#release-builds).
 
 ## Setup
 
@@ -409,35 +409,34 @@ A [path dependency](../dependencies/#local-packages)'s files are copied from its
 
 `kargo build --release -t wasm` (and `kargo run --release`) produces a much smaller module than the default dev build:
 
-1. **Dead code is removed.** The release profile links with the Kotlin compiler's dead code elimination: only what `main` or `@JsExport` can reach stays. For the hello world project that takes the module from 609 KiB to 27 KiB.
-2. **`wasm-opt` optimizes the module**, when Binaryen's `wasm-opt` is on your `PATH`. Kargo runs it with `-O3` and the settings Kotlin/Wasm modules need. The hello world module shrinks again, from 27 KiB to 1.3 KiB.
-3. **Kargo reports the size** of the module, how much it compresses, and the total of the files in the output directory.
+1. **Dead code is removed.** The release profile links with Kotlin's dead code elimination: only what `main` or `@JsExport` can reach stays.
+2. **Pinned Binaryen optimizes the module.** Kargo downloads and SHA-256 checks its pinned release into the toolchain cache when it is not already installed. `opt-level` chooses `-Oz`, `-O2` or `-O3`; Kargo always enables the Wasm GC and exception-handling features the Kotlin output needs.
+3. **Kargo reports the sizes** of the module, its gzip and Brotli representations and the whole output directory. `max-size` and `max-gzip-size` make a release fail when it exceeds a budget. `kargo build --release --size-report` asks Binaryen to print module metrics and function-level metrics to help identify large functions.
 
 ```console
 $ kargo build --release
    Compiling hello v0.1.0 (wasm)
-  Optimizing hello.wasm with wasm-opt
+   Downloading binaryen-version_133-x86_64-linux.tar.gz
+   Optimizing hello.wasm with wasm-opt
    Optimized hello.wasm: 27.2 KiB -> 1.3 KiB
-        Size hello.wasm 1.3 KiB (711 B gzipped), 5 files 8.8 KiB in target/release/wasm
+        Size hello.wasm 1.3 KiB (711 B gzip, 690 B brotli), 5 files 8.8 KiB in target/release/wasm
     Finished `release` profile [optimized] target(s) in 0.86s
 ```
 
-Without `wasm-opt`, the build still removes dead code and says how to get it:
-
-```console
-note: install Binaryen (https://github.com/WebAssembly/binaryen) and put `wasm-opt` on PATH to make the release module smaller; [target.wasm] wasm-opt = false hides this note
-        Size hello.wasm 27.2 KiB (9.5 KiB gzipped), 5 files 34.7 KiB in target/release/wasm
-```
-
-[Binaryen](https://github.com/WebAssembly/binaryen) comes from most package managers (for example `brew install binaryen` or `apt install binaryen`) and from npm (`npm install -g binaryen`). Use `wasm-opt` in `[target.wasm]` to change what Kargo does:
+`[target.wasm] wasm-opt = false` disables Binaryen; a string selects a custom executable. `debug-info = true` preserves debug names and writes `<name>.wasm.map` for release crash reports. By default release output strips debug data and source maps. `compress = ["gzip", "brotli"]` creates compressed copies of the Wasm module and `.mjs` glue. The browser server negotiates those copies with `Content-Encoding`.
 
 ```toml title="kargo.toml"
 [target.wasm]
 wasm-opt = false                 # never run it
 # wasm-opt = "tools/wasm-opt"    # run this executable (relative to the project), not the one on PATH
+opt-level = "size"               # or "balanced" / "speed"
+compress = ["gzip", "brotli"]
+content-hash = true              # app.<hash>.wasm and app.<hash>.mjs for long-lived CDN caching
+max-size = "1 MiB"
+max-gzip-size = "256 KiB"
 ```
 
-An optimized module is not optimized again until the next recompile. The dev profile never runs `wasm-opt` or removes code, so debugging keeps every function.
+`wasm-opt-flags` adds Binaryen passes. `wasm-enable-array-range-checks` can explicitly override the release default, and `wasm-debugger-custom-formatters` enables Kotlin's browser debugger formatters. The dev profile stays fast and keeps the compiler's incremental klib cache; Binaryen optimization, compression and budgets apply to optimized builds.
 
 ## Module name and output files
 

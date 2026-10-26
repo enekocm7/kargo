@@ -26,6 +26,8 @@ use kargo_toolchain::Jdk;
 use kargo_util::fs::{join_paths, remove_dir_all_if_exists};
 use kargo_util::process;
 
+pub(super) const R8_VERSION: &str = "8.13.22";
+
 /// What `kargo package` builds for the JVM target (`--format`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PackageFormat {
@@ -120,6 +122,164 @@ fn output(ctx: &BuildContext, cmd: &mut Command, what: &str) -> Result<String> {
         bail!("{what} failed ({}):\n{}", process::describe_status(out.status), text.trim_end());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Shrinks and obfuscates a JVM application jar with R8's class-file backend.
+pub(super) fn optimize_jar(ctx: &BuildContext, input: &Path, name: &str, main_class: Option<&str>) -> Result<PathBuf> {
+    let settings = &ctx.ws.manifest().packaging.optimize;
+    let out = input.with_file_name(format!("{name}-{}-min.jar", ctx.ws.manifest().package.version));
+    let r8_out = input.with_file_name(format!("{name}-{}-r8.jar", ctx.ws.manifest().package.version));
+    let mapping = input.with_file_name(format!("{name}-{}-mapping.txt", ctx.ws.manifest().package.version));
+    let config = input.with_file_name(format!("{name}-{}-r8.pro", ctx.ws.manifest().package.version));
+    let usage = input.with_file_name(format!("{name}-{}-usage.txt", ctx.ws.manifest().package.version));
+    let _ = std::fs::remove_file(&r8_out);
+    let mut rules = String::from(
+        "-dontwarn kotlin.Metadata\n-dontwarn kotlinx.coroutines.**\n-keep class kotlin.Metadata { *; }\n-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod\n",
+    );
+    if let Some(main_class) = main_class {
+        rules.push_str(&format!("-keep class {main_class} {{ public static void main(java.lang.String[]); }}\n"));
+    } else {
+        // A library's public Kotlin API and metadata are part of its binary contract.
+        rules.push_str("-keep public class * { public protected *; }\n");
+    }
+    let frameworks = &ctx.ws.manifest().frameworks;
+    if frameworks.serialization.is_some() {
+        rules.push_str("-keep class **$$serializer { *; }\n-keepclassmembers class ** { *** Companion; }\n");
+    }
+    if frameworks.spring_boot.is_some() {
+        rules.push_str("-keep @org.springframework.stereotype.Component class * { *; }\n-keep @org.springframework.context.annotation.Configuration class * { *; }\n");
+    }
+    if frameworks.ktor.is_some() {
+        rules.push_str("-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault\n");
+    }
+    if frameworks.compose.is_some() {
+        rules.push_str("-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations\n-keepclassmembers class * { @androidx.compose.runtime.Composable <methods>; }\n");
+    }
+    if frameworks.lombok.is_some() {
+        // Lombok is compile-time only; retain runtime annotations on its generated JVM API.
+        rules.push_str("-keepattributes *Annotation*\n");
+    }
+    if settings.shrink {
+        rules.push_str(&format!("-printusage {}\n", usage.file_name().map(|p| p.to_string_lossy()).unwrap_or_default()));
+    } else {
+        rules.push_str("-dontshrink\n");
+    }
+    if !settings.optimize {
+        rules.push_str("-dontoptimize\n");
+    }
+    if !settings.obfuscate {
+        rules.push_str("-dontobfuscate\n");
+    }
+    let user_rules = ctx.ws.root().join(&settings.rules);
+    if !user_rules.exists() && settings.rules != Path::new("proguard-rules.pro") {
+        bail!("[package.optimize] rules file `{}` does not exist", user_rules.display());
+    }
+    std::fs::write(&config, rules).with_context(|| format!("failed to write R8 config {}", config.display()))?;
+    let r8 = ctx.r8_jar(R8_VERSION).context("failed to fetch R8")?;
+    let jdk = ctx.jdk()?;
+    let mut cmd = Command::new(jdk.java());
+    cmd.arg("-cp")
+        .arg(&r8)
+        .arg("com.android.tools.r8.R8")
+        .arg("--release")
+        .arg("--classfile")
+        .arg("--output")
+        .arg(&r8_out)
+        .arg("--pg-conf")
+        .arg(&config)
+        .arg("--pg-map-output")
+        .arg(&mapping)
+        .arg("--lib")
+        .arg(&jdk.home);
+    if user_rules.exists() {
+        cmd.arg("--pg-conf").arg(user_rules);
+    }
+    cmd.arg(input).current_dir(input.parent().unwrap_or(ctx.ws.root()));
+    ctx.shell().status("Optimizing", format!("{} ({})", input.display(), R8_VERSION));
+    output(ctx, &mut cmd, "R8")?;
+    let manifest = JarManifest {
+        main_class: main_class.map(str::to_owned),
+        class_path: Vec::new(),
+        implementation_title: Some(name.to_owned()),
+        implementation_version: Some(ctx.ws.manifest().package.version.clone()),
+    };
+    write_jar(&out, Path::new(""), &manifest, std::slice::from_ref(&r8_out)).context("failed to write the optimized jar manifest")?;
+    let _ = std::fs::remove_file(&r8_out);
+    let before = std::fs::metadata(input)?.len();
+    let after = std::fs::metadata(&out)?.len();
+    let report = if settings.shrink { std::fs::read_to_string(&usage).unwrap_or_default() } else { String::new() };
+    let (classes, methods, fields) = report.lines().fold((0usize, 0usize, 0usize), |(classes, methods, fields), line| {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if line.contains('(') { (classes, methods + 1, fields) } else { (classes, methods, fields + 1) }
+        } else if line.trim().is_empty() {
+            (classes, methods, fields)
+        } else {
+            (classes + 1, methods, fields)
+        }
+    });
+    if kargo_compiler::diagnostics::is_json() {
+        kargo_compiler::diagnostics::emit(&serde_json::json!({
+            "reason": "optimization-report",
+            "package": ctx.ws.manifest().package.name.as_str(),
+            "target": "jvm",
+            "input": input.display().to_string(),
+            "output": out.display().to_string(),
+            "input_bytes": before,
+            "output_bytes": after,
+            "removed_classes": classes,
+            "removed_methods": methods,
+            "removed_fields": fields,
+            "mapping": mapping.display().to_string(),
+            "usage": if settings.shrink { Some(usage.display().to_string()) } else { None },
+        }));
+    } else {
+        ctx.shell().status("Optimized", format!("{}: {} -> {}", out.display(), human_size(before), human_size(after)));
+    }
+    if settings.shrink {
+        if !kargo_compiler::diagnostics::is_json() {
+            ctx.shell().status("Removed", format!("{classes} classes, {methods} methods and {fields} fields (see {})", usage.display()));
+        }
+    }
+    if !kargo_compiler::diagnostics::is_json() {
+        ctx.shell().status("Mapping", mapping.display());
+    }
+    Ok(out)
+}
+
+/// Runs R8 Retrace against a mapping file and a stack trace file or stdin.
+pub fn retrace(ctx: &BuildContext, mapping: &Path, stack_trace: Option<&Path>) -> Result<()> {
+    if !mapping.is_file() {
+        bail!("mapping file `{}` does not exist", mapping.display());
+    }
+    if let Some(file) = stack_trace
+        && !file.is_file()
+    {
+        bail!("stack trace file `{}` does not exist", file.display());
+    }
+    let r8 = ctx.r8_jar(R8_VERSION).context("failed to fetch R8")?;
+    let jdk = ctx.jdk()?;
+    let mut cmd = Command::new(jdk.java());
+    cmd.arg("-cp").arg(r8).arg("com.android.tools.r8.retrace.Retrace").arg(mapping);
+    if let Some(file) = stack_trace {
+        cmd.arg(file);
+    }
+    ctx.shell().verbose("Running", process::describe(&cmd));
+    let status = cmd.status().context("failed to start R8 Retrace")?;
+    if !status.success() {
+        bail!("R8 Retrace failed ({})", process::describe_status(status));
+    }
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (KIB * KIB))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / KIB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// The modules of `jdeps --print-module-deps`: a comma-separated list on the last line.

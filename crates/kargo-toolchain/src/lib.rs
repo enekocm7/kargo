@@ -3,6 +3,7 @@
 
 pub mod adoptium;
 pub mod archive;
+pub mod binaryen;
 pub mod browser;
 pub mod download;
 pub mod graalvm;

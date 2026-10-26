@@ -138,6 +138,8 @@ struct RawPackage {
     #[serde(default)]
     jlink: RawJlink,
     #[serde(default)]
+    optimize: RawOptimize,
+    #[serde(default)]
     native_image: RawNativeImage,
     #[serde(default)]
     installer: RawInstaller,
@@ -149,6 +151,15 @@ struct RawJlink {
     #[serde(default)]
     modules: Vec<String>,
     jdeps: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawOptimize {
+    shrink: Option<bool>,
+    optimize: Option<bool>,
+    obfuscate: Option<bool>,
+    rules: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -271,6 +282,18 @@ struct RawWasm {
     #[serde(default)]
     npm_dependencies: BTreeMap<String, String>,
     wasm_opt: Option<Value>,
+    opt_level: Option<String>,
+    #[serde(default)]
+    wasm_opt_flags: Vec<String>,
+    debug_info: Option<bool>,
+    #[serde(default)]
+    compress: Vec<String>,
+    content_hash: Option<bool>,
+    max_size: Option<String>,
+    max_gzip_size: Option<String>,
+    size_report: Option<bool>,
+    wasm_enable_array_range_checks: Option<bool>,
+    wasm_debugger_custom_formatters: Option<bool>,
     #[serde(default)]
     web_resources: Vec<PathBuf>,
     web_init: Option<PathBuf>,
@@ -1282,6 +1305,23 @@ pub(super) fn parse_duration_in(section: &str, key: &str, value: &str) -> Result
     }
 }
 
+fn parse_size(key: &str, value: &str) -> Result<u64> {
+    let text = value.trim();
+    let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (amount, unit) = text.split_at(digits);
+    let multiplier = match unit.trim() {
+        "B" => 1,
+        "KiB" => 1024,
+        "MiB" => 1024 * 1024,
+        "GiB" => 1024 * 1024 * 1024,
+        _ => 0,
+    };
+    match amount.parse::<u64>() {
+        Ok(n) if n > 0 && multiplier > 0 => n.checked_mul(multiplier).context("size value overflow"),
+        _ => bail!("{key} must be a positive size such as \"1 MiB\" or \"512 KiB\", not \"{value}\""),
+    }
+}
+
 fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
     let mut tasks = BTreeMap::new();
     for (name, value) in table {
@@ -1762,6 +1802,19 @@ impl RawManifest {
                                 Some(Value::String(path)) if !path.trim().is_empty() => WasmOpt::Path(PathBuf::from(path)),
                                 Some(_) => bail!("[target.wasm] `wasm-opt` must be true, false or the path of a wasm-opt executable"),
                             };
+                            let opt_level = match w.opt_level.as_deref().unwrap_or("balanced") {
+                                "size" => WasmOptLevel::Size,
+                                "speed" => WasmOptLevel::Speed,
+                                "balanced" => WasmOptLevel::Balanced,
+                                other => bail!("unknown [target.wasm] opt-level `{other}` (expected `size`, `balanced` or `speed`)"),
+                            };
+                            let compress = w.compress.iter().map(|v| match v.as_str() {
+                                "gzip" => Ok(WasmCompression::Gzip),
+                                "brotli" => Ok(WasmCompression::Brotli),
+                                other => bail!("unknown [target.wasm] compression `{other}` (expected `gzip` or `brotli`)"),
+                            }).collect::<Result<Vec<_>>>()?;
+                            let max_size = w.max_size.as_deref().map(|s| parse_size("[target.wasm] `max-size`", s)).transpose()?;
+                            let max_gzip_size = w.max_gzip_size.as_deref().map(|s| parse_size("[target.wasm] `max-gzip-size`", s)).transpose()?;
                             let package_manager = w.package_manager.as_deref().map(str::parse).transpose()?;
                             validate_web_resources(kind, environment, &w.web_resources, w.web_init.as_deref())?;
                             let js_sources = match (environment, w.js_sources) {
@@ -1780,6 +1833,16 @@ impl RawManifest {
                                 package_manager,
                                 npm_dependencies: w.npm_dependencies,
                                 wasm_opt,
+                                opt_level,
+                                wasm_opt_flags: w.wasm_opt_flags,
+                                debug_info: w.debug_info.unwrap_or(false),
+                                compress,
+                                content_hash: w.content_hash.unwrap_or(false),
+                                max_size,
+                                max_gzip_size,
+                                size_report: w.size_report.unwrap_or(false),
+                                wasm_enable_array_range_checks: w.wasm_enable_array_range_checks,
+                                wasm_debugger_custom_formatters: w.wasm_debugger_custom_formatters.unwrap_or(false),
                                 web_resources: w.web_resources,
                                 web_init: w.web_init,
                                 js_sources,
@@ -2096,6 +2159,7 @@ impl RawManifest {
         };
         let packaging = PackagingSettings {
             jlink: self.package.jlink.validate()?,
+            optimize: self.package.optimize.validate()?,
             native_image: self.package.native_image.validate(),
             installer: self.package.installer.validate()?,
         };
@@ -2723,6 +2787,17 @@ impl RawJlink {
             bail!("[package.jlink] `jdeps = false` needs `modules`: the JDK modules to put in the runtime image, e.g. [\"java.base\"]");
         }
         Ok(JlinkSettings { modules: self.modules, jdeps })
+    }
+}
+
+impl RawOptimize {
+    fn validate(self) -> Result<OptimizeSettings> {
+        Ok(OptimizeSettings {
+            shrink: self.shrink.unwrap_or(true),
+            optimize: self.optimize.unwrap_or(true),
+            obfuscate: self.obfuscate.unwrap_or(true),
+            rules: self.rules.unwrap_or_else(|| PathBuf::from("proguard-rules.pro")),
+        })
     }
 }
 

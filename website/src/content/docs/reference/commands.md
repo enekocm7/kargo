@@ -185,12 +185,13 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
 | `-j, --jobs <n>` | How many workspace members build at the same time (default: the number of CPUs) |
+| `--size-report` | Print Binaryen per-function metrics for a Wasm release build |
 
 [Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts (unless you pass `--keep-going`), and the error names the member and the target, such as ``could not build `core` (jvm)``.
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
-For Wasm, a release build removes dead code, runs `wasm-opt` when it is installed and prints the size of the module. A `kind = "library"` project also gets a `package.json` and TypeScript declarations. See [WebAssembly](../../guides/wasm/). For JS, a release build removes dead code, and a library gets a `package.json` and TypeScript declarations too. See [JavaScript](../../guides/js/).
+For Wasm, a release build removes dead code, downloads pinned Binaryen on demand, and reports raw, gzip and Brotli sizes. Optional size budgets can fail the build, and `--size-report` asks Binaryen for per-function metrics. See [WebAssembly](../../guides/wasm/). A `kind = "library"` project also gets a `package.json` and TypeScript declarations.
 
 ```sh
 kargo build
@@ -347,6 +348,7 @@ kargo test [filter] [options]
 | `--include-tag <tag>` | Only run JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
 | `--exclude-tag <tag>` | Skip JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
 | `--failed` | Rerun only the JVM test classes that failed in the last run. Conflicts with `--list` and `--no-run`. See [Rerunning failures](../../guides/testing/#rerunning-failures) |
+| `--against-min` | Run JVM tests with the R8-optimized jar on the runtime classpath; useful for finding missing keep rules |
 | `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
 | `--debug[=<port>]` | Start the JVM tests suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`). Needs `-t jvm` in a project with several targets. See [Debugging tests](../../guides/testing/#debugging-tests) |
 | `--list` | Compile the tests and print them (`<target>: <Class>.<name>`) instead of running them. JVM and Native only. See [Listing tests](../../guides/testing/#listing-tests) |
@@ -685,8 +687,18 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
 | `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library (JVM) |
 | `--format <format>` | `jar` (default), `jlink`, `native-image` or `installer` (JVM) |
+| `--optimize` | Shrink and obfuscate the JVM jar with R8; also enabled automatically with `--release` |
+| `--message-format json` | Print compiler diagnostics, optimization reports and package paths as JSON lines |
 | `--desktop` | Package the [Compose Desktop](../../guides/compose/#distributing) application: an installer for this OS unless `--format` says otherwise, with the JDK modules, options and Skiko native library Compose needs. Needs `[frameworks] compose` |
 | `--platforms <list>` | With `--desktop --format jar`: the platforms whose Skiko natives the jar carries instead of only the host's, so it runs on each of them. `all`, or some of `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`, `linux-x64`, `linux-arm64` |
+
+## `kargo retrace`
+
+```sh
+kargo retrace target/release/jvm/app-0.1.0-mapping.txt crash.txt
+```
+
+Uses the mapping file produced by optimized packaging to restore obfuscated stack frames. If the stack trace path is omitted, Kargo reads it from stdin.
 
 ## `kargo publish`
 
@@ -754,7 +766,7 @@ Download all dependencies and toolchains so later builds can run offline, and lo
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
 | `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. Libraries that publish none are skipped. Sources jars are not recorded in `kargo.lock` |
-| `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint) and [`kargo lint`](../../guides/formatting-and-linting/) (detekt), so they work with `--offline` and `--locked` |
+| `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint), [`kargo lint`](../../guides/formatting-and-linting/) (detekt) and R8 for JVM optimization |
 | `-p, --package <name>`, `--workspace` | Which packages to fetch for |
 
 ```console

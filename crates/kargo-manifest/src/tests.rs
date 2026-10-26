@@ -399,6 +399,8 @@ fn wasm_target_options() {
     assert_eq!(default.environment, WasmEnvironment::Js);
     assert_eq!(default.kind, WasmKind::Application);
     assert_eq!(default.wasm_opt, WasmOpt::Auto);
+    assert_eq!(default.opt_level, WasmOptLevel::Balanced);
+    assert!(!default.debug_info && !default.content_hash && default.compress.is_empty());
     assert!(default.npm_dependencies.is_empty());
     assert_eq!(default.module_name(&parse(MINIMAL).package), "hello");
 
@@ -417,6 +419,15 @@ kind = "library"
 module-name = "hello.core"
 npm-name = "@acme/hello"
 wasm-opt = "tools/wasm-opt"
+opt-level = "size"
+wasm-opt-flags = ["--metrics"]
+debug-info = true
+compress = ["gzip", "brotli"]
+content-hash = true
+max-size = "1 MiB"
+max-gzip-size = "128 KiB"
+wasm-enable-array-range-checks = true
+wasm-debugger-custom-formatters = true
 
 [target.wasm.npm-dependencies]
 "@js-joda/core" = "^3.2.0"
@@ -426,6 +437,13 @@ wasm-opt = "tools/wasm-opt"
     assert_eq!(library.module_name(&parse(MINIMAL).package), "hello.core");
     assert_eq!(library.npm_package_name(&parse(MINIMAL).package), "@acme/hello");
     assert_eq!(library.wasm_opt, WasmOpt::Path("tools/wasm-opt".into()));
+    assert_eq!(library.opt_level, WasmOptLevel::Size);
+    assert_eq!(library.wasm_opt_flags, ["--metrics"]);
+    assert!(library.debug_info && library.content_hash && library.wasm_debugger_custom_formatters);
+    assert_eq!(library.compress, [WasmCompression::Gzip, WasmCompression::Brotli]);
+    assert_eq!(library.max_size, Some(1024 * 1024));
+    assert_eq!(library.max_gzip_size, Some(128 * 1024));
+    assert_eq!(library.wasm_enable_array_range_checks, Some(true));
     assert_eq!(library.npm_dependencies["@js-joda/core"], "^3.2.0");
 
     // The npm name defaults to the lowercase package name.
@@ -447,6 +465,9 @@ fn wasm_target_option_errors() {
     assert!(parse_err(&with("kind = \"library\"\nnpm-name = \"Hello\"")).contains("invalid [target.wasm] npm-name `Hello`"));
     assert!(parse_err(&with("kind = \"library\"\nnpm-name = \"@scope\"")).contains("invalid [target.wasm] npm-name"));
     assert!(parse_err(&with("wasm-opt = 3")).contains("`wasm-opt` must be true, false or the path"));
+    assert!(parse_err(&with("opt-level = \"tiny\"")).contains("expected `size`, `balanced` or `speed`"));
+    assert!(parse_err(&with("compress = [\"zip\"]")).contains("expected `gzip` or `brotli`"));
+    assert!(parse_err(&with("max-size = \"0 MiB\"")).contains("must be a positive size"));
     assert!(parse_err(&with("npm-dependencies = { left-pad = 1 }")).contains("invalid type"));
     assert!(parse_err(&with("[target.wasm.npm-dependencies]\nleft-pad = \"\"")).contains("needs a package name and a version"));
     assert!(parse_err(&with("html = \"index.html\"")).contains("unknown field"));
@@ -1720,6 +1741,12 @@ fn packaging_tables() {
 [package.jlink]
 modules = ["java.naming", "jdk.crypto.ec"]
 
+[package.optimize]
+shrink = false
+optimize = true
+obfuscate = false
+rules = "config/keep.pro"
+
 [package.native-image]
 args = ["--enable-url-protocols=https"]
 static = true
@@ -1742,6 +1769,10 @@ category = "Development"
 "#
     ));
     assert_eq!(m.packaging.jlink.modules, ["java.naming", "jdk.crypto.ec"]);
+    assert_eq!(
+        m.packaging.optimize,
+        OptimizeSettings { shrink: false, optimize: true, obfuscate: false, rules: PathBuf::from("config/keep.pro") }
+    );
     let native = &m.packaging.native_image;
     assert!(native.static_link && !native.metadata_repository);
     assert_eq!(native.initialize_at_build_time, ["kotlinx.serialization"]);

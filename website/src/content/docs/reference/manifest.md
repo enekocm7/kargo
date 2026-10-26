@@ -57,6 +57,27 @@ jdeps = true
 | `modules` | `[]` | JDK modules to add to the ones `jdeps` finds, such as modules the program only loads through reflection or a service loader |
 | `jdeps` | `true` | Ask `jdeps` which modules the program and its dependencies use. `false` puts only `modules` in the runtime, so it then needs at least one |
 
+### `[package.optimize]`
+
+R8 settings for shrinking JVM jars. `kargo package --release` enables this automatically; pass `--optimize` to enable it with another profile. The minimized jar, mapping and removed-code report are written under `target/<profile>/jvm/`.
+
+```toml
+[package.optimize]
+shrink = true
+optimize = true
+obfuscate = true
+rules = "proguard-rules.pro"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `shrink` | `true` | Remove unreachable classes and members |
+| `optimize` | `true` | Apply bytecode optimizations |
+| `obfuscate` | `true` | Rename classes and members |
+| `rules` | `"proguard-rules.pro"` | ProGuard-compatible rules file; an absent default file is ignored |
+
+R8 is downloaded from Google's Maven repository and pinned with a checksum in `kargo.lock`. Kargo preserves the selected `[[bin]]` or package main entry point, and keeps public library APIs and Kotlin metadata for library jars. See [JVM shrinking](../../guides/publishing/#jvm-shrinking-and-obfuscation).
+
 ### `[package.native-image]`
 
 Options for `kargo package --format native-image`. See [Native executables](../../guides/distributing/#native-executables).
@@ -332,7 +353,17 @@ kind = "application"      # "application" (default) or "library"
 module-name = "hello"     # name of the .mjs and .wasm files; default: the package name
 npm-name = "@acme/hello"  # npm package name of a library; default: the lowercase package name
 package-manager = "pnpm"  # "npm", "pnpm" or "bun"; default: the first one found on PATH
-wasm-opt = false          # false, or the path of a wasm-opt executable; default: wasm-opt on PATH
+opt-level = "balanced"   # "size" (-Oz), "balanced" (-O2) or "speed" (-O3)
+wasm-opt = true            # pinned Binaryen is installed on demand; false or a custom path also work
+wasm-opt-flags = []        # extra wasm-opt passes/options
+debug-info = false         # keep names and write a .wasm.map in release builds
+compress = ["gzip", "brotli"] # emit .gz/.br copies of the module and JS glue
+content-hash = false       # include a content hash in module filenames
+max-size = "1 MiB"         # fail a release build above this Wasm size
+max-gzip-size = "256 KiB"  # fail a release build above this gzipped size
+size-report = false        # print Binaryen per-function metrics
+wasm-enable-array-range-checks = false
+wasm-debugger-custom-formatters = false
 web-resources = ["web/raylib.mjs", "web/raylib.wasm"]  # a library's files for the browser apps using it
 web-init = "web/init.mjs" # a library's script that runs before a dependent app's module
 js-sources = ["js"]       # your own JavaScript and TypeScript modules; default: js/
@@ -348,13 +379,23 @@ js-sources = ["js"]       # your own JavaScript and TypeScript modules; default:
 | `module-name` | the package name | Name of the compiled module's files (`<name>.mjs`, `<name>.wasm`). Letters, digits, `-`, `_` and `.` |
 | `npm-name` | the lowercase package name | `name` in the `package.json` of a library. May be scoped (`@scope/name`); only valid with `kind = "library"` |
 | `package-manager` | first of `npm`, `pnpm`, `bun` on `PATH` | The tool that installs the [npm packages](../../guides/wasm/#npm-packages) your project needs |
-| `wasm-opt` | `true` | In release builds, run Binaryen's `wasm-opt` over the module when there is one on `PATH`. `false` never runs it; a string is the path of the executable to run, relative to the project. See [Release builds](../../guides/wasm/#release-builds) |
+| `wasm-opt` | `true` | In release builds, use the pinned Binaryen `wasm-opt` installed on demand. `false` disables it; a string is a custom executable path relative to the project. |
+| `opt-level` | `"balanced"` | Binaryen optimization preset: `size` (`-Oz`), `balanced` (`-O2`) or `speed` (`-O3`). |
+| `wasm-opt-flags` | none | Additional arguments passed to Binaryen after Kargo's required Wasm feature flags. |
+| `debug-info` | `false` | Keep debug names and generate a separate `.wasm.map` in release output. |
+| `compress` | none | Emit `.gz` and/or `.br` files for the Wasm module and JavaScript glue; the browser server negotiates `Content-Encoding`. |
+| `content-hash` | `false` | Add a hash of the Wasm bytes to the module and Wasm filenames, and update generated references. |
+| `max-size` | none | Fail release builds when the Wasm module exceeds a byte size such as `"1 MiB"`. |
+| `max-gzip-size` | none | Fail release builds when the gzipped Wasm module exceeds the configured size. |
+| `size-report` | `false` | Ask Binaryen for module and per-function metrics. The `kargo build --size-report` flag enables this for one invocation. |
+| `wasm-enable-array-range-checks` | profile default | Override Kotlin/Wasm array range checks; Kargo disables them in optimized builds by default. |
+| `wasm-debugger-custom-formatters` | `false` | Enable Kotlin/Wasm custom formatters in browser debuggers. |
 | `npm-dependencies` | none | A table of npm packages (`name = "version"`) to install in addition to those the klibs ask for. Your version wins on a conflict. Each gets [Kotlin declarations](../../guides/wasm/#kotlin-declarations-for-npm-packages) generated from its TypeScript ones |
 | `web-resources` | none | Files and directories of a library, relative to the package, that every browser app depending on it gets next to its module under their own names (a directory keeps its name). Published as a `web-resources` zip. Needs `kind = "library"` and `environment = "js"` or `"browser"`. See [Web resources from libraries](../../guides/wasm/#web-resources-from-libraries) |
 | `web-init` | none | A script of a library, relative to the package, that the page Kargo generates for a dependent browser app imports before the app module, after the init scripts of the libraries it depends on. It is shipped like `web-resources`. Same requirements as `web-resources` |
 | `js-sources` | `["js"]` | Directories, relative to the package, of your own JavaScript and TypeScript modules. They land in `js/` next to the module (TypeScript compiled with tsc) and get Kotlin declarations in the package `js.<path>`. A directory that doesn't exist is skipped; `[]` turns the convention off. Not for `environment = "wasi"`. See [Your own JavaScript and TypeScript](../../guides/wasm/#your-own-javascript-and-typescript) |
 
-With `optimize = true`, as in the [release profile](#profilename), a Wasm build removes code nothing reaches, runs `wasm-opt` and reports the size of the output.
+With `optimize = true`, as in the [release profile](#profilename), a Wasm build removes code nothing reaches, runs pinned Binaryen `wasm-opt` and reports module, gzip and Brotli sizes. Size budgets are checked after optimization.
 
 ### `[target.js]`
 

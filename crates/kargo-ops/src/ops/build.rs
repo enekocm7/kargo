@@ -37,6 +37,8 @@ pub struct BuildOptions {
     pub keep_going: bool,
     /// Combine the Apple frameworks into an XCFramework (`--xcframework`).
     pub xcframework: bool,
+    /// Print Binaryen's per-function Wasm metrics (release builds only).
+    pub size_report: bool,
 }
 
 /// Outputs of the JVM target.
@@ -261,7 +263,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         let mut r = BuildResults::default();
         match target {
             TargetKind::Jvm => r.jvm = Some(build_jvm(ctx)?),
-            TargetKind::Wasm => r.wasm = build_wasm(ctx)?,
+            TargetKind::Wasm => r.wasm = build_wasm(ctx, opts.size_report)?,
             TargetKind::Js => r.js = build_js(ctx)?,
             TargetKind::Native => r.native = build_native(ctx)?,
             TargetKind::Android => r.android = Some(crate::gradle::build(ctx)?),
@@ -622,9 +624,10 @@ pub(crate) const ALL_SCOPES: [Scope; 3] = [Scope::Compile, Scope::Runtime, Scope
 
 /// Compiles the Wasm target and adds what surrounds the module: the page of a browser app, the
 /// `package.json` of a library, and in a release build `wasm-opt` and the size report.
-pub fn build_wasm(ctx: &BuildContext) -> Result<Option<WasmBuild>> {
+pub fn build_wasm(ctx: &BuildContext, size_report: bool) -> Result<Option<WasmBuild>> {
     let Some(build) = prepare_wasm(ctx)? else { return Ok(None) };
-    crate::wasm_output::finish(ctx, &build)?;
+    let mut build = build;
+    crate::wasm_output::finish(ctx, &mut build, size_report)?;
     Ok(Some(build))
 }
 
@@ -664,7 +667,10 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
         kotlin_args: &kotlin_args,
         output: ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm),
         debug: profile.debug,
+        debug_info: wasm.debug_info,
         optimize: profile.optimize,
+        array_range_checks: wasm.wasm_enable_array_range_checks,
+        debugger_custom_formatters: wasm.wasm_debugger_custom_formatters,
         // An application's too, for the TypeScript modules and any other code that imports it.
         declarations: true,
         main_args,
