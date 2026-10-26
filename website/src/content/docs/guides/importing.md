@@ -74,7 +74,7 @@ Gradle builds are programs, so `kargo import` reads their declarative parts and 
 | `jvmToolchain(21)`, `java.toolchain.languageVersion` | `jvm-target` and `[toolchain] jdk` |
 | `application { mainClass.set(...) }`, `mainClassName` | `[target.jvm] main-class` |
 | `allOpen { annotation(...) }`, `noArg { annotation(...) }` | `[plugins.allopen]`, `[plugins.noarg]` |
-| `repositories { maven("url") }`, `mavenLocal()` | `[repositories]` (Maven Central and Google Maven are always there) |
+| `repositories { maven("url") }`, `mavenLocal()` | `[repositories]` (Maven Central and Google Maven are there by default) |
 | `group`, `version`, `description`, `rootProject.name` | `[package]` |
 
 A multi-project build keeps what `allprojects { }`, `subprojects { }` and `project(":x") { }` of the root script configure, and plugin versions the root script declares with `apply false`.

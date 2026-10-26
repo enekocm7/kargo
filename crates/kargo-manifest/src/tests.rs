@@ -649,6 +649,37 @@ fn repository_errors() {
     // Duplicate of Maven Central is ignored.
     let m = parse(&with(&format!("central = \"{}/\"", kargo_maven::repo::MAVEN_CENTRAL)));
     assert_eq!(m.repositories.len(), 1);
+    assert!(parse_err(&with("corp = { username-env = \"U\", password-env = \"P\" }")).contains("needs a `url`"));
+    assert!(parse_err(&with("defaults = \"no\"")).contains("true or false"));
+    assert!(parse_err(&with("corp = { url = \"https://a\", include-groups = [\"com.*.corp\"] }")).contains("not a group pattern"));
+}
+
+#[test]
+fn repository_content_and_defaults() {
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[repositories.corp]
+url = "https://nexus.corp/maven"
+include-groups = ["com.corp.*"]
+
+[repositories.maven-central]
+exclude-groups = ["com.corp.*"]
+"#
+    ));
+    let names: Vec<_> = m.repositories.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["maven-central", "corp"], "the built-in repository keeps its place");
+    assert_eq!(m.repositories[0].content.exclude_groups, ["com.corp.*"]);
+    assert_eq!(m.repositories[1].content.include_groups, ["com.corp.*"]);
+
+    // Without the defaults, only the declared repositories are used, even for Compose and Android.
+    let m = parse(&format!(
+        "{MINIMAL}\n[frameworks]\ncompose = true\n[repositories]\ndefaults = false\nmirror = \"https://mirror.corp/maven\"\n"
+    ));
+    let urls: Vec<_> = m.repositories.iter().map(|r| r.url.as_str()).collect();
+    assert_eq!(urls, ["https://mirror.corp/maven"]);
+    // A built-in one can be added back by name.
+    let m = parse(&format!("{MINIMAL}\n[repositories]\ndefaults = false\ngoogle = {{}}\n"));
+    assert_eq!(m.repositories, [kargo_maven::Repository::google()]);
 }
 
 #[test]

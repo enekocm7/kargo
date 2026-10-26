@@ -399,6 +399,42 @@ fn update_locks_processors_apart_from_the_classpaths() {
 }
 
 #[test]
+fn a_group_a_repository_includes_never_comes_from_another() {
+    // A public repository that has a higher version of the private library: dependency confusion.
+    let public = LocalRepo::new();
+    public.publish("com.corp:lib", "1.0", &[]).publish("com.corp:lib", "9.0", &[]).publish(
+        "org.jetbrains.kotlin:kotlin-stdlib",
+        "2.4.21",
+        &[],
+    );
+    let corp = LocalRepo::new();
+    corp.publish("com.corp:lib", "1.0", &[]);
+    let p = Project::new();
+    let toml = |rules: &str| {
+        manifest(
+            "app",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"com.corp:lib\" = \"[1.0,)\"\n[repositories]\ndefaults = false\npublic = \"{}\"\n\
+                 [repositories.corp]\nurl = \"{}\"\n{rules}",
+                public.url(),
+                corp.url()
+            ),
+        )
+    };
+    p.file("kargo.toml", &toml(""));
+    p.kargo().args(["tree", "--offline"]).assert().success().stdout(predicate::str::contains("com.corp:lib:9.0"));
+
+    p.file("kargo.toml", &toml("include-groups = [\"com.corp.*\"]\n"));
+    let out = p.kargo().args(["tree", "--offline"]).assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("com.corp:lib:1.0") && !text.contains("9.0"), "{text}");
+    let cache = p.home.path().join("cache").join("maven");
+    let scopes: Vec<String> = std::fs::read_dir(&cache).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(scopes.iter().any(|s| s.starts_with("@corp-")), "the jar comes from the corp repository: {scopes:?}");
+    assert!(!p.read("kargo.lock").contains("9.0"));
+}
+
+#[test]
 fn tree_resolves_from_local_repository_and_writes_lockfile() {
     let repo = LocalRepo::new();
     repo.publish("g:lib", "1.0", &[("g:util", "1.0")])

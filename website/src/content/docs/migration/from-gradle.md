@@ -215,6 +215,8 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `maven-publish` + `signing` (or `com.vanniktech.maven.publish`) | `kargo publish`, with `[publish]` and the POM fields in `[package]`; see [Publishing a library](../../guides/publishing/) |
 | `./gradlew publishToMavenLocal` | `kargo publish --local` |
 | `mavenLocal()` | `[repositories] local = "maven-local"` |
+| `exclusiveContent { forRepository { maven(url) }; filter { includeGroup("com.corp") } }` | `[repositories.corp] url = "..."`, `include-groups = ["com.corp"]` |
+| `content { excludeGroup("com.corp") }` | `exclude-groups = ["com.corp"]` on the repository (`[repositories.maven-central]` for `mavenCentral()`) |
 | `tasks.register("x") { exec ... }` | `[tasks] x = "..."` |
 | `tasks.compileKotlin { dependsOn(gen) }` | `gen = { run = "...", hooks = ["pre-build"] }` |
 | `com.google.protobuf` plugin, `sourceSets { main { kotlin.srcDir("build/generated/...") } }` | a [`[[generate]]` step](../../guides/code-generation/) such as `builtin = "protobuf"`; its output directory is a source root |

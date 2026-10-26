@@ -266,10 +266,15 @@ inputs = ["proto/**/*.proto"]   # the step runs again only when these change (de
 
 [dev-dependencies]          # test-only dependencies
 
-[repositories]              # Maven Central is always used; Google Maven is added for Android/Compose
+[repositories]              # Maven Central comes first; Google Maven is added for Android/Compose
 jitpack = "https://jitpack.io"
 company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
 local = "maven-local"       # ~/.m2/repository, where `kargo publish --local` and `mvn install` put libraries
+# defaults = false          # leave out Maven Central and Google Maven (everything through your own mirror)
+
+[repositories.corp]         # include-groups: only this repository serves these groups (no dependency confusion)
+url = "https://nexus.corp/maven"
+include-groups = ["com.corp.*"]   # also: exclude-groups; `[repositories.maven-central]` configures the built-in one
 
 [publish]                   # kargo publish; every key is optional
 repository = "maven-central"  # default destination: maven-central, maven-local or a [repositories] entry

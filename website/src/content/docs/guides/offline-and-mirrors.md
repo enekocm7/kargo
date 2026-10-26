@@ -109,7 +109,7 @@ username-env = "ART_USER"
 password-env = "ART_TOKEN"
 ```
 
-A key names what the mirror replaces: a repository URL, a repository name (`maven-central`, `google`, or a name from `[repositories]`), or `*` for every remote repository that no other key names. Repositories on disk (`file:` URLs and `maven-local`) are never mirrored. Repositories that end up at the same mirror are asked once. With `"*"`, no request goes to Maven Central or Google; `kargo -v` prints the URL of every download, so you can check.
+A key names what the mirror replaces: a repository URL, a repository name (`maven-central`, `google`, or a name from `[repositories]`), or `*` for every remote repository that no other key names. Repositories on disk (`file:` URLs and `maven-local`) are never mirrored. Repositories that end up at the same mirror are asked once, for the groups any of them serves (see [`include-groups` and `exclude-groups`](../dependencies/#choosing-which-repository-serves-a-library)). With `"*"`, no request goes to Maven Central or Google; `kargo -v` prints the URL of every download, so you can check.
 
 `[mirrors.credentials."<prefix>"]` gives the credentials for every URL that starts with the prefix (whole path segments; the longest prefix wins), read from the environment variables it names. They apply to mirrors, to repositories of `kargo.toml` that have no `username-env` of their own, and to [toolchain mirrors](#toolchain-mirrors). Unset variables send no credentials, so the server answers with HTTP 401.
 
