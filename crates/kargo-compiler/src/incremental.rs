@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::daemon::{self, Tool};
 use kargo_toolchain::Jdk;
@@ -68,8 +68,11 @@ impl IncrementalUnit<'_> {
         let same_config = std::fs::read_to_string(&config_path).is_ok_and(|c| c == config);
         let previous = if same_config && !output_missing { read_stamps(&sources_path) } else { None };
         if previous.is_none() {
-            // Start over: stale caches must not survive a configuration change.
-            remove_dir_all_if_exists(&self.state_dir)?;
+            // Start over: stale caches must not survive a configuration change. The daemon empties
+            // `caches/` itself (for `--unknown-changes`), once a compilation of this unit that an
+            // earlier, cancelled build left running there has closed them.
+            remove_file_if_exists(&sources_path)?;
+            remove_file_if_exists(&config_path)?;
         }
         std::fs::create_dir_all(&self.state_dir)?;
         std::fs::create_dir_all(self.output)?;
@@ -158,6 +161,13 @@ pub const INCREMENTAL_ENV: &str = "KARGO_INCREMENTAL";
 
 fn enabled() -> bool {
     std::env::var(INCREMENTAL_ENV).map_or(true, |v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e).with_context(|| format!("failed to remove {}", path.display())),
+        _ => Ok(()),
+    }
 }
 
 /// `path -> "size mtime"` for every source.

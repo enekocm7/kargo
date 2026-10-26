@@ -55,8 +55,11 @@ public final class KargoIc {
         return toolchains;
     }
 
-    /** Runs one incremental compilation; returns a process-style exit code. */
-    public static int run(String[] args, PrintStream out) throws Exception {
+    /**
+     * Runs one incremental compilation; returns a process-style exit code. Compiler messages go to
+     * `out`, the incremental compiler's own failures (it falls back to a full rebuild) to `log`.
+     */
+    public static int run(String[] args, PrintStream out, PrintStream log) throws Exception {
         Path workingDir = null;
         Path dest = null;
         Path root = null;
@@ -83,9 +86,15 @@ public final class KargoIc {
             }
         }
 
+        if (unknown) {
+            // New caches. The daemon holds this unit's lock, so no earlier compilation still has them open.
+            deleteRecursively(workingDir);
+        }
+
         KotlinToolchains kotlin = toolchains();
         JvmPlatformToolchain jvm = JvmPlatformToolchain.from(kotlin);
-        KotlinLogger logger = new Logger(out);
+        Logger logger = new Logger(out, log);
+        int code;
         try (KotlinToolchains.BuildSession session = kotlin.createBuildSession()) {
             List<Path> snapshotFiles = new ArrayList<>();
             for (String[] s : snapshots) {
@@ -123,10 +132,29 @@ public final class KargoIc {
 
             CompilationResult result = session.executeOperation(op.build(), kotlin.createInProcessExecutionPolicy(), logger);
             switch (result) {
-                case COMPILATION_SUCCESS: return 0;
-                case COMPILATION_ERROR: return 1;
+                case COMPILATION_SUCCESS: code = 0; break;
+                case COMPILATION_ERROR: code = 1; break;
                 case COMPILATION_OOM_ERROR: throw new OutOfMemoryError("the Kotlin compiler ran out of memory");
-                default: return 2;
+                default: code = 2; break;
+            }
+        }
+        if (logger.storageConflict) {
+            // The caches of an earlier compilation are still registered in this JVM, and every later
+            // one would fail the same way; the daemon retires on this message.
+            throw new IllegalStateException("incremental compilation fell back: a storage is already registered");
+        }
+        return code;
+    }
+
+    static void deleteRecursively(Path dir) throws java.io.IOException {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (java.util.stream.Stream<Path> walk = Files.walk(dir)) {
+            List<Path> paths = new ArrayList<>();
+            walk.forEach(paths::add);
+            for (int i = paths.size() - 1; i >= 0; i--) {
+                Files.deleteIfExists(paths.get(i));
             }
         }
     }
@@ -169,12 +197,46 @@ public final class KargoIc {
         }
     }
 
-    /** Prints compiler diagnostics; the incremental compiler's own progress notes are dropped. */
+    /**
+     * Prints compiler diagnostics. The incremental compiler's own progress notes are dropped, and
+     * its failures (after which it rebuilds everything itself) go to the daemon log: they are not
+     * problems in the user's code.
+     */
     static final class Logger implements KotlinLogger {
         private final PrintStream out;
+        private final PrintStream log;
+        /** Whether a failure was IntelliJ's "Storage for [...] is already registered". */
+        volatile boolean storageConflict;
 
-        Logger(PrintStream out) {
+        Logger(PrintStream out, PrintStream log) {
             this.out = out;
+            this.log = log;
+        }
+
+        /** Whether `message` is the incremental compiler's report of its own failure, not a diagnostic. */
+        static boolean isFallback(String message) {
+            // The compiler's text is a margin-trimmed block; drop a margin it may have kept.
+            String text = message.trim();
+            while (text.startsWith("|")) {
+                text = text.substring(1).trim();
+            }
+            return text.startsWith("Incremental compilation was attempted but failed")
+                    || text.startsWith("Incremental compilation failed")
+                    || text.startsWith("Falling back to non-incremental compilation");
+        }
+
+        private void print(String message, Throwable cause) {
+            PrintStream target = out;
+            if (message != null && isFallback(message)) {
+                target = log;
+                if (message.contains("is already registered")) {
+                    storageConflict = true;
+                }
+            }
+            target.println(message);
+            if (cause != null) {
+                cause.printStackTrace(target);
+            }
         }
 
         @Override
@@ -184,20 +246,17 @@ public final class KargoIc {
 
         @Override
         public void error(String message, Throwable cause) {
-            out.println(message);
-            if (cause != null) {
-                cause.printStackTrace(out);
-            }
+            print(message, cause);
         }
 
         @Override
         public void warn(String message, Throwable cause) {
-            out.println(message);
+            print(message, null);
         }
 
         @Override
         public void warn(String message) {
-            out.println(message);
+            print(message, null);
         }
 
         @Override

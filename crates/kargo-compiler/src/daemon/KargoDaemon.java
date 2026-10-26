@@ -29,7 +29,11 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -47,7 +51,13 @@ public final class KargoDaemon {
     static final AtomicInteger ACTIVE = new AtomicInteger();
     /** One lock per output directory, so a request waits for an orphaned compilation writing to the same one. */
     static final ConcurrentHashMap<String, ReentrantLock> OUTPUT_LOCKS = new ConcurrentHashMap<>();
+    static final boolean WINDOWS = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
     static volatile long lastUse = System.currentTimeMillis();
+    /**
+     * Set when the compiler left incremental caches registered that nothing will close; every
+     * later compilation of that unit would fail, so the daemon exits once it is idle.
+     */
+    static volatile boolean retiring;
     /** The daemon's log (its original stderr), for problems that are not the client's output. */
     static PrintStream log = System.err;
 
@@ -97,7 +107,7 @@ public final class KargoDaemon {
             } catch (IOException e) {
                 owner = false;
             }
-            if (!owner || System.currentTimeMillis() - lastUse > idleMillis) {
+            if (!owner || retiring || System.currentTimeMillis() - lastUse > idleMillis) {
                 if (owner) {
                     // Leave no info file behind for a port another program may take.
                     try {
@@ -162,11 +172,17 @@ public final class KargoDaemon {
             }, "kargo-client-watcher");
             watcher.setDaemon(true);
             watcher.start();
-            String outputDir = outputDirectory(command, arguments);
-            ReentrantLock lock = null;
-            if (outputDir != null) {
-                lock = OUTPUT_LOCKS.computeIfAbsent(outputDir, k -> new ReentrantLock());
+            if (retiring) {
+                // Compilations here can no longer be trusted; the client runs the tool as a process.
+                exit(out, UNSUPPORTED);
+                return;
+            }
+            // Sorted, so two requests that share directories take their locks in the same order.
+            List<ReentrantLock> locks = new ArrayList<>();
+            for (String dir : new TreeSet<>(lockedDirectories(command, arguments))) {
+                ReentrantLock lock = OUTPUT_LOCKS.computeIfAbsent(dir, k -> new ReentrantLock());
                 lock.lock();
+                locks.add(lock);
             }
             try {
                 if (gone.get()) {
@@ -175,7 +191,7 @@ public final class KargoDaemon {
                 }
                 compileAndReply(command, arguments, out, gone);
             } finally {
-                if (lock != null) {
+                for (ReentrantLock lock : locks) {
                     lock.unlock();
                 }
             }
@@ -187,22 +203,51 @@ public final class KargoDaemon {
         }
     }
 
-    /** The directory a request writes its classes to, if it names one. */
-    static String outputDirectory(String command, String[] arguments) {
-        String flag = command.equals("kotlin-ic") ? "--dest" : command.equals("kotlin") || command.equals("javac") ? "-d" : null;
-        if (flag == null) {
-            return null;
-        }
+    /**
+     * The directories a request writes to: its output, and for an incremental compilation its
+     * caches, which the compiler registers JVM-wide and fails to open twice.
+     */
+    static List<String> lockedDirectories(String command, String[] arguments) {
+        List<String> flags = command.equals("kotlin-ic") ? List.of("--dest", "--working-dir")
+                : command.equals("kotlin") || command.equals("javac") ? List.of("-d")
+                : List.of();
+        List<String> dirs = new ArrayList<>();
         for (int i = 0; i + 1 < arguments.length; i++) {
-            if (arguments[i].equals(flag)) {
-                try {
-                    return Paths.get(arguments[i + 1]).toAbsolutePath().normalize().toString();
-                } catch (RuntimeException e) {
-                    return arguments[i + 1];
-                }
+            if (arguments[i].equals("--")) {
+                break;
+            }
+            if (flags.contains(arguments[i])) {
+                dirs.add(lockKey(arguments[i + 1]));
             }
         }
-        return null;
+        return dirs;
+    }
+
+    /**
+     * One key per directory however a client spells it: `F:\p` and `f:\p` (editors often
+     * lowercase the drive letter) are the same directory to the compiler's caches.
+     */
+    static String lockKey(String dir) {
+        Path path;
+        try {
+            path = Paths.get(dir).toAbsolutePath().normalize();
+        } catch (RuntimeException e) {
+            return dir;
+        }
+        // The real path of the deepest existing ancestor, so a directory not created yet keys the same.
+        Path existing = path;
+        while (existing != null && !Files.exists(existing)) {
+            existing = existing.getParent();
+        }
+        if (existing != null) {
+            try {
+                path = existing.toRealPath().resolve(existing.relativize(path));
+            } catch (IOException | RuntimeException e) {
+                // keep the absolute path
+            }
+        }
+        String key = path.toString();
+        return WINDOWS ? key.toLowerCase(Locale.ROOT) : key;
     }
 
     static void compileAndReply(String command, String[] arguments, DataOutputStream out, AtomicBoolean gone) throws IOException {
@@ -249,12 +294,12 @@ public final class KargoDaemon {
         if (command.equals("kotlin-ic")) {
             Method run;
             try {
-                run = Class.forName("KargoIc").getMethod("run", String[].class, PrintStream.class);
-            } catch (ClassNotFoundException | LinkageError e) {
+                run = Class.forName("KargoIc").getMethod("run", String[].class, PrintStream.class, PrintStream.class);
+            } catch (ClassNotFoundException | NoSuchMethodException | LinkageError e) {
                 return UNSUPPORTED;
             }
             try {
-                return (Integer) run.invoke(null, arguments, output);
+                return (Integer) run.invoke(null, arguments, output, log);
             } catch (InvocationTargetException e) {
                 if (e.getCause() instanceof OutOfMemoryError) {
                     throw (OutOfMemoryError) e.getCause();
@@ -262,6 +307,10 @@ public final class KargoDaemon {
                 // Not a compile error: the client recompiles everything from scratch instead.
                 log.println("incremental compilation failed:");
                 e.getCause().printStackTrace(log);
+                if (alreadyRegistered(e.getCause())) {
+                    log.println("incremental caches are still registered in this JVM; the daemon exits once idle");
+                    retiring = true;
+                }
                 return IC_FAILED;
             }
         }
@@ -273,6 +322,22 @@ public final class KargoDaemon {
             return javac.run(null, output, output, arguments);
         }
         return UNSUPPORTED;
+    }
+
+    /** Whether `e` is IntelliJ's "Storage for [...] is already registered", the sign of caches nobody closed. */
+    static boolean alreadyRegistered(Throwable e) {
+        for (int depth = 0; e != null && depth < 20; e = e.getCause(), depth++) {
+            String message = e.getMessage();
+            if (message != null && message.contains("is already registered")) {
+                return true;
+            }
+            for (Throwable s : e.getSuppressed()) {
+                if (s.getMessage() != null && s.getMessage().contains("is already registered")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     static void exit(DataOutputStream out, int code) throws IOException {
