@@ -94,10 +94,31 @@ Kargo also falls back to a full rebuild by itself when the incremental compiler 
 Kargo runs independent work at the same time:
 
 - **Targets.** `kargo build`, `kargo check` and `kargo fetch` build the JVM, Wasm, JS, Native and Android targets of a multiplatform project concurrently.
-- **Workspace members.** `kargo build` and `kargo check` build independent [workspace](../workspaces/#the-build-graph) members at the same time, each after the members it depends on; `-j <n>` limits how many (the default is the number of CPUs). `kargo test` tests one member at a time unless you pass `-j`.
+- **Workspace members.** `kargo build` and `kargo check` build independent [workspace](../workspaces/#the-build-graph) members at the same time, each after the members it depends on. `kargo test`, `bench`, `doc`, `fmt` and `lint` handle one member at a time unless you set a number of jobs.
 - **Native platforms.** Each entry in `[target.native] platforms` compiles in its own Kotlin/Native process at the same time.
 - **Tests.** `kargo test` compiles every target's tests concurrently, then runs them one target at a time so their output doesn't interleave.
 - **Downloads.** The compiler, the JDK and your dependencies download at the same time. Dependency resolution fetches POMs and Gradle module metadata of a whole level of the graph at once, and artifacts listed in `kargo.lock` download in parallel when the cache is empty (a fresh CI machine, for example). Requests that hit a rate limit (HTTP 429) or a temporary server error are retried with backoff.
+
+### Limiting parallelism
+
+The number of jobs limits the members, and the targets and Native platforms of each member, that build at the same time. Each job can start a compiler, a Kotlin/Native link or a test JVM, so a lower number uses less memory, and a higher one keeps more cores busy:
+
+```sh
+kargo build -j 2
+```
+
+| Where | Example | Applies to |
+|---|---|---|
+| `-j, --jobs <n>` | `kargo build -j 2` | This command (`build`, `check`, `test`, `bench`, `run`, `package`, `doc`, `fmt`, `lint`) |
+| `KARGO_JOBS` | `KARGO_JOBS=2 kargo test` | Every command in this shell |
+| `[build] jobs` in `kargo.toml` | `jobs = 2` | The project; in a workspace, write it as `[workspace.build]` in the root `kargo.toml` |
+| `[build] jobs` in [`config.toml`](../offline-and-mirrors/#configuration-files) | `jobs = 2` | Every project on this machine (`~/.kargo/config.toml`) or this checkout (`.kargo/config.toml`) |
+
+The first one set wins, in the order of the table. Each takes a number, or `auto` (also written `0`), which is also the default: the number of CPUs, lowered so that every job has 1.5 GiB of the memory that is free when the command starts (on Linux within the container's cgroup limit; on macOS half of the physical memory counts as free). A 4-core CI runner with 3 GiB free gets 2 jobs.
+
+`-j 1` builds one member, then one target, at a time, always in the same order, so the status lines of a log come out the same on every run. `kargo test` runs one test JVM per member at a time, so `-j` also sets how many test JVMs run at once; without a number of jobs it tests one member at a time. `kargo -v build` prints the numbers it uses.
+
+The Kotlin compiler daemon is one JVM that all jobs share, so more jobs add requests to it, not JVMs. It runs with the JVM's default heap limit, a quarter of the physical memory; set another with [`KARGO_COMPILER_JVM_OPTS`](../../reference/environment/), such as `KARGO_COMPILER_JVM_OPTS=-Xmx2g`, and stop the running daemon with `kargo daemon stop` so the next build starts one with it.
 
 ## Skipped work
 

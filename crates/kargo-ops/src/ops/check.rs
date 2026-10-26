@@ -212,7 +212,7 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     let fp_dir = out.join(".fingerprint");
 
     let platforms = native_platforms(ctx)?;
-    let checked = super::parallel_map(&platforms, |konan_target| -> Result<()> {
+    let checked = super::parallel_jobs(&platforms, |konan_target| -> Result<()> {
         let what = format!(", {konan_target}");
         // A klib holds the analyzed IR; producing one skips code generation and linking.
         let unit = |name, sources, libraries| NativeCompilation {

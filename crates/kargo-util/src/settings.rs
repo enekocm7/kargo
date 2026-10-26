@@ -24,6 +24,9 @@
 //!
 //! [toolchain]
 //! auto-install = false
+//!
+//! [build]
+//! jobs = 4
 //! ```
 
 use std::collections::BTreeMap;
@@ -31,6 +34,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+
+use crate::jobs::Jobs;
 
 /// The name of the configuration file, in the Kargo home and in a project's `.kargo` directory.
 pub const FILE_NAME: &str = "config.toml";
@@ -54,6 +59,8 @@ struct RawSettings {
     source: RawSource,
     #[serde(default)]
     toolchain: RawToolchain,
+    #[serde(default)]
+    build: RawBuild,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +98,12 @@ struct RawToolchain {
     auto_install: Option<bool>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawBuild {
+    jobs: Option<toml::Value>,
+}
+
 /// Environment variables that hold the credentials for every URL starting with a prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialsEnv {
@@ -112,6 +125,7 @@ pub struct Settings {
     vendored: Option<bool>,
     vendor_dir: Option<PathBuf>,
     auto_install: Option<bool>,
+    jobs: Option<Jobs>,
     /// The files the settings were read from, in the order they apply.
     files: Vec<PathBuf>,
 }
@@ -198,6 +212,9 @@ impl Settings {
         if let Some(auto_install) = raw.toolchain.auto_install {
             self.auto_install = Some(auto_install);
         }
+        if let Some(jobs) = raw.build.jobs {
+            self.jobs = Some(crate::jobs::from_toml("[build] `jobs`", &jobs)?);
+        }
         Ok(())
     }
 
@@ -268,6 +285,11 @@ impl Settings {
     pub fn auto_install(&self) -> bool {
         self.auto_install.unwrap_or(true)
     }
+
+    /// `[build] jobs`: how many packages and targets build at the same time.
+    pub fn jobs(&self) -> Option<Jobs> {
+        self.jobs
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +354,17 @@ mod tests {
         assert!(s.merge_str("[http]\nproxy = \"proxy:3128\"\n", Path::new("/")).is_err());
         assert!(s.merge_str("[unknown]\n", Path::new("/")).is_err());
         assert!(s.merge_str("[toolchain]\njdk = \"21\"\n", Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn reads_build_jobs() {
+        assert_eq!(parse("").jobs(), None);
+        let mut s = parse("[build]\njobs = 4\n");
+        assert_eq!(s.jobs(), Some(Jobs::Count(4)));
+        s.merge_str("[build]\njobs = \"auto\"\n", Path::new("/")).unwrap();
+        assert_eq!(s.jobs(), Some(Jobs::Auto));
+        let err = Settings::default().merge_str("[build]\njobs = \"x\"\n", Path::new("/")).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid [build] `jobs`"), "{err:#}");
     }
 
     #[test]

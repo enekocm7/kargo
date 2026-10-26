@@ -184,7 +184,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
-| `-j, --jobs <n>` | How many workspace members build at the same time (default: the number of CPUs) |
+| `-j, --jobs <n>` | How many workspace members, and targets of each, build at the same time: a number, or `auto` (also `0`) for the CPUs within the free memory. Default: `KARGO_JOBS`, then `[build] jobs`, then `auto`. `-j 1` builds one thing at a time, in a fixed order. See [parallelism](../../guides/build-performance/#limiting-parallelism) |
 | `--size-report` | Print Binaryen per-function metrics for a Wasm release build |
 
 [Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts (unless you pass `--keep-going`), and the error names the member and the target, such as ``could not build `core` (jvm)``.
@@ -230,7 +230,7 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to check |
-| `-j, --jobs <n>` | How many workspace members are checked at the same time (default: the number of CPUs) |
+| `-j, --jobs <n>` | How many workspace members, and targets of each, are checked at the same time, as for `kargo build` |
 
 ```sh
 kargo check
@@ -281,6 +281,7 @@ kargo run -e 'println(1 + 1)'
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
 | `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for Android or browser apps. See [Watch mode](../../guides/watch/) |
 | `--hot-reload` | Like `--watch`, but a Compose Desktop app keeps running: the classes a build changed are swapped into it and the UI recomposes. Runs on JetBrains Runtime, which Kargo downloads. Needs `[frameworks] compose` and the jvm target; conflicts with `--debug`. See [Hot reload](../../guides/compose/#hot-reload) |
+| `-j, --jobs <n>` | How many targets and Native platforms build at the same time, as for [`kargo build`](#kargo-build-b) |
 | `--clear` | With `--watch`: clear the terminal before each run |
 | `--ignore <glob>` | With `--watch`: leave out the files matching this gitignore-style pattern, on top of `.gitignore`. Repeatable |
 
@@ -360,7 +361,7 @@ kargo test [filter] [options]
 | `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to test, in dependency order. The command fails if any test failed |
-| `-j, --jobs <n>` | How many packages are tested at the same time (default 1, so test output doesn't interleave) |
+| `-j, --jobs <n>` | How many packages are tested at the same time, and so how many test JVMs run at once, as for `kargo build`. Without `-j`, `KARGO_JOBS` or `[build] jobs`, one package at a time, so test output doesn't interleave |
 | `--watch` | Run the tests again whenever the project's files change, until you press Ctrl+C. A failing test does not stop watching. Conflicts with `--list` and `--debug`. See [Watch mode](../../guides/watch/#rerun-tests-on-change) |
 | `--clear`, `--ignore <glob>` | With `--watch`, as for [`kargo run`](#kargo-run-r) |
 
@@ -394,7 +395,7 @@ kargo bench [filter] [options]
 | `-t, --target <target>` | Only this target. Benchmarks run on the JVM only, so any other target is an error |
 | `--env-file <path>`, `--no-env-file` | As for [`kargo test`](#kargo-test-t) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to benchmark, in dependency order |
-| `-j, --jobs <n>` | How many packages are built at the same time (default 1, so benchmarks don't compete for the machine) |
+| `-j, --jobs <n>` | How many packages are built at the same time, as for `kargo build`. Without `-j`, `KARGO_JOBS` or `[build] jobs`, one at a time, so benchmarks don't compete for the machine |
 
 Benchmarks are kept in `benches/` and `benches-jvm/`, use kotlinx-benchmark's annotations, and are not part of `build`, `test`, `package` or `publish`. A benchmark that can't run (an exception, or a filter that matches nothing) makes `kargo bench` exit with `101`; a benchmark that got slower doesn't. See [Benchmarking](../../guides/benchmarking/).
 
@@ -432,6 +433,7 @@ kargo doc [--open] [-t <target>]
 | `--open` | Open the documentation in a browser when it is generated (the browser in `BROWSER`, else the system default) |
 | `-t, --target <target>` | Only this target (repeatable); defaults to every enabled target |
 | `-p, --package <name>`, `--workspace` | Which packages to document. In a workspace, each goes to `target/debug/<name>/doc/`, and `--open` opens the first |
+| `-j, --jobs <n>` | How many packages are documented at the same time, as for `kargo build`. Without `-j`, `KARGO_JOBS` or `[build] jobs`, one at a time |
 
 Configure it with [`[doc]`](../manifest/#doc). See [API documentation](../../guides/documentation/).
 
@@ -467,6 +469,7 @@ kargo fmt [--check]
 |---|---|
 | `--check` | Report unformatted code without changing files; exit with code 101 if there is any |
 | `-p, --package <name>`, `--workspace` | Which packages to format |
+| `-j, --jobs <n>` | How many packages are formatted at the same time, as for `kargo build`. Without `-j`, `KARGO_JOBS` or `[build] jobs`, one at a time, so each package's report stays together |
 
 Without `--check`, files are rewritten in place, and the command exits with code 101 if ktlint found problems it can't fix. ktlint reads `.editorconfig`; configure the rest with [`[fmt]`](../manifest/#fmt). See [Formatting and linting](../../guides/formatting-and-linting/).
 
@@ -482,6 +485,7 @@ kargo lint [--create-baseline]
 |---|---|
 | `--create-baseline` | Record the current issues in the baseline file (`detekt-baseline.xml` by default) instead of reporting them |
 | `-p, --package <name>`, `--workspace` | Which packages to analyze |
+| `-j, --jobs <n>` | How many packages are analyzed at the same time, as for `kargo fmt` |
 
 detekt reads `detekt.yml`; configure the rest with [`[lint]`](../manifest/#lint). See [Formatting and linting](../../guides/formatting-and-linting/).
 
@@ -691,6 +695,7 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `--message-format json` | Print compiler diagnostics, optimization reports and package paths as JSON lines |
 | `--desktop` | Package the [Compose Desktop](../../guides/compose/#distributing) application: an installer for this OS unless `--format` says otherwise, with the JDK modules, options and Skiko native library Compose needs. Needs `[frameworks] compose` |
 | `--platforms <list>` | With `--desktop --format jar`: the platforms whose Skiko natives the jar carries instead of only the host's, so it runs on each of them. `all`, or some of `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`, `linux-x64`, `linux-arm64` |
+| `-j, --jobs <n>` | How many targets and Native platforms build at the same time, as for [`kargo build`](#kargo-build-b) |
 
 ## `kargo retrace`
 

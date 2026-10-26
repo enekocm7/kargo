@@ -222,6 +222,8 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 | `--vendored` | Build from a committed `vendor/` that [`kargo vendor`](../offline-and-mirrors/#vendoring-dependencies) wrote, without the public repositories |
 | `~/.kargo/config.toml` | Send downloads through your company's [mirrors and proxy](../offline-and-mirrors/) |
 | `kargo test --no-fail-fast` | Test every target and print a result per target instead of stopping at the first failure (or set [`[test] fail-fast = false`](../../reference/manifest/#test)) |
+| `KARGO_JOBS=1` or `-j 1` | Build one workspace member and one target at a time, in the same order on every run, so logs compare line by line. A small number also keeps a runner with little memory from swapping; the default already counts the free memory. See [Limiting parallelism](../build-performance/#limiting-parallelism) |
+| `kargo test -j <n>` | Test `<n>` workspace members at the same time (one test JVM each) instead of one after another |
 | `kargo build --keep-going` | Build every target (and, in a workspace, every member whose dependencies built) and report all failures, not just the first |
 | `kargo test --report junit` | Write JUnit XML reports for the CI's test summary |
 | `[test] timeout` | Stop a hung test run and fail it, rather than waiting for the CI's own job limit. See [Timeouts](../testing/#timeouts) |

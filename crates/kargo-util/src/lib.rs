@@ -7,6 +7,7 @@ pub mod flock;
 pub mod fs;
 pub mod hash;
 pub mod http;
+pub mod jobs;
 pub mod process;
 pub mod retry;
 pub mod settings;
