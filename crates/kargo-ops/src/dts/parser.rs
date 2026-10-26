@@ -60,6 +60,9 @@ pub struct Sig {
     pub tparams: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Type,
+    /// A parameter or the return type has no annotation, as in a `.ts` file that leaves them to
+    /// inference: they are `any` here.
+    pub untyped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -161,13 +164,15 @@ pub enum Stmt {
 }
 
 pub fn parse(src: &str) -> Vec<Stmt> {
-    let mut p = Parser { toks: lex(src), pos: 0 };
+    let mut p = Parser { toks: lex(src), pos: 0, untyped: false };
     p.stmts(false)
 }
 
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// Whether a parameter of the signature being read has no type.
+    untyped: bool,
 }
 
 type R<T> = Result<T, ()>;
@@ -257,11 +262,22 @@ impl Parser {
 
     /// Skips a bracketed group starting at the current token, or else one token.
     fn skip_group(&mut self) {
+        self.skip_bracketed(true);
+    }
+
+    /// Like [`Self::skip_group`] for code (an initializer, a default value), where `<` compares.
+    fn skip_value(&mut self) {
+        self.skip_bracketed(false);
+    }
+
+    /// Skips a group of `{}`, `()`, `[]`, and of `<>` when `angle` is set. Inside the others `<` is a
+    /// comparison of the code in a body or initializer; inside type arguments it opens more of them.
+    fn skip_bracketed(&mut self, angle: bool) {
         let close = match self.peek() {
             Tok::Punct("{") => "}",
             Tok::Punct("(") => ")",
             Tok::Punct("[") => "]",
-            Tok::Punct("<") => ">",
+            Tok::Punct("<") if angle => ">",
             _ => {
                 self.bump();
                 return;
@@ -269,9 +285,40 @@ impl Parser {
         };
         self.bump();
         while !self.at_eof() && !self.is(close) {
-            self.skip_group();
+            self.skip_bracketed(close == ">");
         }
         self.bump();
+    }
+
+    /// Skips the body of a function or method in a `.ts` file, if there is one.
+    fn skip_body(&mut self) {
+        if self.is("{") {
+            self.skip_group();
+        }
+    }
+
+    /// The signature of a function value after `=` in a `.ts` file: an arrow function
+    /// (`(a: number): number => ...`) or a function expression. Its body is left for the caller.
+    fn function_value(&mut self) -> Option<Sig> {
+        let start = self.pos;
+        if self.is_kw("async") && (self.is_at(1, "(") || self.is_at(1, "<") || self.is_kw_at(1, "function")) {
+            self.bump();
+        }
+        let sig = if self.eat_kw("function") {
+            self.eat("*");
+            if let Tok::Ident(_) = self.peek() {
+                self.bump();
+            }
+            self.sig(":").ok()
+        } else if self.is("(") || self.is("<") {
+            self.sig(":").ok().filter(|_| self.eat("=>"))
+        } else {
+            None
+        };
+        if sig.is_none() {
+            self.pos = start;
+        }
+        sig
     }
 
     /// Skips the rest of a statement: up to a `;` (consumed), a closing `}` (not consumed), the
@@ -502,9 +549,7 @@ impl Parser {
                 self.eat("*");
                 let name = if let Tok::Ident(_) = self.peek() { self.ident()? } else { "default".to_owned() };
                 let sig = self.sig(":")?;
-                if self.is("{") {
-                    self.skip_group();
-                }
+                self.skip_body();
                 self.eat(";");
                 Ok(vec![decl(name, DeclKind::Function(sig))])
             }
@@ -514,13 +559,19 @@ impl Parser {
                 loop {
                     let name = self.ident()?;
                     self.eat("!");
-                    let ty = if self.eat(":") { self.ty()? } else { Type::Any };
+                    let annotated = self.eat(":");
+                    let ty = if annotated { self.ty()? } else { Type::Any };
+                    let mut kind = DeclKind::Var(ty);
                     if self.eat("=") {
+                        // `const f = (a: number): number => ...` in a `.ts` file declares a function.
+                        if !annotated && let Some(sig) = self.function_value() {
+                            kind = DeclKind::Function(sig);
+                        }
                         while !self.at_eof() && !self.is(",") && !self.is(";") && !self.is("}") && !self.token().newline {
-                            self.skip_group();
+                            self.skip_value();
                         }
                     }
-                    out.push(decl(name, DeclKind::Var(ty)));
+                    out.push(decl(name, kind));
                     if !self.eat(",") {
                         break;
                     }
@@ -634,9 +685,14 @@ impl Parser {
     /// Type parameters, parameters and a return type introduced by `arrow` (`:` or `=>`).
     fn sig(&mut self, arrow: &str) -> R<Sig> {
         let tparams = self.tparams()?;
-        let params = self.params()?;
-        let ret = if self.eat(arrow) { self.return_type()? } else { Type::Any };
-        Ok(Sig { tparams, params, ret })
+        // Set by `params` for a parameter without a type; nested signatures keep their own.
+        let outer = std::mem::take(&mut self.untyped);
+        let params = self.params();
+        let untyped_params = std::mem::replace(&mut self.untyped, outer);
+        let params = params?;
+        let typed = self.eat(arrow);
+        let ret = if typed { self.return_type()? } else { Type::Any };
+        Ok(Sig { tparams, params, ret, untyped: untyped_params || !typed })
     }
 
     fn return_type(&mut self) -> R<Type> {
@@ -680,11 +736,15 @@ impl Parser {
                 _ => return Err(()),
             };
             let optional = self.eat("?");
-            let ty = if self.eat(":") { self.ty()? } else { Type::Any };
+            let typed = self.eat(":");
+            let ty = if typed { self.ty()? } else { Type::Any };
             if self.eat("=") {
                 while !self.at_eof() && !self.is(",") && !self.is(")") {
-                    self.skip_group();
+                    self.skip_value();
                 }
+            }
+            if !typed && name != "this" {
+                self.untyped = true;
             }
             if name != "this" {
                 out.push(Param { name, ty, optional, rest });
@@ -763,6 +823,7 @@ impl Parser {
         if is_class && self.is_kw("constructor") && self.is_at(1, "(") {
             self.bump();
             let sig = self.sig(":")?;
+            self.skip_body();
             return Ok((!private).then_some(Member { name: String::new(), kind: MemberKind::Ctor(sig), doc, is_static }));
         }
         // Accessors: `get name(): T` and `set name(value: T)`.
@@ -774,6 +835,7 @@ impl Parser {
                 _ => return Err(()),
             };
             let sig = self.sig(":")?;
+            self.skip_body();
             let ty = if getter { sig.ret } else { sig.params.into_iter().next().map_or(Type::Any, |p| p.ty) };
             if private {
                 return Ok(None);
@@ -816,12 +878,14 @@ impl Parser {
         let optional = self.eat("?");
         self.eat("!");
         let kind = if self.is("(") || self.is("<") {
-            MemberKind::Method { sig: self.sig(":")? }
+            let sig = self.sig(":")?;
+            self.skip_body();
+            MemberKind::Method { sig }
         } else {
             let ty = if self.eat(":") { self.ty()? } else { Type::Any };
             if self.eat("=") {
                 while !self.at_eof() && !self.is(";") && !self.is("}") && !self.token().newline {
-                    self.skip_group();
+                    self.skip_value();
                 }
             }
             MemberKind::Prop { ty, optional, readonly }
@@ -1101,7 +1165,12 @@ mod tests {
         assert_eq!(e.doc.as_deref(), Some("Creates an app."));
         assert_eq!(
             e.kind,
-            DeclKind::Function(Sig { tparams: vec![], params: vec![], ret: Type::Ref(vec!["core".into(), "Express".into()], vec![]) })
+            DeclKind::Function(Sig {
+                tparams: vec![],
+                params: vec![],
+                ret: Type::Ref(vec!["core".into(), "Express".into()], vec![]),
+                untyped: false
+            })
         );
         let Stmt::Decl(Decl { kind: DeclKind::Namespace(body), .. }) = &stmts[3] else { panic!() };
         assert_eq!(body.len(), 3);

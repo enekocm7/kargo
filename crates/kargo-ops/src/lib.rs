@@ -10,6 +10,7 @@ pub mod env;
 pub mod generate;
 pub mod gradle;
 pub mod js_output;
+pub mod js_sources;
 pub mod lockfile;
 pub mod native_interop;
 pub mod npm;

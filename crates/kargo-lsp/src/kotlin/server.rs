@@ -106,11 +106,19 @@ enum Event {
         generation: u64,
     },
     /// What a scan of the source roots found: every file now there, and the ones that changed
-    /// since the last scan, with their text and modification time.
+    /// since the last scan, with their text and modification time; and the TypeScript files of
+    /// the JavaScript sources with their modification times.
     Rescanned {
         generation: u64,
         present: HashSet<PathBuf>,
         changed: Vec<(PathBuf, String, SystemTime)>,
+        typescript: HashMap<PathBuf, SystemTime>,
+    },
+    /// The Kotlin declarations of the project's TypeScript modules changed on disk: every file of
+    /// them, for the libraries of load number `generation`.
+    JsDeclarations {
+        generation: u64,
+        units: Vec<Arc<Unit>>,
     },
     /// The answer to a references or rename request, which a worker thread computed.
     Searched {
@@ -188,7 +196,12 @@ pub struct Model {
     pub wasm_platform: Option<String>,
     /// The directories of Kotlin declarations generated for the Wasm target's npm packages,
     /// which load as a library of Wasm code.
-    pub npm_declarations: Vec<PathBuf>,
+    pub npm_declarations: Vec<(PathBuf, Platforms)>,
+    /// The directories of the Wasm target's own JavaScript and TypeScript modules (`js/`), and
+    /// those of the Kotlin declarations Kargo generates for them, which load like `npm_declarations`
+    /// and are generated again when a TypeScript file changes.
+    pub js_sources: Vec<PathBuf>,
+    pub js_declarations: Vec<(PathBuf, Platforms)>,
     pub repositories: Vec<Repository>,
     /// The `kargo.toml` of each package.
     pub manifests: Vec<PathBuf>,
@@ -266,8 +279,20 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             if kind == "wasm" {
                 // `browser` is the `js` platform too.
                 model.wasm_platform = Some(if target["environment"] == "wasi" { "wasi" } else { "js" }.to_owned());
+            }
+            // Declarations Kargo generates for the npm packages and own TypeScript modules of the Wasm and JS targets.
+            if kind == "wasm" || kind == "js" {
+                let platform = Platforms::of_target(&kind);
                 if let Some(dir) = target["npm-declarations"].as_str() {
-                    model.npm_declarations.push(PathBuf::from(dir));
+                    model.npm_declarations.push((PathBuf::from(dir), platform));
+                }
+                if let Some(dir) = target["js-declarations"].as_str() {
+                    model.js_declarations.push((PathBuf::from(dir), platform));
+                    for dir in target["js-sources"].as_array().into_iter().flatten().filter_map(Value::as_str).map(PathBuf::from) {
+                        if !model.js_sources.contains(&dir) {
+                            model.js_sources.push(dir);
+                        }
+                    }
                 }
             }
             // The output directories of `[[generate]]` steps are in the lists below too; they have no place in
@@ -653,11 +678,18 @@ fn load_parts(config: Config, root: PathBuf, generation: u64, tx: &Tx, cache: Un
             units.extend(library::compiled_units(&config, &cache, &compiled));
         }
         units.append(&mut outline_units);
-        for dir in &model.npm_declarations {
-            units.extend(library::directory_units("npm", dir, Platforms::WASM, Platforms::NONE));
+        for (dir, platform) in &model.npm_declarations {
+            units.extend(library::directory_units("npm", dir, *platform, Platforms::NONE));
+        }
+        for (dir, platform) in &model.js_declarations {
+            units.extend(library::directory_units("js", dir, *platform, Platforms::NONE));
         }
         units
     };
+    // The declarations of the project's own TypeScript modules need no install: written before the first libraries.
+    if !model.js_declarations.is_empty() {
+        let _ = crate::project::js_declarations(&root);
+    }
     let jdk = project_jdk(&config, &root);
     let send = |units| tx.send(Event::Libraries { generation, units, jdk: jdk.clone() }).is_ok();
     if !send(libraries(None)) || !options.dependencies {
@@ -1173,6 +1205,8 @@ struct State {
     symbol_resolve: bool,
     /// The modification time of each file the last scans read, so a scan reads only changed files.
     stamps: HashMap<PathBuf, SystemTime>,
+    /// The TypeScript files of the JavaScript sources the last scan found, with their modification times.
+    typescript_stamps: HashMap<PathBuf, SystemTime>,
     rescanning: bool,
     next_poll: Instant,
 }
@@ -1236,6 +1270,7 @@ impl State {
             searches: HashMap::new(),
             symbol_resolve: false,
             stamps: HashMap::new(),
+            typescript_stamps: HashMap::new(),
             rescanning: false,
             next_poll: Instant::now() + RESCAN_INTERVAL,
         }
@@ -1303,10 +1338,28 @@ impl State {
                 };
                 let _ = self.send(&reply);
             }
-            Event::Rescanned { generation, present, changed } => {
+            Event::Rescanned { generation, present, changed, typescript } => {
                 self.rescanning = false;
                 if generation == self.load_generation {
                     self.rescanned(present, changed);
+                    if typescript != self.typescript_stamps {
+                        self.typescript_stamps = typescript;
+                        self.regenerate_js();
+                    }
+                }
+            }
+            Event::JsDeclarations { generation, units } if generation == self.load_generation => {
+                let dirs = &self.model.js_declarations;
+                let mut all: Vec<Arc<Unit>> =
+                    self.lib.units.iter().filter(|u| !dirs.iter().any(|(d, _)| u.path.starts_with(d))).cloned().collect();
+                all.extend(units);
+                self.lib = Arc::new(Index::new(true, all).with_jdk(self.lib.jdk.clone()));
+                self.libraries_generation += 1;
+                self.resolve_scripts();
+                self.changed();
+                // Kotlin code calling into the modules resolves differently now.
+                for uri in self.open.keys().cloned().collect::<Vec<_>>() {
+                    let _ = self.publish_diagnostics(&uri);
                 }
             }
             Event::Searching { token, percentage } => {
@@ -1486,12 +1539,15 @@ impl State {
                 }
                 "workspace/didChangeWatchedFiles" => {
                     let mut reload = false;
+                    let mut typescript = false;
                     for change in params["changes"].as_array().into_iter().flatten() {
                         let uri = change["uri"].as_str().unwrap_or_default();
                         let Some(path) = file_path(uri) else { continue };
                         let name = text::file_name(uri);
                         if name == kargo_manifest::MANIFEST_NAME || name == "kargo.lock" {
                             reload = true;
+                        } else if self.is_typescript_source(&path) {
+                            typescript = true;
                         } else if (uri.ends_with(".kt") || uri.ends_with(".java")) && !self.open.contains_key(uri) {
                             match std::fs::read_to_string(&path) {
                                 Ok(text) if change["type"] != 3 && self.model.origin(&path) != Origin::Loose => self.set_file(path, text),
@@ -1504,6 +1560,8 @@ impl State {
                     }
                     if reload {
                         self.reload();
+                    } else if typescript {
+                        self.regenerate_js();
                     }
                 }
                 _ => {}
@@ -1735,6 +1793,12 @@ impl State {
         self.rescanning = true;
         let (model, stamps, tx, generation) = (self.model.clone(), self.stamps.clone(), self.tx.clone(), self.load_generation);
         thread::spawn(move || {
+            let typescript = model
+                .js_sources
+                .iter()
+                .flat_map(|dir| kargo_util::fs::collect_files(dir, &["ts", "mts"]))
+                .filter_map(|path| Some((path.clone(), std::fs::metadata(&path).and_then(|m| m.modified()).ok()?)))
+                .collect();
             let mut paths: Vec<PathBuf> =
                 model.roots.iter().flat_map(|(root, _)| kargo_util::fs::collect_files(root, &["kt", "java"])).collect();
             paths.extend(model.files.iter().map(|(p, _)| p.clone()).filter(|p| p.is_file()));
@@ -1750,7 +1814,7 @@ impl State {
                     Some((path, text, stamp))
                 })
                 .collect();
-            let _ = tx.send(Event::Rescanned { generation, present, changed });
+            let _ = tx.send(Event::Rescanned { generation, present, changed, typescript });
         });
     }
 
@@ -1777,6 +1841,31 @@ impl State {
         }
     }
 
+    /// Whether `path` is a TypeScript file of the JavaScript sources, whose Kotlin declarations
+    /// [`Self::regenerate_js`] writes.
+    fn is_typescript_source(&self, path: &Path) -> bool {
+        let name = path.to_string_lossy();
+        (name.ends_with(".ts") || name.ends_with(".mts")) && self.model.js_sources.iter().any(|dir| path.starts_with(dir))
+    }
+
+    /// Writes the Kotlin declarations of the project's TypeScript modules again on a worker thread,
+    /// as `kargo build` would, without a build: only files whose text changes are rewritten, and the
+    /// libraries take them in when any did ([`Event::JsDeclarations`]).
+    fn regenerate_js(&mut self) {
+        let Some(root) = self.root.clone() else { return };
+        if self.model.js_declarations.is_empty() {
+            return;
+        }
+        let (tx, generation, dirs) = (self.tx.clone(), self.load_generation, self.model.js_declarations.clone());
+        thread::spawn(move || {
+            if crate::project::js_declarations(&root).unwrap_or(false) {
+                let units =
+                    dirs.iter().flat_map(|(dir, platform)| library::directory_units("js", dir, *platform, Platforms::NONE)).collect();
+                let _ = tx.send(Event::JsDeclarations { generation, units });
+            }
+        });
+    }
+
     fn register_watchers(&mut self) -> anyhow::Result<()> {
         if !self.watch {
             return Ok(());
@@ -1787,7 +1876,9 @@ impl State {
             { "globPattern": "**/*.kt" },
             { "globPattern": "**/*.java" },
             { "globPattern": "**/kargo.toml" },
-            { "globPattern": "**/kargo.lock" }
+            { "globPattern": "**/kargo.lock" },
+            { "globPattern": "**/*.ts" },
+            { "globPattern": "**/*.mts" }
         ]);
         let params = json!({ "registrations": [{ "id": "kargo-kotlin-watch", "method": "workspace/didChangeWatchedFiles", "registerOptions": { "watchers": watchers } }] });
         self.send(&jsonrpc::request(&id, "client/registerCapability", params))
@@ -2204,7 +2295,7 @@ mod tests {
         assert_eq!(model.kotlin, "2.4.21");
         assert_eq!(model.wasm_platform.as_deref(), Some("js"));
         // Loaded as a library, not as sources of the project.
-        assert_eq!(model.npm_declarations, [PathBuf::from("/p/target/debug/generated/npm")]);
+        assert_eq!(model.npm_declarations, [(PathBuf::from("/p/target/debug/generated/npm"), Platforms::WASM)]);
         assert_eq!(model.origin(Path::new("/p/target/debug/generated/npm/express/Default.kt")), Origin::Loose);
         assert_eq!(
             model.packages.platforms,
@@ -2828,6 +2919,73 @@ println(1)"
         }
         assert_eq!(found, ["zzbeta"]);
         assert!(names(&mut editor, "last", "zzalpha").is_empty());
+        editor.finish();
+    }
+
+    #[test]
+    fn saved_typescript_modules_resolve_in_kotlin_without_a_build() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.wasm]\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("js")).unwrap();
+        let sum = dir.path().join("js/sum.ts");
+        std::fs::write(&sum, "export function zzsum(a: number, b: number): number { return a + b; }\n").unwrap();
+        let main = "import js.sum.*\n\nfun main() {\n    zzsum(1, 2)\n    zzdiff(1, 2)\n}\n";
+        std::fs::write(dir.path().join("src/Main.kt"), main).unwrap();
+        let config = Config::new(dir.path().join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (server_in, input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, Arc::new(|_, _, _| Ok(None))));
+        let mut editor = Editor { input, output: BufReader::new(output), server: Some(server) };
+        editor.send(jsonrpc::request("0", "initialize", json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {} })));
+        editor.reply("0");
+        let uri = text::path_to_uri(&dir.path().join("src/Main.kt"));
+        editor.send(jsonrpc::notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": main } }),
+        ));
+        // Where the call on `line` goes, once the libraries are in: the generated declarations, or nowhere.
+        let definition = |editor: &mut Editor, id: &str, line: u32| -> Option<String> {
+            editor.send(jsonrpc::request(
+                id,
+                "textDocument/definition",
+                json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": 6 } }),
+            ));
+            let reply = editor.reply(id);
+            let result = &reply["result"];
+            let location = if result.is_array() { result.get(0).cloned().unwrap_or(Value::Null) } else { result.clone() };
+            location["uri"].as_str().map(str::to_owned)
+        };
+        let wait = |editor: &mut Editor, name: &str, line: u32, found: bool| -> Option<String> {
+            let mut last = None;
+            for n in 0..100 {
+                last = definition(editor, &format!("{name}{n}"), line);
+                if last.is_some() == found {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            last
+        };
+        let target = wait(&mut editor, "a", 3, true).expect("`zzsum` resolves to its generated declaration");
+        assert!(target.ends_with("generated/js-sources/js/sum/Exports.kt"), "{target}");
+        let exports = dir.path().join("target/debug/generated/js-sources/js/sum/Exports.kt");
+        let written = std::fs::metadata(&exports).unwrap().modified().unwrap();
+        assert_eq!(definition(&mut editor, "b", 4), None, "`zzdiff` isn't declared yet");
+
+        // Saving a new function makes it resolve: the declarations are generated again, without a build.
+        std::fs::write(&sum, "export function zzsum(a: number, b: number): number { return a + b; }\nexport function zzdiff(a: number, b: number): number { return a - b; }\n").unwrap();
+        let changes = json!({ "changes": [{ "uri": text::path_to_uri(&sum), "type": 2 }] });
+        editor.send(jsonrpc::notification("workspace/didChangeWatchedFiles", changes.clone()));
+        assert!(wait(&mut editor, "c", 4, true).is_some(), "`zzdiff` resolves after the save");
+        assert!(std::fs::read_to_string(&exports).unwrap().contains("external fun zzdiff("));
+        assert_ne!(std::fs::metadata(&exports).unwrap().modified().unwrap(), written);
+
+        // And a removed one stops resolving.
+        std::fs::write(&sum, "export function zzsum(a: number, b: number): number { return a + b; }\n").unwrap();
+        editor.send(jsonrpc::notification("workspace/didChangeWatchedFiles", changes));
+        assert_eq!(wait(&mut editor, "d", 4, false), None, "`zzdiff` is gone after the save");
+        assert!(definition(&mut editor, "e", 3).is_some());
         editor.finish();
     }
 

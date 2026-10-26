@@ -2,8 +2,10 @@
 //! packages (`@js-joda/core`) at runtime. Kargo reads them from the klibs, adds
 //! the project's own `[target.wasm.npm-dependencies]` (or `[target.js.npm-dependencies]`) and installs them with
 //! npm, pnpm or bun into a `node_modules` that Node.js finds from the compiled
-//! `.mjs` files (a browser gets an import map, see `wasm_output`). The Wasm target's own
-//! packages also get Kotlin declarations generated from their TypeScript ones ([`declarations`]).
+//! `.mjs` files (a browser gets an import map, see `wasm_output`). The project's own packages of
+//! either target also get Kotlin declarations generated from their TypeScript ones ([`declarations`]).
+//! The declarations use the interop types (`JsAny`, `JsString`, ...) that Kotlin/JS shares with
+//! Kotlin/Wasm since Kotlin 2.2.20, so both targets read the same Kotlin.
 //!
 //! Packages are installed with their lifecycle scripts off (`--ignore-scripts`): the names and
 //! versions come from the metadata of Maven libraries, which must not get to run programs on the
@@ -83,13 +85,41 @@ pub fn fetch(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], dir:
     }
 }
 
-/// Where [`declarations`] writes the Kotlin declarations of the npm packages.
-pub fn declarations_dir(ws: &Workspace, profile: &ProfileKind) -> PathBuf {
-    ws.profile_dir(profile).join("generated").join("npm")
+/// Installs the npm packages of a build tool (`deps`, such as `typescript`) into `dir/node_modules`
+/// with the package manager of `target`, apart from the packages the program runs with.
+pub fn install_tool(ctx: &BuildContext, target: TargetKind, deps: &BTreeMap<String, String>, dir: &Path) -> Result<PathBuf> {
+    let (manager, exe) = find_package_manager(ctx, target, deps)?;
+    install_into(ctx, deps, dir, manager, exe)
 }
 
-/// The opt-in Kotlin/Wasm interop needs since Kotlin 2.2 (`JsAny` and friends are
-/// `@ExperimentalWasmJsInterop`), so the generated declarations and the code calling them compile
+/// Where [`declarations`] writes the Kotlin declarations of the npm packages of `target`:
+/// `target/<profile>/generated/npm` for Wasm, `generated/npm-js` for Kotlin/JS.
+pub fn declarations_dir(ws: &Workspace, profile: &ProfileKind, target: TargetKind) -> PathBuf {
+    let name = if target == TargetKind::Js { "npm-js" } else { "npm" };
+    ws.profile_dir(profile).join("generated").join(name)
+}
+
+/// Where the npm packages of `target` are installed: `target/<profile>/node_modules` for Wasm (the
+/// Wasm output directory is wiped on every recompile), next to the module for Kotlin/JS.
+pub fn install_dir(ws: &Workspace, profile: &ProfileKind, target: TargetKind) -> PathBuf {
+    match target {
+        TargetKind::Js => ws.output_dir(profile, TargetKind::Js),
+        _ => ws.profile_dir(profile),
+    }
+}
+
+/// Whether Kotlin declarations can be generated for `target`: Kotlin/JS has the interop types they
+/// use since Kotlin 2.2.20.
+pub fn declarations_supported(manifest: &Manifest, target: TargetKind) -> bool {
+    match target {
+        TargetKind::Wasm => true,
+        TargetKind::Js => Version::parse(&manifest.kotlin.version) >= Version::parse("2.2.20"),
+        _ => false,
+    }
+}
+
+/// The opt-in the interop types need since Kotlin 2.2 (`JsAny` and friends are
+/// `@ExperimentalWasmJsInterop`, on Kotlin/JS too), so the generated declarations and the code calling them compile
 /// without a warning at every use. `None` when the project opts in itself or its Kotlin predates it.
 pub fn interop_opt_in(manifest: &Manifest) -> Option<String> {
     const MARKER: &str = "kotlin.js.ExperimentalWasmJsInterop";
@@ -97,22 +127,29 @@ pub fn interop_opt_in(manifest: &Manifest) -> Option<String> {
     (since && !manifest.kotlin.opt_in.iter().any(|o| o == MARKER)).then(|| format!("-opt-in={MARKER}"))
 }
 
-/// Kotlin declarations for the project's own npm packages (`[target.wasm.npm-dependencies]`),
-/// generated from their TypeScript declarations (see [`crate::dts`]) into [`declarations_dir`].
-/// Installs the packages first (as the build would after compiling), and `@types/<name>` for each
-/// package without declarations of its own. Returns the Kotlin files: none without npm dependencies.
+/// Kotlin declarations for the project's own npm packages of `target` (`[target.wasm.npm-dependencies]`
+/// or `[target.js.npm-dependencies]`), generated from their TypeScript declarations (see
+/// [`crate::dts`]) into [`declarations_dir`]. Installs the packages first (as the build would after
+/// compiling), and `@types/<name>` for each package without declarations of its own. Returns the
+/// Kotlin files: none without npm dependencies.
 ///
 /// The files are written again only when the installed packages change.
-pub fn declarations(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let out = declarations_dir(ctx.ws, &ctx.profile);
-    let packages: Vec<String> =
-        ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.npm_dependencies.keys().cloned().collect()).unwrap_or_default();
+pub fn declarations(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let out = declarations_dir(ctx.ws, &ctx.profile, target);
+    let packages: Vec<String> = settings(ctx.ws.manifest(), target).0.map(|deps| deps.keys().cloned().collect()).unwrap_or_default();
     if packages.is_empty() {
         remove_dir_all_if_exists(&out)?;
         return Ok(Vec::new());
     }
+    if !declarations_supported(ctx.ws.manifest(), target) {
+        ctx.shell().warn(format!(
+            "the npm packages get no Kotlin declarations on the {target} target before Kotlin 2.2.20; set [kotlin] version to 2.2.20 or later, or declare what you use with `@JsModule` external declarations"
+        ));
+        remove_dir_all_if_exists(&out)?;
+        return Ok(Vec::new());
+    }
     let profile_dir = ctx.ws.profile_dir(&ctx.profile);
-    let Some(node_modules) = install(ctx, TargetKind::Wasm, libraries, &profile_dir)? else { return Ok(Vec::new()) };
+    let Some(node_modules) = install(ctx, target, libraries, &install_dir(ctx.ws, &ctx.profile, target))? else { return Ok(Vec::new()) };
     let types: BTreeMap<String, String> = packages
         .iter()
         .filter(|p| !p.starts_with("@types/") && !dts::has_declarations(&node_modules, p))
@@ -129,8 +166,9 @@ pub fn declarations(ctx: &BuildContext, libraries: &[PathBuf]) -> Result<Vec<Pat
     let mut roots = vec![node_modules];
     if !types.is_empty() {
         // Apart from the packages the program runs with: a missing `@types` package only costs its declarations.
-        let fetched = find_package_manager(ctx, TargetKind::Wasm, &types)
-            .and_then(|(manager, exe)| install_into(ctx, &types, &profile_dir.join("npm-types"), manager, exe));
+        let types_dir = profile_dir.join(if target == TargetKind::Js { "npm-types-js" } else { "npm-types" });
+        let fetched =
+            find_package_manager(ctx, target, &types).and_then(|(manager, exe)| install_into(ctx, &types, &types_dir, manager, exe));
         match fetched {
             Ok(dir) => roots.push(dir),
             Err(e) => ctx.shell().warn(format!(

@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use super::parser::{DeclKind, MemberKind, Sig, Type};
 use super::program::{DeclId, Ent, Program, ScopeId, package_of};
@@ -234,7 +235,7 @@ pub struct Output {
 
 #[derive(Default)]
 pub struct KotlinPackage {
-    /// The npm package the Kotlin package is for.
+    /// The JavaScript module the Kotlin package is for: an npm package, or `./js/<file>.js`.
     pub npm: String,
     /// Interfaces, type aliases and extensions.
     pub types: Vec<String>,
@@ -255,6 +256,9 @@ pub struct Generator<'a> {
     /// The Kotlin package of the npm package being generated, where extensions go: code that
     /// imports from it (`import express.*`) gets them without importing the packages it builds on.
     root: String,
+    /// The project's own modules: the Kotlin package and the JavaScript module of each file, whose
+    /// types go in that package instead of one named after an npm package.
+    locals: HashMap<PathBuf, (String, String)>,
     depth: usize,
 }
 
@@ -268,13 +272,27 @@ impl<'a> Generator<'a> {
             queue: Vec::new(),
             classes: HashMap::new(),
             root: String::new(),
+            locals: HashMap::new(),
             depth: 0,
         }
     }
 
+    /// Declares the file `path` one of the project's modules, imported as `spec` and generated into
+    /// the Kotlin package `pkg`. Call it for every such file before generating any of them. Once
+    /// there are such files, types of other files (npm packages) get no declarations.
+    pub fn local(&mut self, path: &Path, pkg: &str, spec: &str) {
+        self.locals.insert(super::program::normalize(path), (pkg.to_owned(), spec.to_owned()));
+    }
+
     /// Declarations for the npm package `npm`, whose module is `module`.
     pub fn package(&mut self, npm: &str, module: ScopeId) {
-        let pkg = kotlin_package(npm);
+        self.module(&kotlin_package(npm), npm, &function_name(npm), module);
+    }
+
+    /// Declarations in the Kotlin package `pkg` for the JavaScript module imported as `npm`, whose
+    /// declarations are `module`; its default export is named `default_name`.
+    pub fn module(&mut self, pkg: &str, npm: &str, default_name: &str, module: ScopeId) {
+        let pkg = pkg.to_owned();
         self.root = pkg.clone();
         self.out.packages.entry(pkg.clone()).or_default().npm = npm.to_owned();
         let default = self.prog.default_export(module);
@@ -300,9 +318,8 @@ impl<'a> Generator<'a> {
         }
 
         if let Some(Ent::Decls(decls)) = default {
-            let name = function_name(npm);
             for d in decls {
-                let texts = self.value(d, &name, &format!("@JsModule(\"{npm}\")\n"));
+                let texts = self.value(d, default_name, &format!("@JsModule(\"{npm}\")\n"));
                 self.package_mut(&pkg).default.extend(texts);
                 if self.is_class(d) {
                     self.name_for(&[d]);
@@ -902,8 +919,15 @@ impl<'a> Generator<'a> {
         }
         let node = &self.prog.decls[key];
         let file = self.prog.scopes[node.scope].file.clone();
-        let npm = package_of(&file).unwrap_or_else(|| "npm".to_owned());
-        let pkg = kotlin_package(&npm);
+        let (pkg, npm) = match self.locals.get(&file) {
+            Some((pkg, spec)) => (pkg.clone(), spec.clone()),
+            // The declarations of the project's own modules leave npm packages to theirs: their types are `JsAny`.
+            None if !self.locals.is_empty() => return None,
+            None => {
+                let npm = package_of(&file).unwrap_or_else(|| "npm".to_owned());
+                (kotlin_package(&npm), npm)
+            }
+        };
         let mut parts = self.prog.namespaces(key);
         if parts.first().is_some_and(|ns| self.prog.assigned_name(node.scope).as_ref() == Some(ns)) {
             parts.remove(0);

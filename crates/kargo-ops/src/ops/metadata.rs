@@ -282,8 +282,9 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             out["module-name"] = json!(wasm.module_name(&m.package));
             out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, kind, &setup)?) };
             // The Kotlin declarations generated for `[target.wasm.npm-dependencies]`, once a build wrote them.
-            out["npm-declarations"] =
-                if wasm.npm_dependencies.is_empty() { Value::Null } else { json!(path(&npm::declarations_dir(ws, &ctx.profile))) };
+            out["npm-declarations"] = npm_declarations(ws, ctx, kind, &wasm.npm_dependencies);
+            out["js-sources"] = json!(roots(&crate::js_sources::dirs(ws, kind)));
+            out["js-declarations"] = js_declarations(ws, ctx, kind);
         }
         TargetKind::Js => {
             let js = m.targets.js.as_ref().expect("the JS target is enabled");
@@ -292,6 +293,9 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             out["module-kind"] = json!(js.module_kind.as_str());
             out["module-name"] = json!(js.module_name(&m.package));
             out["npm"] = if opts.no_deps { Value::Null } else { Value::Array(npm_packages(ctx, kind, &setup)?) };
+            out["npm-declarations"] = npm_declarations(ws, ctx, kind, &js.npm_dependencies);
+            out["js-sources"] = json!(roots(&crate::js_sources::dirs(ws, kind)));
+            out["js-declarations"] = js_declarations(ws, ctx, kind);
         }
         TargetKind::Native => {
             let native = m.targets.native.as_ref().expect("the Native target is enabled");
@@ -392,6 +396,24 @@ fn dependencies(ctx: &BuildContext, kind: TargetKind, setup: &TargetSetup) -> Re
 /// A klib platform: the same libraries compile and link the program.
 fn klib_entry(platform: &str, main: Vec<Value>, test: Vec<Value>) -> Value {
     json!({ "platform": platform, "compile": main, "runtime": main, "test": test })
+}
+
+/// Where the Kotlin declarations generated for the npm packages of `target` go once a build wrote
+/// them, or `null` when it has no `npm-dependencies` (or its Kotlin is too old for them on Kotlin/JS).
+fn npm_declarations(ws: &Workspace, ctx: &BuildContext, target: TargetKind, deps: &BTreeMap<String, String>) -> Value {
+    if deps.is_empty() || !npm::declarations_supported(ws.manifest(), target) {
+        return Value::Null;
+    }
+    json!(path(&npm::declarations_dir(ws, &ctx.profile, target)))
+}
+
+/// Where the Kotlin declarations of the package's own TypeScript modules go, written by a build or
+/// `kargo lsp`; `null` without `js-sources` directories.
+fn js_declarations(ws: &Workspace, ctx: &BuildContext, target: TargetKind) -> Value {
+    if crate::js_sources::dirs(ws, target).is_empty() || !npm::declarations_supported(ws.manifest(), target) {
+        return Value::Null;
+    }
+    json!(path(&crate::js_sources::declarations_dir(ws, &ctx.profile, target)))
 }
 
 /// The npm packages of the Wasm or JS target: the ones its klibs and `[target.<target>.npm-dependencies]` need,

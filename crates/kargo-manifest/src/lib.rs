@@ -418,8 +418,14 @@ pub struct WasmTarget {
     /// A script of a library, relative to the package, that the page Kargo generates for a dependent
     /// browser app imports before the app module. It is shipped like `web_resources`.
     pub web_init: Option<PathBuf>,
+    /// Directories of the package's own JavaScript and TypeScript modules, relative to the package
+    /// ([`DEFAULT_JS_SOURCES`] unless `js-sources` says otherwise; none for WASI).
+    pub js_sources: Vec<PathBuf>,
     pub dependencies: Vec<Dependency>,
 }
+
+/// The directory of a package's own JavaScript and TypeScript modules when `js-sources` is not set.
+pub const DEFAULT_JS_SOURCES: &str = "js";
 
 impl WasmTarget {
     /// The name of the compiled module and its files: `module-name`, else the package name.
@@ -499,6 +505,8 @@ pub struct JsTarget {
     pub package_manager: Option<PackageManager>,
     /// npm packages the project needs besides those its Kotlin/JS libraries ask for, by name.
     pub npm_dependencies: BTreeMap<String, String>,
+    /// Directories of the package's own JavaScript and TypeScript modules, as for Wasm.
+    pub js_sources: Vec<PathBuf>,
     pub dependencies: Vec<Dependency>,
 }
 

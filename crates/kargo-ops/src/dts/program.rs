@@ -381,7 +381,7 @@ impl Program {
 }
 
 /// `a/./b/../c` as `a/c`, so that a file has one key however it was reached.
-fn normalize(path: &Path) -> PathBuf {
+pub fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {
@@ -490,15 +490,17 @@ fn collect_types(entry: &serde_json::Value, out: &mut Vec<String>) {
 }
 
 /// The declaration file for `base`: itself if it is one, `base.d.ts` (or the `.d.ts` of a `.js`
-/// path), or `base/index.d.ts`.
+/// path), or `base/index.d.ts`. A TypeScript source (`base.ts`, the `.ts` of a `.js` path) comes
+/// after the declaration files, for the project's own modules.
 fn resolve_file(base: &Path) -> Option<PathBuf> {
+    const EXTENSIONS: [&str; 5] = [".d.ts", ".d.mts", ".d.cts", ".ts", ".mts"];
     let text = base.to_string_lossy();
-    let is_decl = |p: &Path| p.is_file() && [".d.ts", ".d.mts", ".d.cts"].iter().any(|e| p.to_string_lossy().ends_with(e));
-    if is_decl(base) {
+    let is_typed = |p: &Path| p.is_file() && EXTENSIONS.iter().any(|e| p.to_string_lossy().ends_with(e));
+    if is_typed(base) {
         return Some(base.to_path_buf());
     }
     let stem = [".js", ".mjs", ".cjs", ".ts"].iter().find_map(|e| text.strip_suffix(e)).unwrap_or(&text).to_owned();
-    for ext in [".d.ts", ".d.mts", ".d.cts"] {
+    for ext in EXTENSIONS {
         let p = PathBuf::from(format!("{stem}{ext}"));
         if p.is_file() {
             return Some(p);
@@ -508,9 +510,11 @@ fn resolve_file(base: &Path) -> Option<PathBuf> {
         if base.join("package.json").is_file() {
             return package_entry(base);
         }
-        let index = base.join("index.d.ts");
-        if index.is_file() {
-            return Some(index);
+        for index in ["index.d.ts", "index.ts"] {
+            let index = base.join(index);
+            if index.is_file() {
+                return Some(index);
+            }
         }
     }
     None

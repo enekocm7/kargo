@@ -100,7 +100,11 @@ Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Bu
 
 ### `the npm package ... has no TypeScript declarations, so Kotlin gets none`
 
-Kargo generates Kotlin declarations for the packages of `[target.wasm.npm-dependencies]` from their TypeScript declarations: the package's own `.d.ts` files, or `@types/<name>`. This package has neither, or `@types/<name>` couldn't be installed (the message says why). Write `@JsModule("<name>")` external declarations for what you use yourself, as [the Kotlin docs](https://kotlinlang.org/docs/wasm-js-interop.html) describe, or add a `@types/` package to `npm-dependencies` if one exists under another version. See [Kotlin declarations for npm packages](../../guides/wasm/#kotlin-declarations-for-npm-packages).
+Kargo generates Kotlin declarations for the packages of `[target.wasm.npm-dependencies]` and `[target.js.npm-dependencies]` from their TypeScript declarations: the package's own `.d.ts` files, or `@types/<name>`. This package has neither, or `@types/<name>` couldn't be installed (the message says why). Write `@JsModule("<name>")` external declarations for what you use yourself, as [the Kotlin docs](https://kotlinlang.org/docs/wasm-js-interop.html) describe, or add a `@types/` package to `npm-dependencies` if one exists under another version. See [Kotlin declarations for npm packages](../../guides/wasm/#kotlin-declarations-for-npm-packages).
+
+### `could not compile the TypeScript modules ...`
+
+tsc reported errors in the TypeScript modules of `js/`; they are printed above, with file and line. Fix them as you would a Kotlin error. A module that imports the Kotlin module (`../app.mjs`) is checked against its `.d.mts`, so an error there can also mean that the `@JsExport` function it calls has another signature now. See [Your own JavaScript and TypeScript](../../guides/wasm/#your-own-javascript-and-typescript).
 
 ### `your Wasm dependencies need the npm packages ...`
 

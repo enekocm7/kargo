@@ -197,12 +197,12 @@ Listening on http://localhost:3000
 
 ### Kotlin declarations for npm packages
 
-For each package in `[target.wasm.npm-dependencies]`, Kargo reads the package's own `.d.ts` files, or those of `@types/<name>` when it ships none (express, for example), and writes Kotlin/Wasm `external` declarations into `target/<profile>/generated/npm/`. They compile with your code, and `kargo lsp` reads them for completion, hover (with the package's documentation) and go to definition.
+For each package in `[target.wasm.npm-dependencies]` (and in `[target.js.npm-dependencies]`, for the [Kotlin/JS target](../js/#npm-packages)), Kargo reads the package's own `.d.ts` files, or those of `@types/<name>` when it ships none (express, for example), and writes Kotlin/Wasm `external` declarations into `target/<profile>/generated/npm/`. They compile with your code, and `kargo lsp` reads them for completion, hover (with the package's documentation) and go to definition.
 
 - **Packages.** Each npm package gets a Kotlin package named after it: `express` is `express`, `@acme/my-lib` is `acme.my_lib`. The package's default export is a function named after the package (`express()`, `leftPad()` for `left-pad`), and its named exports keep their names (`import express.Router`). The types a package uses from other packages, such as `express-serve-static-core`, get Kotlin packages of their own.
 - **`@types`.** For a package without declarations of its own, Kargo installs `@types/<name>` at the package's major version (`@types/express@^5`) into `target/<profile>/npm-types/`, apart from the packages your program runs with. If there is no such package, the build warns and goes on without declarations for it. You can also list a `@types/` package in `npm-dependencies` yourself to pick its version.
 - **When.** `kargo build`, `run`, `test` and `check` install the packages before compiling and generate the declarations again only when the installed packages change. `kargo lsp` does the same when it opens the project, so the editor has them before your first build.
-- **Opt-in.** Kotlin/Wasm interop types (`JsAny` and friends) need the opt-in `kotlin.js.ExperimentalWasmJsInterop` since Kotlin 2.2. When a project has npm dependencies, Kargo passes it to the Wasm compiler, so neither the declarations nor your calls to them warn.
+- **Opt-in.** Kotlin/Wasm interop types (`JsAny` and friends) need the opt-in `kotlin.js.ExperimentalWasmJsInterop` since Kotlin 2.2. When a project has npm dependencies or [TypeScript modules](#your-own-javascript-and-typescript) of its own, Kargo passes it to the Wasm compiler, so neither the declarations nor your calls to them warn.
 
 Kotlin/Wasm can only pass `String`, `Int`, `Double`, `Boolean`, function types and JS objects (`JsAny`) to JavaScript, so the TypeScript types are simplified:
 
@@ -240,6 +240,62 @@ package-manager = "bun"   # "npm", "pnpm" or "bun"
 The package manager's lockfile (`package-lock.json`, `pnpm-lock.yaml` or `bun.lock`) stays in `target/<profile>/` and is kept when the packages are installed again, so a version range stays at the version it was first installed at until you delete it (or run `kargo clean`). When you switch package managers, Kargo deletes the old `node_modules` and lockfile and installs again. The packages always run on Node.js or in the browser, whichever tool installed them.
 
 Kargo installs the packages with `--ignore-scripts`, so their `preinstall`, `install` and `postinstall` scripts never run: the packages come from the metadata of Maven libraries, which should not get to run programs on your machine. A package that needs its install script to work (to build a native addon, say) won't; Wasm programs rarely use such packages.
+
+## Your own JavaScript and TypeScript
+
+Put JavaScript and TypeScript modules in `js/`, next to `src/`. Kargo compiles the TypeScript, puts the modules next to the Kotlin module, and generates Kotlin declarations for them, so Kotlin calls them like any Kotlin function:
+
+```ts title="js/greeter.ts"
+/** Greets `name`. */
+export function greet(name: string, times: number): string {
+    return `Hello, ${name}! `.repeat(times);
+}
+```
+
+```kotlin title="src/Main.kt"
+import js.greeter.greet
+
+fun main() = println(greet("Kargo", 2))
+```
+
+```console
+$ kargo run
+   Compiling hello v0.1.0 (wasm)
+   Compiling 1 TypeScript module (tsc 5.9.3)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.02s
+     Running `node target/debug/wasm/hello.mjs`
+Hello, Kargo! Hello, Kargo!
+```
+
+- **Where they go.** Every file of `js/` lands in `target/<profile>/wasm/js/`, keeping its path: `.js` and `.mjs` files and anything else are copied, `.ts` and `.mts` files are compiled to `.js` and `.mjs`. A module is therefore `./js/<path>` from the Kotlin module, the same in Node.js, on the page `kargo run` serves and in `kargo test`. Kargo adds a `package.json` with `"type": "module"` to `js/` (unless you have your own), since tsc writes ES modules to `.js` files. To use other directories, set `js-sources = ["web", "lib/ts"]` in `[target.wasm]`; `js-sources = []` turns `js/` off.
+- **Declarations.** Each TypeScript module gets a Kotlin package named after its path, `js.<path>`: `js/greeter.ts` is `js.greeter`, `js/shapes/point.ts` is `js.shapes.point`. Its exports become `external` declarations with `@JsModule("./js/greeter.js")`, with the [type mapping](#kotlin-declarations-for-npm-packages) of the npm packages, in `target/<profile>/generated/js-sources/`. A JavaScript module gets declarations from a `.d.ts` (or `.d.mts`) file next to it; without one, the build warns and you declare what you use yourself with `@JsModule`. Types that come from npm packages are `JsAny` in these declarations; the packages themselves get [their own](#kotlin-declarations-for-npm-packages).
+- **Write the types out.** Kargo reads the signatures of exported functions, not their bodies, so it infers nothing: a parameter or return type without an annotation is `JsAny?` in Kotlin, and the build warns about it. `export const add = (a: number, b: number): number => a + b` is a function too.
+- **Compiling.** Kargo compiles the TypeScript with its own TypeScript compiler, tsc 5.9.3, which it installs with your package manager into `target/typescript/` and runs on Node.js (or bun). It runs again only when a module, the Kotlin module's declarations or the npm packages change. TypeScript is checked in `strict` mode, for ES2022, with the browser's DOM types. Type errors are reported like Kotlin's, with file, line and column, and in `--message-format json` too, so editors show them; they fail the build with exit code 101. `kargo check` type-checks the modules without writing them out.
+- **Calling Kotlin from TypeScript.** Every Kotlin module gets TypeScript declarations for its `@JsExport` functions (`target/<profile>/wasm/<name>.d.mts`), and the modules are type-checked against them after the Kotlin module is linked, so `import { exclaim } from "../hello.mjs"` is typed. A module may import the Kotlin module that imports it: ES modules allow the cycle, as long as neither calls the other while it loads.
+- **npm packages.** Modules import the packages of `[target.wasm.npm-dependencies]` by name; Node.js finds them in `node_modules`, and a browser through the [import map](#in-the-browser).
+- **In your editor.** `kargo lsp` writes the declarations when it opens the project and again each time you save a TypeScript file of `js/`, without a build, so a new function completes in Kotlin as soon as you save it.
+
+```ts title="js/greeter.ts"
+import { exclaim } from "../hello.mjs";
+
+export function greet(name: string): string {
+    return exclaim(`Hello, ${name}`);
+}
+```
+
+```kotlin title="src/Main.kt"
+import js.greeter.greet
+
+@OptIn(ExperimentalJsExport::class)
+@JsExport
+fun exclaim(text: String): String = "$text!"
+
+fun main() = println(greet("Kargo"))
+```
+
+:::note
+The modules belong to the package that has them: a [path dependency](../workspaces/#path-dependencies) or a published library compiles its declarations into its klib, but its `js/` files are not shipped to the apps that depend on it. Use [web resources](#web-resources-from-libraries) for that. The `wasi` environment has no JavaScript host, so it has no `js-sources`.
+:::
 
 ## Libraries and npm packages
 
@@ -392,8 +448,9 @@ A build writes these files to `target/<profile>/wasm/`, named after the package 
 | `<name>.mjs` | The ES module that loads the Wasm module and runs `main` |
 | `<name>.wasm` | The compiled program |
 | `<name>.import-object.mjs`, `<name>.js-builtins.mjs` | JavaScript the module imports; keep them next to it |
-| `<name>.d.mts` | TypeScript declarations (libraries only) |
+| `<name>.d.mts` | TypeScript declarations of the `@JsExport` functions |
 | `package.json` | The npm package (libraries only) |
+| `js/` | Your own [JavaScript and TypeScript modules](#your-own-javascript-and-typescript), TypeScript compiled |
 | `index.html` and your `resources/` | The page of a `browser` app |
 | The libraries' web resources | The files your [libraries ship](#web-resources-from-libraries) to a `browser` app |
 
@@ -413,7 +470,7 @@ external fun warn(message: String)
 fun shout(text: String) = warn(text.uppercase())
 ```
 
-The Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/wasm-js-interop.html) in depth.
+The Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/wasm-js-interop.html) in depth. For more than a line of JavaScript, write a module in `js/` and let Kargo declare it for you: see [Your own JavaScript and TypeScript](#your-own-javascript-and-typescript).
 
 ## Limitations
 

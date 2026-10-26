@@ -53,6 +53,11 @@ impl WatchSet {
             paths.push(package.test_resources());
             paths.push(package.root().join("android"));
             paths.push(package.root().join("interop"));
+            // The JavaScript and TypeScript modules of the web targets.
+            let manifest = package.manifest();
+            let js_sources =
+                manifest.targets.wasm.iter().flat_map(|w| &w.js_sources).chain(manifest.targets.js.iter().flat_map(|j| &j.js_sources));
+            paths.extend(js_sources.map(|dir| package.root().join(dir)));
             if let Some(native) = &package.manifest().targets.native {
                 paths.extend(native.cinterop.iter().map(|c| package.root().join(c.def_path())));
                 if let Some(c) = &native.c_sources {
