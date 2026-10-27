@@ -316,6 +316,13 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             };
             add("source-roots", SetKind::Main);
             add("test-roots", SetKind::Test);
+            // The `BuildConfig` AGP generates for an Android module, once Gradle built it.
+            for dir in target["android"]["generated-source-roots"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let set = SourceSet { package: pi, kind: SetKind::Main, target: Some(kind.clone()) };
+                if !model.roots.iter().any(|(r, s)| r == Path::new(dir) && *s == set) {
+                    model.roots.push((PathBuf::from(dir), set));
+                }
+            }
             for step in &generated {
                 let set = match step["kind"].as_str() {
                     Some("sources") => SetKind::Main,
@@ -2510,6 +2517,27 @@ mod tests {
         assert_eq!(set("/p/target/generated/debug/mocks/M.kt"), (0, SetKind::Test, None));
         assert_eq!(model.origin(Path::new("/p/target/generated/debug/assets/a.txt")), Origin::Loose, "resources hold no Kotlin");
         assert_eq!(model.origin(Path::new("/elsewhere/X.kt")), Origin::Loose);
+    }
+
+    #[test]
+    fn reads_the_generated_code_of_android_modules() {
+        let meta = json!({
+            "packages": [{
+                "name": "app",
+                "targets": [{
+                    "kind": "android",
+                    "source-roots": ["/p/src", "/p/src-android"],
+                    "test-roots": ["/p/tests", "/p/tests-android"],
+                    "android": { "generated-source-roots": ["/p/target/android/build/generated/source/buildConfig/debug"] },
+                }],
+            }],
+        });
+        let model = model_from_metadata(&meta);
+        let file = Path::new("/p/target/android/build/generated/source/buildConfig/debug/com/example/BuildConfig.java");
+        match model.origin(file) {
+            Origin::Source(s) => assert_eq!((s.package, s.kind, s.target), (0, SetKind::Main, Some("android".into()))),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

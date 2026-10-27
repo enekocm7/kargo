@@ -385,9 +385,8 @@
           "description": "Build for Android (through a generated Gradle project).",
           "type": "object",
           "additionalProperties": false,
-          "required": ["namespace"],
           "properties": {
-            "namespace": { "description": "The Android namespace.", "type": "string", "examples": ["com.example.app"] },
+            "namespace": { "description": "The Android namespace: the package of the `R` and `BuildConfig` classes. Default: `<group>.<name>` of [package] (`-` becomes `_`); required without a `group`.", "type": "string", "examples": ["com.example.app"] },
             "application-id": { "description": "The application id. Default: `namespace`.", "type": "string" },
             "kind": { "enum": ["application", "library"], "default": "application" },
             "min-sdk": { "type": "integer", "minimum": 1, "default": 24 },

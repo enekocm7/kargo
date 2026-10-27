@@ -354,7 +354,9 @@ An Android member can depend on path members. Kargo generates one Gradle build f
 - A path dependency with `[target.android]` and `kind = "library"` is a Gradle subproject (`implementation(project(":core"))`, or `api(...)` when `exported`). It builds from its `src/`, `src-android/` and `android/` like any Android library, with its own dependencies and frameworks. An Android application can't be a dependency.
 - Any other path dependency is the JVM jar Kargo builds for it (`implementation(files(...))`), with the Maven dependencies it brings, so it needs `[target.jvm]`. Keep its `jvm-target` at a level Android supports.
 
-Several Android members (an app and the Android libraries it uses) end up in the app's generated build under `target/android/<member>/`, with each library in `modules/<name>/`, so it opens in Android Studio as one project.
+Several Android members (an app and the Android libraries it uses) end up in the app's generated build under `target/android/<member>/`, with each library in `modules/<name>/`, so it opens in Android Studio as one project. A library builds into its own `target/android/<library>/build`, so its AAR is where `kargo build -p <library>` puts it.
+
+When one command builds an app and the Android libraries it uses (`kargo build` at the root), the libraries are assembled by the app's Gradle run, together with the app, so Gradle starts and configures the build once (`Compiling ui v0.1.0 (android, gradle, with app)`). The members without `[target.android]` are compiled by Kargo first, in the [build graph](#the-build-graph), as usual. One Gradle build loads one Android Gradle Plugin, so the Android packages an app uses must have the same `agp-version` (or none).
 
 ```toml title="myapp/apps/android-app/kargo.toml"
 [package]

@@ -20,7 +20,7 @@ kargo new myapp -t android -w compose    # a Jetpack Compose app
 
 ```toml title="kargo.toml"
 [target.android]
-namespace = "com.example.myapp"
+namespace = "com.example.myapp"   # default: <group>.<name> of [package]
 kind = "application"        # or "library"
 min-sdk = 24
 # target-sdk = 36                        # or compile-sdk, when that is lower
@@ -40,7 +40,8 @@ myapp/
 └── android/
     ├── AndroidManifest.xml
     ├── res/                layouts, strings, drawables
-    └── assets/
+    ├── assets/
+    └── jniLibs/            prebuilt native libraries per ABI (arm64-v8a/libfoo.so)
 ```
 
 With `-w compose`, you can also put Compose Multiplatform resources in `composeResources/` and read them through the generated `Res` class, as on the desktop: Kargo adds the resources runtime and packs the files into the APK's assets. Code in `src/` that uses `Res` then works on both targets. See [Compose resources](../compose/#resources).
@@ -292,11 +293,39 @@ AndroidX and other Android libraries come from Google's Maven repository, which 
 
 `[profile.dev.dependencies]` and `[profile.release.dependencies]` become `debugImplementation` and `releaseImplementation` in the generated Gradle project, so a debug-only library is in debug builds alone. A custom profile does not build for Android yet, and a processor or KSP dependency in a profile is not supported there: put it in `[dependencies]`.
 
+## Android libraries
+
+A package with `kind = "library"` is an Android library: `kargo build -t android` assembles its AAR (classes, resources, `AndroidManifest.xml`, assets, `consumer-proguard-files` and JNI libraries in `android/jniLibs/`) into `target/android/build/outputs/aar/`, and `kargo package -t android` copies it to `target/<profile>/android/`.
+
+```sh
+kargo new ui --lib -t android
+```
+
+```toml title="ui/kargo.toml"
+[package]
+name = "ui"
+version = "0.1.0"
+group = "com.example"
+
+[target.android]
+kind = "library"        # namespace defaults to "com.example.ui"
+```
+
+The `namespace` is the package of the library's `R` and `BuildConfig` classes. Without one, it is the package's `group` and name, lowercase, with `_` in place of `-` (`com.example.my_lib` for `my-lib`); set `namespace` to choose another. Each module's `R` class holds only its own resources (Kargo sets AGP's `android.nonTransitiveRClass`), so an app reaches a library's resources through the library's namespace:
+
+```kotlin title="app/src-android/Welcome.kt"
+import com.example.ui.R as UiR
+
+fun title(context: Context) = context.getString(UiR.string.greeting)
+```
+
+An app or another library uses the library as a [path dependency](#sharing-code-with-other-targets). Gradle merges its resources and its manifest into the app's, and its `consumer-proguard-files` into the app's R8 rules. `kargo publish` publishes the AAR of its release build with Gradle module metadata, so Gradle builds of other apps can use it from a Maven repository; see [Publishing Android libraries](../publishing/#android-libraries).
+
 ## Sharing code with other targets
 
 Android is just another target. Common code in `src/` is shared with JVM, Wasm, JS and Native, and `src-android/` holds `actual` implementations. See [Multiplatform projects](../multiplatform/).
 
-Code can also live in other packages of a [workspace](../workspaces/#android-members): an Android app can depend on path members. An Android library among them (`kind = "library"`) becomes a Gradle subproject of the app's generated build, and a package without `[target.android]` comes in as the JVM jar Kargo builds for it:
+Code can also live in other packages of a [workspace](../workspaces/#android-members): an Android app or library can depend on path members. An [Android library](#android-libraries) among them (`kind = "library"`, including a multiplatform package whose `src-android/` is its Android code) becomes a Gradle subproject of the app's generated build, and a package without `[target.android]` comes in as the JVM jar Kargo builds for it:
 
 ```toml title="apps/android-app/kargo.toml"
 [dependencies]

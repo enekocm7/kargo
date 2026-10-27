@@ -10,7 +10,7 @@ This guide moves a Gradle project, JVM or Kotlin Multiplatform, to Kargo. Most s
 :::
 
 :::caution[Before you start]
-Kargo builds **one package per `kargo.toml`**. In a multi-module build, convert each module with the steps below, list the modules as `members` of a [workspace](../../guides/workspaces/) (the equivalent of `settings.gradle.kts`), and turn `implementation(project(":core"))` into `core = { path = "../core" }`. Android modules can't use path dependencies yet. Gradle plugins that generate code (protobuf, OpenAPI generator) become [`[[generate]]` steps](../../guides/code-generation/); other plugins with no Kargo equivalent can usually be replaced with a [task on a `pre-build` hook](../../guides/tasks-and-plugins/).
+Kargo builds **one package per `kargo.toml`**. In a multi-module build, convert each module with the steps below, list the modules as `members` of a [workspace](../../guides/workspaces/) (the equivalent of `settings.gradle.kts`), and turn `implementation(project(":core"))` into `core = { path = "../core" }`. An Android library module (`com.android.library`) becomes a package with `[target.android] kind = "library"`, which Android apps and libraries use the same way. Gradle plugins that generate code (protobuf, OpenAPI generator) become [`[[generate]]` steps](../../guides/code-generation/); other plugins with no Kargo equivalent can usually be replaced with a [task on a `pre-build` hook](../../guides/tasks-and-plugins/).
 :::
 
 ## Step 1: Create `kargo.toml`

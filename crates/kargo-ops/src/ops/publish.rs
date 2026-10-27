@@ -15,7 +15,7 @@ use super::build::{
     build_jvm, compile_js, compile_wasm, finished, hook_env, jvm_classpaths, native_cinterop, native_cinterop_defs, native_klib,
     native_platforms, native_resolution, warn_about_sources, wasm_resolution,
 };
-use super::context::{BuildContext, TargetSetup};
+use super::context::{BuildContext, merge_deps};
 use crate::env::EnvOptions;
 use crate::publication::{
     DependencyScope, PlatformKind, PlatformPublication, Publication, PublishedDependency, StagedModule, is_multiplatform, platform_module,
@@ -23,7 +23,7 @@ use crate::publication::{
 use crate::signing::Signer;
 use crate::workspace::{Project, Workspace};
 use kargo_compiler::jar::{JarManifest, write_jar};
-use kargo_manifest::{CentralPublishing, GeneratedKind, Hook, Javadoc, MAVEN_CENTRAL_DESTINATION, Manifest, Scope, TargetKind};
+use kargo_manifest::{CentralPublishing, Dependency, GeneratedKind, Hook, Javadoc, MAVEN_CENTRAL_DESTINATION, Manifest, Scope, TargetKind};
 use kargo_maven::central::{self, Portal, PublishingType};
 use kargo_maven::deploy::{DeployFile, Deployer};
 use kargo_maven::repo::MAVEN_LOCAL;
@@ -235,15 +235,21 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     Ok(staged)
 }
 
-/// The targets that are published: every enabled one but Android.
+/// The targets that are published: every enabled one, but Android only for a library.
 fn publishable_targets(ctx: &BuildContext) -> Result<Vec<TargetKind>> {
-    let enabled = ctx.ws.manifest().targets.enabled();
-    let targets: Vec<TargetKind> = enabled.iter().copied().filter(|t| *t != TargetKind::Android).collect();
-    if enabled.contains(&TargetKind::Android) {
+    let manifest = ctx.ws.manifest();
+    let enabled = manifest.targets.enabled();
+    let application = manifest.targets.android.as_ref().is_some_and(|a| a.config.kind != "library");
+    let targets: Vec<TargetKind> = enabled.iter().copied().filter(|t| *t != TargetKind::Android || !application).collect();
+    if application {
         if targets.is_empty() {
-            bail!("`kargo publish` cannot publish Android libraries yet; it publishes the jvm, wasm and native targets");
+            bail!(
+                "`{}` is an Android application, which `kargo publish` does not publish; set `kind = \"library\"` under \
+                 [target.android] to publish an AAR, or use `kargo package` for the APK and App Bundle",
+                manifest.package.name
+            );
         }
-        ctx.shell().warn("the android target is not published; `kargo publish` publishes the jvm, wasm and native targets");
+        ctx.shell().warn("the android target is an application and is not published; only Android libraries are");
     }
     Ok(targets)
 }
@@ -289,6 +295,7 @@ fn targets_per_platform(targets: &[TargetKind], kinds: &[PlatformKind]) -> Vec<T
             PlatformKind::Wasm { .. } => TargetKind::Wasm,
             PlatformKind::Js => TargetKind::Js,
             PlatformKind::Native { .. } => TargetKind::Native,
+            PlatformKind::Android => TargetKind::Android,
         })
         .filter(|t| targets.contains(t))
         .collect()
@@ -301,6 +308,7 @@ fn platform_source_root(kind: &PlatformKind) -> &'static str {
         PlatformKind::Wasm { .. } => "wasmMain",
         PlatformKind::Js => "jsMain",
         PlatformKind::Native { .. } => "nativeMain",
+        PlatformKind::Android => "androidMain",
     }
 }
 
@@ -310,6 +318,10 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
     let pkg = &manifest.package;
     let mut platforms = Vec::new();
     for &target in targets {
+        if target == TargetKind::Android {
+            platforms.push(android_platform(ctx)?);
+            continue;
+        }
         let setup = ctx.setup(target)?;
         match target {
             TargetKind::Jvm => {
@@ -327,7 +339,8 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                 let bytecode = settings.target_for(ctx.jvm_jdk()?.version)?;
                 let jvm_version = bytecode.strip_prefix("1.").unwrap_or(&bytecode).parse().ok();
                 let classpaths = jvm_classpaths(ctx, &setup)?;
-                let dependencies = published_dependencies(ctx, &setup, target, &[&classpaths.compile, &classpaths.runtime])?;
+                let dependencies =
+                    published_dependencies(ctx, &setup.main, &setup.boms, target, &[&classpaths.compile, &classpaths.runtime])?;
                 platforms.push(PlatformPublication {
                     kind: PlatformKind::Jvm { jvm_version },
                     artifact: jar,
@@ -351,7 +364,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     extra: Vec::new(),
                     sources: None,
                     javadoc: None,
-                    dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
+                    dependencies: published_dependencies(ctx, &setup.main, &setup.boms, target, &[&resolution])?,
                     main_class: None,
                     web_resources,
                 });
@@ -366,7 +379,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     extra: Vec::new(),
                     sources: None,
                     javadoc: None,
-                    dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
+                    dependencies: published_dependencies(ctx, &setup.main, &setup.boms, target, &[&resolution])?,
                     main_class: None,
                     web_resources: None,
                 });
@@ -386,16 +399,36 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                         extra,
                         sources: None,
                         javadoc: None,
-                        dependencies: published_dependencies(ctx, &setup, target, &[&resolution])?,
+                        dependencies: published_dependencies(ctx, &setup.main, &setup.boms, target, &[&resolution])?,
                         main_class: None,
                         web_resources: None,
                     });
                 }
             }
-            TargetKind::Android => unreachable!("Android is not published"),
+            TargetKind::Android => unreachable!("published above"),
         }
     }
     Ok(platforms)
+}
+
+/// The AAR of an Android library's release build, which Gradle assembles, with its dependencies as
+/// `kargo.toml` declares them: Gradle resolves Android dependencies, so they keep their declared versions.
+fn android_platform(ctx: &BuildContext) -> Result<PlatformPublication> {
+    let manifest = ctx.ws.manifest();
+    let aar = crate::gradle::release_aar(ctx)?;
+    let contributions = crate::builtins::contributions(manifest, TargetKind::Android, ctx.ws.root())?;
+    let (boms, main): (Vec<Dependency>, Vec<Dependency>) =
+        merge_deps(&manifest.dependencies_for(TargetKind::Android), &contributions.dependencies).into_iter().partition(|d| d.bom);
+    Ok(PlatformPublication {
+        kind: PlatformKind::Android,
+        artifact: aar,
+        extra: Vec::new(),
+        sources: None,
+        javadoc: None,
+        dependencies: published_dependencies(ctx, &main, &boms, TargetKind::Android, &[])?,
+        main_class: None,
+        web_resources: None,
+    })
 }
 
 /// The dependencies a platform's POM and `.module` declare: the package's compile and runtime
@@ -403,12 +436,13 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
 /// and its path dependencies, which are published under their own coordinates.
 fn published_dependencies(
     ctx: &BuildContext,
-    setup: &TargetSetup,
+    main: &[Dependency],
+    boms: &[Dependency],
     target: TargetKind,
     resolutions: &[&Resolution],
 ) -> Result<Vec<PublishedDependency>> {
     let mut out = Vec::new();
-    for dep in &setup.main {
+    for dep in main {
         // Like Gradle's `implementation`, a dependency that is not part of the API (`exported`) is
         // only needed at runtime by consumers.
         let scope = match dep.scope {
@@ -434,7 +468,7 @@ fn published_dependencies(
             bom: false,
         });
     }
-    for bom in &setup.boms {
+    for bom in boms {
         let Some(version) = bom.version.clone() else { continue };
         out.push(PublishedDependency {
             module: bom.module.clone(),
@@ -459,9 +493,21 @@ fn published_dependencies(
         let other = ctx.project.package(*index).manifest();
         let group = other.package.group.clone().with_context(|| format!("`{}` has no `group` in [package]", other.package.name))?;
         let module = ModuleId::new(&group, &other.package.name);
-        let other_targets: Vec<TargetKind> = other.targets.enabled().into_iter().filter(|t| *t != TargetKind::Android).collect();
-        let pom_module = match platform_kind_of(ctx, target) {
-            Some(kind) if other_targets != [TargetKind::Jvm] => platform_module(&group, &other.package.name, &kind, true),
+        // What `other` publishes: an Android application is left out.
+        let other_targets: Vec<TargetKind> = other
+            .targets
+            .enabled()
+            .into_iter()
+            .filter(|t| *t != TargetKind::Android || other.targets.android.as_ref().is_some_and(|a| a.config.kind == "library"))
+            .collect();
+        let single = other_targets == [TargetKind::Jvm] || other_targets == [TargetKind::Android];
+        // An Android library uses the Android module of a package that has one, else the JVM one.
+        let kind = match target {
+            TargetKind::Android if !other_targets.contains(&TargetKind::Android) => Some(PlatformKind::Jvm { jvm_version: None }),
+            _ => platform_kind_of(ctx, target),
+        };
+        let pom_module = match kind {
+            Some(kind) if !single => platform_module(&group, &other.package.name, &kind, true),
             _ => module.clone(),
         };
         out.push(PublishedDependency {
@@ -487,7 +533,7 @@ fn platform_kind_of(ctx: &BuildContext, target: TargetKind) -> Option<PlatformKi
         TargetKind::Wasm => manifest.targets.wasm.as_ref().map(|w| PlatformKind::Wasm { environment: w.environment.platform().to_owned() }),
         TargetKind::Js => manifest.targets.js.is_some().then_some(PlatformKind::Js),
         TargetKind::Native => native_platforms(ctx).ok()?.into_iter().next().map(|konan_target| PlatformKind::Native { konan_target }),
-        TargetKind::Android => None,
+        TargetKind::Android => Some(PlatformKind::Android),
     }
 }
 

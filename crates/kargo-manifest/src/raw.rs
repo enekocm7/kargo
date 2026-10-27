@@ -676,7 +676,11 @@ fn validate_c_sources(c: RawCSources) -> Result<CSources> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AndroidConfig {
+    /// `namespace`, else `<group>.<name>` of [package]: the package of the `R` and `BuildConfig` classes.
+    #[serde(skip)]
     pub namespace: String,
+    #[serde(rename = "namespace")]
+    declared_namespace: Option<String>,
     pub application_id: Option<String>,
     #[serde(default = "default_min_sdk")]
     pub min_sdk: u32,
@@ -845,9 +849,102 @@ fn resolve_sdk_levels(config: &mut AndroidConfig, sdk: AndroidSdkRequest) -> Res
     Ok(())
 }
 
+/// Fills in `namespace`: the declared one, else `<group>.<name>` of [package] made into a Java package name
+/// (`com.example.my_lib` for `my-lib`).
+fn resolve_namespace(config: &mut AndroidConfig, group: Option<&str>, name: &str) -> Result<()> {
+    config.namespace = match (&config.declared_namespace, group) {
+        (Some(namespace), _) => namespace.clone(),
+        (None, Some(group)) => default_namespace(group, name),
+        (None, None) => bail!(
+            "[target.android] needs a `namespace` (the package of the `R` class, e.g. \"com.example.{}\"), or a `group` in              [package] to derive it from",
+            default_namespace("", name)
+        ),
+    };
+    Ok(())
+}
+
+/// `<group>.<name>` as a Java package name: lowercase, with `_` for other characters, and a `_` before a segment that
+/// starts with a digit or is a Java keyword.
+fn default_namespace(group: &str, name: &str) -> String {
+    group
+        .split('.')
+        .chain([name])
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut clean: String =
+                segment.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+            if clean.starts_with(|c: char| c.is_ascii_digit()) || JAVA_KEYWORDS.contains(&clean.as_str()) {
+                clean.insert(0, '_');
+            }
+            clean
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// The Java keywords and literals, which cannot be segments of a package name.
+const JAVA_KEYWORDS: [&str; 53] = [
+    "abstract",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "false",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "implements",
+    "import",
+    "instanceof",
+    "int",
+    "interface",
+    "long",
+    "native",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "strictfp",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "true",
+    "try",
+    "void",
+    "volatile",
+    "while",
+];
+
 fn validate_android(config: &AndroidConfig) -> Result<()> {
     if config.namespace.trim().is_empty() {
         bail!("[target.android] `namespace` must not be empty");
+    }
+    if config.namespace.split('.').any(|segment| !is_java_identifier(segment) || segment.contains('$')) {
+        bail!("[target.android] `namespace = \"{}\"` is not a Java package name such as `com.example.app`", config.namespace);
     }
     if !matches!(config.kind.as_str(), "application" | "library") {
         bail!("[target.android] `kind` must be `application` or `library`");
@@ -2044,6 +2141,7 @@ impl RawManifest {
                             let mut config: AndroidConfig =
                                 Value::Table(table).try_into().context("invalid [target.android] section")?;
                             resolve_sdk_levels(&mut config, android_sdk)?;
+                            resolve_namespace(&mut config, self.package.group.as_deref(), &self.package.name)?;
                             validate_android(&config)?;
                             let dependencies =
                                 deps.parse(&dependencies, "target.android.dependencies", false, Some(TargetKind::Android))?;

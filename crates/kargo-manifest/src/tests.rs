@@ -591,6 +591,22 @@ fn target_errors() {
 }
 
 #[test]
+fn android_namespace_defaults_to_group_and_name() {
+    let namespace = |package: &str, android: &str| {
+        let m = parse(&format!("[package]\n{package}version = \"1.0.0\"\n[target.android]\n{android}"));
+        m.targets.android.unwrap().config.namespace
+    };
+    assert_eq!(namespace("name = \"core\"\ngroup = \"com.example\"\n", ""), "com.example.core");
+    assert_eq!(namespace("name = \"my-lib\"\ngroup = \"com.Example\"\n", "kind = \"library\""), "com.example.my_lib");
+    assert_eq!(namespace("name = \"core\"\ngroup = \"org.2x\"\n", ""), "org._2x.core");
+    assert_eq!(namespace("name = \"class\"\ngroup = \"org.x\"\n", ""), "org.x._class");
+    assert_eq!(namespace("name = \"core\"\ngroup = \"com.example\"\n", "namespace = \"com.other.ui\""), "com.other.ui");
+    let err = parse_err(&format!("{MINIMAL}\n[target.android]\n"));
+    assert!(err.contains("needs a `namespace`") && err.contains("`group`"), "{err}");
+    assert!(parse_err(&format!("{MINIMAL}\n[target.android]\nnamespace = \"com.my-app\"\n")).contains("not a Java package name"));
+}
+
+#[test]
 fn android_release_settings() {
     let m = parse(&format!(
         r#"{MINIMAL}

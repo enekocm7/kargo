@@ -24,7 +24,7 @@ my-app/
 ├── test-resources/      resources for JVM tests
 ├── composeResources/    Compose images, fonts, strings and files, read through the generated Res class
 ├── js/                  your own JavaScript and TypeScript modules for the Wasm and JS targets
-├── android/             AndroidManifest.xml, res/, assets/
+├── android/             AndroidManifest.xml, res/, assets/, jniLibs/
 ├── interop/             cinterop .def files for C libraries (Kotlin/Native)
 ├── c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
 ├── examples/            example programs, run with kargo run --example <name>
