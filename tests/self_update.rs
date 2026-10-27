@@ -199,6 +199,14 @@ fn version_flags_print_the_version_and_host() {
         .success()
         .stdout(predicate::str::contains(format!("release: {version}")))
         .stdout(predicate::str::contains("host: "));
+    // `kargo version` is the same output as a command.
+    p.kargo().arg("version").assert().success().stdout(format!("kargo {version}\n"));
+    p.kargo()
+        .args(["-v", "version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("release: {version}")))
+        .stdout(predicate::str::contains("host: "));
     // No notice when stderr is not a terminal, even when a newer release exists.
     let releases = tempfile::tempdir().unwrap();
     publish(&p, releases.path(), "99.0.0", "new", None);
