@@ -74,6 +74,7 @@ struct RawBin {
 struct RawToolchain {
     jdk: Option<Value>,
     graalvm: Option<Value>,
+    android_sdk: Option<Value>,
     kargo: Option<String>,
 }
 
@@ -679,10 +680,16 @@ pub struct AndroidConfig {
     pub application_id: Option<String>,
     #[serde(default = "default_min_sdk")]
     pub min_sdk: u32,
-    #[serde(default = "default_sdk")]
+    /// `target-sdk`, else 36 (or `compile_sdk`, when lower).
+    #[serde(skip)]
     pub target_sdk: u32,
-    #[serde(default = "default_compile_sdk")]
+    /// `compile-sdk`, else `[toolchain] android-sdk`, else 37.
+    #[serde(skip)]
     pub compile_sdk: u32,
+    #[serde(rename = "target-sdk")]
+    declared_target_sdk: Option<u32>,
+    #[serde(rename = "compile-sdk")]
+    declared_compile_sdk: Option<u32>,
     #[serde(default = "default_version_code")]
     pub version_code: u32,
     pub version_name: Option<String>,
@@ -820,6 +827,21 @@ fn validate_build_config(fields: &BTreeMap<String, BuildConfigValue>, section: &
             bail!("[{section}.build-config] `{name}` is not a valid Java field name");
         }
     }
+    Ok(())
+}
+
+/// Fills in `compile-sdk` and `target-sdk`: `compile-sdk` defaults to the platform of `[toolchain] android-sdk`, and
+/// must match it when both are set.
+fn resolve_sdk_levels(config: &mut AndroidConfig, sdk: AndroidSdkRequest) -> Result<()> {
+    config.compile_sdk = match (config.declared_compile_sdk, sdk.api_level()) {
+        (Some(compile), Some(api)) if compile != api => bail!(
+            "[target.android] `compile-sdk = {compile}` differs from `android-sdk = \"{api}\"` under [toolchain]; \
+             remove `compile-sdk`, which defaults to the [toolchain] version, or set both to the same API level"
+        ),
+        (Some(level), _) | (None, Some(level)) => level,
+        (None, None) => default_compile_sdk(),
+    };
+    config.target_sdk = config.declared_target_sdk.unwrap_or(default_sdk().min(config.compile_sdk));
     Ok(())
 }
 
@@ -1770,6 +1792,13 @@ impl RawManifest {
             validate_exact_version("[kotlin] `ksp`", "1.2.3", ksp)?;
         }
         let mut deps = DependencyParser { workspace, paths: Vec::new() };
+        // Read before the targets: `compile-sdk` defaults to it.
+        let android_sdk = match &self.toolchain.android_sdk {
+            None => AndroidSdkRequest::System,
+            Some(Value::String(s)) => s.parse().context("invalid [toolchain] `android-sdk`")?,
+            Some(Value::Integer(i)) => i.to_string().parse().context("invalid [toolchain] `android-sdk`")?,
+            Some(_) => bail!("[toolchain] `android-sdk` must be a platform API level like \"36\" or \"system\""),
+        };
 
         let mut targets = match self.target {
             // No [target] section means a plain JVM project.
@@ -2012,7 +2041,9 @@ impl RawManifest {
                                 Some(Value::Table(t)) => t,
                                 Some(_) => bail!("[target.android.dependencies] must be a table"),
                             };
-                            let config: AndroidConfig = Value::Table(table).try_into().context("invalid [target.android] section")?;
+                            let mut config: AndroidConfig =
+                                Value::Table(table).try_into().context("invalid [target.android] section")?;
+                            resolve_sdk_levels(&mut config, android_sdk)?;
                             validate_android(&config)?;
                             let dependencies =
                                 deps.parse(&dependencies, "target.android.dependencies", false, Some(TargetKind::Android))?;
@@ -2266,7 +2297,7 @@ impl RawManifest {
 
         Ok(Manifest {
             publish,
-            toolchain: ToolchainSettings { jdk, graalvm, kargo },
+            toolchain: ToolchainSettings { jdk, graalvm, android_sdk, kargo },
             packaging,
             doc,
             fmt,

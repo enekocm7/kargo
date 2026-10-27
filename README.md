@@ -83,7 +83,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo env [--release \| --profile <name>] [--show-values] [--check]` | Show the environment `kargo run` and `kargo test` use: each variable, where it comes from, and its value (hidden unless `--show-values`); `--check` fails on unset required variables and on keys of `.env.example` that nothing sets |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
-| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Kotlin language servers behind `kargo lsp` and the debug adapter behind `kargo dap` |
+| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Android SDK, the Kotlin language servers behind `kargo lsp` and the debug adapter behind `kargo dap` |
 | `kargo self update [--version <v>] [--check]` | Update Kargo to the latest release (or `--version`), checking the archive's SHA-256 against the release's `SHA256SUMS`; `--check` only says whether a newer one exists. A Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN!, Cargo or a system package manager is not replaced: its update command is printed instead. `KARGO_RELEASES_URL` points at a mirror |
 | `kargo self uninstall [--purge]` | Remove the binary and the `PATH` entries the install scripts added; `--purge` also deletes `~/.kargo` |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
@@ -227,7 +227,7 @@ pkg-config = "sqlite3"            # flags from sqlite3.pc; link = "static" embed
 
 [target.android]
 namespace = "com.example.app"
-min-sdk = 24                # target-sdk = 36, compile-sdk = 37, kind = "application" | "library"
+min-sdk = 24                # target-sdk = 36, compile-sdk = [toolchain] android-sdk or 37, kind = "application" | "library"
 # agp-version = "9.4.1"     # gradle-version defaults to what AGP needs (9.6.0)
 # minify = true             # R8 for release builds; proguard-files = ["android/proguard-rules.pro"]
 # build-config = { API_URL = "https://api.example.com" }   # BuildConfig fields
@@ -376,6 +376,7 @@ A path dependency is built for the consumer's target: a jar for the JVM, a klib 
 [toolchain]
 jdk = "21"            # newest Temurin 21; or an exact release like "21.0.5+11"; default "system"
 graalvm = "25"        # GraalVM CE for native images (or "oracle-25"); default "system" (GRAALVM_HOME, then PATH)
+android-sdk = "36"    # Kargo installs Android platform 36, its build-tools and platform-tools; default "system" (ANDROID_HOME)
 kargo = ">=0.3"       # the Kargo versions the project builds with; an older Kargo stops and points to `kargo self update`
 ```
 
@@ -387,13 +388,15 @@ Kotlin/Native distributions are tied to `[kotlin] version`. They are installed u
 
 Android builds run on a Gradle that Kargo downloads from `services.gradle.org` (checksum-verified, under `~/.kargo/toolchains/gradle/<version>`): the version the Android Gradle Plugin in use requires, or `[target.android] gradle-version`. A `gradlew` in the project root takes precedence, `--system-gradle` uses the `gradle` on `PATH`, and `target/android` gets a Gradle wrapper so it opens in Android Studio.
 
+`android-sdk = "36"` makes Kargo install the Android SDK too: that platform, the build-tools of the AGP in use and platform-tools, from `dl.google.com` (verified against the SHA-1 of Google's repository manifest) into `~/.kargo/toolchains/android-sdk`, and `compile-sdk` defaults to it. The packages are under Google's license terms, which Kargo shows and asks you to accept (`kargo toolchain install android-sdk --accept-licenses` in CI); it never accepts them by itself. With `"system"` (the default) it uses `ANDROID_HOME`, `ANDROID_SDK_ROOT` or Android Studio's SDK, and names the `sdkmanager` packages it lacks (see [Android SDK](https://enekocm7.github.io/kargo/guides/android/#android-sdk)).
+
 Toolchains are locked while they install, so concurrent Kargo processes sharing `~/.kargo` install each one once, and downloads retry transient network failures. See [Parallel installs and retries](https://enekocm7.github.io/kargo/guides/toolchains/#parallel-installs-and-retries).
 
 ```console
-$ kargo toolchain available          # JDK versions you can install (LTS marked)
-$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, graalvm 25, native 2.4.21, gradle 9.6.0, kotlin-lsp, kls, kotlin-debug-adapter
+$ kargo toolchain available          # JDK versions you can install (LTS marked); `available android-sdk`: Android platforms
+$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, graalvm 25, native 2.4.21, gradle 9.6.0, android-sdk 36, kotlin-lsp, kls, kotlin-debug-adapter
 $ kargo toolchain install            # whatever the current project needs (a JDK too, when there is none; Kotlin/Native's LLVM and sysroots)
-$ kargo toolchain list               # installed JDKs/GraalVMs/Kotlin/Native/Gradle, disk usage, what the project uses
+$ kargo toolchain list               # installed JDKs/GraalVMs/Kotlin/Native/Gradle/Android SDK packages, disk usage, what the project uses
 $ kargo toolchain which              # toolchains resolved for this project
 $ kargo toolchain remove jdk 17      # all JDK 17 releases (or one release)
 $ kargo toolchain remove native 2.4.10
@@ -474,7 +477,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_INCREMENTAL` | `false` turns off incremental compilation |
 | `KARGO_NATIVE_CACHE` | `false` turns off the precompiled Kotlin/Native standard library cache for debug builds |
 | `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
-| `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations |
+| `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations (`ANDROID_HOME`, then `ANDROID_SDK_ROOT`, when `[toolchain] android-sdk` is `system`) |
 | `GRAALVM_HOME` | GraalVM for native images when `[toolchain] graalvm` is `system` (the default) |
 | `BROWSER` | Browser for `kargo doc --open` and `kargo run --open` |
 | `KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT` | Browser, extra arguments and silence timeout (seconds) for Wasm and JS browser tests |
@@ -493,7 +496,7 @@ Kargo is a Cargo workspace:
 | `kargo-util` | Terminal output, configuration (including `config.toml`: mirrors, proxy, CA bundle, vendoring, jobs), the number of parallel jobs, the HTTP agent, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver, uploads and the Maven Central Portal |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
-| `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, JetBrains Runtime for Compose hot reload, Kotlin compiler, Kotlin/Native, Gradle distributions, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
+| `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, JetBrains Runtime for Compose hot reload, Kotlin compiler, Kotlin/Native, Gradle distributions, the Android SDK, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
 | `kargo-compiler` | JVM/Wasm/JS/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, `[[generate]]` steps (`generate.rs`), Android/Gradle, project warnings, publications and signing, npm packages and their Kotlin declarations, Compose Desktop and Compose resources, `kargo self` (`ops/self_update.rs`), `kargo import` (`ops/import/`), commands |
 | `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, Kargo's own Kotlin server (`kotlin/`: lexer, declaration parser, Java declarations and the JDK's sources, libraries without sources from class files, Kotlin metadata and klibs, index, resolver, completion, hover, signature help, navigation, implementations, call and type hierarchies, rename (also KDoc, labels, packages, files and `kargo.toml` entry points), KDoc links (navigation, hints) and generated KDoc, semantic tokens, inlay hints, folding and selection ranges, formatting, code actions, refactorings), project import for other Kotlin language servers, runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |

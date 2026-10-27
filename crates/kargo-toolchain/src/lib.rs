@@ -1,7 +1,8 @@
 //! External toolchains: JDKs (detected or downloaded Temurin builds), GraalVM, the
-//! Kotlin compiler, Kotlin/Native, Node.js, web browsers, Gradle and Kotlin language servers.
+//! Kotlin compiler, Kotlin/Native, Node.js, web browsers, Gradle, the Android SDK and Kotlin language servers.
 
 pub mod adoptium;
+pub mod android_sdk;
 pub mod archive;
 pub mod binaryen;
 pub mod browser;

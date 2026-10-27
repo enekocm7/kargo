@@ -967,14 +967,14 @@ kargo android connectedAndroidTest
 
 ## `kargo toolchain`
 
-Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, and the Kotlin language servers [`kargo lsp`](#kargo-lsp) runs.
+Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Android SDK, and the Kotlin language servers [`kargo lsp`](#kargo-lsp) runs.
 
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses, including whether the Kotlin/Native dependencies of each native platform are downloaded |
-| `install [jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version]` | Install a toolchain; with no arguments, whatever the project needs (with `jdk = "system"` and no JDK on `JAVA_HOME` or `PATH`, the JDK a build would install), including the Kotlin/Native dependencies (LLVM, sysroots) of every `[target.native]` platform this host can build, so native builds work `--offline` afterwards. It installs even with `KARGO_AUTO_INSTALL=0`. `graalvm` takes `25` (GraalVM Community Edition) or `oracle-25` (Oracle GraalVM). `gradle` without a version installs the one the project uses; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
-| `remove` (`rm`) `<jdk\|graalvm\|native\|gradle\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs and GraalVMs, a major version removes all its releases |
-| `available` | JDK versions available for download (LTS marked) |
+| `install [jdk\|graalvm\|native\|gradle\|android-sdk\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version] [--accept-licenses]` | Install a toolchain; with no arguments, whatever the project needs (with `jdk = "system"` and no JDK on `JAVA_HOME` or `PATH`, the JDK a build would install), including the Kotlin/Native dependencies (LLVM, sysroots) of every `[target.native]` platform this host can build, so native builds work `--offline` afterwards. It installs even with `KARGO_AUTO_INSTALL=0`. `graalvm` takes `25` (GraalVM Community Edition) or `oracle-25` (Oracle GraalVM). `gradle` without a version installs the one the project uses; `android-sdk` installs a platform API level (default: the project's [`[toolchain] android-sdk`](../manifest/#toolchain)) with the build-tools of the project's AGP and platform-tools, after showing Google's license terms and asking, or accepting them with `--accept-licenses` (for CI; see [Android SDK](../../guides/android/#android-sdk)); `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
+| `remove` (`rm`) `<jdk\|graalvm\|native\|gradle\|android-sdk\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs and GraalVMs, a major version removes all its releases. For `android-sdk`, an API level removes that platform, and a package path such as `build-tools;36.0.0` that package; the SDK of `ANDROID_HOME` is never touched |
+| `available [jdk\|android-sdk]` | JDK versions available for download (LTS marked), or the Android SDK platforms and build-tools |
 | `which` | The toolchains this project resolves to |
 
 Other commands install the toolchains they need on first use, including a JDK when the project uses the system JDK and the machine has none; `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` in `config.toml` turns that off. See [what installs automatically](../../guides/toolchains/#what-installs-automatically).

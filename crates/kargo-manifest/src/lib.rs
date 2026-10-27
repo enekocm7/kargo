@@ -1176,6 +1176,8 @@ pub struct ToolchainSettings {
     pub jdk: JdkRequest,
     /// The GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use.
     pub graalvm: GraalvmRequest,
+    /// The Android SDK that builds the Android target.
+    pub android_sdk: AndroidSdkRequest,
     /// The Kargo versions the project builds with (`kargo = ">=0.3"`). Already checked against the running Kargo when the
     /// manifest was read.
     pub kargo: Option<semver::VersionReq>,
@@ -1271,6 +1273,53 @@ impl fmt::Display for GraalvmRequest {
             GraalvmRequest::System => f.write_str("system"),
             GraalvmRequest::Major { distribution: GraalvmDistribution::Community, major } => write!(f, "{major}"),
             GraalvmRequest::Major { distribution, major } => write!(f, "{}-{major}", distribution.as_str()),
+        }
+    }
+}
+
+/// Which Android SDK builds the Android target (`[toolchain] android-sdk = ...`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AndroidSdkRequest {
+    /// The SDK of `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or Android Studio's default location (the default).
+    #[default]
+    System,
+    /// A Kargo-managed SDK with this platform API level, its build-tools and platform-tools.
+    Platform(u32),
+}
+
+impl AndroidSdkRequest {
+    /// The oldest platform API level Kargo installs.
+    pub const MIN_API_LEVEL: u32 = 21;
+
+    pub fn api_level(self) -> Option<u32> {
+        match self {
+            AndroidSdkRequest::System => None,
+            AndroidSdkRequest::Platform(api) => Some(api),
+        }
+    }
+}
+
+impl FromStr for AndroidSdkRequest {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if s == "system" {
+            return Ok(AndroidSdkRequest::System);
+        }
+        match s.parse::<u32>() {
+            Ok(api) if api >= Self::MIN_API_LEVEL => Ok(AndroidSdkRequest::Platform(api)),
+            Ok(api) => bail!("Android API level {api} is not supported; use {} or newer", Self::MIN_API_LEVEL),
+            Err(_) => bail!("invalid Android SDK `{s}` (expected `system` or a platform API level like `36`)"),
+        }
+    }
+}
+
+impl fmt::Display for AndroidSdkRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AndroidSdkRequest::System => f.write_str("system"),
+            AndroidSdkRequest::Platform(api) => write!(f, "{api}"),
         }
     }
 }

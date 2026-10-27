@@ -69,6 +69,30 @@ impl Shell {
         self.print_left(ERROR, "error", message);
     }
 
+    /// Prints a block of text, such as license terms, on stderr.
+    pub fn text(&self, text: impl Display) {
+        if self.verbosity >= Verbosity::Normal {
+            let mut err = anstream::stderr().lock();
+            let _ = writeln!(err, "{text}");
+        }
+    }
+
+    /// Shows `text` and asks `question` on the terminal, for a yes or no. `None` when stdin or stderr is not a
+    /// terminal, so there is nobody to answer.
+    pub fn confirm(&self, text: impl Display, question: impl Display) -> Option<bool> {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) || !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            return None;
+        }
+        {
+            let mut err = anstream::stderr().lock();
+            let _ = write!(err, "{text}\n\n{question} [y/N] ");
+            let _ = err.flush();
+        }
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).ok()?;
+        Some(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    }
+
     /// Clears the terminal before a watched run (`--clear`), when stderr is a terminal.
     pub fn clear(&self) {
         if self.verbosity >= Verbosity::Normal && std::io::IsTerminal::is_terminal(&std::io::stderr()) {

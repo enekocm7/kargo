@@ -1374,6 +1374,118 @@ fn toolchain_manages_gradle() {
     p.kargo().args(["toolchain", "remove", "gradle", "9.6.0"]).assert().failure().stderr(predicate::str::contains("not installed"));
 }
 
+/// Serves a Google SDK repository with platform 36, build-tools 36.0.0 and platform-tools from `repo`, as the
+/// toolchain mirror of `p`.
+fn serve_android_repository(p: &Project, repo: &LocalRepo) {
+    let package = |path: &str, name: &str, revision: &str, top: &str, file: &str| {
+        let zip_path = repo.dir.path().join(format!("{top}.zip"));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        zip.start_file(format!("{top}/{file}"), zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, b"x").unwrap();
+        zip.finish().unwrap();
+        let sha1 = kargo_util::hash::sha1_file(&zip_path).unwrap();
+        format!(
+            "<remotePackage path=\"{path}\"><type-details xsi:type=\"generic:genericDetailsType\"/><revision>{revision}</revision>\
+             <display-name>{name}</display-name><uses-license ref=\"android-sdk-license\"/><channelRef ref=\"channel-0\"/>\
+             <archives><archive><complete><size>1</size><checksum type=\"sha1\">{sha1}</checksum><url>{top}.zip</url></complete></archive></archives>\
+             </remotePackage>"
+        )
+    };
+    let packages = [
+        package("platforms;android-36", "Android SDK Platform 36", "<major>2</major>", "android-36", "android.jar"),
+        package(
+            "build-tools;36.0.0",
+            "Android SDK Build-Tools 36",
+            "<major>36</major><minor>0</minor><micro>0</micro>",
+            "android-16",
+            "aapt2",
+        ),
+        package("platform-tools", "Android SDK Platform-Tools", "<major>37</major>", "platform-tools", "adb"),
+    ];
+    repo.write(
+        "repository2-3.xml",
+        &format!(
+            "<?xml version=\"1.0\"?>\n<sdk:sdk-repository xmlns:sdk=\"http://schemas.android.com/sdk/android/repo/repository2/03\" \
+             xmlns:common=\"http://schemas.android.com/repository/android/common/02\" \
+             xmlns:generic=\"http://schemas.android.com/repository/android/generic/02\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
+             <license id=\"android-sdk-license\" type=\"text\">Terms of the fake license</license>\
+             <channel id=\"channel-0\">stable</channel>{}</sdk:sdk-repository>\n",
+            packages.join("")
+        ),
+    );
+    p.file(".kargo/config.toml", &format!("[toolchain-mirrors]\n\"https://dl.google.com/android/repository\" = \"{}\"\n", repo.url()));
+}
+
+#[test]
+fn toolchain_manages_the_android_sdk() {
+    let p = Project::new();
+    let repo = LocalRepo::new();
+    serve_android_repository(&p, &repo);
+    let android = "[target.android]\nnamespace = \"com.example.droid\"\n";
+    p.file("kargo.toml", &manifest("droid", &format!("[toolchain]\nandroid-sdk = \"36\"\n{android}")));
+
+    // Nobody can accept the license here, so nothing is installed.
+    p.kargo().args(["toolchain", "install", "android-sdk"]).assert().failure().stderr(
+        predicate::str::contains("needs you to accept Google's license `android-sdk-license`")
+            .and(predicate::str::contains("--accept-licenses")),
+    );
+    let sdk = p.home.path().join("toolchains/android-sdk");
+    assert!(!sdk.join("platforms").exists());
+
+    p.kargo().args(["toolchain", "install", "android-sdk", "--accept-licenses"]).assert().success().stderr(
+        predicate::str::contains("Terms of the fake license")
+            .and(predicate::str::contains("Installing Android SDK Platform 36 (platforms;android-36)"))
+            .and(predicate::str::contains("Installed Android SDK platform 36, build-tools 36.0.0 and platform-tools at")),
+    );
+    assert!(sdk.join("platforms/android-36/android.jar").is_file() && sdk.join("platforms/android-36/package.xml").is_file());
+    assert!(sdk.join("build-tools/36.0.0/aapt2").is_file() && sdk.join("platform-tools/adb").is_file());
+    assert!(std::fs::read_to_string(sdk.join("licenses/android-sdk-license")).unwrap().trim().len() == 40);
+    p.kargo()
+        .args(["toolchain", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"Android SDK \(.*\):\n    platforms;android-36 .*used by this project").unwrap());
+
+    p.kargo()
+        .args(["toolchain", "remove", "android-sdk", "36"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removed Android SDK package platforms;android-36"));
+    // The license is accepted now, so installing again asks nothing.
+    p.kargo().args(["toolchain", "install", "android-sdk", "36"]).assert().success();
+    p.kargo()
+        .args(["toolchain", "install", "android-sdk", "35"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`platforms;android-35` is not in Google's repository"));
+
+    // compile-sdk defaults to the toolchain's, and must not differ from it.
+    p.file("kargo.toml", &manifest("droid", &format!("[toolchain]\nandroid-sdk = \"36\"\n{android}compile-sdk = 35\n")));
+    p.kargo().args(["build"]).assert().failure().stderr(predicate::str::contains("`compile-sdk = 35` differs from `android-sdk = \"36\"`"));
+    p.file("kargo.toml", &manifest("droid", &format!("[toolchain]\nandroid-sdk = \"latest\"\n{android}")));
+    p.kargo().args(["build"]).assert().failure().stderr(predicate::str::contains("expected `system` or a platform API level"));
+}
+
+#[test]
+fn a_system_android_sdk_without_the_platform_names_it() {
+    let p = Project::new();
+    let sdk = tempfile::tempdir().unwrap();
+    p.file("kargo.toml", &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\ncompile-sdk = 36\n"));
+    p.file("android/AndroidManifest.xml", "<manifest/>");
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.kargo()
+        .env("ANDROID_HOME", sdk.path())
+        .env_remove("ANDROID_SDK_ROOT")
+        .args(["build", "--target", "android", "--offline"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("lacks platforms;android-36 and build-tools;36.0.0")
+                .and(predicate::str::contains("sdkmanager \"platforms;android-36\" \"build-tools;36.0.0\""))
+                .and(predicate::str::contains("android-sdk = \"36\"")),
+        );
+}
+
 #[test]
 fn doc_reports_what_it_cannot_document() {
     let p = Project::new();

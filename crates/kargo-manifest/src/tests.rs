@@ -950,6 +950,33 @@ jvm-target = \"21\"
 }
 
 #[test]
+fn toolchain_android_sdk_requests() {
+    let with =
+        |toolchain: &str, android: &str| format!("{MINIMAL}\n[toolchain]\n{toolchain}\n[target.android]\nnamespace = \"a.b\"\n{android}\n");
+    let sdk = |toolchain: &str, android: &str| {
+        let m = parse(&with(toolchain, android));
+        let cfg = m.targets.android.unwrap().config;
+        (m.toolchain.android_sdk, cfg.compile_sdk, cfg.target_sdk)
+    };
+    assert_eq!(parse(MINIMAL).toolchain.android_sdk, AndroidSdkRequest::System);
+    assert_eq!(sdk("", ""), (AndroidSdkRequest::System, 37, 36));
+    assert_eq!(sdk("android-sdk = \"system\"", "compile-sdk = 35\ntarget-sdk = 34"), (AndroidSdkRequest::System, 35, 34));
+    // compile-sdk follows the toolchain, and the default target-sdk never exceeds it.
+    assert_eq!(sdk("android-sdk = \"36\"", ""), (AndroidSdkRequest::Platform(36), 36, 36));
+    assert_eq!(sdk("android-sdk = 35", ""), (AndroidSdkRequest::Platform(35), 35, 35));
+    assert_eq!(sdk("android-sdk = \"37\"", "compile-sdk = 37"), (AndroidSdkRequest::Platform(37), 37, 36));
+    let err = parse_err(&with("android-sdk = \"36\"", "compile-sdk = 37"));
+    assert!(err.contains("`compile-sdk = 37` differs from `android-sdk = \"36\"`"), "{err}");
+    let err = parse_err(&with("android-sdk = \"latest\"", ""));
+    assert!(err.contains("expected `system` or a platform API level"), "{err}");
+    assert!(parse_err(&with("android-sdk = 19", "")).contains("not supported; use 21 or newer"));
+    assert!(parse_err(&with("android-sdk = true", "")).contains("android-sdk"));
+    // Without the Android target it is only a preference.
+    assert_eq!(parse(&format!("{MINIMAL}\n[toolchain]\nandroid-sdk = \"36\"\n")).toolchain.android_sdk, AndroidSdkRequest::Platform(36));
+    assert_eq!(AndroidSdkRequest::Platform(36).to_string(), "36");
+}
+
+#[test]
 fn default_jvm_target_follows_older_jdks() {
     let jvm = |text: &str| parse(text).targets.jvm.unwrap();
     // A pinned JDK older than the default lowers the default target.

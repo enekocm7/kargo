@@ -217,6 +217,17 @@ Tests of a Wasm or JS project with `environment = "browser"` run in a headless b
 
 For release builds, Kargo downloads its pinned Binaryen `wasm-opt` into the toolchain cache and verifies its SHA-256 automatically. CI needs no global npm install. See [Wasm release builds](../wasm/#release-builds) for optimization presets, compression and size budgets.
 
+### Android
+
+With [`[toolchain] android-sdk`](../android/#android-sdk), Kargo installs the Android SDK itself, but only after someone accepts Google's license terms, and a CI job has no terminal to ask on. Accept them in a step before the build:
+
+```yaml
+      - run: kargo toolchain install android-sdk --accept-licenses
+      - run: kargo build -t android --release
+```
+
+Without it, the build stops with a message that names this command. The SDK lands in `~/.kargo/toolchains/android-sdk`, which the `~/.kargo` cache keeps, with the acceptance.
+
 ### Publishing releases
 
 `kargo publish` uploads a library from CI, with the Maven Central token and the signing key in secrets. See [Publishing from CI](../publishing/#publishing-from-ci) for a complete workflow.

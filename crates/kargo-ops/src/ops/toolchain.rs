@@ -1,12 +1,13 @@
-//! `kargo toolchain`: managing JDKs, GraalVMs, Kotlin/Native and Gradle distributions, and the
-//! Kotlin language servers behind `kargo lsp`.
+//! `kargo toolchain`: managing JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Android
+//! SDK, and the Kotlin language servers behind `kargo lsp`.
 
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 
-use kargo_manifest::{GraalvmRequest, JdkRequest, Manifest, TargetKind};
+use kargo_manifest::{AndroidSdkRequest, GraalvmRequest, JdkRequest, Manifest, TargetKind};
 use kargo_maven::MavenClient;
+use kargo_toolchain::android_sdk::{self, Licenses};
 use kargo_toolchain::archive::{dir_size, human_size};
 use kargo_toolchain::jdks::{self, ManagedJdk};
 use kargo_toolchain::native::{buildable_on_host, resolve_platform};
@@ -21,6 +22,8 @@ pub enum ToolKind {
     Graalvm,
     Native,
     Gradle,
+    /// Packages of the Kargo-managed Android SDK: a platform, its build-tools and platform-tools.
+    AndroidSdk,
     /// A Kotlin language server for `kargo lsp`.
     Server(ServerKind),
 }
@@ -34,6 +37,16 @@ fn project_gradle(project: &Manifest) -> Result<Option<String>> {
         return Ok(Some(version.clone()));
     }
     Ok(Some(kargo_toolchain::gradle::gradle_for_agp(crate::gradle::agp_version(&android.config))?.version().to_owned()))
+}
+
+/// The SDK packages an Android project builds with, if it uses the Kargo-managed SDK.
+fn project_android_sdk(project: &Manifest) -> Option<Vec<String>> {
+    let android = project.targets.android.as_ref()?;
+    project.toolchain.android_sdk.api_level()?;
+    Some(android_sdk::packages_for(
+        android.config.compile_sdk,
+        android_sdk::build_tools_for_agp(crate::gradle::agp_version(&android.config)),
+    ))
 }
 
 /// The Konan targets of the project's `[target.native] platforms`, `host` resolved; none
@@ -194,6 +207,32 @@ GraalVM ({}):",
         );
     }
 
+    let sdk = config.android_sdk_dir();
+    let used = project.and_then(project_android_sdk).unwrap_or_default();
+    let _ = writeln!(out, "\nAndroid SDK ({}):", sdk.display());
+    let packages = android_sdk::installed(&sdk);
+    if packages.is_empty() {
+        let _ = writeln!(out, "    (none installed)");
+    }
+    for package in &packages {
+        let _ = writeln!(
+            out,
+            "    {:<26} {:>10}{}",
+            package.path,
+            human_size(dir_size(&package.dir)),
+            if used.contains(&package.path) { "  (used by this project)" } else { "" }
+        );
+    }
+    match crate::gradle::android_sdk() {
+        Some(system) => {
+            let used = project.is_some_and(|m| m.targets.android.is_some() && m.toolchain.android_sdk == AndroidSdkRequest::System);
+            let _ = writeln!(out, "    system: {}{}", system.display(), if used { "  (used by this project)" } else { "" });
+        }
+        None => {
+            let _ = writeln!(out, "    system: none found (ANDROID_HOME / ANDROID_SDK_ROOT)");
+        }
+    }
+
     let servers = LanguageServer::installed(config)?;
     let _ = writeln!(
         out,
@@ -218,8 +257,9 @@ Kotlin language servers and debug adapter ({}):",
     Ok(out)
 }
 
-/// Installs a toolchain. `version` defaults to what the project needs.
-pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, version: Option<&str>) -> Result<String> {
+/// Installs a toolchain. `version` defaults to what the project needs; `licenses` says how the licenses of
+/// Android SDK packages get accepted.
+pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, version: Option<&str>, licenses: Licenses) -> Result<String> {
     // Asked for by name, so `KARGO_AUTO_INSTALL=0` doesn't apply.
     let config = &config.clone().with_auto_install(true);
     match kind {
@@ -272,6 +312,36 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
             let dist = GradleDistribution::ensure(config, &version)?;
             Ok(format!("Gradle {} at {}", dist.version, dist.home.display()))
         }
+        ToolKind::AndroidSdk => {
+            let android = project.and_then(|m| m.targets.android.as_ref());
+            let api = match (version, project) {
+                (Some(v), _) => match v.parse::<AndroidSdkRequest>()? {
+                    AndroidSdkRequest::Platform(api) => api,
+                    AndroidSdkRequest::System => {
+                        bail!(
+                            "Kargo does not install the system Android SDK; name an API level, e.g. `kargo toolchain install android-sdk 36`"
+                        )
+                    }
+                },
+                (None, Some(m)) if m.toolchain.android_sdk != AndroidSdkRequest::System => {
+                    android.map_or_else(|| m.toolchain.android_sdk.api_level().expect("not the system SDK"), |a| a.config.compile_sdk)
+                }
+                (None, _) => {
+                    bail!(
+                        "which Android platform? e.g. `kargo toolchain install android-sdk 36` (or set [toolchain] android-sdk in kargo.toml)"
+                    )
+                }
+            };
+            let agp = android.map_or(crate::gradle::AGP_VERSION, |a| crate::gradle::agp_version(&a.config));
+            let build_tools = android_sdk::build_tools_for_agp(agp);
+            let sdk = android_sdk::ensure(
+                config,
+                &android_sdk::packages_for(api, build_tools),
+                licenses,
+                &format!("kargo toolchain install android-sdk {api}"),
+            )?;
+            Ok(format!("Android SDK platform {api}, build-tools {build_tools} and platform-tools at {}", sdk.display()))
+        }
         ToolKind::Server(kind) => {
             let server = LanguageServer::ensure(config, kind, version.unwrap_or(kind.default_version()))?;
             Ok(format!("{} {} at {}", kind.title(), server.version, server.home.display()))
@@ -280,25 +350,28 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
 }
 
 /// Installs everything the project needs (`kargo toolchain install` without arguments).
-pub fn install_for_project(config: &Config, manifest: &Manifest) -> Result<Vec<String>> {
+pub fn install_for_project(config: &Config, manifest: &Manifest, licenses: Licenses) -> Result<Vec<String>> {
     let mut done = Vec::new();
     if manifest.toolchain.jdk != JdkRequest::System {
-        done.push(install(config, Some(manifest), ToolKind::Jdk, None)?);
+        done.push(install(config, Some(manifest), ToolKind::Jdk, None, licenses)?);
     } else {
         // The JDK a build would install on a machine without one.
         let needs = crate::ops::context::jdk_needs(manifest);
         if Jdk::find()?.is_none() && jdks::find_fallback(config, needs)?.is_none() {
-            done.push(install(config, Some(manifest), ToolKind::Jdk, Some(&needs.choose().to_string()))?);
+            done.push(install(config, Some(manifest), ToolKind::Jdk, Some(&needs.choose().to_string()), licenses)?);
         }
     }
     if manifest.toolchain.graalvm != GraalvmRequest::System {
-        done.push(install(config, Some(manifest), ToolKind::Graalvm, None)?);
+        done.push(install(config, Some(manifest), ToolKind::Graalvm, None, licenses)?);
     }
     if manifest.targets.is_enabled(TargetKind::Native) {
-        done.push(install(config, Some(manifest), ToolKind::Native, None)?);
+        done.push(install(config, Some(manifest), ToolKind::Native, None, licenses)?);
     }
     if project_gradle(manifest)?.is_some() {
-        done.push(install(config, Some(manifest), ToolKind::Gradle, None)?);
+        done.push(install(config, Some(manifest), ToolKind::Gradle, None, licenses)?);
+    }
+    if project_android_sdk(manifest).is_some() {
+        done.push(install(config, Some(manifest), ToolKind::AndroidSdk, None, licenses)?);
     }
     Ok(done)
 }
@@ -318,6 +391,7 @@ pub fn remove(config: &Config, kind: ToolKind, selector: &str) -> Result<Vec<Str
             let removed = GradleDistribution::remove(config, selector)?;
             Ok(vec![format!("Gradle {}", removed.version)])
         }
+        ToolKind::AndroidSdk => Ok(vec![format!("Android SDK package {}", android_sdk::remove(config, selector)?)]),
         ToolKind::Server(kind) => {
             let removed = LanguageServer::remove(config, kind, selector)?;
             Ok(vec![format!("{} {}", kind.title(), removed.version)])
@@ -325,8 +399,13 @@ pub fn remove(config: &Config, kind: ToolKind, selector: &str) -> Result<Vec<Str
     }
 }
 
-/// Renders installable JDK feature versions.
-pub fn available(config: &Config) -> Result<String> {
+/// Renders what can be installed: JDK feature versions, or with `kind` the Android SDK platforms and build-tools.
+pub fn available(config: &Config, kind: Option<ToolKind>) -> Result<String> {
+    match kind {
+        None | Some(ToolKind::Jdk) => {}
+        Some(ToolKind::AndroidSdk) => return available_android(config),
+        Some(_) => bail!("`kargo toolchain available` lists JDK versions, and Android SDK platforms with `android-sdk`"),
+    }
     let releases = adoptium::available(config)?;
     let mut out = String::from("Temurin JDK versions (install with `kargo toolchain install jdk <version>`):\n");
     for v in releases.available_releases.iter().rev() {
@@ -338,6 +417,27 @@ pub fn available(config: &Config) -> Result<String> {
             tags.push("recommended");
         }
         let _ = writeln!(out, "    {v:>3}  {}", tags.join(", "));
+    }
+    Ok(out)
+}
+
+/// Renders the Android SDK platforms and build-tools of Google's repository.
+fn available_android(config: &Config) -> Result<String> {
+    let (platforms, build_tools) = android_sdk::Repository::fetch(config)?.available();
+    let installed = android_sdk::installed(&config.android_sdk_dir());
+    let mut out = String::from("Android SDK platforms (install with `kargo toolchain install android-sdk <api>`):\n");
+    for api in platforms {
+        let here = installed.iter().any(|p| p.path == android_sdk::platform_package(api));
+        let _ = writeln!(out, "    {api:>3}{}", if here { "  installed" } else { "" });
+    }
+    let agp = crate::gradle::AGP_VERSION;
+    let _ = writeln!(
+        out,
+        "\nBuild-tools (Kargo installs the one of the project's AGP: {} for AGP {agp}):",
+        android_sdk::build_tools_for_agp(agp)
+    );
+    for version in build_tools.iter().take(10) {
+        let _ = writeln!(out, "    {version}");
     }
     Ok(out)
 }
@@ -400,21 +500,21 @@ mod tests {
 
         let android = Manifest::parse("[package]\nname = \"p\"\nversion = \"1\"\n[target.android]\nnamespace = \"a.b\"\n").unwrap();
         let text = list(&config, Some(&android)).unwrap();
-        let gradle_section = text.split("Gradle (").nth(1).unwrap();
+        let gradle_section = text.split("Gradle (").nth(1).unwrap().split("Android SDK (").next().unwrap();
         let used: Vec<&str> = gradle_section.lines().filter(|l| l.contains("used by this project")).collect();
         assert_eq!(used.len(), 1, "{text}");
         assert!(used[0].contains("9.6.0"), "the default for AGP {}: {text}", crate::gradle::AGP_VERSION);
 
         // Installed already: no download needed, even offline.
-        assert!(install(&config, Some(&android), ToolKind::Gradle, None).unwrap().starts_with("Gradle 9.6.0 at"));
-        assert_eq!(install_for_project(&config, &android).unwrap().len(), 1);
-        assert!(format!("{:#}", install(&config, None, ToolKind::Gradle, Some("9.5.0")).unwrap_err()).contains("offline"));
+        assert!(install(&config, Some(&android), ToolKind::Gradle, None, Licenses::Ask).unwrap().starts_with("Gradle 9.6.0 at"));
+        assert_eq!(install_for_project(&config, &android, Licenses::Ask).unwrap().len(), 1);
+        assert!(format!("{:#}", install(&config, None, ToolKind::Gradle, Some("9.5.0"), Licenses::Ask).unwrap_err()).contains("offline"));
 
         let pinned = Manifest::parse(
             "[package]\nname = \"p\"\nversion = \"1\"\n[target.android]\nnamespace = \"a.b\"\nagp-version = \"9.4.1\"\ngradle-version = \"9.1.0\"\n",
         )
         .unwrap();
-        let err = install(&config, Some(&pinned), ToolKind::Gradle, None).unwrap_err().to_string();
+        let err = install(&config, Some(&pinned), ToolKind::Gradle, None, Licenses::Ask).unwrap_err().to_string();
         assert!(err.contains("needs Gradle 9.6.0 or newer"), "{err}");
 
         assert_eq!(remove(&config, ToolKind::Gradle, "9.6.0").unwrap(), ["Gradle 9.6.0"]);
@@ -422,20 +522,58 @@ mod tests {
     }
 
     #[test]
+    fn manages_the_android_sdk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path());
+        let sdk = config.android_sdk_dir();
+        for path in ["platforms;android-36", "build-tools;36.0.0", "platform-tools", "platforms;android-35"] {
+            let dir = android_sdk::package_dir(&sdk, path);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("package.xml"), "").unwrap();
+        }
+        let android = Manifest::parse(
+            "[package]\nname = \"p\"\nversion = \"1\"\n[toolchain]\nandroid-sdk = \"36\"\n[target.android]\nnamespace = \"a.b\"\n",
+        )
+        .unwrap();
+        let text = list(&config, Some(&android)).unwrap();
+        let section = text.split("Android SDK (").nth(1).unwrap();
+        let used: Vec<&str> = section.lines().filter(|l| l.contains("used by this project")).collect();
+        assert_eq!(used.len(), 3, "the platform, build-tools and platform-tools: {text}");
+        assert!(section.lines().any(|l| l.contains("platforms;android-35") && !l.contains("used by")), "{text}");
+
+        // Installed already: no download, even offline.
+        let done = install(&config, Some(&android), ToolKind::AndroidSdk, None, Licenses::Ask).unwrap();
+        assert!(done.starts_with("Android SDK platform 36, build-tools 36.0.0 and platform-tools at"), "{done}");
+        let gradle = config.gradle_dir().join("9.6.0/bin").join(if cfg!(windows) { "gradle.bat" } else { "gradle" });
+        std::fs::create_dir_all(gradle.parent().unwrap()).unwrap();
+        std::fs::write(&gradle, "").unwrap();
+        assert!(install_for_project(&config, &android, Licenses::Ask).unwrap().iter().any(|d| d.starts_with("Android SDK platform 36")));
+        let err = format!("{:#}", install(&config, None, ToolKind::AndroidSdk, Some("34"), Licenses::Ask).unwrap_err());
+        assert!(err.contains("offline"), "{err}");
+        let err = install(&config, None, ToolKind::AndroidSdk, None, Licenses::Ask).unwrap_err().to_string();
+        assert!(err.contains("which Android platform"), "{err}");
+        assert!(install(&config, None, ToolKind::AndroidSdk, Some("system"), Licenses::Ask).is_err());
+
+        assert_eq!(remove(&config, ToolKind::AndroidSdk, "35").unwrap(), ["Android SDK package platforms;android-35"]);
+        assert!(remove(&config, ToolKind::AndroidSdk, "35").is_err());
+        assert!(available(&config, Some(ToolKind::Gradle)).is_err());
+    }
+
+    #[test]
     fn install_and_remove_validation() {
         let tmp = tempfile::tempdir().unwrap();
         let config = config(tmp.path());
-        let err = install(&config, None, ToolKind::Jdk, None).unwrap_err().to_string();
+        let err = install(&config, None, ToolKind::Jdk, None, Licenses::Ask).unwrap_err().to_string();
         assert!(err.contains("which JDK"), "{err}");
-        assert!(install(&config, None, ToolKind::Native, None).is_err());
-        assert!(install(&config, None, ToolKind::Jdk, Some("system")).is_err());
-        assert!(format!("{:#}", install(&config, None, ToolKind::Jdk, Some("21")).unwrap_err()).contains("offline"));
+        assert!(install(&config, None, ToolKind::Native, None, Licenses::Ask).is_err());
+        assert!(install(&config, None, ToolKind::Jdk, Some("system"), Licenses::Ask).is_err());
+        assert!(format!("{:#}", install(&config, None, ToolKind::Jdk, Some("21"), Licenses::Ask).unwrap_err()).contains("offline"));
 
         fake_jdk(&config, "jdk-17.0.9+9", 17);
         assert_eq!(remove(&config, ToolKind::Jdk, "17").unwrap(), ["JDK jdk-17.0.9+9"]);
         assert!(remove(&config, ToolKind::Native, "2.0.0").is_err());
 
         let plain = Manifest::parse("[package]\nname = \"p\"\nversion = \"1\"\n").unwrap();
-        assert!(install_for_project(&config, &plain).unwrap().is_empty(), "nothing to install for a system-JDK JVM project");
+        assert!(install_for_project(&config, &plain, Licenses::Ask).unwrap().is_empty(), "nothing to install for a system-JDK JVM project");
     }
 }

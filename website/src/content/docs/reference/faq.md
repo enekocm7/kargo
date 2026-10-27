@@ -132,7 +132,15 @@ Node.js can't find an npm package that a library imports. Kargo installs these p
 
 ### `Android SDK not found; set ANDROID_HOME`
 
-Install the Android SDK (Android Studio installs it to `~/Android/Sdk` on Linux and `~/Library/Android/sdk` on macOS) and set `ANDROID_HOME`.
+Either let Kargo install the SDK, with `android-sdk = "36"` (your `compile-sdk`) under `[toolchain]` in `kargo.toml`, or install the Android SDK (Android Studio installs it to `~/Android/Sdk` on Linux and `~/Library/Android/sdk` on macOS) and set `ANDROID_HOME`. See [Android SDK](../../guides/android/#android-sdk).
+
+### `the Android SDK at ... lacks platforms;android-...`
+
+Your own SDK has no platform for `compile-sdk`, or not the build-tools of the Android Gradle Plugin, and no accepted license that would let AGP download them. Run the `sdkmanager` command the message prints, or set `[toolchain] android-sdk` to have Kargo install them.
+
+### `installing ... needs you to accept Google's license`
+
+The Android SDK packages are under Google's license terms, and Kargo needs your explicit acceptance before it installs them. Without a terminal to ask on, as in CI, run `kargo toolchain install android-sdk --accept-licenses` before the build; it shows the terms and records your acceptance in `~/.kargo/toolchains/android-sdk/licenses/`.
 
 ### `Gradle ... is too old for Android Gradle Plugin ...`
 
@@ -140,7 +148,7 @@ The `gradle-version` under `[target.android]` is older than the `agp-version` ne
 
 ### `Gradle ... is not installed and Kargo is offline`
 
-Kargo downloads Gradle for Android builds on first use. Run `kargo fetch` (or `kargo toolchain install gradle`) once while online.
+Kargo downloads Gradle (and with `[toolchain] android-sdk` the Android SDK) for Android builds on first use. Run `kargo fetch` (or `kargo toolchain install`) once while online.
 
 ### `... is not in the local cache and Kargo is running in offline mode`
 

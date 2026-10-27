@@ -714,6 +714,7 @@ dependencies = [
  "kargo-manifest",
  "kargo-maven",
  "kargo-util",
+ "roxmltree",
  "serde",
  "serde_json",
  "tar",

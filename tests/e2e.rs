@@ -2216,6 +2216,30 @@ fun appName(): String = stringResource(Res.string.app_name)
 }
 
 #[test]
+fn android_build_with_a_kargo_managed_sdk() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (downloads the Android SDK from Google)");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["droid", "--target", "android"]);
+    let manifest = t.dir.path().join("droid/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    t.write("droid/kargo.toml", &format!("{text}\n[toolchain]\nandroid-sdk = \"36\"\n"));
+    t.kargo("droid")
+        .args(["toolchain", "install", "android-sdk", "--accept-licenses"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Installed Android SDK platform 36, build-tools"));
+    // The system SDK is not needed, nor looked at.
+    t.kargo("droid").env_remove("ANDROID_HOME").env_remove("ANDROID_SDK_ROOT").arg("build").assert().success();
+    assert!(t.dir.path().join("droid/target/android/build/outputs/apk/debug/droid-debug.apk").is_file());
+    let local = std::fs::read_to_string(t.dir.path().join("droid/target/android/local.properties")).unwrap();
+    assert!(local.contains("android-sdk"), "{local}");
+}
+
+#[test]
 fn android_app_with_compose() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
