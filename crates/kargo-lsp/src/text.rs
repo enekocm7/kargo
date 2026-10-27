@@ -43,10 +43,11 @@ impl Encoding {
     }
 
     /// The encoding to use among the `general.positionEncodings` an editor offers: UTF-8, which
-    /// needs no conversion, when it is there, else UTF-16, which every editor takes.
+    /// needs no conversion, when it is there, then UTF-32, which counts characters, else UTF-16,
+    /// which every editor takes.
     pub fn negotiate(offered: &Value) -> Self {
         let offered: Vec<Encoding> = offered.as_array().into_iter().flatten().filter_map(Value::as_str).filter_map(Self::parse).collect();
-        if offered.contains(&Encoding::Utf8) { Encoding::Utf8 } else { Encoding::Utf16 }
+        [Encoding::Utf8, Encoding::Utf32].into_iter().find(|e| offered.contains(e)).unwrap_or(Encoding::Utf16)
     }
 
     /// The encoding a server's `positionEncoding` capability names (UTF-16 when it names none).
@@ -234,7 +235,8 @@ mod tests {
             assert_eq!(position_in(text, x, encoding), at, "{encoding:?}");
         }
         assert_eq!(Encoding::negotiate(&json!(["utf-16", "utf-8"])), Encoding::Utf8);
-        assert_eq!(Encoding::negotiate(&json!(["utf-32", "utf-16"])), Encoding::Utf16);
+        assert_eq!(Encoding::negotiate(&json!(["utf-32", "utf-16"])), Encoding::Utf32);
+        assert_eq!(Encoding::negotiate(&json!(["utf-32", "utf-8"])), Encoding::Utf8);
         assert_eq!(Encoding::negotiate(&Value::Null), Encoding::Utf16);
         assert_eq!(Encoding::of_capability(&json!("utf-8")), Encoding::Utf8);
     }

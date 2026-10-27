@@ -801,6 +801,9 @@ It speaks LSP over stdin and stdout and gives you:
 - **Code actions in `kargo.toml`**: quick fixes for its errors, and the edits of `kargo add`, `kargo add --framework`, `kargo target add` and `kargo upgrade` from the editor. See [Code actions in `kargo.toml`](#code-actions-in-kargotoml).
 - **Re-import** when `kargo.toml` or `kargo.lock` change: on save, or when the editor reports a changed file (Kargo asks to be told about every `kargo.toml` and `kargo.lock`). If the project's [fingerprint](#importing-a-project) changed, Kargo resolves the dependencies again in the background, reports it with `$/progress`, and the Kotlin server reloads. Add a dependency with `kargo add` and its classes complete a moment later.
 - **Runnables**: the [`kargo/runnables`](#runnables) request lists programs, tests and tasks with the command lines that run them, for Run and Debug buttons.
+- **Test tree**: the [`kargo/testTree`](#test-tree) request lists the test classes and functions of the project, each with the command line that runs it, for editors without a test plugin.
+- **Typing aids**: on-type formatting (indentation after Enter, ` * ` in comments, closing `"""`, `*/` and brackets the editor didn't add), linked editing of a type parameter and its uses in one signature, links for URLs and for strings that name existing files, inline values while debugging, renamed and deleted files leaving the index at once, and a *Run `kargo fmt` on file* code action. See [Typing aids](../kotlin-server/#typing-aids).
+- **Status and logs**: `kargo/status` notifications while the project is indexed, resolved or checked, and `--log-file` with the time of every request. See [Status and logs](#status-and-logs).
 - **Check on save**: when you save a Kotlin file, `kargo check` runs in the background and its errors for every target (Wasm and Native included) appear in the editor. It is on with Kargo's own server, which reports only syntax problems, unused code and deprecated usages of its own, and opt-in with the others. See [Check on save](#check-on-save).
 
 With `--server kotlin-lsp`, the first start downloads the Kotlin LSP (about 360 MB) and resolves the project's dependencies, so it takes a while. Later starts reuse both.
@@ -931,6 +934,81 @@ The `kargo/runnables` request lists what can be run in the project, with the com
 | `description` | A task's `description` |
 
 Programs are listed per target (`run -t <target>`), then each `[[bin]]` (`run --bin <name>`) and example (`run --example <name>`); tests per target (`test -t <target>`, append a filter to run one test); and tasks as `task <name>`. Kargo advertises `"experimental": { "kargo": { "runnables": true } }` in its capabilities so plugins can check for the request.
+
+### Test tree
+
+The `kargo/testTree` request lists the test classes of the project and the test functions in them, with the `kargo test` command line of each, so an editor without a test plugin can show a test tree. Kargo's own Kotlin server answers it; it advertises `"experimental": { "kargo": { "testTree": true } }`.
+
+```json title="Request"
+{ "jsonrpc": "2.0", "id": 8, "method": "kargo/testTree", "params": { "textDocument": { "uri": "file:///home/me/app/tests/MathTest.kt" } } }
+```
+
+`textDocument` is optional: with it, only the tests of that file are listed; without it, those of every test file of the project (of the first workspace folder, when the editor opened several). The answer has one entry per file with tests:
+
+```json
+[
+  {
+    "uri": "file:///home/me/app/tests/MathTest.kt",
+    "target": null,
+    "tests": [
+      {
+        "id": "app.MathTest",
+        "label": "MathTest",
+        "kind": "class",
+        "range": { "start": { "line": 4, "character": 0 }, "end": { "line": 9, "character": 1 } },
+        "cwd": "/home/me/app",
+        "program": "/home/me/.cargo/bin/kargo",
+        "args": ["test", "app.MathTest."],
+        "debugArgs": ["test", "app.MathTest.", "--debug"],
+        "children": [
+          {
+            "id": "app.MathTest.adds",
+            "label": "adds",
+            "kind": "test",
+            "range": { "start": { "line": 5, "character": 4 }, "end": { "line": 6, "character": 18 } },
+            "cwd": "/home/me/app",
+            "program": "/home/me/.cargo/bin/kargo",
+            "args": ["test", "app.MathTest.adds"],
+            "debugArgs": ["test", "app.MathTest.adds", "--debug"]
+          }
+        ]
+      }
+    ]
+  }
+]
+```
+
+A test function is a function annotated with `@Test` (kotlin.test or JUnit), `@ParameterizedTest`, `@RepeatedTest`, `@TestFactory`, `@TestTemplate` or `@Property`; a class is listed when it or a nested class has one, and abstract classes are left out. `target` is the target of a `tests-<target>/` file, and its entries run `kargo test -t <target>`. `args` end with the [filter](../testing/) that selects the class or the test; `debugArgs`, for JVM tests, add [`--debug`](#debugging).
+
+### Status and logs
+
+With `{ "status": true }` in the editor's `initializationOptions`, `kargo lsp` sends a `kargo/status` notification when a background job starts and when it ends, for a status bar:
+
+```json
+{ "jsonrpc": "2.0", "method": "kargo/status", "params": { "task": "checking", "active": false, "message": "2 errors" } }
+```
+
+| `task` | What runs |
+|---|---|
+| `indexing` | Kargo's own Kotlin server reads the project's sources and libraries |
+| `resolving` | The project is imported again after `kargo.toml` or `kargo.lock` changed, which resolves its dependencies |
+| `checking` | [Check on save](#check-on-save) runs `kargo check` |
+
+`active` is `true` when the job starts and `false` when it ends; an ending `resolving` or `checking` has a `message` (`done`, `failed`, or the number of errors).
+
+To see what the editor asks and how long each answer takes, start the server with a log file:
+
+```sh
+kargo lsp --log-file /tmp/kargo-lsp.log
+```
+
+Each request gets a line when it is answered, with its method, id and time, and each notification from the editor a line when it arrives:
+
+```
+[    0.412s] initialize 1 answered in 388.0 ms
+[    0.415s] initialized
+[    2.130s] textDocument/completion 7 answered in 12.6 ms
+```
 
 ### Kotlin scripts
 

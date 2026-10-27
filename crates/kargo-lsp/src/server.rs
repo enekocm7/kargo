@@ -77,6 +77,9 @@ pub struct Options {
     pub builtin_commands: Vec<String>,
     /// The Maven Central search API; default: `KARGO_MAVEN_SEARCH_URL` or [`deps::DEFAULT_SEARCH_URL`].
     pub search_url: Option<String>,
+    /// Appends a line for each message from the editor to this file, with how long each request
+    /// took to answer (`--log-file`).
+    pub log_file: Option<PathBuf>,
 }
 
 /// A backend talking over in-memory streams, for tests.
@@ -221,6 +224,14 @@ struct Server {
     /// Documents Kargo pushed check diagnostics for while their diagnostics are pulled (they
     /// were closed), by [`check::uri_key`].
     pushed: HashSet<String>,
+    /// `initializationOptions.status`: send `kargo/status` notifications.
+    status: bool,
+    /// The `--log-file`, and when the server started, which its lines count from.
+    log: Option<std::fs::File>,
+    started: Instant,
+    /// The editor's requests not answered yet, by [`id_key`]: their method and when they came,
+    /// for the log.
+    timings: HashMap<String, (String, Instant)>,
 }
 
 /// The editor's `textDocument.uri` of a message, if any.
@@ -350,7 +361,10 @@ pub(crate) fn merge_capabilities(backend: &Value) -> Value {
     if !caps["experimental"].is_object() {
         caps["experimental"] = json!({});
     }
-    caps["experimental"]["kargo"] = ours["experimental"]["kargo"].clone();
+    // The backend's own (Kargo's server answers `kargo/testTree`) with Kargo's.
+    let mut kargo = backend["experimental"]["kargo"].as_object().cloned().unwrap_or_default();
+    kargo.extend(ours["experimental"]["kargo"].as_object().cloned().unwrap_or_default());
+    caps["experimental"]["kargo"] = Value::Object(kargo);
     caps
 }
 
@@ -381,6 +395,13 @@ fn label_details_as_detail(result: &mut Value) {
 impl Server {
     fn new(config: Config, opts: Options, out: Box<dyn Write + Send>, tx: Sender<Event>, runner: check::Runner) -> Self {
         let searcher = Arc::new(deps::Searcher::new(&config, opts.search_url.clone()));
+        let log = opts.log_file.as_ref().and_then(|path| match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => Some(file),
+            Err(e) => {
+                eprintln!("kargo lsp: could not open the log file {}: {e}", path.display());
+                None
+            }
+        });
         Self {
             config,
             opts,
@@ -418,11 +439,43 @@ impl Server {
             client_refresh: false,
             open_sources: HashSet::new(),
             pushed: HashSet::new(),
+            status: false,
+            log,
+            started: Instant::now(),
+            timings: HashMap::new(),
         }
     }
 
     fn send(&mut self, message: &Value) -> Result<()> {
+        if self.log.is_some()
+            && jsonrpc::kind(message) == Kind::Response
+            && let Some((method, since)) = self.timings.remove(&id_key(&message["id"]))
+        {
+            let failed = if message["error"].is_object() { " (error)" } else { "" };
+            let ms = since.elapsed().as_secs_f64() * 1000.0;
+            self.log_line(&format!("{method} {} answered in {ms:.1} ms{failed}", message["id"]));
+        }
         jsonrpc::write(&mut self.out, message).context("failed to write to the editor")
+    }
+
+    /// Writes a line to the `--log-file`, after the seconds since the server started.
+    fn log_line(&mut self, line: &str) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        if let Some(log) = &mut self.log {
+            let _ = writeln!(log, "[{elapsed:>9.3}s] {line}");
+        }
+    }
+
+    /// Sends `kargo/status` for `task` (`resolving`, `checking`), when the editor asked for it.
+    fn status(&mut self, task: &str, active: bool, message: Option<&str>) -> Result<()> {
+        if !self.status {
+            return Ok(());
+        }
+        let mut params = json!({ "task": task, "active": active });
+        if let Some(message) = message {
+            params["message"] = json!(message);
+        }
+        self.notify("kargo/status", params)
     }
 
     fn notify(&mut self, method: &str, params: Value) -> Result<()> {
@@ -494,6 +547,15 @@ impl Server {
 
     fn on_client(&mut self, message: Value) -> Result<Option<bool>> {
         let method = jsonrpc::method(&message).to_owned();
+        if self.log.is_some() {
+            match jsonrpc::kind(&message) {
+                Kind::Request => {
+                    self.timings.insert(id_key(&message["id"]), (method.clone(), Instant::now()));
+                }
+                Kind::Notification => self.log_line(&method),
+                Kind::Response => {}
+            }
+        }
         match jsonrpc::kind(&message) {
             Kind::Response => {
                 let id = message["id"].as_str().unwrap_or_default();
@@ -693,6 +755,7 @@ impl Server {
         self.client_apply_edit = params["capabilities"]["workspace"]["applyEdit"] == true;
         self.client_refresh = params["capabilities"]["workspace"]["diagnostics"]["refreshSupport"] == true;
         self.client_label_details = params["capabilities"]["textDocument"]["completion"]["completionItem"]["labelDetailsSupport"] == true;
+        self.status = params["initializationOptions"]["status"] == true;
         // Kargo's own server reports no compiler errors, so `kargo check` does on save.
         self.check = check::Settings::from_options(&params["initializationOptions"], self.opts.server == KotlinServer::Kargo);
         let dir = params["rootUri"]
@@ -902,6 +965,7 @@ impl Server {
         }
         self.fingerprint = Some(fingerprint);
         self.importing = true;
+        self.status("resolving", true, None)?;
         if self.client_progress {
             let create_id = self.next_id();
             let token = format!("{create_id}/import");
@@ -920,6 +984,7 @@ impl Server {
 
     fn imported(&mut self, outcome: project::Outcome) -> Result<()> {
         self.importing = false;
+        self.status("resolving", false, Some(if outcome.error.is_some() { "failed" } else { "done" }))?;
         if let Some(progress) = self.progress.take()
             && progress.begun
         {
@@ -1160,6 +1225,7 @@ impl Server {
         self.end_check_progress("cancelled")?;
         self.check_generation += 1;
         let generation = self.check_generation;
+        self.status("checking", true, None)?;
         if self.client_progress {
             let create_id = self.next_id();
             let token = format!("{create_id}/check");
@@ -1193,6 +1259,12 @@ impl Server {
         }
     }
 
+    /// Ends the progress and the `kargo/status` of a check that finished, saying how.
+    fn finish_check(&mut self, message: &str) -> Result<()> {
+        self.end_check_progress(message)?;
+        self.status("checking", false, Some(message))
+    }
+
     fn checked_event(&mut self, generation: u64, manifest: PathBuf, outcome: Result<check::Output>) -> Result<()> {
         if generation != self.check_generation {
             return Ok(());
@@ -1203,19 +1275,19 @@ impl Server {
             Ok(output) => {
                 // Not about the sources (an unresolvable dependency, a broken kargo.toml): keep
                 // the diagnostics there are and say why in the log.
-                self.end_check_progress("failed")?;
+                self.finish_check("failed")?;
                 let lines: Vec<&str> = output.stderr.lines().collect();
                 let tail = lines[lines.len().saturating_sub(20)..].join("\n");
                 return self.message(2, format!("kargo lsp: `kargo check` failed:\n{tail}"), true);
             }
             Err(e) => {
-                self.end_check_progress("failed")?;
+                self.finish_check("failed")?;
                 return self.message(2, format!("kargo lsp: could not run `kargo check`: {e:#}"), true);
             }
         };
         let found = check::diagnostics(&output.messages, &manifest);
         let errors = found.values().flat_map(|(_, list)| list).filter(|d| d["severity"] == 1).count();
-        self.end_check_progress(&match errors {
+        self.finish_check(&match errors {
             0 => "done".to_owned(),
             1 => "1 error".to_owned(),
             n => format!("{n} errors"),
@@ -2076,6 +2148,40 @@ local = \"{url}\"
         assert!(cleared[&web_uri].is_empty());
         assert_eq!(cleared[&common_uri].len(), 1);
         assert!(editor.finish());
+    }
+
+    #[test]
+    fn reports_status_and_logs_request_timings() {
+        let dir = multiplatform_project();
+        let common = dir.path().join("src/Main.kt");
+        let common_uri = text::path_to_uri(&common);
+        let failing = vec![compiler_message(&common, 3, "jvm", "type mismatch"), json!({ "reason": "build-finished", "success": false })];
+        let (runner, gate, runs) = gated_runner(vec![failing], Value::Null);
+        let log = dir.path().join("lsp.log");
+        let opts = Options { server: KotlinServer::External(ServerKind::KotlinLsp), log_file: Some(log.clone()), ..Options::default() };
+        let (mut editor, _home) = Editor::start_with(opts, Some(diagnosing_backend(false)), runner);
+        let params = json!({
+            "rootUri": text::path_to_uri(dir.path()),
+            "capabilities": {},
+            "initializationOptions": { "checkOnSave": true, "status": true },
+        });
+        editor.request(1, "initialize", params);
+        open(&mut editor, &common_uri, SOURCE);
+        save(&mut editor, &common_uri);
+        runs.recv_timeout(Duration::from_secs(10)).unwrap();
+        let status = |editor: &mut Editor| loop {
+            let message = editor.recv();
+            if message["method"] == "kargo/status" {
+                return message["params"].clone();
+            }
+        };
+        assert_eq!(status(&mut editor), json!({ "task": "checking", "active": true }));
+        gate.send(()).unwrap();
+        assert_eq!(status(&mut editor), json!({ "task": "checking", "active": false, "message": "1 error" }));
+        assert!(editor.finish());
+        let log = std::fs::read_to_string(&log).unwrap();
+        assert!(log.lines().any(|l| l.contains("] initialize 1 answered in ") && l.ends_with(" ms")), "{log}");
+        assert!(log.lines().any(|l| l.ends_with("] textDocument/didSave")), "{log}");
     }
 
     #[test]
