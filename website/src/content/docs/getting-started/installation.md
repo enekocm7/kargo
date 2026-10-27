@@ -102,7 +102,7 @@ Kargo looks for a newer release when you run `kargo --version`, at most once a d
 
 ```console
 $ kargo --version
-kargo 0.1.1
+kargo 0.1.2
 $ kargo --help
 Cargo for Kotlin: a build tool and package manager
 ...
