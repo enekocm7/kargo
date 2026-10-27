@@ -31,6 +31,7 @@ pub mod update;
 pub mod upgrade;
 pub mod vendor;
 pub mod watch;
+pub mod why;
 
 use std::path::PathBuf;
 
@@ -43,7 +44,7 @@ use crate::env::EnvOptions;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::jar::{JarManifest, write_jar};
 use kargo_manifest::{Hook, JdkRequest, Scope, TargetKind};
-use kargo_maven::{Platform, Resolution};
+use kargo_maven::{Explanation, Platform, Resolution};
 use kargo_util::fs::remove_dir_all_if_exists;
 use kargo_util::shell::Shell;
 
@@ -295,37 +296,76 @@ pub enum Configuration {
     Test,
 }
 
-/// Resolves one configuration of one target (used by `tree` and `fetch`).
-pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Configuration) -> Result<Vec<(String, Resolution)>> {
+/// One resolution of a target's configuration: what `kargo tree` labels it (`jvm`, `native-linux_x64`), its
+/// `kargo.lock` key and its inputs.
+struct ResolutionInput {
+    label: String,
+    key: String,
+    platform: Platform,
+    roots: Vec<kargo_maven::DependencyRequest>,
+    boms: Vec<kargo_manifest::Dependency>,
+}
+
+/// The resolutions one configuration of one target is made of, without resolving them.
+fn resolution_inputs(ctx: &BuildContext, target: TargetKind, configuration: Configuration) -> Result<Vec<ResolutionInput>> {
     let setup = ctx.setup(target)?;
     let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
     let test = configuration == Configuration::Test;
+    let input =
+        |label: String, key: String, platform: Platform, roots| ResolutionInput { label, key, platform, roots, boms: setup.boms.clone() };
     match target {
         TargetKind::Jvm => {
-            let res = match configuration {
-                Configuration::Compile => jvm_classpaths(ctx, &setup)?.compile,
-                Configuration::Runtime => jvm_classpaths(ctx, &setup)?.runtime,
-                Configuration::Test => ctx.resolve("jvm/test", Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?,
+            let (key, roots) = match configuration {
+                Configuration::Compile => ("jvm/compile", setup.requests(&[Scope::Compile, Scope::Provided], false)),
+                Configuration::Runtime => ("jvm/runtime", setup.requests(&[Scope::Compile, Scope::Runtime], false)),
+                Configuration::Test => ("jvm/test", setup.requests(&all_scopes, true)),
             };
-            Ok(vec![("jvm".to_owned(), res)])
+            Ok(vec![input("jvm".to_owned(), key.to_owned(), Platform::Jvm, roots)])
         }
         TargetKind::Wasm => {
             let env = ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
             let key = if test { "wasm/test" } else { "wasm/main" };
-            let res = ctx.resolve(key, Platform::Wasm(env.platform().to_owned()), &setup.requests(&all_scopes, test), &setup.boms)?;
-            Ok(vec![(format!("wasm-{}", env.platform()), res)])
+            let platform = Platform::Wasm(env.platform().to_owned());
+            Ok(vec![input(format!("wasm-{}", env.platform()), key.to_owned(), platform, setup.requests(&all_scopes, test))])
         }
-        TargetKind::Js => Ok(vec![("js".to_owned(), build::js_resolution(ctx, &setup, test)?)]),
-        TargetKind::Native => native_platforms(ctx)?
+        TargetKind::Js => {
+            let key = if test { "js/test" } else { "js/main" };
+            Ok(vec![input("js".to_owned(), key.to_owned(), Platform::Js, setup.requests(&all_scopes, test))])
+        }
+        TargetKind::Native => Ok(native_platforms(ctx)?
             .into_iter()
             .map(|p| {
                 let key = format!("native-{p}/{}", if test { "test" } else { "main" });
-                let res = ctx.resolve(&key, Platform::Native(p.clone()), &setup.requests(&all_scopes, test), &setup.boms)?;
-                Ok((format!("native-{p}"), res))
+                input(format!("native-{p}"), key, Platform::Native(p.clone()), setup.requests(&all_scopes, test))
             })
-            .collect(),
+            .collect()),
         TargetKind::Android => bail!("dependency trees for Android are computed by Gradle; run `kargo android -- dependencies`"),
     }
+}
+
+/// Resolves one configuration of one target (used by `tree`, `fetch` and `audit`).
+pub fn resolution_for(ctx: &BuildContext, target: TargetKind, configuration: Configuration) -> Result<Vec<(String, Resolution)>> {
+    resolution_inputs(ctx, target, configuration)?
+        .into_iter()
+        .map(|i| Ok((i.label, ctx.resolve(&i.key, i.platform, &i.roots, &i.boms)?)))
+        .collect()
+}
+
+/// Like [`resolution_for`], with the [`Explanation`] of each resolution's versions (for `kargo why`). The
+/// resolution is the one `kargo.lock` holds; the explanation comes from resolving again without it.
+pub fn explanation_for(
+    ctx: &BuildContext,
+    target: TargetKind,
+    configuration: Configuration,
+) -> Result<Vec<(String, Resolution, Explanation)>> {
+    resolution_inputs(ctx, target, configuration)?
+        .into_iter()
+        .map(|i| {
+            let resolution = ctx.resolve(&i.key, i.platform.clone(), &i.roots, &i.boms)?;
+            let explanation = ctx.explain(&i.key, i.platform, &i.roots, &i.boms)?;
+            Ok((i.label, resolution, explanation))
+        })
+        .collect()
 }
 
 /// `kargo fetch`: downloads what later builds need so they can run offline: the compiler and

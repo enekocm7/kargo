@@ -24,6 +24,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `cargo add -F derive serde` | `kargo add -F serialization` | Kargo's `-F` enables built-in **frameworks** |
 | `cargo remove` | `kargo remove` / `kargo rm` | |
 | `cargo tree [-d]` | `kargo tree [--duplicates]` | |
+| `cargo tree -i <spec>` | `kargo tree -i <group:artifact>` | `kargo why <group:artifact>` also says why that version was picked |
 | `cargo fetch` | `kargo fetch` | |
 | `cargo vendor`, `[source]` replacement in `.cargo/config.toml` | `kargo vendor`, `--vendored` or `[source] vendored = true` in `.kargo/config.toml` | `vendor/` is a Maven repository. Mirrors are `[mirrors]` in `~/.kargo/config.toml`; see [Offline and corporate builds](../../guides/offline-and-mirrors/) |
 | `cargo update [-p foo] [--precise v] [--dry-run]` | `kargo update [group:artifact] [--precise v] [--dry-run]` | |

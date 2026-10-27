@@ -56,6 +56,7 @@ const COMMON_COMMANDS: &[&str] = &[
     "update",
     "fetch",
     "tree",
+    "why",
     "clean",
     "package",
     "publish",
@@ -378,6 +379,38 @@ enum ConfigurationArg {
     Compile,
     Runtime,
     Test,
+}
+
+impl From<ConfigurationArg> for Configuration {
+    fn from(c: ConfigurationArg) -> Self {
+        match c {
+            ConfigurationArg::Compile => Configuration::Compile,
+            ConfigurationArg::Runtime => Configuration::Runtime,
+            ConfigurationArg::Test => Configuration::Test,
+        }
+    }
+}
+
+/// The arguments of `kargo why`, in a struct of their own: clap parses them in a function apart from
+/// the large one for [`Command`], which keeps the latter's stack frame small enough for test threads.
+#[derive(Debug, Args)]
+struct WhyArgs {
+    /// The module: group:artifact, optionally with a version (group:artifact:version)
+    #[arg(value_name = "MODULE")]
+    module: String,
+    #[arg(short, long, value_enum)]
+    target: Option<TargetArg>,
+    /// Which classpath to explain
+    #[arg(short, long, value_enum, default_value = "runtime")]
+    configuration: ConfigurationArg,
+    /// Show every path from the project to the module, not only the shortest
+    #[arg(long)]
+    all_paths: bool,
+    #[command(flatten)]
+    packages: PackageArgs,
+    /// Output format; `json` describes the requests, the reason and the paths
+    #[arg(long, value_enum, default_value_t)]
+    format: FormatArg,
 }
 
 /// `-p` / `--workspace` for commands that work on several packages.
@@ -1062,12 +1095,17 @@ Exits with 101 when an advisory at or above the --deny severity (default: [audit
         /// Only list modules requested in several versions
         #[arg(short, long)]
         duplicates: bool,
+        /// Show what depends on this module (group:artifact, optionally :version), up to the project: the inverted tree
+        #[arg(short, long, value_name = "MODULE", conflicts_with = "duplicates")]
+        invert: Option<String>,
         #[command(flatten)]
         packages: PackageArgs,
-        /// Output format; `json` prints the whole resolved graph
-        #[arg(long, value_enum, default_value_t, conflicts_with_all = ["depth", "duplicates"])]
+        /// Output format; `json` prints the whole resolved graph (`kargo why --format json` explains one module)
+        #[arg(long, value_enum, default_value_t, conflicts_with_all = ["depth", "duplicates", "invert"])]
         format: FormatArg,
     },
+    /// Explain why a module is on the classpath and why at its version
+    Why(WhyArgs),
     /// Download all dependencies and toolchains
     Fetch {
         #[arg(short, long = "target", value_enum)]
@@ -2619,13 +2657,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             Ok(0)
         }
         Command::Target { command } => target(shell, global, command),
-        Command::Tree { target, configuration, depth, duplicates, packages, format } => {
+        Command::Tree { target, configuration, depth, duplicates, invert, packages, format } => {
             let project = load_project(global)?;
-            let configuration = match configuration {
-                ConfigurationArg::Compile => Configuration::Compile,
-                ConfigurationArg::Runtime => Configuration::Runtime,
-                ConfigurationArg::Test => Configuration::Test,
-            };
+            let configuration = configuration.into();
+            let invert: Option<ops::why::Query> = invert.as_deref().map(str::parse).transpose()?;
             if format == FormatArg::Json {
                 let mut documents = Vec::new();
                 for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
@@ -2635,11 +2670,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                             trees.push(ops::tree::json(&label, &res));
                         }
                     }
-                    let configuration_name = match configuration {
-                        Configuration::Compile => "compile",
-                        Configuration::Runtime => "runtime",
-                        Configuration::Test => "test",
-                    };
+                    let configuration_name = configuration_name(configuration);
                     let pkg = &ctx.ws.manifest().package;
                     documents.push(serde_json::json!({
                         "package": { "name": pkg.name, "version": pkg.version },
@@ -2653,13 +2684,20 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(0);
             }
-            for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+            let found = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 let targets = tree_targets(ctx, target);
                 let pkg = &ctx.ws.manifest().package;
+                let mut found = false;
                 for t in targets {
                     let locals = ops::tree::path_dependencies(ctx, t, configuration)?;
                     for (label, res) in ops::resolution_for(ctx, t, configuration)? {
-                        if duplicates {
+                        if let Some(query) = &invert {
+                            if query.matches(&res) {
+                                found = true;
+                                let title = format!("{} v{} ({label})", pkg.name, pkg.version);
+                                print!("{}", ops::why::render_inverted(&title, &res, &query.module, depth));
+                            }
+                        } else if duplicates {
                             for line in ops::tree::conflicts(&res)? {
                                 println!("{line}");
                             }
@@ -2668,8 +2706,54 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                         }
                     }
                 }
-                Ok(())
+                Ok(found)
             })?;
+            if let Some(query) = &invert
+                && !found.contains(&true)
+            {
+                bail!("{}", not_found(query, configuration));
+            }
+            Ok(0)
+        }
+        Command::Why(WhyArgs { module, target, configuration, all_paths, packages, format }) => {
+            let project = load_project(global)?;
+            let configuration: Configuration = configuration.into();
+            let query: ops::why::Query = module.parse()?;
+            let configuration_name = configuration_name(configuration);
+            let documents = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+                let pkg = &ctx.ws.manifest().package;
+                let mut answers = Vec::new();
+                for t in tree_targets(ctx, target) {
+                    for (label, res, explanation) in ops::explanation_for(ctx, t, configuration)? {
+                        if let Some(answer) = ops::why::answer(&label, &res, &explanation, &query, all_paths) {
+                            answers.push(answer);
+                        }
+                    }
+                }
+                if format != FormatArg::Json {
+                    for answer in &answers {
+                        print!("{}", ops::why::render(&format!("{} v{}", pkg.name, pkg.version), configuration_name, answer));
+                    }
+                }
+                Ok((
+                    !answers.is_empty(),
+                    serde_json::json!({
+                        "package": { "name": pkg.name, "version": pkg.version },
+                        "configuration": configuration_name,
+                        "module": query.module.to_string(),
+                        "results": answers.iter().map(ops::why::json).collect::<Vec<_>>(),
+                    }),
+                ))
+            })?;
+            if !documents.iter().any(|(found, _)| *found) {
+                bail!("{}", not_found(&query, configuration));
+            }
+            if format == FormatArg::Json {
+                // One package prints one object; a workspace prints one per member.
+                let mut documents: Vec<serde_json::Value> = documents.into_iter().map(|(_, d)| d).collect();
+                let output = if documents.len() == 1 { documents.remove(0) } else { serde_json::Value::Array(documents) };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
             Ok(0)
         }
         Command::Fetch { targets, sources, tools, packages } => {
@@ -3410,6 +3494,26 @@ fn plural(count: usize, word: &str) -> String {
         Some(stem) => format!("{stem}ies"),
         None => format!("{word}s"),
     }
+}
+
+fn configuration_name(configuration: Configuration) -> &'static str {
+    match configuration {
+        Configuration::Compile => "compile",
+        Configuration::Runtime => "runtime",
+        Configuration::Test => "test",
+    }
+}
+
+/// The error of `kargo why` and `kargo tree --invert` for a module no resolution has.
+fn not_found(query: &ops::why::Query, configuration: Configuration) -> String {
+    let module = match &query.version {
+        Some(v) => format!("{}:{v}", query.module),
+        None => query.module.to_string(),
+    };
+    format!(
+        "`{module}` is not in the {} dependencies; check the name with `kargo tree`, or pick another classpath with `-c` or target with `-t`",
+        configuration_name(configuration)
+    )
 }
 
 fn tree_targets(ctx: &BuildContext, target: Option<TargetArg>) -> Vec<TargetKind> {

@@ -690,10 +690,63 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 | `-c, --configuration <c>` | `runtime` | `compile`, `runtime` or `test` |
 | `--depth <n>` | unlimited | Maximum depth |
 | `-d, --duplicates` | | Only modules requested in several versions |
+| `-i, --invert <module>` | | Show what depends on `<module>` (`group:artifact`, optionally `:version`), up to the project: the inverted tree |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | current package | Which packages to show |
-| `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies; it can't be combined with `--depth` or `--duplicates`. When several packages are selected, the JSON output is an array with one document per package |
+| `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies; it can't be combined with `--depth`, `--duplicates` or `--invert`. When several packages are selected, the JSON output is an array with one document per package |
 
 Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`, each with the path dependencies it uses in turn (the module graph); their Maven dependencies appear in the graph next to yours. With `-c compile`, only the path dependencies there are to compile against are listed: a path dependency's own path dependencies are only there at runtime unless they are `exported` ([what comes along](../../guides/workspaces/#what-comes-along)).
+
+`--invert` turns the tree upside down: the module first, then every module that depends on it, down to the project. A module that asked for another version than the selected one says which (`requests g:util:1.0`). With a version (`g:util:1.0`), the module is shown when that version is the selected one or one that something requested. `--depth` limits how many levels are shown. The command fails when no resolution has the module.
+
+```console
+$ kargo tree --invert g:util
+g:util:2.0
+├── g:left:1.0 (requests g:util:1.0)
+│   └── app v0.1.0 (jvm)
+└── g:right:1.0
+    └── app v0.1.0 (jvm)
+```
+
+## `kargo why`
+
+Explain why a module is on the classpath, and why at its version.
+
+```console
+$ kargo why g:util
+g:util:2.0 (jvm, runtime)
+  selected 2.0, the highest version requested
+  requested:
+    1.0 -> 2.0  by g:left:1.0 (highest wins)
+    2.0         by g:right:1.0
+  path:
+    app v0.1.0 -> g:left:1.0 -> g:util:2.0
+```
+
+The module is `group:artifact`, optionally with a version: `g:util:1.0` explains `g:util` when `1.0` is its version or one that something requested. Each resolution that has the module gets one answer (one per Native platform). The command fails when none has it.
+
+The `selected` line says what decided the version:
+
+| Reason | Meaning |
+|---|---|
+| `the highest version requested` | Several versions were requested and the highest won, as in Gradle |
+| `the only version requested` | Every request asked for the same version |
+| `forced in kargo.toml` | A dependency with [`force = true`](../manifest/#dependencies-and-dev-dependencies) |
+| `the highest version that satisfies <ranges>` | A request was a Maven range |
+| `locked in kargo.lock` | `kargo.lock` holds this version, and resolving again would pick another one; the line says which and why. `kargo update <group:artifact>` takes the new one |
+
+`requested` lists every version asked for in the resolved graph, and who asked: `kargo.toml` (a dependency you declare, `force = true` noted), another module (`g:left:1.0`), a BOM (`BOM g:bom:1.0`), a platform another module depends on (`platform g:bom:1.0 of g:api:1.0`), a Gradle module metadata constraint (`(dependency constraint)`), a module whose POM relocates to this one (`(relocated)`) or a Kotlin Multiplatform module whose variant for the target is this one (`(Gradle module metadata variant)`). A rejected version shows as `1.0 -> 2.0` with what it lost to. Requests from modules that are no longer in the graph (an older version's dependencies) are not listed.
+
+`path` is the shortest chain of dependencies from `kargo.toml` to the module; `--all-paths` lists every one, shortest first (at most 100).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-t, --target <target>` | every enabled target but Android | Which target |
+| `-c, --configuration <c>` | `runtime` | `compile`, `runtime` or `test` |
+| `--all-paths` | | Every path from the project to the module, not only the shortest |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | current package | Which packages to explain |
+| `--format <fmt>` | `text` | `text` or `json` ([format](../machine-readable-output/#kargo-why---format-json)) |
+
+The classpath is the one a build uses, from `kargo.lock`; the reasons come from resolving the same dependencies again, without the lock and without downloading artifacts (the POMs are in the cache already). Android dependencies are resolved by Gradle: run `kargo android -- dependencyInsight --configuration releaseRuntimeClasspath --dependency <module>` there.
 
 ## `kargo classpath`
 

@@ -14,7 +14,7 @@ use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
 use kargo_manifest::{Dependency, JsEnvironment, Manifest, Scope, TargetKind, WasmEnvironment};
 use kargo_maven::resolver::ResolvedNode;
-use kargo_maven::{Artifact, DependencyRequest, Exclusion, MavenClient, ModuleId, Platform, Repository, Resolution, Resolver};
+use kargo_maven::{Artifact, DependencyRequest, Exclusion, Explanation, MavenClient, ModuleId, Platform, Repository, Resolution, Resolver};
 use kargo_toolchain::jdks::JdkNeeds;
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
@@ -567,6 +567,18 @@ impl<'a> BuildContext<'a> {
     /// Resolves `roots` for `platform`, reusing `kargo.lock` when possible.
     pub fn resolve(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
         self.resolve_at(&self.ws.lock_key(&self.profile_resolution(key)?), platform, roots, boms)
+    }
+
+    /// Resolves `roots` again, without `kargo.lock` and without downloading artifacts, to say why each module
+    /// of the resolution `key` has its version (`kargo why`).
+    pub fn explain(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Explanation> {
+        let mut resolver = Resolver::new(&self.client, platform);
+        for bom in boms {
+            let version = bom.version.as_deref().context("BOM without version")?;
+            resolver.import_bom(&bom.module, version)?;
+        }
+        let (_, explanation) = resolver.explain(roots).with_context(|| format!("failed to resolve dependencies for `{key}`"))?;
+        Ok(explanation)
     }
 
     /// The resolution locked under the full `kargo.lock` key `key`, if it is there for these inputs (and not

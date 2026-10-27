@@ -114,6 +114,77 @@ impl Resolution {
 /// `(module, version)` pairs that align versions without adding modules.
 type Constraints = Vec<(ModuleId, String)>;
 
+/// Why each module of a resolution has its version: every version that was asked for, by whom, and
+/// what decided between them. [`Resolver::explain`] records it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Explanation {
+    pub modules: HashMap<ModuleId, ModuleExplanation>,
+}
+
+/// How one module's version was chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleExplanation {
+    pub version: String,
+    pub reason: Reason,
+    /// Every request for the module in the final graph, in the order the resolver met them.
+    pub requests: Vec<VersionRequest>,
+}
+
+/// What decided a module's version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The caller fixed the version (`kargo update` keeping the locked one).
+    Pinned,
+    /// A dependency of the project with `force = true`.
+    Forced,
+    /// The highest version that satisfies these ranges.
+    Range(Vec<String>),
+    /// The highest version requested.
+    Highest,
+}
+
+/// One version asked for a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionRequest {
+    /// As written: `1.0`, or a range such as `[1.0,2.0)`.
+    pub version: String,
+    pub source: RequestSource,
+}
+
+/// Who asked for a version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestSource {
+    /// A dependency the project declares.
+    Root { force: bool },
+    /// A dependency of another module.
+    Dependency { module: ModuleId, version: String },
+    /// Another module whose POM relocates it to this one.
+    Relocation { module: ModuleId, version: String },
+    /// Another module whose Gradle module metadata publishes the variant for this platform as this module (`available-at`).
+    Variant { module: ModuleId, version: String },
+    /// A `dependencyConstraints` entry of another module's Gradle module metadata.
+    Constraint { module: ModuleId, version: String },
+    /// A platform (BOM) that another module depends on.
+    Platform { platform: ModuleId, platform_version: String, module: ModuleId, version: String },
+    /// A BOM the project imports.
+    Bom { bom: ModuleId, version: String },
+}
+
+/// How a module that has no files of its own points at another one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Redirect {
+    Relocation,
+    Variant,
+}
+
+/// A version constraint published by a module, directly or through a platform it depends on.
+#[derive(Debug, Clone)]
+struct NodeConstraint {
+    module: ModuleId,
+    version: String,
+    platform: Option<(ModuleId, String)>,
+}
+
 /// A transitive edge discovered in metadata.
 #[derive(Debug, Clone)]
 struct Edge {
@@ -130,7 +201,9 @@ struct NodeInfo {
     files: Vec<String>,
     /// Version constraints that apply only if the module is otherwise in the
     /// graph (Gradle `dependencyConstraints` and platform/BOM alignment).
-    constraints: Vec<(ModuleId, String)>,
+    constraints: Vec<NodeConstraint>,
+    /// Set when the module only points at another one.
+    redirect: Option<Redirect>,
 }
 
 /// Modules provided by the Kotlin/Native distribution rather than Maven.
@@ -148,6 +221,8 @@ pub struct Resolver<'a> {
     platform: Platform,
     /// Versions managed by BOMs/platforms declared in the manifest.
     constraints: HashMap<ModuleId, String>,
+    /// The BOM that manages each of `constraints`.
+    managed_by: HashMap<ModuleId, (ModuleId, String)>,
     /// Versions fixed by the caller (`kargo update` keeping locked versions), applied whenever
     /// the module is in the graph and overriding everything else.
     pins: HashMap<ModuleId, Version>,
@@ -171,12 +246,29 @@ struct Requests {
     soft: Vec<Version>,
     ranges: Vec<VersionReq>,
     forced: Option<Version>,
+    /// Who asked for what, for [`Explanation`].
+    from: Vec<VersionRequest>,
 }
 
 impl Requests {
     fn is_empty(&self) -> bool {
         self.soft.is_empty() && self.ranges.is_empty() && self.forced.is_none()
     }
+
+    fn record(&mut self, version: &str, source: RequestSource) {
+        let request = VersionRequest { version: version.to_owned(), source };
+        if !self.from.contains(&request) {
+            self.from.push(request);
+        }
+    }
+}
+
+/// What one pass over the graph found.
+struct Traversal {
+    order: Vec<ModuleId>,
+    used: HashMap<ModuleId, Version>,
+    requests: HashMap<ModuleId, Requests>,
+    edges: HashMap<ModuleId, Vec<Edge>>,
 }
 
 const MAX_ITERATIONS: usize = 64;
@@ -187,6 +279,7 @@ impl<'a> Resolver<'a> {
             client,
             platform,
             constraints: HashMap::new(),
+            managed_by: HashMap::new(),
             pins: HashMap::new(),
             infos: Mutex::new(HashMap::new()),
             poms: Mutex::new(HashMap::new()),
@@ -199,9 +292,12 @@ impl<'a> Resolver<'a> {
     pub fn import_bom(&mut self, module: &ModuleId, version: &str) -> Result<()> {
         let pom = self.effective_pom(module, version).with_context(|| format!("failed to import BOM {module}:{version}"))?;
         for managed in pom.dependency_management {
-            let module = managed.module();
-            if let Some(v) = managed.version {
-                self.constraints.entry(module).or_insert(v);
+            let managed_module = managed.module();
+            if let Some(v) = managed.version
+                && !self.constraints.contains_key(&managed_module)
+            {
+                self.managed_by.insert(managed_module.clone(), (module.clone(), version.to_owned()));
+                self.constraints.insert(managed_module, v);
             }
         }
         Ok(())
@@ -318,13 +414,16 @@ impl<'a> Resolver<'a> {
                 }],
                 files: Vec::new(),
                 constraints: Vec::new(),
+                redirect: Some(Redirect::Variant),
             }));
         }
 
-        let mut constraints: Vec<(ModuleId, String)> = variant
+        let mut constraints: Vec<NodeConstraint> = variant
             .dependency_constraints
             .iter()
-            .filter_map(|c| Some((c.module_id(), c.version.as_ref()?.preferred()?.to_owned())))
+            .filter_map(|c| {
+                Some(NodeConstraint { module: c.module_id(), version: c.version.as_ref()?.preferred()?.to_owned(), platform: None })
+            })
             .collect();
         let mut edges: Vec<Edge> = Vec::new();
         for dep in &variant.dependencies {
@@ -332,7 +431,11 @@ impl<'a> Resolver<'a> {
                 // A platform (BOM) aligns versions without adding modules.
                 if let Some(v) = dep.version.as_ref().and_then(|v| v.preferred()) {
                     match self.platform_constraints(&dep.module_id(), v) {
-                        Ok(c) => constraints.extend(c),
+                        Ok(c) => constraints.extend(c.into_iter().map(|(module, version)| NodeConstraint {
+                            module,
+                            version,
+                            platform: Some((dep.module_id(), v.to_owned())),
+                        })),
                         Err(e) => self.client.shell().verbose("Ignoring", format!("platform {}:{v}: {e:#}", dep.module_id())),
                     }
                 }
@@ -349,7 +452,7 @@ impl<'a> Resolver<'a> {
             });
         }
         let files = variant.files.iter().map(|f| resolve_relative(&base_dir, &f.url)).collect::<Result<Vec<_>>>()?;
-        Ok(Some(NodeInfo { edges, files, constraints }))
+        Ok(Some(NodeInfo { edges, files, constraints, redirect: None }))
     }
 
     /// Constraints published by a platform module (Gradle platform variant or Maven BOM).
@@ -398,6 +501,7 @@ impl<'a> Resolver<'a> {
                     edges: vec![Edge { module: target, version: Some(target_version), exclusions: Vec::new() }],
                     files: Vec::new(),
                     constraints: Vec::new(),
+                    redirect: Some(Redirect::Relocation),
                 });
             }
         }
@@ -423,7 +527,7 @@ impl<'a> Resolver<'a> {
             Some(ext) => vec![self.client.artifact_path(&Artifact::new(module.clone(), version).with_extension(ext))?],
             None => Vec::new(),
         };
-        Ok(NodeInfo { edges, files, constraints: Vec::new() })
+        Ok(NodeInfo { edges, files, constraints: Vec::new(), redirect: None })
     }
 
     /// Chooses the version for a module given everything that asked for it.
@@ -454,8 +558,31 @@ impl<'a> Resolver<'a> {
         })
     }
 
+    /// What [`Resolver::choose`] goes by for `module`.
+    fn reason(&self, module: &ModuleId, requests: &Requests) -> Reason {
+        if self.pins.contains_key(module) {
+            Reason::Pinned
+        } else if requests.forced.is_some() {
+            Reason::Forced
+        } else if !requests.ranges.is_empty() {
+            Reason::Range(requests.ranges.iter().map(ToString::to_string).collect())
+        } else {
+            Reason::Highest
+        }
+    }
+
     /// Resolves the dependency graph and downloads all artifacts.
     pub fn resolve(&self, roots: &[DependencyRequest]) -> Result<Resolution> {
+        Ok(self.run(roots, true)?.0)
+    }
+
+    /// Resolves the dependency graph like [`Resolver::resolve`], without downloading artifacts (the
+    /// nodes have no files), and says why each module has its version.
+    pub fn explain(&self, roots: &[DependencyRequest]) -> Result<(Resolution, Explanation)> {
+        self.run(roots, false)
+    }
+
+    fn run(&self, roots: &[DependencyRequest], download: bool) -> Result<(Resolution, Explanation)> {
         let roots: Vec<&DependencyRequest> = roots.iter().filter(|r| !provided_by_toolchain(&self.platform, &r.module)).collect();
 
         let mut root_requests: HashMap<ModuleId, Requests> = HashMap::new();
@@ -470,6 +597,7 @@ impl<'a> Resolver<'a> {
             };
             let req: VersionReq = raw.parse().with_context(|| format!("invalid version for `{}`", root.module))?;
             let entry = root_requests.entry(root.module.clone()).or_default();
+            entry.record(&raw, RequestSource::Root { force: root.force });
             if root.force {
                 let pinned = req.exact().cloned().with_context(|| format!("`force` requires an exact version for `{}`", root.module))?;
                 entry.forced = Some(pinned);
@@ -482,7 +610,7 @@ impl<'a> Resolver<'a> {
 
         let mut selected: HashMap<ModuleId, Version> = HashMap::new();
         for _ in 0..MAX_ITERATIONS {
-            let (order, used, requests, edges_by_module) = self.traverse(&roots, &root_requests, &selected)?;
+            let Traversal { order, used, requests, edges } = self.traverse(&roots, &root_requests, &selected)?;
             let mut next: HashMap<ModuleId, Version> = HashMap::new();
             for module in &order {
                 let chosen = self.choose(module, &requests[module])?;
@@ -490,11 +618,12 @@ impl<'a> Resolver<'a> {
             }
             let stable = order.iter().all(|m| next.get(m) == used.get(m));
             if stable {
-                return self.finish(&roots, order, &used, &edges_by_module);
+                let explanation = self.explanation(&order, &used, requests);
+                return Ok((self.finish(&roots, order, &used, &edges, download)?, explanation));
             }
             selected.extend(next);
         }
-        let (order, used, requests, _) = self.traverse(&roots, &root_requests, &selected)?;
+        let Traversal { order, used, requests, .. } = self.traverse(&roots, &root_requests, &selected)?;
         let unstable: Vec<String> = order
             .iter()
             .filter_map(|m| {
@@ -505,13 +634,29 @@ impl<'a> Resolver<'a> {
         bail!("dependency resolution did not converge after {MAX_ITERATIONS} iterations; conflicting modules: {}", unstable.join(", "))
     }
 
-    #[allow(clippy::type_complexity)]
+    /// The [`Explanation`] of a converged traversal.
+    fn explanation(&self, order: &[ModuleId], used: &HashMap<ModuleId, Version>, mut requests: HashMap<ModuleId, Requests>) -> Explanation {
+        let modules = order
+            .iter()
+            .map(|module| {
+                let mut req = requests.remove(module).unwrap_or_default();
+                if let (Some(version), Some((bom, bom_version))) = (self.constraints.get(module), self.managed_by.get(module)) {
+                    req.record(version, RequestSource::Bom { bom: bom.clone(), version: bom_version.clone() });
+                }
+                let explained =
+                    ModuleExplanation { version: used[module].to_string(), reason: self.reason(module, &req), requests: req.from };
+                (module.clone(), explained)
+            })
+            .collect();
+        Explanation { modules }
+    }
+
     fn traverse(
         &self,
         roots: &[&DependencyRequest],
         root_requests: &HashMap<ModuleId, Requests>,
         selected: &HashMap<ModuleId, Version>,
-    ) -> Result<(Vec<ModuleId>, HashMap<ModuleId, Version>, HashMap<ModuleId, Requests>, HashMap<ModuleId, Vec<Edge>>)> {
+    ) -> Result<Traversal> {
         let mut requests: HashMap<ModuleId, Requests> = root_requests.clone();
         let mut order: Vec<ModuleId> = Vec::new();
         let mut used: HashMap<ModuleId, Version> = HashMap::new();
@@ -594,9 +739,21 @@ impl<'a> Resolver<'a> {
                 self.prefetch(batch);
             }
             let info = self.node_info(&module, version.as_str())?;
-            for (target, v) in &info.constraints {
-                if let Ok(VersionReq::Soft(v)) = v.parse::<VersionReq>() {
-                    requests.entry(target.clone()).or_default().soft.push(v);
+            let from = (module.clone(), version.to_string());
+            for constraint in &info.constraints {
+                if let Ok(VersionReq::Soft(v)) = constraint.version.parse::<VersionReq>() {
+                    let entry = requests.entry(constraint.module.clone()).or_default();
+                    entry.soft.push(v);
+                    let source = match &constraint.platform {
+                        Some((platform, platform_version)) => RequestSource::Platform {
+                            platform: platform.clone(),
+                            platform_version: platform_version.clone(),
+                            module: from.0.clone(),
+                            version: from.1.clone(),
+                        },
+                        None => RequestSource::Constraint { module: from.0.clone(), version: from.1.clone() },
+                    };
+                    entry.record(&constraint.version, source);
                 }
             }
             let mut kept = Vec::new();
@@ -607,6 +764,13 @@ impl<'a> Resolver<'a> {
                 let edge_version = edge.version.clone().or_else(|| self.constraints.get(&edge.module).cloned());
                 let entry = requests.entry(edge.module.clone()).or_default();
                 if let Some(raw) = edge_version {
+                    let (m, v) = from.clone();
+                    let source = match info.redirect {
+                        Some(Redirect::Relocation) => RequestSource::Relocation { module: m, version: v },
+                        Some(Redirect::Variant) => RequestSource::Variant { module: m, version: v },
+                        None => RequestSource::Dependency { module: m, version: v },
+                    };
+                    entry.record(&raw, source);
                     let req: VersionReq =
                         raw.parse().with_context(|| format!("{module}:{version} has an invalid version for {}", edge.module))?;
                     match req {
@@ -621,7 +785,7 @@ impl<'a> Resolver<'a> {
             }
             edges_by_module.insert(module, kept);
         }
-        Ok((order, used, requests, edges_by_module))
+        Ok(Traversal { order, used, requests, edges: edges_by_module })
     }
 
     fn finish(
@@ -630,7 +794,11 @@ impl<'a> Resolver<'a> {
         order: Vec<ModuleId>,
         used: &HashMap<ModuleId, Version>,
         edges: &HashMap<ModuleId, Vec<Edge>>,
+        download: bool,
     ) -> Result<Resolution> {
+        if !download {
+            return Ok(self.nodes(roots, &order, used, edges, order.iter().map(|_| Vec::new()).collect()));
+        }
         // A module gets its default files when a root without classifier or extension, or another
         // module, depends on it. Roots with a classifier or extension add their own artifact on top
         // of those, and are the only artifacts of a module nothing else depends on (as in Gradle).
@@ -661,10 +829,21 @@ impl<'a> Resolver<'a> {
                 .map(|files| files.iter().map(|rel| self.client.fetch_required(rel)).collect::<Result<Vec<_>>>())
                 .collect::<Result<_>>()
         })?;
+        Ok(self.nodes(roots, &order, used, edges, downloaded))
+    }
 
+    /// The [`Resolution`] of `order`, the module at index `i` having the files `files[i]`.
+    fn nodes(
+        &self,
+        roots: &[&DependencyRequest],
+        order: &[ModuleId],
+        used: &HashMap<ModuleId, Version>,
+        edges: &HashMap<ModuleId, Vec<Edge>>,
+        files: Vec<Vec<PathBuf>>,
+    ) -> Resolution {
         let nodes = order
             .iter()
-            .zip(downloaded)
+            .zip(files)
             .map(|(module, files)| ResolvedNode {
                 module: module.clone(),
                 version: used[module].to_string(),
@@ -681,7 +860,7 @@ impl<'a> Resolver<'a> {
                 root_modules.push(root.module.clone());
             }
         }
-        Ok(Resolution { roots: root_modules, nodes })
+        Resolution { roots: root_modules, nodes }
     }
 }
 
@@ -1269,6 +1448,92 @@ mod tests {
         let res = Resolver::new(&client, Platform::Jvm).resolve(&[req("s:ui", "1.0-SNAPSHOT")]).unwrap();
         assert_eq!(versions(&res), ["ui:1.0-SNAPSHOT", "core:1.0-SNAPSHOT", "inherited:1.0"]);
         assert_eq!(file_names(&res), ["ui-1.0-20240101.120000-1.jar", "core-1.0-20240101.110000-2.jar", "inherited-1.0.jar"]);
+    }
+
+    fn sources(explanation: &Explanation, module: &str) -> Vec<(String, RequestSource)> {
+        explanation.modules[&module.parse().unwrap()].requests.iter().map(|r| (r.version.clone(), r.source.clone())).collect()
+    }
+
+    fn dependency(module: &str, version: &str) -> RequestSource {
+        RequestSource::Dependency { module: module.parse().unwrap(), version: version.to_owned() }
+    }
+
+    #[test]
+    fn explains_the_highest_version_and_who_asked() {
+        let repo = TestRepo::new();
+        repo.publish("g:x", "1.0", &[("g:shared", "1.0", "")]);
+        repo.publish("g:y", "1.0", &[("g:shared", "2.0", "")]);
+        repo.publish("g:shared", "1.0", &[("g:old-only", "1.0", "")]);
+        repo.publish("g:shared", "2.0", &[]);
+        repo.publish("g:old-only", "1.0", &[]);
+        let client = repo.client();
+        let (res, why) = Resolver::new(&client, Platform::Jvm).explain(&[req("g:x", "1.0"), req("g:y", "1.0")]).unwrap();
+        assert_eq!(versions(&res), ["x:1.0", "y:1.0", "shared:2.0"]);
+        assert!(res.files().is_empty(), "explaining downloads nothing");
+        let shared = &why.modules[&"g:shared".parse().unwrap()];
+        assert_eq!(shared.version, "2.0");
+        assert_eq!(shared.reason, Reason::Highest);
+        assert_eq!(sources(&why, "g:shared"), [("1.0".into(), dependency("g:x", "1.0")), ("2.0".into(), dependency("g:y", "1.0"))]);
+        assert_eq!(sources(&why, "g:x"), [("1.0".into(), RequestSource::Root { force: false })]);
+        assert!(!why.modules.contains_key(&"g:old-only".parse().unwrap()), "stale subtrees are not explained");
+    }
+
+    #[test]
+    fn explains_force_ranges_and_boms() {
+        let repo = TestRepo::new();
+        repo.publish("g:x", "1.0", &[("g:shared", "2.0", ""), ("g:lib", "[1.0,2.0)", "")]);
+        repo.publish("g:shared", "1.0", &[]);
+        repo.publish("g:shared", "2.0", &[]);
+        for v in ["1.0", "1.5", "2.0"] {
+            repo.publish("g:lib", v, &[]);
+        }
+        repo.write(
+            "g/bom/1.0/bom-1.0.pom",
+            "<project><groupId>g</groupId><artifactId>bom</artifactId><version>1.0</version><packaging>pom</packaging>
+             <dependencyManagement><dependencies>
+               <dependency><groupId>g</groupId><artifactId>managed</artifactId><version>3.0</version></dependency>
+             </dependencies></dependencyManagement></project>",
+        );
+        repo.publish("g:managed", "3.0", &[]);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        resolver.import_bom(&"g:bom".parse().unwrap(), "1.0").unwrap();
+        let mut forced = req("g:shared", "1.0");
+        forced.force = true;
+        let roots = [req("g:x", "1.0"), forced, DependencyRequest::new("g:managed".parse().unwrap(), None)];
+        let (_, why) = resolver.explain(&roots).unwrap();
+        let shared = &why.modules[&"g:shared".parse().unwrap()];
+        assert_eq!((shared.version.as_str(), &shared.reason), ("1.0", &Reason::Forced));
+        assert_eq!(
+            sources(&why, "g:shared"),
+            [("1.0".into(), RequestSource::Root { force: true }), ("2.0".into(), dependency("g:x", "1.0"))]
+        );
+        let lib = &why.modules[&"g:lib".parse().unwrap()];
+        assert_eq!((lib.version.as_str(), &lib.reason), ("1.5", &Reason::Range(vec!["[1.0,2.0)".into()])));
+        let bom = RequestSource::Bom { bom: "g:bom".parse().unwrap(), version: "1.0".into() };
+        assert_eq!(sources(&why, "g:managed"), [("3.0".into(), RequestSource::Root { force: false }), ("3.0".into(), bom)]);
+    }
+
+    #[test]
+    fn explains_relocations_variants_and_constraints() {
+        let repo = TestRepo::new();
+        repo.write(
+            "old/x/1.0/x-1.0.pom",
+            "<project><groupId>old</groupId><artifactId>x</artifactId><version>1.0</version>
+             <distributionManagement><relocation><groupId>new</groupId></relocation></distributionManagement></project>",
+        );
+        repo.publish("new:x", "1.0", &[]);
+        publish_kmp(&repo);
+        let client = repo.client();
+        let (_, why) = Resolver::new(&client, Platform::Jvm).explain(&[req("old:x", "1.0"), req("k:lib", "1.0")]).unwrap();
+        assert_eq!(
+            sources(&why, "new:x"),
+            [("1.0".into(), RequestSource::Relocation { module: "old:x".parse().unwrap(), version: "1.0".into() })]
+        );
+        assert_eq!(
+            sources(&why, "k:lib-jvm"),
+            [("1.0".into(), RequestSource::Variant { module: "k:lib".parse().unwrap(), version: "1.0".into() })]
+        );
     }
 
     #[test]
