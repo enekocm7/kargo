@@ -977,6 +977,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "doc",
         "task",
         "toolchain",
+        "doctor",
     ];
     const UNCOMMON: &[&str] = &[
         "script",
@@ -1702,6 +1703,125 @@ fn toolchain_list_and_remove() {
     p.kargo().args(["toolchain", "remove", "native", "2.4.21"]).assert().failure().stderr(predicate::str::contains("not installed"));
     let out = String::from_utf8(p.kargo().args(["toolchain", "ls"]).assert().success().get_output().stdout.clone()).unwrap();
     assert!(!out.contains("jdk-17.0.12+7") && !out.contains("2.4.21"), "{out}");
+}
+
+/// A JDK of `major` for JAVA_HOME that Kargo identifies by its `release` file, without running it.
+fn fake_java_home(dir: &std::path::Path, major: u32) -> std::path::PathBuf {
+    let home = dir.join(format!("java-{major}"));
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    let java = home.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
+    std::fs::write(&java, "").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(home.join("release"), format!("JAVA_VERSION=\"{major}.0.1\"\n")).unwrap();
+    home
+}
+
+/// `kargo --offline doctor` with `java_home` as JAVA_HOME and first on PATH, so the machine's own JDK stays out of the report.
+fn doctor(p: &Project, java_home: &std::path::Path) -> assert_cmd::Command {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(java_home.join("bin")).chain(std::env::split_paths(&path))).unwrap();
+    let mut cmd = p.kargo();
+    cmd.env("JAVA_HOME", java_home).env("PATH", path).args(["--offline", "doctor"]);
+    cmd
+}
+
+/// The checks of `kargo doctor --format json` whose name contains `name`.
+fn doctor_checks<'a>(report: &'a serde_json::Value, name: &str) -> Vec<&'a serde_json::Value> {
+    report["checks"].as_array().unwrap().iter().filter(|c| c["name"].as_str().unwrap().contains(name)).collect()
+}
+
+#[test]
+fn doctor_outside_a_project_checks_the_machine_and_fixes_incomplete_installs() {
+    let p = Project::new();
+    let java_home = fake_java_home(p.home.path(), 21);
+    fake_jdk(p.home.path(), "jdk-21.0.4+7", 21);
+    // An install that was interrupted: a directory without the metadata of a finished one.
+    std::fs::create_dir_all(p.home.path().join("toolchains/jdk/jdk-17.0.12+7/lib")).unwrap();
+    std::fs::create_dir_all(p.home.path().join("toolchains/gradle/9.0.0")).unwrap();
+
+    let out = doctor(&p, &java_home).args(["--format", "json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(report["errors"], 0, "{report:#}");
+    assert_eq!(doctor_checks(&report, "JAVA_HOME")[0]["status"], "ok", "{report:#}");
+    let jdk = doctor_checks(&report, "system JDK");
+    assert_eq!(jdk[0]["status"], "ok");
+    assert!(jdk[0]["message"].as_str().unwrap().starts_with("JDK 21 at"), "{report:#}");
+    let installed = doctor_checks(&report, "installed");
+    assert!(installed[0]["message"].as_str().unwrap().contains("JDK jdk-21.0.4+7"), "{report:#}");
+    for name in ["JDK jdk-17.0.12+7", "Gradle 9.0.0"] {
+        let check = doctor_checks(&report, name);
+        assert_eq!(check.len(), 1, "{name}: {report:#}");
+        assert_eq!(check[0]["status"], "warning");
+        assert_eq!(check[0]["fixable"], true);
+    }
+    assert_eq!(doctor_checks(&report, "repositories")[0]["message"], "not contacted (offline)");
+    // Outside a project there are no project checks.
+    assert!(report["checks"].as_array().unwrap().iter().all(|c| c["section"] != "project"), "{report:#}");
+
+    doctor(&p, &java_home)
+        .arg("--fix")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed the incomplete install"))
+        .stdout(predicate::str::contains("No problems found."));
+    assert!(!p.home.path().join("toolchains/jdk/jdk-17.0.12+7").exists());
+    assert!(!p.home.path().join("toolchains/gradle/9.0.0").exists());
+    assert!(p.home.path().join("toolchains/jdk/jdk-21.0.4+7").exists());
+}
+
+#[test]
+fn doctor_reports_project_problems_and_fails() {
+    let p = Project::new();
+    let java_home = fake_java_home(p.home.path(), 11);
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "doc",
+            "[target.jvm]\njvm-target = \"17\"\n\n[dependencies]\n\"com.example:lib\" = \"1.0\"\n\n\
+             [repositories.corp]\nurl = \"https://repo.example.com/maven\"\nusername-env = \"KARGO_TEST_DOCTOR_USER\"\npassword-env = \"KARGO_TEST_DOCTOR_PASSWORD\"\n",
+        ),
+    );
+    p.file("src/main.kt", "fun main() {}\n");
+
+    doctor(&p, &java_home)
+        .env_remove("KARGO_TEST_DOCTOR_USER")
+        .env_remove("KARGO_TEST_DOCTOR_PASSWORD")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("cannot compile for `jvm-target` 17"))
+        .stdout(predicate::str::contains("fix: set `[toolchain] jdk = \"17\"` in kargo.toml"))
+        .stdout(predicate::str::contains("repository corp: its credentials are not set"))
+        .stdout(predicate::str::contains("kargo.lock: missing"))
+        .stdout(predicate::str::contains("1 error, 2 warnings."));
+
+    // The lockfile check: a declared dependency kargo.lock does not lock.
+    p.file("kargo.lock", "version = 1\n\n[resolution.\"jvm/runtime\"]\ninputs = \"x\"\nroots = []\n");
+    let out = doctor(&p, &java_home).args(["--format", "json"]).assert().code(1);
+    let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let lock = doctor_checks(&report, "kargo.lock");
+    assert_eq!(lock[0]["message"], "does not lock com.example:lib", "{report:#}");
+}
+
+#[test]
+fn doctor_reports_a_manifest_that_does_not_load() {
+    let p = Project::new();
+    let java_home = fake_java_home(p.home.path(), 21);
+    p.file("kargo.toml", &manifest("bad", "[nonsense]\nkey = 1\n"));
+    doctor(&p, &java_home)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("kargo.toml: "))
+        .stdout(predicate::str::contains("does not load"));
+    // The machine is still checked.
+    doctor(&p, &java_home)
+        .arg("--bug-report")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::starts_with("```text\n$ kargo doctor\nKargo\n").and(predicate::str::contains("system JDK: JDK 21")));
 }
 
 /// A Kotlin/Native 2.4.21 distribution with a standard library whose `konanc` always fails,

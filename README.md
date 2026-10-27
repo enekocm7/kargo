@@ -87,6 +87,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo self update [--version <v>] [--check]` | Update Kargo to the latest release (or `--version`), checking the archive's SHA-256 against the release's `SHA256SUMS`; `--check` only says whether a newer one exists. A Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN!, Cargo or a system package manager is not replaced: its update command is printed instead. `KARGO_RELEASES_URL` points at a mirror |
 | `kargo self uninstall [--purge]` | Remove the binary and the `PATH` entries the install scripts added; `--purge` also deletes `~/.kargo` |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
+| `kargo doctor [--fix] [--format json] [--bug-report]` | Check the JDK, toolchains, Android SDK, Node.js and browsers, network and repositories, and the project (manifest warnings, `kargo.lock` in sync), each with a one-line fix; exits with 1 on errors. `--fix` removes interrupted toolchain installs |
 | `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`; `--release` or `--profile` only that profile's output and generated files), show project information |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 

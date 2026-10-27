@@ -53,6 +53,13 @@ impl FileLock {
     }
 }
 
+/// Whether another process holds the lock on `path` now. A missing lock file is not held. The lock
+/// goes away with the process that held it, so a held lock means a Kargo process is still running.
+pub fn is_held(path: &Path) -> bool {
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(path) else { return false };
+    matches!(file.try_lock(), Err(TryLockError::WouldBlock))
+}
+
 fn held_by_parent(path: &Path) -> bool {
     let Some(held) = std::env::var_os(HELD_LOCK_ENV) else {
         return false;
@@ -81,5 +88,16 @@ mod tests {
         assert!(matches!(other.try_lock(), Err(TryLockError::WouldBlock)));
         drop(first);
         other.try_lock().unwrap();
+    }
+
+    #[test]
+    fn is_held_while_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".lock");
+        assert!(!is_held(&path));
+        let lock = FileLock::exclusive(&path, &Shell::new(Verbosity::Quiet), "test").unwrap();
+        assert!(is_held(&path));
+        drop(lock);
+        assert!(!is_held(&path));
     }
 }

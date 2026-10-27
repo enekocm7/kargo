@@ -909,7 +909,7 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
 }
 
 /// The SDK packages an Android package builds with: its platform, the build-tools of its AGP, and platform-tools.
-fn sdk_packages(cfg: &AndroidConfig) -> Vec<String> {
+pub(crate) fn sdk_packages(cfg: &AndroidConfig) -> Vec<String> {
     android_sdk::packages_for(cfg.compile_sdk, android_sdk::build_tools_for_agp(agp_version(cfg)))
 }
 

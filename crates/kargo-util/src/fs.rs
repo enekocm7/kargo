@@ -155,9 +155,68 @@ pub fn dunce_canonicalize(path: &Path) -> PathBuf {
     canonical
 }
 
+/// The bytes free for this user on the file system holding `path` (the nearest existing ancestor
+/// of it), if the platform tells.
+pub fn free_space(path: &Path) -> Option<u64> {
+    let existing = path.ancestors().find(|p| p.exists())?;
+    free_space_imp::free_space(existing)
+}
+
+#[cfg(windows)]
+mod free_space_imp {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    }
+
+    pub(super) fn free_space(path: &Path) -> Option<u64> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut free = 0u64;
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path; the call writes only to `free`, the other outputs may be null.
+        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) } != 0;
+        ok.then_some(free)
+    }
+}
+
+#[cfg(not(windows))]
+mod free_space_imp {
+    use std::path::Path;
+    use std::process::Command;
+
+    /// Asks POSIX `df`, whose `-P -k` output is the same on Linux and macOS.
+    pub(super) fn free_space(path: &Path) -> Option<u64> {
+        let output = Command::new("df").args(["-P", "-k"]).arg(path).output().ok()?;
+        super::df_available(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+/// The `Available` column, in bytes, of the output of `df -P -k`.
+#[cfg_attr(any(windows, not(test)), allow(dead_code))]
+fn df_available(output: &str) -> Option<u64> {
+    let line = output.lines().nth(1)?;
+    let kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_df_output() {
+        let out = "Filesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/sda1        102400000  51200000  40960000      56% /\n";
+        assert_eq!(df_available(out), Some(40960000 * 1024));
+        assert_eq!(df_available(""), None);
+    }
+
+    #[test]
+    fn free_space_of_a_missing_path_uses_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(free_space(&dir.path().join("not/there")).is_some_and(|b| b > 0));
+    }
 
     #[test]
     fn atomic_write_creates_parents_and_replaces() {

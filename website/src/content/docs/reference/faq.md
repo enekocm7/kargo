@@ -43,13 +43,15 @@ Yes. A package can depend on another package on disk with `{ path = "../lib" }`,
 
 ## Errors
 
+When a build fails for a reason outside your code (the JDK, a missing SDK, the network), start with [`kargo doctor`](../commands/#kargo-doctor). It checks the JDK, the toolchains, the Android SDK, Node.js and browsers, the repositories and the project in one go, and prints a fix for each problem it finds. `kargo doctor --bug-report` gives a block to paste into an issue.
+
 ### `no Java installation found on JAVA_HOME or PATH, and ...`
 
-Normally Kargo downloads a Temurin JDK when you have none. It doesn't with `--offline` or `--locked`, or when `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` turns automatic installs off. Run the `kargo toolchain install jdk <version>` command the error names, install a JDK and set `JAVA_HOME`, or pin one with `[toolchain] jdk = "21"`. See [Without a JDK](../../guides/toolchains/#without-a-jdk).
+Normally Kargo downloads a Temurin JDK when you have none. It doesn't with `--offline` or `--locked`, or when `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` turns automatic installs off. Run the `kargo toolchain install jdk <version>` command the error names, install a JDK and set `JAVA_HOME`, or pin one with `[toolchain] jdk = "21"`. See [Without a JDK](../../guides/toolchains/#without-a-jdk). `kargo doctor` shows which JDK the project would use, and a `JAVA_HOME` that points nowhere.
 
 ### `JDK ... is too old; Kargo needs JDK 11 or newer`
 
-Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one.
+Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` and let Kargo download one. `kargo doctor` reports the JDK it finds and its version.
 
 ### `JDK ... is too old; Kargo needs JDK 17 or newer` when running tests
 
@@ -57,7 +59,7 @@ Install a newer JDK, point `JAVA_HOME` at it, or add `[toolchain] jdk = "21"` an
 
 ### `Kotlin ... cannot run on JDK ...`
 
-Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.10 or newer, or add `[toolchain] jdk = "21"` so Kargo builds with JDK 21. See [Older Kotlin versions on new JDKs](../../guides/toolchains/#older-kotlin-versions-on-new-jdks).
+Compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer. Use Kotlin 2.1.10 or newer, or add `[toolchain] jdk = "21"` so Kargo builds with JDK 21. See [Older Kotlin versions on new JDKs](../../guides/toolchains/#older-kotlin-versions-on-new-jdks). `kargo doctor` checks this combination before you build.
 
 ### `jvm-target ... is newer than JDK ...` or `invalid [target.jvm] jvm-target`
 
@@ -96,7 +98,7 @@ The KSP processor didn't run. Declare it with `scope = "ksp"`, not `processor` (
 
 ### `Node.js is required to run Kotlin/Wasm programs`
 
-Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Building Wasm doesn't need it; running and testing do.
+Install [Node.js](https://nodejs.org) and make sure `node` is on your `PATH`. Building Wasm doesn't need it; running and testing do. `kargo doctor` says whether it finds `node`.
 
 ### `the npm package ... has no TypeScript declarations, so Kotlin gets none`
 
@@ -112,7 +114,7 @@ A Wasm dependency, such as `kotlinx-datetime`, imports npm packages at runtime, 
 
 ### `no browser found to run the Wasm tests`
 
-A Wasm project with `environment = "browser"` runs its tests in a browser without a window, and Kargo found none. Install Chrome, Chromium, Edge, Brave or Firefox, or set `KARGO_BROWSER` to the path of one. In a container, also set `KARGO_BROWSER_ARGS=--no-sandbox` if Chrome refuses to start as root. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser).
+A Wasm project with `environment = "browser"` runs its tests in a browser without a window, and Kargo found none. Install Chrome, Chromium, Edge, Brave or Firefox, or set `KARGO_BROWSER` to the path of one. In a container, also set `KARGO_BROWSER_ARGS=--no-sandbox` if Chrome refuses to start as root. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser). `kargo doctor` shows the browser Kargo would use.
 
 ### Wasm browser tests fail with `timed out ... without output`
 
@@ -132,7 +134,7 @@ Node.js can't find an npm package that a library imports. Kargo installs these p
 
 ### `Android SDK not found; set ANDROID_HOME`
 
-Either let Kargo install the SDK, with `android-sdk = "36"` (your `compile-sdk`) under `[toolchain]` in `kargo.toml`, or install the Android SDK (Android Studio installs it to `~/Android/Sdk` on Linux and `~/Library/Android/sdk` on macOS) and set `ANDROID_HOME`. See [Android SDK](../../guides/android/#android-sdk).
+Either let Kargo install the SDK, with `android-sdk = "36"` (your `compile-sdk`) under `[toolchain]` in `kargo.toml`, or install the Android SDK (Android Studio installs it to `~/Android/Sdk` on Linux and `~/Library/Android/sdk` on macOS) and set `ANDROID_HOME`. See [Android SDK](../../guides/android/#android-sdk). `kargo doctor` checks the SDK, its packages and licenses, `adb` and Gradle of an Android project.
 
 ### `the Android SDK at ... lacks platforms;android-...`
 
@@ -144,7 +146,7 @@ The Android SDK packages are under Google's license terms, and Kargo needs your 
 
 ### `Gradle ... is too old for Android Gradle Plugin ...`
 
-The `gradle-version` under `[target.android]` is older than the `agp-version` needs. Use the version the message names, or remove `gradle-version` to let Kargo pick it. See [Android](../../guides/android/#gradle).
+The `gradle-version` under `[target.android]` is older than the `agp-version` needs. Use the version the message names, or remove `gradle-version` to let Kargo pick it. See [Android](../../guides/android/#gradle). `kargo doctor` reports this mismatch too.
 
 ### `Gradle ... is not installed and Kargo is offline`
 
@@ -160,11 +162,11 @@ Kargo downloads Gradle (and with `[toolchain] android-sdk` the Android SDK) for 
 
 ### Downloads fail behind a company proxy or firewall
 
-Set `HTTPS_PROXY` (and `NO_PROXY` for internal hosts), or `[http] proxy` in `~/.kargo/config.toml`. If the proxy inspects TLS and downloads fail with a certificate error, point `[http] cainfo` at a PEM bundle with your company's certificate authority. If Maven Central is blocked, use your Artifactory or Nexus with `[mirrors] "*" = "https://..."`. See [Offline and corporate builds](../../guides/offline-and-mirrors/).
+Set `HTTPS_PROXY` (and `NO_PROXY` for internal hosts), or `[http] proxy` in `~/.kargo/config.toml`. If the proxy inspects TLS and downloads fail with a certificate error, point `[http] cainfo` at a PEM bundle with your company's certificate authority. If Maven Central is blocked, use your Artifactory or Nexus with `[mirrors] "*" = "https://..."`. See [Offline and corporate builds](../../guides/offline-and-mirrors/). `kargo doctor` shows the proxy Kargo uses and whether each repository answers, and which credentials variables are unset.
 
 ### `kargo.lock needs to be updated ... but --locked was passed`
 
-Either you changed `kargo.toml` without committing the updated lockfile, or the lockfile has no resolution for what this command needs. Kargo writes a resolution only for the configurations a command uses, so `kargo build` records `jvm/compile` and `jvm/runtime` but not `jvm/test`. Run `kargo update` (it resolves every configuration of every enabled target) or `kargo fetch` locally and commit `kargo.lock`.
+Either you changed `kargo.toml` without committing the updated lockfile, or the lockfile has no resolution for what this command needs. Kargo writes a resolution only for the configurations a command uses, so `kargo build` records `jvm/compile` and `jvm/runtime` but not `jvm/test`. Run `kargo update` (it resolves every configuration of every enabled target) or `kargo fetch` locally and commit `kargo.lock`. `kargo doctor` warns about a dependency `kargo.lock` does not lock yet.
 
 ### `the native target has no build for this host`
 
@@ -221,11 +223,11 @@ kargo clean                 # remove build output
 kargo build --refresh       # re-check repositories, ignoring cached metadata and kargo.lock
 ```
 
-`--refresh` also re-verifies cached artifacts against the repository's checksums and downloads corrupt ones again. Use `-v` to see the exact commands Kargo runs.
+`--refresh` also re-verifies cached artifacts against the repository's checksums and downloads corrupt ones again. Use `-v` to see the exact commands Kargo runs. A toolchain whose install was interrupted (a killed download, a full disk) shows up in `kargo doctor`, and `kargo doctor --fix` removes it so it is installed again.
 
 ### `Blocking waiting for file lock on build directory`
 
-Another Kargo process is building or resolving the same project, for example an IDE, a file watcher or a second terminal. The command continues once the other process finishes. If nothing else is running, check for a hung `kargo` process (a stuck hook, for example) and stop it. The operating system releases the lock when that process exits. See [Concurrent commands](../commands/#concurrent-commands).
+Another Kargo process is building or resolving the same project, for example an IDE, a file watcher or a second terminal. The command continues once the other process finishes. If nothing else is running, check for a hung `kargo` process (a stuck hook, for example) and stop it. The operating system releases the lock when that process exits. See [Concurrent commands](../commands/#concurrent-commands). `kargo doctor` tells you whether a process holds the lock now.
 
 ### `failed to move ... to ...` on Windows
 

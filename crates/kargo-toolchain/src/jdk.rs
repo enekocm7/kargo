@@ -62,7 +62,7 @@ impl Jdk {
 
     /// Identifies the JDK of a `java` executable, from the `release` file next to its `bin`
     /// directory when there is one (no JVM start), otherwise by asking `java` itself.
-    fn from_java(java: &Path) -> Result<Self> {
+    pub fn from_java(java: &Path) -> Result<Self> {
         // Without Windows' `\\?\` prefix: the home is passed to the Kotlin compiler, which rejects it.
         let real = dunce_canonicalize(java);
         let home = real.parent().and_then(Path::parent);

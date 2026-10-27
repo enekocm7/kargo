@@ -9,6 +9,7 @@ pub mod ci;
 pub mod classpath;
 pub mod context;
 pub mod doc;
+pub mod doctor;
 pub mod env;
 pub mod fmt;
 pub mod import;
