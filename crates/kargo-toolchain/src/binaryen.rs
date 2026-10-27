@@ -50,10 +50,19 @@ fn find_opt(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The installed pinned `wasm-opt`, if it is installed.
+pub fn find(config: &Config) -> Option<PathBuf> {
+    find_opt(&root(config))
+}
+
+fn root(config: &Config) -> PathBuf {
+    config.toolchains_dir().join("binaryen").join(VERSION.to_string())
+}
+
 /// Finds or installs the pinned `wasm-opt`, checking the official release SHA-256 sidecar.
 pub fn ensure(config: &Config) -> Result<PathBuf> {
     let archive_name = asset()?;
-    let root = config.toolchains_dir().join("binaryen").join(VERSION.to_string());
+    let root = root(config);
     if let Some(path) = find_opt(&root) {
         return Ok(path);
     }

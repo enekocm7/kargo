@@ -108,6 +108,8 @@ Cargo for Kotlin: a build tool and package manager
 ...
 ```
 
+`kargo doctor` checks the rest of the setup: the JDK, the toolchains Kargo installed, and whether Maven Central answers. Run it again inside a project, after the steps below, and it checks what that project's targets need too (the Android SDK, Node.js, a browser). See [`kargo doctor`](../../reference/commands/#kargo-doctor).
+
 ## 2. Get a JDK
 
 The Kotlin compiler runs on the JVM, so Kargo needs a **JDK 11 or newer** for every target. JVM tests need **JDK 17 or newer**, because `kargo test` runs the JUnit 6 launcher on the project's JDK. You don't have to install one yourself.

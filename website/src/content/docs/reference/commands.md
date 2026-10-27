@@ -1011,6 +1011,58 @@ Show or stop the background compiler daemons that keep the Kotlin compiler warm 
 | `status` | List running daemons with their process ID and state directory |
 | `stop` | Stop every running daemon; the next build starts a new one |
 
+## `kargo doctor`
+
+Check the machine and the project for what keeps builds from working, and say how to fix each problem.
+
+```console
+$ kargo doctor
+Kargo
+  ok       version: kargo 0.1.1 (x86_64-unknown-linux-gnu)
+  ok       KARGO_HOME: /home/me/.kargo (writable)
+  ok       disk space: 120.4 GiB free
+  ok       compiler daemons: none running
+
+JDK
+  ok       project JDK: JDK 25 at /usr/lib/jvm/jdk-25 (system), runs Kotlin 2.4.21
+
+Toolchains
+  ok       installed: JDK jdk-21.0.12+7, Gradle 9.6.0
+  warning  JDK jdk-17.0.20+8: JDK jdk-17.0.20+8 at /home/me/.kargo/toolchains/jdk/jdk-17.0.20+8 is incomplete (an install was interrupted)
+           fix: `kargo doctor --fix` removes it; it is installed again when needed
+  ok       Kotlin: 2.4.21 (downloaded from Maven on first build)
+
+Network
+  ok       proxy: none
+  ok       repository maven-central: https://repo.maven.apache.org/maven2 (HTTP 200)
+
+Project
+  ok       package app: /home/me/app/kargo.toml loads without warnings
+  ok       kargo.lock: in sync with kargo.toml
+
+0 errors, 1 warning.
+```
+
+Each check is `ok`, a `warning` (something to know, or a build that will download what it needs) or an `error` (a build that will fail), with a `fix:` line for the last two. Outside a project, `kargo doctor` checks only the machine; inside one, it checks what the project needs too.
+
+| Section | What it checks |
+|---|---|
+| Kargo | The version and platform, that the Kargo home is writable, the free disk space there (a warning under 5 GiB, an error under 1 GiB), the running [compiler daemons](#kargo-daemon), and toolchain installs another Kargo process holds the lock of |
+| JDK | `JAVA_HOME` (one without `bin/java`, or another JDK than `java` on `PATH`), and the JDK the project builds with: found or [pinned and installed](../../guides/toolchains/), at least JDK 11, one the project's Kotlin compiler runs on, new enough for `jvm-target`, with `javac`. A pinned `[toolchain] graalvm` too |
+| Toolchains | The JDKs, GraalVMs, Kotlin/Native and Gradle distributions, language servers and debug adapter installed under the Kargo home, and installs that were interrupted (a directory without a complete toolchain). With the Native target, whether its Kotlin/Native is installed |
+| Android | With the Android target: the SDK (`ANDROID_HOME`, or the [Kargo-managed one](../../guides/android/#android-sdk)), its platform and build-tools, accepted licenses, `adb`, and the Gradle the build runs |
+| Wasm and JavaScript | With the Wasm or JS target: Node.js, a browser for a `browser` environment, and Binaryen's `wasm-opt` |
+| Network | The proxy (`[http] proxy` or `HTTPS_PROXY` and friends, passwords hidden), `[http] cainfo`, repository credentials whose environment variables are unset, and whether each repository (Maven Central outside a project) answers. `--offline` skips contacting them |
+| Project | Each member's `kargo.toml` [warnings](../warnings/), a held build lock on its `target/`, and `kargo.lock`: present, readable, and locking every declared dependency. A `kargo.toml` that does not load is reported here instead of stopping the command |
+
+`kargo doctor` exits with 1 when a check is an error, and 0 otherwise, so a CI job can run it first.
+
+| Option | Meaning |
+|---|---|
+| `--fix` | Make the safe fixes: remove the toolchains whose install was interrupted, so the next command that needs one installs it again |
+| `--format <fmt>` | `text` (default) or `json`: `{ "version", "errors", "warnings", "checks": [{ "section", "name", "status", "message", "fix", "fixable" }], "fixed" }` |
+| `--bug-report` | Print the report as a Markdown code block to paste into a bug report, with your home directory shortened to `~` |
+
 ## `kargo info`
 
 Print project information: package, targets, path dependencies, repositories and paths. A repository that a [mirror](../../guides/offline-and-mirrors/#repository-mirrors) or `--vendored` replaces shows where it is fetched from (`maven-central (via https://nexus.corp/central)`), and a `config:` line lists the [configuration files](../../guides/offline-and-mirrors/#configuration-files) Kargo read. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.

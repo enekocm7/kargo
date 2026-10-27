@@ -66,6 +66,7 @@ const COMMON_COMMANDS: &[&str] = &[
     "doc",
     "task",
     "toolchain",
+    "doctor",
 ];
 
 #[derive(Debug, Parser)]
@@ -1424,6 +1425,28 @@ layout for the adapter, so breakpoints and stack frames find your files.")]
         /// Run this debug adapter executable instead of the one Kargo downloads
         #[arg(long, value_name = "PATH")]
         adapter_path: Option<PathBuf>,
+    },
+    /// Check the JDK, toolchains, SDKs, network and project setup for problems
+    #[command(long_about = "Check the machine and the project for what keeps builds from working.
+
+Checks the Kargo home (writable, free space), the JDK (found or pinned, new enough, supported by the
+project's Kotlin version, JAVA_HOME), the installed toolchains (incomplete installs), the Android SDK,
+Gradle and adb, Node.js, a browser and wasm-opt for Wasm and Kotlin/JS, the proxy, certificates,
+credentials and whether every repository answers, and, inside a project, the manifest warnings, the
+build lock and whether kargo.lock is in sync. Outside a project only the machine is checked.
+
+Each check is ok, a warning or an error, with a one-line fix. Exits with 1 when a check fails.
+--offline skips contacting the repositories.")]
+    Doctor {
+        /// Make the safe fixes: remove toolchains whose install was interrupted, so they are installed again
+        #[arg(long)]
+        fix: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
+        /// Print the report as a Markdown block to paste into a bug report, with your home directory shortened to `~`
+        #[arg(long, conflicts_with = "format")]
+        bug_report: bool,
     },
     /// Print project information
     Info {
@@ -3070,6 +3093,33 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
+        Command::Doctor { fix, format, bug_report } => {
+            let cwd = std::env::current_dir().context("failed to read the current directory")?;
+            let loaded = load_project(global);
+            // A manifest that does not load is a finding, not a reason to stop.
+            let manifest = match &global.manifest_path {
+                Some(path) => Some(cwd.join(path)),
+                None => cwd.ancestors().map(|d| d.join(kargo_manifest::MANIFEST_NAME)).find(|p| p.is_file()),
+            };
+            let state = match (&loaded, manifest) {
+                (Ok(project), _) => ops::doctor::ProjectState::Loaded(project),
+                (Err(error), Some(manifest)) => ops::doctor::ProjectState::Broken { manifest, error },
+                (Err(_), None) => ops::doctor::ProjectState::None,
+            };
+            let builtins = builtin_commands();
+            let mut report = ops::doctor::diagnose(config, state, &|name| builtins.iter().any(|b| b == name));
+            if fix {
+                ops::doctor::fix(&mut report);
+            }
+            if bug_report {
+                print!("{}", ops::doctor::bug_report(&report));
+            } else if format == FormatArg::Json {
+                println!("{}", serde_json::to_string_pretty(&ops::doctor::json(&report))?);
+            } else {
+                print!("{}", ops::doctor::render(&report));
+            }
+            Ok(if report.has_errors() { 1 } else { 0 })
+        }
         Command::Completions { shell } => {
             complete::write_script(shell, &mut std::io::stdout().lock())?;
             Ok(0)
@@ -3713,6 +3763,11 @@ mod tests {
             Cli::try_parse_from(["kargo", "info", "--format", "json"]).unwrap().command,
             Command::Info { format: FormatArg::Json }
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["kargo", "doctor", "--fix", "--format", "json"]).unwrap().command,
+            Command::Doctor { fix: true, format: FormatArg::Json, bug_report: false }
+        ));
+        assert!(Cli::try_parse_from(["kargo", "doctor", "--bug-report", "--format", "json"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "tree", "--format", "json", "--duplicates"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "update", "g:a", "--precise", "1.2", "--dry-run"]).unwrap();
         assert!(
