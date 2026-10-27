@@ -2216,6 +2216,60 @@ fun appName(): String = stringResource(Res.string.app_name)
 }
 
 #[test]
+fn android_app_with_a_library_module() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs the Android SDK)");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["app", "--target", "android"]);
+    t.create(&["ui", "--lib", "--target", "android"]);
+    t.create(&["model", "--lib"]);
+    t.write("kargo.toml", "[workspace]\nmembers = [\"app\", \"ui\", \"model\"]\n");
+    // The library's namespace comes from its group and name.
+    t.write(
+        "ui/kargo.toml",
+        "[package]\nname = \"ui\"\nversion = \"0.1.0\"\ngroup = \"com.example\"\n\n[target.android]\nkind = \"library\"\n\n\
+         [dependencies]\nmodel = { path = \"../model\", exported = true }\n\n[publish]\njavadoc = \"empty\"\n",
+    );
+    t.write("ui/android/res/values/strings.xml", "<resources><string name=\"greeting\">Hello from ui</string></resources>\n");
+    t.write(
+        "ui/src-android/Greeter.kt",
+        "package com.example.ui\n\nimport android.content.Context\n\nfun greeting(context: Context): String = context.getString(R.string.greeting)\n",
+    );
+    t.write("model/src/User.kt", "package com.example.model\n\ndata class User(val name: String)\n");
+    let app = std::fs::read_to_string(t.dir.path().join("app/kargo.toml")).unwrap();
+    t.write("app/kargo.toml", &format!("{app}\n[dependencies]\nui = {{ path = \"../ui\" }}\n"));
+    // The app reaches the library's code, its `R` class (by its namespace) and what it exports.
+    t.write(
+        "app/src-android/Welcome.kt",
+        "package com.example.app\n\nimport android.content.Context\nimport com.example.model.User\nimport com.example.ui.greeting\n\n\
+         fun welcome(context: Context, user: User): String =\n    greeting(context) + \", \" + user.name + context.getString(com.example.ui.R.string.greeting)\n",
+    );
+    t.kargo("").arg("build").assert().success().stderr(predicate::str::contains("Compiling ui v0.1.0 (android, gradle, with app)"));
+    let apk = t.dir.path().join("target/android/app/build/outputs/apk/debug/app-debug.apk");
+    assert!(apk.is_file(), "no {}", apk.display());
+    // The library's AAR is where building it alone puts it.
+    let aar = t.dir.path().join("target/android/ui/build/outputs/aar/ui-debug.aar");
+    assert!(aar.is_file(), "no {}", aar.display());
+    let zip = zip::ZipArchive::new(std::fs::File::open(&aar).unwrap()).unwrap();
+    let names: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).collect();
+    for entry in ["AndroidManifest.xml", "classes.jar", "R.txt", "res/values/values.xml"] {
+        assert!(names.iter().any(|n| n == entry), "{entry} is missing from {}: {names:?}", aar.display());
+    }
+
+    // `kargo publish` stages the release AAR with its POM and `.module`.
+    t.kargo("ui").args(["publish", "--local", "--dry-run"]).env("KARGO_MAVEN_LOCAL", t.dir.path().join("m2")).assert().success();
+    let staged = t.dir.path().join("target/release/ui/publish/repository/com/example/ui/0.1.0");
+    for file in ["ui-0.1.0.aar", "ui-0.1.0.pom", "ui-0.1.0.module"] {
+        assert!(staged.join(file).is_file(), "no {file} in {}", staged.display());
+    }
+    let pom = std::fs::read_to_string(staged.join("ui-0.1.0.pom")).unwrap();
+    assert!(pom.contains("<packaging>aar</packaging>") && pom.contains("<artifactId>model</artifactId>"), "{pom}");
+}
+
+#[test]
 fn android_build_with_a_kargo_managed_sdk() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {

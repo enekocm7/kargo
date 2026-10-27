@@ -561,7 +561,7 @@ Valid platforms: `host`, `linux_x64`, `linux_arm64`, `mingw_x64`, `macos_x64`, `
 
 ```toml
 [target.android]
-namespace = "com.example.app"    # required
+namespace = "com.example.app"    # default: <group>.<name>
 application-id = "com.example.app"
 kind = "application"             # or "library"
 min-sdk = 24
@@ -588,8 +588,9 @@ application-id-suffix = ".free"
 
 | Key | Default |
 |---|---|
+| `namespace` | `<group>.<name>` of `[package]`, lowercase, with `_` for `-` and other characters a Java package can't have (`com.example.my_lib` for `my-lib`). The package of the `R` and `BuildConfig` classes. Required when `[package]` has no `group` |
 | `application-id` | `namespace` |
-| `kind` | `application` |
+| `kind` | `application`. A `library` builds an AAR, can be a [path dependency](../../guides/android/#android-libraries) of other Android packages and is [published](../../guides/publishing/#android-libraries) as an AAR |
 | `min-sdk` | `24` |
 | `target-sdk` | `36`, or `compile-sdk` when that is lower |
 | `compile-sdk` | [`[toolchain] android-sdk`](#toolchain) when it is an API level (and must equal it when set), else `37` |

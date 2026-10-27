@@ -230,6 +230,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
     if kind == TargetKind::Android {
         // Gradle compiles Android code and resolves its dependencies.
         out["dependencies"] = Value::Null;
+        out["android"] = android(ctx)?;
         return Ok(out);
     }
     let setup = ctx.setup(kind)?;
@@ -308,6 +309,30 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
     }
     out["dependencies"] = if opts.no_deps { Value::Null } else { Value::Array(dependencies(ctx, kind, &setup)?) };
     Ok(out)
+}
+
+/// The Android module of a package: its namespace and `R` class, its Android manifest, resources and
+/// assets, the Android libraries of the workspace it uses (Gradle subprojects), and where AGP writes
+/// the `R` class and `BuildConfig` of the default variant (`variant`, `null` for a profile AGP does not build).
+fn android(ctx: &BuildContext) -> Result<Value> {
+    let ws = ctx.ws;
+    let cfg = &ws.manifest().targets.android.as_ref().expect("the Android target is enabled").config;
+    let generated = crate::gradle::generated(ctx).ok();
+    let libraries: Vec<&str> =
+        crate::gradle::android_subprojects(ctx, ctx.package).into_iter().map(|i| ctx.project.package(i).name()).collect();
+    Ok(json!({
+        "kind": cfg.kind,
+        "namespace": cfg.namespace,
+        "r-class": format!("{}.R", cfg.namespace),
+        "manifest": path(&ws.root().join("android/AndroidManifest.xml")),
+        "res-roots": [path(&ws.root().join("android/res"))],
+        "asset-roots": [path(&ws.root().join("android/assets"))],
+        "library-dependencies": libraries,
+        "build-dir": path(&ws.work_dir("android").join("build")),
+        "variant": generated.as_ref().map(|g| g.variant.clone()),
+        "generated-source-roots": generated.iter().filter_map(|g| g.build_config.as_deref()).map(path).collect::<Vec<_>>(),
+        "r-class-jar": generated.as_ref().map(|g| path(&g.r_class_jar)),
+    }))
 }
 
 /// The compiler plugins of a target (frameworks' and `[plugins]`), with their jars unless `--no-deps`.
