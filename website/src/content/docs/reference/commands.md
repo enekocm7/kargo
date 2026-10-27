@@ -818,7 +818,7 @@ Build a library with the release profile and publish it to a Maven repository: t
 kargo publish [--repository <name> | --local] [--dry-run]
 ```
 
-Every target except Android is published: a JVM-only library as one Maven module (`<name>.jar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-wasm-js`, `<name>-js`, `<name>-linuxx64`, ...). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first.
+Every target is published, Android only for a library (`kind = "library"`): a JVM-only library as one Maven module (`<name>.jar`), an Android-only library as one module with the AAR of its release build (`<name>.aar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-android`, `<name>-wasm-js`, `<name>-js`, `<name>-linuxx64`, ...). See [Android libraries](../../guides/publishing/#android-libraries). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first.
 
 | Option | Meaning |
 |---|---|

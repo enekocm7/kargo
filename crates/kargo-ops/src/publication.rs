@@ -1,14 +1,15 @@
 //! What `kargo publish` uploads: the Maven modules of a package, their POMs and their Gradle
 //! module metadata (`.module`), laid out like a Maven repository.
 //!
-//! A package with only the JVM target is one plain Maven module: `<name>.jar` with a POM.
-//! Any other set of targets is published the way the Kotlin Gradle Plugin publishes a
+//! A package with only the JVM target is one plain Maven module: `<name>.jar` with a POM. One
+//! with only the Android target (a library) is one module too: `<name>.aar` with a POM and the
+//! `.module` of its release variants. Any other set of targets is published the way the Kotlin Gradle Plugin publishes a
 //! multiplatform library, so Gradle and Kargo consumers pick the right artifact per target:
 //!
 //! - a root module `<name>` whose `.module` points every platform to its own module
 //!   (`available-at`), with the common sources;
-//! - one module per platform, `<name>-jvm`, `<name>-wasm-js`, `<name>-linuxx64`, ..., holding
-//!   the jar or klib, its sources and javadoc, its POM and its `.module`.
+//! - one module per platform, `<name>-jvm`, `<name>-android`, `<name>-wasm-js`, `<name>-linuxx64`,
+//!   ..., holding the jar, AAR or klib, its sources and javadoc, its POM and its `.module`.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,8 @@ pub enum PlatformKind {
     Js,
     /// Kotlin/Native for a Konan target such as `linux_x64`.
     Native { konan_target: String },
+    /// The release build of an Android library: an AAR.
+    Android,
 }
 
 impl PlatformKind {
@@ -43,12 +46,15 @@ impl PlatformKind {
             PlatformKind::Wasm { environment } => format!("wasm-{environment}"),
             PlatformKind::Js => "js".to_owned(),
             PlatformKind::Native { konan_target } => konan_target.replace('_', "").to_ascii_lowercase(),
+            PlatformKind::Android => "android".to_owned(),
         }
     }
 
-    /// The Kotlin target name the variants are named after: `jvm`, `wasmJs`, `js`, `linuxX64`.
+    /// The Kotlin target name the variants are named after: `jvm`, `wasmJs`, `js`, `linuxX64`, and
+    /// for Android the build type, `release`.
     fn target_name(&self) -> String {
         match self {
+            PlatformKind::Android => "release".to_owned(),
             PlatformKind::Jvm { .. } => "jvm".to_owned(),
             PlatformKind::Wasm { environment } => format!("wasm{}", capitalize(environment)),
             PlatformKind::Js => "js".to_owned(),
@@ -64,6 +70,7 @@ impl PlatformKind {
     pub fn extension(&self) -> &'static str {
         match self {
             PlatformKind::Jvm { .. } => "jar",
+            PlatformKind::Android => "aar",
             PlatformKind::Wasm { .. } | PlatformKind::Js | PlatformKind::Native { .. } => "klib",
         }
     }
@@ -79,6 +86,13 @@ impl PlatformKind {
                 }
                 attrs.insert("org.gradle.libraryelements".into(), json!("jar"));
                 attrs.insert("org.jetbrains.kotlin.platform.type".into(), json!("jvm"));
+            }
+            // As AGP and the Kotlin Gradle Plugin publish an Android library's release variant.
+            PlatformKind::Android => {
+                attrs.insert("com.android.build.api.attributes.BuildTypeAttr".into(), json!("release"));
+                attrs.insert("org.gradle.jvm.environment".into(), json!("android"));
+                attrs.insert("org.gradle.libraryelements".into(), json!("aar"));
+                attrs.insert("org.jetbrains.kotlin.platform.type".into(), json!("androidJvm"));
             }
             PlatformKind::Wasm { environment } => {
                 attrs.insert("org.gradle.jvm.environment".into(), json!("non-jvm"));
@@ -102,7 +116,9 @@ impl PlatformKind {
     /// The usages of the platform's variants, `(variant suffix, org.gradle.usage, includes runtime dependencies)`.
     fn usages(&self) -> Vec<(&'static str, &'static str, bool)> {
         match self {
-            PlatformKind::Jvm { .. } => vec![("ApiElements", "java-api", false), ("RuntimeElements", "java-runtime", true)],
+            PlatformKind::Jvm { .. } | PlatformKind::Android => {
+                vec![("ApiElements", "java-api", false), ("RuntimeElements", "java-runtime", true)]
+            }
             PlatformKind::Wasm { .. } | PlatformKind::Js => {
                 vec![("ApiElements", "kotlin-api", false), ("RuntimeElements", "kotlin-runtime", true)]
             }
@@ -113,7 +129,7 @@ impl PlatformKind {
 
     fn sources_usage(&self) -> &'static str {
         match self {
-            PlatformKind::Jvm { .. } => "java-runtime",
+            PlatformKind::Jvm { .. } | PlatformKind::Android => "java-runtime",
             _ => "kotlin-runtime",
         }
     }
@@ -223,13 +239,13 @@ pub struct StagedModule {
 }
 
 /// Whether a package with these platforms is published as a multiplatform library
-/// (a root module plus one module per platform) rather than one plain JVM module.
+/// (a root module plus one module per platform) rather than one plain JVM or Android module.
 pub fn is_multiplatform(platforms: &[PlatformKind]) -> bool {
-    !matches!(platforms, [PlatformKind::Jvm { .. }])
+    !matches!(platforms, [PlatformKind::Jvm { .. }] | [PlatformKind::Android])
 }
 
 /// The coordinates under which a package is published for `kind`: its own name for a
-/// JVM-only library, `<name>-<suffix>` for a platform of a multiplatform one.
+/// JVM-only or Android-only library, `<name>-<suffix>` for a platform of a multiplatform one.
 pub fn platform_module(group: &str, name: &str, kind: &PlatformKind, multiplatform: bool) -> ModuleId {
     if multiplatform { ModuleId::new(group, format!("{name}-{}", kind.module_suffix())) } else { ModuleId::new(group, name) }
 }
@@ -270,14 +286,16 @@ impl Publication<'_> {
             if let Some(web) = &platform.web_resources {
                 writer.copy(Some(crate::web_resources::CLASSIFIER), "zip", &web.zip)?;
             }
-            if self.multiplatform() {
+            // An AAR always comes with its `.module`, whose attributes tell Gradle it is the release variant.
+            let gradle_metadata = self.multiplatform() || platform.kind == PlatformKind::Android;
+            if gradle_metadata {
                 let mut files = vec![main];
                 files.extend(extra);
                 let metadata = self.platform_metadata(platform, &module, files, sources);
                 writer.write(None, "module", &metadata)?;
             }
             let packaging = (platform.kind.extension() != "jar").then_some(platform.kind.extension());
-            let pom = self.pom(&module, packaging, &platform.dependencies, &platform.pom_properties(), self.multiplatform());
+            let pom = self.pom(&module, packaging, &platform.dependencies, &platform.pom_properties(), gradle_metadata);
             writer.write(None, "pom", &pom)?;
             staged.push(writer.finish());
         }
@@ -386,8 +404,9 @@ impl Publication<'_> {
                 "files": [sources.to_json()],
             }));
         }
-        let url = format!("../../{}/{version}/{}-{version}.module", root.artifact, root.artifact);
-        module_json(self.component(module, Some(url)), variants)
+        // A platform module of a multiplatform library points back at its root module.
+        let url = self.multiplatform().then(|| format!("../../{}/{version}/{}-{version}.module", root.artifact, root.artifact));
+        module_json(self.component(module, url), variants)
     }
 
     /// The POM of `module`. With `gradle_metadata`, it carries the marker that tells Gradle (and
@@ -774,6 +793,82 @@ mod tests {
         assert_eq!(parsed.dependencies[1].exclusions, [("*".to_owned(), "*".to_owned())]);
         assert_eq!(parsed.dependency_management[0].scope.as_deref(), Some("import"));
         assert_eq!(parsed.properties.get(MAIN_CLASS_PROPERTY).map(String::as_str), Some("com.acme.MainKt"));
+    }
+
+    fn android(dir: &Path, dependencies: Vec<PublishedDependency>) -> PlatformPublication {
+        PlatformPublication {
+            kind: PlatformKind::Android,
+            artifact: file(dir, "lib-release.aar"),
+            extra: Vec::new(),
+            sources: Some(file(dir, "android-src.jar")),
+            javadoc: None,
+            dependencies,
+            main_class: None,
+            web_resources: None,
+        }
+    }
+
+    #[test]
+    fn stages_an_android_library_as_an_aar_with_its_release_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package();
+        let appcompat = dep("androidx.appcompat:appcompat", "androidx.appcompat:appcompat", "1.7.0", DependencyScope::Compile);
+        let publication = Publication {
+            group: "com.acme".into(),
+            package: &pkg,
+            platforms: vec![android(dir.path(), vec![appcompat])],
+            common_sources: None,
+            common_javadoc: None,
+        };
+        let repo = dir.path().join("repo");
+        let staged = publication.stage(&repo).unwrap();
+        assert_eq!(staged.len(), 1, "an Android-only library is one module");
+        assert_eq!(staged[0].module, ModuleId::new("com.acme", "mathlib"));
+        assert_eq!(staged[0].files, ["mathlib-1.2.0.aar", "mathlib-1.2.0-sources.jar", "mathlib-1.2.0.module", "mathlib-1.2.0.pom"]);
+
+        let pom = std::fs::read_to_string(staged[0].dir.join("mathlib-1.2.0.pom")).unwrap();
+        assert!(pom.contains("<packaging>aar</packaging>"), "{pom}");
+        assert!(kargo_maven::pom::Pom::parse(&pom).unwrap().has_gradle_metadata);
+        let module: Value = serde_json::from_str(&std::fs::read_to_string(staged[0].dir.join("mathlib-1.2.0.module")).unwrap()).unwrap();
+        assert!(module["component"].get("url").is_none(), "no root module to point at: {module}");
+        let api = &module["variants"][0];
+        assert_eq!(api["name"], "releaseApiElements-published");
+        assert_eq!(api["attributes"]["org.gradle.usage"], "java-api");
+        assert_eq!(api["attributes"]["org.jetbrains.kotlin.platform.type"], "androidJvm");
+        assert_eq!(api["attributes"]["com.android.build.api.attributes.BuildTypeAttr"], "release");
+        assert_eq!(api["files"][0]["url"], "mathlib-1.2.0.aar");
+        assert_eq!(api["dependencies"][0]["module"], "appcompat");
+        assert_eq!(module["variants"][1]["name"], "releaseRuntimeElements-published");
+    }
+
+    #[test]
+    fn an_android_library_with_more_targets_publishes_an_android_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package();
+        let jvm = PlatformPublication {
+            kind: PlatformKind::Jvm { jvm_version: Some(17) },
+            artifact: file(dir.path(), "classes.jar"),
+            extra: Vec::new(),
+            sources: None,
+            javadoc: None,
+            dependencies: Vec::new(),
+            main_class: None,
+            web_resources: None,
+        };
+        let publication = Publication {
+            group: "com.acme".into(),
+            package: &pkg,
+            platforms: vec![jvm, android(dir.path(), Vec::new())],
+            common_sources: None,
+            common_javadoc: None,
+        };
+        let staged = publication.stage(&dir.path().join("repo")).unwrap();
+        let modules: Vec<&str> = staged.iter().map(|m| m.module.artifact.as_str()).collect();
+        assert_eq!(modules, ["mathlib-jvm", "mathlib-android", "mathlib"]);
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(staged[2].dir.join("mathlib-1.2.0.module")).unwrap()).unwrap();
+        let android = root["variants"].as_array().unwrap().iter().find(|v| v["name"] == "releaseApiElements-published").unwrap();
+        assert_eq!(android["available-at"]["module"], "mathlib-android");
+        assert_eq!(android["attributes"]["org.gradle.jvm.environment"], "android");
     }
 
     #[test]

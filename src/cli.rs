@@ -1836,6 +1836,7 @@ fn build_packages<T: Send>(
     for &index in &order {
         warn_manifest(config.shell(), project, project.package(index));
     }
+    ctx.select(&order);
     let jobs = match resolve_jobs(config, project, packages.jobs) {
         Some(jobs) => jobs.count(),
         None if packages.one_by_default => 1,

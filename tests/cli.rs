@@ -3130,6 +3130,65 @@ fn publish_requires_published_path_dependencies() {
 }
 
 #[test]
+fn publish_takes_android_libraries_but_not_applications() {
+    let p = Project::new();
+    p.file("kargo.toml", &format!("{}\n[target.android]\n", manifest("droid", "group = \"com.acme\"\n")));
+    p.kargo()
+        .args(["publish", "--local"])
+        .env("KARGO_MAVEN_LOCAL", p.path().join("m2"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`droid` is an Android application").and(predicate::str::contains("kind = \"library\"")));
+    // A library is published as an AAR; product flavors are not supported yet.
+    p.file(
+        "kargo.toml",
+        &format!(
+            "{}\n[target.android]\nkind = \"library\"\n[target.android.flavors.free]\ndimension = \"tier\"\n",
+            manifest("droid", "group = \"com.acme\"\n")
+        ),
+    );
+    p.file("android/AndroidManifest.xml", "<manifest/>");
+    p.kargo()
+        .args(["publish", "--local", "--offline"])
+        .env("KARGO_MAVEN_LOCAL", p.path().join("m2"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot publish an Android library with product flavors"));
+}
+
+#[test]
+fn metadata_describes_android_modules() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"ui\"]\n");
+    p.file(
+        "app/kargo.toml",
+        &format!(
+            "{}\n[target.android]\nbuild-config = {{ API = \"https://example.com\" }}\n[dependencies]\nui = {{ path = \"../ui\" }}\n",
+            manifest("app", "group = \"com.acme\"\n")
+        ),
+    );
+    p.file("ui/kargo.toml", &format!("{}\n[target.android]\nkind = \"library\"\nnamespace = \"com.acme.widgets\"\n", manifest("ui", "")));
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let android = |name: &str| {
+        let pkg = json["packages"].as_array().unwrap().iter().find(|p| p["name"] == name).unwrap().clone();
+        pkg["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "android").unwrap()["android"].clone()
+    };
+    let app = android("app");
+    // The namespace comes from `group` and the name when `namespace` is left out.
+    assert_eq!(app["namespace"], "com.acme.app");
+    assert_eq!(app["r-class"], "com.acme.app.R");
+    assert_eq!(app["kind"], "application");
+    assert_eq!(app["library-dependencies"], serde_json::json!(["ui"]));
+    assert_eq!(app["variant"], "debug");
+    let build_config = app["generated-source-roots"][0].as_str().unwrap().replace('\\', "/");
+    assert!(build_config.ends_with("target/android/app/build/generated/source/buildConfig/debug"), "{build_config}");
+    let ui = android("ui");
+    assert_eq!((ui["kind"].as_str(), ui["r-class"].as_str()), (Some("library"), Some("com.acme.widgets.R")));
+    assert_eq!(ui["generated-source-roots"], serde_json::json!([]));
+}
+
+#[test]
 fn metadata_describes_a_workspace_for_editors() {
     let repo = LocalRepo::new();
     repo.publish("g:util", "1.0", &[])

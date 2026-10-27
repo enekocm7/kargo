@@ -68,7 +68,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo audit [-t <target>] [--deny low\|medium\|high\|critical\|none] [--tooling] [--fix] [--format json]` | Check every resolved Maven module and npm package against the [OSV](https://osv.dev) advisory database: a table by severity with the fixed version, the advisory link and the dependency path. Exits with 101 on advisories at or above `--deny` (default `high`) that `[audit] ignore` does not list; `--tooling` adds the compiler and other build tools, `--fix` raises the versions `kargo.toml` declares. The only command that contacts the advisory service; answers are cached for a day and `--offline` uses the cache |
 | `kargo package [--release \| --profile <name>] [-t jvm\|android] [--bin <name>] [--fat] [--optimize] [--format jar\|jlink\|native-image\|installer] [--message-format json] [--desktop [--platforms all]] [-j <n>]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `--release` runs R8 to shrink and obfuscate the JVM jar (`--optimize` opts in for other profiles), writing a retrace mapping and usage report; JSON mode prints its report and artifact path as JSON lines. `--format jlink` builds the jars, a Java runtime trimmed by `jlink` and launchers, which run without an installed Java; `native-image` a GraalVM native executable; `installer` a `jpackage` installer (`.msi`, `.dmg`, `.deb`, ...) for the host OS, all into `target/<profile>/jvm/package/` (see [distributing applications](https://enekocm7.github.io/kargo/guides/distributing/)). `--desktop` packages a [Compose Desktop](https://enekocm7.github.io/kargo/guides/compose/) app: an installer with what Compose needs (signed and notarized on macOS), or with `--format jar --platforms all` a jar that runs on every OS. `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
 | `kargo retrace <mapping.txt> [stacktrace.txt]` | Retrace an R8-obfuscated JVM stack trace; reads stdin if no stack trace file is given |
-| `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
+| `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (jar, klibs or an Android library's AAR, with POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
 | `kargo install --path <dir> \| --git <url> [--tag \| --branch \| --rev] \| <group:artifact[:version]> [--bin <name>] [--format jar\|jlink] [--force] [--list]` | Install a Kotlin command-line tool: build a project (release profile), a git repository or download an application from Maven, and put a launcher in `~/.kargo/bin`. A JVM tool runs its fat jar with the JDK it was built with (`--format jlink`: with a trimmed runtime, so no Java is needed); a Native tool is copied as it is. Every entry point is installed, or the `--bin` ones. `kargo install --force <name>` upgrades it from where it came from, `--list` shows what is installed, `--root <dir>` installs elsewhere (see [installing tools](https://enekocm7.github.io/kargo/guides/installing-tools/)) |
 | `kargo uninstall <name>...` | Remove programs installed with `kargo install` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars (or Javadoc jars, for libraries without sources) for editors, `--tools` the Dokka, ktlint, detekt and R8 tools |
@@ -130,7 +130,7 @@ benches/             common benchmarks for kargo bench (JVM); benches-jvm/ for J
 resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm or JS browser app
 composeResources/    Compose images, fonts, strings and files, read through the generated Res class
 js/                  your own JavaScript and TypeScript modules for Wasm and JS (`js-sources`); Kotlin gets declarations
-android/             AndroidManifest.xml, res/, assets/
+android/             AndroidManifest.xml, res/, assets/, jniLibs/
 interop/             cinterop .def files for C libraries (Kotlin/Native)
 c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
 examples/            example programs: kargo run --example <name>
@@ -228,7 +228,7 @@ pkg-config = "sqlite3"            # flags from sqlite3.pc; link = "static" embed
 #       header-filter, excluded-functions, strict-enums, modules, and platform.<platform> tables
 
 [target.android]
-namespace = "com.example.app"
+namespace = "com.example.app"   # default: <group>.<name>
 min-sdk = 24                # target-sdk = 36, compile-sdk = [toolchain] android-sdk or 37, kind = "application" | "library"
 # agp-version = "9.4.1"     # gradle-version defaults to what AGP needs (9.6.0)
 # minify = true             # R8 for release builds; proguard-files = ["android/proguard-rules.pro"]
@@ -370,7 +370,7 @@ release-notes = "./tools/notes.sh"
 jobs = 2
 ```
 
-A path dependency is built for the consumer's target: a jar for the JVM, a klib for Wasm, JS and Native, and for Android a Gradle subproject (an Android library) or the JVM jar. It brings its own Maven dependencies: the `exported = true` ones (its API) to compile against, the others at runtime only. Test helpers in a package's `test-fixtures/` reach the tests of packages that depend on it with `test-fixtures = true`. `kargo new <dir>` inside a workspace adds the member, and `kargo new --workspace` creates one. Packages built together use one Kotlin version and one JDK.
+A path dependency is built for the consumer's target: a jar for the JVM, a klib for Wasm, JS and Native, and for Android a Gradle subproject (an Android library, built in the same Gradle run as the app that uses it) or the JVM jar. It brings its own Maven dependencies: the `exported = true` ones (its API) to compile against, the others at runtime only. Test helpers in a package's `test-fixtures/` reach the tests of packages that depend on it with `test-fixtures = true`. `kargo new <dir>` inside a workspace adds the member, and `kargo new --workspace` creates one. Packages built together use one Kotlin version and one JDK.
 
 ### Toolchains
 

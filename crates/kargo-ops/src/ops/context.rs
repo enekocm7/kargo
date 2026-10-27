@@ -74,6 +74,11 @@ struct Shared {
     built: Mutex<HashMap<String, Arc<Mutex<Option<BuiltArtifact>>>>>,
     /// The build-directory lock, held until [`BuildContext::unlock`] or drop.
     build_lock: Mutex<Option<FileLock>>,
+    /// The packages the command builds, when it builds several ([`BuildContext::select`]).
+    selected: Mutex<Vec<usize>>,
+    /// Held while Gradle runs: the generated Android builds of one invocation share the build
+    /// directories of their library subprojects.
+    gradle: Mutex<()>,
 }
 
 /// The outcome of building a path dependency: its artifact, or why it failed.
@@ -231,7 +236,7 @@ fn with_profile_dependencies(mut user: Vec<Dependency>, profile: &[Dependency]) 
 }
 
 /// Appends `extra` dependencies unless the user already declared that artifact of the module.
-fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
+pub(crate) fn merge_deps(user: &[Dependency], extra: &[Dependency]) -> Vec<Dependency> {
     let mut out: Vec<Dependency> = user.to_vec();
     for d in extra {
         if !out.iter().any(|u| u.same_artifact(d)) {
@@ -268,6 +273,8 @@ impl<'a> BuildContext<'a> {
                 ksp: Mutex::new(HashMap::new()),
                 built: Mutex::new(HashMap::new()),
                 build_lock: Mutex::new(Some(build_lock)),
+                selected: Mutex::new(Vec::new()),
+                gradle: Mutex::new(()),
             }),
             owner: true,
         })
@@ -288,6 +295,24 @@ impl<'a> BuildContext<'a> {
             shared: self.shared.clone(),
             owner: false,
         }
+    }
+
+    /// Records the packages this invocation builds, so a package can leave work to another one that
+    /// does it anyway (an Android library is built by the Gradle run of the Android package that uses it).
+    pub fn select(&self, packages: &[usize]) {
+        *self.shared.selected.lock().unwrap_or_else(|e| e.into_inner()) = packages.to_vec();
+    }
+
+    /// The packages this invocation builds: the ones given to [`BuildContext::select`], else this package.
+    pub fn selected(&self) -> Vec<usize> {
+        let selected = self.shared.selected.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if selected.is_empty() { vec![self.package] } else { selected }
+    }
+
+    /// Runs `f` while no other package of this invocation runs Gradle.
+    pub fn with_gradle<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.shared.gradle.lock().unwrap_or_else(|e| e.into_inner());
+        f()
     }
 
     /// The artifact of a path dependency built earlier in this invocation, or builds it with `build`.

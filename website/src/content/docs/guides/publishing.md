@@ -123,9 +123,27 @@ com/example/mathlib-jvm/1.0.0/      # mathlib-jvm-1.0.0.jar
 com/example/mathlib-wasm-js/1.0.0/  # mathlib-wasm-js-1.0.0.klib
 com/example/mathlib-js/1.0.0/       # mathlib-js-1.0.0.klib (Kotlin/JS)
 com/example/mathlib-linuxx64/1.0.0/ # mathlib-linuxx64-1.0.0.klib, cinterop klibs
+com/example/mathlib-android/1.0.0/  # mathlib-android-1.0.0.aar, with [target.android] kind = "library"
 ```
 
 Consumers depend on the root module, `com.example:mathlib`. Its [Gradle module metadata](https://docs.gradle.org/current/userguide/publishing_gradle_module_metadata.html) (`.module`) sends each platform to its own module, so Kargo and Gradle pick the jar or klib that matches the target they build. Each platform module has its own sources jar (`commonMain/` and the platform's directory), javadoc jar, POM and `.module`. [cinterop](../native/#using-c-libraries) bindings are published next to the klib with the classifier `cinterop-<name>`. A Wasm library's [web resources](../wasm/#web-resources-from-libraries) go next to its klib as a zip with the classifier `web-resources`, announced by the `kargo.web-resources` and `kargo.web-init` properties of its POM.
+
+### Android libraries
+
+An Android library (`[target.android]` with `kind = "library"`) is published as the AAR of its release build, which Gradle assembles: classes, resources, its `AndroidManifest.xml`, assets, its `consumer-proguard-files` and JNI libraries. A library with only the Android target is one module, like AGP publishes one:
+
+```text
+com/example/ui/1.0.0/
+├── ui-1.0.0.aar
+├── ui-1.0.0-sources.jar          # src/ and src-android/
+├── ui-1.0.0-javadoc.jar
+├── ui-1.0.0.module               # releaseApiElements and releaseRuntimeElements
+└── ui-1.0.0.pom                  # <packaging>aar</packaging>
+```
+
+With more targets, it is the `<name>-android` module of a [multiplatform library](#multiplatform-libraries). Either way, the `.module` describes the release variant with the attributes AGP and the Kotlin Gradle Plugin use (`com.android.build.api.attributes.BuildTypeAttr = release`, `org.jetbrains.kotlin.platform.type = androidJvm`), so Gradle builds of Android apps pick the AAR, and a JVM consumer of a multiplatform library keeps its jar.
+
+Gradle resolves Android dependencies, not Kargo, so the POM lists the `[dependencies]` and `[target.android.dependencies]` with the versions `kargo.toml` declares. A dependency without a version (one a BOM manages) is left out with a warning. Path dependencies are published under their own coordinates: `<name>-android` for a multiplatform library with an Android target, its JVM module otherwise. An Android application is not published (`kargo package` builds its APK and App Bundle), nor yet a library with product flavors.
 
 ## JVM shrinking and obfuscation
 
@@ -144,7 +162,7 @@ Add keep rules for reflective entry points. The mapping file is needed to retrac
 Native platforms are published for the `platforms` of `[target.native]`, and each one has to be built on a machine that can compile for it (Apple targets on macOS).
 
 :::caution
-Kargo doesn't publish the common metadata variant yet. Gradle multiplatform projects can use a Kargo-published library from their platform source sets (`jvmMain`, `wasmJsMain`, `jsMain`, ...), but not from `commonMain`. The Android target is not published.
+Kargo doesn't publish the common metadata variant yet. Gradle multiplatform projects can use a Kargo-published library from their platform source sets (`jvmMain`, `androidMain`, `wasmJsMain`, `jsMain`, ...), but not from `commonMain`.
 :::
 
 ### Sources and javadoc

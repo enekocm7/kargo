@@ -335,7 +335,7 @@ A file sees the declarations Kargo compiles it with:
 | `tests-<target>/` | `src/`, `src-<target>/`, `tests/` and `tests-<target>/` |
 | `examples/` | `src/` |
 
-A package also sees the main code of its [path dependencies](../workspaces/), and theirs, without its `internal` declarations: those are visible only inside their own package, in all its source sets. Test fixtures count as test code. With [Compose resources](../compose/#resources), the generated `Res` class counts as code in `src/`. `kargo metadata` writes it when the server loads the project, and every build updates it. A Kotlin file outside the source roots, open in the editor, sees the main code of every package.
+A package also sees the main code of its [path dependencies](../workspaces/), and theirs, without its `internal` declarations: those are visible only inside their own package, in all its source sets. Test fixtures count as test code. With [Compose resources](../compose/#resources), the generated `Res` class counts as code in `src/`. `kargo metadata` writes it when the server loads the project, and every build updates it. The `BuildConfig` class AGP generates for an [Android](../android/#build-config-fields) package counts as code in `src-android/`, once a `kargo build -t android` wrote it. A Kotlin file outside the source roots, open in the editor, sees the main code of every package.
 
 So in a [multiplatform](../multiplatform/) package, common code in `src/` completes and navigates to the `expect` declarations, and `src-jvm/` sees both sides. Code in `src-wasm/`, `src-js/` and `src-native/` gets the same completion, navigation and rename as JVM code, against your sources and the standard library.
 
