@@ -263,7 +263,25 @@ kargo tree -c test               # test classpath
 kargo tree -t wasm               # another target
 kargo tree --depth 1             # direct dependencies only
 kargo tree --duplicates          # only modules requested in more than one version
+kargo tree --invert g:util       # what depends on g:util, up to kargo.toml
 ```
+
+### Why is this version here?
+
+`kargo why` answers the question `kargo tree` can't: why a module is on the classpath, and why at that version.
+
+```console
+$ kargo why g:util
+g:util:2.0 (jvm, runtime)
+  selected 2.0, the highest version requested
+  requested:
+    1.0 -> 2.0  by g:left:1.0 (highest wins)
+    2.0         by g:right:1.0
+  path:
+    app v0.1.0 -> g:left:1.0 -> g:util:2.0
+```
+
+It lists every version that was asked for and by whom (your `kargo.toml`, another module, a BOM, a platform, a Gradle module metadata constraint, a relocation), says what decided between them (the highest wins, `force = true`, a version range, or a version `kargo.lock` keeps), and shows the shortest path from `kargo.toml` to the module (`--all-paths` for every one). Use `-t` and `-c` to pick the target and classpath, as with `kargo tree`, and `--format json` for scripts. To change the outcome, declare the module yourself at the version you want (the highest still wins), or with `force = true` to go lower. See [`kargo why`](../../reference/commands/#kargo-why).
 
 ## Dependencies of one profile
 

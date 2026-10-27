@@ -1,6 +1,6 @@
 ---
 title: Machine-readable output
-description: JSON output for compiler diagnostics, test discovery and test results, kargo metadata, kargo info and kargo tree, and JUnit XML test reports, for editors, scripts and CI.
+description: JSON output for compiler diagnostics, test discovery and test results, kargo metadata, kargo info, kargo tree and kargo why, and JUnit XML test reports, for editors, scripts and CI.
 ---
 
 Kargo's normal output is for people. Editors, scripts and CI systems can ask for stable, machine-readable formats instead:
@@ -13,6 +13,7 @@ Kargo's normal output is for people. Editors, scripts and CI systems can ask for
 | Each test's result as it runs, for a test explorer | `kargo test --message-format json` |
 | Project metadata | `kargo info --format json` |
 | The resolved dependency graph | `kargo tree --format json` |
+| Why a module and its version are on the classpath | `kargo why <module> --format json` |
 | Per-test results for CI | `kargo test --report junit` |
 
 JSON goes to stdout. Kargo's status lines (`Compiling`, `Finished`, ...) stay on stderr, so you can pipe stdout straight into a JSON parser.
@@ -351,7 +352,43 @@ $ kargo tree --format json
 
 There is one entry in `trees` per target (one per platform for Native), for the configuration chosen with `-c` (`runtime` by default). Instead of a nested tree, `modules` lists every resolved module once, in classpath order, with its direct dependencies. Each dependency gives the version that was `requested` and the `version` that was selected, so conflicts show as a difference between the two. `files` are the downloaded artifacts in Kargo's cache.
 
-`--format json` can't be combined with `--depth` or `--duplicates`.
+`--format json` can't be combined with `--depth`, `--duplicates` or `--invert`; `kargo why --format json --all-paths` gives the paths to one module.
+
+## `kargo why --format json`
+
+```console
+$ kargo why g:util --format json
+{
+  "configuration": "runtime",
+  "module": "g:util",
+  "package": { "name": "app", "version": "0.1.0" },
+  "results": [
+    {
+      "target": "jvm",
+      "module": "g:util",
+      "version": "2.0",
+      "reason": { "kind": "highest" },
+      "requests": [
+        { "version": "1.0", "selected": false, "from": { "kind": "dependency", "module": "g:left", "version": "1.0" } },
+        { "version": "2.0", "selected": true, "from": { "kind": "dependency", "module": "g:right", "version": "1.0" } }
+      ],
+      "paths": [["g:left:1.0", "g:util:2.0"]],
+      "truncated": false
+    }
+  ]
+}
+```
+
+`results` has one entry per resolution that has the module: `jvm`, `wasm-js`, `js`, `native-<platform>`. Several packages print an array with one document per package.
+
+| Field | Meaning |
+|---|---|
+| `version` | The version on the classpath |
+| `reason.kind` | `highest`, `forced`, `range` (with the `ranges`), `pinned`, or `locked` when `kargo.lock` holds a version that resolving again would not pick; then `fresh-version` and `fresh-reason` say which one and why |
+| `requests` | Every version asked for: `version` as written (a range stays a range), whether it is the `selected` one, and `from` |
+| `from.kind` | `project` (with `force`), `dependency`, `relocation`, `variant`, `constraint` (each with the `module` and `version` that asked), `platform` (also with the `platform` and `platform-version`) or `bom` (the BOM's `module` and `version`) |
+| `paths` | Each path from a dependency in `kargo.toml` to the module, as `group:artifact:version`: the shortest one, or all of them (at most 100) with `--all-paths` |
+| `truncated` | Whether there were more paths than were listed |
 
 ## JUnit XML test reports
 

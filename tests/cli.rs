@@ -643,6 +643,125 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
 }
 
 #[test]
+fn why_and_tree_invert_explain_versions() {
+    // A diamond (`left` and `right` both bring `util`, in different versions), a module whose
+    // version a BOM manages, and one `force`d below what a dependency asks for.
+    let repo = LocalRepo::new();
+    repo.publish("g:left", "1.0", &[("g:util", "1.0")])
+        .publish("g:right", "1.0", &[("g:util", "2.0"), ("g:pinned", "3.0")])
+        .publish("g:util", "1.0", &[])
+        .publish("g:util", "2.0", &[])
+        .publish("g:pinned", "1.0", &[])
+        .publish("g:pinned", "3.0", &[])
+        .publish("g:managed", "5.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    repo.write(
+        "g/bom/1.0/bom-1.0.pom",
+        "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>bom</artifactId><version>1.0</version><packaging>pom</packaging>\
+         <dependencyManagement><dependencies><dependency><groupId>g</groupId><artifactId>managed</artifactId><version>5.0</version></dependency>\
+         </dependencies></dependencyManagement></project>",
+    );
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "whyapp",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:left\" = \"1.0\"\n\"g:right\" = \"1.0\"\n\
+                 \"g:pinned\" = {{ version = \"1.0\", force = true }}\n\"g:managed\" = {{}}\n\
+                 platform = {{ coords = \"g:bom\", version = \"1.0\", bom = true }}\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    let stdout = |args: &[&str]| -> String {
+        let out = p.kargo().args(args).arg("--offline").assert().success().get_output().stdout.clone();
+        String::from_utf8(out).unwrap()
+    };
+
+    let tree = stdout(&["tree", "--invert", "g:util"]);
+    let expected = "\
+g:util:2.0
+├── g:left:1.0 (requests g:util:1.0)
+│   └── whyapp v0.1.0 (jvm)
+└── g:right:1.0
+    └── whyapp v0.1.0 (jvm)
+";
+    assert_eq!(tree, expected);
+    // A rejected version is found too; one nothing asked for is not.
+    assert_eq!(stdout(&["tree", "-i", "g:util:1.0"]), expected);
+    p.kargo()
+        .args(["tree", "-i", "g:util:9.9", "--offline"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`g:util:9.9` is not in the runtime dependencies"));
+    p.kargo().args(["tree", "-i", "g:util", "--format", "json"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+
+    let why = stdout(&["why", "g:util"]);
+    let expected = "\
+g:util:2.0 (jvm, runtime)
+  selected 2.0, the highest version requested
+  requested:
+    1.0 -> 2.0  by g:left:1.0 (highest wins)
+    2.0         by g:right:1.0
+  path:
+    whyapp v0.1.0 -> g:left:1.0 -> g:util:2.0
+";
+    assert_eq!(why, expected);
+    let all = stdout(&["why", "g:util", "--all-paths"]);
+    assert!(
+        all.contains("  paths:\n    whyapp v0.1.0 -> g:left:1.0 -> g:util:2.0\n    whyapp v0.1.0 -> g:right:1.0 -> g:util:2.0\n"),
+        "{all}"
+    );
+
+    let why = stdout(&["why", "g:pinned"]);
+    assert!(why.contains("selected 1.0, forced in kargo.toml (`force = true`)"), "{why}");
+    assert!(why.contains("1.0         by kargo.toml (force = true)"), "{why}");
+    assert!(why.contains("3.0 -> 1.0  by g:right:1.0 (force wins)"), "{why}");
+
+    let why = stdout(&["why", "g:managed"]);
+    assert!(why.contains("selected 5.0, the only version requested"), "{why}");
+    assert!(why.contains("5.0  by BOM g:bom:1.0"), "{why}");
+
+    let out = stdout(&["why", "g:util", "--format", "json"]);
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["package"]["name"], "whyapp");
+    assert_eq!(json["module"], "g:util");
+    let result = &json["results"][0];
+    assert_eq!(result["target"], "jvm");
+    assert_eq!(result["version"], "2.0");
+    assert_eq!(result["reason"], serde_json::json!({"kind": "highest"}));
+    assert_eq!(
+        result["requests"][0],
+        serde_json::json!({"version": "1.0", "selected": false, "from": {"kind": "dependency", "module": "g:left", "version": "1.0"}})
+    );
+    assert_eq!(result["paths"], serde_json::json!([["g:left:1.0", "g:util:2.0"]]));
+
+    // The lock keeps a version a fresh resolution no longer picks: `why` says so.
+    let lock = p.read("kargo.lock");
+    repo.publish("g:util", "2.5", &[]);
+    repo.publish("g:right", "1.0", &[("g:util", "2.5"), ("g:pinned", "3.0")]);
+    std::fs::remove_dir_all(p.home.path().join("cache")).unwrap();
+    p.file("kargo.lock", &lock);
+    let why = stdout(&["why", "g:util"]);
+    assert!(
+        why.contains(
+            "selected 2.0, locked in kargo.lock; resolving again picks 2.5, the highest version requested (run `kargo update g:util`)"
+        ),
+        "{why}"
+    );
+
+    p.kargo()
+        .args(["why", "g:absent", "--offline"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`g:absent` is not in the runtime dependencies"));
+    p.kargo().args(["why", "nonsense", "--offline"]).assert().failure().stderr(predicate::str::contains("expected `group:artifact`"));
+}
+
+#[test]
 fn classifier_dependencies_keep_both_jars() {
     // Native libraries are declared twice: the module, and its classifier jar. Both belong on the
     // runtime classpath and in kargo.lock, and neither may replace the other.
@@ -967,6 +1086,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "update",
         "fetch",
         "tree",
+        "why",
         "clean",
         "package",
         "publish",

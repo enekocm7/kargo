@@ -144,7 +144,7 @@ kargo test
 kargo tree      # compare with ./gradlew dependencies --configuration runtimeClasspath
 ```
 
-Kargo resolves conflicts like Gradle (highest version wins), so the trees should match. If something differs, pin it with `force = true`.
+Kargo resolves conflicts like Gradle (highest version wins), so the trees should match. If something differs, `kargo why <group:artifact>` shows who asks for which version and what decided, as `dependencyInsight` does; pin it with `force = true`.
 
 ## Reference: Gradle → Kargo
 
@@ -224,6 +224,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | extra `JavaExec` tasks for other mains | `[[bin]]` and `kargo run --bin <name>`, or `kargo run --main <class>` |
 | `./gradlew test --tests "*Foo*"` | `kargo test Foo` |
 | `./gradlew dependencies` | `kargo tree` |
+| `./gradlew dependencyInsight --dependency <module>` | `kargo why <group:artifact>` (or `kargo tree --invert <group:artifact>`) |
 | `./gradlew dependencyUpdates` (Versions plugin) | `kargo outdated`, then `kargo upgrade` |
 | `./gradlew dependencies --update-locks g:a` | `kargo update g:a` |
 | `./gradlew dokkaGenerate` (Dokka plugin) | `kargo doc` |
