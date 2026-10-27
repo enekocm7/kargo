@@ -1116,6 +1116,19 @@ Each check is `ok`, a `warning` (something to know, or a build that will downloa
 | `--format <fmt>` | `text` (default) or `json`: `{ "version", "errors", "warnings", "checks": [{ "section", "name", "status", "message", "fix", "fixable" }], "fixed" }` |
 | `--bug-report` | Print the report as a Markdown code block to paste into a bug report, with your home directory shortened to `~` |
 
+## `kargo version`
+
+Print the version of Kargo, like [`kargo --version`](#global-flags). It never reads a project. With `-v`, it also prints the release and the target the binary was built for. When a newer release exists, a note on stderr says so, at most once a day (see [`kargo self`](#kargo-self)).
+
+```console
+$ kargo version
+kargo 0.1.2
+$ kargo -v version
+kargo 0.1.2
+release: 0.1.2
+host: x86_64-unknown-linux-gnu
+```
+
 ## `kargo info`
 
 Print project information: package, targets, path dependencies, repositories and paths. A repository that a [mirror](../../guides/offline-and-mirrors/#repository-mirrors) or `--vendored` replaces shows where it is fetched from (`maven-central (via https://nexus.corp/central)`), and a `config:` line lists the [configuration files](../../guides/offline-and-mirrors/#configuration-files) Kargo read. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.

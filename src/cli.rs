@@ -1489,6 +1489,8 @@ Each check is ok, a warning or an error, with a one-line fix. Exits with 1 when 
         #[arg(long, conflicts_with = "format")]
         bug_report: bool,
     },
+    /// Print the Kargo version (with -v, also the release and the target it was built for)
+    Version,
     /// Print project information
     Info {
         /// Output format
@@ -1605,8 +1607,17 @@ fn wants_version(args: &[std::ffi::OsString]) -> bool {
 /// `kargo --version`: the version on stdout like clap prints it, then, on stderr, a note when a newer release exists (at most
 /// once a day; see `KARGO_NO_UPDATE_CHECK`).
 fn print_version(args: &[std::ffi::OsString]) {
+    let offline =
+        args.iter().any(|a| a == "--offline") || std::env::var("KARGO_OFFLINE").is_ok_and(|v| !v.is_empty() && v != "0" && v != "false");
+    let verbose = args.iter().any(|a| a == "-vV" || a == "-v" || a == "--verbose");
+    let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
+    show_version(verbose, quiet, offline);
+}
+
+/// The output of `kargo --version` and `kargo version`.
+fn show_version(verbose: bool, quiet: bool, offline: bool) {
     println!("kargo {}", env!("CARGO_PKG_VERSION"));
-    if args.iter().any(|a| a == "-vV" || a == "-v" || a == "--verbose") {
+    if verbose {
         println!(
             "release: {}
 host: {}",
@@ -1614,9 +1625,7 @@ host: {}",
             ops::self_update::TARGET
         );
     }
-    let offline =
-        args.iter().any(|a| a == "--offline") || std::env::var("KARGO_OFFLINE").is_ok_and(|v| !v.is_empty() && v != "0" && v != "false");
-    let verbosity = if args.iter().any(|a| a == "-q" || a == "--quiet") { Verbosity::Quiet } else { Verbosity::Normal };
+    let verbosity = if quiet { Verbosity::Quiet } else { Verbosity::Normal };
     let shell = Shell::new(verbosity);
     if verbosity == Verbosity::Quiet {
         return;
@@ -3180,6 +3189,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (FormatArg::Json, Some(index)) => println!("{}", serde_json::to_string_pretty(&info_json(config, project.package(index)))?),
                 (FormatArg::Json, None) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(&project))?),
             }
+            Ok(0)
+        }
+        Command::Version => {
+            show_version(global.verbose, global.quiet, global.offline);
             Ok(0)
         }
         Command::Doctor { fix, format, bug_report } => {
