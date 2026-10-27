@@ -25,7 +25,11 @@ use super::syntax::{Decl, DeclId, File, InitKind, Kind, TypeRef};
 use crate::text;
 
 /// The kinds of code actions the server offers.
-pub const KINDS: &[&str] = &["quickfix", "source.organizeImports", refactor::EXTRACT, refactor::INLINE, refactor::REWRITE, refactor::MOVE];
+pub const KINDS: &[&str] =
+    &["quickfix", "source.organizeImports", FORMAT, refactor::EXTRACT, refactor::INLINE, refactor::REWRITE, refactor::MOVE];
+
+/// The kind of the "Run `kargo fmt` on file" action, which the server adds (it needs the formatter).
+pub const FORMAT: &str = "source.format";
 
 /// The body of the stubs the actions write.
 const TODO: &str = "TODO(\"Not yet implemented\")";

@@ -270,3 +270,81 @@ fn operator_hints(an: &Analyzer, u: UnitId, out: &mut Vec<Hint>) {
         out.push(Hint { offset, label, kind: PARAMETER, padding_left: true, padding_right: false });
     }
 }
+
+/// The `textDocument/inlineValue` of a debugging session stopped at `stopped`: a variable
+/// lookup for each use of a parameter or local of the enclosing function, from the function's
+/// start to the end of the stopped line, within `range`. The editor shows each value the debug
+/// adapter has for the name.
+pub fn inline_values(file: &super::syntax::File, src: &str, range: Range<usize>, stopped: Range<usize>) -> Value {
+    let lx = &file.lexed;
+    let mut names: Vec<(&str, usize)> = Vec::new();
+    let mut from = None;
+    for scope in file.scope_chain(stopped.start) {
+        let s = &file.scopes[scope];
+        if matches!(s.kind, ScopeKind::Class(_) | ScopeKind::File) {
+            break;
+        }
+        for &id in &s.decls {
+            let d = &file.decls[id];
+            if matches!(d.kind, Kind::Parameter | Kind::Variable) && !d.name.is_empty() {
+                names.push((d.name.as_str(), d.name_span.start));
+            }
+        }
+        from = Some(s.range.start);
+        if matches!(s.kind, ScopeKind::Function(_)) {
+            break;
+        }
+    }
+    let Some(from) = from else { return json!([]) };
+    // A function's parameters come before its body scope.
+    let from = names.iter().map(|(_, at)| *at).min().map_or(from, |at| at.min(from)).max(range.start);
+    let until = src[stopped.end.min(src.len())..].find('\n').map_or(src.len(), |i| stopped.end + i).min(range.end);
+    let line_of_stop = src[..stopped.start.min(src.len())].rfind('\n').map_or(0, |i| i + 1);
+    let mut out = Vec::new();
+    for i in lx.at_or_after(from)..lx.tokens.len() {
+        let t = &lx.tokens[i];
+        if t.start >= until {
+            break;
+        }
+        if t.kind != Tok::Ident || (i > 0 && matches!(lx.tokens[i - 1].kind, Tok::Dot | Tok::SafeDot | Tok::ColonColon)) {
+            continue;
+        }
+        let name = lx.text(src, i);
+        // A variable declared on the stopped line has no value yet.
+        if names.iter().any(|(n, at)| *n == name && *at <= t.start && *at < line_of_stop) {
+            out.push(json!({ "range": text::range(src, t.span()), "variableName": name, "caseSensitiveLookup": true }));
+        }
+    }
+    json!(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kotlin::syntax::parse;
+
+    #[test]
+    fn looks_up_the_locals_and_parameters_up_to_the_stopped_line() {
+        let src = "class A(val field: Int) {\n    fun sum(a: Int, b: Int): Int {\n        val c = a + b\n        val d = c * field\n        return d + a.inc()\n    }\n}\n";
+        let file = parse(src);
+        let stop = src.find("val d").unwrap();
+        let values = inline_values(&file, src, 0..src.len(), stop..stop);
+        let found: Vec<(String, usize)> = values
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| (v["variableName"].as_str().unwrap().to_owned(), text::offset(src, &v["range"]["start"])))
+            .collect();
+        let line = src.find("val c").unwrap();
+        let expected = vec![
+            ("a".to_owned(), src.find("a: Int").unwrap()),
+            ("b".to_owned(), src.find("b: Int").unwrap()),
+            ("c".to_owned(), line + 4),
+            ("a".to_owned(), line + 8),
+            ("b".to_owned(), line + 12),
+            ("c".to_owned(), stop + 8),
+        ];
+        // `field` is a property, not a local; `d` has no value yet; nothing past the stopped line.
+        assert_eq!(found, expected, "{values}");
+    }
+}

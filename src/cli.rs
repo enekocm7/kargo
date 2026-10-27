@@ -1409,6 +1409,9 @@ whenever kargo.toml or kargo.lock change.")]
         /// Also describe Wasm and Native sources to the Kotlin LSP (it doesn't read klibs yet, so their libraries don't resolve)
         #[arg(long)]
         klib_targets: bool,
+        /// Append each message from the editor to this file, with how long each request took to answer
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<PathBuf>,
         /// Accepted for editors that pass it; Kargo always talks over stdio
         #[arg(long, hide = true)]
         stdio: bool,
@@ -2773,7 +2776,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Lsp { server, server_path, klib_targets, stdio: _ } => {
+        Command::Lsp { server, server_path, klib_targets, log_file, stdio: _ } => {
             // A server executable is JetBrains' Kotlin LSP unless `--server` says otherwise.
             let server = server.unwrap_or(if server_path.is_some() { LspServerArg::KotlinLsp } else { LspServerArg::Kargo });
             let server = match server {
@@ -2786,7 +2789,8 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 bail!("`--server-path` runs a Kotlin language server Kargo downloads; use `--server kotlin-lsp` or `--server kls` with it");
             }
             let targets = if klib_targets { kargo_lsp::project::Targets::All } else { kargo_lsp::project::Targets::Jvm };
-            let opts = kargo_lsp::Options { server, server_path, targets, builtin_commands: builtin_commands(), search_url: None };
+            let opts =
+                kargo_lsp::Options { server, server_path, targets, builtin_commands: builtin_commands(), search_url: None, log_file };
             let clean = kargo_lsp::run(config.clone(), opts)?;
             Ok(if clean { 0 } else { 1 })
         }

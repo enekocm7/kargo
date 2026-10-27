@@ -33,7 +33,7 @@ use super::index::{Index, Origin, Platforms, SetKind, SourceSet, Unit, UnitId};
 use super::jdk::Jdk;
 use super::library::{self, CompiledLibrary, SourcesJar, UnitCache};
 use super::resolve::{Analyzer, Packages};
-use super::{hierarchy, inlay, ranges, rename, semantic};
+use super::{editing, hierarchy, inlay, links, ranges, rename, semantic, testing};
 use crate::jsonrpc::{self, Kind};
 use crate::{check, text};
 
@@ -86,6 +86,9 @@ enum Event {
         uri: String,
         original: String,
         outcome: anyhow::Result<Option<String>>,
+        /// Asked by the `kargo/formatFile` command: the server applies the edit with
+        /// `workspace/applyEdit` and answers the command with `null`.
+        apply: bool,
     },
     /// The dependencies of the Kargo script at `path`, declared as `declared`, resolved against the
     /// libraries of generation `generation`: `index` holds those libraries with the script's own, or
@@ -1030,7 +1033,7 @@ impl Hub {
         if method == "workspace/symbol" && self.live().len() > 1 {
             return self.search_symbols(message);
         }
-        let uri = [&params["textDocument"]["uri"], &params["item"]["uri"], &params["files"][0]["oldUri"]]
+        let uri = [&params["textDocument"]["uri"], &params["item"]["uri"], &params["files"][0]["oldUri"], &params["arguments"][0]["uri"]]
             .into_iter()
             .find_map(Value::as_str)
             .map(str::to_owned);
@@ -1103,6 +1106,12 @@ impl Hub {
                 }
             }
             "workspace/didChangeWorkspaceFolders" => self.folders_changed(params)?,
+            // A renamed file may move between projects; each takes out and reads what is its own.
+            "workspace/didRenameFiles" | "workspace/didDeleteFiles" => {
+                for state in self.states.iter_mut().flatten() {
+                    state.message(message.clone())?;
+                }
+            }
             "workspace/didChangeWatchedFiles" => {
                 let mut by_project: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
                 for change in params["changes"].as_array().into_iter().flatten() {
@@ -1209,6 +1218,10 @@ struct State {
     searches: HashMap<String, Arc<AtomicBool>>,
     /// Whether `workspace/symbol` results may leave out ranges for `workspaceSymbol/resolve`.
     symbol_resolve: bool,
+    /// Whether the editor applies `workspace/applyEdit`, which the `kargo/formatFile` command needs.
+    apply_edit: bool,
+    /// `initializationOptions.status`: send `kargo/status` notifications.
+    status: bool,
     /// The modification time of each file the last scans read, so a scan reads only changed files.
     stamps: HashMap<PathBuf, SystemTime>,
     /// The TypeScript files of the JavaScript sources the last scan found, with their modification times.
@@ -1275,6 +1288,8 @@ impl State {
             formatter,
             searches: HashMap::new(),
             symbol_resolve: false,
+            apply_edit: false,
+            status: false,
             stamps: HashMap::new(),
             typescript_stamps: HashMap::new(),
             rescanning: false,
@@ -1318,7 +1333,10 @@ impl State {
                     self.generation += 1;
                 }
             }
-            Event::Loaded { generation } if generation == self.load_generation => self.end_loading(),
+            Event::Loaded { generation } if generation == self.load_generation => {
+                self.end_loading();
+                self.status("indexing", false);
+            }
             Event::Fetching { generation, modules } => {
                 self.end_loading();
                 self.end_progress(None);
@@ -1328,16 +1346,26 @@ impl State {
             Event::Fetched { generation, found } if self.progress.as_ref().is_some_and(|p| p.generation == generation) => {
                 self.end_progress(Some(format!("{found} sources or Javadoc jar{}", if found == 1 { "" } else { "s" })));
             }
-            Event::Formatted { id, uri, original, outcome } => {
+            Event::Formatted { id, uri, original, outcome, apply } => {
                 let current = self.open.get(&uri).and_then(|p| self.files.get(p)).map(|u| u.text.as_str());
                 let reply = if current != Some(original.as_str()) {
                     // The edit would apply to text that is gone.
                     jsonrpc::error(&id, CONTENT_MODIFIED, "the document changed while it was being formatted")
                 } else {
                     match outcome {
+                        Ok(Some(formatted)) if apply => {
+                            if let Some(edit) = text::edit(&original, &formatted) {
+                                self.next_id += 1;
+                                let request_id = format!("kotlin/{}/{}", self.index, self.next_id);
+                                let params = json!({ "label": "kargo fmt", "edit": { "changes": { uri: [edit] } } });
+                                let _ = self.send(&jsonrpc::request(&request_id, "workspace/applyEdit", params));
+                            }
+                            jsonrpc::response(&id, Value::Null)
+                        }
                         Ok(Some(formatted)) => {
                             jsonrpc::response(&id, json!(text::edit(&original, &formatted).into_iter().collect::<Vec<_>>()))
                         }
+                        Ok(None) if apply => jsonrpc::response(&id, Value::Null),
                         Ok(None) => jsonrpc::response(&id, json!([])),
                         Err(e) => jsonrpc::error(&id, REQUEST_FAILED, format!("{e:#}")),
                     }
@@ -1472,6 +1500,7 @@ impl State {
         self.load_generation += 1;
         self.end_loading();
         self.loading = self.start_progress(self.load_generation, "load", "Loading Kotlin project", "reading the sources".to_owned());
+        self.status("indexing", true);
         let (config, tx, cache, generation, options) =
             (self.config.clone(), self.tx.clone(), Arc::clone(&self.cache), self.load_generation, self.load_options.clone());
         thread::spawn(move || load(config, root, generation, tx, cache, options));
@@ -1527,6 +1556,16 @@ impl State {
                         self.rescan();
                     }
                 }
+                "workspace/didRenameFiles" | "workspace/didDeleteFiles" => {
+                    let files = params["files"].as_array().map(Vec::as_slice).unwrap_or_default();
+                    let path = |file: &Value, key: &str| file[key].as_str().and_then(file_path);
+                    let (removed, added): (Vec<PathBuf>, Vec<PathBuf>) = if method == "workspace/didRenameFiles" {
+                        (files.iter().filter_map(|f| path(f, "oldUri")).collect(), files.iter().filter_map(|f| path(f, "newUri")).collect())
+                    } else {
+                        (files.iter().filter_map(|f| path(f, "uri")).collect(), Vec::new())
+                    };
+                    self.files_moved(&removed, &added);
+                }
                 "textDocument/didClose" => {
                     let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
                     if let Some(path) = self.open.remove(uri) {
@@ -1575,7 +1614,13 @@ impl State {
             Kind::Request => {
                 let id = message["id"].clone();
                 if method == "textDocument/formatting" {
-                    self.format(id, params)?;
+                    let uri = params["textDocument"]["uri"].as_str().unwrap_or_default().to_owned();
+                    self.format(id, uri, false)?;
+                    return Ok(true);
+                }
+                if method == "workspace/executeCommand" && params["command"] == FORMAT_COMMAND {
+                    let uri = params["arguments"][0]["uri"].as_str().unwrap_or_default().to_owned();
+                    self.format(id, uri, true)?;
                     return Ok(true);
                 }
                 if matches!(
@@ -1598,16 +1643,59 @@ impl State {
 
     /// Formats an open document with ktlint on a worker thread, which answers when it is done.
     /// The JVM takes a while to start, and the other requests must not wait for it.
-    fn format(&mut self, id: Value, params: &Value) -> anyhow::Result<()> {
-        let uri = params["textDocument"]["uri"].as_str().unwrap_or_default().to_owned();
+    /// With `apply` (the `kargo/formatFile` command), the server applies the edit itself.
+    fn format(&mut self, id: Value, uri: String, apply: bool) -> anyhow::Result<()> {
         let open = self.open.get(&uri).and_then(|path| self.files.get(path).map(|unit| (path.clone(), unit.text.clone())));
         let Some((path, original)) = open else { return self.send(&jsonrpc::response(&id, Value::Null)) };
         let (config, tx, formatter) = (self.config.clone(), self.tx.clone(), Arc::clone(&self.formatter));
         thread::spawn(move || {
             let outcome = formatter(&config, &path, &original);
-            let _ = tx.send(Event::Formatted { id, uri, original, outcome });
+            let _ = tx.send(Event::Formatted { id, uri, original, outcome, apply });
         });
         Ok(())
+    }
+
+    /// Sends `kargo/status` for `task` (`indexing`), when the editor asked for it.
+    fn status(&mut self, task: &str, active: bool) {
+        if self.status {
+            let _ = self.send(&jsonrpc::notification("kargo/status", json!({ "task": task, "active": active })));
+        }
+    }
+
+    /// Takes files the editor renamed or deleted out of the index at once, and reads the new
+    /// ones, without waiting for the file watcher. A path may be a directory.
+    fn files_moved(&mut self, removed: &[PathBuf], added: &[PathBuf]) {
+        let gone: Vec<PathBuf> = self
+            .files
+            .keys()
+            .filter(|path| removed.iter().any(|r| path.starts_with(r)))
+            .filter(|path| !self.open.values().any(|open| open == *path))
+            .cloned()
+            .collect();
+        for path in gone {
+            self.files.remove(&path);
+            self.stamps.remove(&path);
+            self.changed();
+        }
+        let mut found = Vec::new();
+        for path in added {
+            if path.is_dir() {
+                for entry in walkdir::WalkDir::new(path).into_iter().flatten().filter(|e| e.file_type().is_file()) {
+                    found.push(entry.into_path());
+                }
+            } else {
+                found.push(path.clone());
+            }
+        }
+        for path in found {
+            let source = path.extension().is_some_and(|e| e == "kt" || e == "java");
+            if !source || self.open.values().any(|open| *open == path) || self.model.origin(&path) == Origin::Loose {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                self.set_file(path, text);
+            }
+        }
     }
 
     /// Answers a references or rename request on a worker thread: the search resolves every
@@ -1711,6 +1799,24 @@ impl State {
         } else {
             self.changed();
         }
+    }
+
+    /// Where the strings of the file at `path` name files from, for its document links: the
+    /// file's directory, and the directory of its package with that package's `resources/`.
+    fn link_bases(&self, path: &Path) -> Vec<PathBuf> {
+        let mut bases: Vec<PathBuf> = path.parent().map(Path::to_path_buf).into_iter().collect();
+        let package = self
+            .model
+            .manifests
+            .iter()
+            .filter_map(|m| m.parent())
+            .filter(|dir| path.starts_with(dir))
+            .max_by_key(|dir| dir.as_os_str().len());
+        if let Some(dir) = package.map(Path::to_path_buf).or_else(|| self.root.clone()) {
+            bases.push(dir.join("resources"));
+            bases.push(dir);
+        }
+        bases
     }
 
     /// The libraries the file at `path` sees: the project's, and those of a Kargo script's own
@@ -2048,7 +2154,15 @@ impl State {
                     document_changes: self.document_changes,
                     create_files: self.create_files,
                 };
-                Ok(json!(actions::code_actions(&an, &request)))
+                let mut found = actions::code_actions(&an, &request);
+                if self.apply_edit && request.wants(actions::FORMAT) && self.open.contains_key(uri) {
+                    found.push(json!({
+                        "title": "Run `kargo fmt` on file",
+                        "kind": actions::FORMAT,
+                        "command": { "title": "kargo fmt", "command": FORMAT_COMMAND, "arguments": [{ "uri": uri }] },
+                    }));
+                }
+                Ok(json!(found))
             }
             "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => {
                 let Some(unit) = unit else { return Ok(Value::Null) };
@@ -2083,6 +2197,48 @@ impl State {
                 Ok(ranges::selection_ranges(an.file(unit), &an.unit(unit).text, &positions))
             }
             "workspaceSymbol/resolve" => Ok(features::resolve_symbol(&an, params.clone())),
+            "textDocument/documentLink" => {
+                let Some(unit) = unit else { return Ok(json!([])) };
+                let u = an.unit(unit);
+                Ok(links::document_links(&u.file, &u.text, &self.link_bases(&u.path)))
+            }
+            "textDocument/linkedEditingRange" => {
+                let Some(unit) = unit else { return Ok(Value::Null) };
+                let u = an.unit(unit);
+                Ok(editing::linked_editing(&u.file, &u.text, text::offset(&u.text, &params["position"])))
+            }
+            "textDocument/onTypeFormatting" => {
+                let Some(unit) = unit else { return Ok(json!([])) };
+                let u = an.unit(unit);
+                let offset = text::offset(&u.text, &params["position"]);
+                let ch = params["ch"].as_str().unwrap_or_default();
+                Ok(json!(editing::on_type(&u.file, &u.text, offset, ch, &editing::Indent::from_options(&params["options"]))))
+            }
+            "textDocument/inlineValue" => {
+                let Some(unit) = unit else { return Ok(json!([])) };
+                let u = an.unit(unit);
+                let span = |range: &Value| text::offset(&u.text, &range["start"])..text::offset(&u.text, &range["end"]);
+                let stopped = &params["context"]["stoppedLocation"];
+                Ok(inlay::inline_values(&u.file, &u.text, span(&params["range"]), span(stopped)))
+            }
+            "kargo/testTree" => {
+                let only = file_path(uri);
+                let files: Vec<testing::TestFile> = proj
+                    .units
+                    .iter()
+                    .filter(|u| !u.is_java() && only.as_ref().is_none_or(|p| *p == u.path))
+                    .filter_map(|u| match &u.origin {
+                        Origin::Source(set) if set.kind == SetKind::Test => Some(testing::TestFile {
+                            unit: u,
+                            target: set.target.as_deref(),
+                            cwd: self.model.manifests.get(set.package).and_then(|m| m.parent()),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                let program = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "kargo".to_owned());
+                Ok(json!(testing::test_tree(&files, &program)))
+            }
             _ => Err(Failure::NotFound),
         }
     }
@@ -2106,6 +2262,8 @@ impl State {
         self.inlay_options = inlay::Options::from_json(&params["initializationOptions"]);
         self.diagnostic_options = diagnostics::Options::from_json(&params["initializationOptions"]);
         self.load_options.fetch_sources = params["initializationOptions"]["fetchSources"] != false;
+        self.apply_edit = params["capabilities"]["workspace"]["applyEdit"] == true;
+        self.status = params["initializationOptions"]["status"] == true;
         self.root = params["rootUri"]
             .as_str()
             .and_then(file_path)
@@ -2134,8 +2292,16 @@ impl State {
                 "inlayHintProvider": true,
                 "selectionRangeProvider": true,
                 "documentFormattingProvider": true,
+                "documentOnTypeFormattingProvider": {
+                    "firstTriggerCharacter": editing::TRIGGERS[0],
+                    "moreTriggerCharacter": &editing::TRIGGERS[1..],
+                },
+                "documentLinkProvider": { "resolveProvider": false },
+                "linkedEditingRangeProvider": true,
+                "inlineValueProvider": true,
                 "workspaceSymbolProvider": { "resolveProvider": true },
                 "codeActionProvider": { "codeActionKinds": actions::KINDS },
+                "executeCommandProvider": { "commands": [FORMAT_COMMAND] },
                 "workspace": {
                     "fileOperations": {
                         "willRename": {
@@ -2143,9 +2309,12 @@ impl State {
                                 { "pattern": { "glob": "**/*.kt", "matches": "file" } },
                                 { "pattern": { "glob": "**", "matches": "folder" } }
                             ]
-                        }
+                        },
+                        "didRename": { "filters": source_filters() },
+                        "didDelete": { "filters": source_filters() },
                     }
                 },
+                "experimental": { "kargo": { "testTree": true } },
             },
             "serverInfo": { "name": "kargo-kotlin", "version": env!("CARGO_PKG_VERSION") },
         })
@@ -2208,6 +2377,20 @@ fn run_search(
     let found = rename::subject(&an, unit, text::offset(&u.text, &params["position"])).map_err(Failure::Invalid)?;
     let new_name = params["newName"].as_str().unwrap_or_default();
     rename::rename(&an, env, &found, new_name, control).map_err(Failure::Invalid)
+}
+
+/// The command of the "Run `kargo fmt` on file" action: formats the file whose `uri` its argument
+/// holds, and applies the edit with `workspace/applyEdit`.
+pub const FORMAT_COMMAND: &str = "kargo/formatFile";
+
+/// The files whose renames and deletions the server hears of at once: Kotlin and Java sources,
+/// and folders that may hold them.
+fn source_filters() -> Value {
+    json!([
+        { "pattern": { "glob": "**/*.kt", "matches": "file" } },
+        { "pattern": { "glob": "**/*.java", "matches": "file" } },
+        { "pattern": { "glob": "**", "matches": "folder" } }
+    ])
 }
 
 fn location(an: &Analyzer, u: UnitId, range: std::ops::Range<usize>) -> Value {
@@ -2884,6 +3067,79 @@ println(1)"
         editor.send(jsonrpc::request("2", "workspaceSymbol/resolve", symbol));
         let resolved = editor.reply("2");
         assert_eq!(resolved["result"]["location"]["range"]["start"], json!({ "line": 2, "character": 4 }), "{resolved}");
+        editor.finish();
+    }
+
+    #[test]
+    fn formats_a_file_from_its_code_action() {
+        let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (server_in, input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let formatter: Formatter = Arc::new(|_, _, text| Ok(Some(text.replace("fun  main", "fun main"))));
+        let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, formatter));
+        let mut editor = Editor { input, output: BufReader::new(output), server: Some(server) };
+        editor.send(jsonrpc::request("0", "initialize", json!({ "capabilities": { "workspace": { "applyEdit": true } } })));
+        let init = editor.reply("0");
+        let capabilities = &init["result"]["capabilities"];
+        assert_eq!(capabilities["executeCommandProvider"]["commands"], json!([FORMAT_COMMAND]), "{init}");
+        assert_eq!(capabilities["documentOnTypeFormattingProvider"]["firstTriggerCharacter"], "\n");
+        assert_eq!(capabilities["experimental"]["kargo"]["testTree"], true);
+        let uri = "file:///p/src/A.kt";
+        editor.open(uri, "package p\n\nfun  main() {}\n");
+        let range = json!({ "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 0 } });
+        editor.send(jsonrpc::request(
+            "1",
+            "textDocument/codeAction",
+            json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [], "only": ["source"] } }),
+        ));
+        let actions = editor.reply("1");
+        let action = actions["result"].as_array().unwrap().iter().find(|a| a["kind"] == actions::FORMAT).cloned();
+        let command = action.expect("the format action")["command"].clone();
+        editor.send(jsonrpc::request("2", "workspace/executeCommand", command));
+        let apply = editor.notification("workspace/applyEdit");
+        let edits = &apply["params"]["edit"]["changes"][uri];
+        assert_eq!(edits[0]["newText"], "", "{apply}");
+        assert_eq!(edits[0]["range"]["start"], json!({ "line": 2, "character": 4 }), "{apply}");
+        assert!(editor.reply("2")["result"].is_null());
+        editor.finish();
+    }
+
+    #[test]
+    fn hears_of_renamed_and_deleted_files_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src/old")).unwrap();
+        std::fs::write(dir.path().join("src/old/A.kt"), "package p\n\nfun zzalpha() = 1\n").unwrap();
+        let config = Config::new(dir.path().join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (server_in, input) = io::pipe().unwrap();
+        let (output, server_out) = io::pipe().unwrap();
+        let server = thread::spawn(move || serve_with(config, BufReader::new(server_in), server_out, false, Arc::new(|_, _, _| Ok(None))));
+        let mut editor = Editor { input, output: BufReader::new(output), server: Some(server) };
+        let params = json!({ "rootUri": text::path_to_uri(dir.path()), "capabilities": {}, "initializationOptions": { "status": true } });
+        editor.send(jsonrpc::request("0", "initialize", params));
+        editor.reply("0");
+        let status = editor.notification("kargo/status");
+        assert_eq!(status["params"], json!({ "task": "indexing", "active": true }));
+        let status = editor.notification("kargo/status");
+        assert_eq!(status["params"], json!({ "task": "indexing", "active": false }));
+        fn uris(editor: &mut Editor, id: &str) -> Vec<String> {
+            editor.send(jsonrpc::request(id, "workspace/symbol", json!({ "query": "zzalpha" })));
+            let reply = editor.reply(id);
+            match reply["result"].as_array() {
+                Some(symbols) => symbols.iter().map(|s| s["location"]["uri"].as_str().unwrap().to_owned()).collect(),
+                None => uris(editor, &format!("{id}-again")),
+            }
+        }
+        assert_eq!(uris(&mut editor, "1"), [text::path_to_uri(&dir.path().join("src/old/A.kt"))]);
+        // A folder renamed: its files move with it.
+        std::fs::rename(dir.path().join("src/old"), dir.path().join("src/new")).unwrap();
+        let (old, new) = (text::path_to_uri(&dir.path().join("src/old")), text::path_to_uri(&dir.path().join("src/new")));
+        editor.send(jsonrpc::notification("workspace/didRenameFiles", json!({ "files": [{ "oldUri": old, "newUri": new }] })));
+        assert_eq!(uris(&mut editor, "2"), [text::path_to_uri(&dir.path().join("src/new/A.kt"))]);
+        let file = dir.path().join("src/new/A.kt");
+        std::fs::remove_file(&file).unwrap();
+        editor.send(jsonrpc::notification("workspace/didDeleteFiles", json!({ "files": [{ "uri": text::path_to_uri(&file) }] })));
+        assert!(uris(&mut editor, "3").is_empty());
         editor.finish();
     }
 
