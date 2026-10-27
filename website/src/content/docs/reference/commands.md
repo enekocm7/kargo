@@ -1071,7 +1071,7 @@ Check the machine and the project for what keeps builds from working, and say ho
 ```console
 $ kargo doctor
 Kargo
-  ok       version: kargo 0.1.1 (x86_64-unknown-linux-gnu)
+  ok       version: kargo 0.1.2 (x86_64-unknown-linux-gnu)
   ok       KARGO_HOME: /home/me/.kargo (writable)
   ok       disk space: 120.4 GiB free
   ok       compiler daemons: none running
