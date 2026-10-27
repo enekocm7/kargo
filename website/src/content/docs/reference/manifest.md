@@ -171,10 +171,13 @@ In a workspace, `[workspace.kotlin]` sets these for every member: a member's `op
 [toolchain]
 jdk = "21"         # "system" (default), a major version, or an exact release like "21.0.5+11"
 graalvm = "25"     # "system" (default), a Java version for GraalVM CE, or "oracle-25" for Oracle GraalVM
+android-sdk = "36" # "system" (default), or a platform API level that Kargo installs
 kargo = ">=0.3"    # the Kargo versions this project builds with (default: any)
 ```
 
 `graalvm` is the GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use. `system` looks at `GRAALVM_HOME`, then a `JAVA_HOME` with `native-image`, then `native-image` on `PATH`.
+
+`android-sdk` is the Android SDK of the Android target. An API level such as `"36"` (or `36`; 21 or newer) makes Kargo install that platform, the build-tools of the Android Gradle Plugin in use and platform-tools under `~/.kargo/toolchains/android-sdk`, after you accept Google's license terms, and build with that SDK. `compile-sdk` under [`[target.android]`](#targetandroid) defaults to it and must equal it when set. `system` uses `ANDROID_HOME`, then `ANDROID_SDK_ROOT`, then Android Studio's default location. See [Android SDK](../../guides/android/#android-sdk).
 
 `kargo` is a [semver requirement](https://docs.rs/semver/latest/semver/enum.Op.html) such as `">=0.3"`, `"^0.3.1"` or `">=0.3, <0.5"`. A Kargo that does not satisfy it stops before doing anything else with the project, and says how to get a newer one:
 
@@ -588,8 +591,8 @@ application-id-suffix = ".free"
 | `application-id` | `namespace` |
 | `kind` | `application` |
 | `min-sdk` | `24` |
-| `target-sdk` | `36` |
-| `compile-sdk` | `37` |
+| `target-sdk` | `36`, or `compile-sdk` when that is lower |
+| `compile-sdk` | [`[toolchain] android-sdk`](#toolchain) when it is an API level (and must equal it when set), else `37` |
 | `version-code` | `1` |
 | `agp-version` | `9.4.1` |
 | `gradle-version` | The minimum Gradle version `agp-version` requires (`9.6.0` for AGP 9.4.1). Must not be older than that. A `gradlew` in the project root is used instead when present. See [Android](../../guides/android/#gradle) |

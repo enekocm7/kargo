@@ -148,7 +148,7 @@
       }
     },
     "toolchain": {
-      "description": "Which JDK builds and runs the project, which GraalVM builds native images, and which Kargo versions the project needs.",
+      "description": "Which JDK builds and runs the project, which GraalVM builds native images, which Android SDK builds the Android target, and which Kargo versions the project needs.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -163,6 +163,12 @@
           "type": ["string", "integer"],
           "default": "system",
           "examples": ["system", "25", "oracle-25"]
+        },
+        "android-sdk": {
+          "description": "The Android SDK of the Android target: \"system\" (ANDROID_HOME, ANDROID_SDK_ROOT, then Android Studio's default location), or a platform API level such as \"36\" that Kargo installs with its build-tools and platform-tools under ~/.kargo/toolchains/android-sdk. `compile-sdk` defaults to it.",
+          "type": ["string", "integer"],
+          "default": "system",
+          "examples": ["system", "36", "37"]
         },
         "kargo": {
           "description": "The Kargo versions this project builds with, a semver requirement such as \">=0.3\". An older Kargo stops with a message that points to `kargo self update`.",
@@ -385,8 +391,8 @@
             "application-id": { "description": "The application id. Default: `namespace`.", "type": "string" },
             "kind": { "enum": ["application", "library"], "default": "application" },
             "min-sdk": { "type": "integer", "minimum": 1, "default": 24 },
-            "target-sdk": { "type": "integer", "minimum": 1, "default": 36 },
-            "compile-sdk": { "type": "integer", "minimum": 1, "default": 37 },
+            "target-sdk": { "description": "Default: 36, or compile-sdk when lower.", "type": "integer", "minimum": 1, "default": 36 },
+            "compile-sdk": { "description": "Default: [toolchain] android-sdk when it is an API level, else 37. Must match [toolchain] android-sdk when both are set.", "type": "integer", "minimum": 1, "default": 37 },
             "version-code": { "type": "integer", "minimum": 1, "default": 1 },
             "version-name": { "type": "string" },
             "agp-version": { "description": "Android Gradle Plugin version.", "type": "string", "default": "9.4.1" },

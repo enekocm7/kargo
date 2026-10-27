@@ -243,6 +243,8 @@ enum ToolArg {
     Native,
     /// A Gradle distribution (runs Android builds)
     Gradle,
+    /// An Android SDK platform with its build-tools and platform-tools
+    AndroidSdk,
     /// JetBrains' Kotlin language server, run by `kargo lsp`
     KotlinLsp,
     /// fwcd's kotlin-language-server, run by `kargo lsp --server kls`
@@ -258,6 +260,7 @@ impl From<ToolArg> for ToolKind {
             ToolArg::Graalvm => ToolKind::Graalvm,
             ToolArg::Native => ToolKind::Native,
             ToolArg::Gradle => ToolKind::Gradle,
+            ToolArg::AndroidSdk => ToolKind::AndroidSdk,
             ToolArg::KotlinLsp => ToolKind::Server(ServerKind::KotlinLsp),
             ToolArg::Kls => ToolKind::Server(ServerKind::Kls),
             ToolArg::KotlinDebugAdapter => ToolKind::Server(ServerKind::Kda),
@@ -275,7 +278,7 @@ enum DaemonCommand {
 
 #[derive(Debug, Subcommand)]
 enum ToolchainCommand {
-    /// List installed JDKs, GraalVMs, Kotlin/Native and Gradle distributions, Kotlin language servers and the debug adapter
+    /// List installed JDKs, GraalVMs, Kotlin/Native and Gradle distributions, Android SDK packages, Kotlin language servers and the debug adapter
     #[command(visible_alias = "ls")]
     List,
     /// Install a toolchain (without arguments: everything this project needs)
@@ -283,20 +286,28 @@ enum ToolchainCommand {
         #[arg(value_enum)]
         kind: Option<ToolArg>,
         /// JDK: `21` (latest 21) or `21.0.5+11`; GraalVM: `25` or `oracle-25`; Native: a Kotlin version; Gradle: a Gradle version (default: the project's);
+        /// android-sdk: a platform API level such as `36` (default: the project's);
         /// kotlin-lsp, kls, kotlin-debug-adapter: a version (default: the one `kargo lsp` or `kargo dap` uses)
         version: Option<String>,
+        /// Accept the licenses of the Android SDK packages, after showing them, instead of asking (for CI)
+        #[arg(long)]
+        accept_licenses: bool,
     },
     /// Remove an installed toolchain
     #[command(visible_alias = "rm")]
     Remove {
         #[arg(value_enum)]
         kind: ToolArg,
-        /// JDK: a major version (removes all its releases) or a release; Native, Gradle, kotlin-lsp, kls, kotlin-debug-adapter: a version
+        /// JDK: a major version (removes all its releases) or a release; Native, Gradle, kotlin-lsp, kls, kotlin-debug-adapter: a version;
+        /// android-sdk: a platform API level or a package such as `build-tools;36.0.0`
         #[arg(add = ArgValueCandidates::new(complete::installed_toolchains))]
         version: String,
     },
-    /// Show JDK versions available for download
-    Available,
+    /// Show JDK versions, or with `android-sdk` the Android SDK platforms, available for download
+    Available {
+        #[arg(value_enum)]
+        kind: Option<ToolArg>,
+    },
     /// Show which toolchains this project uses
     Which,
 }
@@ -3095,6 +3106,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
     }
 }
 
+/// How `kargo toolchain install` gets the licenses of Android SDK packages accepted.
+fn licenses(accept: bool) -> kargo_toolchain::android_sdk::Licenses {
+    if accept { kargo_toolchain::android_sdk::Licenses::Accept } else { kargo_toolchain::android_sdk::Licenses::Ask }
+}
+
 fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) -> Result<i32> {
     // Toolchain commands also work outside a project. Packages built together share their
     // toolchains, so the first member stands for a whole workspace.
@@ -3104,21 +3120,21 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
     let shell = config.shell();
     match command {
         ToolchainCommand::List => print!("{}", toolchain_ops::list(config, manifest)?),
-        ToolchainCommand::Install { kind: Some(kind), version } => {
-            let what = toolchain_ops::install(config, manifest, kind.into(), version.as_deref())?;
+        ToolchainCommand::Install { kind: Some(kind), version, accept_licenses } => {
+            let what = toolchain_ops::install(config, manifest, kind.into(), version.as_deref(), licenses(accept_licenses))?;
             shell.status("Installed", what);
         }
-        ToolchainCommand::Install { kind: None, version: Some(_) } => {
-            bail!("specify what to install: `jdk`, `graalvm`, `native` or `gradle`")
+        ToolchainCommand::Install { kind: None, version: Some(_), .. } => {
+            bail!("specify what to install: `jdk`, `graalvm`, `native`, `gradle` or `android-sdk`")
         }
-        ToolchainCommand::Install { kind: None, version: None } => {
+        ToolchainCommand::Install { kind: None, version: None, accept_licenses } => {
             let project = project
                 .as_ref()
                 .context("not in a Kargo project; use `kargo toolchain install jdk <version>`, `native <version>` or `gradle <version>`")?;
             // Members share the JDK and Kotlin version, but any of them may have the Native target.
             let mut done: Vec<String> = Vec::new();
             for &member in project.members() {
-                for what in toolchain_ops::install_for_project(config, project.package(member).manifest())? {
+                for what in toolchain_ops::install_for_project(config, project.package(member).manifest(), licenses(accept_licenses))? {
                     if !done.contains(&what) {
                         done.push(what);
                     }
@@ -3136,7 +3152,7 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
                 shell.status("Removed", what);
             }
         }
-        ToolchainCommand::Available => print!("{}", toolchain_ops::available(config)?),
+        ToolchainCommand::Available { kind } => print!("{}", toolchain_ops::available(config, kind.map(Into::into))?),
         ToolchainCommand::Which => {
             let project = project.as_ref().context("`kargo toolchain which` must run inside a Kargo project")?;
             let ws = ws.context("`kargo toolchain which` must run inside a Kargo project")?;
@@ -3153,6 +3169,7 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
             }
             if m.targets.is_enabled(TargetKind::Android) {
                 println!("gradle:        {}", kargo_ops::gradle::describe_gradle(ws, config)?);
+                println!("android-sdk:   {}", kargo_ops::gradle::describe_sdk(ws, config)?);
             }
             // Only shown when pinned: most projects never build a native image.
             if m.toolchain.graalvm != kargo_manifest::GraalvmRequest::System {
@@ -3658,7 +3675,12 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "toolchain", "install", "jdk", "21"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::Jdk), ref version } } if version.as_deref() == Some("21")
+            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::Jdk), ref version, accept_licenses: false } } if version.as_deref() == Some("21")
+        ));
+        let cli = Cli::try_parse_from(["kargo", "toolchain", "install", "android-sdk", "36", "--accept-licenses"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::AndroidSdk), ref version, accept_licenses: true } } if version.as_deref() == Some("36")
         ));
         assert!(Cli::try_parse_from(["kargo", "toolchain", "remove", "native"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "-v", "test", "MathTest", "--no-run"]).unwrap();

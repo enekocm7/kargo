@@ -39,13 +39,14 @@ With `--offline` or `--locked`, Kargo never chooses and downloads a JDK by itsel
 | JetBrains Runtime | `run --hot-reload` | Yes, the JBR of the project's Java version, into `~/.kargo/toolchains/jbr/`. Offline, the app runs on the project's JDK instead. See [Hot reload](../compose/#hot-reload) |
 | Kotlin/Native | Builds of the `native` target | Yes |
 | Gradle | Builds of the `android` target without a `gradlew` | Yes |
+| Android SDK (`[toolchain] android-sdk = "36"`) | Builds of the `android` target | Yes, once its licenses are accepted: Kargo asks on a terminal, and elsewhere stops and names `kargo toolchain install android-sdk --accept-licenses`. With `system`, Kargo uses `ANDROID_HOME` and installs nothing. See [Android SDK](../android/#android-sdk) |
 | Kotlin LSP, kotlin-language-server | `lsp --server kotlin-lsp`, `lsp --server kls` | Yes |
 | kotlin-debug-adapter | `dap` | Yes |
 | Kotlin compiler, compiler plugins | Every build | Yes, from Maven Central like a dependency |
 | ktlint, detekt, Dokka, JUnit launcher, JMH | `fmt`, `lint`, `doc`, `test`, `bench` | Yes, from Maven Central like a dependency |
 | Node.js, a browser | Running Wasm programs and tests | No: install them yourself |
 
-Every install prints a status line, verifies the download's SHA-256 and takes the toolchain's [lock](#parallel-installs-and-retries). It never prompts, so CI behaves like your terminal. Downloads go through [`[toolchain-mirrors]`](../offline-and-mirrors/#toolchain-mirrors).
+Every install prints a status line, verifies the download's SHA-256 (SHA-1 for the Android SDK, the only checksum Google publishes) and takes the toolchain's [lock](#parallel-installs-and-retries). It never prompts, so CI behaves like your terminal, except for the Android SDK's license terms, which only you can accept. Downloads go through [`[toolchain-mirrors]`](../offline-and-mirrors/#toolchain-mirrors).
 
 ### Turning automatic installs off
 
@@ -116,11 +117,13 @@ kargo = ">=0.3"
 
 ```console
 $ kargo toolchain available          # JDK versions you can install (LTS releases are marked)
+$ kargo toolchain available android-sdk   # Android SDK platforms and build-tools you can install
 $ kargo toolchain install jdk 21     # newest 21
 $ kargo toolchain install jdk 21.0.5+11
 $ kargo toolchain install graalvm 25 # newest GraalVM CE for JDK 25 (or: graalvm oracle-25)
 $ kargo toolchain install native 2.4.21
 $ kargo toolchain install gradle     # the Gradle this Android project needs (or: gradle 9.6.0)
+$ kargo toolchain install android-sdk --accept-licenses   # the Android SDK of [toolchain] android-sdk (or: android-sdk 36)
 $ kargo toolchain install            # everything the current project needs (a JDK too, when there is none; the Kotlin/Native LLVM and sysroots of its platforms)
 $ kargo toolchain list               # installed toolchains, disk usage, and what this project uses
 $ kargo toolchain which              # the toolchains this project resolves to
@@ -129,6 +132,8 @@ $ kargo toolchain remove jdk 17.0.13+11
 $ kargo toolchain remove graalvm 25  # every GraalVM CE 25 release
 $ kargo toolchain remove native 2.4.10
 $ kargo toolchain remove gradle 9.5.0
+$ kargo toolchain remove android-sdk 35              # the platform for API 35
+$ kargo toolchain remove android-sdk "build-tools;35.0.0"
 $ kargo toolchain install kotlin-lsp # the Kotlin language server `kargo lsp --server kotlin-lsp` runs (or: kls)
 ```
 
@@ -156,6 +161,18 @@ Kotlin/Native distributions are tied to `[kotlin] version` and installed automat
 ## Gradle
 
 Android builds run the Android Gradle Plugin on Gradle. Kargo downloads the Gradle version that plugin needs on the first Android build, verifies its SHA-256 and installs it under `~/.kargo/toolchains/gradle/<version>`. A `gradlew` in the project root takes precedence, and `gradle-version` under `[target.android]` pins another version. See [Android](../android/#gradle).
+
+## Android SDK
+
+Android builds also need an Android SDK. Pin one like a JDK, by platform API level, and Kargo installs that platform, the build-tools of the Android Gradle Plugin in use, and platform-tools:
+
+```toml title="kargo.toml"
+[toolchain]
+android-sdk = "36"          # Kargo installs platform 36 under ~/.kargo/toolchains/android-sdk
+# android-sdk = "system"    # the default: ANDROID_HOME, then ANDROID_SDK_ROOT, then Android Studio's location
+```
+
+Kargo reads Google's repository manifest on `dl.google.com`, verifies every download against the SHA-1 it lists (the only checksum Google publishes for these packages), and keeps every installed platform in the one SDK directory. The packages are under Google's license terms: Kargo shows them and asks, or takes `kargo toolchain install android-sdk --accept-licenses` in CI, and never accepts them by itself. `compile-sdk` under `[target.android]` defaults to this version. See [Android SDK](../android/#android-sdk).
 
 ## Kotlin language servers
 

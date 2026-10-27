@@ -59,7 +59,7 @@ const CHECKSUM_FILE: &str = "kargo-sha256.txt";
 const WRAPPER_DIR: &str = "kargo-wrapper";
 
 /// The `major.minor` of a version, as numbers.
-fn major_minor(version: &str) -> Option<(u32, u32)> {
+pub(crate) fn major_minor(version: &str) -> Option<(u32, u32)> {
     let mut parts = version.split(|c: char| !c.is_ascii_digit());
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);

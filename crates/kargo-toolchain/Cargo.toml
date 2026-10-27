@@ -17,6 +17,7 @@ ureq.workspace = true
 flate2.workspace = true
 tar.workspace = true
 zip.workspace = true
+roxmltree.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -158,6 +158,11 @@ impl Config {
         self.toolchains_dir().join("gradle")
     }
 
+    /// The Kargo-managed Android SDK: one SDK directory holding every installed platform.
+    pub fn android_sdk_dir(&self) -> PathBuf {
+        self.toolchains_dir().join("android-sdk")
+    }
+
     /// Kotlin/Native's own dependency cache (LLVM, sysroots), normally `~/.konan`.
     pub fn konan_data_dir(&self) -> PathBuf {
         match std::env::var_os("KONAN_DATA_DIR") {

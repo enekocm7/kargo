@@ -7,7 +7,7 @@ Android apps are built by the Android Gradle Plugin (AGP), which Kargo drives fo
 
 ## Requirements
 
-- The [Android SDK](https://developer.android.com/studio). Set `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) to its location.
+- An Android SDK. Either let Kargo install one with `[toolchain] android-sdk = "36"` (see [Android SDK](#android-sdk)), or install [Android Studio](https://developer.android.com/studio) and set `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) to its SDK.
 - Nothing else: Kargo downloads the Gradle version your Android Gradle Plugin needs (see [Gradle](#gradle)).
 - For `kargo run`: `adb` (from the SDK platform-tools) and a connected device or running emulator.
 
@@ -23,8 +23,8 @@ kargo new myapp -t android -w compose    # a Jetpack Compose app
 namespace = "com.example.myapp"
 kind = "application"        # or "library"
 min-sdk = 24
-# target-sdk = 36
-# compile-sdk = 37
+# target-sdk = 36                        # or compile-sdk, when that is lower
+# compile-sdk = 37                       # default: [toolchain] android-sdk, else 37
 # application-id = "com.example.myapp"   # defaults to namespace
 # version-code = 1
 # version-name = "0.1.0"
@@ -72,6 +72,79 @@ kargo doc -t android                # API documentation in target/debug/doc/
 
 The generated project compiles Kotlin with the Kotlin Gradle plugin at your `[kotlin] version`, so Android code is compiled with the same Kotlin version as your other targets rather than the version bundled with AGP.
 
+## Android SDK
+
+Kargo can install the Android SDK the project needs, the way it installs a JDK. Name the platform API level under `[toolchain]`:
+
+```toml title="kargo.toml"
+[toolchain]
+android-sdk = "36"
+
+[target.android]
+namespace = "com.example.myapp"   # compile-sdk defaults to 36 now
+```
+
+```console
+$ kargo toolchain install android-sdk --accept-licenses
+...the terms of the Android Software Development Kit License Agreement...
+note: accepted the license `android-sdk-license` above for platforms;android-36, build-tools;36.0.0, platform-tools (--accept-licenses)
+ Downloading android-platform-36_r02.zip
+  Installing Android SDK Platform 36 (platforms;android-36)
+ Downloading android-build-tools_r36_linux.zip
+  Installing Android SDK Build-Tools 36 (build-tools;36.0.0)
+ Downloading android-platform-tools_r37.0.1-linux.zip
+  Installing Android SDK Platform-Tools (platform-tools)
+   Installed Android SDK platform 36, build-tools 36.0.0 and platform-tools at /home/me/.kargo/toolchains/android-sdk
+```
+
+Kargo installs three packages into one SDK directory, `~/.kargo/toolchains/android-sdk`:
+
+- the platform of the API level (`platforms;android-36`; from API 37 on, `platforms;android-37.0`),
+- the build-tools version the Android Gradle Plugin in use expects (36.0.0 for AGP 9.x),
+- `platform-tools`, which has `adb` for `kargo run`.
+
+It reads the packages from Google's repository manifest on `dl.google.com`, checks every download against the SHA-1 the manifest lists for it, and writes the same layout as `sdkmanager`. The build then points Gradle at this SDK, through `sdk.dir` in the generated `local.properties` and `ANDROID_HOME`, whatever `ANDROID_HOME` says outside Kargo. Several projects share the SDK directory, each with its own platform.
+
+`compile-sdk` defaults to the `android-sdk` version, and if you set both they must be equal:
+
+```console
+$ kargo build -t android
+error: [target.android] `compile-sdk = 35` differs from `android-sdk = "36"` under [toolchain]; remove `compile-sdk`, which defaults to the [toolchain] version, or set both to the same API level
+```
+
+### Licenses
+
+The SDK packages are under Google's license terms, which you have to accept, and Kargo never accepts them for you. The first install shows the terms and asks:
+
+- In a terminal, Kargo asks `Do you accept the license ...? [y/N]`, and installs only on `y`.
+- Without a terminal (CI), the install stops and asks you to run `kargo toolchain install android-sdk --accept-licenses`, which shows the terms and accepts them.
+
+The acceptance is recorded in `~/.kargo/toolchains/android-sdk/licenses/`, as `sdkmanager --licenses` does, so later installs of packages under the same terms don't ask again.
+
+### When it is installed
+
+`kargo toolchain install android-sdk` installs it, and so do `kargo toolchain install` (everything the project needs) and `kargo fetch`. If it is still missing, the first Android build installs it, asking for the licenses if they aren't accepted yet; `KARGO_AUTO_INSTALL=0` turns that off. An `--offline` build without it fails and tells you to run `kargo fetch` while online.
+
+In CI, install it in a step of its own before building:
+
+```sh
+kargo toolchain install android-sdk --accept-licenses
+kargo build -t android --release
+```
+
+`kargo toolchain available android-sdk` lists the platforms you can install, `kargo toolchain list` the installed packages, and `kargo toolchain remove android-sdk 36` removes a platform (or `build-tools;36.0.0` another package). See [Toolchains](../toolchains/#android-sdk).
+
+### The system SDK
+
+Without `[toolchain] android-sdk` (or with `android-sdk = "system"`), Kargo uses the SDK you installed: `ANDROID_HOME`, then `ANDROID_SDK_ROOT`, then Android Studio's default location (`%LOCALAPPDATA%\Android\Sdk` on Windows, `~/Library/Android/sdk` on macOS, `~/Android/Sdk` on Linux). Kargo doesn't change that SDK. When it lacks the platform of `compile-sdk` or the build-tools of AGP, and no license is accepted in it (which would let AGP download them itself), Kargo stops before Gradle runs and names them:
+
+```console
+$ kargo build -t android
+error: the Android SDK at /home/me/Android/Sdk lacks platforms;android-37.0 and build-tools;36.0.0; install with `sdkmanager "platforms;android-37.0" "build-tools;36.0.0"`, or set `android-sdk = "37"` under [toolchain] in kargo.toml to have Kargo manage the SDK
+```
+
+The NDK is not managed yet.
+
 ## Gradle
 
 You don't install Gradle. The first Android build downloads the Gradle version the Android Gradle Plugin (AGP) in use requires from `services.gradle.org`, verifies the SHA-256 Gradle publishes for it, and installs it under `~/.kargo/toolchains/gradle/<version>`. With the default AGP 9.4.1 that is Gradle 9.6.0. Gradle runs on the project's JDK (`[toolchain] jdk`), which must be JDK 17 or newer for AGP 8 and later.
@@ -108,7 +181,7 @@ $ kargo build -t android
 error: Gradle 9.1.0 is too old for Android Gradle Plugin 9.4.1, which needs Gradle 9.6.0 or newer; set `gradle-version = "9.6.0"` under [target.android] (or remove it to use 9.6.0), or pick an older `agp-version`
 ```
 
-For `--offline` builds, download Gradle beforehand with `kargo fetch` or `kargo toolchain install gradle`. If Gradle isn't installed and Kargo is offline, it falls back to a `gradle` on `PATH` and warns.
+For `--offline` builds, download Gradle (and the [Android SDK](#android-sdk), when Kargo manages it) beforehand with `kargo fetch` or `kargo toolchain install`. If Gradle isn't installed and Kargo is offline, it falls back to a `gradle` on `PATH` and warns.
 
 Gradle keeps its daemon and caches in `~/.gradle` (`GRADLE_USER_HOME`), shared with any other Gradle builds on the machine, so later builds start faster.
 
