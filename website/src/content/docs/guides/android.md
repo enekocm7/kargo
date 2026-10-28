@@ -46,6 +46,20 @@ myapp/
 
 With `-w compose`, you can also put Compose Multiplatform resources in `composeResources/` and read them through the generated `Res` class, as on the desktop: Kargo adds the resources runtime and packs the files into the APK's assets. Code in `src/` that uses `Res` then works on both targets. See [Compose resources](../compose/#resources).
 
+### Network access
+
+The manifest of a new application declares the `INTERNET` permission, so the app can make network calls. Without `<uses-permission android:name="android.permission.INTERNET" />` in `android/AndroidManifest.xml`, every request fails at run time with no hint at the cause. `kargo target add android` writes it too. Add the line yourself to a manifest created before that.
+
+Android 9 (API 28) and later also block plain `http://` traffic. Requests to a development server on your machine fail until the app allows cleartext traffic:
+
+```xml title="android/AndroidManifest.xml"
+<application
+    android:usesCleartextTraffic="true"
+    ...>
+```
+
+Remove it again before you ship, or serve the API over `https://`. From the emulator, the host machine is `10.0.2.2`, not `localhost`.
+
 ### Add Android to an existing project
 
 ```sh
