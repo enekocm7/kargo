@@ -1172,6 +1172,10 @@ args = ["lsp"]
 config = { checkOnSave = true }
 ```
 
+:::note
+Compile errors (type errors, unresolved names) appear only after a save. Opening or editing a file reports none of them. The bundled extensions and the usual editors send `textDocument/didSave` themselves, but a client you drive by hand or write yourself must send it, or `kargo lsp` reports no compile errors. The check also waits for the build lock, so it can take a while when a build is running.
+:::
+
 When you save a `.kt` or `.java` file, Kargo runs `kargo check --tests --keep-going --message-format json` for the package that contains it (every member, when the nearest `kargo.toml` is a workspace root) and shows the result:
 
 - Each error and warning is a diagnostic with source `kargo` and the targets that report it as its code, for example `kargo(native, wasm)`. Messages without a file, such as the `-Werror` summary, go on `kargo.toml`.
