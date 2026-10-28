@@ -278,6 +278,184 @@ enum DaemonCommand {
     Stop,
 }
 
+/// The arguments of `kargo android`, in a struct of their own for the same reason as [`WhyArgs`].
+#[derive(Debug, Args)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    long_about = "Run Gradle tasks in the generated Android project, and manage the devices `kargo run -t android` installs on.
+
+Anything that is not one of the subcommands is passed to Gradle: `kargo android lint`, `kargo android bundleRelease`.
+Tasks that use a device (`install*`, `uninstall*`, `connected*`, `*AndroidTest`) run on the one chosen like
+`kargo run -t android` chooses: `--device`, then KARGO_ANDROID_DEVICE, then the only device, or a list to pick from."
+)]
+struct AndroidArgs {
+    #[command(subcommand)]
+    command: Option<AndroidCommand>,
+    /// For Gradle tasks that use a device: the serial or the name of the virtual device to run on (or set KARGO_ANDROID_DEVICE)
+    #[arg(short = 's', long, value_name = "SERIAL|AVD")]
+    device: Option<String>,
+    /// Arguments passed to Gradle
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+/// The arguments of `kargo devices`.
+#[derive(Debug, Args)]
+struct DevicesArgs {
+    /// Output format
+    #[arg(long, value_enum, default_value_t)]
+    format: FormatArg,
+}
+
+/// The options of `kargo run -t android` that choose the device and the log.
+#[derive(Debug, Args)]
+struct AndroidRunArgs {
+    /// Android: run on this device, a serial (`kargo android devices` lists them) or the name of a virtual device, which is started if it is not
+    /// running; without it one device is used, several are chosen from a list, and none asks before starting or creating an emulator
+    #[arg(short = 's', long, value_name = "SERIAL|AVD", env = "KARGO_ANDROID_DEVICE")]
+    device: Option<String>,
+    /// Android: do not show the app's log; leave once the app started
+    #[arg(long, overrides_with = "logcat", conflicts_with = "watch")]
+    no_logcat: bool,
+    /// Android: show the app's log until it exits or Ctrl+C stops it (the default)
+    #[arg(long, overrides_with = "no_logcat")]
+    logcat: bool,
+    #[command(flatten)]
+    emulator: EmulatorArgs,
+    /// Android: shut down an emulator that this run started once the app is done
+    #[arg(long, conflicts_with = "watch")]
+    stop_emulator: bool,
+}
+
+impl AndroidRunArgs {
+    /// Whether a flag that only an Android run has was given (`--device` set by the environment does not count).
+    fn is_set(&self) -> bool {
+        self.no_logcat || self.stop_emulator || self.emulator.headless || self.emulator.cold_boot || self.emulator.wipe_data
+    }
+
+    fn options(self) -> kargo_ops::android_device::AndroidRun {
+        kargo_ops::android_device::AndroidRun {
+            device: self.device,
+            no_logcat: self.no_logcat,
+            emulator: self.emulator.options(),
+            stop_emulator: self.stop_emulator,
+            watch: false,
+        }
+    }
+}
+
+/// How an emulator that Kargo starts boots.
+#[derive(Debug, Args)]
+struct EmulatorArgs {
+    /// Android: start an emulator without a window or sound
+    #[arg(long)]
+    headless: bool,
+    /// Android: boot an emulator without its saved snapshot
+    #[arg(long)]
+    cold_boot: bool,
+    /// Android: erase the user data of an emulator before it starts
+    #[arg(long)]
+    wipe_data: bool,
+    /// Android: seconds to wait for an emulator to boot
+    #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+    boot_timeout: u64,
+}
+
+impl EmulatorArgs {
+    fn options(&self) -> kargo_ops::android_device::EmulatorOptions {
+        kargo_ops::android_device::EmulatorOptions {
+            headless: self.headless,
+            cold_boot: self.cold_boot,
+            wipe_data: self.wipe_data,
+            timeout: std::time::Duration::from_secs(self.boot_timeout),
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum AndroidCommand {
+    /// List connected devices, running emulators and installed virtual devices
+    Devices {
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
+    },
+    /// List, create and delete virtual devices (AVDs)
+    Avd {
+        #[command(subcommand)]
+        command: AvdCommand,
+    },
+    /// Start and stop emulators
+    Emulator {
+        #[command(subcommand)]
+        command: EmulatorCommand,
+    },
+    /// Connect to a device over Wi-Fi (wireless debugging)
+    Connect {
+        /// The address from the Wireless debugging screen of the device, `192.168.1.20:37099`
+        address: String,
+    },
+    /// Pair with a device for wireless debugging
+    Pair {
+        /// The pairing address from "Pair device with pairing code" on the device
+        address: String,
+        /// The six-digit pairing code (adb asks for it when left out)
+        code: Option<String>,
+    },
+    /// Disconnect from a wireless device (all of them without an address)
+    Disconnect { address: Option<String> },
+}
+
+#[derive(Debug, Subcommand)]
+enum AvdCommand {
+    /// List the installed virtual devices
+    #[command(visible_alias = "ls")]
+    List {
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
+    },
+    /// Create a virtual device; Kargo's SDK installs the emulator and the system image first (after asking)
+    Create {
+        /// Its name (default: Kargo_API_<api>)
+        name: Option<String>,
+        /// The Android API level (default: the project's compile-sdk, else the newest installed system image)
+        #[arg(long, value_name = "LEVEL")]
+        api: Option<u32>,
+        /// The hardware profile, such as `pixel_8` (`avdmanager list device` shows them)
+        #[arg(long, value_name = "PROFILE")]
+        hardware: Option<String>,
+        /// Replace a virtual device of the same name
+        #[arg(long)]
+        force: bool,
+        /// Accept the licenses of the Android SDK packages, after showing them, instead of asking (for CI)
+        #[arg(long)]
+        accept_licenses: bool,
+    },
+    /// Delete a virtual device
+    #[command(visible_alias = "rm")]
+    Delete {
+        /// Its name
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EmulatorCommand {
+    /// Start a virtual device and wait until it booted
+    Start {
+        /// The virtual device (default: the only one)
+        avd: Option<String>,
+        #[command(flatten)]
+        options: EmulatorArgs,
+    },
+    /// Shut down a running emulator
+    Stop {
+        /// The serial (`emulator-5554`) or the virtual device it runs
+        target: String,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum ToolchainCommand {
     /// List installed JDKs, GraalVMs, Kotlin/Native and Gradle distributions, Android SDK packages, Kotlin language servers and the debug adapter
@@ -294,6 +472,9 @@ enum ToolchainCommand {
         /// Accept the licenses of the Android SDK packages, after showing them, instead of asking (for CI)
         #[arg(long)]
         accept_licenses: bool,
+        /// android-sdk: also install the emulator, `avdmanager` and a system image, to run the app on a virtual device
+        #[arg(long)]
+        emulator: bool,
     },
     /// Remove an installed toolchain
     #[command(visible_alias = "rm")]
@@ -651,6 +832,71 @@ struct NewArgs {
     workspace: bool,
 }
 
+/// The arguments of `kargo run`, in a struct of their own for the same reason as [`WhyArgs`].
+#[derive(Debug, Args)]
+struct RunArgs {
+    #[arg(short, long, conflicts_with = "profile")]
+    release: bool,
+    /// Run with a custom profile from kargo.toml (`[profile.<name>]`)
+    #[arg(long, value_name = "NAME", conflicts_with = "release")]
+    profile: Option<String>,
+    /// Target to run (defaults to jvm, then native, wasm, js, android)
+    #[arg(short, long, value_enum)]
+    target: Option<TargetArg>,
+    /// Run this main instead: a JVM class (com.example.ToolKt) or a native entry function (com.example.main)
+    #[arg(long, visible_alias = "entry-point", value_name = "NAME", conflicts_with_all = ["bin", "example"])]
+    main: Option<String>,
+    /// Run the [[bin]] with this name
+    #[arg(long, value_name = "NAME", conflicts_with = "example", add = ArgValueCandidates::new(complete::bins))]
+    bin: Option<String>,
+    /// Run examples/<NAME>.kt
+    #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::examples))]
+    example: Option<String>,
+    /// Port to serve a Wasm or JS browser app on (default 8080; 0 picks a free one)
+    #[arg(long, value_name = "PORT")]
+    port: Option<u16>,
+    /// Open the served page of a Wasm or JS browser app in your browser
+    #[arg(long)]
+    open: bool,
+    /// Start the JVM suspended, waiting for a debugger on this port (default 5005)
+    #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
+    debug: Option<u16>,
+    /// Run on GraalVM with its tracing agent, writing native-image configuration to native-image/
+    #[arg(long)]
+    native_agent: bool,
+    /// Install this Android product flavor (repeatable, one per dimension; default: the first of each)
+    #[arg(long = "flavor", value_name = "NAME")]
+    flavors: Vec<String>,
+    #[command(flatten)]
+    android: Box<AndroidRunArgs>,
+    #[command(flatten)]
+    package: OnePackageArg,
+    #[command(flatten)]
+    jobs: JobsArg,
+    /// How to print compiler diagnostics
+    #[arg(long, value_enum, default_value_t, value_name = "FMT")]
+    message_format: MessageFormatArg,
+    /// Rebuild and restart the program when its files change (Ctrl+C stops it)
+    #[arg(long, conflicts_with = "debug")]
+    watch: bool,
+    /// Like --watch, but a Compose Desktop app keeps running and reloads the changed code in place
+    #[arg(long, conflicts_with = "debug")]
+    hot_reload: bool,
+    #[command(flatten)]
+    watch_args: WatchArgs,
+    #[command(flatten)]
+    env: EnvArgs,
+    /// Run this Kotlin code as a script, like `kargo script -e`
+    #[arg(short, long, value_name = "CODE", conflicts_with_all = ["main", "bin", "example"])]
+    expr: Option<String>,
+    /// A .kt or .kts file to run, then arguments for the program; a first word that is not an existing .kt or .kts file is an argument too
+    #[arg(value_name = "FILE")]
+    words: Vec<String>,
+    /// Arguments for the program
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Create a new Kotlin project in a new directory
@@ -719,66 +965,7 @@ enum Command {
     },
     /// Build and run the program
     #[command(visible_alias = "r")]
-    Run {
-        #[arg(short, long, conflicts_with = "profile")]
-        release: bool,
-        /// Run with a custom profile from kargo.toml (`[profile.<name>]`)
-        #[arg(long, value_name = "NAME", conflicts_with = "release")]
-        profile: Option<String>,
-        /// Target to run (defaults to jvm, then native, wasm, js, android)
-        #[arg(short, long, value_enum)]
-        target: Option<TargetArg>,
-        /// Run this main instead: a JVM class (com.example.ToolKt) or a native entry function (com.example.main)
-        #[arg(long, visible_alias = "entry-point", value_name = "NAME", conflicts_with_all = ["bin", "example"])]
-        main: Option<String>,
-        /// Run the [[bin]] with this name
-        #[arg(long, value_name = "NAME", conflicts_with = "example", add = ArgValueCandidates::new(complete::bins))]
-        bin: Option<String>,
-        /// Run examples/<NAME>.kt
-        #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::examples))]
-        example: Option<String>,
-        /// Port to serve a Wasm or JS browser app on (default 8080; 0 picks a free one)
-        #[arg(long, value_name = "PORT")]
-        port: Option<u16>,
-        /// Open the served page of a Wasm or JS browser app in your browser
-        #[arg(long)]
-        open: bool,
-        /// Start the JVM suspended, waiting for a debugger on this port (default 5005)
-        #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
-        debug: Option<u16>,
-        /// Run on GraalVM with its tracing agent, writing native-image configuration to native-image/
-        #[arg(long)]
-        native_agent: bool,
-        /// Install this Android product flavor (repeatable, one per dimension; default: the first of each)
-        #[arg(long = "flavor", value_name = "NAME")]
-        flavors: Vec<String>,
-        #[command(flatten)]
-        package: OnePackageArg,
-        #[command(flatten)]
-        jobs: JobsArg,
-        /// How to print compiler diagnostics
-        #[arg(long, value_enum, default_value_t, value_name = "FMT")]
-        message_format: MessageFormatArg,
-        /// Rebuild and restart the program when its files change (Ctrl+C stops it)
-        #[arg(long, conflicts_with = "debug")]
-        watch: bool,
-        /// Like --watch, but a Compose Desktop app keeps running and reloads the changed code in place
-        #[arg(long, conflicts_with = "debug")]
-        hot_reload: bool,
-        #[command(flatten)]
-        watch_args: WatchArgs,
-        #[command(flatten)]
-        env: EnvArgs,
-        /// Run this Kotlin code as a script, like `kargo script -e`
-        #[arg(short, long, value_name = "CODE", conflicts_with_all = ["main", "bin", "example"])]
-        expr: Option<String>,
-        /// A .kt or .kts file to run, then arguments for the program; a first word that is not an existing .kt or .kts file is an argument too
-        #[arg(value_name = "FILE")]
-        words: Vec<String>,
-        /// Arguments for the program
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
+    Run(RunArgs),
     /// Run a Kotlin script (.kts) or a .kt file without a project
     Script {
         /// The .kts or .kt file to run (not needed with --expr)
@@ -1339,12 +1526,10 @@ upgrade). `kargo install --list` shows what is installed; `kargo uninstall <name
     },
     /// List plugins: hook plugins, compiler plugins and `kargo-*` subcommands
     Plugins,
-    /// Run Gradle tasks in the generated Android project
-    Android {
-        /// Arguments passed to Gradle
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
+    /// Run Gradle tasks in the generated Android project, and manage devices, emulators and virtual devices
+    Android(AndroidArgs),
+    /// List the devices, emulators and virtual devices `kargo run -t android` can use (same as `kargo android devices`)
+    Devices(DevicesArgs),
     /// Manage JDKs and Kotlin/Native distributions
     Toolchain {
         #[command(subcommand)]
@@ -2332,7 +2517,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             build_finished(build.message_format, results.map(|_| ()))?;
             Ok(0)
         }
-        Command::Run {
+        Command::Run(RunArgs {
             release,
             profile,
             target,
@@ -2344,6 +2529,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             debug,
             native_agent,
             flavors,
+            android,
             message_format,
             package,
             jobs,
@@ -2354,7 +2540,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             expr,
             words,
             args,
-        } => {
+        }) => {
             set_message_format(message_format);
             let watch = watch_options(watch || hot_reload, &watch_args)?;
             let (file, args) = if expr.is_some() { (None, [words, args].concat()) } else { split_run_words(words, args) };
@@ -2383,6 +2569,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     (debug.is_some(), "--debug"),
                     (native_agent, "--native-agent"),
                     (!flavors.is_empty(), "--flavor"),
+                    (android.is_set(), "--no-logcat, --stop-emulator or an emulator option"),
                     (package.package.is_some(), "--package"),
                     (watch.is_some(), if hot_reload { "--hot-reload" } else { "--watch" }),
                     (!env.env_file.is_empty(), "--env-file"),
@@ -2418,7 +2605,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (_, _, _, Some(example)) => Program::Example(example),
                 _ => Program::Default,
             };
-            let opts = RunOptions {
+            let mut opts = RunOptions {
                 target: target.map(Into::into),
                 profile,
                 program,
@@ -2428,6 +2615,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 debug,
                 native_agent,
                 flavors,
+                android: android.options(),
                 env: env.options(),
                 hot_reload,
             };
@@ -2436,6 +2624,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 return Ok(code);
             };
             ops::run::check_watchable(&ctx, &opts)?;
+            ops::run::choose_watch_device(&ctx, &mut opts)?;
             drop(ctx);
             let mut running = Running::default();
             ops::watch::repeatedly(shell, &watch, WatchSet::of(&project), || {
@@ -3172,11 +3361,14 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             list_plugins(config, global);
             Ok(0)
         }
-        Command::Android { args } => {
+        Command::Android(AndroidArgs { command: Some(command), .. }) => android(config, global, command),
+        Command::Devices(DevicesArgs { format }) => android(config, global, AndroidCommand::Devices { format }),
+        Command::Android(AndroidArgs { command: None, device, args }) => {
             let project = load_project(global)?;
             let index = project.select_one(&Selection::default(), "`kargo android`")?;
             let ctx = context(config, &project, index, global, ProfileKind::Dev)?;
-            let ok = kargo_ops::gradle::gradle(&ctx, &args)?;
+            let device = device.or_else(|| std::env::var(kargo_ops::android_device::DEVICE_ENV).ok());
+            let ok = kargo_ops::gradle::run_tasks(&ctx, &args, device.as_deref())?;
             Ok(if ok { 0 } else { FAILURE })
         }
         Command::Info { format } => {
@@ -3263,6 +3455,76 @@ fn licenses(accept: bool) -> kargo_toolchain::android_sdk::Licenses {
     if accept { kargo_toolchain::android_sdk::Licenses::Accept } else { kargo_toolchain::android_sdk::Licenses::Ask }
 }
 
+/// `kargo android <devices|avd|emulator|connect|pair|disconnect>`.
+fn android(config: &Config, global: &GlobalArgs, command: AndroidCommand) -> Result<i32> {
+    use kargo_ops::android_device as device;
+    // These commands also work outside a project, with the SDK of ANDROID_HOME.
+    let project = load_project(global).ok();
+    let manifest = project.as_ref().map(|p| p.package(p.current().unwrap_or(p.members()[0])).manifest());
+    let toolbox = device::Toolbox::locate(config, manifest);
+    let shell = config.shell();
+    match command {
+        AndroidCommand::Devices { format } => {
+            let devices = device::list(&toolbox, shell)?;
+            match format {
+                FormatArg::Text => print!("{}", device::render_table(&devices)),
+                FormatArg::Json => println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "devices": devices }))?),
+            }
+        }
+        AndroidCommand::Avd { command: AvdCommand::List { format } } => {
+            let avds = device::avds(&toolbox.avd_home());
+            match format {
+                FormatArg::Text if avds.is_empty() => {
+                    println!("No virtual devices in {}; `kargo android avd create` makes one.", toolbox.avd_home().display())
+                }
+                FormatArg::Text => {
+                    for avd in &avds {
+                        let api = avd.api.map(|a| format!("API {a}")).unwrap_or_else(|| "-".to_owned());
+                        println!("{:<28} {:<8} {}", avd.name, api, avd.image.as_deref().unwrap_or("-"));
+                    }
+                }
+                FormatArg::Json => {
+                    let list: Vec<_> = avds
+                        .iter()
+                        .map(|a| serde_json::json!({ "name": a.name, "api": a.api, "image": a.image, "hardware": a.hardware, "path": a.dir }))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "avds": list }))?);
+                }
+            }
+        }
+        AndroidCommand::Avd { command: AvdCommand::Create { name, api, hardware, force, accept_licenses } } => {
+            let new = device::NewAvd { name, api: api.unwrap_or_else(|| toolbox.default_api()), hardware, force };
+            device::create_avd(&toolbox, shell, &new, licenses(accept_licenses))?;
+        }
+        AndroidCommand::Avd { command: AvdCommand::Delete { name } } => device::delete_avd(&toolbox, shell, &name)?,
+        AndroidCommand::Emulator { command: EmulatorCommand::Start { avd, options } } => {
+            let name = match avd {
+                Some(name) => name,
+                None => match device::avds(&toolbox.avd_home()).as_slice() {
+                    [only] => only.name.clone(),
+                    [] => bail!("there is no virtual device to start; `kargo android avd create` makes one"),
+                    many => bail!("which virtual device? {}", many.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")),
+                },
+            };
+            let serial = device::start_emulator(&toolbox, shell, &toolbox.adb()?, &name, &options.options())?;
+            shell.status("Ready", format!("{name} is {serial}"));
+        }
+        AndroidCommand::Emulator { command: EmulatorCommand::Stop { target } } => {
+            let serial = if target.starts_with("emulator-") {
+                target
+            } else {
+                device::running_serial(&toolbox, &target)?
+                    .with_context(|| format!("no running emulator for the virtual device `{target}`"))?
+            };
+            device::stop_emulator(&toolbox.adb()?, shell, &serial)?;
+        }
+        AndroidCommand::Connect { address } => device::connect(&toolbox, shell, &address)?,
+        AndroidCommand::Pair { address, code } => device::pair(&toolbox, shell, &address, code.as_deref())?,
+        AndroidCommand::Disconnect { address } => device::disconnect(&toolbox, shell, address.as_deref())?,
+    }
+    Ok(0)
+}
+
 fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) -> Result<i32> {
     // Toolchain commands also work outside a project. Packages built together share their
     // toolchains, so the first member stands for a whole workspace.
@@ -3272,14 +3534,21 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
     let shell = config.shell();
     match command {
         ToolchainCommand::List => print!("{}", toolchain_ops::list(config, manifest)?),
-        ToolchainCommand::Install { kind: Some(kind), version, accept_licenses } => {
+        ToolchainCommand::Install { kind: Some(kind), version, accept_licenses, emulator } => {
+            if emulator && !matches!(kind, ToolArg::AndroidSdk) {
+                bail!("`--emulator` installs the Android emulator and needs `android-sdk`");
+            }
             let what = toolchain_ops::install(config, manifest, kind.into(), version.as_deref(), licenses(accept_licenses))?;
             shell.status("Installed", what);
+            if emulator {
+                let what = toolchain_ops::install_android_emulator(config, manifest, version.as_deref(), licenses(accept_licenses))?;
+                shell.status("Installed", what);
+            }
         }
         ToolchainCommand::Install { kind: None, version: Some(_), .. } => {
             bail!("specify what to install: `jdk`, `graalvm`, `native`, `gradle` or `android-sdk`")
         }
-        ToolchainCommand::Install { kind: None, version: None, accept_licenses } => {
+        ToolchainCommand::Install { kind: None, version: None, accept_licenses, .. } => {
             let project = project
                 .as_ref()
                 .context("not in a Kargo project; use `kargo toolchain install jdk <version>`, `native <version>` or `gradle <version>`")?;
@@ -3794,19 +4063,19 @@ mod tests {
             other => panic!("{other:?}"),
         }
         let cli = Cli::try_parse_from(["kargo", "run", "--", "--flag", "x"]).unwrap();
-        assert!(matches!(cli.command, Command::Run { ref args, .. } if args == &["--flag", "x"]));
+        assert!(matches!(cli.command, Command::Run(RunArgs { ref args, .. }) if args == &["--flag", "x"]));
         let cli = Cli::try_parse_from(["kargo", "run", "--entry-point", "com.x.main"]).unwrap();
-        assert!(matches!(cli.command, Command::Run { main: Some(ref m), .. } if m == "com.x.main"));
+        assert!(matches!(cli.command, Command::Run(RunArgs { main: Some(ref m), .. }) if m == "com.x.main"));
         let cli = Cli::try_parse_from(["kargo", "run", "--bin", "migrate", "--", "up"]).unwrap();
-        assert!(matches!(cli.command, Command::Run { bin: Some(ref b), ref args, .. } if b == "migrate" && args == &["up"]));
+        assert!(matches!(cli.command, Command::Run(RunArgs { bin: Some(ref b), ref args, .. }) if b == "migrate" && args == &["up"]));
         assert!(Cli::try_parse_from(["kargo", "run", "--bin", "a", "--example", "b"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "run", "Tool.kt", "up", "--release", "--", "--flag"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Run { release: true, ref words, ref args, .. } if words == &["Tool.kt", "up"] && args == &["--flag"]
+            Command::Run(RunArgs { release: true, ref words, ref args, .. }) if words == &["Tool.kt", "up"] && args == &["--flag"]
         ));
         let cli = Cli::try_parse_from(["kargo", "run", "-e", "println(1)", "x"]).unwrap();
-        assert!(matches!(cli.command, Command::Run { expr: Some(ref e), ref words, .. } if e == "println(1)" && words == &["x"]));
+        assert!(matches!(cli.command, Command::Run(RunArgs { expr: Some(ref e), ref words, .. }) if e == "println(1)" && words == &["x"]));
         assert!(Cli::try_parse_from(["kargo", "run", "-e", "1", "--main", "A"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "run", "--main", "A", "--bin", "b"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "package", "--bin", "migrate"]).unwrap();
@@ -3847,12 +4116,12 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "toolchain", "install", "jdk", "21"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::Jdk), ref version, accept_licenses: false } } if version.as_deref() == Some("21")
+            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::Jdk), ref version, accept_licenses: false, .. } } if version.as_deref() == Some("21")
         ));
         let cli = Cli::try_parse_from(["kargo", "toolchain", "install", "android-sdk", "36", "--accept-licenses"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::AndroidSdk), ref version, accept_licenses: true } } if version.as_deref() == Some("36")
+            Command::Toolchain { command: ToolchainCommand::Install { kind: Some(ToolArg::AndroidSdk), ref version, accept_licenses: true, .. } } if version.as_deref() == Some("36")
         ));
         assert!(Cli::try_parse_from(["kargo", "toolchain", "remove", "native"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "-v", "test", "MathTest", "--no-run"]).unwrap();
@@ -3917,7 +4186,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "target", "ls", "--format", "json"]).unwrap();
         assert!(matches!(cli.command, Command::Target { command: TargetCommand::List { format: FormatArg::Json, .. } }));
         let cli = Cli::try_parse_from(["kargo", "run", "--debug", "--", "x"]).unwrap();
-        assert!(matches!(cli.command, Command::Run { debug: Some(5005), ref args, .. } if args == &["x"]));
+        assert!(matches!(cli.command, Command::Run(RunArgs { debug: Some(5005), ref args, .. }) if args == &["x"]));
         let cli = Cli::try_parse_from(["kargo", "test", "--debug=6000", "MathTest"]).unwrap();
         assert!(matches!(cli.command, Command::Test { debug: Some(6000), ref filter, .. } if filter.as_deref() == Some("MathTest")));
         // `--debug` never takes the next word as its port.
@@ -3952,7 +4221,7 @@ mod tests {
         assert!(Cli::try_parse_from(["kargo", "build", "--workspace", "-p", "app"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "run", "-p", "app", "--", "x"]).unwrap();
         assert!(
-            matches!(cli.command, Command::Run { ref package, ref args, .. } if package.package.as_deref() == Some("app") && args == &["x"])
+            matches!(cli.command, Command::Run(RunArgs { ref package, ref args, .. }) if package.package.as_deref() == Some("app") && args == &["x"])
         );
         assert!(Cli::try_parse_from(["kargo", "run", "-p", "a", "-p", "b"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "add", "--path", "../lib", "--dev"]).unwrap();
@@ -3995,7 +4264,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "run", "--watch", "--clear", "--ignore", "*.log", "--", "x"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Run { watch: true, ref watch_args, ref args, .. }
+            Command::Run(RunArgs { watch: true, ref watch_args, ref args, .. })
                 if watch_args.clear && watch_args.ignore == ["*.log"] && args == &["x"]
         ));
         assert!(Cli::try_parse_from(["kargo", "run", "--watch", "--debug"]).is_err());

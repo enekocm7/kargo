@@ -349,6 +349,24 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
     }
 }
 
+/// `kargo toolchain install android-sdk --emulator`: the emulator, `avdmanager` and a system image for platform
+/// `version` (default: the project's `compile-sdk`) in the Kargo-managed SDK.
+pub fn install_android_emulator(config: &Config, project: Option<&Manifest>, version: Option<&str>, licenses: Licenses) -> Result<String> {
+    let config = &config.clone().with_auto_install(true);
+    let api = match (version, project.and_then(|m| m.targets.android.as_ref())) {
+        (Some(v), _) => match v.parse::<AndroidSdkRequest>()? {
+            AndroidSdkRequest::Platform(api) => api,
+            AndroidSdkRequest::System => bail!(
+                "Kargo does not install the system Android SDK; name an API level, e.g. `kargo toolchain install android-sdk 36 --emulator`"
+            ),
+        },
+        (None, Some(android)) => android.config.compile_sdk,
+        (None, None) => bail!("which Android platform? e.g. `kargo toolchain install android-sdk 36 --emulator`"),
+    };
+    let (sdk, image) = android_sdk::ensure_emulator(config, api, licenses)?;
+    Ok(format!("the Android emulator, avdmanager and system image {image} at {}", sdk.display()))
+}
+
 /// Installs everything the project needs (`kargo toolchain install` without arguments).
 pub fn install_for_project(config: &Config, manifest: &Manifest, licenses: Licenses) -> Result<Vec<String>> {
     let mut done = Vec::new();

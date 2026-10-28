@@ -17,6 +17,7 @@ anstyle.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 brotli.workspace = true
+ctrlc.workspace = true
 minify-js.workspace = true
 dirs.workspace = true
 flate2.workspace = true

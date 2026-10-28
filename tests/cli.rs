@@ -1112,6 +1112,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "version",
         "plugins",
         "android",
+        "devices",
         "daemon",
         "env",
         "metadata",
@@ -1496,6 +1497,9 @@ fn toolchain_manages_gradle() {
     p.kargo().args(["toolchain", "remove", "gradle", "9.6.0"]).assert().failure().stderr(predicate::str::contains("not installed"));
 }
 
+/// The ABI of the system images that run on this machine.
+const ABI: &str = if cfg!(target_arch = "aarch64") { "arm64-v8a" } else { "x86_64" };
+
 /// Serves a Google SDK repository with platform 36, build-tools 36.0.0 and platform-tools from `repo`, as the
 /// toolchain mirror of `p`.
 fn serve_android_repository(p: &Project, repo: &LocalRepo) {
@@ -1523,6 +1527,9 @@ fn serve_android_repository(p: &Project, repo: &LocalRepo) {
             "aapt2",
         ),
         package("platform-tools", "Android SDK Platform-Tools", "<major>37</major>", "platform-tools", "adb"),
+        package("emulator", "Android Emulator", "<major>36</major>", "emulator", "emulator"),
+        package("cmdline-tools;latest", "Android SDK Command-line Tools (latest)", "<major>20</major>", "cmdline-tools", "bin"),
+        package(&format!("system-images;android-36;google_apis;{ABI}"), "Google APIs System Image", "<major>1</major>", ABI, "system.img"),
     ];
     repo.write(
         "repository2-3.xml",
@@ -1606,6 +1613,369 @@ fn a_system_android_sdk_without_the_platform_names_it() {
                 .and(predicate::str::contains("sdkmanager \"platforms;android-36\" \"build-tools;36.0.0\""))
                 .and(predicate::str::contains("android-sdk = \"36\"")),
         );
+}
+
+#[test]
+fn toolchain_installs_the_emulator_and_a_system_image() {
+    let p = Project::new();
+    let repo = LocalRepo::new();
+    serve_android_repository(&p, &repo);
+    p.kargo().args(["toolchain", "install", "android-sdk", "36", "--emulator", "--accept-licenses"]).assert().success().stderr(
+        predicate::str::contains("Installing Android Emulator (emulator)").and(predicate::str::contains(format!(
+            "Installed the Android emulator, avdmanager and system image system-images;android-36;google_apis;{ABI}"
+        ))),
+    );
+    let sdk = p.home.path().join("toolchains/android-sdk");
+    assert!(sdk.join("emulator/package.xml").is_file() && sdk.join("cmdline-tools/latest/package.xml").is_file());
+    assert!(sdk.join("system-images/android-36/google_apis").join(ABI).join("package.xml").is_file());
+    p.kargo().args(["toolchain", "list"]).assert().success().stdout(
+        predicate::str::contains("emulator")
+            .and(predicate::str::contains("cmdline-tools;latest"))
+            .and(predicate::str::contains("system-images;android-36;google_apis")),
+    );
+    p.kargo()
+        .args(["toolchain", "install", "jdk", "--emulator"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs `android-sdk`"));
+}
+
+/// An Android application project that the fake tools run.
+fn android_app(p: &Project) {
+    p.file("kargo.toml", &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\ncompile-sdk = 36\n"));
+    p.file("android/AndroidManifest.xml", "<manifest/>");
+    p.file("src/Main.kt", "fun main() {}\n");
+}
+
+const EMULATOR_AND_PHONE: &str = "emulator-5554|device|Google|sdk_gphone64|35|Pixel_8_API_35\nR58M123ABC|device|samsung|SM-S918B|34|\n";
+
+#[test]
+fn android_devices_lists_devices_emulators_and_virtual_devices() {
+    let p = Project::new();
+    let fake = common::FakeAndroid::new(&format!("{EMULATOR_AND_PHONE}0123ABCD|unauthorized|||0|\n"));
+    fake.add_avd("Pixel_8_API_35", 35);
+    fake.add_avd("Tablet_API_34", 34);
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    let out = cmd.args(["android", "devices"]).assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.lines().next().unwrap().starts_with("ID"), "{text}");
+    for expected in ["emulator-5554", "R58M123ABC", "samsung SM-S918B", "0123ABCD", "unauthorized", "Tablet_API_34", "stopped"] {
+        assert!(text.contains(expected), "{expected} missing from\n{text}");
+    }
+    // The running virtual device is its emulator, not a second entry.
+    assert_eq!(text.lines().filter(|l| l.contains("Pixel_8_API_35")).count(), 1, "{text}");
+
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    let json: serde_json::Value =
+        serde_json::from_slice(&cmd.args(["devices", "--format", "json"]).assert().success().get_output().stdout).unwrap();
+    let devices = json["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 4, "{json}");
+    let kinds: Vec<(&str, &str, &str)> =
+        devices.iter().map(|d| (d["id"].as_str().unwrap(), d["kind"].as_str().unwrap(), d["state"].as_str().unwrap())).collect();
+    assert_eq!(
+        kinds,
+        [
+            ("emulator-5554", "emulator", "device"),
+            ("R58M123ABC", "physical", "device"),
+            ("0123ABCD", "physical", "unauthorized"),
+            ("Tablet_API_34", "avd", "stopped")
+        ]
+    );
+    assert_eq!(devices[0]["api"], 35);
+    assert_eq!(devices[0]["avd"], "Pixel_8_API_35");
+    assert_eq!(devices[1]["name"], "samsung SM-S918B");
+}
+
+#[test]
+fn android_run_installs_only_on_the_chosen_device() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new(EMULATOR_AND_PHONE);
+
+    // Without a terminal there is nobody to choose.
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android"]).assert().failure().stderr(
+        predicate::str::contains("more than one device is connected and there is no terminal")
+            .and(predicate::str::contains("--device <serial>"))
+            .and(predicate::str::contains("emulator-5554"))
+            .and(predicate::str::contains("R58M123ABC")),
+    );
+    assert!(!fake.log().contains("gradle") && !fake.log().contains("am start"), "nothing is built or installed:\n{}", fake.log());
+
+    // `--device` skips the list; Gradle installs on that device only, and the app starts with `am start -W`.
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--device", "R58M123ABC"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("the app says hi"))
+        .stderr(
+            predicate::str::contains("Using R58M123ABC")
+                .and(predicate::str::contains("Launching com.example.droid on samsung SM-S918B"))
+                .and(predicate::str::contains("Logcat com.example.droid (pid 4242)"))
+                .and(predicate::str::contains("com.example.droid exited")),
+        );
+    let log = fake.log();
+    assert!(log.contains("gradle-env ANDROID_SERIAL=R58M123ABC"), "{log}");
+    assert!(log.contains("gradle installDebug") || log.contains("installDebug"), "{log}");
+    assert!(
+        log.contains(
+            "adb -s R58M123ABC shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.example.droid"
+        ),
+        "{log}"
+    );
+    assert!(log.contains("adb -s R58M123ABC logcat -v threadtime --pid 4242"), "{log}");
+    assert!(!log.contains("monkey"), "{log}");
+    // The emulator that was not chosen is only asked what it is, never given the app.
+    for line in log.lines().filter(|l| l.contains("emulator-5554")) {
+        assert!(line.contains("getprop") || line.contains("emu avd name"), "touched the other device: {line}");
+    }
+}
+
+#[test]
+fn android_run_picks_the_device_from_the_environment_or_an_avd_name() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new(EMULATOR_AND_PHONE);
+    for (var, expected) in [("KARGO_ANDROID_DEVICE", "emulator-5554"), ("--device", "emulator-5554")] {
+        let mut cmd = p.kargo();
+        fake.apply(&mut cmd);
+        cmd.args(["--system-gradle", "run", "-t", "android", "--no-logcat"]);
+        if var == "--device" {
+            // The name of the virtual device an emulator runs.
+            cmd.args(["--device", "Pixel_8_API_35"]);
+        } else {
+            cmd.env(var, "emulator-5554");
+        }
+        cmd.assert().success();
+        assert!(fake.log().contains(&format!("gradle-env ANDROID_SERIAL={expected}")), "{}", fake.log());
+    }
+    // `--no-logcat` leaves once the app started.
+    assert!(!fake.log().contains("logcat"), "{}", fake.log());
+
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "-s", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no device or virtual device named `nope`").and(predicate::str::contains("available:")));
+}
+
+#[test]
+fn android_run_reports_a_crash_and_a_failed_start() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new("emulator-5554|device|Google|sdk_gphone64|35|Pixel_8_API_35\n");
+    fake.switch("crash");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("com.example.droid crashed"));
+
+    fake.switch("am-fails");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android"]).assert().failure().stderr(
+        predicate::str::contains("starting com.example.droid on emulator-5554 failed").and(predicate::str::contains("does not exist")),
+    );
+}
+
+#[test]
+fn android_run_names_the_problem_of_a_device_that_is_not_ready() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new("R58M123ABC|unauthorized|||0|\n0123ABCD|offline|||0|\n");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android"]).assert().failure().stderr(
+        predicate::str::contains("R58M123ABC is unauthorized")
+            .and(predicate::str::contains("Allow USB debugging"))
+            .and(predicate::str::contains("0123ABCD is offline")),
+    );
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--device", "R58M123ABC"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("R58M123ABC is unauthorized"));
+    assert!(!fake.log().contains("gradle"), "{}", fake.log());
+}
+
+#[test]
+fn android_run_never_starts_an_emulator_unasked() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new("");
+    fake.add_avd("Tablet_API_34", 34);
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android"]).assert().failure().stderr(
+        predicate::str::contains("no device or emulator is connected and there is no terminal to ask on")
+            .and(predicate::str::contains("--device <name>"))
+            .and(predicate::str::contains("Tablet_API_34")),
+    );
+    assert!(!fake.log().contains("emulator "), "{}", fake.log());
+
+    // Naming the virtual device is the request: it starts, boots, runs the app and is stopped afterwards.
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--device", "Tablet_API_34", "--headless", "--cold-boot", "--stop-emulator"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Starting the emulator Tablet_API_34 (headless)")
+                .and(predicate::str::contains("Booted Tablet_API_34"))
+                .and(predicate::str::contains("Stopped the emulator emulator-5554")),
+        );
+    let log = fake.log();
+    assert!(log.contains("emulator -avd Tablet_API_34 -no-window -no-audio -no-boot-anim -no-snapshot-load"), "{log}");
+    assert!(log.contains("gradle-env ANDROID_SERIAL=emulator-5554") && log.contains("adb -s emulator-5554 emu kill"), "{log}");
+
+    // An emulator that cannot start says why.
+    fake.switch("emulator-fails");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--device", "Tablet_API_34"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("the emulator exited").and(predicate::str::contains("Missing emulator engine")));
+}
+
+#[test]
+fn android_flags_need_the_android_target() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    for flag in ["--no-logcat", "--stop-emulator", "--headless"] {
+        p.kargo()
+            .args(["run", flag])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!("`{flag}` applies to an Android run and needs `-t android`")));
+    }
+    p.kargo().args(["run", "--watch", "--no-logcat"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn android_gradle_tasks_that_use_a_device_get_the_chosen_one() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new(EMULATOR_AND_PHONE);
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "android", "-s", "R58M123ABC", "connectedDebugAndroidTest"]).assert().success();
+    assert!(fake.log().contains("gradle-env ANDROID_SERIAL=R58M123ABC"), "{}", fake.log());
+
+    // Other tasks neither choose a device nor need one.
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "android", "lint"]).assert().success();
+    assert!(fake.log().contains("gradle-env ANDROID_SERIAL=none"), "{}", fake.log());
+
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "android", "installDebug"]).assert().failure().stderr(predicate::str::contains("more than one device"));
+}
+
+#[test]
+fn android_creates_lists_starts_and_deletes_virtual_devices() {
+    let p = Project::new();
+    let fake = common::FakeAndroid::new("");
+    let run = |args: &[&str]| {
+        let mut cmd = p.kargo();
+        fake.apply(&mut cmd);
+        cmd.args(args).assert()
+    };
+    run(&["android", "avd", "list"]).success().stdout(predicate::str::contains("No virtual devices"));
+    run(&["android", "avd", "create", "--api", "35", "--hardware", "pixel_8"])
+        .success()
+        .stderr(predicate::str::contains("Created the virtual device Kargo_API_35"));
+    assert!(fake.avds.join("Kargo_API_35.ini").is_file());
+    assert!(
+        fake.log().contains("avdmanager create avd --name Kargo_API_35 --package system-images;android-35;google_apis;"),
+        "{}",
+        fake.log()
+    );
+    let json = run(&["android", "avd", "list", "--format", "json"]).success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(json["avds"][0]["name"], "Kargo_API_35");
+    assert_eq!(json["avds"][0]["api"], 35);
+    assert_eq!(json["avds"][0]["hardware"], "pixel_8");
+
+    run(&["android", "avd", "create", "Kargo_API_35", "--api", "35"]).failure().stderr(predicate::str::contains("exists already"));
+    run(&["android", "avd", "create", "my phone", "--api", "35"]).failure().stderr(predicate::str::contains("not a valid name"));
+    run(&["android", "avd", "create", "--api", "30"]).failure().stderr(predicate::str::contains("system image for Android 30"));
+
+    // The only virtual device starts without a name; a running one is stopped by name.
+    run(&["android", "emulator", "start", "--headless"]).success().stderr(predicate::str::contains("Ready Kargo_API_35 is emulator-5554"));
+    run(&["android", "avd", "delete", "Kargo_API_35"]).failure().stderr(predicate::str::contains("is running; stop it first"));
+    run(&["android", "emulator", "stop", "Kargo_API_35"]).success().stderr(predicate::str::contains("Stopped the emulator emulator-5554"));
+    run(&["android", "avd", "delete", "Kargo_API_35"])
+        .success()
+        .stderr(predicate::str::contains("Deleted the virtual device Kargo_API_35"));
+    assert!(!fake.avds.join("Kargo_API_35.ini").exists() && !fake.avds.join("Kargo_API_35.avd").exists());
+    run(&["android", "emulator", "start"]).failure().stderr(predicate::str::contains("there is no virtual device to start"));
+}
+
+#[test]
+fn android_connects_to_wireless_devices() {
+    let p = Project::new();
+    let fake = common::FakeAndroid::new("");
+    let run = |args: &[&str]| {
+        let mut cmd = p.kargo();
+        fake.apply(&mut cmd);
+        cmd.args(args).assert()
+    };
+    run(&["android", "connect", "192.168.1.5:5555"]).success().stderr(predicate::str::contains("Connected to 192.168.1.5:5555"));
+    run(&["android", "devices"])
+        .success()
+        .stdout(predicate::str::contains("192.168.1.5:5555").and(predicate::str::contains("Google Pixel 7")));
+    run(&["android", "connect", "bad:1"])
+        .failure()
+        .stderr(predicate::str::contains("could not connect to bad:1").and(predicate::str::contains("Wireless debugging")));
+    run(&["android", "pair", "192.168.1.5:40000", "123456"]).success().stderr(predicate::str::contains("Paired with 192.168.1.5:40000"));
+    run(&["android", "pair", "192.168.1.5:40000", "000000"]).failure().stderr(predicate::str::contains("could not pair"));
+    run(&["android", "disconnect"]).success().stderr(predicate::str::contains("Disconnected all wireless devices"));
+    run(&["android", "devices"]).success().stdout(predicate::str::contains("192.168.1.5:5555").not());
+}
+
+#[test]
+fn android_run_connects_to_a_wireless_address() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new(EMULATOR_AND_PHONE);
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--no-logcat", "--device", "192.168.1.5:5555"]).assert().success();
+    assert!(fake.log().contains("gradle-env ANDROID_SERIAL=192.168.1.5:5555"), "{}", fake.log());
+}
+
+#[test]
+fn doctor_reports_devices_virtual_devices_and_the_emulator() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new("R58M123ABC|unauthorized|||0|\nemulator-5554|device|Google|sdk_gphone64|35|Pixel_8_API_35\n");
+    fake.add_avd("Pixel_8_API_35", 35);
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    let out = cmd.args(["doctor", "--offline"]).output().unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    for expected in [
+        "Android Debug Bridge version",
+        "device R58M123ABC",
+        "is unauthorized",
+        "accept the USB debugging prompt",
+        "1 ready: Pixel_8_API_35 (emulator-5554)",
+        "1 installed: Pixel_8_API_35",
+    ] {
+        assert!(text.contains(expected), "{expected} missing from\n{text}");
+    }
 }
 
 #[test]
@@ -2566,13 +2936,19 @@ fn watch_options_are_checked_before_anything_builds() {
     // Combinations that cannot work are refused by the parser.
     p.kargo().args(["run", "--watch", "--debug"]).assert().failure().code(2).stderr(predicate::str::contains("cannot be used with"));
     p.kargo().args(["test", "--watch", "--list"]).assert().failure().code(2).stderr(predicate::str::contains("cannot be used with"));
-    // Android apps run inside Gradle, so there is nothing for the watcher to restart.
+    // An Android app's log is what keeps running, so it cannot be left out or the emulator stopped.
     p.kargo()
-        .args(["run", "--watch", "-t", "android"])
+        .args(["run", "--watch", "-t", "android", "--no-logcat"])
         .assert()
         .failure()
-        .code(101)
-        .stderr(predicate::str::contains("`--watch` does not run Android apps"));
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+    p.kargo()
+        .args(["run", "--watch", "-t", "android", "--stop-emulator"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]

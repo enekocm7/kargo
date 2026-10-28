@@ -84,6 +84,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo env [--release \| --profile <name>] [--show-values] [--check]` | Show the environment `kargo run` and `kargo test` use: each variable, where it comes from, and its value (hidden unless `--show-values`); `--check` fails on unset required variables and on keys of `.env.example` that nothing sets |
 | `kargo plugins` | List compiler, hook and subcommand plugins |
 | `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
+| `kargo android devices\|avd\|emulator\|connect\|pair\|disconnect`, `kargo devices` | List devices, emulators and virtual devices; create, delete and start virtual devices; connect over Wi-Fi. `kargo run -t android --device <serial\|avd>` picks the device (a list to choose from when several are connected; it asks before it starts or creates an emulator), launches with `am start -W` and shows the app's log |
 | `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Android SDK, the Kotlin language servers behind `kargo lsp` and the debug adapter behind `kargo dap` |
 | `kargo self update [--version <v>] [--check]` | Update Kargo to the latest release (or `--version`), checking the archive's SHA-256 against the release's `SHA256SUMS`; `--check` only says whether a newer one exists. A Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN!, Cargo or a system package manager is not replaced: its update command is printed instead. `KARGO_RELEASES_URL` points at a mirror |
 | `kargo self uninstall [--purge]` | Remove the binary and the `PATH` entries the install scripts added; `--purge` also deletes `~/.kargo` |
@@ -472,6 +473,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_VENDORED` | Same as `--vendored` |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | Proxy for Kargo's downloads (overridden by `[http] proxy` in `config.toml`) |
 | `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
+| `KARGO_ANDROID_DEVICE` | Same as `--device` of `kargo run -t android`: the serial or virtual device name to run on |
 | `KARGO_AUTO_INSTALL` | `0` stops commands from downloading the toolchains they need (a JDK when none is on `JAVA_HOME` or `PATH`, a pinned JDK or GraalVM, Kotlin/Native, Gradle, the language servers); `1` turns installs on over `[toolchain] auto-install = false` in `config.toml` |
 | `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
 | `KARGO_JOBS` | Same as `-j`: how many workspace members and targets build at the same time (a number or `auto`); overrides `[build] jobs` |

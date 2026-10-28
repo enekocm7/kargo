@@ -93,6 +93,55 @@ impl Shell {
         Some(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
     }
 
+    /// Whether there is a person to ask: stdin and stderr are both terminals.
+    pub fn is_interactive(&self) -> bool {
+        std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stderr())
+    }
+
+    /// Shows `items` under `title` as a list the user moves through with the arrow keys (or `j`/`k`) and picks from
+    /// with Enter. Returns the index of the item picked, or `None` when the user cancels (Esc, `q` or Ctrl-C).
+    /// Fails when there is no terminal to ask on; check [`Shell::is_interactive`] first.
+    pub fn select(&self, title: impl Display, items: &[String]) -> std::io::Result<Option<usize>> {
+        use console::{Key, Term};
+        let term = Term::stderr();
+        if items.is_empty() || !self.is_interactive() {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no terminal to ask on"));
+        }
+        let hint = "(arrow keys to move, Enter to select, Esc to cancel)";
+        term.write_line(&format!("{title} {hint}"))?;
+        term.hide_cursor()?;
+        let mut at = 0usize;
+        let draw = |at: usize, first: bool| -> std::io::Result<()> {
+            if !first {
+                term.clear_last_lines(items.len())?;
+            }
+            for (i, item) in items.iter().enumerate() {
+                let (mark, style) = if i == at { ('>', NOTE) } else { (' ', Style::new()) };
+                term.write_line(&format!("{style}{mark} {item}{style:#}"))?;
+            }
+            Ok(())
+        };
+        draw(at, true)?;
+        let picked = loop {
+            match term.read_key() {
+                Ok(Key::ArrowUp | Key::Char('k')) => at = at.checked_sub(1).unwrap_or(items.len() - 1),
+                Ok(Key::ArrowDown | Key::Char('j') | Key::Tab) => at = (at + 1) % items.len(),
+                Ok(Key::Home) => at = 0,
+                Ok(Key::End) => at = items.len() - 1,
+                Ok(Key::Enter) => break Some(at),
+                Ok(Key::Escape | Key::Char('q') | Key::CtrlC) | Err(_) => break None,
+                Ok(Key::Char(c)) if c.is_ascii_digit() && c != '0' && (c as usize - '0' as usize) <= items.len() => {
+                    break Some(c as usize - '1' as usize);
+                }
+                Ok(_) => continue,
+            }
+            draw(at, false)?;
+        };
+        term.clear_last_lines(items.len() + 1)?;
+        term.show_cursor()?;
+        Ok(picked)
+    }
+
     /// Clears the terminal before a watched run (`--clear`), when stderr is a terminal.
     pub fn clear(&self) {
         if self.verbosity >= Verbosity::Normal && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
