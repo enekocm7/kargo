@@ -351,6 +351,7 @@ struct RawWasm {
     web_resources: Vec<PathBuf>,
     web_init: Option<PathBuf>,
     js_sources: Option<Vec<PathBuf>>,
+    port: Option<u16>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -367,6 +368,7 @@ struct RawJs {
     #[serde(default)]
     npm_dependencies: BTreeMap<String, String>,
     js_sources: Option<Vec<PathBuf>>,
+    port: Option<u16>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -2043,6 +2045,9 @@ impl RawManifest {
                                 (WasmEnvironment::Wasi, _) => Vec::new(),
                                 (_, dirs) => js_sources("wasm", dirs)?,
                             };
+                            if w.port.is_some() && environment != WasmEnvironment::Browser {
+                                bail!("[target.wasm] `port` is the port `kargo run` serves a browser app on; it needs environment = \"browser\"");
+                            }
                             Ok(WasmTarget {
                                 environment,
                                 kind,
@@ -2064,6 +2069,7 @@ impl RawManifest {
                                 web_resources: w.web_resources,
                                 web_init: w.web_init,
                                 js_sources,
+                                port: w.port,
                                 dependencies: deps.parse(&w.dependencies, "target.wasm.dependencies", false, Some(TargetKind::Wasm))?,
                             })
                         })
@@ -2107,6 +2113,9 @@ impl RawManifest {
                                     bail!("[target.js.npm-dependencies] needs a package name and a version for every entry");
                                 }
                             }
+                            if j.port.is_some() && environment != JsEnvironment::Browser {
+                                bail!("[target.js] `port` is the port `kargo run` serves a browser app on; it needs environment = \"browser\"");
+                            }
                             Ok(JsTarget {
                                 environment,
                                 kind,
@@ -2116,6 +2125,7 @@ impl RawManifest {
                                 package_manager: j.package_manager.as_deref().map(str::parse).transpose()?,
                                 npm_dependencies: j.npm_dependencies,
                                 js_sources: js_sources("js", j.js_sources)?,
+                                port: j.port,
                                 dependencies: deps.parse(&j.dependencies, "target.js.dependencies", false, Some(TargetKind::Js))?,
                             })
                         })

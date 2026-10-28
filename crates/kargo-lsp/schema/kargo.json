@@ -219,6 +219,7 @@
             "web-resources": { "description": "Files and directories of a library (relative to the package) that every browser app depending on it gets next to its module, under their own names. Needs kind = \"library\".", "type": "array", "items": { "type": "string" } },
             "web-init": { "description": "A script of a library (relative to the package) that the page Kargo generates for a dependent browser app imports before the app module. It is shipped like `web-resources`. Needs kind = \"library\".", "type": "string" },
             "js-sources": { "description": "Directories (relative to the package) of your own JavaScript and TypeScript modules. `.js`/`.mjs` files are copied to `js/` next to the module, `.ts`/`.mts` files are compiled there with tsc, and their exports get Kotlin declarations in the package `js.<path>`. Default: `js/` when it exists; `[]` turns it off. Not for environment = \"wasi\".", "type": "array", "items": { "type": "string" }, "default": ["js"] },
+            "port": { "description": "The port `kargo run` serves a browser app on; `--port` overrides it. `0` picks a free one. Needs environment = \"browser\".", "type": "integer", "minimum": 0, "maximum": 65535, "default": 8080 },
             "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the Wasm target only." }
           }
         },
@@ -235,6 +236,7 @@
             "package-manager": { "description": "The tool that installs npm packages. Default: the first of npm, pnpm, bun on PATH.", "enum": ["npm", "pnpm", "bun"] },
             "npm-dependencies": { "description": "npm packages (`name = \"version\"`) to install besides those the klibs ask for.", "type": "object", "additionalProperties": { "type": "string" } },
             "js-sources": { "description": "Directories (relative to the package) of your own JavaScript and TypeScript modules. `.js`/`.mjs` files are copied to `js/` next to the module and `.ts`/`.mts` files are compiled there with tsc. Default: `js/` when it exists; `[]` turns it off.", "type": "array", "items": { "type": "string" }, "default": ["js"] },
+            "port": { "description": "The port `kargo run` serves a browser app on; `--port` overrides it. `0` picks a free one. Needs environment = \"browser\".", "type": "integer", "minimum": 0, "maximum": 65535, "default": 8080 },
             "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the JS target only." }
           }
         },

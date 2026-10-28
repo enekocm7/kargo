@@ -108,7 +108,7 @@ pub struct RunOptions {
     pub profile: ProfileKind,
     pub program: Program,
     pub args: Vec<String>,
-    /// The port a Wasm browser app is served on (`--port`); `None` uses [`DEFAULT_PORT`].
+    /// The port a Wasm browser app is served on (`--port`); `None` uses the `port` of `kargo.toml`, else [`DEFAULT_PORT`].
     pub port: Option<u16>,
     /// Open the served page in a browser (`--open`).
     pub open: bool,
@@ -383,7 +383,13 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
             if wasm.environment == WasmEnvironment::Browser {
-                return Ok(Start::Finished(serve_app(ctx, &wasm.dir, wasm.node_modules.as_deref(), opts)?));
+                return Ok(Start::Finished(serve_app(
+                    ctx,
+                    &wasm.dir,
+                    wasm.node_modules.as_deref(),
+                    opts,
+                    ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.port),
+                )?));
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             cmd.arg(&wasm.module);
@@ -394,7 +400,13 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let js = results.js.context("there are no Kotlin/JS sources to run")?;
             if js.environment == JsEnvironment::Browser {
-                return Ok(Start::Finished(serve_app(ctx, &js.dir, js.node_modules.as_deref(), opts)?));
+                return Ok(Start::Finished(serve_app(
+                    ctx,
+                    &js.dir,
+                    js.node_modules.as_deref(),
+                    opts,
+                    ctx.ws.manifest().targets.js.as_ref().and_then(|j| j.port),
+                )?));
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             // Stack traces point into the Kotlin sources when the build has source maps.
@@ -591,8 +603,9 @@ fn is_browser_app(ctx: &BuildContext, target: TargetKind) -> bool {
 }
 
 /// Serves the browser app in `dir`, with the npm packages of `node_modules`, until the process is stopped (Ctrl+C).
-fn serve_app(ctx: &BuildContext, dir: &Path, node_modules: Option<&Path>, opts: &RunOptions) -> Result<i32> {
-    let listener = web::bind(opts.port.unwrap_or(DEFAULT_PORT))?;
+/// The port is `--port`, else the `port` of the target in `kargo.toml` (`configured`), else [`DEFAULT_PORT`].
+fn serve_app(ctx: &BuildContext, dir: &Path, node_modules: Option<&Path>, opts: &RunOptions, configured: Option<u16>) -> Result<i32> {
+    let listener = web::bind(opts.port.or(configured).unwrap_or(DEFAULT_PORT))?;
     let mut site = web::Site::new(dir);
     if let Some(node_modules) = node_modules {
         site = site.mount("node_modules", node_modules);

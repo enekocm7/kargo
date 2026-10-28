@@ -447,6 +447,8 @@ pub struct WasmTarget {
     /// Directories of the package's own JavaScript and TypeScript modules, relative to the package
     /// ([`DEFAULT_JS_SOURCES`] unless `js-sources` says otherwise; none for WASI).
     pub js_sources: Vec<PathBuf>,
+    /// The port `kargo run` serves a browser app on; `None` uses the default and `--port` overrides it.
+    pub port: Option<u16>,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -533,6 +535,8 @@ pub struct JsTarget {
     pub npm_dependencies: BTreeMap<String, String>,
     /// Directories of the package's own JavaScript and TypeScript modules, as for Wasm.
     pub js_sources: Vec<PathBuf>,
+    /// The port `kargo run` serves a browser app on, as for Wasm.
+    pub port: Option<u16>,
     pub dependencies: Vec<Dependency>,
 }
 

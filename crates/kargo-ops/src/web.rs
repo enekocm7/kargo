@@ -117,8 +117,11 @@ pub fn open_in_browser(target: &OsStr) -> Result<()> {
 
 /// Listens on `127.0.0.1:port`; port 0 picks a free one.
 pub fn bind(port: u16) -> Result<TcpListener> {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-        .with_context(|| format!("failed to listen on 127.0.0.1:{port}; is something else using it? choose another port with `--port`"))
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).with_context(|| {
+        format!(
+            "failed to listen on 127.0.0.1:{port}; is something else using it? choose another port with `--port` or `port` in kargo.toml"
+        )
+    })
 }
 
 /// What the connection threads share with the [`Server`].

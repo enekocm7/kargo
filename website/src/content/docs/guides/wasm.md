@@ -80,8 +80,27 @@ Open the address in a browser. The page loads your program, and whatever it prin
 
 | Option | Meaning |
 |---|---|
-| `--port <port>` | The port to listen on. The default is `8080`; `0` picks a free one. Kargo only listens on `127.0.0.1`, so the page is not reachable from other machines |
+| `--port <port>` | The port to listen on. The default is `8080`, or the `port` of `[target.wasm]`; `0` picks a free one. Kargo only listens on `127.0.0.1`, so the page is not reachable from other machines |
 | `--open` | Open the page in your browser (the one named by `$BROWSER`, else the system default) |
+
+### Choosing the port
+
+Port 8080 is also where Spring Boot, Ktor and most other backends listen, so a project that runs an API next to its web app needs another one. Set `port` in `[target.wasm]` instead of typing `--port` on every run:
+
+```toml title="kargo.toml"
+[target.wasm]
+environment = "browser"
+port = 5173
+```
+
+`--port` overrides the key for one run. `port = 0` picks a free port each time and prints it on the `Serving` line, which suits a task that opens the page:
+
+```toml title="kargo.toml"
+[tasks]
+web = "kargo run -t wasm --port 0 --open"
+```
+
+`kargo web` then builds the app and opens it on a free port. If you give the API a CORS allow-list, it has to name the port the app is served on, so use a fixed `port` in that case.
 
 Kargo serves the files with the content types browsers need (`application/wasm` for the module, JavaScript for the `.mjs` files) and without caching, so reload the page after you run `kargo run` again.
 

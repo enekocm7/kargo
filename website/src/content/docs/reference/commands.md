@@ -273,7 +273,7 @@ kargo run -e 'println(1 + 1)'
 | `--main <name>` | Run another `main`: a JVM class such as `com.example.tools.MigrateKt`, or on Native an entry function such as `com.example.tools.main`. `--entry-point` is an alias |
 | `--bin <name>` | Run the [`[[bin]]`](../manifest/#bin) with this name |
 | `--example <name>` | Compile and run `examples/<name>.kt` against the project and its dev-dependencies |
-| `--port <port>` | Wasm and JS browser apps: the port to serve on (default `8080`; `0` picks a free one) |
+| `--port <port>` | Wasm and JS browser apps: the port to serve on (default: `port` of `[target.wasm]` / `[target.js]`, else `8080`; `0` picks a free one) |
 | `--open` | Wasm and JS browser apps: open the served page in your browser |
 | `--debug[=<port>]` | JVM: start the program suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`; `0` lets the JVM pick and print one). See [Debugging](../../guides/editors/#debugging) |
 | `--native-agent` | JVM: run on GraalVM (`[toolchain] graalvm`) with its tracing agent, which records the reflection, resources and proxies the program uses as `native-image` configuration in `native-image/`. Later runs add to it. See [Native executables](../../guides/distributing/#native-executables) |

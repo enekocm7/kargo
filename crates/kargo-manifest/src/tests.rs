@@ -452,6 +452,10 @@ wasm-debugger-custom-formatters = true
 
     assert_eq!(wasm("[target.wasm]\nwasm-opt = false").wasm_opt, WasmOpt::Off);
     assert_eq!(wasm("[target.wasm]\nwasm-opt = true").wasm_opt, WasmOpt::Auto);
+
+    assert_eq!(default.port, None);
+    assert_eq!(wasm("[target.wasm]\nenvironment = \"browser\"\nport = 5173").port, Some(5173));
+    assert_eq!(wasm("[target.wasm]\nenvironment = \"browser\"\nport = 0").port, Some(0));
 }
 
 #[test]
@@ -471,6 +475,8 @@ fn wasm_target_option_errors() {
     assert!(parse_err(&with("npm-dependencies = { left-pad = 1 }")).contains("invalid type"));
     assert!(parse_err(&with("[target.wasm.npm-dependencies]\nleft-pad = \"\"")).contains("needs a package name and a version"));
     assert!(parse_err(&with("html = \"index.html\"")).contains("unknown field"));
+    assert!(parse_err(&with("port = 5173")).contains("`port` is the port `kargo run` serves a browser app on"));
+    assert!(parse_err(&with("environment = \"browser\"\nport = 70000")).contains("invalid value"));
 }
 
 #[test]
@@ -507,6 +513,8 @@ package-manager = "pnpm"
     assert_eq!(library.npm_dependencies["left-pad"], "^1.3.0");
     assert_eq!(library.dependencies[0].module.to_string(), "org.example:dom");
     assert_eq!(js("[target.js]\nmodule-kind = \"commonjs\"").module_kind, JsModuleKind::CommonJs);
+    assert_eq!(default.port, None);
+    assert_eq!(js("[target.js]\nenvironment = \"browser\"\nport = 5173").port, Some(5173));
 }
 
 #[test]
@@ -522,6 +530,7 @@ fn js_target_option_errors() {
     assert!(parse_err(&with("package-manager = \"yarn\"")).contains("unknown package-manager `yarn`"));
     assert!(parse_err(&with("[target.js.npm-dependencies]\nleft-pad = \"\"")).contains("needs a package name and a version"));
     assert!(parse_err(&with("wasm-opt = false")).contains("unknown field"));
+    assert!(parse_err(&with("port = 5173")).contains("`port` is the port `kargo run` serves a browser app on"));
 }
 
 #[test]

@@ -122,7 +122,7 @@ The browser started but its page stopped reporting, so Kargo gave up after `KARG
 
 ### How do I run my Wasm code in a browser?
 
-Set `environment = "browser"` in `[target.wasm]` and run `kargo run -t wasm`. Kargo writes a page, serves it on `http://127.0.0.1:8080/` and, with `--open`, opens it. See [Browser apps](../../guides/wasm/#browser-apps).
+Set `environment = "browser"` in `[target.wasm]` and run `kargo run -t wasm`. Kargo writes a page, serves it on `http://127.0.0.1:8080/` (change the port with `port` in `[target.wasm]` or `--port`) and, with `--open`, opens it. See [Browser apps](../../guides/wasm/#browser-apps).
 
 ### How do I publish a Kotlin/Wasm library to npm?
 
