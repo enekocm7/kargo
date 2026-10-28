@@ -958,7 +958,7 @@ kargo uninstall <name>... [--root <dir>]
 
 ## `kargo fetch`
 
-Download all dependencies and toolchains so later builds can run offline, and lock them in `kargo.lock`. For each enabled target this is the Kotlin compiler, its plugins and the dependencies; the compiler, the plugins and the JUnit launcher are pinned as [build tools](../lockfile/#build-tools). The JVM, Wasm and JS targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs and, in a package with `benches/`, the libraries and the harness generator of [`kargo bench`](#kargo-bench) (locked as `jvm/bench` and `jvm/bench-tools`), and the Wasm and JS targets get the [npm packages](../../guides/wasm/#npm-packages) of their Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
+Download all dependencies and toolchains so later builds can run offline, and lock them in `kargo.lock`. For each enabled target this is the Kotlin compiler, its plugins and the dependencies; the compiler, the plugins and the JUnit launcher are pinned as [build tools](../lockfile/#build-tools), and so is the [TypeScript compiler](../../guides/toolchains/#the-typescript-compiler) of the Wasm and JS targets when the package has `.ts` modules. The JVM, Wasm and JS targets also get the JDK that `[toolchain] jdk` asks for (`system`, the default, is the JDK on the machine and is left alone). The JVM target gets the JUnit console launcher that `kargo test` runs and, in a package with `benches/`, the libraries and the harness generator of [`kargo bench`](#kargo-bench) (locked as `jvm/bench` and `jvm/bench-tools`), and the Wasm and JS targets get the [npm packages](../../guides/wasm/#npm-packages) of their Maven dependencies when npm, pnpm or bun is on `PATH`; without one, Kargo warns and skips them. For Android this is the [Gradle distribution](../../guides/android/#gradle) and its wrapper; Gradle fetches Android dependencies itself during the build.
 
 | Option | Meaning |
 |---|---|
@@ -1027,7 +1027,7 @@ vendored = true
 
 ## `kargo update`
 
-Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges and new builds of [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) are picked up. The [build tools](../lockfile/#build-tools) that `kargo.lock` had are locked again too, so `--locked` builds still find them; a tool it did not have is locked by the first build that runs it.
+Re-resolve dependencies and rewrite `kargo.lock`. Cached repository metadata is ignored, so new versions within version ranges and new builds of [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) are picked up. The [build tools](../lockfile/#build-tools) that `kargo.lock` had are locked again too, so `--locked` builds still find them; a tool it did not have is locked by the first build that runs it. A bare `kargo update` also looks up the newest [TypeScript compiler](../../guides/toolchains/#the-typescript-compiler) again (unless `[toolchain] typescript` names an exact version); `kargo update <group:artifact>` keeps the one that is locked.
 
 ```sh
 kargo update [group:artifact]... [--precise <version>] [--dry-run]

@@ -3,10 +3,10 @@
 //!
 //! They land in `js/` next to the Kotlin module, keeping their paths, so `@JsModule("./js/canvas.js")`
 //! resolves the same in Node.js, on the page `kargo run` serves and in `kargo test` ([`install`]).
-//! JavaScript and any other file is copied; TypeScript (`.ts`, `.mts`) is compiled with the pinned
-//! `tsc` after the Kotlin module is linked, so it type-checks against the module's own `.d.mts`
-//! (`import { greet } from "../app.mjs"`). Its errors go through the compiler diagnostics, in
-//! `--message-format json` too.
+//! JavaScript and any other file is copied; TypeScript (`.ts`, `.mts`) is compiled with `tsc` (the newest
+//! release, or `[toolchain] typescript`, pinned in `kargo.lock`) after the Kotlin module is linked, so it
+//! type-checks against the module's own `.d.mts` (`import { greet } from "../app.mjs"`). Its errors go
+//! through the compiler diagnostics, in `--message-format json` too.
 //!
 //! The TypeScript modules (and the `.d.ts` files next to JavaScript ones) also get Kotlin
 //! declarations ([`declarations`]), with the generator of the npm packages
@@ -21,6 +21,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::dts::{self, FACTORIES_DIR, LocalGenerated, LocalModule};
+use crate::npm_registry::{Package, Registry};
+use crate::npm_semver::{Range, Semver};
 use crate::ops::context::BuildContext;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::diagnostics::Relay;
@@ -29,8 +31,11 @@ use kargo_util::fs::remove_dir_all_if_exists;
 use kargo_util::hash::Fingerprint;
 use kargo_util::process::{self, find_on_path};
 
-/// The TypeScript compiler that compiles the TypeScript modules.
-pub const TYPESCRIPT_VERSION: &str = "5.9.3";
+/// What `[toolchain] typescript` asks for when it is not set: the newest release of the `typescript` npm package.
+pub const DEFAULT_TYPESCRIPT: &str = "latest";
+
+/// The `kargo.lock` name of the TypeScript compiler (see [`BuildContext::npm_tool_key`]).
+const TYPESCRIPT_TOOL: &str = "typescript";
 
 /// The directory next to the Kotlin module that the modules land in.
 pub const OUTPUT_DIR: &str = "js";
@@ -308,6 +313,7 @@ fn typescript(
     node_modules: Option<&Path>,
     check: bool,
 ) -> Result<PathBuf> {
+    let version = typescript_version(ctx)?;
     let stage = ctx.ws.profile_dir(&ctx.profile).join("ts").join(target.as_str());
     let mirror = stage.join("src");
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -321,7 +327,7 @@ fn typescript(
     std::fs::write(stage.join("tsconfig.json"), &config)?;
 
     let mut fp = Fingerprint::new();
-    fp.str(env!("CARGO_PKG_VERSION")).str(TYPESCRIPT_VERSION).str(&config).str(if check { "check" } else { "emit" });
+    fp.str(env!("CARGO_PKG_VERSION")).str(&version).str(&config).str(if check { "check" } else { "emit" });
     for (rel, bytes) in &files {
         fp.str(rel).bytes(bytes);
     }
@@ -350,12 +356,12 @@ fn typescript(
         remove_dir_all_if_exists(&stage.join("out"))?;
     }
 
-    let tsc = tsc(ctx, target)?;
+    let tsc = tsc(ctx, target, &version)?;
     let runtime = find_on_path("node")
         .or_else(|| find_on_path("bun"))
         .context("the TypeScript modules are compiled with tsc, which runs on Node.js or bun; install one of them and put it on PATH")?;
     let count = sources.iter().filter(|s| compiled_name(&s.rel).is_some()).count();
-    let what = format!("{count} TypeScript module{} (tsc {TYPESCRIPT_VERSION})", if count == 1 { "" } else { "s" });
+    let what = format!("{count} TypeScript module{} (tsc {version})", if count == 1 { "" } else { "s" });
     ctx.shell().status(if check { "Checking" } else { "Compiling" }, &what);
     let mut cmd = Command::new(runtime);
     cmd.arg(&tsc).args(["--project", "tsconfig.json", "--pretty", "false"]).current_dir(&stage);
@@ -431,9 +437,48 @@ fn tsconfig(stage: &Path, module_dir: &Path, node_modules: Option<&Path>, debug:
     format!("{}\n", serde_json::to_string_pretty(&config).expect("a JSON value serializes"))
 }
 
-/// Installs the pinned `typescript` package (in `target/typescript`) and returns its `tsc` script.
-fn tsc(ctx: &BuildContext, target: TargetKind) -> Result<PathBuf> {
-    let deps = BTreeMap::from([("typescript".to_owned(), TYPESCRIPT_VERSION.to_owned())]);
+/// The version of the TypeScript compiler this package compiles with: `[toolchain] typescript` when it is an exact
+/// version, else what it (or [`DEFAULT_TYPESCRIPT`]) stands for in the npm registry, pinned in `kargo.lock` until
+/// `kargo update`.
+pub fn typescript_version(ctx: &BuildContext) -> Result<String> {
+    let request = ctx.ws.manifest().toolchain.typescript.as_deref().unwrap_or(DEFAULT_TYPESCRIPT);
+    if let Some(exact) = Semver::parse(request) {
+        return Ok(exact.to_string());
+    }
+    ctx.lock_npm_tool(TYPESCRIPT_TOOL, request, || {
+        let package = Registry::new(ctx.config, ctx.ws.root()).package("typescript").with_context(|| {
+            format!("could not look up the TypeScript version for `[toolchain] typescript = \"{request}\"`; name an exact version to skip the lookup")
+        })?;
+        pick_typescript(&package, request)
+    })
+}
+
+/// The version of `package` that `request` names: `latest`, a range (`^6`, `5.9.x`) or another dist-tag (`next`).
+fn pick_typescript(package: &Package, request: &str) -> Result<String> {
+    let picked = if request == DEFAULT_TYPESCRIPT {
+        package.default_version(false)
+    } else if let Some(range) = Range::parse(request) {
+        range.newest(&package.semvers()).cloned()
+    } else {
+        package.tag(request)
+    };
+    picked.map(|v| v.to_string()).with_context(|| {
+        format!("no version of `typescript` matches `[toolchain] typescript = \"{request}\"`; use a version like \"5.9.3\", a range like \"^6\" or \"latest\"")
+    })
+}
+
+/// `kargo fetch` and `kargo update`: pins the TypeScript compiler of `target` in `kargo.lock` when it has TypeScript
+/// modules, so a `--locked` build finds it.
+pub fn lock_typescript(ctx: &BuildContext, target: TargetKind) -> Result<()> {
+    if has_typescript(&sources(&dirs(ctx.ws, target))?) {
+        typescript_version(ctx)?;
+    }
+    Ok(())
+}
+
+/// Installs the `typescript` package at `version` (in `target/typescript`) and returns its `tsc` script.
+fn tsc(ctx: &BuildContext, target: TargetKind, version: &str) -> Result<PathBuf> {
+    let deps = BTreeMap::from([("typescript".to_owned(), version.to_owned())]);
     let node_modules = crate::npm::install_tool(ctx, target, &deps, &ctx.ws.work_dir("typescript"))
         .context("the TypeScript modules need the TypeScript compiler")?;
     Ok(node_modules.join("typescript").join("bin").join("tsc"))
@@ -490,6 +535,27 @@ mod tests {
         assert_eq!((diagnostic.severity.as_str(), diagnostic.line, diagnostic.column), ("error", Some(3), Some(7)));
         assert_eq!(diagnostic_line("  Some context.", Path::new("/s"), &originals), "  Some context.");
         assert_eq!(diagnostic_line("error TS5023: Unknown option.", Path::new("/s"), &originals), "error TS5023: Unknown option.");
+    }
+
+    #[test]
+    fn typescript_requests_pick_a_registry_version() {
+        let package = Package {
+            name: "typescript".into(),
+            registry: "https://registry.npmjs.org".into(),
+            tags: BTreeMap::from([("latest".to_owned(), "7.0.2".to_owned()), ("next".to_owned(), "7.1.0-dev.1".to_owned())]),
+            versions: ["5.9.3", "6.0.3", "7.0.1-rc", "7.0.2", "7.1.0-dev.1"]
+                .into_iter()
+                .map(|version| crate::npm_registry::Published { version: version.into(), types: false, deprecated: false })
+                .collect(),
+        };
+        let pick = |request: &str| pick_typescript(&package, request).map_err(|e| format!("{e:#}"));
+        assert_eq!(pick("latest").unwrap(), "7.0.2", "the `latest` tag, not a release candidate");
+        assert_eq!(pick("^6").unwrap(), "6.0.3");
+        assert_eq!(pick("~5.9").unwrap(), "5.9.3");
+        assert_eq!(pick("<7").unwrap(), "6.0.3");
+        assert_eq!(pick("next").unwrap(), "7.1.0-dev.1");
+        assert!(pick("^8").unwrap_err().contains("no version of `typescript` matches"));
+        assert!(pick("nightly").unwrap_err().contains("[toolchain] typescript"));
     }
 
     #[test]

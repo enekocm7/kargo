@@ -2039,6 +2039,18 @@ fn toolchain_kargo_requirement() {
 }
 
 #[test]
+fn toolchain_typescript_request() {
+    let with = |line: &str| format!("{MINIMAL}\n[toolchain]\n{line}\n");
+    assert_eq!(parse(MINIMAL).toolchain.typescript, None);
+    assert_eq!(parse(&with("typescript = \"5.9.3\"")).toolchain.typescript.as_deref(), Some("5.9.3"));
+    assert_eq!(parse(&with("typescript = \" ^6 \"")).toolchain.typescript.as_deref(), Some("^6"));
+    assert_eq!(parse(&with("typescript = \"latest\"")).toolchain.typescript.as_deref(), Some("latest"));
+    assert!(parse_err(&with("typescript = \"\"")).contains("`typescript` is empty"));
+    assert!(parse_err(&with("typescript = \">=5 <7\"")).contains("invalid [toolchain] `typescript`"));
+    assert!(parse_err(&with("typescript = 5")).contains("typescript"));
+}
+
+#[test]
 fn kargo_version_requirements_are_checked_against_the_running_kargo() {
     let req = |text: &str| semver::VersionReq::parse(text).unwrap();
     assert!(check_kargo_version(&req(">=0.3"), "0.3.0").is_ok());

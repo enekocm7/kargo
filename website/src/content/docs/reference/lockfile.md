@@ -37,6 +37,14 @@ What the build downloads and runs is pinned too, under `tools/`, so a changed or
 
 Each entry is recorded and checked like a dependency resolution, and `--locked` fails when one is missing or out of date. `kargo fetch` locks the tools of the enabled targets (`--tools` adds Dokka, ktlint and detekt), `kargo update` locks again the ones the lockfile had, and a build locks any other the first time it runs it. A [Compose Desktop](../../guides/compose/) jar for other platforms (`kargo package --platforms`) pins the Skiko natives it adds the same way, as `tools/skiko-awt-runtime-<platform>`. In a workspace, every entry but the compiler's is keyed with its package's name, like the resolutions.
 
+The TypeScript compiler that compiles the `.ts` modules of `js/` is an npm package, so it is pinned differently: in an `npm-tool` entry, `npm-tools/typescript`, that records what `[toolchain] typescript` asked for (`latest` when it is not set) and the version that resolved to. The npm registry is asked only when the entry is missing or the request changed, so every build and every machine compiles with the same TypeScript until `kargo update` (or `--refresh`) looks it up again. `kargo fetch` and `kargo update` write the entry for a project with TypeScript modules; `--locked` fails when it is missing. An exact version in `[toolchain] typescript` is not recorded, since `kargo.toml` already pins it.
+
+```toml title="kargo.lock"
+[npm-tool."npm-tools/typescript"]
+request = "latest"
+version = "7.0.2"
+```
+
 A [profile](../manifest/#profilename) with dependencies of its own has resolutions of its own, named after it: `jvm/runtime@staging` is the runtime classpath of the `staging` profile. The profiles without such dependencies all share `jvm/runtime`.
 
 ```toml title="kargo.lock"

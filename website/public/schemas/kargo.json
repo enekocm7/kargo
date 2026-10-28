@@ -148,7 +148,7 @@
       }
     },
     "toolchain": {
-      "description": "Which JDK builds and runs the project, which GraalVM builds native images, which Android SDK builds the Android target, and which Kargo versions the project needs.",
+      "description": "Which JDK builds and runs the project, which GraalVM builds native images, which Android SDK builds the Android target, which TypeScript compiler builds the project's `.ts` modules, and which Kargo versions the project needs.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -174,6 +174,12 @@
           "description": "The Kargo versions this project builds with, a semver requirement such as \">=0.3\". An older Kargo stops with a message that points to `kargo self update`.",
           "type": "string",
           "examples": [">=0.3", "^0.3.1"]
+        },
+        "typescript": {
+          "description": "The TypeScript compiler (the `typescript` npm package) that compiles the `.ts` modules of `js/`: an exact version such as \"5.9.3\", a range such as \"^6\", or a tag. Default: the newest release (\"latest\"), which `kargo.lock` pins until `kargo update`.",
+          "type": "string",
+          "default": "latest",
+          "examples": ["latest", "5.9.3", "^6"]
         }
       }
     },

@@ -1603,6 +1603,62 @@ fn wasm_and_typescript_call_each_other() {
         .stdout(predicate::str::contains("\"line\":2"));
 }
 
+/// The default compiler is the newest TypeScript, which `kargo.lock` pins; `[toolchain] typescript` names another
+/// one, and both compile the same modules with the same `tsc` command line and `tsconfig.json`.
+#[test]
+fn typescript_compiler_is_the_latest_unless_pinned() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    typescript_interop(&t, "tsver", "js");
+    let lock = t.dir.path().join("tsver/kargo.lock");
+    let compiler = |out: &std::process::Output| {
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let (_, rest) = stderr.split_once("(tsc ").expect("tsc ran");
+        rest.split_once(')').expect("a version").0.to_owned()
+    };
+
+    let out = t.kargo("tsver").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kargo! x2")).get_output().clone();
+    let latest = compiler(&out);
+    let locked = std::fs::read_to_string(&lock).unwrap();
+    assert!(locked.contains("request = \"latest\"") && locked.contains(&format!("version = \"{latest}\"")), "{locked}");
+    // Nothing changed: it is neither looked up nor run again, and `--locked` accepts the lock.
+    t.kargo("tsver").args(["build", "--locked"]).assert().success().stderr(predicate::str::contains("TypeScript").not());
+
+    let manifest = t.dir.path().join("tsver/kargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!(
+            "{text}
+[toolchain]
+typescript = \"5.9.3\"
+"
+        ),
+    )
+    .unwrap();
+    let out = t.kargo("tsver").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kargo! x2")).get_output().clone();
+    assert_eq!(compiler(&out), "5.9.3");
+
+    std::fs::write(
+        &manifest,
+        format!(
+            "{text}
+[toolchain]
+typescript = \"^6\"
+"
+        ),
+    )
+    .unwrap();
+    let out = t.kargo("tsver").arg("run").assert().success().get_output().clone();
+    assert!(compiler(&out).starts_with("6."), "{}", String::from_utf8_lossy(&out.stderr));
+    let locked = std::fs::read_to_string(&lock).unwrap();
+    assert!(locked.contains("request = \"^6\""), "{locked}");
+}
+
 #[test]
 fn kotlin_js_and_typescript_call_each_other() {
     require_e2e!();
