@@ -29,6 +29,7 @@ use crate::ops::build::{announce, compiling};
 use crate::ops::context::BuildContext;
 use crate::ops::test::{emit_report_event, emit_summary, human_out};
 use crate::workspace::{ProfileKind, Workspace};
+use kargo_compiler::SourceSet;
 use kargo_compiler::testreport::{self, TestSummary};
 use kargo_manifest::{
     AndroidConfig, AndroidSdkRequest, AndroidTarget, BuildConfigValue, Dependency, GeneratedKind, Manifest, Scope, TargetKind,
@@ -476,6 +477,30 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     }
     let _ = writeln!(s, "    }}\n}}\n");
 
+    // `expect` declarations of `src/` and their `actual`s in `src-android/`: AGP compiles the module as
+    // plain Android Kotlin, so the compiler is told about the two fragments like the other targets'.
+    let mut common_dirs = vec![root.join("src")];
+    common_dirs.extend(module.generated.sources.iter().cloned());
+    if let Some(dir) = &compose_resources {
+        common_dirs.push(dir.join("kotlin"));
+    }
+    let mut common_test_dirs = vec![root.join("tests")];
+    common_test_dirs.extend(module.generated.test_sources.iter().cloned());
+    let main_fragments = fragment_args(&common_dirs, &root.join(TargetKind::Android.source_dir_name()));
+    let test_fragments = fragment_args(&common_test_dirs, &root.join("tests-android"));
+    if !main_fragments.is_empty() || !test_fragments.is_empty() {
+        let list = |args: &[String]| format!("listOf({})", args.iter().map(|a| kts_string(a)).collect::<Vec<_>>().join(", "));
+        let _ = writeln!(s, "tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{");
+        let _ = writeln!(s, "    val unitTest = name.contains(\"UnitTest\")");
+        let _ = writeln!(
+            s,
+            "    compilerOptions.freeCompilerArgs.addAll(if (unitTest) {} else {})",
+            list(&test_fragments),
+            list(&main_fragments)
+        );
+        let _ = writeln!(s, "}}\n");
+    }
+
     // Dependencies.
     let _ = writeln!(s, "dependencies {{");
     let mut seen = Vec::new();
@@ -532,6 +557,13 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let _ = writeln!(s, "}}");
     s.push_str(&doc_classpath_task_kts(&variant_name(&default_flavors(cfg, &[])?, "debug")));
     Ok(s)
+}
+
+/// The compiler arguments that make the Kotlin files of `common` and of `platform` two fragments of one
+/// multiplatform compilation, so `expect` and `actual` declarations match. Empty unless both have Kotlin files.
+fn fragment_args(common: &[PathBuf], platform: &Path) -> Vec<String> {
+    let files = |dirs: &[PathBuf]| dirs.iter().flat_map(|d| kargo_util::fs::collect_files(d, &["kt"])).collect::<Vec<_>>();
+    SourceSet::new(files(common), files(&[platform.to_path_buf()]), TargetKind::Android.as_str()).fragment_args()
 }
 
 /// The Gradle line of a `[profile.<profile>.dependencies]` entry, in the configuration of its build
@@ -1856,6 +1888,36 @@ mod tests {
                 assert!(block.contains(&line), "missing {line} in\n{text}");
             }
         }
+    }
+
+    #[test]
+    fn expect_actual_files_are_fragments_of_one_compilation() {
+        let (dir, ws) = workspace("");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let write = |path: &str| {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "").unwrap();
+            kargo_util::process::slash(&file)
+        };
+        // Only `src/`: nothing to match, so no fragments.
+        let common = write("src/Platform.kt");
+        assert!(!build_gradle(&ws, &android).unwrap().contains("-Xfragments"));
+
+        let actual = write("src-android/Platform.android.kt");
+        let common_test = write("tests/PlatformTest.kt");
+        let actual_test = write("tests-android/AndroidTest.kt");
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains("tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>()"), "{text}");
+        assert!(text.contains("\"-Xmulti-platform\""), "{text}");
+        assert!(text.contains("\"-Xfragments=common,android\""), "{text}");
+        assert!(text.contains("\"-Xfragment-refines=android:common\""), "{text}");
+        let sources = |files: [(&str, &str); 2]| {
+            let list: Vec<String> = files.iter().map(|(fragment, file)| format!("{fragment}:{file}")).collect();
+            format!("\"-Xfragment-sources={}\"", list.join(","))
+        };
+        assert!(text.contains(&sources([("common", &common), ("android", &actual)])), "{text}");
+        assert!(text.contains(&sources([("common", &common_test), ("android", &actual_test)])), "{text}");
     }
 
     #[test]

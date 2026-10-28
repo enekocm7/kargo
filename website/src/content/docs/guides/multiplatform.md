@@ -76,6 +76,14 @@ import kotlin.experimental.ExperimentalNativeApi
 actual fun platformName(): String = "Kotlin/Native on ${Platform.osFamily}"
 ```
 
+```kotlin title="src-android/Platform.kt"
+package com.example.hello
+
+actual fun platformName(): String = "Android ${android.os.Build.VERSION.RELEASE}"
+```
+
+On Android, Kargo has Gradle compile `src/` and `src-android/` as two fragments of one compilation, the way the other targets do, so the `expect` in `src/` finds its `actual` in `src-android/`. The same holds for `tests/` and `tests-android/`. The fragments are only declared when both directories hold Kotlin files.
+
 ## Build, run and test each target
 
 ```console
