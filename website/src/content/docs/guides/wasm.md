@@ -252,6 +252,33 @@ Kotlin/Wasm can only pass `String`, `Int`, `Double`, `Boolean`, function types a
 | Other unions, `object`, `Date`, conditional and mapped types | `JsAny` (or `JsAny?` for `any` and `unknown`) |
 | `string[]`, `Promise<T>` | `JsArray<JsString>`, `Promise<...>` |
 | A string index signature `[key: string]: T` | An `operator fun get(key: String)` extension in the package's Kotlin package, so `req.params["id"]` works with `import express.get` (or `import express.*`) |
+| An object type literal, such as `opts: { a: number }` | An `external interface` named after where it is: `DoSomethingOpts` for the parameter `opts` of `doSomething`, `DoSomethingOptsB` for its property `b`, `Theme` for `type Theme = { ... }`. `{}` is `JsAny` |
+| An interface whose members are all properties | Also a [factory](#building-objects) of the same name, so you write `Options(a = 1)` |
+
+#### Building objects
+
+An options object is plain data: its interface has only properties (callbacks included), no methods, call or index signatures. Kargo gives each such interface a factory, a function of the same name with one parameter per property, so you build the object in Kotlin instead of writing `js("({})")` helpers:
+
+```ts title="node_modules/widgets/index.d.ts"
+export interface Options { size: number; label?: string }
+export declare function make(options: Options): void;
+export declare function doSomething(opts: { a: number; b?: string }): void;
+```
+
+```kotlin title="src/Main.kt"
+import widgets.*
+
+fun main() {
+    make(Options(size = 2))
+    make(Options(size = 2, label = "big"))
+    doSomething(DoSomethingOpts(a = 1, b = "x"))
+}
+```
+
+- **Parameters.** Required properties come first, then the optional ones, which default to `definedExternally`. A property is set on the object only when the call passes it, so an omitted one is missing from the object rather than `undefined` or `null`, which many libraries treat differently. A property Kotlin can't name (`"data-id"`) is a positional parameter (`p2`).
+- **Types.** The parameters follow the [type mapping](#kotlin-declarations-for-npm-packages) of function parameters: a `number` property gets `Int` and `Double` overloads, a callback property takes a lambda. When the combinations would exceed 24 overloads, there is one, with `Double` for each number.
+- **Where it runs.** The factories are JavaScript functions that Kargo generates next to the declarations (`target/<profile>/generated/npm/kargo-factories/<package>.mjs`) and copies to `js/kargo-factories/` next to the module, which `Factories.kt` imports with `@file:JsModule`. Like the modules in `js/`, they are ES modules.
+- **Skipped.** Classes, objects with methods or index signatures, and interfaces whose factory would clash with a function of the package (`declare function Theme(dark: boolean): Theme`) get none. The `external interface` stays either way, so objects a library returns still read their properties.
 
 A package without TypeScript declarations gets none, with a warning; declare what you use yourself with `@JsModule("<name>")` [external declarations](https://kotlinlang.org/docs/wasm-js-interop.html). The generated files are rewritten by the next build, so edit your own declarations instead of them.
 
@@ -301,7 +328,7 @@ Hello, Kargo! Hello, Kargo!
 ```
 
 - **Where they go.** Every file of `js/` lands in `target/<profile>/wasm/js/`, keeping its path: `.js` and `.mjs` files and anything else are copied, `.ts` and `.mts` files are compiled to `.js` and `.mjs`. A module is therefore `./js/<path>` from the Kotlin module, the same in Node.js, on the page `kargo run` serves and in `kargo test`. Kargo adds a `package.json` with `"type": "module"` to `js/` (unless you have your own), since tsc writes ES modules to `.js` files. To use other directories, set `js-sources = ["web", "lib/ts"]` in `[target.wasm]`; `js-sources = []` turns `js/` off.
-- **Declarations.** Each TypeScript module gets a Kotlin package named after its path, `js.<path>`: `js/greeter.ts` is `js.greeter`, `js/shapes/point.ts` is `js.shapes.point`. Its exports become `external` declarations with `@JsModule("./js/greeter.js")`, with the [type mapping](#kotlin-declarations-for-npm-packages) of the npm packages, in `target/<profile>/generated/js-sources/`. A JavaScript module gets declarations from a `.d.ts` (or `.d.mts`) file next to it; without one, the build warns and you declare what you use yourself with `@JsModule`. Types that come from npm packages are `JsAny` in these declarations; the packages themselves get [their own](#kotlin-declarations-for-npm-packages).
+- **Declarations.** Each TypeScript module gets a Kotlin package named after its path, `js.<path>`: `js/greeter.ts` is `js.greeter`, `js/shapes/point.ts` is `js.shapes.point`. Its exports become `external` declarations with `@JsModule("./js/greeter.js")`, with the [type mapping](#kotlin-declarations-for-npm-packages) of the npm packages, in `target/<profile>/generated/js-sources/`. A JavaScript module gets declarations from a `.d.ts` (or `.d.mts`) file next to it; without one, the build warns and you declare what you use yourself with `@JsModule`. Types that come from npm packages are `JsAny` in these declarations; the packages themselves get [their own](#kotlin-declarations-for-npm-packages). Interfaces of plain data get [factories](#building-objects) here too: `export interface Point { x: number; y: number }` in `js/shapes/point.ts` is built with `js.shapes.point.Point(x = 1, y = 2)`.
 - **Write the types out.** Kargo reads the signatures of exported functions, not their bodies, so it infers nothing: a parameter or return type without an annotation is `JsAny?` in Kotlin, and the build warns about it. `export const add = (a: number, b: number): number => a + b` is a function too.
 - **Compiling.** Kargo compiles the TypeScript with its own TypeScript compiler, tsc 5.9.3, which it installs with your package manager into `target/typescript/` and runs on Node.js (or bun). It runs again only when a module, the Kotlin module's declarations or the npm packages change. TypeScript is checked in `strict` mode, for ES2022, with the browser's DOM types. Type errors are reported like Kotlin's, with file, line and column, and in `--message-format json` too, so editors show them; they fail the build with exit code 101. `kargo check` type-checks the modules without writing them out.
 - **Calling Kotlin from TypeScript.** Every Kotlin module gets TypeScript declarations for its `@JsExport` functions (`target/<profile>/wasm/<name>.d.mts`), and the modules are type-checked against them after the Kotlin module is linked, so `import { exclaim } from "../hello.mjs"` is typed. A module may import the Kotlin module that imports it: ES modules allow the cycle, as long as neither calls the other while it loads.
@@ -482,7 +509,7 @@ A build writes these files to `target/<profile>/wasm/`, named after the package 
 | `<name>.import-object.mjs`, `<name>.js-builtins.mjs` | JavaScript the module imports; keep them next to it |
 | `<name>.d.mts` | TypeScript declarations of the `@JsExport` functions |
 | `package.json` | The npm package (libraries only) |
-| `js/` | Your own [JavaScript and TypeScript modules](#your-own-javascript-and-typescript), TypeScript compiled |
+| `js/` | Your own [JavaScript and TypeScript modules](#your-own-javascript-and-typescript), TypeScript compiled, and the generated [factories](#building-objects) in `js/kargo-factories/` |
 | `index.html` and your `resources/` | The page of a `browser` app |
 | The libraries' web resources | The files your [libraries ship](#web-resources-from-libraries) to a `browser` app |
 

@@ -11,7 +11,8 @@
 //! The TypeScript modules (and the `.d.ts` files next to JavaScript ones) also get Kotlin
 //! declarations ([`declarations`]), with the generator of the npm packages
 //! ([`crate::dts::generate_local`]): `js/canvas.ts` is the Kotlin package `js.canvas`. Both targets
-//! get the same Kotlin, in a directory of their own.
+//! get the same Kotlin, in a directory of their own. The JavaScript factories of those declarations
+//! and of the npm packages' (see [`crate::dts`]) land in `js/kargo-factories/` with the modules.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::dts::{self, LocalGenerated, LocalModule};
+use crate::dts::{self, FACTORIES_DIR, LocalGenerated, LocalModule};
 use crate::ops::context::BuildContext;
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::diagnostics::Relay;
@@ -206,6 +207,17 @@ pub fn install(ctx: &BuildContext, target: TargetKind, out: &Path, module_dir: &
                 }
             }
         }
+    }
+    // The factories of the generated declarations, which import them from `./js/kargo-factories/`.
+    let generated = [crate::npm::declarations_dir(ctx.ws, &ctx.profile, target), declarations_dir(ctx.ws, &ctx.profile, target)];
+    for (rel, path) in generated.iter().flat_map(|dir| dts::factory_modules(dir)) {
+        if wanted.contains_key(&rel) {
+            bail!(
+                "`{rel}` in the JavaScript modules would replace the factories Kargo generates there; rename it or move it out of `{FACTORIES_DIR}/`"
+            );
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        wanted.insert(rel, bytes);
     }
     if !wanted.is_empty() && !wanted.contains_key("package.json") {
         // `tsc` writes ES modules to `.js` files: Node.js reads them as such only with this.

@@ -399,7 +399,7 @@ fn the_projects_own_modules_get_declarations() {
     let modules = local_modules(dir.path());
     let out = dir.path().join("out");
     let generated = generate_local(&modules, &[], &out).unwrap();
-    assert_eq!(generated.files.len(), generated.changed.len(), "all new");
+    assert_eq!(generated.files.len() + 1, generated.changed.len(), "all new, with the module of `Point`'s factory");
     assert_eq!(generated.untyped, [("js/sum.ts".to_owned(), "guess".to_owned())]);
 
     let sum = std::fs::read_to_string(out.join("js/sum/Exports.kt")).unwrap();
@@ -420,6 +420,17 @@ fn the_projects_own_modules_get_declarations() {
     let point = std::fs::read_to_string(out.join("js/shapes/point/Types.kt")).unwrap();
     assert!(point.contains("package js.shapes.point"), "{point}");
     assert!(point.contains("external interface Point : JsAny {\n    var x: Double\n    var y: Double\n}"), "{point}");
+    let factory = std::fs::read_to_string(out.join("js/shapes/point/Factories.kt")).unwrap();
+    assert!(factory.contains("@file:JsModule(\"./js/kargo-factories/js.shapes.point.mjs\")\n\npackage js.shapes.point\n"), "{factory}");
+    assert!(factory.contains("external fun Point(x: Int, y: Int): js.shapes.point.Point\n"), "{factory}");
+    assert!(factory.contains("external fun Point(x: Double, y: Double): js.shapes.point.Point\n"), "{factory}");
+    let module = out.join("kargo-factories/js.shapes.point.mjs");
+    assert_eq!(factory_modules(&out), [("kargo-factories/js.shapes.point.mjs".to_owned(), module.clone())]);
+    let js = std::fs::read_to_string(&module).unwrap();
+    assert!(
+        js.contains("export function Point(x, y) {\n    const $o = {};\n    $o[\"x\"] = x;\n    $o[\"y\"] = y;\n    return $o;\n}"),
+        "{js}"
+    );
     let origin = std::fs::read_to_string(out.join("js/shapes/point/Exports.kt")).unwrap();
     assert!(origin.contains("@file:JsModule(\"./js/shapes/point.js\")"), "{origin}");
     assert!(origin.contains("external fun origin(): js.shapes.point.Point"), "{origin}");
@@ -453,4 +464,77 @@ fn only_changed_declarations_are_written_again() {
     let generated = generate_local(&modules, &[], &out).unwrap();
     assert_eq!(generated.changed, [out.join("js/legacy/Exports.kt")]);
     assert!(!out.join("js/legacy/Exports.kt").exists());
+}
+
+#[test]
+fn object_types_get_interfaces_and_factories() {
+    let (dir, out) = generated(&["widgets"], |nm| {
+        write(nm, "widgets/package.json", r#"{"name":"widgets","types":"index.d.ts"}"#);
+        write(
+            nm,
+            "widgets/index.d.ts",
+            r#"
+            export interface Options { label?: string; size: number; "data-id"?: string; onClick?: (x: number) => void }
+            export interface Handle { close(): void; id: string }
+            export interface Indexed { [key: string]: number }
+            export interface Empty {}
+            export declare function doSomething(opts: { a: number; b?: { deep: boolean } }): void;
+            export declare function make(options: Options): Handle;
+            export declare function anything(value: {}): void;
+            export type Theme = { dark: boolean };
+            export declare function theme(): Theme;
+            export declare function Theme(dark: boolean): Theme;
+            "#,
+        );
+    });
+    assert!(out.untyped.is_empty());
+    let types = read(&dir, "widgets/Types.kt");
+    let exports = read(&dir, "widgets/Exports.kt");
+    let factories = read(&dir, "widgets/Factories.kt");
+    let js = read(&dir, "kargo-factories/widgets.mjs");
+
+    // An inline object type is an interface named after the function and parameter, and nested ones after the property.
+    assert!(exports.contains("external fun doSomething(opts: widgets.DoSomethingOpts): Unit"), "{exports}");
+    assert!(
+        types.contains("external interface DoSomethingOpts : JsAny {\n    var a: Double\n    var b: widgets.DoSomethingOptsB?\n}"),
+        "{types}"
+    );
+    assert!(types.contains("external interface DoSomethingOptsB : JsAny {\n    var deep: Boolean\n}"), "{types}");
+    assert!(factories.contains("@file:JsModule(\"./js/kargo-factories/widgets.mjs\")\n\npackage widgets\n"), "{factories}");
+    for number in ["Int", "Double"] {
+        let factory = format!(
+            "external fun DoSomethingOpts(a: {number}, b: widgets.DoSomethingOptsB = definedExternally): widgets.DoSomethingOpts\n"
+        );
+        assert!(factories.contains(&factory), "{factories}");
+    }
+    assert!(factories.contains("external fun DoSomethingOptsB(deep: Boolean): widgets.DoSomethingOptsB\n"), "{factories}");
+    // `{}` is any object.
+    assert!(exports.contains("external fun anything(value: JsAny): Unit"), "{exports}");
+
+    // Required properties come first; an optional one is set only when given; a JavaScript name Kotlin can't
+    // spell is a positional parameter; a callback property takes a lambda.
+    let optional = "label: String = definedExternally, p2: String = definedExternally";
+    for factory in [
+        format!("external fun Options(size: Int, {optional}): widgets.Options\n"),
+        format!("external fun Options(size: Double, {optional}): widgets.Options\n"),
+        format!("external fun Options(size: Int, {optional}, onClick: (Double) -> Unit): widgets.Options\n"),
+    ] {
+        assert!(factories.contains(&factory), "{factories}");
+    }
+    assert!(
+        js.contains(
+            "export function Options(size, label, p2, onClick) {\n    const $o = {};\n    $o[\"size\"] = size;\n    \
+             if (label !== undefined) $o[\"label\"] = label;\n    if (p2 !== undefined) $o[\"data-id\"] = p2;\n    \
+             if (onClick !== undefined) $o[\"onClick\"] = onClick;\n    return $o;\n}"
+        ),
+        "{js}"
+    );
+    // Objects with methods or index signatures, and empty ones, get none.
+    assert!(!factories.contains("fun Handle("), "{factories}");
+    assert!(!factories.contains("fun Indexed("), "{factories}");
+    assert!(!js.contains("function Handle(") && !js.contains("function Indexed("), "{js}");
+    // A type alias of an object type keeps its name; a function of the package with the same signature wins.
+    assert!(types.contains("external interface Theme : JsAny {\n    var dark: Boolean\n}"), "{types}");
+    assert!(exports.contains("external fun Theme(dark: Boolean): widgets.Theme"), "{exports}");
+    assert!(!factories.contains("fun Theme("), "{factories}");
 }
