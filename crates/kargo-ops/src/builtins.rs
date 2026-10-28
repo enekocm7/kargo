@@ -498,6 +498,91 @@ pub fn enabled_frameworks(manifest: &Manifest) -> Vec<&'static str> {
     FRAMEWORK_NAMES.iter().zip(enabled).filter_map(|(name, on)| on.then_some(*name)).collect()
 }
 
+/// An enabled framework with the version it uses, and the versions its BOM manages that the classpath has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkVersion {
+    /// The name in `[frameworks]`, such as `spring-boot`.
+    pub name: &'static str,
+    pub version: String,
+    /// The modules whose versions a migration changes. Empty for a framework without a BOM, and for one whose
+    /// modules are not on the classpath yet.
+    pub managed: Vec<ManagedVersion>,
+}
+
+/// A module a framework's BOM manages, at the version the classpath resolved it to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVersion {
+    /// What the output calls the module, such as `Spring Framework`.
+    pub name: &'static str,
+    pub module: ModuleId,
+    pub version: String,
+}
+
+impl FrameworkVersion {
+    /// `spring-boot 4.1.1 (Spring Framework 7.0.9, Spring Security 7.1.1, Jackson 3.1.2)`, as `kargo info` and
+    /// the build print it.
+    pub fn describe(&self) -> String {
+        if self.managed.is_empty() {
+            return format!("{} {}", self.name, self.version);
+        }
+        let managed: Vec<String> = self.managed.iter().map(|m| format!("{} {}", m.name, m.version)).collect();
+        format!("{} {} ({})", self.name, self.version, managed.join(", "))
+    }
+}
+
+/// The version of each enabled framework (see [`enabled_frameworks`]), in the same order. `resolved` gives the
+/// version the classpath resolved a module to, when it has it; a BOM's managed modules are listed only then.
+pub fn framework_versions(manifest: &Manifest, resolved: impl Fn(&ModuleId) -> Option<String>) -> Vec<FrameworkVersion> {
+    let fw = &manifest.frameworks;
+    let pinned: [(&'static str, Option<&str>); 7] = [
+        ("compose", fw.compose.as_ref().map(|c| c.version.as_deref().unwrap_or(COMPOSE_VERSION))),
+        ("serialization", fw.serialization.as_ref().map(|s| s.version.as_deref().unwrap_or(SERIALIZATION_VERSION))),
+        ("coroutines", fw.coroutines.as_ref().map(|c| c.version.as_deref().unwrap_or(COROUTINES_VERSION))),
+        ("ktor", fw.ktor.as_ref().map(|k| k.version.as_deref().unwrap_or(KTOR_VERSION))),
+        ("lombok", fw.lombok.as_ref().map(|l| l.version.as_deref().unwrap_or(LOMBOK_VERSION))),
+        ("spring-boot", fw.spring_boot.as_ref().map(|s| s.version.as_deref().unwrap_or(SPRING_BOOT_VERSION))),
+        ("benchmark", fw.benchmark.as_ref().map(|b| b.version.as_deref().unwrap_or(KOTLINX_BENCHMARK_VERSION))),
+    ];
+    pinned
+        .into_iter()
+        .filter_map(|(name, version)| {
+            let version = version?;
+            let managed = match name {
+                "spring-boot" => spring_boot_managed(version, &resolved),
+                _ => Vec::new(),
+            };
+            Some(FrameworkVersion { name, version: version.to_owned(), managed })
+        })
+        .collect()
+}
+
+/// The modules of the Spring Boot BOM of version `spring` that a migration changes: Spring Framework,
+/// Spring Security and Jackson (Jackson 3 with Spring Boot 4), at the versions `resolved` gives them.
+fn spring_boot_managed(spring: &str, resolved: &impl Fn(&ModuleId) -> Option<String>) -> Vec<ManagedVersion> {
+    let jackson = format!("{}:jackson-databind", spring_jackson_core_group(spring));
+    [
+        ("Spring Framework", "org.springframework:spring-core".to_owned()),
+        ("Spring Security", "org.springframework.security:spring-security-core".to_owned()),
+        ("Jackson", jackson),
+    ]
+    .into_iter()
+    .filter_map(|(name, coordinates)| {
+        let module: ModuleId = coordinates.parse().expect("built-in coordinates are valid");
+        let version = resolved(&module)?;
+        Some(ManagedVersion { name, module, version })
+    })
+    .collect()
+}
+
+/// The group of Jackson's core artifacts (`jackson-databind`) in the Spring Boot BOM of version `spring`, which
+/// moved from `com.fasterxml.jackson.core` to `tools.jackson.core` with Spring Boot 4.
+fn spring_jackson_core_group(spring: &str) -> &'static str {
+    match spring_major(spring) {
+        Some(major) if major < 4 => "com.fasterxml.jackson.core",
+        _ => "tools.jackson.core",
+    }
+}
+
 /// Summary of plugin options as `-P` arguments.
 pub fn plugin_option_args(plugin: &PluginSpec) -> Vec<String> {
     let Some(id) = &plugin.id else { return Vec::new() };
@@ -779,6 +864,29 @@ spring-boot = {{ version = \"{version}\" }}
         assert_eq!(jackson("3.3.1"), "com.fasterxml.jackson.module");
         assert_eq!(jackson("4.0.0"), "tools.jackson.module");
         assert_eq!(jackson(SPRING_BOOT_VERSION), "tools.jackson.module");
+    }
+
+    #[test]
+    fn framework_versions_name_the_bom_modules_the_classpath_resolved() {
+        let m = manifest("[frameworks]\nspring-boot = true\nserialization = true\n");
+        let resolved = |module: &ModuleId| match module.to_string().as_str() {
+            "org.springframework:spring-core" => Some("7.0.9".to_owned()),
+            "tools.jackson.core:jackson-databind" => Some("3.1.2".to_owned()),
+            _ => None,
+        };
+        let versions = framework_versions(&m, resolved);
+        assert_eq!(versions.iter().map(|f| f.name).collect::<Vec<_>>(), ["serialization", "spring-boot"]);
+        assert_eq!(versions[0].version, SERIALIZATION_VERSION);
+        assert_eq!(versions[0].describe(), format!("serialization {SERIALIZATION_VERSION}"));
+        assert_eq!(versions[1].version, SPRING_BOOT_VERSION);
+        // Spring Security is not on the classpath, so it is not listed.
+        assert_eq!(versions[1].describe(), format!("spring-boot {SPRING_BOOT_VERSION} (Spring Framework 7.0.9, Jackson 3.1.2)"));
+
+        let m = manifest("[frameworks]\nspring-boot = { version = \"3.5.0\" }\n");
+        let jackson_2 =
+            |module: &ModuleId| (module.to_string() == "com.fasterxml.jackson.core:jackson-databind").then(|| "2.19.0".to_owned());
+        assert_eq!(framework_versions(&m, jackson_2)[0].describe(), "spring-boot 3.5.0 (Jackson 2.19.0)");
+        assert_eq!(framework_versions(&m, |_| None)[0].describe(), "spring-boot 3.5.0", "nothing resolved yet");
     }
 
     #[test]

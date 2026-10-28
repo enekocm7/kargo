@@ -1710,6 +1710,9 @@ fn spring_boot_with_lombok() {
         "sb/tests/PersonTest.kt",
         "package com.example.sb\n\nimport kotlin.test.*\n\nclass PersonTest {\n    @Test fun accessors() {\n        val p = Person()\n        p.name = \"Ada\"\n        assertEquals(\"Ada\", p.name)\n    }\n}\n",
     );
+    // The build prints the framework versions it resolved, with the BOM's Spring Framework and Jackson versions.
+    let spring = format!("spring-boot {} (Spring Framework ", kargo_ops::builtins::SPRING_BOOT_VERSION);
+    t.kargo("sb").arg("build").assert().success().stderr(predicate::str::contains(spring).and(predicate::str::contains("Jackson ")));
     t.kargo("sb").arg("test").assert().success();
 }
 

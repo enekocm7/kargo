@@ -204,6 +204,50 @@ fn info_as_json() {
 }
 
 #[test]
+fn info_shows_the_framework_versions_the_lockfile_resolved() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("infoapp", "[frameworks]\nspring-boot = { version = \"4.1.1\" }\n[target.jvm]\n"));
+    // What `kargo fetch` locks for the JVM runtime: the BOM-managed modules that are on the classpath.
+    p.file(
+        "kargo.lock",
+        "version = 1\n\n[resolution.\"jvm/runtime\"]\ninputs = \"x\"\nroots = []\n\n\
+         [[resolution.\"jvm/runtime\".package]]\nmodule = \"org.springframework:spring-core\"\nversion = \"7.0.9\"\n\n\
+         [[resolution.\"jvm/runtime\".package]]\nmodule = \"tools.jackson.core:jackson-databind\"\nversion = \"3.1.2\"\n",
+    );
+    p.kargo()
+        .arg("info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("frameworks:   spring-boot 4.1.1 (Spring Framework 7.0.9, Jackson 3.1.2)"));
+
+    let out = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let info: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(info["frameworks"], serde_json::json!(["spring-boot"]));
+    assert_eq!(
+        info["framework-versions"],
+        serde_json::json!([{
+            "name": "spring-boot",
+            "version": "4.1.1",
+            "managed": [
+                {"name": "Spring Framework", "module": "org.springframework:spring-core", "version": "7.0.9"},
+                {"name": "Jackson", "module": "tools.jackson.core:jackson-databind", "version": "3.1.2"},
+            ],
+        }])
+    );
+}
+
+#[test]
+fn info_shows_framework_versions_before_the_first_resolution() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("infoapp", "[frameworks]\nspring-boot = true\n[target.jvm]\n"));
+    p.kargo()
+        .arg("info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("frameworks:   spring-boot {}\n", kargo_ops::builtins::SPRING_BOOT_VERSION)));
+}
+
+#[test]
 fn add_and_remove_dependencies() {
     let repo = LocalRepo::new();
     repo.publish("com.acme:widget", "1.0.0", &[]).publish("com.acme:widget", "1.2.0", &[]).publish("com.acme:widget", "2.0.0-beta1", &[]);

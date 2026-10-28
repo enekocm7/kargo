@@ -76,6 +76,17 @@ error: the Spring Boot starter `aop` of `[frameworks] spring-boot` does not exis
 
 Kargo checks the starters of `starters` and the `org.springframework.boot:spring-boot-starter-*` coordinates in your dependency tables against the Spring Boot version, in both directions: on Spring Boot 3 it is `aop`, and `aspectj` is the error. Starters Kargo doesn't know about are passed on as they are, so a misspelled one still fails as a missing artifact. Look for it among the `spring-boot-starter-*` artifacts on [Maven Central](https://central.sonatype.com/namespace/org.springframework.boot).
 
+## Versions
+
+The Spring Boot version also decides the versions of what the BOM manages: Spring Framework, Spring Security and Jackson. Jackson 3 and Spring Security 7 come with Spring Boot 4, so a Boot 3 example can fail on a Boot 4 project. Kargo prints the versions the build resolved, and the managed modules that are on the classpath:
+
+```console
+$ kargo build
+    Resolved spring-boot 4.1.1 (Spring Framework 7.0.9, Jackson 3.1.5)
+```
+
+`kargo fetch` prints the same line. `kargo info` shows it too, from `kargo.lock`, once the project has been built or fetched, and `kargo info --format json` lists the modules under `framework-versions`. Spring Security appears in the line when a security starter puts it on the classpath.
+
 ## JPA entities
 
 With `data-jpa` (or `jpa = true`), Kargo enables the `noarg` and `allopen` compiler plugins for `@Entity`, `@MappedSuperclass` and `@Embeddable`, so Kotlin classes work as JPA entities:

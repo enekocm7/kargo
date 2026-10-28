@@ -276,6 +276,7 @@ $ kargo info --format json
   ],
   "dev-dependencies": [],
   "examples": ["greet"],
+  "framework-versions": [{ "managed": [], "name": "serialization", "version": "1.11.0" }],
   "frameworks": ["serialization"],
   "jdk": "system",
   "kotlin": "2.4.21",
@@ -296,6 +297,8 @@ $ kargo info --format json
 ```
 
 At the root of a [workspace](../../guides/workspaces/), it describes the workspace instead: `workspace` (its root), `members` (each with its `name`, `version`, `root` and the `dependencies` it builds on through path dependencies), `default-members`, `lockfile` and `target-dir`.
+
+`framework-versions` has an entry for each enabled framework, in the order of `frameworks`: its `name`, the `version` it uses, and the `managed` modules of its BOM that `kargo.lock` resolved for the JVM runtime, each with its `name`, `module` and `version`. `managed` is empty for a framework without a BOM, and before the project has been built or fetched. For Spring Boot these are Spring Framework, Spring Security and Jackson.
 
 `dependencies` and `dev-dependencies` are what `kargo.toml` declares: `name` is the key in `kargo.toml`, `version` is `null` when a BOM manages it. Target-specific dependencies are not listed; `kargo tree --format json` shows everything that was resolved.
 

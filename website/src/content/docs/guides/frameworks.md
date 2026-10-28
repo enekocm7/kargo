@@ -18,7 +18,7 @@ kargo add --framework serialization,coroutines
 kargo new myapp -w ktor,serialization       # when creating a project
 ```
 
-Each framework adds what it needs for every target that supports it. Use `kargo tree` to see exactly what was added, and the [frameworks reference](../../reference/frameworks/) for every key and the artifacts each target gets.
+Each framework adds what it needs for every target that supports it. Use `kargo tree` to see exactly what was added, and the [frameworks reference](../../reference/frameworks/) for every key and the artifacts each target gets. `kargo build` prints the version of each enabled framework, and `kargo info` lists them; for [Spring Boot](../spring-boot/#versions), they also name the Spring Framework and Jackson versions the BOM resolved.
 
 | Framework | JVM | Wasm | JS | Native | Android |
 |---|:-:|:-:|:-:|:-:|:-:|

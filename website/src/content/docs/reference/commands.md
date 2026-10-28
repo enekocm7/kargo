@@ -189,6 +189,8 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `-j, --jobs <n>` | How many workspace members, and targets of each, build at the same time: a number, or `auto` (also `0`) for the CPUs within the free memory. Default: `KARGO_JOBS`, then `[build] jobs`, then `auto`. `-j 1` builds one thing at a time, in a fixed order. See [parallelism](../../guides/build-performance/#limiting-parallelism) |
 | `--size-report` | Print Binaryen per-function metrics for a Wasm release build |
 
+After a JVM build, `kargo build` prints a `Resolved` line for each enabled [framework](../../guides/frameworks/) with its version, and for Spring Boot the versions of the BOM's Spring Framework, Spring Security and Jackson modules on the classpath, so a version that changes the code you write (Jackson 2 or 3, Spring Boot 3 or 4) is visible without opening `kargo.lock`. [`kargo fetch`](#kargo-fetch) prints the same lines.
+
 [Path dependencies](../../guides/workspaces/) are built first, for the same targets. In a workspace, members build in dependency order, and independent members at the same time ([the build graph](../../guides/workspaces/#the-build-graph)); after a failure no new member starts (unless you pass `--keep-going`), and the error names the member and the target, such as ``could not build `core` (jvm)``.
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
@@ -973,6 +975,8 @@ $ kargo fetch --sources
 
 The count of javadoc jars is left out when there are none.
 
+When the JVM target is fetched, `kargo fetch` also prints a `Resolved` line for each enabled framework with its version, as [`kargo build`](#kargo-build-b) does, so you can see which Spring Boot, Spring Framework and Jackson versions the project uses before you build.
+
 ## `kargo generate`
 
 Run the [`[[generate]]` steps](../manifest/#generate) of kargo.toml without building: protobuf, OpenAPI, `BuildConfig` and other generated sources. `kargo build`, `check`, `test`, `run` and `package` run the steps they need first, so this command is for CI checks, for trying a step out, and for an editor that wants the generated files before the first build.
@@ -1233,7 +1237,7 @@ host: x86_64-unknown-linux-gnu
 
 ## `kargo info`
 
-Print project information: package, targets, path dependencies, repositories and paths. A repository that a [mirror](../../guides/offline-and-mirrors/#repository-mirrors) or `--vendored` replaces shows where it is fetched from (`maven-central (via https://nexus.corp/central)`), and a `config:` line lists the [configuration files](../../guides/offline-and-mirrors/#configuration-files) Kargo read. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.
+Print project information: package, targets, frameworks, path dependencies, repositories and paths. Each framework shows its version; for Spring Boot, the Spring Framework, Spring Security and Jackson versions that `kargo.lock` resolved follow it, in parentheses (see [Spring Boot versions](../../guides/spring-boot/#versions)). A repository that a [mirror](../../guides/offline-and-mirrors/#repository-mirrors) or `--vendored` replaces shows where it is fetched from (`maven-central (via https://nexus.corp/central)`), and a `config:` line lists the [configuration files](../../guides/offline-and-mirrors/#configuration-files) Kargo read. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.
 
 | Option | Default | Meaning |
 |---|---|---|
