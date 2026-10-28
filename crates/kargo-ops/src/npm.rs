@@ -156,10 +156,27 @@ pub fn install_for_tests(ctx: &BuildContext, target: TargetKind, libraries: &[Pa
 
 fn install_deps(ctx: &BuildContext, target: TargetKind, deps: BTreeMap<String, String>, dir: &Path) -> Result<Option<PathBuf>> {
     if deps.is_empty() {
+        prune(dir)?;
         return Ok(None);
     }
     let (manager, exe) = find_package_manager(ctx, target, &deps)?;
     install_into(ctx, &deps, dir, manager, exe).map(Some)
+}
+
+/// Removes what an earlier install left in `dir` once no package is needed any more: `node_modules`,
+/// the `package.json` Kargo wrote and the package manager's lockfile. Only when Kargo's own marker is
+/// there, so a `node_modules` that is not Kargo's stays.
+fn prune(dir: &Path) -> Result<()> {
+    let node_modules = dir.join("node_modules");
+    if !node_modules.join(".kargo-package.json").is_file() {
+        return Ok(());
+    }
+    remove_dir_all_if_exists(&node_modules)?;
+    let _ = std::fs::remove_file(dir.join("package.json"));
+    for (lockfile, _) in LOCKFILES {
+        let _ = std::fs::remove_file(dir.join(lockfile));
+    }
+    Ok(())
 }
 
 /// `kargo fetch`: installs the packages [`install`] would, so an offline build finds them. Without
@@ -402,6 +419,25 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&package_json(&deps)).unwrap();
         assert_eq!(json["private"], true);
         assert_eq!(json["dependencies"]["@js-joda/core"], "3.2.0");
+    }
+
+    #[test]
+    fn prune_removes_only_what_kargo_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let node_modules = dir.path().join("node_modules");
+        std::fs::create_dir_all(node_modules.join("three")).unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+
+        // Without Kargo's marker the directory is not Kargo's.
+        prune(dir.path()).unwrap();
+        assert!(node_modules.join("three").is_dir());
+
+        std::fs::write(node_modules.join(".kargo-package.json"), "npm\n{}").unwrap();
+        prune(dir.path()).unwrap();
+        assert!(!node_modules.exists());
+        assert!(!dir.path().join("package.json").exists());
+        assert!(!dir.path().join("package-lock.json").exists());
     }
 
     #[test]
