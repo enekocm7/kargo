@@ -172,7 +172,7 @@ In a workspace, `[workspace.kotlin]` sets these for every member: a member's `op
 jdk = "21"         # "system" (default), a major version, or an exact release like "21.0.5+11"
 graalvm = "25"     # "system" (default), a Java version for GraalVM CE, or "oracle-25" for Oracle GraalVM
 android-sdk = "36" # "system" (default), or a platform API level that Kargo installs
-kargo = ">=0.3"    # the Kargo versions this project builds with (default: any)
+kargo = ">=0.1.2"    # the Kargo versions this project builds with (default: any)
 typescript = "^6"  # the TypeScript compiler for the .ts modules of js/ (default: the newest release, pinned in kargo.lock)
 ```
 
@@ -180,11 +180,11 @@ typescript = "^6"  # the TypeScript compiler for the .ts modules of js/ (default
 
 `android-sdk` is the Android SDK of the Android target. An API level such as `"36"` (or `36`; 21 or newer) makes Kargo install that platform, the build-tools of the Android Gradle Plugin in use and platform-tools under `~/.kargo/toolchains/android-sdk`, after you accept Google's license terms, and build with that SDK. `compile-sdk` under [`[target.android]`](#targetandroid) defaults to it and must equal it when set. `system` uses `ANDROID_HOME`, then `ANDROID_SDK_ROOT`, then Android Studio's default location. See [Android SDK](../../guides/android/#android-sdk).
 
-`kargo` is a [semver requirement](https://docs.rs/semver/latest/semver/enum.Op.html) such as `">=0.3"`, `"^0.3.1"` or `">=0.3, <0.5"`. A Kargo that does not satisfy it stops before doing anything else with the project, and says how to get a newer one:
+`kargo` is a [semver requirement](https://docs.rs/semver/latest/semver/enum.Op.html) such as `">=0.1.2"`, `"^0.1.2"` or `">=0.1.2, <0.5"`. A Kargo that does not satisfy it stops before doing anything else with the project, and says how to get a newer one:
 
 ```console
 $ kargo build
-error: this project needs kargo >=0.3 (`[toolchain] kargo` in kargo.toml), but this is kargo 0.1.0: run `kargo self update` to get a newer Kargo
+error: this project needs kargo >=0.1.2 (`[toolchain] kargo` in kargo.toml), but this is kargo 0.1.0: run `kargo self update` to get a newer Kargo
 ```
 
 `typescript` is the version of the [`typescript`](https://www.npmjs.com/package/typescript) npm package that compiles the `.ts` modules of [`js/`](../../guides/wasm/#your-own-javascript-and-typescript) on the Wasm and JS targets: an exact version (`"5.9.3"`), a range (`"^6"`, `"~5.9"`) or a dist-tag (`"latest"`, `"next"`). Without it, Kargo uses the newest release (`latest`). Anything but an exact version is looked up in the npm registry (honoring `.npmrc` and `NPM_CONFIG_REGISTRY`) and the version it resolves to is pinned in [`kargo.lock`](../lockfile/#build-tools) as `npm-tools/typescript`, so builds keep one compiler until `kargo update`. Pin an older version here when a new major release of TypeScript is not ready for your code. The compiler in use is shown in the build output (`Compiling 3 TypeScript modules (tsc 7.0.2)`).
