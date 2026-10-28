@@ -772,7 +772,19 @@ fn framework_toggles() {
     assert_eq!(on.frameworks.coroutines.unwrap().version, None);
     assert!(parse_err(&with("coroutines = 3")).contains("coroutines"));
     assert!(parse_err(&with("ktor = true")).contains("server"));
-    assert!(Manifest::parse(&with("compose = { colour = 1 }")).is_err());
+    assert!(parse_err(&with("compose = { colour = 1 }")).contains("unknown field `colour`"));
+    assert!(parse_err(&with("compose = 3")).contains("expected true, false or a table"));
+    let client = parse_err(&with("ktor = { client = true }"));
+    assert!(
+        client.contains("`client` is the name of an engine") && client.contains("\"okhttp\"") && client.contains("boolean"),
+        "{client}"
+    );
+    assert!(parse_err(&with("ktor = { server = false }")).contains("`server` is the name of an engine"));
+    let engines = parse(&with("ktor = { client = \"cio\", client-engines = { native = \"darwin\", wasm = \"none\" } }"));
+    assert_eq!(engines.frameworks.ktor.unwrap().client_engines["native"], "darwin");
+    assert!(parse_err(&with("ktor = { server = \"netty\", client-engines = { jvm = \"cio\" } }")).contains("set `client"));
+    assert!(parse_err(&with("ktor = { client = \"cio\", client-engines = { ios = \"darwin\" } }")).contains("unknown target `ios`"));
+    assert!(parse_err(&with("ktor = { client = \"cio\", client-engines = { jvm = \"\" } }")).contains("`client-engines.jvm` is empty"));
     let options = parse(&with(
         "compose = { stability-config = [\"a.conf\", \"b.conf\"], strong-skipping = false, feature-flags = [\"-IntrinsicRemember\"], metrics = true }",
     ));

@@ -208,6 +208,17 @@ The whole test run passed its `[test] timeout`, so Kargo stopped it. A test that
 
 Tasks run in `cmd` on Windows, which doesn't understand `$VAR`, `mkdir -p` or `./script.sh`. Add `shell = "sh"` to the task to run it in Git for Windows' `sh` everywhere, or give Windows its own commands with `windows-run`. A hook plugin's `.sh` script runs through `sh` automatically; for any other non-executable `command`, set `windows-command`. See [Tasks and plugins](../../guides/tasks-and-plugins/#windows).
 
+### Ktor: `is the name of an engine`, or the wrong client engine on a target
+
+`client` and `server` take the name of an engine, such as `client = "cio"`; `client = true` is an error. `client = "cio"` adds the CIO engine to every target, the browser and iOS included. In a multiplatform app, set the engine of single targets with `client-engines`, and `"none"` where Ktor's core is enough (Kotlin/Wasm):
+
+```toml
+[frameworks]
+ktor = { client = "cio", client-engines = { android = "okhttp", native = "darwin", wasm = "none" } }
+```
+
+See [Ktor in the frameworks reference](../frameworks/#ktor).
+
 ### A dependency has the wrong version
 
 Run `kargo tree --duplicates` to see who asks for what. The highest requested version wins; add `force = true` to your own declaration to pin one.

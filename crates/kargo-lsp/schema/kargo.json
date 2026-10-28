@@ -828,7 +828,19 @@
               "properties": {
                 "version": { "type": "string", "default": "3.6.0" },
                 "server": { "description": "Server engine.", "type": "string", "examples": ["netty", "cio", "jetty", "tomcat"] },
-                "client": { "description": "Client engine.", "type": "string", "examples": ["cio", "okhttp", "java", "apache5", "js", "curl", "winhttp", "darwin"] },
+                "client": { "description": "Client engine, for every target that has no entry in client-engines. A name, not true.", "type": "string", "examples": ["cio", "okhttp", "java", "apache5", "js", "curl", "winhttp", "darwin"] },
+                "client-engines": {
+                  "description": "The client engine of single targets, instead of `client`: an engine name, or `none` for ktor-client-core alone (Kotlin/Wasm and Kotlin/JS need no engine artifact).",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "jvm": { "type": "string", "examples": ["cio", "okhttp", "java", "none"] },
+                    "android": { "type": "string", "examples": ["okhttp", "cio", "none"] },
+                    "wasm": { "type": "string", "examples": ["none"] },
+                    "js": { "type": "string", "examples": ["js", "none"] },
+                    "native": { "type": "string", "examples": ["darwin", "curl", "winhttp", "cio", "none"] }
+                  }
+                },
                 "server-plugins": { "type": "array", "items": { "type": "string" } },
                 "client-plugins": { "type": "array", "items": { "type": "string" } },
                 "json": { "description": "Add ktor-serialization-kotlinx-json (default: when serialization is enabled).", "type": "boolean" }
