@@ -1,0 +1,59 @@
+name: Feature request
+description: Suggest a command, a kargo.toml key, a target or another improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Please search the [open issues](https://github.com/enekocm7/kargo/issues?q=is%3Aissue) first, and check that [`kargo --help`](https://enekocm7.github.io/kargo/reference/commands/) and the [`kargo.toml` reference](https://enekocm7.github.io/kargo/reference/manifest/) do not already cover it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the problem or the workflow, not the solution. What do you do today, and what is hard, slow or impossible?
+      placeholder: I build a multiplatform library that ..., and today I have to ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Kargo to do?
+      description: A command, flag or `kargo.toml` key as you would like to type it, and what it prints or changes. Kargo follows Cargo's conventions where it can, so say if Cargo, Gradle or Maven has something similar.
+      placeholder: |
+        ```toml
+        [target.jvm]
+        some-key = "value"
+        ```
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: What have you tried instead, such as a `[tasks]` entry, a plugin, a hook or a `[[generate]]` step? Why is it not enough?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Commands and flags
+        - kargo.toml
+        - Dependency resolution / kargo.lock
+        - JVM
+        - Wasm
+        - JavaScript
+        - Kotlin/Native
+        - Android
+        - Compose
+        - Frameworks (serialization, coroutines, ktor, spring-boot, ...)
+        - Toolchains (JDK, Kotlin, SDKs)
+        - Packaging / publishing
+        - Language server / editor plugins
+        - Documentation
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to work on this and open a pull request.

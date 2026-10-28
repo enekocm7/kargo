@@ -5,6 +5,12 @@ description: How Kargo is built and how to work on it.
 
 Kargo is written in Rust and lives at [github.com/enekocm7/kargo](https://github.com/enekocm7/kargo). Issues and pull requests are welcome.
 
+## Issues and pull requests
+
+New issues use a form: a bug report, a feature request, or a question (which also covers documentation problems). A bug report asks for the output of `kargo -vV`, the smallest project that shows the problem and the report of [`kargo doctor --bug-report`](../commands/#kargo-doctor), which saves a round trip.
+
+A pull request starts with a checklist that mirrors what is asked below: formatted code, passing tests, a test for new behavior, and the documentation of the change in the same pull request. The forms and the template are in `.github/ISSUE_TEMPLATE/` and `.github/pull_request_template.md`.
+
 ## Architecture
 
 Kargo is a Cargo workspace of focused crates:
