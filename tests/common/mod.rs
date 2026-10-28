@@ -235,6 +235,87 @@ Connection: close
     }
 }
 
+/// A loopback npm registry: `GET /<name>` (a scoped name as `@scope%2Fname`) answers the package's document.
+/// Point Kargo at it with the `NPM_CONFIG_REGISTRY` environment variable or a `.npmrc`.
+/// The package paths a `FakeRegistry` was asked for, with the `Authorization` header of each request.
+type RegistryLog = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A package of a `FakeRegistry`: its name, dist-tags, and versions with whether each ships types.
+pub type FakePackage<'a> = (&'a str, Vec<(&'a str, &'a str)>, Vec<(&'a str, bool)>);
+
+pub struct FakeRegistry {
+    pub url: String,
+    requests: RegistryLog,
+}
+
+impl FakeRegistry {
+    /// `packages` are `(name, dist-tags, versions)`, each version `(version, ships types)`.
+    pub fn start(packages: Vec<FakePackage>) -> Self {
+        let documents: Vec<(String, String)> = packages
+            .into_iter()
+            .map(|(name, tags, versions)| {
+                let tags: serde_json::Map<String, serde_json::Value> = tags.into_iter().map(|(t, v)| (t.to_owned(), v.into())).collect();
+                let versions: serde_json::Map<String, serde_json::Value> = versions
+                    .into_iter()
+                    .map(|(v, types)| {
+                        let info = if types {
+                            serde_json::json!({ "name": name, "version": v, "types": "index.d.ts" })
+                        } else {
+                            serde_json::json!({ "name": name, "version": v })
+                        };
+                        (v.to_owned(), info)
+                    })
+                    .collect();
+                (name.to_owned(), serde_json::json!({ "name": name, "dist-tags": tags, "versions": versions }).to_string())
+            })
+            .collect();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests: RegistryLog = Arc::default();
+        let log = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("").trim_start_matches('/').replace("%2F", "/").replace("%2f", "/");
+                let mut auth = None;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim_end().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = header.split_once(':')
+                        && k.eq_ignore_ascii_case("authorization")
+                    {
+                        auth = Some(v.trim().to_owned());
+                    }
+                }
+                log.lock().unwrap().push((path.clone(), auth));
+                let (status, answer) = match documents.iter().find(|(name, _)| *name == path) {
+                    Some((_, document)) => (200, document.clone()),
+                    None => (404, "{\"error\":\"Not found\"}".to_owned()),
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        Self { url, requests }
+    }
+
+    /// The packages asked for so far, with the `Authorization` header of each request.
+    pub fn requests(&self) -> Vec<(String, Option<String>)> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
 pub fn manifest(name: &str, extra: &str) -> String {
     format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n{extra}")
 }

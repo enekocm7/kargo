@@ -14,7 +14,8 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 
 use kargo_manifest::TargetKind;
-use kargo_manifest::edit::{DependencySection, ManifestEditor};
+use kargo_manifest::edit::{DependencySection, ManifestEditor, npm_table_key};
+use kargo_ops::ops::upgrade::Section;
 use kargo_util::config::Config;
 
 use crate::schema::Fix;
@@ -187,11 +188,15 @@ fn upgrades(req: &Request, out: &mut Vec<Value>) {
             versions.push((latest, hint.compatible.is_none()));
         }
         for (version, preferred) in versions {
-            let new = req.edited(|editor| {
-                if editor.is_inherited(hint.section, &hint.name) {
-                    return Ok(false);
+            let new = req.edited(|editor| match hint.section {
+                Section::Maven(section) => {
+                    if editor.is_inherited(section, &hint.name) {
+                        return Ok(false);
+                    }
+                    let module = hint.module.parse::<kargo_maven::ModuleId>()?;
+                    editor.set_dependency_version(section, &module, version).map(|_| true)
                 }
-                editor.set_dependency_version(hint.section, &hint.module, version).map(|_| true)
+                Section::Npm { target, dev } => editor.set_npm_version(target, dev, &hint.name, version).map(|_| true),
             });
             let title = format!("Upgrade `{}` to {version}", hint.module);
             if let Some(mut action) = new.and_then(|new| req.edit_action(title, "quickfix", &new)) {
@@ -201,6 +206,23 @@ fn upgrades(req: &Request, out: &mut Vec<Value>) {
             }
         }
     }
+}
+
+/// The npm table of a target a key path is (`target.<wasm|js>.npm-dependencies` or its `dev-` twin), as
+/// `kargo add --npm` writes to: the target and whether the packages are for the tests only.
+fn npm_section_of(table: &[String]) -> Option<(TargetKind, bool)> {
+    match table {
+        [t, kind, d] if t == "target" && (d == "npm-dependencies" || d == "dev-npm-dependencies") => {
+            let kind: TargetKind = kind.parse().ok()?;
+            matches!(kind, TargetKind::Wasm | TargetKind::Js).then_some((kind, d.starts_with("dev-")))
+        }
+        _ => None,
+    }
+}
+
+/// [`npm_section_of`] for the name a command was given (`target.wasm.npm-dependencies`).
+fn parse_npm_section(name: &str) -> Option<(TargetKind, bool)> {
+    npm_section_of(&name.split('.').map(str::to_owned).collect::<Vec<_>>())
 }
 
 /// The dependency table a key path starts with, as `kargo add` writes to.
@@ -229,11 +251,28 @@ fn add_dependency_action(req: &Request, out: &mut Vec<Value>) {
     let line = req.text[line_start..line_end].trim();
     let line = line.strip_suffix('=').map_or(line, str::trim_end);
     let coords = line.trim_matches(['"', '\'']);
+    let table = manifest::current_table(req.text, line_start);
+    let line_number = req.text[..line_start].matches('\n').count();
+    // A package name alone on a line of an npm table.
+    if let Some((target, dev)) = npm_section_of(&table) {
+        let named = kargo_ops::ops::add_npm::split_spec(coords).is_ok_and(|(_, version)| version.is_none());
+        if !named || coords.len() + 2 < line.len() {
+            return;
+        }
+        let section = format!("target.{target}.{}", npm_table_key(dev));
+        let arguments = json!([{ "uri": req.uri, "coords": coords, "section": section, "line": line_number }]);
+        out.push(json!({
+            "title": format!("Add `{coords}` at its latest version"),
+            "kind": "quickfix",
+            "isPreferred": true,
+            "command": { "title": "Add dependency", "command": ADD_DEPENDENCY, "arguments": arguments },
+        }));
+        return;
+    }
     if coords.parse::<kargo_maven::ModuleId>().is_err() || coords.len() + 2 < line.len() {
         return;
     }
-    let Some(section) = section_of(&manifest::current_table(req.text, line_start)) else { return };
-    let line_number = req.text[..line_start].matches('\n').count();
+    let Some(section) = section_of(&table) else { return };
     let arguments = json!([{ "uri": req.uri, "coords": coords, "section": section.display(), "line": line_number }]);
     out.push(json!({
         "title": format!("Add `{coords}` at its latest version"),
@@ -301,10 +340,7 @@ pub fn add_dependency(config: &Config, path: &Path, text: &str, params: &Value) 
         Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
         _ => bail!("`{ADD_DEPENDENCY}` needs `coords`, such as `io.ktor:ktor-server-core`"),
     };
-    let section = match argument(params, "section").and_then(Value::as_str) {
-        Some(name) => parse_section(name)?,
-        None => DependencySection::Main,
-    };
+    let section_name = argument(params, "section").and_then(Value::as_str);
     // The half-typed dependency the action was offered on goes, so the rest parses.
     let mut base = text.to_owned();
     if let Some(line) = argument(params, "line").and_then(Value::as_u64) {
@@ -313,6 +349,20 @@ pub fn add_dependency(config: &Config, path: &Path, text: &str, params: &Value) 
         base.replace_range(start..end, "");
     }
     let mut editor = ManifestEditor::from_str(path, &base)?;
+    // npm packages: the same edit as `kargo add --npm`.
+    if let Some((target, dev)) = section_name.and_then(parse_npm_section) {
+        let opts = kargo_ops::ops::add_npm::NpmAddOptions { specs, target: Some(target), dev, ..Default::default() };
+        let changes = kargo_ops::ops::add_npm::add_to(config, path.parent().unwrap_or(Path::new(".")), &mut editor, &opts)?;
+        let workspace = manifest::enclosing_workspace(path.parent().unwrap_or(Path::new(".")));
+        kargo_manifest::Manifest::parse_in(&editor.contents(), workspace.as_ref())
+            .context("the edited manifest is invalid; nothing was changed")?;
+        let added: Vec<String> = changes.iter().map(|c| format!("{}@{}", c.name, c.version)).collect();
+        return Ok((editor.contents(), json!({ "added": added, "section": section_name })));
+    }
+    let section = match section_name {
+        Some(name) => parse_section(name)?,
+        None => DependencySection::Main,
+    };
     let opts = kargo_ops::ops::add::AddOptions { specs, section, scope: None, bom: false, prerelease: false, no_verify: false };
     let added = kargo_ops::ops::add::add_to(config, deps::repositories(&base, path), &mut editor, &opts)?;
     let workspace = manifest::enclosing_workspace(path.parent().unwrap_or(Path::new(".")));
@@ -460,9 +510,9 @@ mod tests {
     fn upgrades_like_kargo_upgrade() {
         let text = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\"com.acme:widget\" = \"1.0.0\" # ui\n";
         let hint = deps::Hint {
-            section: DependencySection::Main,
+            section: Section::Maven(DependencySection::Main),
             name: "com.acme:widget".into(),
-            module: "com.acme:widget".parse().unwrap(),
+            module: "com.acme:widget".into(),
             compatible: Some("1.2.0".into()),
             latest: Some("2.0.0".into()),
             message: "`com.acme:widget` 1.2.0 is available (latest: 2.0.0)".into(),
@@ -475,6 +525,43 @@ mod tests {
         assert_eq!(compatible["diagnostics"][0]["severity"], 3);
         assert_eq!(apply(text, compatible), text.replace("1.0.0\" # ui", "1.2.0\" # ui"));
         assert_eq!(titled(&found, "Upgrade `com.acme:widget` to 2.0.0")["isPreferred"], false);
+    }
+
+    #[test]
+    fn works_on_npm_packages_like_the_commands() {
+        let text = "[package]\nname = \"web\"\nversion = \"0.1.0\"\n\n[target.wasm]\nenvironment = \"browser\"\n\n[target.wasm.npm-dependencies]\nleft-pad = \"^1.0.0\" # pad\n\"@js-joda/core\"\n";
+        let valid = text.replace("\"@js-joda/core\"\n", "");
+        let hint = deps::Hint {
+            section: Section::Npm { target: TargetKind::Wasm, dev: false },
+            name: "left-pad".into(),
+            module: "left-pad".into(),
+            compatible: Some("^1.3.0".into()),
+            latest: Some("^2.0.0".into()),
+            message: "`left-pad` ^1.3.0 is available (latest: ^2.0.0)".into(),
+        };
+        let offset = valid.find("left-pad").unwrap();
+        let hints = [hint];
+        let found = code_actions(&request("file:///p/kargo.toml", &valid, Path::new("/p/kargo.toml"), offset..offset, &hints));
+        let upgrade = titled(&found, "Upgrade `left-pad` to ^1.3.0");
+        assert_eq!(apply(&valid, upgrade), valid.replace("\"^1.0.0\" # pad", "\"^1.3.0\" # pad"));
+
+        // A package name alone on a line offers `kargo add --npm`, which the command then runs.
+        let found = actions(text, "\"@js-joda");
+        let add = titled(&found, "Add `@js-joda/core` at its latest version");
+        assert_eq!(
+            add["command"]["arguments"],
+            json!([{ "uri": "file:///p/kargo.toml", "coords": "@js-joda/core", "section": "target.wasm.npm-dependencies", "line": 9 }])
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kargo.toml");
+        let home = tempfile::tempdir().unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet)).with_offline(true);
+        let params = json!({ "arguments": [{ "uri": "u", "coords": "@js-joda/core@^3.2.0", "section": "target.wasm.npm-dependencies", "line": 9 }] });
+        let (new, reply) = add_dependency(&config, &path, text, &params).unwrap();
+        assert!(new.contains("[target.wasm.npm-dependencies]\nleft-pad = \"^1.0.0\" # pad\n\"@js-joda/core\" = \"^3.2.0\"\n"), "{new}");
+        assert_eq!(reply, json!({ "added": ["@js-joda/core@^3.2.0"], "section": "target.wasm.npm-dependencies" }));
+        let jvm = json!({ "arguments": [{ "uri": "u", "coords": "left-pad@1.0.0", "section": "target.jvm.npm-dependencies" }] });
+        assert!(add_dependency(&config, &path, &new, &jvm).is_err());
     }
 
     #[test]

@@ -1121,12 +1121,14 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     crate::js_sources::alias_module(ctx.ws, TargetKind::Wasm, &unit.output, wasm.module_name(&manifest.package), &name)?;
     // `prepare_wasm` installed the main npm packages one level up; dev-dependencies
     // that need more get their own `node_modules` next to the test module.
-    let node_modules =
-        if main_node_modules.is_none() || npm_dependencies(&unit.libraries)? != npm_dependencies(&wasm_libraries(ctx, &setup, false)?)? {
-            crate::npm::install(ctx, TargetKind::Wasm, &unit.libraries, &unit.output)?
-        } else {
-            main_node_modules
-        };
+    let node_modules = if main_node_modules.is_none()
+        || npm_dependencies(&unit.libraries)? != npm_dependencies(&wasm_libraries(ctx, &setup, false)?)?
+        || !crate::npm::dev_dependencies(manifest, TargetKind::Wasm).is_empty()
+    {
+        crate::npm::install_for_tests(ctx, TargetKind::Wasm, &unit.libraries, &unit.output)?
+    } else {
+        main_node_modules
+    };
     if wasm.environment == WasmEnvironment::Browser {
         return browser_tests(ctx, opts, &unit, node_modules);
     }
@@ -1217,12 +1219,14 @@ fn test_js(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     crate::js_sources::install(ctx, TargetKind::Js, &output, &main_dir, main_node_modules.as_deref())?;
     crate::js_sources::alias_module(ctx.ws, TargetKind::Js, &output, js.module_name(&manifest.package), &name)?;
     // The main npm packages are one level up; dev-dependencies that need more get their own.
-    let node_modules =
-        if main_node_modules.is_none() || npm_dependencies(&unit.libraries)? != npm_dependencies(&js_libraries(ctx, &setup, false)?)? {
-            crate::npm::install(ctx, TargetKind::Js, &unit.libraries, &output)?
-        } else {
-            main_node_modules
-        };
+    let node_modules = if main_node_modules.is_none()
+        || npm_dependencies(&unit.libraries)? != npm_dependencies(&js_libraries(ctx, &setup, false)?)?
+        || !crate::npm::dev_dependencies(manifest, TargetKind::Js).is_empty()
+    {
+        crate::npm::install_for_tests(ctx, TargetKind::Js, &unit.libraries, &output)?
+    } else {
+        main_node_modules
+    };
     let browser = js.environment == JsEnvironment::Browser;
     let imports = match (&node_modules, browser) {
         (Some(node_modules), true) => crate::wasm_output::import_map(node_modules),

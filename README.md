@@ -57,11 +57,13 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo lint [--create-baseline] [-j <n>]` | Analyze Kotlin sources with detekt |
 | `kargo add --path <dir> [--dev] [-t <target>]` | Depend on another Kargo package on disk, built from source |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor\|ksp] [--bom]` | Add dependencies (latest release when no version is given) |
+| `kargo add --npm <package[@version]>... [--dev] [-t wasm\|js] [--types]` | Add npm packages to `[target.wasm.npm-dependencies]` or `[target.js.npm-dependencies]` (latest release from the npm registry when no version is given) |
 | `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
 | `kargo add --cinterop <name> [--header <file>] [--pkg-config <package>]` | Add a C library: `[target.native.cinterop.<name>]` and `interop/<name>.def` |
 | `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
+| `kargo remove --npm <package>... [--dev] [-t wasm\|js]` | Remove npm packages |
 | `kargo target add\|remove\|list <target>... [--lib\|--app]` | Enable or disable targets in an existing project (keeps `kargo.toml` formatting, scaffolds `src-<target>/` and Android files), or list them |
-| `kargo outdated [--pre]` | List dependencies in `kargo.toml` with newer compatible / latest versions |
+| `kargo outdated [--pre]` | List dependencies in `kargo.toml`, npm packages included, with newer compatible / latest versions |
 | `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
 | `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [-i <group:artifact>] [--format json]` | Show the dependency graph; `--invert` shows what depends on one module, up to `kargo.toml` |
 | `kargo why <group:artifact[:version]> [-t <target>] [-c compile\|runtime\|test] [--all-paths] [--format json]` | Explain why a module is on the classpath and why at its version: every version requested and by whom, what decided (highest wins, `force = true`, a range, `kargo.lock`), and the path from `kargo.toml` |
@@ -202,6 +204,7 @@ environment = "js"          # or "browser" (serves a page, tests in a headless b
 
 # [target.wasm.npm-dependencies]
 # "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for; Kotlin gets declarations from their .d.ts
+#                           # (`kargo add --npm left-pad` writes the entry; [target.wasm.dev-npm-dependencies] is for tests only)
 
 [target.js]                 # Kotlin/JS (the IR compiler)
 environment = "node"        # or "browser" (serves a page, tests in a headless browser)
@@ -470,6 +473,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_HOME` | Cache and toolchains (default `~/.kargo`) |
 | `KARGO_RELEASES_URL` | Where `kargo self update`, `install.sh` and `install.ps1` look for releases (default `https://github.com/enekocm7/kargo/releases`; a mirror, or a directory with `file://`) |
 | `KARGO_OSV_URL` | Where `kargo audit` reads security advisories (default `https://api.osv.dev`; another server with the OSV API) |
+| `NPM_CONFIG_REGISTRY`, `NPM_CONFIG_USERCONFIG` | The npm registry (default: the `.npmrc` registry, else registry.npmjs.org) and user `.npmrc` that `kargo add --npm`, `kargo outdated` and `kargo upgrade` use |
 | `KARGO_NO_UPDATE_CHECK` | Any non-empty value stops `kargo --version` from mentioning newer releases (it checks at most once a day, never offline or in CI) |
 | `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory |

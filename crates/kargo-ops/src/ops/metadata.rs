@@ -445,17 +445,32 @@ fn js_declarations(ws: &Workspace, ctx: &BuildContext, target: TargetKind) -> Va
 /// and where `kargo build` and `kargo test` install them. Path dependencies are not built to read their klibs
 /// here, so their packages are missing.
 fn npm_packages(ctx: &BuildContext, target: TargetKind, setup: &TargetSetup) -> Result<Vec<Value>> {
-    let (main, test, main_dir) = if target == TargetKind::Js {
-        let main = super::build::js_resolution(ctx, setup, false)?.files();
-        let test = super::build::js_resolution(ctx, setup, true)?.files();
+    let (main_resolution, test_resolution, main_dir) = if target == TargetKind::Js {
+        let main = super::build::js_resolution(ctx, setup, false)?;
+        let test = super::build::js_resolution(ctx, setup, true)?;
         (main, test, ctx.ws.output_dir(&ctx.profile, target))
     } else {
-        (wasm_resolution(ctx, setup, false)?.files(), wasm_resolution(ctx, setup, true)?.files(), ctx.ws.profile_dir(&ctx.profile))
+        (wasm_resolution(ctx, setup, false)?, wasm_resolution(ctx, setup, true)?, ctx.ws.profile_dir(&ctx.profile))
     };
-    let main = npm::dependencies(ctx, target, &main)?;
-    let test = npm::dependencies(ctx, target, &test)?;
+    let (main, test) = (main_resolution.files(), test_resolution.files());
+    let main_deps = npm::dependencies(ctx, target, &main)?;
+    let test_deps = npm::test_dependencies(ctx, target, &test)?;
     let test_dir = ctx.ws.output_dir(&ctx.profile, target).join("test").join("node_modules");
-    Ok(npm_listing(&main, &test, &main_dir.join("node_modules"), &test_dir))
+    let mut listing = npm_listing(&main_deps, &test_deps, &main_dir.join("node_modules"), &test_dir);
+    // Where each package comes from: the libraries that ask for it and the version `kargo.toml` declares.
+    let manifest = ctx.ws.manifest();
+    let mut origins = npm::origins(manifest, target, &main_resolution, false)?;
+    let extra: Vec<_> =
+        npm::origins(manifest, target, &test_resolution, true)?.into_iter().filter(|o| !origins.iter().any(|m| m.name == o.name)).collect();
+    origins.extend(extra);
+    for entry in &mut listing {
+        if let Some(origin) = origins.iter().find(|o| entry["name"] == o.name.as_str()) {
+            let origin = super::tree::json_npm(std::slice::from_ref(origin));
+            entry["declared"] = origin[0]["declared"].clone();
+            entry["requested-by"] = origin[0]["requested-by"].clone();
+        }
+    }
+    Ok(listing)
 }
 
 /// The packages of the program, installed in `main_dir`, and of its tests. `kargo test` installs every

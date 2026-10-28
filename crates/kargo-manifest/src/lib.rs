@@ -427,6 +427,8 @@ pub struct WasmTarget {
     pub package_manager: Option<PackageManager>,
     /// npm packages the project needs besides those its Wasm libraries ask for, by name.
     pub npm_dependencies: BTreeMap<String, String>,
+    /// npm packages only the tests need (`kargo test` installs them next to the test module), by name.
+    pub dev_npm_dependencies: BTreeMap<String, String>,
     pub wasm_opt: WasmOpt,
     pub opt_level: WasmOptLevel,
     pub wasm_opt_flags: Vec<String>,
@@ -533,6 +535,8 @@ pub struct JsTarget {
     pub package_manager: Option<PackageManager>,
     /// npm packages the project needs besides those its Kotlin/JS libraries ask for, by name.
     pub npm_dependencies: BTreeMap<String, String>,
+    /// npm packages only the tests need (`kargo test` installs them next to the test module), by name.
+    pub dev_npm_dependencies: BTreeMap<String, String>,
     /// Directories of the package's own JavaScript and TypeScript modules, as for Wasm.
     pub js_sources: Vec<PathBuf>,
     /// The port `kargo run` serves a browser app on, as for Wasm.

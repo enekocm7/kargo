@@ -502,6 +502,7 @@ Add dependencies to `kargo.toml`, enable frameworks, or add a C library.
 ```sh
 kargo add <group:artifact[:version[:classifier]]>... [options]
 kargo add --path <dir> [--dev] [-t <target>] [--scope <scope>]
+kargo add --npm <package[@version]>... [--dev] [-t <wasm|js>] [--types]
 kargo add -F <framework,...>
 kargo add --cinterop <name> [--header <file>]... [--pkg-config <package>]
 ```
@@ -509,12 +510,14 @@ kargo add --cinterop <name> [--header <file>]... [--pkg-config <package>]
 | Option | Meaning |
 |---|---|
 | `--path <dir>` | Depend on the Kargo package in `<dir>` (relative to the current directory), built from source. The entry is named after that package, and its path is written relative to `kargo.toml`. See [path dependencies](../../guides/workspaces/) |
-| `--dev` | Add to `[dev-dependencies]` |
-| `-t, --target <target>` | Add to `[target.<target>.dependencies]` |
+| `--dev` | Add to `[dev-dependencies]`. With `--npm`: to `[target.<target>.dev-npm-dependencies]`, the packages only `kargo test` installs |
+| `-t, --target <target>` | Add to `[target.<target>.dependencies]`. With `--npm`: the `wasm` or `js` target whose npm packages to edit |
+| `--npm` | Add npm packages instead of Maven dependencies (see [npm packages](#npm-packages-with-kargo-add---npm)) |
+| `--types` | With `--npm`: also add `@types/<package>` for a package that ships no TypeScript declarations |
 | `--scope <scope>` | `compile`, `runtime`, `provided`, `processor` (javac annotation processor) or `ksp` (KSP processor) |
 | `--bom` | Import as a BOM |
 | `--pre` | Allow pre-release versions when picking the latest |
-| `--no-verify` | Don't check that the artifact exists |
+| `--no-verify` | Don't check that the artifact exists (with `--npm`: that the version exists in the registry) |
 | `-F, --framework <list>` | Enable built-in frameworks instead |
 | `--cinterop <name>` | Add the C library `<name>` instead: a `[target.native.cinterop.<name>]` entry (with `package = "<name>"`) and, unless it exists, `interop/<name>.def`. Needs `[target.native]`. See [C interop](../../guides/c-interop/) |
 | `--header <file>` | With `--cinterop`: a header the `.def` file binds (repeatable; default `<name>.h`) |
@@ -525,18 +528,45 @@ kargo add --cinterop <name> [--header <file>]... [--pkg-config <package>]
 
 Without a version, the latest release is used. Plain versions win over variants that some libraries publish next to them, such as `0.8.0-0.6.x-compat` or `33.0.0-jre`; Kargo prints a note naming the variant it skipped. When a library publishes only variants, the newest one is used.
 
+### npm packages with `kargo add --npm`
+
+`kargo add --npm` writes to `[target.wasm.npm-dependencies]` or `[target.js.npm-dependencies]` instead of a Maven table, in the same format-preserving way:
+
+```console
+$ kargo add --npm left-pad @js-joda/core@^3.2.0 chart.js --types
+      Adding left-pad ^1.3.0 to [target.wasm.npm-dependencies]
+      Adding @js-joda/core ^3.2.0 to [target.wasm.npm-dependencies]
+      Adding chart.js ^4.4.1 to [target.wasm.npm-dependencies]
+      Adding @types/chart.js ^4.4.1 to [target.wasm.npm-dependencies]
+```
+
+| Argument | What is written |
+|---|---|
+| `left-pad` | The `latest` release of the registry as a caret range, `^1.3.0` (a pre-release only with `--pre`) |
+| `left-pad@1.3.0`, `left-pad@~1.2`, `left-pad@>=1 <2` | The version or range as given. An exact version must exist in the registry (unless `--no-verify`); a range must match a published version |
+| `left-pad@next`, `left-pad@latest` | The version a dist-tag points at, as a caret range (`^2.0.0-beta.1`) |
+| `@scope/name`, `@scope/name@^1.0.0` | A scoped package; its key is quoted in `kargo.toml` |
+
+A project with one of the wasm and js targets writes to that target; with both, choose with `-t wasm` or `-t js`. `--dev` writes to `[target.<target>.dev-npm-dependencies]`. Adding a package that is already declared replaces its version.
+
+Kargo asks the registry's HTTP API itself, so no package manager has to be installed. The registry is the one npm would use: `NPM_CONFIG_REGISTRY`, else the `registry` of the project's `.npmrc` and then the user's (`~/.npmrc`, or the file `NPM_CONFIG_USERCONFIG` names), else `https://registry.npmjs.org`. `@scope:registry=` lines choose the registry of a scope, and `//host/path/:_authToken=` lines (with `${VAR}` replaced) are sent as a bearer token. An unknown package is an error that names the registry. With `--offline`, the versions come from what an earlier run cached under `~/.kargo/npm/registry`, or you pass a version, which needs no lookup.
+
+`--types` adds `@types/<package>` (`@scope/name` is `@types/scope__name`) when the chosen version ships no declarations of its own (no `types`, `typings` or `exports` `types` entry), at the same major version when the registry has it. A package without an `@types` package only gets a warning. The declarations feed the [Kotlin declarations](../../guides/wasm/#kotlin-declarations-for-npm-packages) Kargo generates.
+
 ## `kargo remove` (`rm`)
 
 Remove dependencies from `kargo.toml`.
 
 ```sh
 kargo remove <group:artifact or key>... [--dev] [-t <target>]
+kargo remove --npm <package>... [--dev] [-t <wasm|js>]
 ```
 
 | Option | Meaning |
 |---|---|
-| `--dev` | Remove from `[dev-dependencies]` |
-| `-t, --target <target>` | Remove from `[target.<target>.dependencies]` |
+| `--dev` | Remove from `[dev-dependencies]` (with `--npm`: from `[target.<target>.dev-npm-dependencies]`) |
+| `-t, --target <target>` | Remove from `[target.<target>.dependencies]` (with `--npm`: from the npm packages of that target) |
+| `--npm` | Remove npm packages. Without `-t`, the package is removed from the only target that declares it; its `@types/<package>` goes with it. An emptied table is removed |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 Path dependencies are removed by their key: `kargo remove mathlib`. Without an option, the dependency is removed from `[dependencies]`.
@@ -546,7 +576,7 @@ Path dependencies are removed by their key: `kargo remove mathlib`. Without an o
 List the dependencies in `kargo.toml` that have newer versions in your repositories.
 
 ```sh
-kargo outdated [group:artifact or key]... [--pre]
+kargo outdated [group:artifact or key or npm package]... [--pre]
 ```
 
 ```console
@@ -554,12 +584,13 @@ $ kargo outdated
 name                                    current  compatible  latest   kind
 org.jetbrains.kotlinx:kotlinx-datetime  0.6.0    0.6.2       0.8.0    dependencies
 io.mockk:mockk                          1.13.0   1.14.11     1.14.11  dev-dependencies
+left-pad                                ^1.0.0   ^1.3.0      ^1.3.0   target.wasm.npm-dependencies
 ```
 
 | Column | Meaning |
 |---|---|
 | `current` | The version in `kargo.toml` |
-| `compatible` | The newest version with the same major version (for `0.x`, the same minor version), or `-` if there is none |
+| `compatible` | The newest version with the same major version (for `0.x`, the same minor version), or `-` if there is none. For an npm package, the newest version its range accepts (`~1.2.0` stays on `1.2.x`; an exact version or `^` stays on its major) |
 | `latest` | The newest version, or `-` if `current` is the newest |
 | `kind` | The table the dependency is declared in |
 
@@ -570,6 +601,8 @@ io.mockk:mockk                          1.13.0   1.14.11     1.14.11  dev-depend
 | `-p, --package <name>` | The workspace member to check |
 
 A dependency stays on its variant: `33.0.0-jre` is compared with other `-jre` versions, and a plain version never moves to a `-compat` one. Dependencies declared with a version range or without a version (managed by a BOM) are skipped. The command only reads; nothing is changed.
+
+The npm packages of `[target.wasm.npm-dependencies]`, `[target.js.npm-dependencies]` and their `dev-npm-dependencies` are compared with the registry (see [`kargo add --npm`](#npm-packages-with-kargo-add---npm) for how it is chosen). Their `latest` is what the registry's `latest` dist-tag points at, and the values show the range as `kargo upgrade` would write it (`^1.3.0`). Only a single version with an optional `^` or `~` (`1.3.0`, `^1.3.0`, `~1.3.0`) is compared; ranges such as `>=1 <2` or `1.x` are skipped.
 
 ## `kargo upgrade`
 
@@ -594,7 +627,7 @@ note: `org.jetbrains.kotlinx:kotlinx-datetime` 0.8.0 is available but not compat
 | `--dry-run` | Print the changes without writing `kargo.toml` |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
-Dependencies inherited with `workspace = true` are skipped; upgrade them in the workspace's `kargo.toml`. "Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). `kargo.lock` is re-resolved on the next build because the manifest changed.
+Dependencies inherited with `workspace = true` are skipped; upgrade them in the workspace's `kargo.toml`. "Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). npm packages are upgraded too, keeping the `^` or `~` of the entry: `left-pad = "^1.0.0"` becomes `"^1.3.0"`, or with `--incompatible` the newest version, `"^2.0.0"`; a spec that isn't a single version is skipped (naming it says so). `kargo.lock` is re-resolved on the next build because the manifest changed.
 
 ## `kargo audit`
 
@@ -698,7 +731,7 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 | `-d, --duplicates` | | Only modules requested in several versions |
 | `-i, --invert <module>` | | Show what depends on `<module>` (`group:artifact`, optionally `:version`), up to the project: the inverted tree |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | current package | Which packages to show |
-| `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies; it can't be combined with `--depth`, `--duplicates` or `--invert`. When several packages are selected, the JSON output is an array with one document per package |
+| `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies (and for wasm and js the `npm` packages, see below); it can't be combined with `--depth`, `--duplicates` or `--invert`. When several packages are selected, the JSON output is an array with one document per package |
 
 Path dependencies are listed first, as `mathlib v0.1.0 (<directory>)`, each with the path dependencies it uses in turn (the module graph); their Maven dependencies appear in the graph next to yours. With `-c compile`, only the path dependencies there are to compile against are listed: a path dependency's own path dependencies are only there at runtime unless they are `exported` ([what comes along](../../guides/workspaces/#what-comes-along)).
 
@@ -712,6 +745,20 @@ g:util:2.0
 └── g:right:1.0
     └── app v0.1.0 (jvm)
 ```
+
+For the wasm and js targets, the tree is followed by the `npm packages` the target installs, each with the version that wins and where it comes from: the Maven libraries whose klibs ask for it (with the version they want when it differs), and `kargo.toml`, which overrides them. `-c test` adds the `dev-npm-dependencies`.
+
+```console
+$ kargo tree -t wasm
+web v0.1.0 (wasm-js)
+├── org.jetbrains.kotlin:kotlin-stdlib-wasm-js:2.2.20
+└── org.jetbrains.kotlinx:kotlinx-datetime-wasm-js:0.7.1
+npm packages
+├── @js-joda/core 3.2.0 (asked for by org.jetbrains.kotlinx:kotlinx-datetime-wasm-js:0.7.1)
+└── left-pad ^1.3.0 (kargo.toml)
+```
+
+In `--format json`, each tree has an `npm` array of `{ name, version, declared, dev, requested-by }` objects. The packages of a path dependency are not listed: its klibs are only built by `kargo build`.
 
 ## `kargo why`
 
