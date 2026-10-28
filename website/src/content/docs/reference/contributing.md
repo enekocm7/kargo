@@ -132,4 +132,4 @@ npm run dev        # http://localhost:4321/
 npm run build      # static site in website/dist
 ```
 
-Pages are Markdown files in `website/src/content/docs/`. The sidebar is configured in `website/astro.config.mjs`.
+Pages are Markdown files in `website/src/content/docs/`. The sidebar is configured in `website/astro.config.mjs`. It groups pages by task (build and test, targets, frameworks, packaging, toolchains and CI, editors, migration, reference), not by folder, so a page's URL and its sidebar group can differ.

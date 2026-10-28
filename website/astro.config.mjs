@@ -33,12 +33,13 @@ export default defineConfig({
 						{ label: 'Installation', slug: 'getting-started/installation' },
 						{ label: 'Quick start', slug: 'getting-started/quick-start' },
 						{ label: 'Project layout', slug: 'getting-started/project-layout' },
+						{ label: 'Your first Kotlin app', slug: 'guides/first-app' },
 					],
 				},
 				{
-					label: 'Guides',
+					label: 'Build and test',
+					collapsed: true,
 					items: [
-						{ label: 'Your first Kotlin app', slug: 'guides/first-app' },
 						{ label: 'Managing dependencies', slug: 'guides/dependencies' },
 						{ label: 'Workspaces', slug: 'guides/workspaces' },
 						{ label: 'Testing', slug: 'guides/testing' },
@@ -46,34 +47,65 @@ export default defineConfig({
 						{ label: 'Watch mode', slug: 'guides/watch' },
 						{ label: 'Several programs', slug: 'guides/multiple-programs' },
 						{ label: 'Kotlin scripts', slug: 'guides/scripts' },
-						{ label: 'API documentation', slug: 'guides/documentation' },
+						{ label: 'Code generation', slug: 'guides/code-generation' },
+						{ label: 'Tasks and plugins', slug: 'guides/tasks-and-plugins' },
+						{ label: 'Project environment ([env])', slug: 'guides/environment' },
 						{ label: 'Formatting and linting', slug: 'guides/formatting-and-linting' },
-						{ label: 'Publishing a library', slug: 'guides/publishing' },
-						{ label: 'Distributing applications', slug: 'guides/distributing' },
-						{ label: 'Installing tools', slug: 'guides/installing-tools' },
+						{ label: 'API documentation', slug: 'guides/documentation' },
+					],
+				},
+				{
+					label: 'Targets',
+					collapsed: true,
+					items: [
 						{ label: 'Multiplatform projects', slug: 'guides/multiplatform' },
 						{ label: 'WebAssembly', slug: 'guides/wasm' },
 						{ label: 'JavaScript (Kotlin/JS)', slug: 'guides/js' },
 						{ label: 'Kotlin/Native', slug: 'guides/native' },
 						{ label: 'C interop', slug: 'guides/c-interop' },
 						{ label: 'Android', slug: 'guides/android' },
+					],
+				},
+				{
+					label: 'Frameworks',
+					collapsed: true,
+					items: [
 						{ label: 'Built-in frameworks', slug: 'guides/frameworks' },
 						{ label: 'A REST API with Ktor', slug: 'guides/ktor' },
 						{ label: 'Spring Boot', slug: 'guides/spring-boot' },
 						{ label: 'Compose', slug: 'guides/compose' },
-						{ label: 'Code generation', slug: 'guides/code-generation' },
-						{ label: 'Tasks and plugins', slug: 'guides/tasks-and-plugins' },
-						{ label: 'Environment variables', slug: 'guides/environment' },
+					],
+				},
+				{
+					label: 'Package and publish',
+					collapsed: true,
+					items: [
+						{ label: 'Publishing a library', slug: 'guides/publishing' },
+						{ label: 'Distributing applications', slug: 'guides/distributing' },
+						{ label: 'Installing tools', slug: 'guides/installing-tools' },
+					],
+				},
+				{
+					label: 'Toolchains and CI',
+					collapsed: true,
+					items: [
 						{ label: 'Managing JDKs', slug: 'guides/toolchains' },
 						{ label: 'Continuous integration', slug: 'guides/ci' },
-						{ label: 'Offline and corporate builds', slug: 'guides/offline-and-mirrors' },
 						{ label: 'Build performance', slug: 'guides/build-performance' },
+						{ label: 'Offline and corporate builds', slug: 'guides/offline-and-mirrors' },
+					],
+				},
+				{
+					label: 'Editors and IDEs',
+					collapsed: true,
+					items: [
 						{ label: 'Editor integration', slug: 'guides/editors' },
 						{ label: "Kargo's Kotlin server", slug: 'guides/kotlin-server' },
 					],
 				},
 				{
 					label: 'Migration',
+					collapsed: true,
 					items: [
 						{ label: 'Importing a project', slug: 'guides/importing' },
 						{ label: 'From Gradle', slug: 'migration/from-gradle' },
@@ -83,6 +115,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Reference',
+					collapsed: true,
 					items: [
 						{ label: 'Commands', slug: 'reference/commands' },
 						{ label: 'kargo.toml', slug: 'reference/manifest' },
@@ -91,6 +124,12 @@ export default defineConfig({
 						{ label: 'Environment variables', slug: 'reference/environment' },
 						{ label: 'Machine-readable output', slug: 'reference/machine-readable-output' },
 						{ label: 'Warnings', slug: 'reference/warnings' },
+					],
+				},
+				{
+					label: 'Help and contributing',
+					collapsed: true,
+					items: [
 						{ label: 'FAQ & troubleshooting', slug: 'reference/faq' },
 						{ label: 'Contributing', slug: 'reference/contributing' },
 					],

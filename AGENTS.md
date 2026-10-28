@@ -172,7 +172,7 @@ If the change introduces something the existing pages don't cover (a new framewo
    description: One sentence on what the reader will learn or find.
    ---
    ```
-3. **Add it to the sidebar** in `website/astro.config.mjs`, in the matching group: `{ label: 'Short title', slug: '<section>/<slug>' }`. The slug has no extension and no leading slash. Pages not in the sidebar are effectively hidden.
+3. **Add it to the sidebar** in `website/astro.config.mjs`, in the matching group: `{ label: 'Short title', slug: '<section>/<slug>' }`. The slug has no extension and no leading slash. The sidebar groups are by task, not by folder: Getting started, Build and test, Targets, Frameworks, Package and publish, Toolchains and CI, Editors and IDEs, Migration, Reference, and Help and contributing. A page's folder (`guides/`, `reference/`, ...) is only its URL, so a guide can sit in any of the first seven groups; keep each group short and add a new group only when several pages share a topic no existing one covers. Pages not in the sidebar are effectively hidden.
 4. **Link it** from the related pages (and from `reference/commands.md` or `reference/manifest.md` when it documents a command or key).
 5. Add a card or link on `index.mdx` only if it is a headline feature.
 
