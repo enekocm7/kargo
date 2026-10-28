@@ -138,7 +138,7 @@ To publish a Kotlin library for other Kotlin projects, use [`kargo publish`](../
 
 Kotlin/JS libraries that import npm packages at runtime list them in a `package.json` inside their klib. Kargo installs them after compiling, with the package manager rules described for [Wasm](../wasm/#npm-packages): the first of npm, pnpm and bun on your `PATH` (or `package-manager`), lifecycle scripts off (`--ignore-scripts`), the highest version when two libraries disagree, and `--offline` passed on.
 
-The packages go to `target/<profile>/js/node_modules`, next to the module, where Node.js finds them. For a browser app, the page gets an import map for them and `kargo run` serves them at `/node_modules/` (an ES module app only; a UMD page can't use an import map).
+The packages go to `target/<profile>/js/node_modules`, next to the module, where Node.js finds them. When you remove the last npm dependency, the next build deletes that `node_modules` and the `package.json` Kargo wrote. For a browser app, the page gets an import map for them and `kargo run` serves them at `/node_modules/` (an ES module app only; a UMD page can't use an import map).
 
 For an npm package of your own, list it in `[target.js.npm-dependencies]`. Kargo generates Kotlin declarations for it from its TypeScript declarations, as it does [for Wasm](../wasm/#kotlin-declarations-for-npm-packages), so you call it like a Kotlin library:
 
