@@ -171,9 +171,9 @@
           "examples": ["system", "36", "37"]
         },
         "kargo": {
-          "description": "The Kargo versions this project builds with, a semver requirement such as \">=0.3\". An older Kargo stops with a message that points to `kargo self update`.",
+          "description": "The Kargo versions this project builds with, a semver requirement such as \">=0.1.2\". An older Kargo stops with a message that points to `kargo self update`.",
           "type": "string",
-          "examples": [">=0.3", "^0.3.1"]
+          "examples": [">=0.1.2", "^0.1.2"]
         },
         "typescript": {
           "description": "The TypeScript compiler (the `typescript` npm package) that compiles the `.ts` modules of `js/`: an exact version such as \"5.9.3\", a range such as \"^6\", or a tag. Default: the newest release (\"latest\"), which `kargo.lock` pins until `kargo update`.",

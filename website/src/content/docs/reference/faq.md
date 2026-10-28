@@ -31,7 +31,7 @@ Yes, on the JVM and Android. `.java` files next to your Kotlin files are compile
 
 ### How do I update Kargo, and how do I make sure my team has a new enough one?
 
-`kargo self update` replaces the binary with the latest release, after checking its SHA-256 (see [Installation](../../getting-started/installation/#updating)). Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN! or a Linux distribution is updated by that package manager, and `kargo self update` prints its command. To require a minimum version, put `kargo = ">=0.3"` in [`[toolchain]`](../manifest/#toolchain): an older Kargo then stops with a message that points to `kargo self update`.
+`kargo self update` replaces the binary with the latest release, after checking its SHA-256 (see [Installation](../../getting-started/installation/#updating)). Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN! or a Linux distribution is updated by that package manager, and `kargo self update` prints its command. To require a minimum version, put `kargo = ">=0.1.2"` in [`[toolchain]`](../manifest/#toolchain): an older Kargo then stops with a message that points to `kargo self update`.
 
 ### `kargo self update` says a package manager installed this kargo
 

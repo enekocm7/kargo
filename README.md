@@ -388,7 +388,7 @@ A path dependency is built for the consumer's target: a jar for the JVM, a klib 
 jdk = "21"            # newest Temurin 21; or an exact release like "21.0.5+11"; default "system"
 graalvm = "25"        # GraalVM CE for native images (or "oracle-25"); default "system" (GRAALVM_HOME, then PATH)
 android-sdk = "36"    # Kargo installs Android platform 36, its build-tools and platform-tools; default "system" (ANDROID_HOME)
-kargo = ">=0.3"       # the Kargo versions the project builds with; an older Kargo stops and points to `kargo self update`
+kargo = ">=0.1.2"       # the Kargo versions the project builds with; an older Kargo stops and points to `kargo self update`
 typescript = "^6"     # the TypeScript compiler for the .ts modules of js/; default: the newest release, pinned in kargo.lock
 ```
 
