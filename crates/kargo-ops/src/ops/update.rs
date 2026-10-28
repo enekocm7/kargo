@@ -63,6 +63,9 @@ pub fn update(ctx: &mut BuildContext, opts: &UpdateOptions) -> Result<Vec<LockCh
 fn resolve_all(ctx: &BuildContext) -> Result<()> {
     let previous = ctx.lockfile();
     ctx.reset_lockfile(None);
+    if ctx.update.is_some() {
+        ctx.keep_npm_tools(&previous.npm_tools);
+    }
     for package in 0..ctx.project.packages().len() {
         resolve_package(&ctx.for_package(package), &previous)?;
     }
@@ -115,6 +118,9 @@ fn relock_tools(ctx: &BuildContext, target: TargetKind, previous: &Lockfile) -> 
     }
     let plugins: Vec<PluginSpec> = setup.contributions.plugins.iter().filter(|p| had(&ctx.tool_key(&p.artifact))).cloned().collect();
     ctx.plugin_jars(&plugins)?;
+    if matches!(target, TargetKind::Wasm | TargetKind::Js) && previous.npm_tools.contains_key(&ctx.npm_tool_key("typescript")) {
+        crate::js_sources::lock_typescript(ctx, target)?;
+    }
     if target == TargetKind::Jvm {
         if had(&ctx.tool_key("junit-platform-console-standalone")) {
             super::test::console_launcher(ctx)?;

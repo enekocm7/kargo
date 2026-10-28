@@ -170,7 +170,7 @@ A package without TypeScript declarations gets none, with a warning: write the `
 
 ## Your own JavaScript and TypeScript
 
-JavaScript and TypeScript modules in `js/` work as they do [on Wasm](../wasm/#your-own-javascript-and-typescript): Kargo copies the JavaScript, compiles the TypeScript with tsc into `target/<profile>/js/js/`, and generates Kotlin declarations for them into `target/<profile>/generated/js-sources-js/`, so `js/greeter.ts` is the Kotlin package `js.greeter`:
+JavaScript and TypeScript modules in `js/` work as they do [on Wasm](../wasm/#your-own-javascript-and-typescript): Kargo copies the JavaScript, compiles the TypeScript with tsc (the newest release, or [`[toolchain] typescript`](../../reference/manifest/#toolchain)) into `target/<profile>/js/js/`, and generates Kotlin declarations for them into `target/<profile>/generated/js-sources-js/`, so `js/greeter.ts` is the Kotlin package `js.greeter`:
 
 ```ts title="js/greeter.ts"
 export function greet(name: string): string {

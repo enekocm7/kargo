@@ -23,6 +23,19 @@ pub struct Lockfile {
     /// Keyed by resolution name, e.g. `jvm/runtime`.
     #[serde(default, rename = "resolution")]
     pub resolutions: BTreeMap<String, LockedResolution>,
+    /// The npm packages of build tools whose version the project does not spell out, keyed like a resolution
+    /// (`npm-tools/typescript`).
+    #[serde(default, rename = "npm-tool", skip_serializing_if = "BTreeMap::is_empty")]
+    pub npm_tools: BTreeMap<String, LockedNpmTool>,
+}
+
+/// An npm package a build tool runs with (the TypeScript compiler), pinned to the version its request resolved to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedNpmTool {
+    /// What `kargo.toml` asked for (`latest`, `^6`, `5.9.3`); a different request is resolved again.
+    pub request: String,
+    /// The version it resolved to.
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

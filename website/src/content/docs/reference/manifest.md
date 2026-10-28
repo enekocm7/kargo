@@ -173,6 +173,7 @@ jdk = "21"         # "system" (default), a major version, or an exact release li
 graalvm = "25"     # "system" (default), a Java version for GraalVM CE, or "oracle-25" for Oracle GraalVM
 android-sdk = "36" # "system" (default), or a platform API level that Kargo installs
 kargo = ">=0.3"    # the Kargo versions this project builds with (default: any)
+typescript = "^6"  # the TypeScript compiler for the .ts modules of js/ (default: the newest release, pinned in kargo.lock)
 ```
 
 `graalvm` is the GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use. `system` looks at `GRAALVM_HOME`, then a `JAVA_HOME` with `native-image`, then `native-image` on `PATH`.
@@ -186,9 +187,11 @@ $ kargo build
 error: this project needs kargo >=0.3 (`[toolchain] kargo` in kargo.toml), but this is kargo 0.1.0: run `kargo self update` to get a newer Kargo
 ```
 
+`typescript` is the version of the [`typescript`](https://www.npmjs.com/package/typescript) npm package that compiles the `.ts` modules of [`js/`](../../guides/wasm/#your-own-javascript-and-typescript) on the Wasm and JS targets: an exact version (`"5.9.3"`), a range (`"^6"`, `"~5.9"`) or a dist-tag (`"latest"`, `"next"`). Without it, Kargo uses the newest release (`latest`). Anything but an exact version is looked up in the npm registry (honoring `.npmrc` and `NPM_CONFIG_REGISTRY`) and the version it resolves to is pinned in [`kargo.lock`](../lockfile/#build-tools) as `npm-tools/typescript`, so builds keep one compiler until `kargo update`. Pin an older version here when a new major release of TypeScript is not ready for your code. The compiler in use is shown in the build output (`Compiling 3 TypeScript modules (tsc 7.0.2)`).
+
 [`kargo self`](../commands/#kargo-self) ignores it, so an old Kargo can always update itself. A Kargo older than this key rejects it as an unknown key, so it protects against old versions only from the release that introduced it on.
 
-See [Managing JDKs](../../guides/toolchains/) and [GraalVM](../../guides/toolchains/#graalvm).
+See [Managing JDKs](../../guides/toolchains/), [GraalVM](../../guides/toolchains/#graalvm) and [The TypeScript compiler](../../guides/toolchains/#the-typescript-compiler).
 
 ## `[build]`
 

@@ -758,6 +758,33 @@ impl<'a> BuildContext<'a> {
         locked.files().into_iter().next().with_context(|| format!("kargo.lock lists no file for `{key}`; run `kargo update`"))
     }
 
+    /// The `kargo.lock` key of the npm package `name` of a build tool, `npm-tools/<name>`.
+    pub fn npm_tool_key(&self, name: &str) -> String {
+        self.ws.lock_key(&format!("npm-tools/{name}"))
+    }
+
+    /// The version of the npm package of a build tool that `request` (what `kargo.toml` asks for) stands for, pinned
+    /// in `kargo.lock` under [`BuildContext::npm_tool_key`]: `resolve` runs only when the lock has no entry for this
+    /// request (or with `--refresh`), and `--locked` refuses to make one.
+    pub fn lock_npm_tool(&self, name: &str, request: &str, resolve: impl FnOnce() -> Result<String>) -> Result<String> {
+        let key = self.npm_tool_key(name);
+        if !self.config.refresh()
+            && let Some(tool) = self.shared.lock.lock().expect("lock poisoned").npm_tools.get(&key).filter(|t| t.request == request)
+        {
+            return Ok(tool.version.clone());
+        }
+        if self.locked {
+            bail!(
+                "kargo.lock needs to be updated for `{key}` but --locked was passed; run `kargo update` (or `kargo fetch`) without --locked and commit kargo.lock"
+            );
+        }
+        let version = resolve()?;
+        let locked = crate::lockfile::LockedNpmTool { request: request.to_owned(), version: version.clone() };
+        self.shared.lock.lock().expect("lock poisoned").npm_tools.insert(key, locked);
+        self.shared.lock_dirty.store(true, Ordering::SeqCst);
+        Ok(version)
+    }
+
     /// A copy of the lockfile as currently resolved.
     pub fn lockfile(&self) -> Lockfile {
         self.shared.lock.lock().expect("lock poisoned").clone()
@@ -785,9 +812,18 @@ impl<'a> BuildContext<'a> {
         let mut lock = self.shared.lock.lock().expect("lock poisoned");
         match keep {
             Some(keys) => lock.retain(keys),
-            None => lock.resolutions.clear(),
+            None => {
+                lock.resolutions.clear();
+                lock.npm_tools.clear();
+            }
         }
         self.shared.lock_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Puts back the npm tools of an earlier lockfile after [`BuildContext::reset_lockfile`]: a selective `kargo update`
+    /// keeps the TypeScript compiler it had.
+    pub fn keep_npm_tools(&self, tools: &std::collections::BTreeMap<String, crate::lockfile::LockedNpmTool>) {
+        self.shared.lock.lock().expect("lock poisoned").npm_tools.extend(tools.clone());
     }
 
     /// Saves `kargo.lock` and releases the build-directory lock, so a long-running
@@ -954,6 +990,41 @@ lib = { path = \"../lib\" }
 
         let err = format!("{:#}", ctx.setup(TargetKind::Wasm).unwrap_err());
         assert!(err.contains("`app` depends on the path dependency `lib`, which does not enable the wasm target"), "{err}");
+    }
+
+    #[test]
+    fn npm_tools_are_pinned_in_the_lockfile() {
+        use kargo_util::shell::{Shell, Verbosity};
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n").unwrap();
+        let project = Project::load(&dir.path().join("kargo.toml")).unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let ctx = BuildContext::new(&config, &project, 0, ProfileKind::Dev).unwrap();
+
+        let resolved = std::cell::Cell::new(0);
+        let resolve = |version: &str| {
+            resolved.set(resolved.get() + 1);
+            Ok(version.to_owned())
+        };
+        assert_eq!(ctx.lock_npm_tool("typescript", "latest", || resolve("7.0.2")).unwrap(), "7.0.2");
+        assert_eq!(ctx.lock_npm_tool("typescript", "latest", || resolve("8.0.0")).unwrap(), "7.0.2", "the lock wins over the registry");
+        assert_eq!(resolved.get(), 1);
+        assert_eq!(ctx.lock_npm_tool("typescript", "^5", || resolve("5.9.3")).unwrap(), "5.9.3", "another request is resolved again");
+        ctx.save_lockfile().unwrap();
+        let text = std::fs::read_to_string(dir.path().join("kargo.lock")).unwrap();
+        assert!(text.contains("[npm-tool.\"npm-tools/typescript\"]") && text.contains("version = \"5.9.3\""), "{text}");
+
+        // A new run reads it back, and `--locked` refuses what the lock lacks.
+        drop(ctx);
+        let mut ctx = BuildContext::new(&config, &project, 0, ProfileKind::Dev).unwrap();
+        ctx.locked = true;
+        assert_eq!(ctx.lock_npm_tool("typescript", "^5", || unreachable!()).unwrap(), "5.9.3");
+        let err = format!("{:#}", ctx.lock_npm_tool("typescript", "latest", || unreachable!()).unwrap_err());
+        assert!(err.contains("kargo.lock needs to be updated for `npm-tools/typescript`"), "{err}");
+        // `kargo update` forgets it.
+        ctx.reset_lockfile(None);
+        assert!(ctx.lockfile().npm_tools.is_empty());
     }
 
     #[test]

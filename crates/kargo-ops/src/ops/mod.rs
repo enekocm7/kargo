@@ -471,6 +471,9 @@ pub(crate) fn lock_tools(ctx: &BuildContext, target: TargetKind) -> Result<()> {
         ctx.kotlin_compiler()?;
     }
     ctx.plugin_jars(&setup.contributions.plugins)?;
+    if matches!(target, TargetKind::Wasm | TargetKind::Js) {
+        crate::js_sources::lock_typescript(ctx, target)?;
+    }
     if target == TargetKind::Jvm {
         test::console_launcher(ctx)?;
         if !build::jvm_ksp_path(ctx, &setup, true)?.is_empty() {

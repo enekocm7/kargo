@@ -194,6 +194,24 @@ Kargo pins one version of each and checks the download's SHA-256: the one JetBra
 
 You don't install the Kotlin compiler. Kargo downloads the version in `[kotlin] version` from Maven Central into its cache. To try a new Kotlin release, change the version and rebuild.
 
+## The TypeScript compiler
+
+The `.ts` modules of `js/` on the [Wasm](../wasm/#your-own-javascript-and-typescript) and [JS](../js/) targets are compiled with the `typescript` npm package, which Kargo installs with npm, pnpm or bun into `target/typescript/` and runs on Node.js (or bun). Without configuration it is the newest release, whatever the npm registry's `latest` tag points at, so a new TypeScript major version arrives without a Kargo update. Kargo looks the version up once and pins it in `kargo.lock`, so a project keeps one compiler until you run `kargo update`:
+
+```console
+$ kargo build
+   Compiling 3 TypeScript modules (tsc 7.0.2)
+```
+
+To stay on a compiler on purpose, pin it in `kargo.toml` with an exact version, a range or a dist-tag:
+
+```toml title="kargo.toml"
+[toolchain]
+typescript = "5.9.3"   # or "^6", "~5.9", "next"; default "latest"
+```
+
+An exact version needs no registry lookup, which helps offline and on a mirror that lacks the registry's metadata. Kargo compiles with the same `tsc` command line and `tsconfig.json` for every version. See [`kargo.lock`](../../reference/lockfile/#build-tools) for what is recorded.
+
 ## Parallel installs and retries
 
 Toolchains are shared by every project on the machine, so two Kargo processes can need the same one at once. Kargo locks a toolchain while it installs or removes it: the second process prints a `Blocking` status and waits, then uses what the first one installed. Nothing is downloaded or deleted twice.

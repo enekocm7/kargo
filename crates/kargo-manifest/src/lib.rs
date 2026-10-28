@@ -1189,6 +1189,9 @@ pub struct ToolchainSettings {
     /// The Kargo versions the project builds with (`kargo = ">=0.3"`). Already checked against the running Kargo when the
     /// manifest was read.
     pub kargo: Option<semver::VersionReq>,
+    /// The npm version, range or tag of the TypeScript compiler that compiles the project's `.ts` modules. `None` is
+    /// the newest release (`latest`), which `kargo.lock` pins.
+    pub typescript: Option<String>,
 }
 
 /// The version of the running Kargo.

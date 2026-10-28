@@ -76,6 +76,7 @@ struct RawToolchain {
     graalvm: Option<Value>,
     android_sdk: Option<Value>,
     kargo: Option<String>,
+    typescript: Option<String>,
 }
 
 /// `[build]` (and `[workspace.build]`).
@@ -2447,6 +2448,16 @@ impl RawManifest {
                 Some(req)
             }
         };
+        let typescript = match self.toolchain.typescript.as_deref().map(str::trim) {
+            None => None,
+            Some("") => bail!("[toolchain] `typescript` is empty; use a version like \"5.9.3\", a range like \"^6\" or \"latest\""),
+            Some(spec) if spec.contains(char::is_whitespace) => {
+                bail!(
+                    "invalid [toolchain] `typescript` `{spec}`: use a version like \"5.9.3\", a range like \"^6\" or a tag like \"latest\""
+                )
+            }
+            Some(spec) => Some(spec.to_owned()),
+        };
         let packaging = PackagingSettings {
             jlink: self.package.jlink.validate()?,
             optimize: self.package.optimize.validate()?,
@@ -2489,7 +2500,7 @@ impl RawManifest {
 
         Ok(Manifest {
             publish,
-            toolchain: ToolchainSettings { jdk, graalvm, android_sdk, kargo },
+            toolchain: ToolchainSettings { jdk, graalvm, android_sdk, kargo, typescript },
             packaging,
             doc,
             fmt,
