@@ -3535,9 +3535,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             // At the root of a workspace, the workspace; elsewhere, the package.
             let package = task_package(&project);
             match (format, package) {
-                (FormatArg::Text, Some(index)) => print_info(config, &project, project.package(index)),
+                (FormatArg::Text, Some(index)) => print_info(config, &project, project.package(index))?,
                 (FormatArg::Text, None) => print_workspace_info(&project),
-                (FormatArg::Json, Some(index)) => println!("{}", serde_json::to_string_pretty(&info_json(config, project.package(index)))?),
+                (FormatArg::Json, Some(index)) => {
+                    println!("{}", serde_json::to_string_pretty(&info_json(config, project.package(index))?)?)
+                }
                 (FormatArg::Json, None) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(&project))?),
             }
             Ok(0)
@@ -4019,7 +4021,18 @@ fn print_workspace_info(project: &Project) {
     }
 }
 
-fn print_info(config: &Config, project: &Project, ws: &Workspace) {
+/// The versions of the frameworks of `ws`, with the modules their BOMs manage as `kargo.lock` resolved them for the
+/// JVM runtime. Before the first resolution there is no such entry, and those modules are left out.
+fn locked_framework_versions(ws: &Workspace) -> Result<Vec<kargo_ops::builtins::FrameworkVersion>> {
+    let lock = kargo_ops::lockfile::Lockfile::load(&ws.lockfile_path())?;
+    let runtime = lock.resolutions.get(&ws.lock_key("jvm/runtime"));
+    Ok(kargo_ops::builtins::framework_versions(ws.manifest(), |module| {
+        let package = runtime?.packages.iter().find(|p| p.module == module.to_string())?;
+        Some(package.version.clone())
+    }))
+}
+
+fn print_info(config: &Config, project: &Project, ws: &Workspace) -> Result<()> {
     let m = ws.manifest();
     println!("package:      {} v{}", m.package.name, m.package.version);
     if project.is_workspace() {
@@ -4031,9 +4044,9 @@ fn print_info(config: &Config, project: &Project, ws: &Workspace) {
     println!("kotlin:       {}", m.kotlin.version);
     let targets: Vec<&str> = m.targets.enabled().iter().map(|t| t.as_str()).collect();
     println!("targets:      {}", targets.join(", "));
-    let enabled = kargo_ops::builtins::enabled_frameworks(m);
-    if !enabled.is_empty() {
-        println!("frameworks:   {}", enabled.join(", "));
+    for (i, framework) in locked_framework_versions(ws)?.iter().enumerate() {
+        let label = if i == 0 { "frameworks:" } else { "" };
+        println!("{label:<14}{}", framework.describe());
     }
     println!("dependencies: {} (+{} dev)", m.dependencies.len(), m.dev_dependencies.len());
     if !ws.path_dependencies().is_empty() {
@@ -4058,17 +4071,19 @@ fn print_info(config: &Config, project: &Project, ws: &Workspace) {
     }
     println!("root:         {}", ws.root().display());
     println!("target dir:   {}", ws.target_dir().display());
+    Ok(())
 }
 
 /// `kargo info --format json`.
-fn info_json(config: &Config, ws: &Workspace) -> serde_json::Value {
+fn info_json(config: &Config, ws: &Workspace) -> Result<serde_json::Value> {
     let m = ws.manifest();
+    let frameworks = locked_framework_versions(ws)?;
     let dependencies = |deps: &[kargo_manifest::Dependency]| -> Vec<serde_json::Value> {
         deps.iter()
             .map(|d| serde_json::json!({ "name": d.name, "module": d.module.to_string(), "version": d.version, "scope": d.scope.as_str() }))
             .collect()
     };
-    serde_json::json!({
+    Ok(serde_json::json!({
         "package": {
             "name": m.package.name,
             "version": m.package.version,
@@ -4079,6 +4094,17 @@ fn info_json(config: &Config, ws: &Workspace) -> serde_json::Value {
         "jdk": m.toolchain.jdk.to_string(),
         "targets": m.targets.enabled().iter().map(|t| t.as_str()).collect::<Vec<_>>(),
         "frameworks": kargo_ops::builtins::enabled_frameworks(m),
+        "framework-versions": frameworks
+            .iter()
+            .map(|f| {
+                let managed: Vec<serde_json::Value> = f
+                    .managed
+                    .iter()
+                    .map(|v| serde_json::json!({ "name": v.name, "module": v.module.to_string(), "version": v.version }))
+                    .collect();
+                serde_json::json!({ "name": f.name, "version": f.version, "managed": managed })
+            })
+            .collect::<Vec<_>>(),
         "dependencies": dependencies(&m.dependencies),
         "dev-dependencies": dependencies(&m.dev_dependencies),
         "repositories": m
@@ -4095,7 +4121,7 @@ fn info_json(config: &Config, ws: &Workspace) -> serde_json::Value {
         "root": ws.root().display().to_string(),
         "manifest": ws.manifest_path().display().to_string(),
         "target-dir": ws.target_dir().display().to_string(),
-    })
+    }))
 }
 
 /// The candidate closest to `name` when it is near enough to be a typo (as Cargo suggests commands):

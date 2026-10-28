@@ -294,6 +294,9 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         results.native.extend(r.native);
         results.android = results.android.or(r.android);
     }
+    if let Some(jvm) = &results.jvm {
+        announce_frameworks(ctx, |module| jvm.runtime_modules.iter().find(|(m, _)| m == module).map(|(_, version)| version.clone()));
+    }
     if opts.xcframework {
         create_xcframework(ctx, &results.native)?;
     }
@@ -333,6 +336,15 @@ pub fn finished(ctx: &BuildContext, start: Instant) {
     };
     ctx.shell()
         .status("Finished", format!("`{}` profile [{detail}] target(s) in {:.2}s", ctx.profile.name(), start.elapsed().as_secs_f64()));
+}
+
+/// Prints each enabled framework's version as a `Resolved` status line, with the versions of the modules its BOM
+/// manages that `resolved` gives. `kargo fetch` and `kargo build` print them, so a migration-sensitive choice (Spring
+/// Boot 3 or 4, Jackson 2 or 3) shows without opening `kargo.lock`.
+pub fn announce_frameworks(ctx: &BuildContext, resolved: impl Fn(&ModuleId) -> Option<String>) {
+    for framework in crate::builtins::framework_versions(ctx.ws.manifest(), resolved) {
+        ctx.shell().status("Resolved", framework.describe());
+    }
 }
 
 pub fn compiling(ctx: &BuildContext, target: TargetKind, what: &str) {

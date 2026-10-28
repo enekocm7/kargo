@@ -388,8 +388,9 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                     || join(|| jvm_classpaths(ctx, &setup), || resolution_for(ctx, target, Configuration::Test)),
                 );
                 toolchain?;
-                main?;
+                let classpaths = main?;
                 test?;
+                build::announce_frameworks(ctx, |module| classpaths.runtime.node(module).map(|n| n.version.clone()));
                 build::jvm_processor_path(ctx, &setup, false)?;
                 build::jvm_processor_path(ctx, &setup, true)?;
                 build::jvm_ksp_path(ctx, &setup, false)?;
