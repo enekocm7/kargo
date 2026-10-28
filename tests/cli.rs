@@ -1124,6 +1124,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "self",
         "completions",
         "init-ci",
+        "inspect",
     ];
     let p = Project::new();
     let stdout = |args: &[&str]| {
@@ -3952,6 +3953,73 @@ fn lsp_code_actions_edit_kargo_toml_like_the_cli() {
     cli.kargo().args(["target", "add", "native"]).assert().success();
     assert_eq!(editor.read("kargo.toml"), cli.read("kargo.toml"));
     assert!(editor.path().join("src-native").is_dir() && cli.path().join("src-native").is_dir());
+}
+
+#[test]
+fn inspect_lists_the_classes_of_a_resolved_jar() {
+    // A class file with an empty constant pool: all the listing reads is its access flags.
+    let class = |flags: u16| -> Vec<u8> {
+        let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52, 0, 1];
+        bytes.extend(flags.to_be_bytes());
+        bytes
+    };
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let jar = repo.dir.path().join("g/lib/1.0/lib-1.0.jar");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+    for (name, flags) in [
+        ("com/acme/Outer.class", 0x21),
+        ("com/acme/Outer$Inner.class", 0x21),
+        ("com/acme/Outer$1.class", 0x20),
+        ("com/acme/Hidden.class", 0x20),
+        ("com/acme/package-info.class", 0x1600),
+        ("META-INF/versions/9/com/acme/Outer.class", 0x21),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, &class(flags)).unwrap();
+    }
+    zip.start_file("com/acme/data.txt", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.finish().unwrap();
+
+    let p = Project::new();
+    let extra = format!(
+        "[kotlin]
+version = \"2.4.21\"
+[dependencies]
+\"g:lib\" = \"1.0\"
+[repositories]
+local = \"{}\"
+",
+        repo.url()
+    );
+    p.file("kargo.toml", &manifest("app", &extra)).file(
+        "src/Main.kt",
+        "fun main() {}
+",
+    );
+
+    let listed = |args: &[&str]| -> (Vec<String>, String) {
+        let out = p.kargo().args(["--offline", "inspect"]).args(args).assert().success().get_output().clone();
+        (String::from_utf8(out.stdout).unwrap().lines().map(str::to_owned).collect(), String::from_utf8(out.stderr).unwrap())
+    };
+    let (classes, stderr) = listed(&["g:lib"]);
+    assert_eq!(classes, ["com.acme.Outer", "com.acme.Outer.Inner"]);
+    assert!(stderr.contains("g:lib:1.0 (jvm, runtime)") && stderr.contains("lib-1.0.jar"), "{stderr}");
+    // The version asked for can be given, and the classes that are not public with the visibility.
+    assert_eq!(listed(&["g:lib:1.0", "--visibility", "package"]).0, ["com.acme.Hidden", "com.acme.Outer", "com.acme.Outer.Inner"]);
+
+    p.kargo()
+        .args(["--offline", "inspect", "g:other"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`g:other` is not in the runtime dependencies"));
+    p.kargo()
+        .args(["--offline", "inspect", "g:lib", "Missing"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no class `Missing` in the jar"));
 }
 
 #[test]

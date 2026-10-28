@@ -28,6 +28,10 @@ impl Jdk {
         self.home.join("bin").join(exe("javac"))
     }
 
+    pub fn javap(&self) -> PathBuf {
+        self.home.join("bin").join(exe("javap"))
+    }
+
     pub fn has_javac(&self) -> bool {
         self.javac().is_file()
     }
