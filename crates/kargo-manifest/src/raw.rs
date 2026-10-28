@@ -334,6 +334,8 @@ struct RawWasm {
     package_manager: Option<String>,
     #[serde(default)]
     npm_dependencies: BTreeMap<String, String>,
+    #[serde(default)]
+    dev_npm_dependencies: BTreeMap<String, String>,
     wasm_opt: Option<Value>,
     opt_level: Option<String>,
     #[serde(default)]
@@ -367,6 +369,8 @@ struct RawJs {
     package_manager: Option<String>,
     #[serde(default)]
     npm_dependencies: BTreeMap<String, String>,
+    #[serde(default)]
+    dev_npm_dependencies: BTreeMap<String, String>,
     js_sources: Option<Vec<PathBuf>>,
     port: Option<u16>,
     #[serde(default)]
@@ -2011,9 +2015,11 @@ impl RawManifest {
                                 }
                                 validate_npm_name("wasm", name)?;
                             }
-                            for (name, version) in &w.npm_dependencies {
-                                if name.trim().is_empty() || version.trim().is_empty() {
-                                    bail!("[target.wasm.npm-dependencies] needs a package name and a version for every entry");
+                            for (table, deps) in [("npm-dependencies", &w.npm_dependencies), ("dev-npm-dependencies", &w.dev_npm_dependencies)] {
+                                for (name, version) in deps {
+                                    if name.trim().is_empty() || version.trim().is_empty() {
+                                        bail!("[target.wasm.{table}] needs a package name and a version for every entry");
+                                    }
                                 }
                             }
                             let wasm_opt = match w.wasm_opt {
@@ -2055,6 +2061,7 @@ impl RawManifest {
                                 npm_name: w.npm_name,
                                 package_manager,
                                 npm_dependencies: w.npm_dependencies,
+                                dev_npm_dependencies: w.dev_npm_dependencies,
                                 wasm_opt,
                                 opt_level,
                                 wasm_opt_flags: w.wasm_opt_flags,
@@ -2108,9 +2115,11 @@ impl RawManifest {
                                 }
                                 validate_npm_name("js", name)?;
                             }
-                            for (name, version) in &j.npm_dependencies {
-                                if name.trim().is_empty() || version.trim().is_empty() {
-                                    bail!("[target.js.npm-dependencies] needs a package name and a version for every entry");
+                            for (table, deps) in [("npm-dependencies", &j.npm_dependencies), ("dev-npm-dependencies", &j.dev_npm_dependencies)] {
+                                for (name, version) in deps {
+                                    if name.trim().is_empty() || version.trim().is_empty() {
+                                        bail!("[target.js.{table}] needs a package name and a version for every entry");
+                                    }
                                 }
                             }
                             if j.port.is_some() && environment != JsEnvironment::Browser {
@@ -2124,6 +2133,7 @@ impl RawManifest {
                                 npm_name: j.npm_name,
                                 package_manager: j.package_manager.as_deref().map(str::parse).transpose()?,
                                 npm_dependencies: j.npm_dependencies,
+                                dev_npm_dependencies: j.dev_npm_dependencies,
                                 js_sources: js_sources("js", j.js_sources)?,
                                 port: j.port,
                                 dependencies: deps.parse(&j.dependencies, "target.js.dependencies", false, Some(TargetKind::Js))?,

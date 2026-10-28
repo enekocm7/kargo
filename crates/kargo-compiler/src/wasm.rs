@@ -338,26 +338,31 @@ impl WasmCompilation<'_> {
 pub fn npm_dependencies(libraries: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for klib in libraries {
-        let Some(json) = read_package_json(klib).with_context(|| format!("failed to read {}", klib.display()))? else {
-            continue;
-        };
-        let Ok(package) = serde_json::from_str::<serde_json::Value>(&json) else {
-            continue;
-        };
-        let Some(deps) = package.get("dependencies").and_then(|d| d.as_object()) else {
-            continue;
-        };
-        for (name, version) in deps {
-            let Some(version) = version.as_str() else { continue };
-            match out.get(name) {
-                Some(existing) if npm_version(existing) >= npm_version(version) => {}
+        for (name, version) in klib_npm_dependencies(klib)? {
+            match out.get(&name) {
+                Some(existing) if npm_version(existing) >= npm_version(&version) => {}
                 _ => {
-                    out.insert(name.clone(), version.to_owned());
+                    out.insert(name, version);
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// The npm packages one klib needs at runtime, as `name -> version`: what its `package.json` lists. Empty for a
+/// klib without one and for a file that is not a klib.
+pub fn klib_npm_dependencies(klib: &Path) -> Result<BTreeMap<String, String>> {
+    let Some(json) = read_package_json(klib).with_context(|| format!("failed to read {}", klib.display()))? else {
+        return Ok(BTreeMap::new());
+    };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(deps) = package.get("dependencies").and_then(|d| d.as_object()) else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(deps.iter().filter_map(|(name, version)| Some((name.clone(), version.as_str()?.to_owned()))).collect())
 }
 
 /// Compares npm versions and simple ranges (`3.2.0`, `^3.2.0`, `~3.2`) by their lower bound.

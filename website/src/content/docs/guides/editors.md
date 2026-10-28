@@ -1067,6 +1067,7 @@ The schema checks the shape of `kargo.toml`. Some rules need Kargo itself, such 
 
 - **Coordinates**: start typing a key such as `"io.ktor:ktor-server-c` and Kargo offers the matching artifacts from the [Maven Central search](https://central.sonatype.com/search), with the artifact names that start with what you typed first. Choosing one writes `"io.ktor:ktor-server-core" = `, ready for a version. Without a `:`, the words you typed are searched. The same works in a `coords = "..."` value.
 - **Versions**: in a dependency's version (`"g:a" = "|"`, `version = "|"`, or the `version` next to `coords`), Kargo offers every version the project's [`[repositories]`](../../reference/manifest/#repositories) publish, newest stable version first and pre-releases after them.
+- **npm packages**: in `[target.wasm.npm-dependencies]`, `[target.js.npm-dependencies]` and their `dev-npm-dependencies`, a package name you type (`"left-pa`) is completed from the registry's search (`/-/v1/search`; a registry without it offers none), and a package's version (`left-pad = "|"`) from the versions the registry lists, as caret ranges (`^1.3.0`), newest release first. The registry is the one `kargo add --npm` uses. Packages with a newer version get the same update hints as Maven dependencies, as `kargo outdated` reports them.
 - **Update hints**: a dependency with a newer version gets an information diagnostic on its key, such as ``"`io.ktor:ktor-server-core` 3.2.3 is available (latest: 4.0.0)"``. The rules are those of [`kargo outdated`](../../reference/commands/#kargo-outdated): the newest compatible version (same major, or same minor for `0.x`), and the latest one when it differs. Ranges and BOM-managed versions get no hint. Run `kargo upgrade` to apply them.
 
 ```toml title="kargo.toml"
@@ -1092,6 +1093,7 @@ With `kargo --offline lsp`, coordinates aren't searched, and versions and hints 
 | A missing required key | Add it under the table's header: `version = "0.1.0"` in `[package]`, a `name` in `[[bin]]` (taken from its `path`), or a whole `[package]` table |
 | An [update hint](#dependency-completion-and-update-hints) | Upgrade the dependency to the newest compatible version, as `kargo upgrade` does, or to the latest one, as `kargo upgrade --incompatible` does |
 | A line holding only `"group:artifact"` in a dependency table | Add it at its latest version, as `kargo add group:artifact` does |
+| A line holding only a package name in an npm table (`[target.wasm.npm-dependencies]`) | Add it at its latest version, as `kargo add --npm <name>` does |
 
 ```toml title="kargo.toml"
 [target.wasm]

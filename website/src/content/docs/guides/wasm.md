@@ -191,6 +191,19 @@ To use an npm package from your own code, list it in `[target.wasm.npm-dependenc
 express = "5.1.0"
 ```
 
+You don't have to write the table by hand. [`kargo add --npm`](../../reference/commands/#npm-packages-with-kargo-add---npm) looks the latest version up in the npm registry and edits `kargo.toml` in place, and `kargo remove --npm`, `kargo outdated` and `kargo upgrade` keep the packages as they do Maven dependencies:
+
+```sh
+kargo add --npm express                  # express = "^5.1.0"
+kargo add --npm chart.js --types         # also @types/chart.js, for a package without declarations
+kargo add --npm mocha --dev              # [target.wasm.dev-npm-dependencies]: only `kargo test` installs it
+kargo outdated                           # Maven dependencies and npm packages together
+kargo upgrade express
+kargo remove --npm express
+```
+
+`[target.wasm.dev-npm-dependencies]` lists packages only your tests need. `kargo test` installs them next to the test module, and `kargo tree -c test` and `kargo metadata` include them; no Kotlin declarations are generated for them.
+
 Kargo then generates Kotlin declarations for the package from its TypeScript declarations, so you call it like a Kotlin library, and your editor completes and navigates it:
 
 ```kotlin title="src/Main.kt"

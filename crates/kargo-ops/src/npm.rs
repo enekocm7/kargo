@@ -35,13 +35,24 @@ const LOCKFILES: [(&str, PackageManager); 4] = [
     ("bun.lockb", PackageManager::Bun),
 ];
 
-/// The npm settings of `target` (Wasm or JS): its own `npm-dependencies` and its `package-manager`.
+/// The npm settings of `target` (Wasm or JS): its own `npm-dependencies`, its test-only
+/// `dev-npm-dependencies` and its `package-manager`.
 fn settings(manifest: &Manifest, target: TargetKind) -> (Option<&BTreeMap<String, String>>, Option<PackageManager>) {
     match target {
         TargetKind::Wasm => manifest.targets.wasm.as_ref().map_or((None, None), |w| (Some(&w.npm_dependencies), w.package_manager)),
         TargetKind::Js => manifest.targets.js.as_ref().map_or((None, None), |j| (Some(&j.npm_dependencies), j.package_manager)),
         _ => (None, None),
     }
+}
+
+/// The packages only the tests of `target` install (`dev-npm-dependencies`).
+pub fn dev_dependencies(manifest: &Manifest, target: TargetKind) -> BTreeMap<String, String> {
+    match target {
+        TargetKind::Wasm => manifest.targets.wasm.as_ref().map(|w| w.dev_npm_dependencies.clone()),
+        TargetKind::Js => manifest.targets.js.as_ref().map(|j| j.dev_npm_dependencies.clone()),
+        _ => None,
+    }
+    .unwrap_or_default()
 }
 
 /// The npm packages the project needs on `target`, as `name -> version`: those its
@@ -54,6 +65,78 @@ pub fn dependencies(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf
     Ok(deps)
 }
 
+/// [`dependencies`] and the packages only the tests install (`dev-npm-dependencies`), which win on a conflict.
+pub fn test_dependencies(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+    let mut deps = dependencies(ctx, target, libraries)?;
+    deps.extend(dev_dependencies(ctx.ws.manifest(), target));
+    Ok(deps)
+}
+
+/// A library that asks for an npm package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryRequest {
+    /// `group:artifact` of the library.
+    pub module: String,
+    /// The library's resolved version.
+    pub version: String,
+    /// The version range of the package the library's klib asks for.
+    pub spec: String,
+}
+
+/// Where an npm package of a target comes from: the libraries that ask for it and the version `kargo.toml`
+/// declares for it, which wins over them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub name: String,
+    /// What gets installed: the declared version, else the highest one the libraries ask for.
+    pub version: String,
+    /// The version in `[target.<target>.npm-dependencies]` (or the test-only table, then `dev` is set).
+    pub declared: Option<String>,
+    pub dev: bool,
+    pub requested_by: Vec<LibraryRequest>,
+}
+
+/// The npm packages `resolution` (the libraries of `target`) and the manifest need, with where each comes
+/// from; `tests` adds the test-only packages. Sorted by name.
+pub fn origins(manifest: &Manifest, target: TargetKind, resolution: &kargo_maven::Resolution, tests: bool) -> Result<Vec<Origin>> {
+    let mut requests: BTreeMap<String, Vec<LibraryRequest>> = BTreeMap::new();
+    let mut files = Vec::new();
+    for node in &resolution.nodes {
+        for file in &node.files {
+            for (name, spec) in kargo_compiler::wasm::klib_npm_dependencies(file)? {
+                requests.entry(name).or_default().push(LibraryRequest {
+                    module: node.module.to_string(),
+                    version: node.version.clone(),
+                    spec,
+                });
+            }
+            files.push(file.clone());
+        }
+    }
+    let mut versions = npm_dependencies(&files)?;
+    let mut declared: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    if let (Some(own), _) = settings(manifest, target) {
+        declared.extend(own.iter().map(|(n, v)| (n.clone(), (v.clone(), false))));
+    }
+    if tests {
+        declared.extend(dev_dependencies(manifest, target).into_iter().map(|(n, v)| (n, (v, true))));
+    }
+    for (name, (version, _)) in &declared {
+        versions.insert(name.clone(), version.clone());
+    }
+    Ok(versions
+        .into_iter()
+        .map(|(name, version)| {
+            let (declared, dev) = match declared.get(&name) {
+                Some((v, dev)) => (Some(v.clone()), *dev),
+                None => (None, false),
+            };
+            let requested_by = requests.remove(&name).unwrap_or_default();
+            Origin { name, version, declared, dev, requested_by }
+        })
+        .collect())
+}
+
 /// Installs the npm packages that `libraries` need on `target` into `dir/node_modules` and
 /// returns that directory, or `None` when no package is needed.
 ///
@@ -62,6 +145,16 @@ pub fn dependencies(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf
 /// holds exactly these packages installed by the same package manager.
 pub fn install(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], dir: &Path) -> Result<Option<PathBuf>> {
     let deps = dependencies(ctx, target, libraries)?;
+    install_deps(ctx, target, deps, dir)
+}
+
+/// [`install`] for the tests, which also get the project's `dev-npm-dependencies`.
+pub fn install_for_tests(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], dir: &Path) -> Result<Option<PathBuf>> {
+    let deps = test_dependencies(ctx, target, libraries)?;
+    install_deps(ctx, target, deps, dir)
+}
+
+fn install_deps(ctx: &BuildContext, target: TargetKind, deps: BTreeMap<String, String>, dir: &Path) -> Result<Option<PathBuf>> {
     if deps.is_empty() {
         return Ok(None);
     }
@@ -72,7 +165,15 @@ pub fn install(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], di
 /// `kargo fetch`: installs the packages [`install`] would, so an offline build finds them. Without
 /// npm, pnpm or bun the build could not install them either, so this warns instead of failing.
 pub fn fetch(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], dir: &Path) -> Result<()> {
-    let deps = dependencies(ctx, target, libraries)?;
+    fetch_deps(ctx, target, dependencies(ctx, target, libraries)?, dir)
+}
+
+/// [`fetch`] for the tests (see [`install_for_tests`]).
+pub fn fetch_for_tests(ctx: &BuildContext, target: TargetKind, libraries: &[PathBuf], dir: &Path) -> Result<()> {
+    fetch_deps(ctx, target, test_dependencies(ctx, target, libraries)?, dir)
+}
+
+fn fetch_deps(ctx: &BuildContext, target: TargetKind, deps: BTreeMap<String, String>, dir: &Path) -> Result<()> {
     if deps.is_empty() {
         return Ok(());
     }
@@ -301,6 +402,48 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&package_json(&deps)).unwrap();
         assert_eq!(json["private"], true);
         assert_eq!(json["dependencies"]["@js-joda/core"], "3.2.0");
+    }
+
+    #[test]
+    fn origins_tell_the_libraries_from_the_manifest() {
+        use kargo_maven::Resolution;
+        use kargo_maven::resolver::ResolvedNode;
+        let dir = tempfile::tempdir().unwrap();
+        let klib = |name: &str, json: &str| {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("package.json"), json).unwrap();
+            path
+        };
+        let node = |module: &str, version: &str, files: Vec<PathBuf>| ResolvedNode {
+            module: module.parse().unwrap(),
+            version: version.into(),
+            files,
+            dependencies: vec![],
+        };
+        let resolution = Resolution {
+            roots: vec![],
+            nodes: vec![
+                node("org.acme:datetime", "0.7.1", vec![klib("a", r#"{"dependencies":{"@js-joda/core":"3.2.0","left-pad":"1.0.0"}}"#)]),
+                node("org.acme:other", "1.0", vec![klib("b", r#"{"dependencies":{"@js-joda/core":"3.1.0"}}"#)]),
+            ],
+        };
+        let manifest = Manifest::parse(
+            "[package]\nname = \"web\"\nversion = \"0.1.0\"\n\n[target.wasm]\n\n[target.wasm.npm-dependencies]\nleft-pad = \"^1.3.0\"\n\n[target.wasm.dev-npm-dependencies]\nmocha = \"^10.0.0\"\n",
+        )
+        .unwrap();
+        let main = origins(&manifest, TargetKind::Wasm, &resolution, false).unwrap();
+        let summary: Vec<(&str, &str, Option<&str>, usize)> =
+            main.iter().map(|o| (o.name.as_str(), o.version.as_str(), o.declared.as_deref(), o.requested_by.len())).collect();
+        assert_eq!(summary, [("@js-joda/core", "3.2.0", None, 2), ("left-pad", "^1.3.0", Some("^1.3.0"), 1)]);
+        assert_eq!(
+            main[0].requested_by[1],
+            LibraryRequest { module: "org.acme:other".into(), version: "1.0".into(), spec: "3.1.0".into() }
+        );
+        let test = origins(&manifest, TargetKind::Wasm, &resolution, true).unwrap();
+        let mocha = test.iter().find(|o| o.name == "mocha").unwrap();
+        assert!(mocha.dev && mocha.declared.as_deref() == Some("^10.0.0") && mocha.requested_by.is_empty());
+        assert!(origins(&manifest, TargetKind::Js, &resolution, false).unwrap().iter().all(|o| o.declared.is_none()));
     }
 
     #[test]

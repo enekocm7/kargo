@@ -431,6 +431,9 @@ port = 5173               # the port `kargo run` serves a browser app on; defaul
 
 [target.wasm.npm-dependencies]
 "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for
+
+[target.wasm.dev-npm-dependencies]
+mocha = "^10.0.0"         # npm packages only `kargo test` installs
 ```
 
 | Key | Default | Meaning |
@@ -451,7 +454,8 @@ port = 5173               # the port `kargo run` serves a browser app on; defaul
 | `size-report` | `false` | Ask Binaryen for module and per-function metrics. The `kargo build --size-report` flag enables this for one invocation. |
 | `wasm-enable-array-range-checks` | profile default | Override Kotlin/Wasm array range checks; Kargo disables them in optimized builds by default. |
 | `wasm-debugger-custom-formatters` | `false` | Enable Kotlin/Wasm custom formatters in browser debuggers. |
-| `npm-dependencies` | none | A table of npm packages (`name = "version"`) to install in addition to those the klibs ask for. Your version wins on a conflict. Each gets [Kotlin declarations](../../guides/wasm/#kotlin-declarations-for-npm-packages) generated from its TypeScript ones |
+| `npm-dependencies` | none | A table of npm packages (`name = "version"`, a semver range such as `^1.3.0`) to install in addition to those the klibs ask for. Your version wins on a conflict. Each gets [Kotlin declarations](../../guides/wasm/#kotlin-declarations-for-npm-packages) generated from its TypeScript ones. [`kargo add --npm`](../commands/#npm-packages-with-kargo-add---npm) edits it |
+| `dev-npm-dependencies` | none | npm packages only the tests need. `kargo test` installs them (and the `npm-dependencies`) next to the test module; no Kotlin declarations are generated for them. `kargo add --npm --dev` edits it |
 | `web-resources` | none | Files and directories of a library, relative to the package, that every browser app depending on it gets next to its module under their own names (a directory keeps its name). Published as a `web-resources` zip. Needs `kind = "library"` and `environment = "js"` or `"browser"`. See [Web resources from libraries](../../guides/wasm/#web-resources-from-libraries) |
 | `web-init` | none | A script of a library, relative to the package, that the page Kargo generates for a dependent browser app imports before the app module, after the init scripts of the libraries it depends on. It is shipped like `web-resources`. Same requirements as `web-resources` |
 | `js-sources` | `["js"]` | Directories, relative to the package, of your own JavaScript and TypeScript modules. They land in `js/` next to the module (TypeScript compiled with tsc) and get Kotlin declarations in the package `js.<path>`. A directory that doesn't exist is skipped; `[]` turns the convention off. Not for `environment = "wasi"`. See [Your own JavaScript and TypeScript](../../guides/wasm/#your-own-javascript-and-typescript) |
@@ -474,6 +478,9 @@ port = 5173               # the port `kargo run` serves a browser app on; defaul
 
 [target.js.npm-dependencies]
 "left-pad" = "1.3.0"      # npm packages besides those your Kotlin/JS libraries ask for
+
+[target.js.dev-npm-dependencies]
+mocha = "^10.0.0"         # npm packages only `kargo test` installs
 ```
 
 | Key | Default | Meaning |
@@ -484,7 +491,8 @@ port = 5173               # the port `kargo run` serves a browser app on; defaul
 | `module-name` | the package name | Name of the compiled module's files. Letters, digits, `-`, `_` and `.` |
 | `npm-name` | the lowercase package name | `name` in the `package.json` of a library. May be scoped (`@scope/name`); only valid with `kind = "library"` |
 | `package-manager` | first of `npm`, `pnpm`, `bun` on `PATH` | The tool that installs the [npm packages](../../guides/js/#npm-packages) the JS target needs |
-| `npm-dependencies` | none | A table of npm packages (`name = "version"`) to install in addition to those the klibs ask for. Your version wins on a conflict. Each gets [Kotlin declarations](../../guides/js/#npm-packages) generated from its TypeScript ones (Kotlin 2.2.20 or later) |
+| `npm-dependencies` | none | A table of npm packages (`name = "version"`, a semver range such as `^1.3.0`) to install in addition to those the klibs ask for. Your version wins on a conflict. Each gets [Kotlin declarations](../../guides/js/#npm-packages) generated from its TypeScript ones (Kotlin 2.2.20 or later). [`kargo add --npm`](../commands/#npm-packages-with-kargo-add---npm) edits it |
+| `dev-npm-dependencies` | none | npm packages only the tests need, installed by `kargo test` next to the test module. No Kotlin declarations are generated for them. `kargo add --npm --dev` edits it |
 | `js-sources` | `["js"]` | Directories of your own JavaScript and TypeScript modules, as for Wasm. See [Your own JavaScript and TypeScript](../../guides/js/#your-own-javascript-and-typescript) |
 | `port` | `8080` | The port `kargo run` serves a browser app on, as for Wasm. Needs `environment = "browser"` |
 

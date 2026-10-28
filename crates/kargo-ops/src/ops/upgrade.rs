@@ -1,20 +1,44 @@
 //! `kargo outdated` and `kargo upgrade`: compare the versions declared in `kargo.toml` with the
-//! versions published in the repositories, and bump them in place.
+//! versions published in the repositories (Maven) and in the npm registry (`[target.wasm.npm-dependencies]`
+//! and the same of `js`), and bump them in place.
 
 use anyhow::{Context, Result, bail};
 
+use crate::npm_registry::Registry;
+use crate::npm_semver::{Pinned, newer};
 use crate::workspace::Workspace;
-use kargo_manifest::edit::{DependencySection, ManifestEditor};
+use kargo_manifest::edit::{DependencySection, ManifestEditor, npm_table_key};
 use kargo_manifest::{Dependency, Manifest, TargetKind};
 use kargo_maven::{MavenClient, Version, VersionReq, select_latest};
 use kargo_util::config::Config;
 
+/// The table a dependency is declared in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    /// A Maven dependency table.
+    Maven(DependencySection),
+    /// The npm packages of a target; `dev` is the table only the tests install.
+    Npm { target: TargetKind, dev: bool },
+}
+
+impl Section {
+    /// The table's name in `kargo.toml`, such as `dev-dependencies` or `target.wasm.npm-dependencies`.
+    pub fn display(self) -> String {
+        match self {
+            Section::Maven(section) => section.display(),
+            Section::Npm { target, dev } => format!("target.{target}.{}", npm_table_key(dev)),
+        }
+    }
+}
+
 /// A declared dependency and the newer versions available for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outdated {
+    /// The manifest key; for an npm package its name.
     pub name: String,
+    /// `group:artifact`; for an npm package its name.
     pub module: String,
-    pub section: DependencySection,
+    pub section: Section,
     pub current: String,
     /// The newest compatible version (same major, or same minor for `0.x`), if newer than `current`.
     pub compatible: Option<String>,
@@ -45,20 +69,61 @@ pub(crate) fn declared(manifest: &Manifest) -> Vec<(DependencySection, &Dependen
     out
 }
 
-/// The declared dependencies selected by `names`, failing on a name that matches nothing.
-fn selected<'m>(manifest: &'m Manifest, names: &[String]) -> Result<Vec<(DependencySection, &'m Dependency)>> {
+/// Every npm package declared in the manifest: its target, whether it is a test-only one, its name and spec.
+pub(crate) fn declared_npm(manifest: &Manifest) -> Vec<(TargetKind, bool, String, String)> {
+    let mut out = Vec::new();
+    for kind in [TargetKind::Wasm, TargetKind::Js] {
+        for dev in [false, true] {
+            let table = match (kind, dev) {
+                (TargetKind::Wasm, false) => manifest.targets.wasm.as_ref().map(|w| &w.npm_dependencies),
+                (TargetKind::Wasm, true) => manifest.targets.wasm.as_ref().map(|w| &w.dev_npm_dependencies),
+                (_, false) => manifest.targets.js.as_ref().map(|j| &j.npm_dependencies),
+                (_, true) => manifest.targets.js.as_ref().map(|j| &j.dev_npm_dependencies),
+            };
+            out.extend(table.into_iter().flatten().map(|(name, spec)| (kind, dev, name.clone(), spec.clone())));
+        }
+    }
+    out
+}
+
+type NpmDeclaration = (TargetKind, bool, String, String);
+type Selected<'m> = (Vec<(DependencySection, &'m Dependency)>, Vec<NpmDeclaration>);
+
+/// The declared Maven dependencies and npm packages selected by `names` (all when empty), failing on a name
+/// that matches neither.
+fn selected<'m>(manifest: &'m Manifest, names: &[String]) -> Result<Selected<'m>> {
     let all = declared(manifest);
+    let npm = declared_npm(manifest);
     for name in names {
-        if !all.iter().any(|(_, d)| d.name == *name || d.module.to_string() == *name) {
+        if !all.iter().any(|(_, d)| d.name == *name || d.module.to_string() == *name) && !npm.iter().any(|(_, _, n, _)| n == name) {
             bail!("dependency `{name}` is not declared in kargo.toml");
         }
     }
-    Ok(all.into_iter().filter(|(_, d)| names.is_empty() || names.iter().any(|n| d.name == *n || d.module.to_string() == *n)).collect())
+    let maven =
+        all.into_iter().filter(|(_, d)| names.is_empty() || names.iter().any(|n| d.name == *n || d.module.to_string() == *n)).collect();
+    let npm = npm.into_iter().filter(|(_, _, n, _)| names.is_empty() || names.contains(n)).collect();
+    Ok((maven, npm))
+}
+
+/// Checks one npm package against the registry. Specs that are not a single version with an optional `^` or
+/// `~` (`>=1 <2`, `1.x`, a tag, a URL) are skipped.
+fn check_npm(registry: &Registry, target: TargetKind, dev: bool, name: &str, spec: &str, prerelease: bool) -> Result<Option<Outdated>> {
+    let Some(pinned) = Pinned::parse(spec) else { return Ok(None) };
+    let package = registry.package(name)?;
+    let (compatible, latest) = newer(&pinned, &package.semvers(), package.tag("latest").as_ref(), prerelease);
+    Ok(Some(Outdated {
+        name: name.to_owned(),
+        module: name.to_owned(),
+        section: Section::Npm { target, dev },
+        current: spec.to_owned(),
+        compatible: compatible.map(|v| pinned.with_version(&v)),
+        latest: latest.map(|v| pinned.with_version(&v)),
+    }))
 }
 
 /// Checks one dependency against the versions its repositories publish. Dependencies without a
 /// plain version (ranges, or versions managed by a BOM) are skipped.
-fn check(client: &MavenClient, section: DependencySection, dep: &Dependency, prerelease: bool) -> Result<Option<Outdated>> {
+fn check(client: &MavenClient, section: Section, dep: &Dependency, prerelease: bool) -> Result<Option<Outdated>> {
     let Some(raw) = &dep.version else { return Ok(None) };
     let Ok(VersionReq::Soft(current)) = raw.parse::<VersionReq>() else { return Ok(None) };
     let versions = client.versions(&dep.module).with_context(|| format!("failed to list the versions of `{}`", dep.module))?;
@@ -77,12 +142,23 @@ fn check(client: &MavenClient, section: DependencySection, dep: &Dependency, pre
     }))
 }
 
-/// `kargo outdated`: the declared dependencies that have newer versions.
+/// `kargo outdated`: the declared dependencies, then the npm packages, that have newer versions.
 pub fn outdated(config: &Config, ws: &Workspace, names: &[String], prerelease: bool) -> Result<Vec<Outdated>> {
-    let client = MavenClient::new(config, ws.manifest().repositories.clone());
+    let (maven, npm) = selected(ws.manifest(), names)?;
     let mut out = Vec::new();
-    for (section, dep) in selected(ws.manifest(), names)? {
-        if let Some(o) = check(&client, section, dep, prerelease)?
+    if !maven.is_empty() {
+        let client = MavenClient::new(config, ws.manifest().repositories.clone());
+        for (section, dep) in maven {
+            if let Some(o) = check(&client, Section::Maven(section), dep, prerelease)?
+                && (o.compatible.is_some() || o.latest.is_some())
+            {
+                out.push(o);
+            }
+        }
+    }
+    let registry = Registry::new(config, ws.root());
+    for (target, dev, name, spec) in npm {
+        if let Some(o) = check_npm(&registry, target, dev, &name, &spec, prerelease)?
             && (o.compatible.is_some() || o.latest.is_some())
         {
             out.push(o);
@@ -112,32 +188,43 @@ pub fn render(rows: &[Outdated]) -> String {
 /// the newest overall with `incompatible`), preserving formatting. Returns the changes made.
 pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result<Vec<Outdated>> {
     let client = MavenClient::new(config, ws.manifest().repositories.clone());
+    let registry = Registry::new(config, ws.root());
     let mut editor = ManifestEditor::load(&ws.manifest_path())?;
     let mut changed = Vec::new();
-    for (section, dep) in selected(ws.manifest(), &opts.names)? {
+    let (maven, npm) = selected(ws.manifest(), &opts.names)?;
+    let named = |name: &str, module: &str| opts.names.iter().any(|n| n == name || n == module);
+    for (section, dep) in maven {
         if editor.is_inherited(section, &dep.name) {
-            if opts.names.iter().any(|n| *n == dep.name || *n == dep.module.to_string()) {
+            if named(&dep.name, &dep.module.to_string()) {
                 config
                     .shell()
                     .note(format!("`{}` is inherited from [workspace.dependencies]; upgrade it in the workspace's kargo.toml", dep.name));
             }
             continue;
         }
-        let Some(o) = check(&client, section, dep, opts.prerelease)? else {
-            if opts.names.iter().any(|n| *n == dep.name || *n == dep.module.to_string()) {
+        let Some(o) = check(&client, Section::Maven(section), dep, opts.prerelease)? else {
+            if named(&dep.name, &dep.module.to_string()) {
                 config.shell().note(format!("`{}` has no single version to upgrade (a range or a BOM-managed version)", dep.name));
             }
             continue;
         };
-        let target = if opts.incompatible { o.latest.clone() } else { o.compatible.clone() };
-        if !opts.incompatible
-            && let Some(latest) = o.latest.as_ref().filter(|l| o.compatible.as_ref() != Some(*l))
-        {
-            config.shell().note(format!("`{}` {latest} is available but not compatible; use `--incompatible` to upgrade to it", o.name));
-        }
-        let Some(target) = target else { continue };
+        let Some(target) = pick(config, opts, &o) else { continue };
         editor.set_dependency_version(section, &dep.module, &target)?;
         config.shell().status("Upgrading", format!("{} v{} -> v{target} in [{}]", o.name, o.current, section.display()));
+        changed.push(o);
+    }
+    for (kind, dev, name, spec) in npm {
+        let Some(o) = check_npm(&registry, kind, dev, &name, &spec, opts.prerelease)? else {
+            if named(&name, &name) {
+                config.shell().note(format!(
+                    "npm package `{name}` is declared as `{spec}`, which is not a single version (`1.2.3`, `^1.2.3` or `~1.2.3`) to upgrade"
+                ));
+            }
+            continue;
+        };
+        let Some(target) = pick(config, opts, &o) else { continue };
+        editor.set_npm_version(kind, dev, &name, &target)?;
+        config.shell().status("Upgrading", format!("{name} {spec} -> {target} in [{}]", o.section.display()));
         changed.push(o);
     }
     if opts.dry_run {
@@ -150,6 +237,16 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
     ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     editor.save()?;
     Ok(changed)
+}
+
+/// The version `upgrade` moves `o` to: the newest compatible one, or the newest with `--incompatible`.
+fn pick(config: &Config, opts: &UpgradeOptions, o: &Outdated) -> Option<String> {
+    if !opts.incompatible
+        && let Some(latest) = o.latest.as_ref().filter(|l| o.compatible.as_ref() != Some(*l))
+    {
+        config.shell().note(format!("`{}` {latest} is available but not compatible; use `--incompatible` to upgrade to it", o.name));
+    }
+    if opts.incompatible { o.latest.clone() } else { o.compatible.clone() }
 }
 
 #[cfg(test)]
@@ -197,7 +294,7 @@ mod tests {
         let summary: Vec<(&str, Option<&str>, Option<&str>)> =
             rows.iter().map(|r| (r.name.as_str(), r.compatible.as_deref(), r.latest.as_deref())).collect();
         assert_eq!(summary, [("com.acme:widget", Some("1.2.0"), Some("2.0.0")), ("com.acme:datetime", Some("0.6.2"), Some("0.8.0"))]);
-        assert_eq!(rows[1].section, DependencySection::Dev);
+        assert_eq!(rows[1].section, Section::Maven(DependencySection::Dev));
         let pre = outdated(&config, &ws, &["com.acme:widget".into()], true).unwrap();
         assert_eq!(pre[0].compatible.as_deref(), Some("1.3.0-RC1"));
         assert!(outdated(&config, &ws, &["com.acme:nope".into()], false).is_err());

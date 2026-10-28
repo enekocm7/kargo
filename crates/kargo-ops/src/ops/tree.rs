@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use super::Configuration;
 use super::context::BuildContext;
+use crate::npm::Origin;
 use kargo_manifest::{Scope, TargetKind};
 use kargo_maven::{ModuleId, Resolution};
 
@@ -125,6 +126,58 @@ pub fn render(title: &str, locals: &[LocalNode], resolution: &Resolution, max_de
         walk(&mut out, root, None, "", i + 1 == resolution.roots.len(), 1, max_depth, &versions, &deps, &mut expanded);
     }
     out
+}
+
+/// Renders the npm packages of the Wasm or JS target below its tree: each with the version that gets
+/// installed and where it comes from (the libraries that ask for it, and `kargo.toml`, which wins). Empty
+/// without packages.
+pub fn render_npm(origins: &[Origin]) -> String {
+    if origins.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("npm packages\n");
+    for (i, origin) in origins.iter().enumerate() {
+        let branch = if i + 1 == origins.len() { "└── " } else { "├── " };
+        let _ = writeln!(out, "{branch}{} {} ({})", origin.name, origin.version, describe_npm(origin));
+    }
+    out
+}
+
+fn describe_npm(origin: &Origin) -> String {
+    let asked: Vec<String> = origin
+        .requested_by
+        .iter()
+        .map(|r| {
+            if r.spec == origin.version {
+                format!("{}:{}", r.module, r.version)
+            } else {
+                format!("{}:{} wants {}", r.module, r.version, r.spec)
+            }
+        })
+        .collect();
+    let declared = if origin.dev { "kargo.toml, tests only" } else { "kargo.toml" };
+    match (&origin.declared, asked.is_empty()) {
+        (Some(_), true) => declared.to_owned(),
+        (Some(_), false) => format!("{declared}; also asked for by {}", asked.join(", ")),
+        (None, _) => format!("asked for by {}", asked.join(", ")),
+    }
+}
+
+/// The npm packages of a tree for `kargo tree --format json` and `kargo metadata`: the version installed,
+/// the one `kargo.toml` declares for it and the libraries that ask for it.
+pub fn json_npm(origins: &[Origin]) -> serde_json::Value {
+    origins
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "name": o.name,
+                "version": o.version,
+                "declared": o.declared,
+                "dev": o.dev,
+                "requested-by": o.requested_by.iter().map(|r| serde_json::json!({ "module": r.module, "version": r.version, "spec": r.spec })).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
 }
 
 /// Describes a resolution for `kargo tree --format json`: the roots plus every
@@ -266,6 +319,43 @@ server v0.1.0 (jvm)
         assert_eq!(modules[0]["id"], "g:app");
         assert_eq!(modules[0]["group"], "g");
         assert_eq!(modules[0]["dependencies"][0], serde_json::json!({"id": "g:shared", "requested": "1.0", "version": "2.0"}));
+    }
+
+    #[test]
+    fn renders_where_npm_packages_come_from() {
+        use crate::npm::LibraryRequest;
+        let ask =
+            |module: &str, version: &str, spec: &str| LibraryRequest { module: module.into(), version: version.into(), spec: spec.into() };
+        let origins = vec![
+            Origin {
+                name: "@js-joda/core".into(),
+                version: "^3.2.0".into(),
+                declared: None,
+                dev: false,
+                requested_by: vec![ask("org.acme:datetime", "0.7.1", "^3.2.0"), ask("org.acme:other", "1.0", "^3.1.0")],
+            },
+            Origin { name: "left-pad".into(), version: "^1.3.0".into(), declared: Some("^1.3.0".into()), dev: false, requested_by: vec![] },
+            Origin {
+                name: "mocha".into(),
+                version: "^10.0.0".into(),
+                declared: Some("^10.0.0".into()),
+                dev: true,
+                requested_by: vec![ask("org.acme:test", "2", "^9.0.0")],
+            },
+        ];
+        let expected = "\
+npm packages
+├── @js-joda/core ^3.2.0 (asked for by org.acme:datetime:0.7.1, org.acme:other:1.0 wants ^3.1.0)
+├── left-pad ^1.3.0 (kargo.toml)
+└── mocha ^10.0.0 (kargo.toml, tests only; also asked for by org.acme:test:2 wants ^9.0.0)
+";
+        assert_eq!(render_npm(&origins), expected);
+        assert_eq!(render_npm(&[]), "");
+        let json = json_npm(&origins);
+        assert_eq!(json[0]["requested-by"][1], serde_json::json!({ "module": "org.acme:other", "version": "1.0", "spec": "^3.1.0" }));
+        assert_eq!(json[1]["declared"], "^1.3.0");
+        assert_eq!(json[0]["declared"], serde_json::Value::Null);
+        assert_eq!(json[2]["dev"], true);
     }
 
     #[test]

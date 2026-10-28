@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use toml_edit::{Decor, DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{Decor, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
 use super::{Scope, TargetKind};
 use kargo_maven::ModuleId;
@@ -28,6 +28,11 @@ impl DependencySection {
     pub fn display(self) -> String {
         self.path().join(".")
     }
+}
+
+/// The key of a target's npm packages: `npm-dependencies`, or with `dev` the one for the tests only.
+pub fn npm_table_key(dev: bool) -> &'static str {
+    if dev { "dev-npm-dependencies" } else { "npm-dependencies" }
 }
 
 /// Options for a dependency entry written by `kargo add`.
@@ -232,18 +237,81 @@ impl ManifestEditor {
         Ok(key)
     }
 
+    /// The table of `kind`'s npm packages: `[target.<kind>.npm-dependencies]`, or with `dev` the one of
+    /// the packages only the tests need. Created when `create` is set; `None` when it is missing.
+    fn npm_table_mut(&mut self, kind: TargetKind, dev: bool, create: bool) -> Result<Option<&mut dyn TableLike>> {
+        let key = npm_table_key(dev);
+        let Some(target) = self.doc.get_mut("target").and_then(|t| t.get_mut(kind.as_str())) else {
+            if create {
+                bail!("[target.{kind}] is not declared in the manifest; add the target first with `kargo target add {kind}`");
+            }
+            return Ok(None);
+        };
+        let target = target.as_table_like_mut().with_context(|| format!("[target.{kind}] in the manifest is not a table"))?;
+        if !target.contains_key(key) {
+            if !create {
+                return Ok(None);
+            }
+            target.insert(key, Item::Table(Table::new()));
+        }
+        let table =
+            target.get_mut(key).and_then(Item::as_table_like_mut).with_context(|| format!("[target.{kind}] `{key}` is not a table"))?;
+        Ok(Some(table))
+    }
+
+    /// The version `kind` declares for the npm package `name` in its `npm-dependencies` (or the test-only
+    /// table with `dev`).
+    pub fn npm_dependency(&mut self, kind: TargetKind, dev: bool, name: &str) -> Option<String> {
+        let table = self.npm_table_mut(kind, dev, false).ok().flatten()?;
+        table.get(name)?.as_str().map(str::to_owned)
+    }
+
+    /// Adds the npm package `name` at `version` (a semver range) to `[target.<kind>.npm-dependencies]`, or
+    /// to the table of the test-only packages with `dev`. Returns the version it replaced, if any.
+    pub fn add_npm_dependency(&mut self, kind: TargetKind, dev: bool, name: &str, version: &str) -> Result<Option<String>> {
+        let table = self.npm_table_mut(kind, dev, true)?.expect("the table was created");
+        let previous = table.get(name).and_then(|item| item.as_str()).map(str::to_owned);
+        match table.get_mut(name).filter(|item| item.is_str()) {
+            Some(item) => replace_str(item, version),
+            None => {
+                table.insert(name, toml_edit::value(version));
+            }
+        }
+        Ok(previous)
+    }
+
+    /// Removes the npm package `name` from `[target.<kind>.npm-dependencies]` (or the test-only table with
+    /// `dev`), and the table itself when nothing is left in it. Returns the version it had.
+    pub fn remove_npm_dependency(&mut self, kind: TargetKind, dev: bool, name: &str) -> Result<String> {
+        let key = npm_table_key(dev);
+        let removed = self.npm_table_mut(kind, dev, false)?.and_then(|table| {
+            let version = table.get(name).and_then(|item| item.as_str()).map(str::to_owned);
+            version.inspect(|_| {
+                table.remove(name);
+            })
+        });
+        let Some(version) = removed else {
+            bail!("npm package `{name}` is not declared in [target.{kind}.{key}]");
+        };
+        if self.npm_table_mut(kind, dev, false)?.is_some_and(|table| table.is_empty())
+            && let Some(target) = self.doc.get_mut("target").and_then(|t| t.get_mut(kind.as_str())).and_then(Item::as_table_like_mut)
+        {
+            target.remove(key);
+        }
+        Ok(version)
+    }
+
     /// Changes the version of the npm package `name` in `[target.<kind>.npm-dependencies]` in place,
     /// keeping its formatting and comments.
     pub fn set_npm_dependency_version(&mut self, kind: TargetKind, name: &str, version: &str) -> Result<()> {
-        let item = self
-            .doc
-            .get_mut("target")
-            .and_then(|t| t.get_mut(kind.as_str()))
-            .and_then(|t| t.get_mut("npm-dependencies"))
-            .and_then(|t| t.get_mut(name))
-            .filter(|item| item.is_str());
+        self.set_npm_version(kind, false, name, version)
+    }
+
+    /// [`set_npm_dependency_version`](Self::set_npm_dependency_version) for either npm table of `kind`.
+    pub fn set_npm_version(&mut self, kind: TargetKind, dev: bool, name: &str, version: &str) -> Result<()> {
+        let item = self.npm_table_mut(kind, dev, false)?.and_then(|table| table.get_mut(name)).filter(|item| item.is_str());
         let Some(item) = item else {
-            bail!("npm package `{name}` is not declared in [target.{kind}.npm-dependencies]");
+            bail!("npm package `{name}` is not declared in [target.{kind}.{}]", npm_table_key(dev));
         };
         replace_str(item, version);
         Ok(())
@@ -619,6 +687,40 @@ members = [\"app\"]
         let out = ed.contents();
         assert!(out.contains("npm-dependencies = { \"left-pad\" = \"1.3.0\" }"), "{out}");
         assert!(out.contains("\"@js-joda/core\" = \"^3.2.1\"  # dates"), "{out}");
+    }
+
+    #[test]
+    fn adds_and_removes_npm_packages() {
+        let text = format!(
+            "{BASE}\n[target.wasm]\nenvironment = \"browser\"  # web\nnpm-dependencies = {{ \"left-pad\" = \"^1.0.0\" }}\n\n[target.js]\n"
+        );
+        let mut ed = ManifestEditor::from_str(Path::new("kargo.toml"), &text).unwrap();
+        // An inline table is extended in place; a missing one is created, with the scoped name quoted.
+        assert_eq!(ed.add_npm_dependency(TargetKind::Wasm, false, "chart.js", "^4.4.0").unwrap(), None);
+        assert_eq!(ed.add_npm_dependency(TargetKind::Wasm, false, "left-pad", "^1.3.0").unwrap().as_deref(), Some("^1.0.0"));
+        assert_eq!(ed.add_npm_dependency(TargetKind::Js, false, "@js-joda/core", "^3.2.0").unwrap(), None);
+        assert_eq!(ed.add_npm_dependency(TargetKind::Js, true, "mocha", "^10.0.0").unwrap(), None);
+        let out = ed.contents();
+        assert!(out.contains("environment = \"browser\"  # web"), "{out}");
+        assert!(out.contains("\"left-pad\" = \"^1.3.0\""), "{out}");
+        assert!(out.contains("\"chart.js\" = \"^4.4.0\""), "a dot in a name is quoted: {out}");
+        assert!(out.contains("[target.js.npm-dependencies]\n\"@js-joda/core\" = \"^3.2.0\""), "{out}");
+        assert!(out.contains("[target.js.dev-npm-dependencies]\nmocha = \"^10.0.0\""), "{out}");
+        let manifest = crate::Manifest::parse(&out).unwrap();
+        assert_eq!(manifest.targets.js.unwrap().dev_npm_dependencies["mocha"], "^10.0.0");
+
+        assert_eq!(ed.remove_npm_dependency(TargetKind::Js, true, "mocha").unwrap(), "^10.0.0");
+        assert_eq!(ed.remove_npm_dependency(TargetKind::Wasm, false, "chart.js").unwrap(), "^4.4.0");
+        assert!(ed.remove_npm_dependency(TargetKind::Wasm, false, "nope").unwrap_err().to_string().contains("not declared"));
+        assert!(ed.remove_npm_dependency(TargetKind::Wasm, true, "left-pad").is_err());
+        let out = ed.contents();
+        assert!(!out.contains("mocha") && !out.contains("dev-npm-dependencies"), "an empty table goes away: {out}");
+        assert!(out.contains("[target.js.npm-dependencies]"), "{out}");
+        crate::Manifest::parse(&out).unwrap();
+
+        let mut no_target = editor();
+        let err = no_target.add_npm_dependency(TargetKind::Wasm, false, "left-pad", "^1.0.0").unwrap_err().to_string();
+        assert!(err.contains("[target.wasm] is not declared"), "{err}");
     }
 
     #[test]

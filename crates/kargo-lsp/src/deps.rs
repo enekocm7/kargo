@@ -16,8 +16,11 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 
-use kargo_manifest::edit::DependencySection;
+use kargo_manifest::edit::{DependencySection, npm_table_key};
 use kargo_maven::{MavenClient, ModuleId, Repository, Version};
+use kargo_ops::npm_registry::Registry;
+use kargo_ops::npm_semver::Semver;
+use kargo_ops::ops::upgrade::Section;
 use kargo_util::config::Config;
 
 use crate::manifest::{self, Context};
@@ -46,6 +49,16 @@ pub enum Request {
     Coordinate { partial: String, range: Range<usize>, key: bool, quoted: bool, has_value: bool },
     /// The version of `module`; `range` is the text to replace.
     Version { module: ModuleId, range: Range<usize>, quoted: bool },
+    /// An npm package name being typed as a key of `[target.<wasm|js>.npm-dependencies]` (or the
+    /// `dev-` table).
+    NpmName { partial: String, range: Range<usize>, quoted: bool, has_value: bool },
+    /// The version (a semver range) of the npm `package`; `range` is the text to replace.
+    NpmVersion { package: String, range: Range<usize>, quoted: bool },
+}
+
+/// Whether `path` is in the npm packages table of the Wasm or JS target.
+fn npm_table(path: &[String]) -> bool {
+    matches!(path, [t, k, d, ..] if t == "target" && (k == "wasm" || k == "js") && (d == "npm-dependencies" || d == "dev-npm-dependencies"))
 }
 
 /// The length of the dependency table at the start of `path`: `dependencies`,
@@ -74,7 +87,10 @@ pub fn request(text: &str, offset: usize) -> Option<Request> {
     let line_end = text[offset..].find('\n').map_or(text.len(), |i| offset + i);
     match manifest::context(text, offset) {
         Context::Key { table, .. } => {
-            dependency_table(&table)?;
+            let npm = npm_table(&table) && table.len() == 3;
+            if !npm {
+                dependency_table(&table)?;
+            }
             let start = token_start(text, offset).max(line_start);
             // A key at the start of the line: not inside an inline table or after a dotted key.
             if !text[line_start..start].trim().is_empty() {
@@ -92,12 +108,18 @@ pub fn request(text: &str, offset: usize) -> Option<Request> {
                 end += 1;
             }
             let has_value = text[end..line_end].trim_start().starts_with('=');
+            if npm {
+                return Some(Request::NpmName { partial, range: start..end, quoted, has_value });
+            }
             Some(Request::Coordinate { partial, range: start..end, key: true, quoted, has_value })
         }
         Context::Value { key, quoted } => {
+            let start = if quoted { text[..offset].rfind(['"', '\'']).map_or(offset, |i| i + 1) } else { token_start(text, offset) };
+            if let ([_, _, _, package], true) = (key.as_slice(), npm_table(&key)) {
+                return Some(Request::NpmVersion { package: package.clone(), range: start..offset, quoted });
+            }
             let n = dependency_table(&key)?;
             let rest = &key[n..];
-            let start = if quoted { text[..offset].rfind(['"', '\'']).map_or(offset, |i| i + 1) } else { token_start(text, offset) };
             match rest {
                 [_, field] if field == "coords" && quoted => {
                     let partial = text[start..offset].to_owned();
@@ -165,6 +187,8 @@ pub struct Searcher {
     agent: ureq::Agent,
     generation: AtomicU64,
     memory: Mutex<HashMap<String, Vec<Hit>>>,
+    npm_generation: AtomicU64,
+    npm_memory: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl Searcher {
@@ -184,7 +208,25 @@ impl Searcher {
             agent,
             generation: AtomicU64::new(0),
             memory: Mutex::new(HashMap::new()),
+            npm_generation: AtomicU64::new(0),
+            npm_memory: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The npm packages whose names match `partial`, best first, from the registry's search. `None` when the
+    /// search was superseded by a newer one.
+    pub fn search_npm(&self, registry: &Registry, partial: &str) -> Option<Vec<String>> {
+        let generation = self.npm_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(names) = self.npm_memory.lock().expect("lock poisoned").get(partial) {
+            return Some(names.clone());
+        }
+        std::thread::sleep(DEBOUNCE);
+        if self.npm_generation.load(Ordering::SeqCst) != generation {
+            return None;
+        }
+        let names = registry.search(partial, MAX_ITEMS);
+        self.npm_memory.lock().expect("lock poisoned").insert(partial.to_owned(), names.clone());
+        Some(names)
     }
 
     /// The modules matching `partial` (`group:artifact-prefix`, or words), best first. Returns
@@ -307,6 +349,59 @@ pub fn coordinate_items(text: &str, request: &Request, hits: &[Hit]) -> Vec<Valu
         .collect()
 }
 
+/// The completion items for an npm package name request.
+pub fn npm_name_items(text: &str, request: &Request, names: &[String]) -> Vec<Value> {
+    let Request::NpmName { range, quoted, has_value, .. } = request else { return Vec::new() };
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let new_text = if *has_value { format!("\"{name}\"") } else { format!("\"{name}\" = ") };
+            json!({
+                "label": name,
+                "kind": KIND_MODULE,
+                "detail": "npm",
+                "sortText": format!("{i:04}"),
+                "filterText": if *quoted { format!("\"{name}") } else { name.clone() },
+                "textEdit": { "range": crate::text::range(text, range.clone()), "newText": new_text },
+            })
+        })
+        .collect()
+}
+
+/// The published versions of the npm `package`, newest releases first, then pre-releases. Empty when the
+/// registry cannot be reached and nothing is cached.
+pub fn npm_versions(config: &Config, project_dir: &Path, package: &str) -> Vec<Semver> {
+    let Ok(package) = Registry::new(config, project_dir).package(package) else { return Vec::new() };
+    let mut versions = package.semvers();
+    versions.sort_by(|a, b| a.is_prerelease().cmp(&b.is_prerelease()).then_with(|| b.cmp(a)));
+    versions
+}
+
+/// The completion items for an npm version request: caret ranges, as `kargo add --npm` writes them.
+pub fn npm_version_items(text: &str, request: &Request, versions: &[Semver]) -> Vec<Value> {
+    let Request::NpmVersion { range, quoted, .. } = request else { return Vec::new() };
+    versions
+        .iter()
+        .take(MAX_ITEMS)
+        .enumerate()
+        .map(|(i, v)| {
+            let new_text = if *quoted { format!("^{v}") } else { format!("\"^{v}\"") };
+            let mut item = json!({
+                "label": format!("^{v}"),
+                "kind": KIND_VALUE,
+                "sortText": format!("{i:04}"),
+                "filterText": new_text,
+                "textEdit": { "range": crate::text::range(text, range.clone()), "newText": new_text },
+            });
+            if v.is_prerelease() {
+                item["detail"] = json!("pre-release");
+            }
+            item
+        })
+        .collect()
+}
+
 /// The repositories of the manifest at `path` with contents `text`, or Maven Central and Google
 /// while it doesn't parse.
 pub fn repositories(text: &str, path: &Path) -> Vec<Repository> {
@@ -352,10 +447,11 @@ pub fn version_items(text: &str, request: &Request, versions: &[Version]) -> Vec
 /// A dependency with a newer version, as `kargo outdated` reports it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hint {
-    pub section: DependencySection,
+    pub section: Section,
     /// The dependency's key in the table.
     pub name: String,
-    pub module: ModuleId,
+    /// `group:artifact`; for an npm package its name.
+    pub module: String,
     /// The newest compatible version, if newer.
     pub compatible: Option<String>,
     /// The newest version, if newer.
@@ -379,8 +475,7 @@ pub fn hints(config: &Config, path: &Path) -> Vec<Hint> {
                 (None, Some(latest)) => format!("`{}` {latest} is available (not compatible with {})", row.module, row.current),
                 (None, None) => return None,
             };
-            let module = row.module.parse().ok()?;
-            Some(Hint { section: row.section, name: row.name, module, compatible: row.compatible, latest: row.latest, message })
+            Some(Hint { section: row.section, name: row.name, module: row.module, compatible: row.compatible, latest: row.latest, message })
         })
         .collect()
 }
@@ -395,9 +490,10 @@ pub fn diagnostic(text: &str, hint: &Hint) -> Option<Value> {
 pub fn locate(text: &str, hint: &Hint) -> Option<Range<usize>> {
     let doc = toml_edit::Document::parse(text.to_owned()).ok()?;
     let path = match hint.section {
-        DependencySection::Main => vec!["dependencies"],
-        DependencySection::Dev => vec!["dev-dependencies"],
-        DependencySection::Target(kind) => vec!["target", kind.as_str(), "dependencies"],
+        Section::Maven(DependencySection::Main) => vec!["dependencies"],
+        Section::Maven(DependencySection::Dev) => vec!["dev-dependencies"],
+        Section::Maven(DependencySection::Target(kind)) => vec!["target", kind.as_str(), "dependencies"],
+        Section::Npm { target, dev } => vec!["target", target.as_str(), npm_table_key(dev)],
     };
     let mut item = doc.as_item();
     for key in path {
@@ -521,6 +617,31 @@ mod tests {
         assert_eq!(items[0]["textEdit"]["range"]["end"], json!({ "line": 1, "character": 24 }), "the closing quote is replaced");
     }
 
+    #[test]
+    fn completes_npm_packages_and_versions() {
+        let (text, offset) = cursor("[target.wasm.npm-dependencies]\n\"left-pa|\"\n");
+        let found = request(&text, offset).unwrap();
+        assert!(matches!(&found, Request::NpmName { partial, has_value: false, quoted: true, .. } if partial == "left-pa"), "{found:?}");
+        let items = npm_name_items(&text, &found, &["left-pad".to_owned()]);
+        assert_eq!(items[0]["textEdit"]["newText"], "\"left-pad\" = ");
+        assert_eq!(items[0]["textEdit"]["range"]["start"], json!({ "line": 1, "character": 0 }));
+
+        let (text, offset) = cursor("[target.js.dev-npm-dependencies]\n\"@js-joda/core\" = \"^3|\"\n");
+        let found = request(&text, offset).unwrap();
+        assert!(matches!(&found, Request::NpmVersion { package, quoted: true, .. } if package == "@js-joda/core"), "{found:?}");
+        let versions = ["3.2.0", "3.1.0", "4.0.0-beta.1"].map(|v| Semver::parse(v).unwrap());
+        let items = npm_version_items(&text, &found, &versions);
+        assert_eq!(items[0]["label"], "^3.2.0");
+        assert_eq!(items[0]["textEdit"]["newText"], "^3.2.0");
+        assert_eq!(items[2]["detail"], "pre-release");
+
+        // Only the npm tables of the wasm and js targets.
+        let (text, offset) = cursor("[target.jvm.npm-dependencies]\n\"left-pa|\"\n");
+        assert_eq!(request(&text, offset), None);
+        let (text, offset) = cursor("[target.wasm]\nnpm-name = \"left-pa|\"\n");
+        assert_eq!(request(&text, offset), None);
+    }
+
     fn publish(repo: &Path, artifact: &str, versions: &[&str]) {
         let dir = repo.join("com/acme").join(artifact);
         std::fs::create_dir_all(&dir).unwrap();
@@ -555,9 +676,9 @@ mod tests {
         assert_eq!(
             hints,
             [Hint {
-                section: DependencySection::Main,
+                section: Section::Maven(DependencySection::Main),
                 name: "com.acme:widget".into(),
-                module: module("com.acme:widget"),
+                module: "com.acme:widget".into(),
                 compatible: Some("1.10.0".into()),
                 latest: Some("1.10.0".into()),
                 message: "`com.acme:widget` 1.10.0 is available".into()

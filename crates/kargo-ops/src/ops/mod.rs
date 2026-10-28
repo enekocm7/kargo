@@ -1,6 +1,7 @@
 //! High-level operations behind each CLI command.
 
 pub mod add;
+pub mod add_npm;
 pub mod audit;
 pub mod bench;
 pub mod build;
@@ -409,8 +410,8 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 // next to the build, and the test ones in the test output when they differ.
                 crate::npm::fetch(ctx, target, &main, &ctx.ws.profile_dir(&ctx.profile))?;
                 let test_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test");
-                if crate::npm::dependencies(ctx, target, &test)? != crate::npm::dependencies(ctx, target, &main)? {
-                    crate::npm::fetch(ctx, target, &test, &test_dir)?;
+                if crate::npm::test_dependencies(ctx, target, &test)? != crate::npm::dependencies(ctx, target, &main)? {
+                    crate::npm::fetch_for_tests(ctx, target, &test, &test_dir)?;
                 }
                 crate::web_resources::fetch(ctx)?;
             }
@@ -428,8 +429,8 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 // Where `kargo build` and `kargo test` install them: next to the module and the test module.
                 let dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Js);
                 crate::npm::fetch(ctx, target, &main, &dir)?;
-                if crate::npm::dependencies(ctx, target, &test)? != crate::npm::dependencies(ctx, target, &main)? {
-                    crate::npm::fetch(ctx, target, &test, &dir.join("test"))?;
+                if crate::npm::test_dependencies(ctx, target, &test)? != crate::npm::dependencies(ctx, target, &main)? {
+                    crate::npm::fetch_for_tests(ctx, target, &test, &dir.join("test"))?;
                 }
             }
             TargetKind::Native => {

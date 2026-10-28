@@ -147,6 +147,8 @@ For an npm package of your own, list it in `[target.js.npm-dependencies]`. Kargo
 left-pad = "1.3.0"
 ```
 
+`kargo add --npm left-pad -t js` writes the entry for you (`-t js` is only needed when the project has the wasm target too), and `kargo remove --npm`, `kargo outdated` and `kargo upgrade` work on it; see [Your own npm packages](../wasm/#your-own-npm-packages). `[target.js.dev-npm-dependencies]` holds the packages only `kargo test` installs.
+
 ```kotlin title="src/Main.kt"
 import left_pad.leftPad
 

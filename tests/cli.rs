@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{LocalRepo, OsvServer, Project, manifest, which};
+use common::{FakeRegistry, LocalRepo, OsvServer, Project, manifest, which};
 use predicates::prelude::*;
 
 #[test]
@@ -5945,4 +5945,249 @@ fn init_ci_follows_the_manifest() {
     assert!(!workflow.contains("setup-java"), "the JDK is pinned");
     assert!(workflow.contains("actions/setup-node@v4"), "Wasm tests need Node");
     assert!(workflow.contains("os: [ubuntu-latest, macos-latest, windows-latest]"), "Native needs an OS matrix");
+}
+
+/// `kargo` in `p` talking to the fake npm registry `registry`, whatever `.npmrc` the machine has.
+fn kargo_npm(p: &Project, registry: &FakeRegistry) -> assert_cmd::Command {
+    let mut cmd = p.kargo();
+    cmd.env("NPM_CONFIG_REGISTRY", &registry.url).env("NPM_CONFIG_USERCONFIG", p.path().join("no-user-npmrc"));
+    cmd
+}
+
+fn npm_registry() -> FakeRegistry {
+    FakeRegistry::start(vec![
+        (
+            "left-pad",
+            vec![("latest", "1.3.0"), ("next", "2.0.0-beta.1")],
+            vec![("1.0.0", false), ("1.2.0", false), ("1.3.0", false), ("2.0.0-beta.1", false)],
+        ),
+        ("@js-joda/core", vec![("latest", "3.2.0")], vec![("3.1.0", true), ("3.2.0", true)]),
+        ("chart.js", vec![("latest", "4.4.1")], vec![("3.9.1", false), ("4.4.1", false)]),
+        ("@types/chart.js", vec![("latest", "2.9.41")], vec![("2.9.41", true)]),
+        ("@types/left-pad", vec![("latest", "1.3.4")], vec![("1.3.4", true)]),
+        ("early", vec![("latest", "1.0.0-rc.1")], vec![("1.0.0-rc.1", false)]),
+    ])
+}
+
+const WASM_MANIFEST: &str = "\n[target.wasm]  # the web app\nenvironment = \"browser\"\n";
+
+#[test]
+fn add_and_remove_npm_packages() {
+    let registry = npm_registry();
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", WASM_MANIFEST));
+
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "left-pad"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding left-pad ^1.3.0 to [target.wasm.npm-dependencies]"));
+    kargo_npm(&p, &registry).args(["add", "--npm", "@js-joda/core", "chart.js@3.9.1", "left-pad@next", "--dev"]).assert().success();
+    let text = p.read("kargo.toml");
+    assert!(text.contains("[target.wasm]  # the web app"), "comments stay: {text}");
+    assert!(text.contains("[target.wasm.npm-dependencies]\nleft-pad = \"^1.3.0\""), "{text}");
+    assert!(text.contains("[target.wasm.dev-npm-dependencies]"), "{text}");
+    assert!(text.contains("\"@js-joda/core\" = \"^3.2.0\""), "scoped names are quoted: {text}");
+    assert!(text.contains("\"chart.js\" = \"3.9.1\""), "an exact version is written as given: {text}");
+    assert!(text.contains("left-pad = \"^2.0.0-beta.1\""), "a dist-tag resolves to a caret range: {text}");
+
+    // A second add replaces the entry.
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "left-pad@1.2.0", "-t", "wasm", "--dev"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updating left-pad ^2.0.0-beta.1 -> 1.2.0"));
+
+    kargo_npm(&p, &registry)
+        .args(["remove", "--npm", "left-pad"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing left-pad from [target.wasm.npm-dependencies]"));
+    kargo_npm(&p, &registry).args(["remove", "--npm", "left-pad", "--dev", "-t", "wasm"]).assert().success();
+    kargo_npm(&p, &registry).args(["remove", "--npm", "left-pad"]).assert().failure().stderr(predicate::str::contains("not declared"));
+    let text = p.read("kargo.toml");
+    assert!(!text.contains("left-pad"), "{text}");
+    assert!(text.contains("[target.wasm.dev-npm-dependencies]"), "{text}");
+    assert!(text.contains("\"chart.js\" = \"3.9.1\""), "{text}");
+    p.kargo().arg("metadata").assert().success();
+}
+
+#[test]
+fn add_npm_picks_the_target_and_reports_registry_problems() {
+    let registry = npm_registry();
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "\n[target.jvm]\n"));
+    kargo_npm(&p, &registry).args(["add", "--npm", "left-pad"]).assert().failure().stderr(predicate::str::contains("neither"));
+
+    p.file("kargo.toml", &manifest("app", "\n[target.wasm]\n\n[target.js]\n"));
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "left-pad"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("both the wasm and js targets"));
+    kargo_npm(&p, &registry).args(["add", "--npm", "left-pad", "-t", "js"]).assert().success();
+    assert!(p.read("kargo.toml").contains("[target.js.npm-dependencies]\nleft-pad = \"^1.3.0\""), "{}", p.read("kargo.toml"));
+    kargo_npm(&p, &registry).args(["add", "--npm", "left-pad", "-t", "jvm"]).assert().failure().stderr(predicate::str::contains("not jvm"));
+    // Removing finds the only target that declares the package.
+    kargo_npm(&p, &registry).args(["remove", "--npm", "left-pad"]).assert().success();
+
+    kargo_npm(&p, &registry).args(["add", "--npm", "nope", "-t", "wasm"]).assert().failure().stderr(
+        predicate::str::contains("npm package `nope` was not found in the registry").and(predicate::str::contains(registry.url.as_str())),
+    );
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "left-pad@9.9.9", "-t", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`left-pad@9.9.9` was not found"));
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "left-pad@^7", "-t", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("satisfies `^7`"));
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "left-pad@nightly", "-t", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no version or dist-tag `nightly`"));
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "early", "-t", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("lists no releases"));
+    kargo_npm(&p, &registry).args(["add", "--npm", "early", "--pre", "-t", "wasm"]).assert().success();
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "not a name", "-t", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not an npm package name"));
+    kargo_npm(&p, &registry).args(["add", "--npm", "left-pad", "--path", "../x"]).assert().failure();
+}
+
+#[test]
+fn add_npm_with_types_adds_the_declarations_package() {
+    let registry = npm_registry();
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", WASM_MANIFEST));
+    // chart.js ships none, so the @types package joins it; @js-joda/core ships its own.
+    kargo_npm(&p, &registry).args(["add", "--npm", "chart.js", "@js-joda/core", "--types"]).assert().success().stderr(
+        predicate::str::contains("Adding @types/chart.js ^2.9.41")
+            .and(predicate::str::contains("@js-joda/core` ships its own TypeScript declarations")),
+    );
+    let text = p.read("kargo.toml");
+    assert!(text.contains("\"@types/chart.js\" = \"^2.9.41\""), "{text}");
+    assert!(!text.contains("@types/js-joda"), "{text}");
+    // Removing the package takes its declarations along.
+    kargo_npm(&p, &registry)
+        .args(["remove", "--npm", "chart.js"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing @types/chart.js"));
+    assert!(!p.read("kargo.toml").contains("chart.js"));
+    // No @types package is only a warning.
+    kargo_npm(&p, &registry)
+        .args(["add", "--npm", "early@1.0.0-rc.1", "--types"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ships no TypeScript declarations"));
+    assert!(!p.read("kargo.toml").contains("@types/early"));
+}
+
+#[test]
+fn add_npm_offline_uses_the_cache_and_honors_npmrc() {
+    let registry = npm_registry();
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", WASM_MANIFEST));
+    // Offline with nothing cached: a hint, and an explicit version needs no registry.
+    kargo_npm(&p, &registry)
+        .args(["--offline", "add", "--npm", "left-pad"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no cached registry data for the npm package `left-pad`"));
+    kargo_npm(&p, &registry).args(["--offline", "add", "--npm", "left-pad@1.3.0"]).assert().success();
+    assert_eq!(registry.requests().len(), 0, "an explicit version is not looked up offline");
+    kargo_npm(&p, &registry).args(["add", "--npm", "left-pad@1.2.0", "chart.js"]).assert().success();
+    let before = registry.requests().len();
+    kargo_npm(&p, &registry)
+        .args(["--offline", "add", "--npm", "left-pad"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("1.2.0 -> ^1.3.0"));
+    assert_eq!(registry.requests().len(), before, "offline answers from the cache");
+
+    // A project `.npmrc` names the registry, and its token is sent along.
+    let private = FakeRegistry::start(vec![("secret", vec![("latest", "1.0.0")], vec![("1.0.0", false)])]);
+    p.file(".npmrc", &format!("registry={}\n//{}/:_authToken=${{TOKEN}}\n", private.url, private.url.trim_start_matches("http://")));
+    let mut cmd = p.kargo();
+    cmd.env_remove("NPM_CONFIG_REGISTRY")
+        .env_remove("npm_config_registry")
+        .env("NPM_CONFIG_USERCONFIG", p.path().join("none"))
+        .env("TOKEN", "abc123");
+    cmd.args(["add", "--npm", "secret"]).assert().success();
+    assert_eq!(private.requests(), [("secret".to_owned(), Some("Bearer abc123".to_owned()))]);
+}
+
+const NPM_DEPS_MANIFEST: &str = "
+[target.wasm]
+environment = \"browser\"
+
+[target.wasm.npm-dependencies]
+left-pad = \"^1.0.0\"  # pad
+\"chart.js\" = \"3.9.1\"
+ranged = \">=1 <2\"
+
+[target.wasm.dev-npm-dependencies]
+\"@js-joda/core\" = \"^3.1.0\"
+";
+
+#[test]
+fn outdated_and_upgrade_cover_npm_packages() {
+    let registry = npm_registry();
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("web", NPM_DEPS_MANIFEST));
+
+    let out = kargo_npm(&p, &registry).arg("outdated").assert().success().get_output().stdout.clone();
+    let table = String::from_utf8(out).unwrap();
+    assert!(table.starts_with("name"), "{table}");
+    let row = |name: &str| {
+        table
+            .lines()
+            .find(|l| l.starts_with(name))
+            .unwrap_or_else(|| panic!("no row for {name}: {table}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(row("left-pad"), ["left-pad", "^1.0.0", "^1.3.0", "^1.3.0", "target.wasm.npm-dependencies"]);
+    assert_eq!(row("chart.js"), ["chart.js", "3.9.1", "-", "4.4.1", "target.wasm.npm-dependencies"]);
+    assert_eq!(row("@js-joda/core"), ["@js-joda/core", "^3.1.0", "^3.2.0", "^3.2.0", "target.wasm.dev-npm-dependencies"]);
+    assert!(!table.contains("ranged"), "a range with two bounds has no single version: {table}");
+    kargo_npm(&p, &registry).args(["outdated", "left-pad"]).assert().success().stdout(predicate::str::contains("chart.js").not());
+    kargo_npm(&p, &registry).args(["outdated", "nope"]).assert().failure().stderr(predicate::str::contains("`nope` is not declared"));
+
+    // Dry run writes nothing.
+    let before = p.read("kargo.toml");
+    kargo_npm(&p, &registry)
+        .args(["upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Upgrading left-pad ^1.0.0 -> ^1.3.0"));
+    assert_eq!(p.read("kargo.toml"), before);
+
+    // Offline answers from what the last run cached.
+    kargo_npm(&p, &registry).args(["--offline", "outdated", "left-pad"]).assert().success().stdout(predicate::str::contains("^1.3.0"));
+
+    kargo_npm(&p, &registry)
+        .arg("upgrade")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("`chart.js` 4.4.1 is available but not compatible"));
+    let text = p.read("kargo.toml");
+    assert!(text.contains("left-pad = \"^1.3.0\"  # pad"), "{text}");
+    assert!(text.contains("\"chart.js\" = \"3.9.1\""), "a major version needs --incompatible: {text}");
+    assert!(text.contains("\"@js-joda/core\" = \"^3.2.0\""), "{text}");
+    assert!(text.contains("ranged = \">=1 <2\""), "{text}");
+
+    kargo_npm(&p, &registry).args(["upgrade", "chart.js", "--incompatible"]).assert().success();
+    assert!(p.read("kargo.toml").contains("\"chart.js\" = \"4.4.1\""), "{}", p.read("kargo.toml"));
+    kargo_npm(&p, &registry).args(["upgrade", "ranged"]).assert().success().stderr(predicate::str::contains("not a single version"));
+    kargo_npm(&p, &registry).arg("outdated").assert().success().stderr(predicate::str::contains("Fresh"));
 }

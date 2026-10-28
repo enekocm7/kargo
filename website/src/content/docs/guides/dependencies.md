@@ -17,6 +17,7 @@ kargo add com.google.auto.value:auto-value:1.11.0 --scope processor # a javac an
 kargo add com.squareup.moshi:moshi-kotlin-codegen:1.15.2 --scope ksp # a KSP processor
 kargo add com.google.guava:guava -t jvm          # only for the JVM target
 kargo add org.jetbrains.kotlinx:kotlinx-io-core --pre   # allow a pre-release as "latest"
+kargo add --npm left-pad                         # an npm package, for the wasm or js target
 ```
 
 Kargo checks that the artifact exists before editing `kargo.toml` (skip that with `--no-verify`), and it keeps your file's comments and formatting.
@@ -30,6 +31,20 @@ kargo remove com.squareup.okio:okio
 kargo rm io.mockk:mockk --dev
 kargo rm com.google.guava:guava -t jvm
 ```
+
+### npm packages
+
+The wasm and js targets take npm packages besides Maven libraries, in `[target.wasm.npm-dependencies]` and `[target.js.npm-dependencies]`. `kargo add --npm` and `kargo remove --npm` edit those tables the way `kargo add` and `kargo remove` edit the Maven ones:
+
+```sh
+kargo add --npm left-pad                  # ^1.3.0, the registry's latest release
+kargo add --npm @js-joda/core@^3.2.0      # a scoped package with a range
+kargo add --npm chart.js@next --types     # a dist-tag; also @types/chart.js when it ships no declarations
+kargo add --npm mocha --dev -t js         # [target.js.dev-npm-dependencies], for tests only
+kargo rm --npm left-pad
+```
+
+Versions come from the npm registry of your `.npmrc` (see [`kargo add --npm`](../../reference/commands/#npm-packages-with-kargo-add---npm)); the entries are ranges, and the versions that get installed are the package manager's. See [Your own npm packages](../wasm/#your-own-npm-packages) for what Kargo does with them. `kargo audit` checks the installed versions, and `kargo tree` shows which library asked for each package.
 
 ## Keeping dependencies up to date
 
@@ -49,6 +64,8 @@ kargo upgrade -i io.mockk:mockk          # newest version of one dependency, eve
 ```
 
 A compatible version has the same major version as the current one (for `0.x`, the same minor version), like Cargo's default requirements. `kargo upgrade` edits only the version strings, so your comments and layout stay as they are. Dependencies declared with a range or managed by a BOM are skipped.
+
+The npm packages of the wasm and js targets are listed and upgraded next to the Maven ones, against the npm registry, within the range in `kargo.toml`: `^1.0.0` moves to the newest `1.x`, and `-i` crosses to the next major version. Only `1.2.3`, `^1.2.3` and `~1.2.3` are rewritten; other ranges are left alone.
 
 `kargo upgrade` changes what you declared in `kargo.toml`. To move versions in `kargo.lock` only, for example a transitive dependency, use `kargo update` (see [The lockfile](#the-lockfile)).
 

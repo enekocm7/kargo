@@ -1058,6 +1058,15 @@ impl Server {
                     let versions = deps::versions(&config, deps::repositories(&text, &path), module);
                     json!({ "isIncomplete": false, "items": deps::version_items(&text, &request, &versions) })
                 }
+                deps::Request::NpmName { partial, .. } => {
+                    let registry = kargo_ops::npm_registry::Registry::new(&config, path.parent().unwrap_or(Path::new(".")));
+                    let names = searcher.search_npm(&registry, partial);
+                    json!({ "isIncomplete": true, "items": deps::npm_name_items(&text, &request, &names.unwrap_or_default()) })
+                }
+                deps::Request::NpmVersion { package, .. } => {
+                    let versions = deps::npm_versions(&config, path.parent().unwrap_or(Path::new(".")), package);
+                    json!({ "isIncomplete": false, "items": deps::npm_version_items(&text, &request, &versions) })
+                }
             };
             let _ = tx.send(Event::Reply(jsonrpc::response(&id, result)));
         });

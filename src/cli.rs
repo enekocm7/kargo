@@ -617,6 +617,61 @@ impl From<VisibilityArg> for ops::inspect::Visibility {
 }
 
 /// The arguments of `kargo inspect`, in a struct of their own for the same reason as [`WhyArgs`].
+/// The arguments of `kargo add`, apart from the enum of commands, which is close to the stack of the test threads.
+#[derive(Debug, clap::Args)]
+struct AddArgs {
+    /// Coordinates: group:artifact[:version[:classifier]] (latest release if no version); with --npm, packages: name[@version]
+    #[arg(required_unless_present_any = ["frameworks", "path", "cinterop"], conflicts_with_all = ["path", "cinterop"])]
+    coordinates: Vec<String>,
+    /// Depend on the Kargo package in this directory, built from source
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["bom", "pre", "no_verify", "frameworks"])]
+    path: Option<PathBuf>,
+    /// Add to [dev-dependencies] (with --npm: to the test-only [target.<target>.dev-npm-dependencies])
+    #[arg(long)]
+    dev: bool,
+    /// Add to [target.<target>.dependencies] (with --npm: to the wasm or js target's npm packages)
+    #[arg(short, long, value_enum)]
+    target: Option<TargetArg>,
+    /// Add npm packages (name[@version], @scope/name, name@tag) to [target.wasm.npm-dependencies] or [target.js.npm-dependencies]
+    #[arg(long, conflicts_with_all = ["path", "cinterop", "frameworks", "bom", "scope", "header", "pkg_config"])]
+    npm: bool,
+    /// With --npm: also add @types/<package> when the package ships no TypeScript declarations
+    #[arg(long, requires = "npm")]
+    types: bool,
+    /// Dependency scope
+    #[arg(long, value_enum)]
+    scope: Option<ScopeArg>,
+    /// Import as a BOM (platform) managing versions
+    #[arg(long)]
+    bom: bool,
+    /// Allow pre-release versions when picking the latest
+    #[arg(long)]
+    pre: bool,
+    /// Do not check that the artifact exists
+    #[arg(long)]
+    no_verify: bool,
+    /// Enable built-in frameworks instead (comma-separated)
+    #[arg(
+        short = 'F',
+        long = "framework",
+        value_delimiter = ',',
+        conflicts_with_all = ["dev", "target", "scope", "bom"],
+        add = ArgValueCandidates::new(complete::frameworks)
+    )]
+    frameworks: Vec<String>,
+    /// Add the C library NAME: [target.native.cinterop.NAME] and interop/NAME.def
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["path", "frameworks", "dev", "target", "scope", "bom"])]
+    cinterop: Option<String>,
+    /// With --cinterop: a header to bind (repeatable; default NAME.h)
+    #[arg(long, value_name = "FILE")]
+    header: Vec<String>,
+    /// With --cinterop: the pkg-config package that gives the library's compiler and linker flags
+    #[arg(long, value_name = "PACKAGE")]
+    pkg_config: Option<String>,
+    #[command(flatten)]
+    package: OnePackageArg,
+}
+
 #[derive(Debug, Args)]
 #[command(long_about = "Show the jar of a resolved dependency and its API, as `javap` would, without finding the jar by hand.
 
@@ -1202,64 +1257,22 @@ enum Command {
         jobs: JobsArg,
     },
     /// Add dependencies or built-in frameworks to kargo.toml
-    Add {
-        /// Coordinates: group:artifact[:version[:classifier]] (latest release if no version)
-        #[arg(required_unless_present_any = ["frameworks", "path", "cinterop"], conflicts_with_all = ["path", "cinterop"])]
-        coordinates: Vec<String>,
-        /// Depend on the Kargo package in this directory, built from source
-        #[arg(long, value_name = "DIR", conflicts_with_all = ["bom", "pre", "no_verify", "frameworks"])]
-        path: Option<PathBuf>,
-        /// Add to [dev-dependencies]
-        #[arg(long, conflicts_with = "target")]
-        dev: bool,
-        /// Add to [target.<target>.dependencies]
-        #[arg(short, long, value_enum)]
-        target: Option<TargetArg>,
-        /// Dependency scope
-        #[arg(long, value_enum)]
-        scope: Option<ScopeArg>,
-        /// Import as a BOM (platform) managing versions
-        #[arg(long)]
-        bom: bool,
-        /// Allow pre-release versions when picking the latest
-        #[arg(long)]
-        pre: bool,
-        /// Do not check that the artifact exists
-        #[arg(long)]
-        no_verify: bool,
-        /// Enable built-in frameworks instead (comma-separated)
-        #[arg(
-            short = 'F',
-            long = "framework",
-            value_delimiter = ',',
-            conflicts_with_all = ["dev", "target", "scope", "bom"],
-            add = ArgValueCandidates::new(complete::frameworks)
-        )]
-        frameworks: Vec<String>,
-        /// Add the C library NAME: [target.native.cinterop.NAME] and interop/NAME.def
-        #[arg(long, value_name = "NAME", conflicts_with_all = ["path", "frameworks", "dev", "target", "scope", "bom"])]
-        cinterop: Option<String>,
-        /// With --cinterop: a header to bind (repeatable; default NAME.h)
-        #[arg(long, value_name = "FILE")]
-        header: Vec<String>,
-        /// With --cinterop: the pkg-config package that gives the library's compiler and linker flags
-        #[arg(long, value_name = "PACKAGE")]
-        pkg_config: Option<String>,
-        #[command(flatten)]
-        package: OnePackageArg,
-    },
+    Add(AddArgs),
     /// Remove dependencies from kargo.toml
     #[command(visible_alias = "rm")]
     Remove {
-        /// group:artifact or the manifest key
+        /// group:artifact or the manifest key; with --npm, the package name
         #[arg(required = true)]
         names: Vec<String>,
-        /// Remove from [dev-dependencies]
-        #[arg(long, conflicts_with = "target")]
+        /// Remove from [dev-dependencies] (with --npm: from [target.<target>.dev-npm-dependencies])
+        #[arg(long)]
         dev: bool,
-        /// Remove from [target.<target>.dependencies]
+        /// Remove from [target.<target>.dependencies] (with --npm: from the wasm or js target's npm packages)
         #[arg(short, long, value_enum)]
         target: Option<TargetArg>,
+        /// Remove npm packages from [target.wasm.npm-dependencies] or [target.js.npm-dependencies]
+        #[arg(long)]
+        npm: bool,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -2456,7 +2469,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
             | Command::Test { .. }
             | Command::Bench { .. }
             | Command::Fetch { .. }
-            | Command::Add { .. }
+            | Command::Add(_)
             | Command::Remove { .. }
             | Command::Update { .. }
             | Command::Upgrade { .. }
@@ -2877,11 +2890,44 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 Ok(FAILURE)
             }
         }
-        Command::Add { coordinates, path, dev, target, scope, bom, pre, no_verify, frameworks, cinterop, header, pkg_config, package } => {
+        Command::Add(AddArgs {
+            coordinates,
+            path,
+            dev,
+            target,
+            npm,
+            types,
+            scope,
+            bom,
+            pre,
+            no_verify,
+            frameworks,
+            cinterop,
+            header,
+            pkg_config,
+            package,
+        }) => {
             if cinterop.is_none() && (!header.is_empty() || pkg_config.is_some()) {
                 bail!("`--header` and `--pkg-config` describe a C library; use them with `--cinterop <NAME>`");
             }
             let ws = load_one(global, &package, "`kargo add`")?;
+            if npm {
+                let opts = ops::add_npm::NpmAddOptions {
+                    specs: coordinates,
+                    target: target.map(Into::into),
+                    dev,
+                    types,
+                    prerelease: pre,
+                    no_verify,
+                };
+                ops::add_npm::add(config, &ws, &opts)?;
+                return Ok(0);
+            }
+            if dev && target.is_some() {
+                bail!(
+                    "`--dev` and `--target` cannot be used together; use `--dev` for [dev-dependencies] or `--target <target>` for [target.<target>.dependencies]"
+                );
+            }
             if let Some(name) = cinterop {
                 ops::add::add_cinterop(config, &ws, &name, &header, pkg_config.as_deref())?;
             }
@@ -2905,8 +2951,17 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Remove { names, dev, target, package } => {
+        Command::Remove { names, dev, target, npm, package } => {
             let ws = load_one(global, &package, "`kargo remove`")?;
+            if npm {
+                ops::add_npm::remove(config, &ws, &names, target.map(Into::into), dev)?;
+                return Ok(0);
+            }
+            if dev && target.is_some() {
+                bail!(
+                    "`--dev` and `--target` cannot be used together; use `--dev` for [dev-dependencies] or `--target <target>` for [target.<target>.dependencies]"
+                );
+            }
             ops::add::remove(config, &ws, &names, section(dev, target))?;
             Ok(0)
         }
@@ -2921,7 +2976,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     let mut trees = Vec::new();
                     for t in tree_targets(ctx, target) {
                         for (label, res) in ops::resolution_for(ctx, t, configuration)? {
-                            trees.push(ops::tree::json(&label, &res));
+                            let mut tree = ops::tree::json(&label, &res);
+                            if matches!(t, TargetKind::Wasm | TargetKind::Js) {
+                                let tests = matches!(configuration, Configuration::Test);
+                                let origins = kargo_ops::npm::origins(ctx.ws.manifest(), t, &res, tests)?;
+                                tree["npm"] = ops::tree::json_npm(&origins);
+                            }
+                            trees.push(tree);
                         }
                     }
                     let configuration_name = configuration_name(configuration);
@@ -2957,6 +3018,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                             }
                         } else {
                             print!("{}", ops::tree::render(&format!("{} v{} ({label})", pkg.name, pkg.version), &locals, &res, depth));
+                            if matches!(t, TargetKind::Wasm | TargetKind::Js) {
+                                let tests = matches!(configuration, Configuration::Test);
+                                print!("{}", ops::tree::render_npm(&kargo_ops::npm::origins(ctx.ws.manifest(), t, &res, tests)?));
+                            }
                         }
                     }
                 }
@@ -4201,7 +4266,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "new", "app", "--target", "jvm,wasm", "--with", "serialization,coroutines"]).unwrap();
         assert!(matches!(cli.command, Command::New { ref args, .. } if args.targets.len() == 2 && args.frameworks.len() == 2));
         let cli = Cli::try_parse_from(["kargo", "add", "--framework", "compose"]).unwrap();
-        assert!(matches!(cli.command, Command::Add { ref frameworks, .. } if frameworks == &["compose"]));
+        assert!(matches!(cli.command, Command::Add(AddArgs { ref frameworks, .. }) if frameworks == &["compose"]));
         assert!(Cli::try_parse_from(["kargo", "add"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "my-plugin", "--x"]).unwrap();
         assert!(matches!(cli.command, Command::External(ref v) if v == &["my-plugin", "--x"]));
@@ -4319,7 +4384,7 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["kargo", "run", "-p", "a", "-p", "b"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "add", "--path", "../lib", "--dev"]).unwrap();
-        assert!(matches!(cli.command, Command::Add { ref path, dev: true, .. } if path.as_deref() == Some(Path::new("../lib"))));
+        assert!(matches!(cli.command, Command::Add(AddArgs { ref path, dev: true, .. }) if path.as_deref() == Some(Path::new("../lib"))));
         assert!(Cli::try_parse_from(["kargo", "add", "--path", "../lib", "g:a"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "add", "--path", "../lib", "--bom"]).is_err());
     }
