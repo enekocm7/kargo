@@ -18,7 +18,7 @@ kargo add --framework serialization,coroutines
 kargo new myapp -w ktor,serialization       # when creating a project
 ```
 
-Each framework adds what it needs for every target that supports it. Use `kargo tree` to see exactly what was added.
+Each framework adds what it needs for every target that supports it. Use `kargo tree` to see exactly what was added, and the [frameworks reference](../../reference/frameworks/) for every key and the artifacts each target gets.
 
 | Framework | JVM | Wasm | JS | Native | Android |
 |---|:-:|:-:|:-:|:-:|:-:|
@@ -84,11 +84,19 @@ ktor = { version = "3.6.0", server = "netty", client = "cio", server-plugins = [
 | Key | Effect |
 |---|---|
 | `server` | Adds `ktor-server-core` and `ktor-server-<engine>` (`netty`, `cio`, `jetty`, ...). Native supports only `cio`. On the JVM it also adds Logback and `ktor-server-test-host` for tests. |
-| `client` | Adds `ktor-client-core` and `ktor-client-<engine>` (`cio`, `okhttp`, `java`, `js`, ...). |
+| `client` | Adds `ktor-client-core` and `ktor-client-<engine>` (`cio`, `okhttp`, `java`, `js`, ...) to every target. The value is an engine name, not `true`. |
+| `client-engines` | The client engine of single targets instead of `client`, or `"none"` for `ktor-client-core` alone. |
 | `server-plugins` / `client-plugins` | Each name adds `ktor-server-<name>` / `ktor-client-<name>`. |
 | `json` | Adds `ktor-serialization-kotlinx-json` and content negotiation. Defaults to `true` when `serialization` is also enabled. |
 
-See [A REST API with Ktor](../ktor/) for a full walkthrough.
+A client engine runs on some targets only (CIO is not a browser engine). In a multiplatform app, give each target its own:
+
+```toml
+[frameworks]
+ktor = { client = "cio", client-engines = { android = "okhttp", native = "darwin", wasm = "none" } }
+```
+
+Kotlin/Wasm needs no engine artifact: Ktor's core carries the browser engine. The artifacts each target gets are listed in the [frameworks reference](../../reference/frameworks/#ktor). See [A REST API with Ktor](../ktor/) for a full walkthrough.
 
 ## Spring Boot
 

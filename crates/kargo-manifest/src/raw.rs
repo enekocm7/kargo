@@ -1058,11 +1058,22 @@ struct RawFrameworks {
 }
 
 /// `feature = true`, `feature = false` or `feature = { ...options }`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum Toggle<T> {
     Enabled(bool),
     Config(T),
+}
+
+/// Not `#[serde(untagged)]`, which would answer a bad option with "data did not match any variant":
+/// a table is read as `T` so its own error (an unknown key, a wrong type) reaches the user.
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Toggle<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::Boolean(enabled) => Ok(Toggle::Enabled(enabled)),
+            table @ Value::Table(_) => T::deserialize(table).map(Toggle::Config).map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(format!("expected true, false or a table of options, found {}", other.type_str()))),
+        }
+    }
 }
 
 impl<T: Default> Toggle<T> {
@@ -1104,6 +1115,25 @@ pub struct ComposeConfig {
 /// The feature flags of the Compose compiler that `[frameworks.compose] feature-flags` accepts.
 pub const COMPOSE_FEATURE_FLAGS: &[&str] = &["StrongSkipping", "IntrinsicRemember", "OptimizeNonSkippingGroups", "PausableComposition"];
 
+/// A Ktor engine name. A boolean is the likely mistake (`client = true`), so the error names what is accepted.
+fn engine_name<'de, D: serde::Deserializer<'de>>(deserializer: D, key: &str, engines: &str) -> Result<Option<String>, D::Error> {
+    match Value::deserialize(deserializer)? {
+        Value::String(name) => Ok(Some(name)),
+        other => Err(serde::de::Error::custom(format!(
+            "`{key}` is the name of an engine, a string such as {engines}, not {}; remove the key if you do not need a {key}",
+            other.type_str()
+        ))),
+    }
+}
+
+fn server_engine<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    engine_name(deserializer, "server", "\"netty\", \"cio\", \"jetty\" or \"tomcat\"")
+}
+
+fn client_engine<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    engine_name(deserializer, "client", "\"cio\", \"okhttp\", \"java\", \"apache5\", \"js\", \"curl\", \"winhttp\" or \"darwin\"")
+}
+
 fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
     OneOrMany::deserialize(deserializer).map(OneOrMany::into_vec)
 }
@@ -1121,9 +1151,15 @@ pub struct SerializationConfig {
 pub struct KtorConfig {
     pub version: Option<String>,
     /// Server engine (`netty`, `cio`, `jetty`, `tomcat`), or omitted for no server.
+    #[serde(default, deserialize_with = "server_engine")]
     pub server: Option<String>,
     /// Client engine (`cio`, `okhttp`, `java`, `apache5`, `js`, `curl`, `winhttp`, `darwin`).
+    #[serde(default, deserialize_with = "client_engine")]
     pub client: Option<String>,
+    /// The client engine of single targets, instead of `client`: an engine name, or `none` for the
+    /// client core alone (the engine of Kotlin/Wasm and Kotlin/JS comes with it).
+    #[serde(default)]
+    pub client_engines: BTreeMap<String, String>,
     /// Extra server plugins, e.g. `content-negotiation`, `cors`, `auth`.
     #[serde(default)]
     pub server_plugins: Vec<String>,
@@ -2295,6 +2331,24 @@ impl RawManifest {
             && ktor.client.is_none()
         {
             bail!("[frameworks.ktor] enable at least one of `server = \"netty\"` or `client = \"cio\"`");
+        }
+        if let Some(ktor) = &frameworks.ktor {
+            if !ktor.client_engines.is_empty() && ktor.client.is_none() {
+                bail!(
+                    "[frameworks.ktor] `client-engines` changes the engine of single targets; set `client = \"cio\"` (or another engine) for the others"
+                );
+            }
+            for (target, engine) in &ktor.client_engines {
+                if !TargetKind::ALL.iter().any(|t| t.as_str() == target) {
+                    let all: Vec<&str> = TargetKind::ALL.iter().map(|t| t.as_str()).collect();
+                    bail!("[frameworks.ktor] `client-engines` has unknown target `{target}` (expected one of: {})", all.join(", "));
+                }
+                if engine.trim().is_empty() {
+                    bail!(
+                        "[frameworks.ktor] `client-engines.{target}` is empty; name an engine such as \"okhttp\", or \"none\" for no engine"
+                    );
+                }
+            }
         }
 
         let mut compiler_plugins = Vec::new();

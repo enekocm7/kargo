@@ -417,6 +417,7 @@ coroutines = true           # or "1.11.0"
 compose = true              # Compose Multiplatform: desktop (JVM), web (Wasm browser), iOS (Native framework), Jetpack Compose (Android); Res from composeResources/
 # compose = { stability-config = "compose-stability.conf", strong-skipping = true, feature-flags = [], metrics = true, reports = true }  # compiler options
 ktor = { server = "netty", client = "cio", server-plugins = ["cors"], client-plugins = ["logging"] }
+# ktor = { client = "cio", client-engines = { android = "okhttp", native = "darwin", wasm = "none" } }  # a client engine per target
 lombok = true               # Lombok for Java sources + the Kotlin Lombok plugin
 spring-boot = { starters = ["web", "data-jpa"] }   # BOM, starters, allopen/noarg presets, -Xjsr305=strict
 benchmark = true            # kotlinx-benchmark annotations and JMH for the benchmarks in benches/ (kargo bench)

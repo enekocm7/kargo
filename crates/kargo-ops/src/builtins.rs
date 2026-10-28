@@ -17,6 +17,8 @@ pub const SERIALIZATION_VERSION: &str = "1.11.0";
 pub const COMPOSE_VERSION: &str = "1.12.1";
 pub const COMPOSE_MATERIAL3_VERSION: &str = "1.9.0";
 pub const KTOR_VERSION: &str = "3.6.0";
+/// The value of `[frameworks.ktor] client-engines` for a target that needs `ktor-client-core` alone.
+const NO_KTOR_ENGINE: &str = "none";
 pub const LOGBACK_VERSION: &str = "1.5.32";
 pub const LOMBOK_VERSION: &str = "1.18.48";
 pub const SPRING_BOOT_VERSION: &str = "4.1.1";
@@ -309,9 +311,12 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
                 c.dev_dependencies.push(dep("io.ktor:ktor-server-test-host", Some(v)));
             }
         }
-        if let Some(engine) = &ktor.client {
+        if let Some(default_engine) = &ktor.client {
             c.dependencies.push(dep("io.ktor:ktor-client-core", Some(v)));
-            c.dependencies.push(dep(&format!("io.ktor:ktor-client-{engine}"), Some(v)));
+            let engine = ktor.client_engines.get(target.as_str()).unwrap_or(default_engine);
+            if engine != NO_KTOR_ENGINE {
+                c.dependencies.push(dep(&format!("io.ktor:ktor-client-{engine}"), Some(v)));
+            }
             for plugin in &ktor.client_plugins {
                 c.dependencies.push(dep(&format!("io.ktor:ktor-client-{plugin}"), Some(v)));
             }
@@ -630,6 +635,21 @@ mod tests {
             assert!(deps.contains(&expected.to_owned()), "missing {expected}");
         }
         assert!(contributions(&m, TargetKind::Native, Path::new(".")).is_err(), "netty is JVM-only");
+    }
+
+    #[test]
+    fn ktor_client_engines_follow_the_target() {
+        let m = manifest(
+            "[frameworks]\nktor = { client = \"cio\", client-engines = { native = \"darwin\", wasm = \"none\", android = \"okhttp\" } }\n",
+        );
+        let client_modules = |target| {
+            let c = contributions(&m, target, Path::new(".")).unwrap();
+            coords(&c.dependencies).into_iter().filter(|d| d.starts_with("io.ktor:")).collect::<Vec<_>>()
+        };
+        assert_eq!(client_modules(TargetKind::Jvm), ["io.ktor:ktor-client-core", "io.ktor:ktor-client-cio"]);
+        assert_eq!(client_modules(TargetKind::Native), ["io.ktor:ktor-client-core", "io.ktor:ktor-client-darwin"]);
+        assert_eq!(client_modules(TargetKind::Android), ["io.ktor:ktor-client-core", "io.ktor:ktor-client-okhttp"]);
+        assert_eq!(client_modules(TargetKind::Wasm), ["io.ktor:ktor-client-core"]);
     }
 
     #[test]
