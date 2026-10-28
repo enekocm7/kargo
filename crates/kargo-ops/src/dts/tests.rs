@@ -260,6 +260,26 @@ fn es_modules_classes_and_missing_types() {
 }
 
 #[test]
+fn a_name_exported_as_a_value_and_an_interface_does_not_clash() {
+    let (dir, _) = generated(&["colors"], |nm| {
+        write(nm, "colors/package.json", r#"{"name":"colors","types":"index.d.ts"}"#);
+        write(
+            nm,
+            "colors/index.d.ts",
+            r#"
+            export interface ColorManagement { enabled: boolean }
+            export declare const ColorManagement: ColorManagement;
+            "#,
+        );
+    });
+    let exports = read(&dir, "colors/Exports.kt");
+    let types = read(&dir, "colors/Types.kt");
+    assert!(exports.contains("external val ColorManagement: colors.IColorManagement"), "{exports}");
+    assert!(types.contains("external interface IColorManagement : JsAny"), "{types}");
+    assert!(!types.contains("interface ColorManagement :"), "{types}");
+}
+
+#[test]
 fn a_package_with_only_subpath_exports_gets_a_kotlin_package_per_subpath() {
     // Like `cubing`: no `"."` entry, so `import "cubing"` fails and each subpath is a module.
     let (dir, out) = generated(&["cubing"], |nm| {
