@@ -36,9 +36,31 @@ Arguments after `--` go to the program on every start: `kargo run --watch -- --p
 
 On Unix, a program is first sent SIGTERM and given five seconds to exit, so a server can close its sockets and run its shutdown hooks. Only then is it killed. On Windows it is terminated at once.
 
-`--watch` starts JVM, Native, Wasm and JS programs the same way (Wasm and JS programs run on Node.js). It does not run Android apps, which run inside Gradle, or Wasm and JS browser apps, which `kargo run` serves until Ctrl+C. `--watch` conflicts with `--debug`, because a debugger would have to attach again after every restart.
+`--watch` starts JVM, Native, Wasm and JS programs the same way (Wasm and JS programs run on Node.js). It does not run Android apps, which run inside Gradle. Wasm and JS browser apps are [served and reloaded](#reload-a-browser-app-on-change) instead of restarted. `--watch` conflicts with `--debug`, because a debugger would have to attach again after every restart.
 
 For a Compose Desktop app, `kargo run --hot-reload` watches the same way but does not restart the app: it swaps the changed classes into the running one, which keeps its state. See [Hot reload](../compose/#hot-reload).
+
+## Reload a browser app on change
+
+For a Wasm or JS browser app, `kargo run --watch` builds the app, serves it and keeps serving it. After each successful build, the pages that are open in a browser reload by themselves:
+
+```console
+$ kargo run -t js --watch --open
+     Watching 4 files for changes (press Ctrl+C to stop)
+   Compiling hello v0.1.0 (js)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.12s
+     Serving target/debug/js at http://127.0.0.1:8080/ (reloading on change, press Ctrl+C to stop)
+     Changed src/Main.kt
+   Compiling hello v0.1.0 (js)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.85s
+   Reloading the open pages
+```
+
+The server starts once, so the address stays the same, and `--port` and `--open` work as in [`kargo run`](../../reference/commands/#kargo-run-r) (`--open` opens the page once, not after every build). Kargo watches the Kotlin sources, the TypeScript and JavaScript modules in `js/`, the resources and `kargo.toml`, as for any other program.
+
+A build that fails prints its errors and leaves the page as it is; the next successful build reloads it. The pages listen to a server-sent events stream on `/__kargo/reload`, which the served HTML pages get a small script for. Kargo adds the script to the pages it serves and not to the files in `target/`, and only with `--watch`.
+
+The page reloads completely, so its state is lost. [Compose Desktop hot reload](../compose/#hot-reload) swaps code without a restart, but it is for the JVM.
 
 ## Rerun tests on change
 
@@ -101,7 +123,8 @@ Saving often comes as a burst of writes. Kargo waits until the files have been s
 
 ## Limits
 
-- **Android apps and browser apps** are not restarted. Run them with `kargo run` again after a change.
+- **Android apps** are installed again and their log followed, but the app is not reloaded in place.
+- **Browser apps** reload the whole page; the state of the page is lost.
 - **Windows and native programs:** Windows does not let a running executable be replaced. While a native program runs, the next build that links it fails with the linker's error, and the running program keeps running. Stop watching with Ctrl+C, then start `kargo run --watch` again. This is not tested on every setup; if you hit it, report it.
 - **Changes are seen up to half a second late**, because of the polling. Every watched file is read once when watching starts, so a large `resources/` folder makes the start slower.
 - **A program that writes into a watched directory** restarts itself: each file it writes is a change. Write such files somewhere else, or leave them out with `--ignore`.

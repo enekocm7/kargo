@@ -73,6 +73,8 @@ $ kargo run -t js
 
 `kargo run` serves the app the way it serves a [Wasm browser app](../wasm/#browser-apps), with the same `--port` and `--open` options, and the same `port` key in `[target.js]` to change the default port 8080 (see [Choosing the port](../wasm/#choosing-the-port)). Kargo writes `index.html` next to the module, unless `resources/index.html` is your own page; everything below `resources/` is copied to `target/<profile>/js/`. The generated page loads `<name>.mjs` with `<script type="module">`, or `<name>.js` with a plain `<script>` for a UMD module.
 
+`kargo run --watch` rebuilds the app on each change and reloads the open pages, see [Reload a browser app on change](../watch/#reload-a-browser-app-on-change).
+
 `kargo test` runs the tests in a headless browser, found and configured as for [Wasm](../wasm/#testing-in-a-browser) (`KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT`). Any current browser runs Kotlin/JS.
 
 ## Module kinds
