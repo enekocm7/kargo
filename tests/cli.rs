@@ -2298,6 +2298,39 @@ fn doctor_reports_project_problems_and_fails() {
 }
 
 #[test]
+fn doctor_names_the_process_that_holds_the_build_directory_lock_once_for_a_workspace() {
+    let p = Project::new();
+    let java_home = fake_java_home(p.home.path(), 21);
+    p.file("kargo.toml", "[workspace]\nmembers = [\"a\", \"b\"]\n")
+        .file("a/kargo.toml", &manifest("a", ""))
+        .file("a/src/main.kt", "fun main() {}\n")
+        .file("b/kargo.toml", &manifest("b", ""))
+        .file("b/src/main.kt", "fun main() {}\n");
+
+    let locks = |report: &serde_json::Value| doctor_checks(report, "build directory").len();
+    let out = doctor(&p, &java_home).args(["--format", "json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(locks(&report), 0, "{report:#}");
+
+    // This process holds the lock of the workspace's `target/`, which both members share.
+    let shell = kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet);
+    let held = kargo_util::flock::FileLock::exclusive_recorded(&p.path().join("target/.kargo-lock"), &shell, "test").unwrap();
+    let out = doctor(&p, &java_home).args(["--format", "json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let checks = doctor_checks(&report, "build directory");
+    assert_eq!(checks.len(), 1, "{report:#}");
+    assert_eq!(checks[0]["status"], "warning");
+    let message = checks[0]["message"].as_str().unwrap();
+    assert!(message.contains(&format!("(process {})", std::process::id())), "{message}");
+    assert!(message.contains("target"), "{message}");
+
+    drop(held);
+    let out = doctor(&p, &java_home).args(["--format", "json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(locks(&report), 0, "{report:#}");
+}
+
+#[test]
 fn doctor_reports_a_manifest_that_does_not_load() {
     let p = Project::new();
     let java_home = fake_java_home(p.home.path(), 21);

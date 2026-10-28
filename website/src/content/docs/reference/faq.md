@@ -243,7 +243,7 @@ kargo build --refresh       # re-check repositories, ignoring cached metadata an
 
 ### `Blocking waiting for file lock on build directory`
 
-Another Kargo process is building or resolving the same project, for example an IDE, a file watcher or a second terminal. The command continues once the other process finishes. If nothing else is running, check for a hung `kargo` process (a stuck hook, for example) and stop it. The operating system releases the lock when that process exits. See [Concurrent commands](../commands/#concurrent-commands). `kargo doctor` tells you whether a process holds the lock now.
+Another Kargo process is building or resolving the same project, for example an IDE, a file watcher or a second terminal. The command continues once the other process finishes. If nothing else is running, check for a hung `kargo` process (a stuck hook, for example) and stop it. The operating system releases the lock when that process exits. See [Concurrent commands](../commands/#concurrent-commands). `kargo doctor` tells you whether a process holds the lock now, and which one (for example `kargo run`, process 1234).
 
 ### `failed to move ... to ...` on Windows
 

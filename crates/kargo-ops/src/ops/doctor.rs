@@ -809,16 +809,36 @@ fn project_checks(project: &Project, is_builtin_command: &dyn Fn(&str) -> bool, 
         for message in messages {
             out.push(Check::warning(s, name.clone(), message, "see `reference/warnings.md` in the documentation"));
         }
-        if flock::is_held(&ws.target_dir().join(BUILD_LOCK_NAME)) {
-            out.push(Check::warning(
-                s,
-                name.clone(),
-                format!("another Kargo process is using {}", ws.target_dir().display()),
-                "wait for it to finish; if no build is running, a hung `kargo` process holds the lock: stop it",
-            ));
-        }
     }
+    build_directory_locks(project, out);
     lockfile(project, out);
+}
+
+/// Warns once per build directory (the members of a workspace share `target/`) that another process holds its lock.
+fn build_directory_locks(project: &Project, out: &mut Vec<Check>) {
+    let mut seen: Vec<&Path> = Vec::new();
+    for &i in project.members() {
+        let dir = project.package(i).target_dir();
+        if seen.contains(&dir) {
+            continue;
+        }
+        seen.push(dir);
+        let lock = dir.join(BUILD_LOCK_NAME);
+        if !flock::is_held(&lock) {
+            continue;
+        }
+        let (what, fix) = match flock::holder(&lock) {
+            Some(holder) => (
+                format!("{holder} is using {}", dir.display()),
+                format!("wait for it to finish, or stop process {} if it is hung", holder.pid),
+            ),
+            None => (
+                format!("another Kargo process is using {}", dir.display()),
+                "wait for it to finish; if no build is running, a hung `kargo` process holds the lock: stop it".to_owned(),
+            ),
+        };
+        out.push(Check::warning(Section::Project, "build directory", what, fix));
+    }
 }
 
 fn lockfile(project: &Project, out: &mut Vec<Check>) {

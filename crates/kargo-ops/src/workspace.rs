@@ -183,7 +183,7 @@ impl Workspace {
     /// Takes the build-directory lock that guards `target/` and `kargo.lock`,
     /// waiting (with a `Blocking` status) while another Kargo process holds it.
     pub fn lock(&self, shell: &Shell) -> Result<FileLock> {
-        FileLock::exclusive(&self.target_dir.join(BUILD_LOCK_NAME), shell, "build directory")
+        FileLock::exclusive_recorded(&self.target_dir.join(BUILD_LOCK_NAME), shell, "build directory")
     }
 
     pub fn name(&self) -> &str {

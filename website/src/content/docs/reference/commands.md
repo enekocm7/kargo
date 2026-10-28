@@ -81,6 +81,8 @@ $ kargo build
 
 `kargo run` releases the lock once the build is done, so a long-running program doesn't block other commands. Downloads to the shared cache in `~/.kargo` don't need the lock: each file is written to a temporary name and renamed into place, so two projects can fetch the same artifact at the same time.
 
+The process that holds the lock writes its command and process id to `target/.kargo-lock.holder` and removes the file when it releases the lock, so [`kargo doctor`](#kargo-doctor) can name it. A workspace has one `target/`, so one process holds the lock for all its members.
+
 ---
 
 ## `kargo new`
@@ -965,7 +967,7 @@ In a workspace, or with path dependencies, `kargo update` re-resolves every pack
 
 ## `kargo clean`
 
-Delete everything in `target/` except the build-directory lock, `target/.kargo-lock`, which includes the files of [`[[generate]]` steps](../../guides/code-generation/) in `target/generated/`. In a workspace, that is the workspace's `target/`.
+Delete everything in `target/` except the build-directory lock, `target/.kargo-lock` (and its `.kargo-lock.holder`), which includes the files of [`[[generate]]` steps](../../guides/code-generation/) in `target/generated/`. In a workspace, that is the workspace's `target/`.
 
 | Option | Meaning |
 |---|---|
@@ -1126,7 +1128,7 @@ Each check is `ok`, a `warning` (something to know, or a build that will downloa
 | Android | With the Android target: the SDK (`ANDROID_HOME`, or the [Kargo-managed one](../../guides/android/#android-sdk)), its platform and build-tools, accepted licenses, `adb` and its version, the connected devices and their states, the installed virtual devices, the emulator package and whether the machine accelerates the emulator (KVM, the Windows Hypervisor Platform, Hypervisor.framework), and the Gradle the build runs |
 | Wasm and JavaScript | With the Wasm or JS target: Node.js, a browser for a `browser` environment, and Binaryen's `wasm-opt` |
 | Network | The proxy (`[http] proxy` or `HTTPS_PROXY` and friends, passwords hidden), `[http] cainfo`, repository credentials whose environment variables are unset, and whether each repository (Maven Central outside a project) answers. `--offline` skips contacting them |
-| Project | Each member's `kargo.toml` [warnings](../warnings/), a held build lock on its `target/`, and `kargo.lock`: present, readable, and locking every declared dependency. A `kargo.toml` that does not load is reported here instead of stopping the command |
+| Project | Each member's `kargo.toml` [warnings](../warnings/), the process that holds the build lock on the `target/` of the project or workspace (named once, with its command and process id), and `kargo.lock`: present, readable, and locking every declared dependency. A `kargo.toml` that does not load is reported here instead of stopping the command |
 
 `kargo doctor` exits with 1 when a check is an error, and 0 otherwise, so a CI job can run it first.
 

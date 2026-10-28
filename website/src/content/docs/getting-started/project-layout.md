@@ -158,7 +158,8 @@ target/
 ├── generated/                    what [[generate]] steps write: generated/<profile>/<name>/ (KARGO_GEN_DIR), one directory per step
 ├── lint/                         Kargo's detekt settings for kargo lint
 ├── android/                      the generated Gradle project
-└── .kargo-lock                   build-directory lock (see below)
+├── .kargo-lock                   build-directory lock (see below)
+└── .kargo-lock.holder            the process holding the lock, while one does
 ```
 
 `kargo package` writes `target/<profile>/jvm/<name>-<version>-all.jar` (`<bin>-<version>-all.jar` with `--bin`).
@@ -179,4 +180,4 @@ myapp/
 
 Change the output directory with the `KARGO_TARGET_DIR` environment variable.
 
-`target/.kargo-lock` keeps two Kargo processes from building the same project at the same time. See [Concurrent commands](../../reference/commands/#concurrent-commands).
+`target/.kargo-lock` keeps two Kargo processes from building the same project at the same time. `target/.kargo-lock.holder` names the process that holds it, for `kargo doctor`. See [Concurrent commands](../../reference/commands/#concurrent-commands).
