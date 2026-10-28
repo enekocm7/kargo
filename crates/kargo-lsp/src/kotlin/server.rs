@@ -1323,6 +1323,7 @@ impl State {
                     self.files.insert(path.clone(), Arc::new(Unit::new(path, unit.text.clone(), origin)));
                 }
                 self.changed();
+                self.republish_diagnostics();
             }
             Event::Libraries { generation, units, jdk } if generation == self.load_generation => {
                 self.libraries_loaded = true;
@@ -1330,6 +1331,9 @@ impl State {
                 self.libraries_generation += 1;
                 self.resolve_scripts();
                 self.changed();
+                // A file opened before its libraries loaded was checked without them.
+                // A file opened before its libraries loaded was checked without them.
+                self.republish_diagnostics();
                 self.report_loading("Indexing the dependencies");
             }
             Event::Scripted { path, declared, generation, index } => {
@@ -1399,9 +1403,7 @@ impl State {
                 self.resolve_scripts();
                 self.changed();
                 // Kotlin code calling into the modules resolves differently now.
-                for uri in self.open.keys().cloned().collect::<Vec<_>>() {
-                    let _ = self.publish_diagnostics(&uri);
-                }
+                self.republish_diagnostics();
             }
             Event::Searching { token, percentage } => {
                 let value = json!({ "kind": "report", "percentage": percentage });
@@ -1776,6 +1778,14 @@ impl State {
         }
         let diagnostics: Vec<Value> = problems.iter().map(|p| p.to_json(&unit.text)).collect();
         self.send(&jsonrpc::notification("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics })))
+    }
+
+    /// Pushes the diagnostics of every open document again, after the declarations they resolve
+    /// against changed.
+    fn republish_diagnostics(&mut self) {
+        for uri in self.open.keys().cloned().collect::<Vec<_>>() {
+            let _ = self.publish_diagnostics(&uri);
+        }
     }
 
     /// Remembers that `word` was inserted, forgetting the oldest names past [`RECENT_NAMES`].
@@ -3411,6 +3421,42 @@ println(1)"
         let reply = editor.reply("1");
         assert_eq!(reply["error"]["code"], CONTENT_MODIFIED, "{reply}");
         editor.finish();
+    }
+
+    #[test]
+    fn checks_open_documents_again_when_the_libraries_load() {
+        let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let (sender, events) = std::sync::mpsc::channel();
+        let formatter: Formatter = Arc::new(|_, _, _| Ok(None));
+        let mut state = State::new(config, Tx { index: 0, tx: sender }, 0, false, formatter);
+        let uri = "file:///p/src/app/Main.kt";
+        let main = "package app\n\nimport three.MaterialOptions\n\n/** Options (typed via [MaterialOptions]). */\nfun options(build: MaterialOptions.() -> Unit) {}\n";
+        let document = json!({ "uri": uri, "languageId": "kotlin", "version": 1, "text": main });
+        state.message(jsonrpc::notification("textDocument/didOpen", json!({ "textDocument": document }))).unwrap();
+        // The messages the state sent for the document, the last one first.
+        let last = || {
+            let published: Vec<Value> = events
+                .try_iter()
+                .filter_map(|event| match event {
+                    Event::Out(_, message) if message["method"] == "textDocument/publishDiagnostics" => Some(message),
+                    _ => None,
+                })
+                .collect();
+            published.last().expect("diagnostics").clone()
+        };
+        let before = last();
+        assert_eq!(before["params"]["diagnostics"][0]["message"], "unresolved reference `MaterialOptions`", "{before}");
+
+        let npm = "package three\n\nexternal interface MaterialOptions\n";
+        let unit = Arc::new(Unit::new(
+            PathBuf::from("/p/target/debug/generated/npm/three/Default.kt"),
+            npm.to_owned(),
+            Origin::Library { name: "npm".into(), main: Platforms::WASM, test: Platforms::NONE },
+        ));
+        state.loaded(Event::Libraries { generation: 0, units: vec![unit], jdk: None });
+        let after = last();
+        assert_eq!(after["params"]["uri"], uri);
+        assert_eq!(after["params"]["diagnostics"], json!([]), "{after}");
     }
 
     #[test]
