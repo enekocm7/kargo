@@ -344,7 +344,7 @@ impl FakeAndroid {
         .unwrap();
     }
 
-    /// A switch of the fake tools (`am-fails`, `crash`, `emulator-fails`).
+    /// A switch of the fake tools (`am-fails`, `crash`, `emulator-fails`, `no-default`, `no-resolve`, `no-launcher`).
     pub fn switch(&self, name: &str) {
         std::fs::write(self.state.join(name), "").unwrap();
     }
