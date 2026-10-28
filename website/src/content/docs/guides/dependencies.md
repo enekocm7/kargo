@@ -283,6 +283,24 @@ g:util:2.0 (jvm, runtime)
 
 It lists every version that was asked for and by whom (your `kargo.toml`, another module, a BOM, a platform, a Gradle module metadata constraint, a relocation), says what decided between them (the highest wins, `force = true`, a version range, or a version `kargo.lock` keeps), and shows the shortest path from `kargo.toml` to the module (`--all-paths` for every one). Use `-t` and `-c` to pick the target and classpath, as with `kargo tree`, and `--format json` for scripts. To change the outcome, declare the module yourself at the version you want (the highest still wins), or with `force = true` to go lower. See [`kargo why`](../../reference/commands/#kargo-why).
 
+### What does a dependency offer?
+
+`kargo inspect` shows where a dependency's jar is and what is in it, so you don't have to find the jar in the cache and run `javap` on it yourself. This is how you see, for example, that a library's `JsonNode` declares its own `map` that shadows Kotlin's `Iterable.map`.
+
+```console
+$ kargo inspect org.jetbrains.kotlin:kotlin-stdlib kotlin.Pair
+  Inspecting org.jetbrains.kotlin:kotlin-stdlib:2.4.21 (jvm, runtime) /home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar
+Compiled from "Tuples.kt"
+public final class kotlin.Pair<A, B> implements java.io.Serializable {
+  public kotlin.Pair(A, B);
+  public final A getFirst();
+  public final B getSecond();
+  ...
+}
+```
+
+Without a class it lists the public classes of the jar, one per line. A class is named in full (`com.acme.Outer.Inner` or `com/acme/Outer$Inner`) or by the end of its name (`Inner`, `Outer.Inner`) when only one class of the jar matches. The module is looked up in the classpath a build uses, so the jar is the version in `kargo.lock`. `-c` picks the classpath, `--visibility` the members printed. The output is the JVM view of a class, so a Kotlin property shows as its getter and setter. See [`kargo inspect`](../../reference/commands/#kargo-inspect). The cache the jar lives in is described in [the lockfile reference](../../reference/lockfile/), and `kargo classpath` prints the paths of every jar.
+
 ## Dependencies of one profile
 
 A dependency that only some builds need goes in the profile table: an HTTP logger in debug builds, or a mock server in a staging build. It is added to the build of every target with that profile, and to no other profile:

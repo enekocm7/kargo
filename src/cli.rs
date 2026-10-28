@@ -594,6 +594,56 @@ struct WhyArgs {
     format: FormatArg,
 }
 
+/// Which members `kargo inspect` prints.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum VisibilityArg {
+    /// Public members (and protected ones, which subclasses use)
+    #[default]
+    Public,
+    Protected,
+    Package,
+    Private,
+}
+
+impl From<VisibilityArg> for ops::inspect::Visibility {
+    fn from(v: VisibilityArg) -> Self {
+        match v {
+            VisibilityArg::Public => Self::Public,
+            VisibilityArg::Protected => Self::Protected,
+            VisibilityArg::Package => Self::Package,
+            VisibilityArg::Private => Self::Private,
+        }
+    }
+}
+
+/// The arguments of `kargo inspect`, in a struct of their own for the same reason as [`WhyArgs`].
+#[derive(Debug, Args)]
+#[command(long_about = "Show the jar of a resolved dependency and its API, as `javap` would, without finding the jar by hand.
+
+Looks the module up in the classpath a build uses (the version in kargo.lock) and prints where its jar
+is in the cache. With no class it lists the jar's public classes; with one or more it prints their
+members using the JDK's `javap`, with the whole classpath behind them so supertypes resolve. A class
+is named in full (com.acme.Outer.Inner or com/acme/Outer$Inner) or by the end of its name (Inner,
+Outer.Inner) when only one class matches.
+
+The output is the JVM view of a class, so Kotlin properties show as getters and setters.")]
+struct InspectArgs {
+    /// The module: group:artifact, optionally with a version (group:artifact:version)
+    #[arg(value_name = "MODULE")]
+    module: String,
+    /// Classes to print; none lists the classes of the jar
+    #[arg(value_name = "CLASS")]
+    classes: Vec<String>,
+    /// Which classpath to read the module from
+    #[arg(short, long, value_enum, default_value = "runtime")]
+    configuration: ConfigurationArg,
+    /// Which members to print, and with `package` or `private` also the classes that are not public
+    #[arg(long, value_enum, default_value_t)]
+    visibility: VisibilityArg,
+    #[command(flatten)]
+    package: OnePackageArg,
+}
+
 /// `-p` / `--workspace` for commands that work on several packages.
 #[derive(Debug, Args, Default)]
 struct PackageArgs {
@@ -1293,6 +1343,8 @@ Exits with 101 when an advisory at or above the --deny severity (default: [audit
     },
     /// Explain why a module is on the classpath and why at its version
     Why(WhyArgs),
+    /// Show where a dependency's jar is and the API of its classes, javap style
+    Inspect(InspectArgs),
     /// Download all dependencies and toolchains
     Fetch {
         #[arg(short, long = "target", value_enum)]
@@ -2915,6 +2967,45 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             {
                 bail!("{}", not_found(query, configuration));
             }
+            Ok(0)
+        }
+        Command::Inspect(InspectArgs { module, classes, configuration, visibility, package }) => {
+            let project = load_project(global)?;
+            let index = project.select_one(&package.selection(), "`kargo inspect`")?;
+            let ctx = context(config, &project, index, global, ProfileKind::Dev)?;
+            let configuration: Configuration = configuration.into();
+            let visibility: ops::inspect::Visibility = visibility.into();
+            let query: ops::why::Query = module.parse()?;
+            let mut found = None;
+            for (label, resolution) in ops::inspect::resolutions(&ctx, configuration)? {
+                if let Some(located) = ops::inspect::locate(&label, &resolution, &query)? {
+                    found = Some(located);
+                    break;
+                }
+            }
+            let Some(located) = found else { bail!("{}", not_found(&query, configuration)) };
+            shell.status(
+                "Inspecting",
+                format!(
+                    "{}:{} ({}, {}) {}",
+                    located.module,
+                    located.version,
+                    located.target,
+                    configuration_name(configuration),
+                    located.jar.display()
+                ),
+            );
+            let available = ops::inspect::classes(&located.jar, visibility)?;
+            if classes.is_empty() {
+                for class in &available {
+                    println!("{}", ops::inspect::source_name(class));
+                }
+                shell.note(format!("{} classes; name one to print its members: `kargo inspect {} <class>`", available.len(), query.module));
+                return Ok(0);
+            }
+            let all = ops::inspect::classes(&located.jar, ops::inspect::Visibility::Private)?;
+            let wanted = classes.iter().map(|c| ops::inspect::find_class(&all, c)).collect::<Result<Vec<_>>>()?;
+            ops::inspect::javap(&ctx, &located, &wanted, visibility)?;
             Ok(0)
         }
         Command::Why(WhyArgs { module, target, configuration, all_paths, packages, format }) => {

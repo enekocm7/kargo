@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod env;
 pub mod fmt;
 pub mod import;
+pub mod inspect;
 pub mod install;
 pub mod lint;
 pub mod local;

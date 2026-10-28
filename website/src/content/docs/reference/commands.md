@@ -754,6 +754,39 @@ The `selected` line says what decided the version:
 
 The classpath is the one a build uses, from `kargo.lock`; the reasons come from resolving the same dependencies again, without the lock and without downloading artifacts (the POMs are in the cache already). Android dependencies are resolved by Gradle: run `kargo android -- dependencyInsight --configuration releaseRuntimeClasspath --dependency <module>` there.
 
+## `kargo inspect`
+
+Show where the jar of a resolved dependency is, and what is in it: the `javap` of a dependency, without finding its jar in the cache.
+
+```console
+$ kargo inspect g:util
+  Inspecting g:util:2.0 (jvm, runtime) /home/me/.kargo/cache/maven/g/util/2.0/util-2.0.jar
+com.acme.util.Strings
+com.acme.util.Strings.Companion
+note: 2 classes; name one to print its members: `kargo inspect g:util <class>`
+
+$ kargo inspect g:util Strings
+  Inspecting g:util:2.0 (jvm, runtime) /home/me/.kargo/cache/maven/g/util/2.0/util-2.0.jar
+public final class com.acme.util.Strings {
+  public static final com.acme.util.Strings$Companion Companion;
+  ...
+}
+```
+
+The module is `group:artifact`, optionally with a version (`g:util:2.0`; it must be the one on the classpath or one something requested). It is looked up in the resolution a build uses, so the jar is the version `kargo.lock` pins. A module that only redirects to another (a Kotlin Multiplatform root such as `kotlinx-coroutines-core`) shows the jar of the module it redirects to. The status line, on stderr, says which module, resolution and jar.
+
+With no class, the public classes of the jar are listed on stdout. Anonymous and local classes, `module-info` and `package-info` are left out. With one or more classes, their members are printed by the JDK's `javap` (the JDK of `[toolchain] jdk`), with the whole classpath behind them so supertypes resolve. A class is named in full (`com.acme.Outer.Inner` or `com/acme/Outer$Inner`) or by the end of its name (`Inner`, `Outer.Inner`); the command fails when no class or several classes of the jar match, and lists the several.
+
+The output is the JVM view of a class: a Kotlin property shows as a getter and a setter, a top-level function as a static method of its `FooKt` class.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-c, --configuration <c>` | `runtime` | `compile`, `runtime` or `test` |
+| `--visibility <v>` | `public` | Members to print: `public`, `protected`, `package` or `private`. `package` and `private` also list the classes that are not public |
+| `-p, --package <name>` | current package | Which package's classpath |
+
+Only the JVM target has jars. For the files of the whole classpath, use [`kargo classpath`](#kargo-classpath).
+
 ## `kargo classpath`
 
 Print the resolved classpath (JVM) or klib path (Wasm, JS, Native) of a target: the jars on disk, where `kargo tree` shows coordinates. Use it to point any tool, script or editor at a project's libraries.
