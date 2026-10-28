@@ -117,6 +117,56 @@ class ApplicationTest {
 }
 ```
 
+### Test slices in Spring Boot 4
+
+Spring Boot 4 split its test auto-configuration into one module per technology and moved the annotations to new packages. `spring-boot-starter-test` only has the core (`@SpringBootTest`), so `@WebMvcTest`, `@AutoConfigureMockMvc` and `@DataJpaTest` fail to compile until you add the test starter that matches each starter you use. The Spring Boot BOM manages their versions, so add them to `[dev-dependencies]` without one:
+
+```toml title="kargo.toml"
+[frameworks]
+spring-boot = { starters = ["webmvc", "data-jpa"] }
+
+[dev-dependencies]
+"org.springframework.boot:spring-boot-starter-webmvc-test" = {}
+"org.springframework.boot:spring-boot-starter-data-jpa-test" = {}
+```
+
+The test starter of `<name>` is `spring-boot-starter-<name>-test`:
+
+| Starter you use | Add to `[dev-dependencies]`                   | Annotations it brings                                                                     |
+| --------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `web`, `webmvc` | `spring-boot-starter-webmvc-test`             | `org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest`, `AutoConfigureMockMvc`   |
+| `webflux`       | `spring-boot-starter-webflux-test`            | `org.springframework.boot.webflux.test.autoconfigure.WebFluxTest`                         |
+| `data-jpa`      | `spring-boot-starter-data-jpa-test`           | `org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest`                        |
+| `jdbc`          | `spring-boot-starter-jdbc-test`               | `org.springframework.boot.jdbc.test.autoconfigure.JdbcTest`                               |
+| `validation`    | `spring-boot-starter-validation-test`         |                                                                                           |
+| `security`      | `spring-boot-starter-security-test`           |                                                                                           |
+
+There is a test starter for most other starters too (for example `actuator`). Without a matching one, look for the starter's `-test` artifact on [Maven Central](https://central.sonatype.com/namespace/org.springframework.boot). A test with MockMvc then looks like this:
+
+```kotlin title="tests-jvm/GreetingControllerTest.kt"
+import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
+import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.get
+
+@SpringBootTest
+@AutoConfigureMockMvc
+class GreetingControllerTest {
+    @Autowired lateinit var mockMvc: MockMvc
+
+    @Test
+    fun greets() {
+        mockMvc.get("/?name=Kargo").andExpect { status { isOk() } }
+    }
+}
+```
+
+:::note
+These packages and modules are new in Spring Boot 4. On Spring Boot 3 (`version = "3.x"`), `spring-boot-starter-test` already includes the slices and they live under `org.springframework.boot.test.autoconfigure...`, for example `org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc`. Copying a Boot 3 example into a Boot 4 project is the usual cause of "unresolved reference" errors in tests.
+:::
+
 ## Packaging
 
 ```sh
