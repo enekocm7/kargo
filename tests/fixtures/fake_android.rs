@@ -8,6 +8,8 @@
 //! - `log`: every call, one line each, `tool arg arg ...`.
 //! - `running`: exists while the app runs (`am start` creates it, `am force-stop` and the end of `logcat` remove it).
 //! - `am-fails`, `crash`, `emulator-fails`: switches for the failure cases.
+//! - `no-default`: `am start` only resolves an activity started by name (`-n`), as with a launcher filter without a DEFAULT category.
+//! - `no-resolve`: `cmd package resolve-activity` fails (an old device). `no-launcher`: no activity has the LAUNCHER category.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -119,8 +121,22 @@ fn adb(state: &std::path::Path, mut args: Vec<String>) {
             };
             println!("{value}");
         }
-        ["shell", "am", "start", ..] => {
-            if state.join("am-fails").exists() {
+        // The launcher filter of the app has no DEFAULT category: it resolves with `resolve-activity`, but an implicit intent does not.
+        ["shell", "cmd", "package", "resolve-activity", ..] => {
+            if state.join("no-resolve").exists() {
+                eprintln!("Can't find service: package");
+                std::process::exit(1);
+            } else if state.join("no-launcher").exists() {
+                println!("No activity found");
+            } else {
+                println!("priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.example.droid/.MainActivity");
+            }
+        }
+        ["shell", "am", "start", rest @ ..] => {
+            let by_name = rest.contains(&"-n");
+            if (state.join("no-default").exists() || state.join("no-launcher").exists()) && !by_name {
+                println!("Starting: Intent {{ act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] pkg=com.example.droid }}\nError: Activity not started, unable to resolve Intent {{ act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10000000 xflg=0x4 pkg=com.example.droid }}");
+            } else if state.join("am-fails").exists() {
                 println!("Starting: Intent {{ act=android.intent.action.MAIN }}\nError type 3\nError: Activity class {{com.example.droid/com.example.droid.Missing}} does not exist.");
             } else {
                 std::fs::write(state.join("running"), "1").unwrap();

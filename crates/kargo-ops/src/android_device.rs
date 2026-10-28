@@ -995,9 +995,34 @@ pub fn disconnect(tb: &Toolbox, shell: &Shell, address: Option<&str>) -> Result<
     Ok(())
 }
 
+const MAIN_ACTION: &str = "android.intent.action.MAIN";
+const LAUNCHER_CATEGORY: &str = "android.intent.category.LAUNCHER";
+
+/// The launcher activity of `app_id` as `package/.Activity`, or `None` when the device (an old one has no `cmd package`) cannot say.
+fn launcher_activity(adb: &Adb, serial: &str, app_id: &str) -> Option<String> {
+    let args = ["shell", "cmd", "package", "resolve-activity", "--brief", "-c", LAUNCHER_CATEGORY, app_id];
+    let out = adb.capture(Some(serial), &args, Duration::from_secs(30)).ok()?;
+    out.success.then(|| resolved_component(&out.stdout, app_id)).flatten()
+}
+
+/// The component `resolve-activity --brief` printed, which is its last line (after a `priority=... isDefault=...` line). An answer
+/// that is not an activity of `app_id`, such as "No activity found" or the system's chooser, is not one.
+fn resolved_component(output: &str, app_id: &str) -> Option<String> {
+    let line = output.lines().map(str::trim).rfind(|l| !l.is_empty())?;
+    let (package, class) = line.split_once('/')?;
+    (package == app_id && !class.is_empty() && !line.contains(char::is_whitespace)).then(|| line.to_owned())
+}
+
 /// Starts the launcher activity of `app_id` on `serial` and waits until it is up. Returns the activity.
+///
+/// The activity is resolved first and started by name, like Android Studio does: `startActivity` adds `CATEGORY_DEFAULT` to an
+/// implicit intent, so that never matches the usual launcher filter, which has no `DEFAULT` category.
 pub fn launch(adb: &Adb, serial: &str, app_id: &str) -> Result<String> {
-    let args = ["shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", app_id];
+    let component = launcher_activity(adb, serial, app_id);
+    let args: Vec<&str> = match &component {
+        Some(component) => vec!["shell", "am", "start", "-W", "-n", component, "-a", MAIN_ACTION, "-c", LAUNCHER_CATEGORY],
+        None => vec!["shell", "am", "start", "-W", "-a", MAIN_ACTION, "-c", LAUNCHER_CATEGORY, "-p", app_id],
+    };
     let out = adb.capture(Some(serial), &args, Duration::from_secs(60))?;
     let text = format!("{}\n{}", out.stdout, out.stderr);
     // `am` exits with 0 whatever happens; its output says.
@@ -1006,12 +1031,16 @@ pub fn launch(adb: &Adb, serial: &str, app_id: &str) -> Result<String> {
     let error = (!errors.is_empty()).then(|| errors.join("; "));
     if !out.success || error.is_some() || status.as_deref().is_some_and(|s| s != "ok") {
         let why = error.or_else(|| status.map(|s| format!("status {s}"))).unwrap_or_else(|| out.message());
-        bail!(
-            "starting {app_id} on {serial} failed: {why}; check that the app has an activity with the LAUNCHER category in android/AndroidManifest.xml"
-        );
+        let hint = if component.is_none() && why.contains("unable to resolve Intent") {
+            "check that the app has an activity with the LAUNCHER category in android/AndroidManifest.xml; if it has one, its intent \
+             filter may lack android.intent.category.DEFAULT, which only lets the device start it by name"
+        } else {
+            "check that the app has an activity with the LAUNCHER category in android/AndroidManifest.xml"
+        };
+        bail!("starting {app_id} on {serial} failed: {why}; {hint}");
     }
     let activity = text.lines().find_map(|l| l.trim().strip_prefix("Activity:")).map(|a| a.trim().to_owned());
-    Ok(activity.unwrap_or_else(|| app_id.to_owned()))
+    Ok(activity.unwrap_or_else(|| component.unwrap_or_else(|| app_id.to_owned())))
 }
 
 /// The process id of the running app, waiting a few seconds for it to appear.
@@ -1224,6 +1253,21 @@ pub fn acceleration() -> Acceleration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_component_resolve_activity_prints() {
+        let id = "com.example.sosial";
+        let brief = "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.example.sosial/.MainActivity\n";
+        assert_eq!(resolved_component(brief, id).as_deref(), Some("com.example.sosial/.MainActivity"));
+        assert_eq!(
+            resolved_component("com.example.sosial/com.example.sosial.ui.Main\r\n", id).as_deref(),
+            Some("com.example.sosial/com.example.sosial.ui.Main")
+        );
+        // Nothing found, an empty answer and the chooser of several activities are not an activity of the app.
+        assert_eq!(resolved_component("No activity found\n", id), None);
+        assert_eq!(resolved_component("", id), None);
+        assert_eq!(resolved_component("priority=0 isDefault=true\nandroid/com.android.internal.app.ResolverActivity\n", id), None);
+    }
 
     #[test]
     fn parses_adb_devices() {

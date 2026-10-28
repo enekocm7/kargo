@@ -1721,9 +1721,14 @@ fn android_run_installs_only_on_the_chosen_device() {
     let log = fake.log();
     assert!(log.contains("gradle-env ANDROID_SERIAL=R58M123ABC"), "{log}");
     assert!(log.contains("gradle installDebug") || log.contains("installDebug"), "{log}");
+    // The launcher activity is resolved and started by name, so a filter without the DEFAULT category works.
+    assert!(
+        log.contains("adb -s R58M123ABC shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.example.droid"),
+        "{log}"
+    );
     assert!(
         log.contains(
-            "adb -s R58M123ABC shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.example.droid"
+            "adb -s R58M123ABC shell am start -W -n com.example.droid/.MainActivity -a android.intent.action.MAIN -c android.intent.category.LAUNCHER"
         ),
         "{log}"
     );
@@ -1783,6 +1788,47 @@ fn android_run_reports_a_crash_and_a_failed_start() {
     fake.apply(&mut cmd);
     cmd.args(["--system-gradle", "run", "-t", "android"]).assert().failure().stderr(
         predicate::str::contains("starting com.example.droid on emulator-5554 failed").and(predicate::str::contains("does not exist")),
+    );
+}
+
+#[test]
+fn android_run_starts_an_activity_whose_launcher_filter_has_no_default_category() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new("emulator-5554|device|Google|sdk_gphone64|35|Pixel_8_API_35\n");
+    fake.switch("no-default");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--no-logcat"]).assert().success();
+    let log = fake.log();
+    assert!(log.contains("am start -W -n com.example.droid/.MainActivity"), "{log}");
+    assert!(!log.contains(" -p com.example.droid"), "{log}");
+}
+
+#[test]
+fn android_run_falls_back_to_an_implicit_intent_and_explains_a_launcher_it_cannot_find() {
+    let p = Project::new();
+    android_app(&p);
+
+    // A device that cannot resolve activities still starts the app the old way.
+    let fake = common::FakeAndroid::new("emulator-5554|device|Google|sdk_gphone64|35|Pixel_8_API_35\n");
+    fake.switch("no-resolve");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--no-logcat"]).assert().success();
+    let log = fake.log();
+    assert!(log.contains("am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.example.droid"), "{log}");
+    assert!(!log.contains(" -n "), "{log}");
+
+    // Nothing resolves: the message names the DEFAULT category as a possible reason.
+    let fake = common::FakeAndroid::new("emulator-5554|device|Google|sdk_gphone64|35|Pixel_8_API_35\n");
+    fake.switch("no-launcher");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "run", "-t", "android", "--no-logcat"]).assert().failure().stderr(
+        predicate::str::contains("unable to resolve Intent")
+            .and(predicate::str::contains("LAUNCHER category in android/AndroidManifest.xml"))
+            .and(predicate::str::contains("android.intent.category.DEFAULT")),
     );
 }
 

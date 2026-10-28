@@ -111,7 +111,7 @@ A device in a state that cannot run apps is named with what to do about it: `una
 
 ### Running the app
 
-Kargo runs `install<Variant>` with Gradle, restricted to the chosen device, and starts the launcher activity with `am start -W`, which waits until the activity is up and reports a start that failed. Then it shows the log of the app (`adb logcat --pid`) on stdout until the app's process ends:
+Kargo runs `install<Variant>` with Gradle, restricted to the chosen device, and starts the launcher activity with `am start -W`, which waits until the activity is up and reports a start that failed. Kargo asks the device for the launcher activity of the app and starts it by name, as Android Studio does, so the usual `<intent-filter>` with the `MAIN` action and the `LAUNCHER` category works without an `android.intent.category.DEFAULT` category. (On a device that cannot say, Kargo starts the app with an implicit `MAIN`/`LAUNCHER` intent, which does need that category.) Then it shows the log of the app (`adb logcat --pid`) on stdout until the app's process ends:
 
 - The exit code is `0` when the app exits, `1` when the log shows it crashed (a `FATAL EXCEPTION` or a fatal signal), and `130` after Ctrl+C.
 - Ctrl+C stops the app on the device (`am force-stop`) before Kargo exits.
