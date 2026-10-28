@@ -89,7 +89,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo self uninstall [--purge]` | Remove the binary and the `PATH` entries the install scripts added; `--purge` also deletes `~/.kargo` |
 | `kargo daemon status\|stop` | Show or stop the background compiler daemons |
 | `kargo doctor [--fix] [--format json] [--bug-report]` | Check the JDK, toolchains, Android SDK, Node.js and browsers, network and repositories, and the project (manifest warnings, `kargo.lock` in sync), each with a one-line fix; exits with 1 on errors. `--fix` removes interrupted toolchain installs |
-| `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock`; `--release` or `--profile` only that profile's output and generated files), show project information |
+| `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock` and `.kargo-lock.holder`; `--release` or `--profile` only that profile's output and generated files), show project information |
 | `kargo version` | Print the Kargo version (`-v` adds the release and the target it was built for), like `kargo --version` |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 

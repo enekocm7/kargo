@@ -1577,6 +1577,9 @@ fn parse() -> Cli {
         }
     }
     let matches = cmd.get_matches_from(args);
+    if let Some(name) = matches.subcommand_name() {
+        kargo_util::flock::set_command(name);
+    }
     Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
 }
 

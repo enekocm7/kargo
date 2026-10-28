@@ -274,7 +274,7 @@ pub fn clean(ws: &Workspace, shell: &Shell, profile: Option<crate::workspace::Pr
         // Everything but the lock this process holds.
         for entry in std::fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
             let path = entry?.path();
-            if path == lock.path() {
+            if path == lock.path() || path == kargo_util::flock::holder_path(lock.path()) {
                 continue;
             }
             if path.is_dir() {
