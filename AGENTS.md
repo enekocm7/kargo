@@ -204,3 +204,7 @@ Before reporting a task as done:
 1. `cargo fmt --all` and `cargo test --workspace` pass (when you touched compiler drivers, frameworks or toolchains, ask the user to run the e2e tests, as described under Build, test, format).
 2. The docs are updated per the section above, and `bun run build` in `website/` passes if you touched `website/`.
 3. Your summary lists which docs pages you changed or created, or states why none were needed.
+
+## Issues and pull requests
+
+Use the templates in `.github/ISSUE_TEMPLATE/` (bug report, feature request, question) when you open an issue and `.github/pull_request_template.md` when you open a pull request, and fill in every section instead of replacing them with a free-form description.
