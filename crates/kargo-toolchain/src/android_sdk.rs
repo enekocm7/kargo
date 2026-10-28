@@ -63,6 +63,36 @@ pub fn packages_for(api: u32, build_tools: &str) -> Vec<String> {
     vec![platform_package(api), build_tools_package(build_tools), PLATFORM_TOOLS.to_owned()]
 }
 
+/// The package with the Android emulator.
+pub const EMULATOR: &str = "emulator";
+
+/// The package with `avdmanager`, which creates virtual devices.
+pub const CMDLINE_TOOLS: &str = "cmdline-tools;latest";
+
+/// The ABI of the system images that run well on this machine: the host's own, since the emulator only
+/// virtualizes it.
+pub fn host_abi() -> &'static str {
+    if cfg!(target_arch = "aarch64") { "arm64-v8a" } else { "x86_64" }
+}
+
+/// The system image tags Kargo uses, best first: Google APIs without the Play Store, which can be rooted and
+/// logged out of, then the same with it.
+const IMAGE_TAGS: [&str; 2] = ["google_apis", "google_apis_playstore"];
+
+/// The packages that run virtual devices: the emulator, `avdmanager` and `adb`.
+pub fn emulator_packages() -> Vec<String> {
+    vec![EMULATOR.to_owned(), CMDLINE_TOOLS.to_owned(), PLATFORM_TOOLS.to_owned()]
+}
+
+/// The system image packages for `api` with `tag` and `abi`: `system-images;android-35;google_apis;x86_64`. The
+/// platform naming rule applies, so the first one is what the repository most likely has, the second its other
+/// spelling.
+pub fn system_image_packages(api: u32, tag: &str, abi: &str) -> [String; 2] {
+    let plain = format!("system-images;android-{api};{tag};{abi}");
+    let minor = format!("system-images;android-{api}.0;{tag};{abi}");
+    if api <= 36 { [plain, minor] } else { [minor, plain] }
+}
+
 /// The directory of package `path` (`build-tools;36.0.0`) in the SDK at `sdk`.
 pub fn package_dir(sdk: &Path, path: &str) -> PathBuf {
     path.split(';').fold(sdk.to_path_buf(), |dir, part| dir.join(part))
@@ -107,10 +137,117 @@ pub fn installed(sdk: &Path) -> Vec<InstalledPackage> {
             }
         }
     }
-    if is_installed(sdk, PLATFORM_TOOLS) {
-        out.push(InstalledPackage { path: PLATFORM_TOOLS.to_owned(), dir: package_dir(sdk, PLATFORM_TOOLS) });
+    for path in [PLATFORM_TOOLS, EMULATOR] {
+        if is_installed(sdk, path) {
+            out.push(InstalledPackage { path: path.to_owned(), dir: package_dir(sdk, path) });
+        }
+    }
+    for name in subdirectories(&sdk.join("cmdline-tools")) {
+        let path = format!("cmdline-tools;{name}");
+        if is_installed(sdk, &path) {
+            out.push(InstalledPackage { dir: package_dir(sdk, &path), path });
+        }
+    }
+    out.extend(installed_system_images(sdk));
+    out
+}
+
+/// The names of the directories in `dir`, sorted.
+fn subdirectories(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> =
+        entries.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
+/// The system images installed in `sdk`: `system-images/android-35/google_apis/x86_64`.
+pub fn installed_system_images(sdk: &Path) -> Vec<InstalledPackage> {
+    let root = sdk.join("system-images");
+    let mut out = Vec::new();
+    for platform in subdirectories(&root) {
+        for tag in subdirectories(&root.join(&platform)) {
+            for abi in subdirectories(&root.join(&platform).join(&tag)) {
+                let path = format!("system-images;{platform};{tag};{abi}");
+                if is_installed(sdk, &path) {
+                    out.push(InstalledPackage { dir: package_dir(sdk, &path), path });
+                }
+            }
+        }
     }
     out
+}
+
+/// The system image of `sdk` for platform `api` that runs on this machine, if one is installed.
+pub fn installed_system_image(sdk: &Path, api: u32) -> Option<String> {
+    IMAGE_TAGS.iter().flat_map(|tag| system_image_packages(api, tag, host_abi())).find(|path| is_installed(sdk, path))
+}
+
+/// The file name of the program `name` of the SDK: `adb.exe`, `avdmanager.bat` on Windows.
+fn program_name(name: &str) -> String {
+    match (cfg!(windows), name) {
+        (true, "avdmanager" | "sdkmanager") => format!("{name}.bat"),
+        (true, _) => format!("{name}.exe"),
+        (false, _) => name.to_owned(),
+    }
+}
+
+/// `adb` in `sdk`, if its platform-tools are installed.
+pub fn adb_in(sdk: &Path) -> Option<PathBuf> {
+    Some(sdk.join(PLATFORM_TOOLS).join(program_name("adb"))).filter(|p| p.is_file())
+}
+
+/// The `emulator` of `sdk`, if installed.
+pub fn emulator_in(sdk: &Path) -> Option<PathBuf> {
+    Some(sdk.join(EMULATOR).join(program_name("emulator"))).filter(|p| p.is_file())
+}
+
+/// `avdmanager` in `sdk`: the newest command-line tools, or the `tools/` of older SDKs.
+pub fn avdmanager_in(sdk: &Path) -> Option<PathBuf> {
+    let program = program_name("avdmanager");
+    let mut versions = subdirectories(&sdk.join("cmdline-tools"));
+    // `latest` is the one `sdkmanager` keeps up to date; numbers sort after it by version.
+    versions.sort_by(|a, b| match (a.as_str(), b.as_str()) {
+        ("latest", "latest") => std::cmp::Ordering::Equal,
+        ("latest", _) => std::cmp::Ordering::Less,
+        (_, "latest") => std::cmp::Ordering::Greater,
+        _ => Version::parse(b).cmp(&Version::parse(a)),
+    });
+    versions
+        .into_iter()
+        .map(|v| sdk.join("cmdline-tools").join(v).join("bin").join(&program))
+        .chain(std::iter::once(sdk.join("tools").join("bin").join(&program)))
+        .find(|p| p.is_file())
+}
+
+/// Picks the system image to install for platform `api`: the first tag and spelling that Google's repository has
+/// for this machine's ABI.
+pub fn system_image_for(repo: &Repository, api: u32) -> Option<String> {
+    IMAGE_TAGS.iter().flat_map(|tag| system_image_packages(api, tag, host_abi())).find(|path| repo.find(path).is_some())
+}
+
+/// Installs what a virtual device for platform `api` needs and returns the SDK directory and the system image: the
+/// emulator, `avdmanager`, `adb` and the image. An image that is installed already is kept.
+pub fn ensure_emulator(config: &Config, api: u32, licenses: Licenses) -> Result<(PathBuf, String)> {
+    let install = format!("kargo toolchain install android-sdk {api} --emulator");
+    let sdk = config.android_sdk_dir();
+    let mut packages = emulator_packages();
+    let image = match installed_system_image(&sdk, api) {
+        Some(image) => image,
+        None => {
+            let repo = Repository::fetch(config)?;
+            system_image_for(&repo, api).with_context(|| {
+                format!(
+                    "Google's repository has no `{}` system image for Android {api} on this machine ({REPOSITORY_URL}/{MANIFEST}); \
+                     pick another API level with `--api`",
+                    host_abi()
+                )
+            })?
+        }
+    };
+    packages.push(image.clone());
+    ensure(config, &packages, licenses, &install)?;
+    Ok((sdk, image))
 }
 
 /// How the licenses of the packages to install get accepted.
@@ -586,6 +723,52 @@ mod tests {
         );
         assert!(!xml.contains("archives") && !xml.contains("channelRef"), "{xml}");
         roxmltree::Document::parse(&xml).unwrap();
+    }
+
+    #[test]
+    fn finds_emulator_packages_and_system_images() {
+        assert_eq!(system_image_packages(35, "google_apis", "x86_64")[0], "system-images;android-35;google_apis;x86_64");
+        assert_eq!(system_image_packages(37, "google_apis", "arm64-v8a")[0], "system-images;android-37.0;google_apis;arm64-v8a");
+        assert_eq!(emulator_packages(), ["emulator", "cmdline-tools;latest", "platform-tools"]);
+
+        // The repository's own spelling and tag are found; a preview-only or missing image is not.
+        let image = format!("system-images;android-35;google_apis_playstore;{}", host_abi());
+        let extra = format!(
+            "<remotePackage path=\"{image}\"><type-details xsi:type=\"generic:genericDetailsType\"/><revision><major>1</major></revision>\
+             <display-name>Image</display-name><uses-license ref=\"android-sdk-license\"/><archives><archive><complete><size>1</size>\
+             <checksum type=\"sha1\">aa</checksum><url>image.zip</url></complete></archive></archives></remotePackage></sdk:sdk-repository>"
+        );
+        let repo = Repository::parse(&manifest(&[]).replace("</sdk:sdk-repository>", &extra)).unwrap();
+        assert_eq!(system_image_for(&repo, 35).as_deref(), Some(image.as_str()));
+        assert_eq!(system_image_for(&repo, 34), None);
+
+        // Installed images, the tools and the emulator are read from the SDK's layout.
+        let sdk = tempfile::tempdir().unwrap();
+        let dir = package_dir(sdk.path(), &image);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.xml"), "<x/>").unwrap();
+        for tool in ["emulator", "cmdline-tools;latest"] {
+            std::fs::create_dir_all(package_dir(sdk.path(), tool)).unwrap();
+            std::fs::write(package_dir(sdk.path(), tool).join("package.xml"), "<x/>").unwrap();
+        }
+        assert_eq!(installed_system_image(sdk.path(), 35).as_deref(), Some(image.as_str()));
+        assert_eq!(installed_system_image(sdk.path(), 36), None);
+        let paths: Vec<String> = installed(sdk.path()).into_iter().map(|p| p.path).collect();
+        assert_eq!(paths, ["emulator".to_owned(), "cmdline-tools;latest".to_owned(), image.clone()]);
+        assert_eq!(emulator_in(sdk.path()), None);
+        assert_eq!(avdmanager_in(sdk.path()), None);
+        let write = |path: PathBuf| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x").unwrap();
+            path
+        };
+        let emulator = write(sdk.path().join("emulator").join(program_name("emulator")));
+        let avdmanager = write(sdk.path().join("cmdline-tools/latest/bin").join(program_name("avdmanager")));
+        assert_eq!(emulator_in(sdk.path()), Some(emulator));
+        assert_eq!(avdmanager_in(sdk.path()), Some(avdmanager));
+        // A newer numbered version of the tools is not preferred over `latest`, but older SDKs' `tools/` still work.
+        let numbered = write(sdk.path().join("cmdline-tools/19.0/bin").join(program_name("avdmanager")));
+        assert_ne!(avdmanager_in(sdk.path()), Some(numbered));
     }
 
     #[test]

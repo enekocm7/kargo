@@ -1,6 +1,6 @@
 ---
 title: Machine-readable output
-description: JSON output for compiler diagnostics, test discovery and test results, kargo metadata, kargo info, kargo tree and kargo why, and JUnit XML test reports, for editors, scripts and CI.
+description: JSON output for compiler diagnostics, test discovery and test results, kargo metadata, kargo info, kargo tree, kargo why and kargo android devices, and JUnit XML test reports, for editors, scripts and CI.
 ---
 
 Kargo's normal output is for people. Editors, scripts and CI systems can ask for stable, machine-readable formats instead:
@@ -15,6 +15,7 @@ Kargo's normal output is for people. Editors, scripts and CI systems can ask for
 | The resolved dependency graph | `kargo tree --format json` |
 | Why a module and its version are on the classpath | `kargo why <module> --format json` |
 | Per-test results for CI | `kargo test --report junit` |
+| The devices, emulators and virtual devices `kargo run -t android` can use | `kargo android devices --format json` |
 
 JSON goes to stdout. Kargo's status lines (`Compiling`, `Finished`, ...) stay on stderr, so you can pipe stdout straight into a JSON parser.
 
@@ -390,6 +391,31 @@ $ kargo why g:util --format json
 | `from.kind` | `project` (with `force`), `dependency`, `relocation`, `variant`, `constraint` (each with the `module` and `version` that asked), `platform` (also with the `platform` and `platform-version`) or `bom` (the BOM's `module` and `version`) |
 | `paths` | Each path from a dependency in `kargo.toml` to the module, as `group:artifact:version`: the shortest one, or all of them (at most 100) with `--all-paths` |
 | `truncated` | Whether there were more paths than were listed |
+
+## `kargo android devices --format json`
+
+The devices `kargo run -t android` can target. Nothing is started or installed to list them.
+
+```json
+{
+  "devices": [
+    { "id": "emulator-5554", "name": "Pixel_8_API_35", "kind": "emulator", "state": "device", "api": 35, "avd": "Pixel_8_API_35" },
+    { "id": "R58M123ABC", "name": "samsung SM-S918B", "kind": "physical", "state": "unauthorized", "api": null, "avd": null },
+    { "id": "Tablet_API_34", "name": "Tablet_API_34", "kind": "avd", "state": "stopped", "api": 34, "avd": null }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | The serial of a connected device (`emulator-5554`, or `host:port` over Wi-Fi), or the name of a virtual device that is not running. This is what `--device` takes |
+| `name` | The maker and model of a device, or the name of the virtual device |
+| `kind` | `physical`, `emulator` (running) or `avd` (installed, not running) |
+| `state` | `adb`'s: `device` (ready), `unauthorized`, `offline`, `no permissions`, ...; `stopped` for a virtual device that is not running |
+| `api` | The Android API level, when known (`null` for a device that is not ready) |
+| `avd` | The virtual device a running emulator runs, else `null` |
+
+`kargo android avd list --format json` prints `{"avds": [...]}` with `name`, `api`, `image` (the system image package), `hardware` and `path`.
 
 ## JUnit XML test reports
 

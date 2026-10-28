@@ -136,6 +136,22 @@ Node.js can't find an npm package that a library imports. Kargo installs these p
 
 Either let Kargo install the SDK, with `android-sdk = "36"` (your `compile-sdk`) under `[toolchain]` in `kargo.toml`, or install the Android SDK (Android Studio installs it to `~/Android/Sdk` on Linux and `~/Library/Android/sdk` on macOS) and set `ANDROID_HOME`. See [Android SDK](../../guides/android/#android-sdk). `kargo doctor` checks the SDK, its packages and licenses, `adb` and Gradle of an Android project.
 
+### `more than one device is connected and there is no terminal to choose on`
+
+`kargo run -t android` asks which device to use when several are ready, and it can only ask in a terminal. Pass `--device <serial>` (`kargo android devices` lists the serials) or set `KARGO_ANDROID_DEVICE`, which is also how to pick a device from an editor's run button. See [Devices and emulators](../../guides/android/#devices-and-emulators).
+
+### `no device or emulator is connected`
+
+Kargo never starts or creates an emulator on its own. In a terminal it asks; elsewhere, start one with `kargo android emulator start <name>` or pass its name as `--device`, and create one with `kargo android avd create` (with `kargo toolchain install android-sdk <api> --emulator` before it, if you use Kargo's SDK). A phone needs USB debugging turned on, or `kargo android connect <host:port>` for wireless debugging.
+
+### `R58M123ABC is unauthorized`
+
+The phone has not accepted this computer. Unlock it and accept the "Allow USB debugging?" prompt. If none appears, unplug the cable, choose *Revoke USB debugging authorizations* in Developer options and plug it in again. `offline` devices need the cable replugged or `adb kill-server`; `no permissions` needs the udev rules of the maker on Linux, or its USB driver on Windows.
+
+### The emulator is very slow
+
+Without hardware acceleration the emulator emulates the CPU in software. `kargo doctor` says whether the machine has KVM (Linux; add yourself to the `kvm` group), the Windows Hypervisor Platform or Hypervisor.framework (macOS), and what to turn on if not.
+
 ### `the Android SDK at ... lacks platforms;android-...`
 
 Your own SDK has no platform for `compile-sdk`, or not the build-tools of the Android Gradle Plugin, and no accepted license that would let AGP download them. Run the `sdkmanager` command the message prints, or set `[toolchain] android-sdk` to have Kargo install them.

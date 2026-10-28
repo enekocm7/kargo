@@ -9,7 +9,7 @@ Android apps are built by the Android Gradle Plugin (AGP), which Kargo drives fo
 
 - An Android SDK. Either let Kargo install one with `[toolchain] android-sdk = "36"` (see [Android SDK](#android-sdk)), or install [Android Studio](https://developer.android.com/studio) and set `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) to its SDK.
 - Nothing else: Kargo downloads the Gradle version your Android Gradle Plugin needs (see [Gradle](#gradle)).
-- For `kargo run`: `adb` (from the SDK platform-tools) and a connected device or running emulator.
+- For `kargo run`: `adb` (from the SDK platform-tools) and a device or emulator. Kargo lists them, asks which to use, and can create and start emulators: see [Devices and emulators](#devices-and-emulators).
 
 ## Create an app
 
@@ -62,7 +62,7 @@ kargo check -t android --tests      # compile sources and unit tests without pac
 kargo build -t android              # debug APK in target/android/build/outputs/apk/debug/
 kargo build -t android --release    # release APK (or AAR for libraries)
 kargo package -t android --release  # release App Bundle and APK in target/release/android/
-kargo run -t android                # install on the connected device and launch
+kargo run -t android                # install on a device or emulator, launch and show its log
 kargo test -t android               # local unit tests (testDebugUnitTest)
 kargo doc -t android                # API documentation in target/debug/doc/
 ```
@@ -72,6 +72,109 @@ kargo doc -t android                # API documentation in target/debug/doc/
 `kargo doc -t android` documents `src/` and `src-android/` with Dokka, using the classpath Gradle resolves for the debug variant. See [API documentation](../documentation/#android).
 
 The generated project compiles Kotlin with the Kotlin Gradle plugin at your `[kotlin] version`, so Android code is compiled with the same Kotlin version as your other targets rather than the version bundled with AGP.
+
+## Devices and emulators
+
+`kargo run -t android` needs a device to install on: a phone with USB debugging, or an emulator (a virtual device, AVD). Kargo lists them, picks one with you, starts and creates emulators when you say so, and passes `-s <serial>` to every `adb` call and `ANDROID_SERIAL` to Gradle, so a second device that is attached is never touched.
+
+```console
+$ kargo android devices
+ID             NAME              TYPE      API   STATE
+emulator-5554  Pixel_8_API_35    emulator  35    device
+R58M123ABC     samsung SM-S918B  device    34    device
+0123ABCD       0123ABCD          device    -     unauthorized
+Tablet_API_34  Tablet_API_34     avd       34    stopped
+```
+
+The list has what `kargo run` can target: physical devices (over USB or Wi-Fi), running emulators, and virtual devices that are installed but not running (`avd`, state `stopped`). `kargo devices` is the same, and `--format json` prints `{"devices": [...]}` with `id`, `name`, `kind` (`physical`, `emulator` or `avd`), `state`, `api` and `avd` for each.
+
+### Choosing the device
+
+`--device <serial|avd-name>` (`-s`) or `KARGO_ANDROID_DEVICE` names the device. It is a serial from the list, the name of a virtual device, or the `host:port` of a wireless device, which Kargo connects first. A virtual device that is not running is started; naming it is the request to start it.
+
+```sh
+kargo run -t android --device R58M123ABC
+kargo run -t android --device Pixel_8_API_35 --headless   # starts the virtual device if needed
+KARGO_ANDROID_DEVICE=emulator-5554 kargo run -t android
+```
+
+Without a device name, Kargo decides:
+
+- **One device is ready**: it is used.
+- **Several are ready**: you pick one from a list with the arrow keys and Enter (`j`/`k`, a digit and Esc work too).
+- **None is connected**: Kargo does not start or create an emulator by itself. In a terminal it asks what to do: start one of the installed virtual devices, create a new one, or cancel. Only your answer starts or creates anything.
+- **Without a terminal** (CI, a piped stdin, an editor's task that is not a terminal) there is nobody to ask. Kargo stops, lists the devices or virtual devices, and says to pass `--device`.
+
+The choice is made before the build starts, so a question never waits behind a long Gradle run. In `--watch` it is made once.
+
+A device in a state that cannot run apps is named with what to do about it: `unauthorized` (unlock the device and accept the "Allow USB debugging?" prompt), `offline` (reconnect it, or `adb kill-server`) and `no permissions` (udev rules and the `plugdev` group on Linux, the maker's USB driver on Windows).
+
+### Running the app
+
+Kargo runs `install<Variant>` with Gradle, restricted to the chosen device, and starts the launcher activity with `am start -W`, which waits until the activity is up and reports a start that failed. Then it shows the log of the app (`adb logcat --pid`) on stdout until the app's process ends:
+
+- The exit code is `0` when the app exits, `1` when the log shows it crashed (a `FATAL EXCEPTION` or a fatal signal), and `130` after Ctrl+C.
+- Ctrl+C stops the app on the device (`am force-stop`) before Kargo exits.
+- `--no-logcat` leaves as soon as the app started. `--logcat` is the default.
+- `--watch` installs the app again whenever the project changes, and keeps showing the log of the new process. It chooses the device once, and does not combine with `--no-logcat` or `--stop-emulator`.
+
+```sh
+kargo run -t android --device emulator-5554 --stop-emulator   # stop the emulator this run started
+```
+
+`--stop-emulator` shuts down an emulator that this run started, once the app is done. An emulator that was already running, or that you started with `kargo android emulator start`, is left alone.
+
+### Virtual devices and the emulator
+
+The emulator and a system image are not among the SDK packages every build needs, so Kargo installs them when you ask, into the SDK it manages (`[toolchain] android-sdk`):
+
+```sh
+kargo toolchain install android-sdk 36 --emulator --accept-licenses
+```
+
+This installs `emulator`, `cmdline-tools;latest` (which has `avdmanager`) and a system image, `system-images;android-<api>;google_apis;<abi>`. `<abi>` is the one of the host (`x86_64`, or `arm64-v8a` on ARM machines) and `<api>` the platform you name, or `compile-sdk`. The packages are under the same license as the others. The system image is 1 GB or more.
+
+`kargo android avd` and `kargo android emulator` manage the virtual devices:
+
+```sh
+kargo android avd create                          # Kargo_API_36: the compile-sdk of the project, else the newest image installed
+kargo android avd create Pixel8 --api 35 --hardware pixel_8
+kargo android avd list [--format json]
+kargo android avd delete Pixel8
+kargo android emulator start Pixel8 --headless    # waits until sys.boot_completed
+kargo android emulator stop Pixel8                # or: stop emulator-5554
+```
+
+`avd create` installs what is missing, after telling you what it downloads and asking (without a terminal it installs only when you passed `--accept-licenses`). The virtual devices of a Kargo-managed SDK live in `~/.kargo/toolchains/android-avd`, because their images are paths into that SDK. With the system SDK they are where Android Studio and `avdmanager` keep them (`ANDROID_AVD_HOME`, else `~/.android/avd`), and Kargo installs nothing there: it names the `sdkmanager` packages to install instead. `avdmanager` needs Java 17 or newer; Kargo uses `JAVA_HOME`, a JDK on `PATH`, or a JDK it installs.
+
+`emulator start` and the `--device` of a virtual device take `--headless` (no window or sound), `--cold-boot` (ignore the saved snapshot), `--wipe-data` (erase the user data first) and `--boot-timeout <seconds>` (default 300). Kargo prints progress while it boots, and an emulator that exits early shows the end of its output. The emulator keeps running after Kargo exits, so the next run starts fast.
+
+### Physical devices
+
+Turn on USB debugging in Developer options, connect the cable and accept the prompt on the device. For wireless debugging (Android 11 and newer), turn on *Wireless debugging* in Developer options:
+
+```sh
+kargo android pair 192.168.1.20:40123 123456   # the pairing address and code from "Pair device with pairing code"
+kargo android connect 192.168.1.20:37099       # the address on the Wireless debugging screen
+kargo android disconnect                       # or one address
+```
+
+`pair` without the code lets `adb` ask for it. `kargo run -t android --device 192.168.1.20:37099` connects by itself.
+
+### Instrumented tests and other tasks
+
+Gradle tasks that use a device (`install*`, `uninstall*`, `connected*`, `*AndroidTest`) run on the device chosen the same way:
+
+```sh
+kargo android -s R58M123ABC connectedDebugAndroidTest
+KARGO_ANDROID_DEVICE=emulator-5554 kargo android connectedCheck
+```
+
+### Editors
+
+The run buttons of the editors run `kargo run -t android`, so they ask in a terminal and fail with the list of devices where there is none. Set `KARGO_ANDROID_DEVICE` in the environment of the run configuration or task to pick the device.
+
+`kargo doctor` reports `adb`, the devices and their states, the installed virtual devices, the emulator package and whether the machine accelerates the emulator (KVM, the Windows Hypervisor Platform, Hypervisor.framework).
 
 ## Android SDK
 
@@ -103,6 +206,8 @@ Kargo installs three packages into one SDK directory, `~/.kargo/toolchains/andro
 - the platform of the API level (`platforms;android-36`; from API 37 on, `platforms;android-37.0`),
 - the build-tools version the Android Gradle Plugin in use expects (36.0.0 for AGP 9.x),
 - `platform-tools`, which has `adb` for `kargo run`.
+
+The emulator, `avdmanager` and a system image come with `--emulator` (see [Virtual devices and the emulator](#virtual-devices-and-the-emulator)).
 
 It reads the packages from Google's repository manifest on `dl.google.com`, checks every download against the SHA-1 the manifest lists for it, and writes the same layout as `sdkmanager`. The build then points Gradle at this SDK, through `sdk.dir` in the generated `local.properties` and `ANDROID_HOME`, whatever `ANDROID_HOME` says outside Kargo. Several projects share the SDK directory, each with its own platform.
 
@@ -278,6 +383,8 @@ kargo android lint
 kargo android connectedAndroidTest
 kargo android bundleRelease
 ```
+
+Tasks that use a device run on the one `--device` (`-s`) or `KARGO_ANDROID_DEVICE` names, or on the one Kargo asks you to pick; see [Devices and emulators](#devices-and-emulators). The same command also manages devices (`kargo android devices`, `avd`, `emulator`, `connect`, `pair` and `disconnect`), so those names are not passed to Gradle.
 
 ## Dependencies
 

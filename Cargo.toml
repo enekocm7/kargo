@@ -26,6 +26,8 @@ minify-js = "0.6.0"
 clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 # Pinned exactly: dynamic completion is behind clap_complete's `unstable-dynamic` feature.
 clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
+console = { version = "0.16.6", default-features = false, features = ["std"] }
+ctrlc = "3.5.2"
 dirs = "7.0.0"
 flate2 = "1.1.10"
 hex = "0.4.3"

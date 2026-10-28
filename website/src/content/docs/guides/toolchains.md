@@ -124,6 +124,7 @@ $ kargo toolchain install graalvm 25 # newest GraalVM CE for JDK 25 (or: graalvm
 $ kargo toolchain install native 2.4.21
 $ kargo toolchain install gradle     # the Gradle this Android project needs (or: gradle 9.6.0)
 $ kargo toolchain install android-sdk --accept-licenses   # the Android SDK of [toolchain] android-sdk (or: android-sdk 36)
+$ kargo toolchain install android-sdk 36 --emulator   # also the emulator, avdmanager and a system image
 $ kargo toolchain install            # everything the current project needs (a JDK too, when there is none; the Kotlin/Native LLVM and sysroots of its platforms)
 $ kargo toolchain list               # installed toolchains, disk usage, and what this project uses
 $ kargo toolchain which              # the toolchains this project resolves to
@@ -171,6 +172,8 @@ Android builds also need an Android SDK. Pin one like a JDK, by platform API lev
 android-sdk = "36"          # Kargo installs platform 36 under ~/.kargo/toolchains/android-sdk
 # android-sdk = "system"    # the default: ANDROID_HOME, then ANDROID_SDK_ROOT, then Android Studio's location
 ```
+
+To run apps on a virtual device, add `--emulator`: `kargo toolchain install android-sdk 36 --emulator` also installs the emulator, `cmdline-tools;latest` and a system image for that API level (see [Devices and emulators](../android/#devices-and-emulators)).
 
 Kargo reads Google's repository manifest on `dl.google.com`, verifies every download against the SHA-1 it lists (the only checksum Google publishes for these packages), and keeps every installed platform in the one SDK directory. The packages are under Google's license terms: Kargo shows them and asks, or takes `kargo toolchain install android-sdk --accept-licenses` in CI, and never accepts them by itself. `compile-sdk` under `[target.android]` defaults to this version. See [Android SDK](../android/#android-sdk).
 

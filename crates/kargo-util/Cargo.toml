@@ -11,6 +11,7 @@ anstream.workspace = true
 anstyle.workspace = true
 anyhow.workspace = true
 base64.workspace = true
+console.workspace = true
 dirs.workspace = true
 hex.workspace = true
 ignore.workspace = true

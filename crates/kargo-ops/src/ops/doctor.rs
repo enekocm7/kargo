@@ -547,18 +547,10 @@ fn android(config: &Config, project: &Project, out: &mut Vec<Check>) {
                         format!("run `sdkmanager --licenses` and `sdkmanager {}`", missing.join(" ")),
                     ));
                 }
-                let adb = sdk.join("platform-tools").join(if cfg!(windows) { "adb.exe" } else { "adb" });
-                if !adb.is_file() {
-                    out.push(Check::warning(
-                        s,
-                        "adb",
-                        format!("{} has no platform-tools/adb, which `kargo run` needs to install the app", sdk.display()),
-                        "run `sdkmanager platform-tools`",
-                    ));
-                }
             }
         },
     }
+    devices(config, m, out);
     match crate::gradle::choose_gradle(ws, config) {
         Ok(GradleChoice::Project(wrapper)) => out.push(Check::ok(s, "Gradle", format!("the project's wrapper at {}", wrapper.display()))),
         Ok(GradleChoice::System(gradle)) => out.push(Check::ok(s, "Gradle", format!("{} (--system-gradle)", gradle.display()))),
@@ -572,6 +564,73 @@ fn android(config: &Config, project: &Project, out: &mut Vec<Check>) {
             )),
         },
         Err(e) => out.push(Check::error(s, "Gradle", chain(&e), "change `gradle-version` or `agp-version` under [target.android]")),
+    }
+}
+
+/// What `kargo run -t android` needs on the machine: adb, the devices and their states, the virtual devices, the emulator
+/// and its hardware acceleration. Nothing is started or installed.
+fn devices(config: &Config, manifest: &Manifest, out: &mut Vec<Check>) {
+    use crate::android_device::{self as device, Acceleration, DeviceKind};
+    let s = Section::Android;
+    let toolbox = device::Toolbox::locate(config, Some(manifest));
+    let report = device::report(&toolbox, config.shell());
+    match &report.adb {
+        Some((path, version)) => out.push(Check::ok(s, "adb", format!("{version} at {}", path.display()))),
+        None => out.push(Check::warning(
+            s,
+            "adb",
+            match toolbox.sdk() {
+                Some(sdk) => format!("{} has no platform-tools/adb, which `kargo run` needs to install the app", sdk.display()),
+                None => "adb not found, which `kargo run` needs to install the app".to_owned(),
+            },
+            if toolbox.is_managed() { "run `kargo toolchain install android-sdk`" } else { "run `sdkmanager platform-tools`" },
+        )),
+    }
+    if report.adb.is_some() {
+        let ready: Vec<String> = report.devices.iter().filter(|d| d.is_ready()).map(|d| format!("{} ({})", d.name, d.id)).collect();
+        let mut problems = false;
+        for d in report.devices.iter().filter(|d| !d.is_ready()) {
+            problems = true;
+            let fix = match d.state.as_str() {
+                "unauthorized" => "unlock the device and accept the USB debugging prompt".to_owned(),
+                "offline" => "reconnect the cable, or run `adb kill-server`".to_owned(),
+                "no permissions" => "add the udev rules (Linux) or install the OEM USB driver (Windows) for the device".to_owned(),
+                _ => "wait for it to finish starting, or reconnect it".to_owned(),
+            };
+            let kind = if d.kind == DeviceKind::Emulator { "emulator" } else { "device" };
+            out.push(Check::warning(s, format!("{kind} {}", d.id), format!("{} is {}", d.name, d.state), fix));
+        }
+        if !ready.is_empty() {
+            out.push(Check::ok(s, "devices", format!("{} ready: {}", ready.len(), ready.join(", "))));
+        } else if !problems {
+            out.push(Check::ok(s, "devices", "none connected (`kargo run -t android` asks before starting an emulator)"));
+        }
+    }
+    if report.avds.is_empty() {
+        out.push(Check::ok(s, "virtual devices", "none installed (`kargo android avd create` makes one)"));
+    } else {
+        let names: Vec<String> = report.avds.iter().map(|a| a.name.clone()).collect();
+        out.push(Check::ok(s, "virtual devices", format!("{} installed: {}", names.len(), names.join(", "))));
+    }
+    match &report.emulator {
+        Some(path) => out.push(Check::ok(s, "emulator", path.display().to_string())),
+        None => out.push(Check::warning(
+            s,
+            "emulator",
+            "the Android emulator package is not installed, so apps cannot run on a virtual device",
+            if toolbox.is_managed() {
+                format!("run `kargo toolchain install android-sdk {} --emulator`", toolbox.default_api())
+            } else {
+                "install the `emulator` package with Android Studio's SDK Manager or `sdkmanager emulator`".to_owned()
+            },
+        )),
+    }
+    match report.acceleration {
+        Acceleration::Available(how) => out.push(Check::ok(s, "emulator acceleration", how)),
+        Acceleration::Missing(fix) => {
+            out.push(Check::warning(s, "emulator acceleration", "no hardware acceleration, so emulators run very slowly", fix))
+        }
+        Acceleration::Unknown => {}
     }
 }
 

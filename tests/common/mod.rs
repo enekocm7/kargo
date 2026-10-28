@@ -249,3 +249,123 @@ pub fn which(name: &str) -> Option<PathBuf> {
     let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
     std::env::split_paths(&path).find_map(|d| exts.iter().map(|e| d.join(format!("{name}{e}"))).find(|p| p.is_file()))
 }
+
+/// The fake `adb`, `emulator`, `avdmanager` and `gradle` of `tests/fixtures/fake_android.rs`, compiled once per test run.
+fn fake_android_exe() -> &'static Path {
+    static EXE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake-android");
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(format!("fake-android-{}{}", std::process::id(), std::env::consts::EXE_SUFFIX));
+        let source = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_android.rs");
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let out = std::process::Command::new(rustc)
+            .args(["--edition", "2021", "-o"])
+            .arg(&exe)
+            .arg(source)
+            .output()
+            .expect("failed to run rustc");
+        assert!(out.status.success(), "could not compile the fake Android tools:\n{}", String::from_utf8_lossy(&out.stderr));
+        exe
+    })
+}
+
+/// An Android SDK of fake tools (`adb`, `emulator`, `avdmanager`), a fake JDK, a fake `gradle` and a device list that the
+/// tools read, for tests of `kargo run -t android` and `kargo android` that need no emulator.
+pub struct FakeAndroid {
+    pub sdk: PathBuf,
+    pub state: PathBuf,
+    pub avds: PathBuf,
+    pub jdk: PathBuf,
+    pub bin: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl FakeAndroid {
+    /// `devices` lists them as `serial|state|manufacturer|model|api|avd`, one per line.
+    pub fn new(devices: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let (sdk, state, avds, jdk, bin) = (root.join("sdk"), root.join("state"), root.join("avds"), root.join("jdk"), root.join("bin"));
+        for d in [&state, &avds, &bin, &jdk.join("bin")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let exe = fake_android_exe();
+        let copy = |to: PathBuf| {
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(exe, to).unwrap();
+        };
+        let ext = std::env::consts::EXE_SUFFIX;
+        copy(sdk.join("platform-tools").join(format!("adb{ext}")));
+        copy(sdk.join("emulator").join(format!("emulator{ext}")));
+        copy(bin.join(format!("gradle{ext}")));
+        let avdmanager = sdk.join("cmdline-tools/latest/bin");
+        std::fs::create_dir_all(&avdmanager).unwrap();
+        if cfg!(windows) {
+            std::fs::write(avdmanager.join("avdmanager.bat"), format!("@\"{}\" avdmanager %*\r\n", exe.display())).unwrap();
+        } else {
+            copy(avdmanager.join("avdmanager"));
+        }
+        let abi = if cfg!(target_arch = "aarch64") { "arm64-v8a" } else { "x86_64" };
+        for package in [
+            "platforms/android-36",
+            "build-tools/36.0.0",
+            "platform-tools",
+            "emulator",
+            "cmdline-tools/latest",
+            &format!("system-images/android-35/google_apis/{abi}"),
+        ] {
+            std::fs::write(sdk.join(package).join("package.xml"), "<package/>").unwrap_or_else(|_| {
+                std::fs::create_dir_all(sdk.join(package)).unwrap();
+                std::fs::write(sdk.join(package).join("package.xml"), "<package/>").unwrap();
+            });
+        }
+        // `Jdk::find` reads the version from the `release` file, so the fake `java` never runs.
+        std::fs::write(jdk.join("release"), "JAVA_VERSION=\"21.0.5\"\n").unwrap();
+        std::fs::write(jdk.join("bin").join(format!("java{ext}")), "").unwrap();
+        let fake = Self { sdk, state, avds, jdk, bin, _dir: dir };
+        fake.set_devices(devices);
+        fake
+    }
+
+    pub fn set_devices(&self, devices: &str) {
+        std::fs::write(self.state.join("devices"), devices).unwrap();
+    }
+
+    /// A virtual device on disk, as `avdmanager` would have made it.
+    pub fn add_avd(&self, name: &str, api: u32) {
+        let dir = self.avds.join(format!("{name}.avd"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(self.avds.join(format!("{name}.ini")), format!("path={}\ntarget=android-{api}\n", dir.display())).unwrap();
+        std::fs::write(
+            dir.join("config.ini"),
+            format!("image.sysdir.1=system-images/android-{api}/google_apis/x86_64/\nhw.device.name=pixel_8\n"),
+        )
+        .unwrap();
+    }
+
+    /// A switch of the fake tools (`am-fails`, `crash`, `emulator-fails`).
+    pub fn switch(&self, name: &str) {
+        std::fs::write(self.state.join(name), "").unwrap();
+    }
+
+    /// Every call the tools got, one per line.
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(self.state.join("log")).unwrap_or_default()
+    }
+
+    /// Points `kargo` at the fake SDK, JDK and Gradle, and away from the real ones.
+    pub fn apply(&self, cmd: &mut Command) {
+        let path = std::env::join_paths(
+            std::iter::once(self.bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        )
+        .unwrap();
+        cmd.env("ANDROID_HOME", &self.sdk)
+            .env_remove("ANDROID_SDK_ROOT")
+            .env("ANDROID_AVD_HOME", &self.avds)
+            .env_remove("KARGO_ANDROID_DEVICE")
+            .env("JAVA_HOME", &self.jdk)
+            .env("PATH", path)
+            .env("FAKE_ANDROID_STATE", &self.state);
+    }
+}

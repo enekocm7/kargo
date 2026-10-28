@@ -278,8 +278,12 @@ kargo run -e 'println(1 + 1)'
 | `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `--flavor <name>` | Android: install this [product flavor](../../guides/android/#product-flavors) (repeatable, one per dimension; default: the first flavor of each dimension). Needs `-t android` |
+| `-s, --device <serial\|avd>` | Android: run on this device: a serial from `kargo android devices`, the name of a virtual device (started if it is not running) or the `host:port` of a wireless device. Also `KARGO_ANDROID_DEVICE`. Without it, one device is used, several are chosen from a list, and with none Kargo asks before it starts or creates an emulator; without a terminal it fails and lists them. See [Devices and emulators](../../guides/android/#devices-and-emulators) |
+| `--no-logcat`, `--logcat` | Android: leave once the app started, or (the default) show its log until it exits or Ctrl+C stops it. The exit code is 1 when the app crashed |
+| `--stop-emulator` | Android: shut down an emulator that this run started once the app is done |
+| `--headless`, `--cold-boot`, `--wipe-data`, `--boot-timeout <seconds>` | Android: how an emulator that Kargo has to start boots: without a window, without its snapshot, with erased user data, and how long to wait (default 300) |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
-| `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for Android or browser apps. See [Watch mode](../../guides/watch/) |
+| `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for browser apps. An Android app is installed again and its new log followed. See [Watch mode](../../guides/watch/) |
 | `--hot-reload` | Like `--watch`, but a Compose Desktop app keeps running: the classes a build changed are swapped into it and the UI recomposes. Runs on JetBrains Runtime, which Kargo downloads. Needs `[frameworks] compose` and the jvm target; conflicts with `--debug`. See [Hot reload](../../guides/compose/#hot-reload) |
 | `-j, --jobs <n>` | How many targets and Native platforms build at the same time, as for [`kargo build`](#kargo-build-b) |
 | `--clear` | With `--watch`: clear the terminal before each run |
@@ -1010,13 +1014,29 @@ List hook plugins, compiler plugins and `kargo-*` subcommands.
 
 ## `kargo android`
 
-Run Gradle in the generated Android project (`target/android`).
+Run Gradle in the generated Android project (`target/android`), and manage the devices, emulators and virtual devices that `kargo run -t android` uses. See [Devices and emulators](../../guides/android/#devices-and-emulators).
 
 ```sh
 kargo android <gradle args...>
 kargo android lint
-kargo android connectedAndroidTest
+kargo android -s emulator-5554 connectedAndroidTest
+kargo android devices
 ```
+
+| Subcommand | Meaning |
+|---|---|
+| `<gradle args...>` | Run the Gradle tasks. A task that uses a device (`install*`, `uninstall*`, `connected*`, `*AndroidTest`) runs on the device `-s, --device` (or `KARGO_ANDROID_DEVICE`) names, else the one Kargo chooses like `kargo run` does |
+| `devices [--format text\|json]` | List physical devices, running emulators and installed virtual devices with their id, name, type, API level and state (`device`, `unauthorized`, `offline`, `no permissions`, `stopped`). `kargo devices` is the same |
+| `avd list` (`ls`) `[--format text\|json]` | The installed virtual devices |
+| `avd create [name] [--api <level>] [--hardware <profile>] [--force] [--accept-licenses]` | Create a virtual device with `avdmanager` (default name `Kargo_API_<api>`, default API the project's `compile-sdk`). With Kargo's SDK it installs the emulator, the command-line tools and the system image first, after telling you the download and asking |
+| `avd delete` (`rm`) `<name>` | Delete a virtual device that is not running |
+| `emulator start [avd] [--headless] [--cold-boot] [--wipe-data] [--boot-timeout <seconds>]` | Start a virtual device (the only one without a name) and wait until it booted |
+| `emulator stop <serial\|avd>` | Shut down a running emulator |
+| `connect <host:port>` | Connect to a device over Wi-Fi (wireless debugging) |
+| `pair <host:port> [code]` | Pair with a device for wireless debugging; `adb` asks for the code when it is left out |
+| `disconnect [host:port]` | Disconnect from one wireless device, or all of them |
+
+The subcommands work outside a project too, with the SDK of `ANDROID_HOME` (or Android Studio's location), else Kargo's.
 
 ## `kargo toolchain`
 
@@ -1025,7 +1045,7 @@ Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Android SDK, 
 | Subcommand | Meaning |
 |---|---|
 | `list` (`ls`) | Installed toolchains, disk usage and what this project uses, including whether the Kotlin/Native dependencies of each native platform are downloaded |
-| `install [jdk\|graalvm\|native\|gradle\|android-sdk\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version] [--accept-licenses]` | Install a toolchain; with no arguments, whatever the project needs (with `jdk = "system"` and no JDK on `JAVA_HOME` or `PATH`, the JDK a build would install), including the Kotlin/Native dependencies (LLVM, sysroots) of every `[target.native]` platform this host can build, so native builds work `--offline` afterwards. It installs even with `KARGO_AUTO_INSTALL=0`. `graalvm` takes `25` (GraalVM Community Edition) or `oracle-25` (Oracle GraalVM). `gradle` without a version installs the one the project uses; `android-sdk` installs a platform API level (default: the project's [`[toolchain] android-sdk`](../manifest/#toolchain)) with the build-tools of the project's AGP and platform-tools, after showing Google's license terms and asking, or accepting them with `--accept-licenses` (for CI; see [Android SDK](../../guides/android/#android-sdk)); `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
+| `install [jdk\|graalvm\|native\|gradle\|android-sdk\|kotlin-lsp\|kls\|kotlin-debug-adapter] [version] [--accept-licenses] [--emulator]` | Install a toolchain; with no arguments, whatever the project needs (with `jdk = "system"` and no JDK on `JAVA_HOME` or `PATH`, the JDK a build would install), including the Kotlin/Native dependencies (LLVM, sysroots) of every `[target.native]` platform this host can build, so native builds work `--offline` afterwards. It installs even with `KARGO_AUTO_INSTALL=0`. `graalvm` takes `25` (GraalVM Community Edition) or `oracle-25` (Oracle GraalVM). `gradle` without a version installs the one the project uses; `android-sdk` installs a platform API level (default: the project's [`[toolchain] android-sdk`](../manifest/#toolchain)) with the build-tools of the project's AGP and platform-tools, after showing Google's license terms and asking, or accepting them with `--accept-licenses` (for CI; see [Android SDK](../../guides/android/#android-sdk)); `--emulator` adds the emulator, the command-line tools and a system image for that API level, to run apps on a virtual device; `kotlin-lsp` and `kls` without a version install the one `kargo lsp` uses, `kotlin-debug-adapter` the one `kargo dap` uses |
 | `remove` (`rm`) `<jdk\|graalvm\|native\|gradle\|android-sdk\|kotlin-lsp\|kls\|kotlin-debug-adapter> <version>` | Remove one. For JDKs and GraalVMs, a major version removes all its releases. For `android-sdk`, an API level removes that platform, and a package path such as `build-tools;36.0.0` that package; the SDK of `ANDROID_HOME` is never touched |
 | `available [jdk\|android-sdk]` | JDK versions available for download (LTS marked), or the Android SDK platforms and build-tools |
 | `which` | The toolchains this project resolves to |
@@ -1103,7 +1123,7 @@ Each check is `ok`, a `warning` (something to know, or a build that will downloa
 | Kargo | The version and platform, that the Kargo home is writable, the free disk space there (a warning under 5 GiB, an error under 1 GiB), the running [compiler daemons](#kargo-daemon), and toolchain installs another Kargo process holds the lock of |
 | JDK | `JAVA_HOME` (one without `bin/java`, or another JDK than `java` on `PATH`), and the JDK the project builds with: found or [pinned and installed](../../guides/toolchains/), at least JDK 11, one the project's Kotlin compiler runs on, new enough for `jvm-target`, with `javac`. A pinned `[toolchain] graalvm` too |
 | Toolchains | The JDKs, GraalVMs, Kotlin/Native and Gradle distributions, language servers and debug adapter installed under the Kargo home, and installs that were interrupted (a directory without a complete toolchain). With the Native target, whether its Kotlin/Native is installed |
-| Android | With the Android target: the SDK (`ANDROID_HOME`, or the [Kargo-managed one](../../guides/android/#android-sdk)), its platform and build-tools, accepted licenses, `adb`, and the Gradle the build runs |
+| Android | With the Android target: the SDK (`ANDROID_HOME`, or the [Kargo-managed one](../../guides/android/#android-sdk)), its platform and build-tools, accepted licenses, `adb` and its version, the connected devices and their states, the installed virtual devices, the emulator package and whether the machine accelerates the emulator (KVM, the Windows Hypervisor Platform, Hypervisor.framework), and the Gradle the build runs |
 | Wasm and JavaScript | With the Wasm or JS target: Node.js, a browser for a `browser` environment, and Binaryen's `wasm-opt` |
 | Network | The proxy (`[http] proxy` or `HTTPS_PROXY` and friends, passwords hidden), `[http] cainfo`, repository credentials whose environment variables are unset, and whether each repository (Maven Central outside a project) answers. `--offline` skips contacting them |
 | Project | Each member's `kargo.toml` [warnings](../warnings/), a held build lock on its `target/`, and `kargo.lock`: present, readable, and locking every declared dependency. A `kargo.toml` that does not load is reported here instead of stopping the command |

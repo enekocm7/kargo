@@ -172,7 +172,7 @@ Compiler errors and file locations in the output are links to the source.
 
 ### Android
 
-Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, the project import, run configurations and the tool window work for every target but Android. Android sources (`src-android/`, `android/`) aren't imported, because Kargo hands Android to Gradle and the Android Gradle Plugin. Layout and Compose previews need Gradle's model. For those, open the Gradle project Kargo generates in `target/android` (see [Android](../android/)) in a second window.
+Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, the project import, run configurations and the tool window work for every target but Android. Android sources (`src-android/`, `android/`) aren't imported, because Kargo hands Android to Gradle and the Android Gradle Plugin. Run configurations of an Android app run `kargo run -t android`, so they follow [Devices and emulators](../android/#devices-and-emulators); where there is no terminal to ask in, set `KARGO_ANDROID_DEVICE` in the run configuration's environment. Layout and Compose previews need Gradle's model. For those, open the Gradle project Kargo generates in `target/android` (see [Android](../android/)) in a second window.
 
 ### Limitations of the plugin
 
@@ -292,7 +292,7 @@ The status bar shows the target and profile that build, run and test use, such a
 | Remove Dependency… | Runs `kargo remove` for a dependency of `kargo.toml` |
 | Fetch Dependencies and Sources | `kargo fetch --sources`, for navigation into library sources |
 | Update Dependencies | `kargo update` |
-| Select Target… | The target for build, run and test: all enabled targets, or one of `jvm`, `wasm`, `native` and `android` |
+| Select Target… | The target for build, run and test: all enabled targets, or one of `jvm`, `wasm`, `native` and `android`. An Android run asks which device to use in a terminal; set `KARGO_ANDROID_DEVICE` (see [Devices and emulators](../android/#devices-and-emulators)) to choose it without asking |
 | Select Profile… | `dev`, or `release` for `--release` |
 | Open kargo.toml | The project's manifest |
 | Restart the Kargo Language Server | Restarts `kargo lsp` and discovers the tests again |

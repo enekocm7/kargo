@@ -18,6 +18,7 @@ use super::build::{
     jvm_javac_args, jvm_processor_path, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries, sources,
 };
 use super::context::BuildContext;
+use crate::android_device::{self, AndroidRun};
 use crate::compose::hot_reload::{Answer, HotReload};
 use crate::env::EnvOptions;
 use crate::warnings;
@@ -118,6 +119,8 @@ pub struct RunOptions {
     pub native_agent: bool,
     /// The Android flavors to install (`--flavor`), at most one per dimension.
     pub flavors: Vec<String>,
+    /// The device and log options of an Android run.
+    pub android: AndroidRun,
     /// The `.env` files the program's environment is read from (`--env-file`, `--no-env-file`).
     pub env: EnvOptions,
     /// Start a Compose Desktop app with the hot reload agent (`--hot-reload`), so that
@@ -200,6 +203,9 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
     }
     if !opts.flavors.is_empty() && target != TargetKind::Android {
         bail!("`--flavor` picks an Android product flavor and needs `-t android`, not {target}");
+    }
+    if let Some(flag) = opts.android.flag_set().filter(|_| target != TargetKind::Android) {
+        bail!("`{flag}` applies to an Android run and needs `-t android`, not {target}");
     }
     if target == TargetKind::Android {
         crate::gradle::validate_run(ctx, &opts.flavors)?;
@@ -299,6 +305,8 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
     };
     // `--main`, `--example` and a file on Kotlin/Native link their own executable instead of the project's.
     let separate_native = target == TargetKind::Native && matches!(opts.program, Program::Main(_) | Program::Example(_) | Program::File(_));
+    // The device comes first: it may ask a question, and the build is long.
+    let device = if target == TargetKind::Android { Some(crate::gradle::choose_device(ctx, &opts.android)?) } else { None };
     let results = if separate_native {
         BuildResults::default()
     } else {
@@ -406,7 +414,15 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
         }
         TargetKind::Android => {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
-            return Ok(Start::Finished(crate::gradle::run(ctx, &opts.flavors)?));
+            let device = device.context("no Android device was chosen")?;
+            if opts.android.watch {
+                // The app is installed and started; what keeps running is its log, which the next round replaces.
+                let deployed = crate::gradle::deploy(ctx, &opts.flavors, device)?;
+                let cmd = android_device::logcat_command(&deployed.adb, &deployed.serial, deployed.pid);
+                let label = format!("adb logcat ({})", deployed.app_id);
+                return Ok(Start::Process(Box::new(Launch { cmd, label, hot_reload: None })));
+            }
+            return Ok(Start::Finished(crate::gradle::run(ctx, &opts.flavors, &opts.android, device)?));
         }
     };
     cmd.args(&opts.args).current_dir(ctx.ws.root()).envs(project_env);
@@ -437,13 +453,27 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
 /// in the foreground themselves. Then checks the rest of the options as [`start`] does.
 pub fn check_watchable(ctx: &BuildContext, opts: &RunOptions) -> Result<()> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
-    if target == TargetKind::Android {
-        bail!("`--watch` does not run Android apps: the app runs inside Gradle; use `kargo run -t android` instead");
+    if target == TargetKind::Android && (opts.android.no_logcat || opts.android.stop_emulator) {
+        bail!(
+            "`--watch` follows the log of the app and keeps the emulator running; it cannot be combined with `--no-logcat` or `--stop-emulator`"
+        );
     }
     if is_browser_app(ctx, target) {
         bail!("`--watch` does not serve browser apps yet; `kargo run` serves one until Ctrl+C");
     }
     validate(ctx, target, opts)
+}
+
+/// Chooses the device of an Android run once, before the first round of `--watch`, so that no round asks again.
+pub fn choose_watch_device(ctx: &BuildContext, opts: &mut RunOptions) -> Result<()> {
+    let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
+    if target != TargetKind::Android {
+        return Ok(());
+    }
+    opts.android.watch = true;
+    let selection = crate::gradle::choose_device(ctx, &opts.android)?;
+    opts.android.device = Some(selection.serial);
+    Ok(())
 }
 
 /// The program `kargo run --watch` keeps running. A build that succeeds replaces it; a build that fails leaves it running.

@@ -23,6 +23,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::android_device::{self, Adb, AndroidRun, Selection, Toolbox};
 use crate::builtins;
 use crate::ops::build::{announce, compiling};
 use crate::ops::context::BuildContext;
@@ -1273,10 +1274,33 @@ pub fn fetch(ctx: &BuildContext) -> Result<()> {
 
 /// Runs Gradle tasks in the generated project.
 pub fn gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
-    ctx.with_gradle(|| run_gradle(ctx, tasks))
+    gradle_with_env(ctx, tasks, &[])
 }
 
-fn run_gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
+/// Runs Gradle tasks with more environment variables, such as `ANDROID_SERIAL`, which picks the device that
+/// `install` and `connected*` tasks use.
+pub fn gradle_with_env(ctx: &BuildContext, tasks: &[String], env: &[(&str, &str)]) -> Result<bool> {
+    ctx.with_gradle(|| run_gradle(ctx, tasks, env))
+}
+
+/// Whether the Gradle task `name` runs on a device: `installDebug`, `uninstallDebug`, `connectedDebugAndroidTest`.
+fn is_device_task(name: &str) -> bool {
+    let task = name.rsplit(':').next().unwrap_or(name);
+    task.starts_with("connected") || task.starts_with("install") || task.starts_with("uninstall") || task.ends_with("AndroidTest")
+}
+
+/// `kargo android <gradle args>`: runs the tasks. A task that uses a device gets the one chosen like `kargo run -t android`
+/// chooses it (`device` is `--device` or `KARGO_ANDROID_DEVICE`), passed to Gradle as `ANDROID_SERIAL`.
+pub fn run_tasks(ctx: &BuildContext, args: &[String], device: Option<&str>) -> Result<bool> {
+    if !args.iter().any(|a| is_device_task(a)) {
+        return gradle(ctx, args);
+    }
+    let opts = AndroidRun { device: device.map(str::to_owned), ..Default::default() };
+    let selection = choose_device(ctx, &opts)?;
+    gradle_with_env(ctx, args, &[("ANDROID_SERIAL", &selection.serial)])
+}
+
+fn run_gradle(ctx: &BuildContext, tasks: &[String], env: &[(&str, &str)]) -> Result<bool> {
     // Chosen first, so an incompatible `agp-version` and `gradle-version` fail before anything else.
     let choice = choose_gradle(ctx.ws, ctx.config)?;
     let dir = generate(ctx)?;
@@ -1295,7 +1319,7 @@ fn run_gradle(ctx: &BuildContext, tasks: &[String]) -> Result<bool> {
     if ctx.config.offline() {
         cmd.arg("--offline");
     }
-    cmd.env("JAVA_HOME", &jdk.home);
+    cmd.env("JAVA_HOME", &jdk.home).envs(env.iter().copied());
     if ctx.ws.manifest().toolchain.android_sdk != AndroidSdkRequest::System {
         // AGP also reads these, and fails when they name another SDK than `sdk.dir`.
         cmd.env("ANDROID_HOME", ctx.config.android_sdk_dir()).env_remove("ANDROID_SDK_ROOT");
@@ -1511,31 +1535,68 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
     Ok(gradle_ok && summary.success())
 }
 
-/// `kargo run --target android`: installs on a connected device and launches. `flavors`
-/// (`--flavor`) picks the flavor of a dimension; the others use their first flavor.
-pub fn run(ctx: &BuildContext, flavors: &[String]) -> Result<i32> {
+/// An app installed and started on a device.
+pub struct Deployed {
+    pub adb: Adb,
+    pub serial: String,
+    pub app_id: String,
+    /// The emulator was started for this run.
+    pub started_emulator: bool,
+    /// The process of the app, when it was found.
+    pub pid: Option<u32>,
+}
+
+/// Picks the device `kargo run -t android` uses (see [`android_device::select`]). It comes before the build: it may
+/// ask a question, and there is no use compiling for a device that does not exist. Kargo's SDK is installed first, so
+/// that `adb` is there.
+pub fn choose_device(ctx: &BuildContext, opts: &AndroidRun) -> Result<Selection> {
+    sdk(ctx.ws, ctx.config, Licenses::Ask)?;
+    let toolbox = Toolbox::locate(ctx.config, Some(ctx.ws.manifest()));
+    android_device::select(&toolbox, ctx.shell(), opts.device.as_deref(), &opts.emulator)
+}
+
+/// Installs the app on the chosen device with Gradle (`install<Variant>` with `ANDROID_SERIAL`, so no other device gets
+/// it) and starts it. `flavors` (`--flavor`) picks the flavor of a dimension; the others use their first flavor.
+pub fn deploy(ctx: &BuildContext, flavors: &[String], selection: Selection) -> Result<Deployed> {
     let cfg = android_config(ctx)?;
     let flavors = validate_run(ctx, flavors)?;
     let build_type = build_type(&ctx.profile)?;
     if !flavors.is_empty() {
         ctx.shell().verbose("Using", format!("flavor {}", flavors.join(", ")));
     }
+    let adb = Toolbox::locate(ctx.config, Some(ctx.ws.manifest())).adb()?;
     let task = format!("install{}", capitalize(&variant_name(&flavors, build_type)));
-    if !gradle(ctx, std::slice::from_ref(&task))? {
-        bail!("installing the app failed; is a device or emulator connected (`adb devices`)?");
+    if !gradle_with_env(ctx, std::slice::from_ref(&task), &[("ANDROID_SERIAL", &selection.serial)])? {
+        bail!("installing the app on {} ({}) failed; the Gradle output above says why", selection.name, selection.serial);
     }
-    let adb = sdk(ctx.ws, ctx.config, Licenses::Ask)
-        .ok()
-        .map(|sdk| sdk.join("platform-tools").join(if cfg!(windows) { "adb.exe" } else { "adb" }))
-        .filter(|p| p.is_file())
-        .or_else(|| process::find_on_path("adb"))
-        .context("`adb` not found; install the Android SDK platform-tools")?;
     let app_id = application_id(cfg, &flavors);
-    let mut cmd = Command::new(adb);
-    cmd.args(["shell", "monkey", "-p", &app_id, "-c", "android.intent.category.LAUNCHER", "1"]);
-    ctx.shell().status("Launching", &app_id);
-    let status = process::status(ctx.shell(), &mut cmd, "adb")?;
-    Ok(status.code().unwrap_or(1))
+    ctx.shell().status("Launching", format!("{app_id} on {}", selection.name));
+    let activity = android_device::launch(&adb, &selection.serial, &app_id)?;
+    ctx.shell().verbose("Started", activity);
+    let pid = android_device::wait_for_pid(&adb, &selection.serial, &app_id);
+    Ok(Deployed { adb, serial: selection.serial, app_id, started_emulator: selection.started, pid })
+}
+
+/// `kargo run --target android`: installs on the chosen device, launches the app and follows its log until it exits
+/// or the user presses Ctrl+C, which stops it.
+pub fn run(ctx: &BuildContext, flavors: &[String], opts: &AndroidRun, selection: Selection) -> Result<i32> {
+    let deployed = deploy(ctx, flavors, selection)?;
+    let shell = ctx.shell();
+    let code = match deployed.pid {
+        _ if opts.no_logcat => 0,
+        Some(pid) => android_device::follow(&deployed.adb, shell, &deployed.serial, &deployed.app_id, pid)?.code(),
+        None => {
+            shell.warn(format!(
+                "could not find the process of {}; it may have exited right after starting, so there is no log to show",
+                deployed.app_id
+            ));
+            1
+        }
+    };
+    if opts.stop_emulator && deployed.started_emulator {
+        android_device::stop_emulator(&deployed.adb, shell, &deployed.serial)?;
+    }
+    Ok(code)
 }
 
 /// Checks what `kargo run -t android` needs before anything builds: an application, known

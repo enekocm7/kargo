@@ -163,6 +163,12 @@ impl Config {
         self.toolchains_dir().join("android-sdk")
     }
 
+    /// The Android virtual devices of the Kargo-managed SDK. Their images are paths into that SDK, so
+    /// they live next to it instead of among the ones Android Studio manages in `~/.android/avd`.
+    pub fn android_avd_dir(&self) -> PathBuf {
+        self.toolchains_dir().join("android-avd")
+    }
+
     /// Kotlin/Native's own dependency cache (LLVM, sysroots), normally `~/.konan`.
     pub fn konan_data_dir(&self) -> PathBuf {
         match std::env::var_os("KONAN_DATA_DIR") {
