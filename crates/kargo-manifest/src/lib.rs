@@ -1543,11 +1543,14 @@ pub enum Notarization {
 }
 
 /// `[build]` (`[workspace.build]` in a workspace): how the build commands run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BuildSettings {
     /// How many packages and targets build at the same time; `None` leaves it to `KARGO_JOBS`,
     /// `config.toml` or the default.
     pub jobs: Option<kargo_util::jobs::Jobs>,
+    /// The targets the commands use without `-t`; `None` uses every enabled target. In a
+    /// `[workspace.build]` it applies to the members that enable at least one of them.
+    pub default_targets: Option<Vec<TargetKind>>,
 }
 
 /// `[doc]`: options for `kargo doc` (Dokka).

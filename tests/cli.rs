@@ -3204,6 +3204,46 @@ fn build_and_check_warn_when_a_target_has_no_sources() {
 }
 
 #[test]
+fn default_targets_choose_the_targets_without_t() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("empty", "[target.jvm]\n[target.wasm]\n[build]\ndefault-targets = [\"jvm\"]\n"));
+    // The warnings come before the toolchain, so they show which targets a build took up.
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("for the jvm target"))
+        .stderr(predicate::str::contains("for the wasm target").not());
+    p.kargo()
+        .args(["--offline", "build", "-t", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("for the wasm target"))
+        .stderr(predicate::str::contains("for the jvm target").not());
+
+    p.file("kargo.toml", &manifest("empty", "[target.jvm]\n[build]\ndefault-targets = [\"wasm\"]\n"));
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`default-targets` names `wasm`, which is not enabled"));
+}
+
+#[test]
+fn workspace_default_targets_apply_to_the_members_that_enable_them() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n[workspace.build]\ndefault-targets = [\"jvm\"]\n");
+    p.file("app/kargo.toml", &manifest("app", "[target.jvm]\n[target.wasm]\n"));
+    p.file("lib/kargo.toml", &manifest("lib", "[target.wasm]\n"));
+    let out = p.kargo().args(["--offline", "build", "--keep-going"]).assert().failure().get_output().stderr.clone();
+    let err = String::from_utf8_lossy(&out);
+    assert!(err.contains("for the jvm target"), "{err}");
+    // `app` builds only the JVM; `lib` has none of the default targets, so it builds all it has.
+    assert!(err.contains("for the wasm target"), "{err}");
+    assert_eq!(err.matches("for the wasm target").count(), 1, "{err}");
+}
+
+#[test]
 fn pre_build_hooks_can_provide_the_sources() {
     let p = Project::new();
     let hook =

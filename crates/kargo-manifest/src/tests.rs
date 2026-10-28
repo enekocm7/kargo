@@ -2163,3 +2163,17 @@ fn build_jobs() {
     let ws = WorkspaceManifest::parse("[workspace]\nmembers = []\n[workspace.build]\njobs = 3\n", Path::new("/ws")).unwrap();
     assert_eq!(ws.build.jobs, Some(Jobs::Count(3)));
 }
+
+#[test]
+fn build_default_targets() {
+    assert_eq!(parse(MINIMAL).build.default_targets, None);
+    let m = parse(&format!("{MINIMAL}[target.jvm]\n[target.wasm]\n[build]\ndefault-targets = [\"wasm\", \"jvm\", \"wasm\"]\n"));
+    assert_eq!(m.build.default_targets, Some(vec![TargetKind::Wasm, TargetKind::Jvm]));
+    assert!(parse_err(&format!("{MINIMAL}[build]\ndefault-targets = []\n")).contains("`default-targets` is empty"));
+    assert!(parse_err(&format!("{MINIMAL}[build]\ndefault-targets = [\"ios\"]\n")).contains("unknown target `ios`"));
+    assert!(parse_err(&format!("{MINIMAL}[build]\ndefault-targets = [\"wasm\"]\n")).contains("names `wasm`, which is not enabled"));
+
+    let ws =
+        WorkspaceManifest::parse("[workspace]\nmembers = []\n[workspace.build]\ndefault-targets = [\"jvm\"]\n", Path::new("/ws")).unwrap();
+    assert_eq!(ws.build.default_targets, Some(vec![TargetKind::Jvm]));
+}

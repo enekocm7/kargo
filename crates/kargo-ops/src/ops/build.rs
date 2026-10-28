@@ -110,11 +110,28 @@ pub struct BuildResults {
     pub android: Option<PathBuf>,
 }
 
+/// The targets an operation uses without `-t`: `[build] default-targets` of the package, else the
+/// ones of `[workspace.build]` that the package enables, else every enabled target.
+pub fn default_targets(ctx: &BuildContext) -> Vec<TargetKind> {
+    let manifest = ctx.ws.manifest();
+    let enabled = manifest.targets.enabled();
+    if let Some(own) = &manifest.build.default_targets {
+        return enabled.into_iter().filter(|t| own.contains(t)).collect();
+    }
+    if let Some(shared) = ctx.ws.workspace().and_then(|w| w.build.default_targets.as_ref()) {
+        let chosen: Vec<TargetKind> = enabled.iter().copied().filter(|t| shared.contains(t)).collect();
+        if !chosen.is_empty() {
+            return chosen;
+        }
+    }
+    enabled
+}
+
 /// Resolves which targets an operation applies to.
 pub fn select_targets(ctx: &BuildContext, requested: &[TargetKind]) -> Result<Vec<TargetKind>> {
     let enabled = ctx.ws.manifest().targets.enabled();
     if requested.is_empty() {
-        return Ok(enabled);
+        return Ok(default_targets(ctx));
     }
     for t in requested {
         if !enabled.contains(t) {
