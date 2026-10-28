@@ -15,6 +15,7 @@ mod parser;
 mod program;
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -22,16 +23,16 @@ use anyhow::{Context, Result};
 use parser::DeclKind;
 use program::Ent;
 
-pub use kotlin::{function_name, kotlin_package};
+pub use kotlin::{FACTORIES_DIR, function_name, kotlin_package};
 pub use program::types_name;
 
 /// Bumped whenever the generated Kotlin changes, so that declarations generated before are written again.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 
 /// What [`generate`] wrote.
 #[derive(Debug, Default)]
 pub struct Generated {
-    /// The Kotlin files.
+    /// The Kotlin files (the factory modules next to them are not listed).
     pub files: Vec<PathBuf>,
     /// The packages without TypeScript declarations, which got none.
     pub untyped: Vec<String>,
@@ -77,21 +78,43 @@ pub fn generate(packages: &[String], roots: &[PathBuf], out: &Path) -> Result<Ge
     for (path, text) in render(&output, out, header) {
         std::fs::create_dir_all(path.parent().expect("a generated file is in a package directory"))?;
         std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
-        generated.files.push(path);
+        if is_kotlin(&path) {
+            generated.files.push(path);
+        }
     }
     Ok(generated)
 }
 
-/// The Kotlin files of `output` below `out`, each starting with `header`: `Types.kt`, `Exports.kt`
-/// (under `@file:JsModule`) and `Default.kt` in the directory of each Kotlin package.
+fn is_kotlin(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "kt")
+}
+
+/// The JavaScript modules with the factories that [`generate`] and [`generate_local`] write below
+/// `out`, by their path below the project's JavaScript modules (`kargo-factories/express.mjs`).
+pub fn factory_modules(out: &Path) -> Vec<(String, PathBuf)> {
+    let dir = out.join(FACTORIES_DIR);
+    let mut modules: Vec<(String, PathBuf)> = kargo_util::fs::collect_files(&dir, &["mjs"])
+        .into_iter()
+        .filter_map(|p| Some((format!("{FACTORIES_DIR}/{}", p.file_name()?.to_str()?), p)))
+        .collect();
+    modules.sort();
+    modules
+}
+
+/// The files of `output` below `out`, each starting with `header`: `Types.kt`, `Exports.kt`
+/// (under `@file:JsModule`), `Default.kt` and `Factories.kt` (under `@file:JsModule` of the
+/// factory module) in the directory of each Kotlin package, and the factory module itself in
+/// [`FACTORIES_DIR`].
 fn render(output: &kotlin::Output, out: &Path, header: impl Fn(&kotlin::KotlinPackage) -> String) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
     for (package, content) in &output.packages {
         let dir = package.split('.').fold(out.to_path_buf(), |dir, part| dir.join(part));
+        let factories = kotlin::factory_module(package);
         let parts = [
             ("Types.kt", None, &content.types),
             ("Exports.kt", Some(&content.npm), &content.exports),
             ("Default.kt", None, &content.default),
+            ("Factories.kt", Some(&factories), &content.factories),
         ];
         for (name, module, decls) in parts {
             if decls.is_empty() {
@@ -108,6 +131,19 @@ fn render(output: &kotlin::Output, out: &Path, header: impl Fn(&kotlin::KotlinPa
                 text.push('\n');
             }
             files.push((dir.join(name), text));
+        }
+        if !content.factory_js.is_empty() {
+            let mut text = header(content);
+            let _ = writeln!(
+                text,
+                "// The factories of the Kotlin package `{package}`: each builds an object from its properties, leaving out those that are `undefined`."
+            );
+            for function in &content.factory_js {
+                text.push('\n');
+                text.push_str(function);
+                text.push('\n');
+            }
+            files.push((out.join(FACTORIES_DIR).join(format!("{package}.mjs")), text));
         }
     }
     files
@@ -130,7 +166,7 @@ pub struct LocalModule {
 /// What [`generate_local`] wrote.
 #[derive(Debug, Default)]
 pub struct LocalGenerated {
-    /// Every Kotlin file of the declarations.
+    /// Every Kotlin file of the declarations (the factory modules next to them are not listed).
     pub files: Vec<PathBuf>,
     /// The files whose text changed (new ones included), and those it removed.
     pub changed: Vec<PathBuf>,
@@ -178,7 +214,7 @@ pub fn generate_local(modules: &[LocalModule], roots: &[PathBuf], out: &Path) ->
     };
     let files = render(&output, out, header);
     let wanted: std::collections::HashSet<&Path> = files.iter().map(|(p, _)| p.as_path()).collect();
-    for stale in kargo_util::fs::collect_files(out, &["kt"]).into_iter().filter(|p| !wanted.contains(p.as_path())) {
+    for stale in kargo_util::fs::collect_files(out, &["kt", "mjs"]).into_iter().filter(|p| !wanted.contains(p.as_path())) {
         std::fs::remove_file(&stale).with_context(|| format!("failed to remove {}", stale.display()))?;
         generated.changed.push(stale);
     }
@@ -188,7 +224,9 @@ pub fn generate_local(modules: &[LocalModule], roots: &[PathBuf], out: &Path) ->
             std::fs::write(&path, &text).with_context(|| format!("failed to write {}", path.display()))?;
             generated.changed.push(path.clone());
         }
-        generated.files.push(path);
+        if is_kotlin(&path) {
+            generated.files.push(path);
+        }
     }
     Ok(generated)
 }

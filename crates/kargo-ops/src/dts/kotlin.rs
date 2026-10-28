@@ -13,13 +13,27 @@
 //!   lambda works); optional parameters default to `definedExternally`.
 //! - Only the npm packages the project depends on get functions, values and classes (imported
 //!   with `@JsModule`); the packages their declarations refer to only contribute types.
+//! - An object type literal (`opts: { a: number }`) becomes an interface named after where it is
+//!   (`DoSomethingOpts`). An interface whose members are all properties also gets a factory, a
+//!   function of the same name with one parameter per property (`Options(a = 1)`), imported from a
+//!   JavaScript module generated next to the declarations ([`factory_module`]): it builds the
+//!   object, leaving out the optional properties the call leaves out.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::parser::{DeclKind, MemberKind, Sig, Type};
-use super::program::{DeclId, Ent, Program, ScopeId, package_of};
+use super::parser::{Decl, DeclKind, Interface, Member, MemberKind, Sig, Type};
+use super::program::{DeclId, DeclNode, Ent, Program, ScopeId, package_of};
+
+/// The directory below the project's JavaScript modules (`js/` next to the Kotlin module) that the
+/// generated factory modules land in.
+pub const FACTORIES_DIR: &str = "kargo-factories";
+
+/// The JavaScript module of the factories of the Kotlin package `pkg`, as Kotlin imports it.
+pub fn factory_module(pkg: &str) -> String {
+    format!("./{}/{FACTORIES_DIR}/{pkg}.mjs", crate::js_sources::OUTPUT_DIR)
+}
 
 /// The most interfaces generated, so that a large dependency graph stays bounded; types beyond it are `JsAny`.
 const MAX_TYPES: usize = 600;
@@ -208,6 +222,11 @@ struct Members {
     /// How far up the class hierarchy the constructors were found: a class inherits the nearest ones.
     ctor_depth: Option<usize>,
     index: Option<KT>,
+    /// Every property as JavaScript names it, for a factory: its name, type and whether it is optional.
+    fields: Vec<(String, RT, bool)>,
+    /// Whether there are members other than properties (methods, call, construct or index
+    /// signatures), so that the object is not plain data and gets no factory.
+    behavior: bool,
 }
 
 impl Members {
@@ -243,6 +262,17 @@ pub struct KotlinPackage {
     pub exports: Vec<String>,
     /// The module's default export (`@JsModule` on each declaration).
     pub default: Vec<String>,
+    /// Factories of plain-data interfaces, imported by name from [`factory_module`] (`@file:JsModule`).
+    pub factories: Vec<String>,
+    /// The JavaScript functions of [`factory_module`], one per interface.
+    pub factory_js: Vec<String>,
+}
+
+/// A factory, kept until the functions it must not clash with are all known.
+struct Factory {
+    pkg: String,
+    funs: Vec<Fun>,
+    js: String,
 }
 
 pub struct Generator<'a> {
@@ -260,6 +290,13 @@ pub struct Generator<'a> {
     /// types go in that package instead of one named after an npm package.
     locals: HashMap<PathBuf, (String, String)>,
     depth: usize,
+    /// Where the type being resolved is (`["doSomething", "opts"]`): an object type literal is named after it.
+    hint: Vec<String>,
+    /// The interfaces made for object type literals, by their scope and members.
+    literals: HashMap<(ScopeId, String), DeclId>,
+    factories: Vec<Factory>,
+    /// The functions generated in each Kotlin package (by [`Fun::key`]), which a factory must not clash with.
+    values: HashSet<(String, String)>,
 }
 
 impl<'a> Generator<'a> {
@@ -274,7 +311,50 @@ impl<'a> Generator<'a> {
             root: String::new(),
             locals: HashMap::new(),
             depth: 0,
+            hint: Vec::new(),
+            literals: HashMap::new(),
+            factories: Vec::new(),
+            values: HashSet::new(),
         }
+    }
+
+    /// Runs `f` with the naming hint `hint` in place of the current one.
+    fn hinted<T>(&mut self, hint: Vec<String>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::replace(&mut self.hint, hint);
+        let out = f(self);
+        self.hint = saved;
+        out
+    }
+
+    /// Runs `f` with `part` added to the naming hint.
+    fn hinted_in<T>(&mut self, part: &str, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.hint.push(part.to_owned());
+        let out = f(self);
+        self.hint.pop();
+        out
+    }
+
+    /// The interface for the object type literal `members` in `scope`, named after the current hint.
+    /// A literal without properties, methods or signatures (`{}`) is any object.
+    fn literal(&mut self, members: &[Member], scope: ScopeId) -> RT {
+        if members.iter().all(|m| matches!(m.kind, MemberKind::Ctor(_))) {
+            return RT::Opaque;
+        }
+        let key = (scope, format!("{members:?}"));
+        let id = match self.literals.get(&key) {
+            Some(&id) => id,
+            None => {
+                let name: String = self.hint.iter().map(|p| pascal(p)).collect();
+                let name = if name.is_empty() { "Object".to_owned() } else { name };
+                let iface = Interface { tparams: Vec::new(), extends: Vec::new(), members: members.to_vec(), is_class: false };
+                let decl = Decl { name, kind: DeclKind::Interface(iface), doc: None, exported: false, default: false };
+                self.prog.decls.push(DeclNode { decl, scope, body: None });
+                let id = self.prog.decls.len() - 1;
+                self.literals.insert(key, id);
+                id
+            }
+        };
+        RT::Ent(Ent::Decls(vec![id]), Vec::new())
     }
 
     /// Declares the file `path` one of the project's modules, imported as `spec` and generated into
@@ -303,7 +383,7 @@ impl<'a> Generator<'a> {
 
         if let Some(Ent::Decls(decls)) = default {
             for d in decls {
-                let texts = self.value(d, default_name, &format!("@JsModule(\"{npm}\")\n"));
+                let texts = self.value(&pkg, d, default_name, &format!("@JsModule(\"{npm}\")\n"));
                 self.package_mut(&pkg).default.extend(texts);
                 if self.is_class(d) {
                     self.name_for(&[d]);
@@ -314,7 +394,7 @@ impl<'a> Generator<'a> {
             let Some(Ent::Decls(decls)) = ent else { continue };
             for &d in &decls {
                 if matches!(self.prog.decls[d].decl.kind, DeclKind::Function(_) | DeclKind::Var(_)) {
-                    let texts = self.value(d, &name, "");
+                    let texts = self.value(&pkg, d, &name, "");
                     self.package_mut(&pkg).exports.extend(texts);
                 }
             }
@@ -347,6 +427,17 @@ impl<'a> Generator<'a> {
 
     pub fn finish(mut self) -> Output {
         self.drain();
+        for factory in std::mem::take(&mut self.factories) {
+            let funs: Vec<&Fun> = factory.funs.iter().filter(|f| !self.values.contains(&(factory.pkg.clone(), f.key()))).collect();
+            if funs.is_empty() {
+                continue;
+            }
+            let package = self.out.packages.entry(factory.pkg.clone()).or_default();
+            for fun in funs {
+                package.factories.push(format!("external fun {}({}): {}", fun.name, fun.render_params(), fun.ret.render()));
+            }
+            package.factory_js.push(factory.js);
+        }
         self.out
     }
 
@@ -387,10 +478,14 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// A function or variable declaration as top-level Kotlin declarations named `name`, each
-    /// with `annotation` after its documentation.
-    fn value(&mut self, d: DeclId, name: &str, annotation: &str) -> Vec<String> {
+    /// A function or variable declaration as top-level Kotlin declarations named `name` in the
+    /// Kotlin package `pkg`, each with `annotation` after its documentation.
+    fn value(&mut self, pkg: &str, d: DeclId, name: &str, annotation: &str) -> Vec<String> {
         let Some(kname) = identifier(name) else { return Vec::new() };
+        self.hinted(vec![name.to_owned()], |g| g.value_in(pkg, d, &kname, annotation))
+    }
+
+    fn value_in(&mut self, pkg: &str, d: DeclId, kname: &str, annotation: &str) -> Vec<String> {
         let scope = self.prog.decls[d].scope;
         let doc = self.prog.decls[d].decl.doc.clone();
         let kind = self.prog.decls[d].decl.kind.clone();
@@ -410,7 +505,8 @@ impl<'a> Generator<'a> {
             _ => return out,
         };
         for sig in sigs {
-            for fun in self.variants(&kname, &sig, &None) {
+            for fun in self.variants(kname, &sig, &None) {
+                self.values.insert((pkg.to_owned(), fun.key()));
                 if keys.insert(fun.key()) {
                     out.push(format!("{}{annotation}external fun {kname}({}): {}", kdoc(&doc, ""), fun.render_params(), fun.ret.render()));
                 }
@@ -426,7 +522,8 @@ impl<'a> Generator<'a> {
             Type::Any | Type::Unknown | Type::Never | Type::Other => RT::Any,
             Type::Void | Type::Undefined => RT::Void,
             Type::Null => RT::Null,
-            Type::Object | Type::BigInt | Type::Symbol | Type::Ctor(_) | Type::Obj(_) => RT::Opaque,
+            Type::Object | Type::BigInt | Type::Symbol | Type::Ctor(_) => RT::Opaque,
+            Type::Obj(members) => self.literal(members, scope),
             Type::String | Type::StrLit => RT::Str,
             Type::Number | Type::NumLit => RT::Num,
             Type::Boolean | Type::BoolLit => RT::Bool,
@@ -477,9 +574,13 @@ impl<'a> Generator<'a> {
         let params = sig
             .params
             .iter()
-            .map(|p| RParam { name: p.name.clone(), ty: self.rt(&p.ty, scope, &env), optional: p.optional, rest: p.rest })
+            .map(|p| {
+                let ty = self.hinted_in(&p.name, |g| g.rt(&p.ty, scope, &env));
+                RParam { name: p.name.clone(), ty, optional: p.optional, rest: p.rest }
+            })
             .collect();
-        RSig { params, ret: self.rt(&sig.ret, scope, &env) }
+        let ret = self.hinted_in("Result", |g| g.rt(&sig.ret, scope, &env));
+        RSig { params, ret }
     }
 
     /// The interface-level environment of a declaration: its type parameters stay parameters.
@@ -522,7 +623,8 @@ impl<'a> Generator<'a> {
         let DeclKind::Alias { ty, .. } = self.prog.decls[d].decl.kind.clone() else { return RT::Any };
         let scope = self.prog.decls[d].scope;
         let env = self.own_env(d);
-        let body = self.rt(&ty, scope, &env);
+        let name = self.prog.decls[d].decl.name.clone();
+        let body = self.hinted(vec![name], |g| g.rt(&ty, scope, &env));
         let b = self.bindings(d, args);
         subst(&body, &b)
     }
@@ -565,7 +667,8 @@ impl<'a> Generator<'a> {
                 for &d in decls {
                     if let DeclKind::Function(sig) = self.prog.decls[d].decl.kind.clone() {
                         let scope = self.prog.decls[d].scope;
-                        out.push(self.rsig(&sig, scope, &Bindings::new()));
+                        let name = self.prog.decls[d].decl.name.clone();
+                        out.push(self.hinted(vec![name], |g| g.rsig(&sig, scope, &Bindings::new())));
                     }
                 }
                 out
@@ -596,10 +699,11 @@ impl<'a> Generator<'a> {
         let scope = self.prog.decls[d].scope;
         let env = self.own_env(d);
         let b = self.bindings(d, args);
+        let name = self.prog.decls[d].decl.name.clone();
         let mut out = Vec::new();
         for m in &iface.members {
             if let MemberKind::Call(sig) = &m.kind {
-                let s = self.rsig(sig, scope, &env);
+                let s = self.hinted(vec![name.clone()], |g| g.rsig(sig, scope, &env));
                 out.push(subst_sig(&s, &b));
             }
         }
@@ -970,11 +1074,13 @@ impl<'a> Generator<'a> {
         let this = Some(fq.to_owned());
         let mut members = Members::default();
         let mut visited = HashSet::new();
-        for &d in decls {
-            let b = self.bindings(d, &[]);
-            self.collect(d, &b, &this, &mut members, &mut visited, 0);
-        }
         let (pkg, simple) = fq.rsplit_once('.').map(|(p, s)| (p.to_owned(), s.to_owned())).unwrap_or_default();
+        self.hinted(vec![simple.trim_matches('`').to_owned()], |g| {
+            for &d in decls {
+                let b = g.bindings(d, &[]);
+                g.collect(d, &b, &this, &mut members, &mut visited, 0);
+            }
+        });
         let key = *decls.iter().min().unwrap();
         let doc = decls.iter().find_map(|&d| self.prog.decls[d].decl.doc.clone());
         let class = self.classes.get(&key).cloned();
@@ -1005,6 +1111,9 @@ impl<'a> Generator<'a> {
             let _ = writeln!(text, "    fun {}({}): {}", fun.name, fun.render_params(), fun.ret.render());
         }
         text.push('}');
+        if class.is_none() {
+            self.factory(&pkg, &simple, &this, &members);
+        }
         let package = self.out.packages.entry(pkg.clone()).or_default();
         match class {
             Some(ClassImport::Default(_)) => package.default.push(text),
@@ -1029,6 +1138,42 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// The factory of the interface `simple` of the Kotlin package `pkg` with `members`, when they
+    /// are all properties: a Kotlin function per combination of their types (required ones first,
+    /// optional ones defaulting to `definedExternally`), and the JavaScript function it calls, which
+    /// sets a property only when its argument is not `undefined`.
+    fn factory(&mut self, pkg: &str, simple: &str, this: &Option<String>, members: &Members) {
+        if members.behavior || members.fields.is_empty() || simple.starts_with('`') || JS_RESERVED.contains(&simple) {
+            return;
+        }
+        let mut fields = members.fields.clone();
+        // Leaving out an optional parameter leaves out those after it, never a required one.
+        fields.sort_by_key(|(_, _, optional)| *optional);
+        let params =
+            fields.iter().map(|(name, ty, optional)| RParam { name: name.clone(), ty: ty.clone(), optional: *optional, rest: false });
+        let sig = RSig { params: params.collect(), ret: RT::This };
+        let funs = self.variants(simple, &sig, this);
+        let mut names: Vec<String> = Vec::new();
+        for name in param_names(&sig.params) {
+            let mut name = if JS_RESERVED.contains(&name.as_str()) { format!("{name}_") } else { name };
+            while names.contains(&name) {
+                name.push('_');
+            }
+            names.push(name);
+        }
+        let mut js = format!("export function {simple}({}) {{\n    const $o = {{}};\n", names.join(", "));
+        for ((name, _, optional), param) in fields.iter().zip(&names) {
+            let key = serde_json::to_string(name).expect("a string serializes");
+            if *optional {
+                let _ = writeln!(js, "    if ({param} !== undefined) $o[{key}] = {param};");
+            } else {
+                let _ = writeln!(js, "    $o[{key}] = {param};");
+            }
+        }
+        js.push_str("    return $o;\n}");
+        self.factories.push(Factory { pkg: pkg.to_owned(), funs, js });
+    }
+
     /// Adds the members of an interface or class `d` and its supertypes, its type parameters bound by `b`.
     fn collect(
         &mut self,
@@ -1048,8 +1193,11 @@ impl<'a> Generator<'a> {
         for m in iface.members.iter().filter(|m| !m.is_static) {
             match &m.kind {
                 MemberKind::Prop { ty, optional, readonly } => {
+                    let r = subst(&self.hinted_in(&m.name, |g| g.rt(ty, scope, &env)), b);
+                    if members.fields.iter().all(|(n, ..)| *n != m.name) {
+                        members.fields.push((m.name.clone(), r.clone(), *optional));
+                    }
                     let Some(name) = member_name(&m.name) else { continue };
-                    let r = subst(&self.rt(ty, scope, &env), b);
                     let sigs = self.callables(&r);
                     if sigs.is_empty() {
                         if members.props.iter().all(|(n, ..)| *n != name) {
@@ -1066,13 +1214,15 @@ impl<'a> Generator<'a> {
                     }
                 }
                 MemberKind::Method { sig } => {
+                    members.behavior = true;
                     let Some(name) = member_name(&m.name) else { continue };
-                    let s = subst_sig(&self.rsig(sig, scope, &env), b);
+                    let s = subst_sig(&self.hinted_in(&m.name, |g| g.rsig(sig, scope, &env)), b);
                     for fun in self.variants(&name, &s, this) {
                         members.add_fun(fun, m.doc.clone());
                     }
                 }
                 MemberKind::Ctor(sig) if iface.is_class && members.ctor_depth.is_none_or(|found| found == depth) => {
+                    members.behavior = true;
                     members.ctor_depth = Some(depth);
                     let s = subst_sig(&self.rsig(sig, scope, &env), b);
                     for fun in self.variants("constructor", &s, this) {
@@ -1082,10 +1232,11 @@ impl<'a> Generator<'a> {
                     }
                 }
                 MemberKind::Index(ty) if members.index.is_none() => {
+                    members.behavior = true;
                     let r = subst(&self.rt(ty, scope, &env), b);
                     members.index = Some(self.kt(&r, Pos::Prop, this));
                 }
-                _ => {}
+                _ => members.behavior = true,
             }
         }
         for ext in &iface.extends {
@@ -1164,6 +1315,54 @@ const KEYWORDS: [&str; 28] = [
     "when",
     "while",
 ];
+
+/// JavaScript's reserved words that Kotlin takes as names: a factory never uses them as its own
+/// name or its parameters'.
+const JS_RESERVED: [&str; 28] = [
+    "arguments",
+    "await",
+    "case",
+    "catch",
+    "const",
+    "debugger",
+    "default",
+    "delete",
+    "enum",
+    "eval",
+    "export",
+    "extends",
+    "finally",
+    "function",
+    "implements",
+    "import",
+    "instanceof",
+    "let",
+    "new",
+    "private",
+    "protected",
+    "public",
+    "static",
+    "switch",
+    "undefined",
+    "void",
+    "with",
+    "yield",
+];
+
+/// A part of a name in PascalCase, without the characters an identifier can't have (`on-load` is `OnLoad`).
+fn pascal(s: &str) -> String {
+    let mut out = String::new();
+    let mut upper = true;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(if upper { c.to_ascii_uppercase() } else { c });
+            upper = false;
+        } else {
+            upper = true;
+        }
+    }
+    out
+}
 
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();

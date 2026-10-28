@@ -1616,6 +1616,46 @@ fn kotlin_js_and_typescript_call_each_other() {
     assert!(t.dir.path().join("mixedjs/target/debug/generated/js-sources-js/js/greeter/Exports.kt").is_file());
 }
 
+/// Object parameters built with the generated factories, on Wasm and Kotlin/JS: a named interface
+/// and an inline object type, with optional properties left out of the object when not given.
+#[test]
+fn object_parameters_are_built_with_generated_factories() {
+    require_e2e!();
+    if which("node").is_none() {
+        eprintln!("skipping: Node.js not installed");
+        return;
+    }
+    let t = E2e::new();
+    for (name, target, generated) in [("objwasm", "wasm", "js-sources"), ("objjs", "js", "js-sources-js")] {
+        t.create(&[name, "--target", target]);
+        t.write(
+            &format!("{name}/js/greet.js"),
+            "export function greet(g, style) {\n    \
+             const s = `Hello, ${g.name}` + (\"times\" in g ? ` x${g.times}` : \"\") + (style.suffix ?? \"\");\n    \
+             return style.loud ? s.toUpperCase() : s;\n}\n",
+        );
+        t.write(
+            &format!("{name}/js/greet.d.ts"),
+            "export interface Greeting { name: string; times?: number }\n\
+             export declare function greet(greeting: Greeting, style: { loud: boolean; suffix?: string }): string;\n",
+        );
+        t.write(
+            &format!("{name}/src/Main.kt"),
+            "import js.greet.*\n\nfun main() {\n    println(greet(Greeting(name = \"Kargo\"), GreetStyle(loud = false)))\n    \
+             println(greet(Greeting(name = \"Kargo\", times = 2), GreetStyle(loud = true, suffix = \"!\")))\n}\n",
+        );
+        t.kargo(name)
+            .arg("run")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("warning").not())
+            .stdout(predicate::str::contains("Hello, Kargo\n"))
+            .stdout(predicate::str::contains("HELLO, KARGO X2!\n"));
+        assert!(t.dir.path().join(format!("{name}/target/debug/generated/{generated}/js/greet/Factories.kt")).is_file());
+        assert!(t.dir.path().join(format!("{name}/target/debug/{target}/js/kargo-factories/js.greet.mjs")).is_file());
+    }
+}
+
 #[test]
 fn wasm_browser_app_serves_its_typescript_modules() {
     require_e2e!();

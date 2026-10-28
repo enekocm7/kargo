@@ -164,7 +164,7 @@ $ kargo run
 [007]
 ```
 
-The declarations go to `target/<profile>/generated/npm-js/` (`@types` packages to `target/<profile>/npm-types-js/`), with the same Kotlin packages, names and [type mapping](../wasm/#kotlin-declarations-for-npm-packages) as on Wasm: they use the interop types `JsAny`, `JsString`, `JsArray` and `Promise`, which Kotlin/JS shares with Kotlin/Wasm since Kotlin 2.2.20, so code that calls an npm package compiles for both targets. Kargo passes the opt-in `kotlin.js.ExperimentalWasmJsInterop` they need. With an older Kotlin, Kargo warns and generates none.
+The declarations go to `target/<profile>/generated/npm-js/` (`@types` packages to `target/<profile>/npm-types-js/`), with the same Kotlin packages, names and [type mapping](../wasm/#kotlin-declarations-for-npm-packages) as on Wasm: they use the interop types `JsAny`, `JsString`, `JsArray` and `Promise`, which Kotlin/JS shares with Kotlin/Wasm since Kotlin 2.2.20, so code that calls an npm package compiles for both targets. Kargo passes the opt-in `kotlin.js.ExperimentalWasmJsInterop` they need. With an older Kotlin, Kargo warns and generates none. Options objects are built with the same [factories](../wasm/#building-objects) (`make(Options(size = 2))`), copied to `target/<profile>/js/js/kargo-factories/`; they are ES modules, so use `module-kind = "es"` (the default) for a program that calls them.
 
 A package without TypeScript declarations gets none, with a warning: write the `external` declarations you need with `@JsModule`, or use `dynamic`. The Kotlin docs cover [JavaScript interop](https://kotlinlang.org/docs/js-interop.html) and [`@JsModule`](https://kotlinlang.org/docs/js-modules.html).
 
