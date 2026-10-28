@@ -287,7 +287,7 @@ kargo run -e 'println(1 + 1)'
 | `--stop-emulator` | Android: shut down an emulator that this run started once the app is done |
 | `--headless`, `--cold-boot`, `--wipe-data`, `--boot-timeout <seconds>` | Android: how an emulator that Kargo has to start boots: without a window, without its snapshot, with erased user data, and how long to wait (default 300) |
 | `--message-format <fmt>` | `human` (default) or `json` for the compiler diagnostics, as for `kargo build`. The program's own output still goes to stdout |
-| `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`; not for browser apps. An Android app is installed again and its new log followed. See [Watch mode](../../guides/watch/) |
+| `--watch` | Rebuild and restart the program when its files change, until you press Ctrl+C. A failed build prints its errors and leaves the running program alone. Conflicts with `--debug`. A Wasm or JS browser app is served by one server for all rounds, and its open pages reload after each successful build. An Android app is installed again and its new log followed. See [Watch mode](../../guides/watch/) |
 | `--hot-reload` | Like `--watch`, but a Compose Desktop app keeps running: the classes a build changed are swapped into it and the UI recomposes. Runs on JetBrains Runtime, which Kargo downloads. Needs `[frameworks] compose` and the jvm target; conflicts with `--debug`. See [Hot reload](../../guides/compose/#hot-reload) |
 | `-j, --jobs <n>` | How many targets and Native platforms build at the same time, as for [`kargo build`](#kargo-build-b) |
 | `--clear` | With `--watch`: clear the terminal before each run |

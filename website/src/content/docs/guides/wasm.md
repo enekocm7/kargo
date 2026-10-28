@@ -76,7 +76,7 @@ $ kargo run -t wasm
      Serving target/debug/wasm at http://127.0.0.1:8080/ (press Ctrl+C to stop)
 ```
 
-Open the address in a browser. The page loads your program, and whatever it prints with `println` appears in the browser's developer console. Stop the server with Ctrl+C.
+Open the address in a browser. The page loads your program, and whatever it prints with `println` appears in the browser's developer console. Stop the server with Ctrl+C. `kargo run --watch` rebuilds and reloads the page when you save a file; see [Reload a browser app on change](../watch/#reload-a-browser-app-on-change).
 
 | Option | Meaning |
 |---|---|

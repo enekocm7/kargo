@@ -1,6 +1,7 @@
-//! A small HTTP server for Kotlin/Wasm in the browser. `kargo run` uses it to
-//! serve the build output; `kargo test` serves the page that runs the tests
-//! and receives the console output that page reports back.
+//! A small HTTP server for Kotlin/Wasm and Kotlin/JS in the browser. `kargo run` uses it to
+//! serve the build output (`kargo run --watch` also reloads the open pages after each
+//! build); `kargo test` serves the page that runs the tests and receives the console
+//! output that page reports back.
 //!
 //! It listens on the loopback interface only and serves files from a few
 //! directories, so it needs no dependencies and no configuration.
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -24,6 +25,21 @@ use kargo_util::process;
 pub const REPORT_PREFIX: &str = "/__kargo/";
 /// A request to this endpoint is answered once [`Server::ask_to_quit`] is called, which is when the page closes its window.
 pub const QUIT_PATH: &str = "/__kargo/quit";
+
+/// The endpoint a page served with [`Site::live_reload`] listens to (server-sent events): it is told
+/// the current generation on connecting and again whenever [`Server::reload`] is called.
+pub const RELOAD_PATH: &str = "/__kargo/reload";
+
+/// Added to the HTML pages of a [`Site::live_reload`] site. The page reloads when the generation it is told differs from
+/// the first one it saw, so a reload that happened while it was reconnecting is not missed.
+const RELOAD_SCRIPT: &str = concat!(
+    "<script>(()=>{const s=new EventSource(\"/__kargo/reload\");let g;",
+    "s.onmessage=e=>{if(g===undefined)g=e.data;else if(e.data!==g)location.reload()}})()</script>"
+);
+
+/// How long a page waits for a reload before the server writes a comment to keep the connection open, which also
+/// notices a page that is gone.
+const KEEP_ALIVE: Duration = Duration::from_secs(5);
 
 /// The largest request body accepted, which is plenty for console output.
 const MAX_BODY: usize = 16 * 1024 * 1024;
@@ -46,12 +62,19 @@ pub enum PageEvent {
 #[derive(Debug, Clone)]
 pub struct Site {
     mounts: Vec<(String, PathBuf)>,
+    live_reload: bool,
 }
 
 impl Site {
     /// A site that serves `root` at `/`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { mounts: vec![("/".to_owned(), root.into())] }
+        Self { mounts: vec![("/".to_owned(), root.into())], live_reload: false }
+    }
+
+    /// Adds a script to the HTML pages that reloads them when [`Server::reload`] is called.
+    pub fn live_reload(mut self) -> Self {
+        self.live_reload = true;
+        self
     }
 
     /// Also serves `dir` below `prefix` (`/node_modules/`), taking precedence over files at `/`.
@@ -130,12 +153,37 @@ struct Shared {
     stopped: AtomicBool,
     quit: Mutex<bool>,
     quit_asked: Condvar,
+    /// Changes with every [`Server::reload`]; starts at a value that differs between servers, so that a page
+    /// that outlives one server reloads when it finds the next on the same port.
+    generation: Mutex<u64>,
+    reloaded: Condvar,
 }
 
 impl Shared {
     fn ask_to_quit(&self) {
         *self.quit.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.quit_asked.notify_all();
+    }
+
+    fn generation(&self) -> u64 {
+        *self.generation.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn reload(&self) {
+        *self.generation.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        self.reloaded.notify_all();
+    }
+
+    /// Blocks until the generation is not `seen` any more, the server stops or `timeout` passes; returns the generation.
+    fn wait_for_reload(&self, seen: u64, timeout: Duration) -> u64 {
+        let deadline = Instant::now() + timeout;
+        let mut generation = self.generation.lock().unwrap_or_else(PoisonError::into_inner);
+        while *generation == seen && !self.stopped.load(Ordering::Relaxed) {
+            let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else { break };
+            generation =
+                self.reloaded.wait_timeout(generation, left.min(Duration::from_millis(100))).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        *generation
     }
 
     /// Blocks until the page is asked to quit or the server stops.
@@ -160,7 +208,8 @@ impl Server {
     pub fn start(listener: TcpListener, site: Site, events: Option<Sender<PageEvent>>) -> Result<Server> {
         let addr = listener.local_addr()?;
         listener.set_nonblocking(true)?;
-        let shared = Arc::new(Shared::default());
+        let start = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        let shared = Arc::new(Shared { generation: Mutex::new(start), ..Shared::default() });
         let thread = std::thread::spawn({
             let shared = shared.clone();
             let site = Arc::new(site);
@@ -186,6 +235,11 @@ impl Server {
     /// that Kargo cannot stop by ending the process it started is stopped this way.
     pub fn ask_to_quit(&self) {
         self.shared.ask_to_quit();
+    }
+
+    /// Reloads the pages of a [`Site::live_reload`] site that are open.
+    pub fn reload(&self) {
+        self.shared.reload();
     }
 
     pub fn port(&self) -> u16 {
@@ -279,11 +333,22 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
         shared.wait_for_quit();
         return respond(stream, "204 No Content", "text/plain", b"", false);
     }
+    if request.method == "GET" && site.live_reload && path == RELOAD_PATH {
+        return stream_reloads(stream, shared);
+    }
     match request.method.as_str() {
         "GET" | "HEAD" => {
             let head = request.method == "HEAD";
             match read_file(site, &request.target, request.accept_encoding.as_deref()) {
-                Some((file, body, encoding)) => respond_encoding(stream, "200 OK", content_type(&file), &body, head, encoding),
+                Some((file, body, encoding)) => {
+                    let kind = content_type(&file);
+                    let body = if site.live_reload && encoding.is_none() && kind.starts_with("text/html") {
+                        with_reload_script(body)
+                    } else {
+                        body
+                    };
+                    respond_encoding(stream, "200 OK", kind, &body, head, encoding)
+                }
                 None => respond(stream, "404 Not Found", "text/plain", b"not found", head),
             }
         }
@@ -308,6 +373,39 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
         }
         _ => respond(stream, "405 Method Not Allowed", "text/plain", b"method not allowed", false),
     }
+}
+
+/// Answers a page's request to [`RELOAD_PATH`] with an event stream: the generation now, then the new one after each
+/// [`Shared::reload`], until the page goes away or the server stops.
+fn stream_reloads(stream: &mut TcpStream, shared: &Shared) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut seen = shared.generation();
+    write!(stream, "data: {seen}\n\n")?;
+    stream.flush()?;
+    while !shared.stopped.load(Ordering::Relaxed) {
+        let current = shared.wait_for_reload(seen, KEEP_ALIVE);
+        if current == seen {
+            write!(stream, ": keep-alive\n\n")?;
+        } else {
+            seen = current;
+            write!(stream, "data: {seen}\n\n")?;
+        }
+        stream.flush()?;
+    }
+    Ok(())
+}
+
+/// `page` with [`RELOAD_SCRIPT`] before its closing `</body>`, else at its end. A page that is not UTF-8 is left alone.
+fn with_reload_script(page: Vec<u8>) -> Vec<u8> {
+    let text = match String::from_utf8(page) {
+        Ok(text) => text,
+        Err(not_utf8) => return not_utf8.into_bytes(),
+    };
+    let at = text.to_ascii_lowercase().rfind("</body>").unwrap_or(text.len());
+    format!("{}{RELOAD_SCRIPT}{}", &text[..at], &text[at..]).into_bytes()
 }
 
 /// The file a GET request names (`index.html` for a directory) and its contents.
@@ -567,6 +665,56 @@ mod tests {
         let port = server.port();
         drop(server);
         assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err());
+    }
+
+    #[test]
+    fn live_reload_adds_its_script_to_html_pages_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = Server::start(bind(0).unwrap(), site(dir.path()).live_reload(), None).unwrap();
+        let home = get(&live, "/");
+        let at = home.find("<script>").expect("the script is added");
+        assert!(home.contains("/__kargo/reload") && !home.ends_with("<h1>home</h1>") && home[..at].ends_with("<h1>home</h1>"), "{home}");
+        assert!(!get(&live, "/app.mjs").contains("EventSource"));
+        // Content-Length counts the script.
+        let (head, body) = home.split_once("\r\n\r\n").unwrap();
+        assert!(head.contains(&format!("Content-Length: {}", body.len())), "{home}");
+
+        std::fs::write(dir.path().join("root/page.html"), "<body>hi</BODY>").unwrap();
+        let page = get(&live, "/page.html");
+        assert!(page.contains("<body>hi<script>") && page.ends_with("</BODY>"), "{page}");
+
+        let plain = Server::start(bind(0).unwrap(), site(dir.path()), None).unwrap();
+        assert!(get(&plain, "/").ends_with("<h1>home</h1>"));
+        assert!(get(&plain, RELOAD_PATH).starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn open_pages_are_told_to_reload() {
+        use std::io::BufRead;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start(bind(0).unwrap(), site(dir.path()).live_reload(), None).unwrap();
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        (&stream).write_all(format!("GET {RELOAD_PATH} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", server.port()).as_bytes()).unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut next_event = || loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0, "the stream ended");
+            if let Some(data) = line.strip_prefix("data: ") {
+                return data.trim().to_owned();
+            }
+            if line.starts_with("HTTP/1.1") {
+                assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+            }
+        };
+
+        let first = next_event();
+        server.reload();
+        let second = next_event();
+        assert_ne!(first, second);
+        server.reload();
+        assert_ne!(next_event(), second);
     }
 
     #[test]

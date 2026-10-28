@@ -286,11 +286,13 @@ impl Launch {
 pub enum Start {
     /// Start this program as a child process.
     Process(Box<Launch>),
-    /// The program already ran in the foreground (Android and browser apps), with this exit code.
+    /// A Wasm or JS browser app: serve this site.
+    Serve(Box<Served>),
+    /// The program already ran in the foreground (Android), with this exit code.
     Finished(i32),
 }
 
-/// Builds the program and returns how to start it. Android and browser apps run in the foreground here instead.
+/// Builds the program and returns how to start it. Browser apps are served and Android apps run in the foreground here instead.
 pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
     validate(ctx, target, opts)?;
@@ -383,13 +385,8 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
             if wasm.environment == WasmEnvironment::Browser {
-                return Ok(Start::Finished(serve_app(
-                    ctx,
-                    &wasm.dir,
-                    wasm.node_modules.as_deref(),
-                    opts,
-                    ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.port),
-                )?));
+                let configured = ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.port);
+                return served(ctx, &wasm.dir, wasm.node_modules.as_deref(), opts, configured);
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             cmd.arg(&wasm.module);
@@ -400,13 +397,8 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let js = results.js.context("there are no Kotlin/JS sources to run")?;
             if js.environment == JsEnvironment::Browser {
-                return Ok(Start::Finished(serve_app(
-                    ctx,
-                    &js.dir,
-                    js.node_modules.as_deref(),
-                    opts,
-                    ctx.ws.manifest().targets.js.as_ref().and_then(|j| j.port),
-                )?));
+                let configured = ctx.ws.manifest().targets.js.as_ref().and_then(|j| j.port);
+                return served(ctx, &js.dir, js.node_modules.as_deref(), opts, configured);
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             // Stack traces point into the Kotlin sources when the build has source maps.
@@ -457,21 +449,23 @@ pub fn run(ctx: &BuildContext, opts: &RunOptions) -> Result<i32> {
             }
             Ok(kargo_util::process::exit_code_of(status))
         }
+        Start::Serve(site) => {
+            // Until the process is stopped (Ctrl+C).
+            site.serve(ctx.shell(), false)?.wait();
+            Ok(0)
+        }
         Start::Finished(code) => Ok(code),
     }
 }
 
-/// Fails before anything builds when `kargo run --watch` cannot keep the program running, since Android and browser apps run
-/// in the foreground themselves. Then checks the rest of the options as [`start`] does.
+/// Fails before anything builds when `kargo run --watch` cannot keep the program running, since Android apps run in the
+/// foreground themselves. Then checks the rest of the options as [`start`] does.
 pub fn check_watchable(ctx: &BuildContext, opts: &RunOptions) -> Result<()> {
     let target = runnable_target(&ctx.ws.manifest().targets.enabled(), opts.target)?;
     if target == TargetKind::Android && (opts.android.no_logcat || opts.android.stop_emulator) {
         bail!(
             "`--watch` follows the log of the app and keeps the emulator running; it cannot be combined with `--no-logcat` or `--stop-emulator`"
         );
-    }
-    if is_browser_app(ctx, target) {
-        bail!("`--watch` does not serve browser apps yet; `kargo run` serves one until Ctrl+C");
     }
     validate(ctx, target, opts)
 }
@@ -489,9 +483,12 @@ pub fn choose_watch_device(ctx: &BuildContext, opts: &mut RunOptions) -> Result<
 }
 
 /// The program `kargo run --watch` keeps running. A build that succeeds replaces it; a build that fails leaves it running.
+/// A browser app is served by one server for all the rounds, which reloads the open pages after each build.
 #[derive(Default)]
 pub struct Running {
     child: Option<Child>,
+    /// The server of a browser app.
+    server: Option<web::Server>,
     /// The hot reload agent of the running program, if it has one.
     hot_reload: Option<HotReload>,
 }
@@ -523,6 +520,18 @@ impl Running {
         self.stop();
         self.hot_reload = launch.hot_reload.clone();
         self.child = Some(launch.spawn(shell)?);
+        Ok(())
+    }
+
+    /// Serves the browser app of a build that succeeded: starts the server the first time, and reloads the open pages after.
+    pub fn serve(&mut self, site: Served, shell: &Shell) -> Result<()> {
+        match &self.server {
+            Some(server) => {
+                shell.status("Reloading", "the open pages");
+                server.reload();
+            }
+            None => self.server = Some(site.serve(shell, true)?),
+        }
         Ok(())
     }
 
@@ -602,24 +611,51 @@ fn is_browser_app(ctx: &BuildContext, target: TargetKind) -> bool {
     }
 }
 
-/// Serves the browser app in `dir`, with the npm packages of `node_modules`, until the process is stopped (Ctrl+C).
-/// The port is `--port`, else the `port` of the target in `kargo.toml` (`configured`), else [`DEFAULT_PORT`].
-fn serve_app(ctx: &BuildContext, dir: &Path, node_modules: Option<&Path>, opts: &RunOptions, configured: Option<u16>) -> Result<i32> {
-    let listener = web::bind(opts.port.or(configured).unwrap_or(DEFAULT_PORT))?;
-    let mut site = web::Site::new(dir);
-    if let Some(node_modules) = node_modules {
-        site = site.mount("node_modules", node_modules);
-    }
+/// A built browser app, ready to serve.
+pub struct Served {
+    dir: PathBuf,
+    /// The directory shown in the `Serving` line.
+    shown: String,
+    node_modules: Option<PathBuf>,
+    port: u16,
+    open: bool,
+}
+
+/// The browser app in `dir`, with the npm packages of `node_modules`. The port is `--port`, else the `port` of the target in
+/// `kargo.toml` (`configured`), else [`DEFAULT_PORT`].
+fn served(ctx: &BuildContext, dir: &Path, node_modules: Option<&Path>, opts: &RunOptions, configured: Option<u16>) -> Result<Start> {
     // Other `kargo` commands may build while the page is being served.
     ctx.unlock()?;
-    let server = web::Server::start(listener, site, None)?;
-    let dir = dir.strip_prefix(ctx.ws.root()).unwrap_or(dir);
-    ctx.shell().status("Serving", format!("{} at {} (press Ctrl+C to stop)", dir.display(), server.url()));
-    if opts.open {
-        web::open_in_browser(std::ffi::OsStr::new(&server.url()))?;
+    let shown = dir.strip_prefix(ctx.ws.root()).unwrap_or(dir).display().to_string();
+    Ok(Start::Serve(Box::new(Served {
+        dir: dir.to_path_buf(),
+        shown,
+        node_modules: node_modules.map(Path::to_path_buf),
+        port: opts.port.or(configured).unwrap_or(DEFAULT_PORT),
+        open: opts.open,
+    })))
+}
+
+impl Served {
+    /// Starts serving the app, and opens it in the browser if asked to. With `live_reload`, the pages reload when the
+    /// server is told to.
+    fn serve(&self, shell: &Shell, live_reload: bool) -> Result<web::Server> {
+        let listener = web::bind(self.port)?;
+        let mut site = web::Site::new(&self.dir);
+        if let Some(node_modules) = &self.node_modules {
+            site = site.mount("node_modules", node_modules);
+        }
+        if live_reload {
+            site = site.live_reload();
+        }
+        let server = web::Server::start(listener, site, None)?;
+        let reloading = if live_reload { "reloading on change, " } else { "" };
+        shell.status("Serving", format!("{} at {} ({reloading}press Ctrl+C to stop)", self.shown, server.url()));
+        if self.open {
+            web::open_in_browser(std::ffi::OsStr::new(&server.url()))?;
+        }
+        Ok(server)
     }
-    server.wait();
-    Ok(0)
 }
 
 /// The main class and classpath of the JVM program to run.

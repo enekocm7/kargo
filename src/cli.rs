@@ -981,7 +981,7 @@ struct RunArgs {
     /// How to print compiler diagnostics
     #[arg(long, value_enum, default_value_t, value_name = "FMT")]
     message_format: MessageFormatArg,
-    /// Rebuild and restart the program when its files change (Ctrl+C stops it)
+    /// Rebuild and restart the program when its files change, or reload the open pages of a browser app (Ctrl+C stops it)
     #[arg(long, conflicts_with = "debug")]
     watch: bool,
     /// Like --watch, but a Compose Desktop app keeps running and reloads the changed code in place
@@ -2249,6 +2249,7 @@ fn restart_program(
     let ctx = context(config, project, index, global, opts.profile.clone())?;
     match ops::run::start(&ctx, opts)? {
         Start::Process(launch) => running.replace(*launch, config.shell()),
+        Start::Serve(site) => running.serve(*site, config.shell()),
         // `check_watchable` refused these targets before the first round.
         Start::Finished(_) => bail!("`--watch` cannot run this program"),
     }
