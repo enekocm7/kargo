@@ -585,6 +585,8 @@ pub(crate) fn android_files(opts: &NewOptions, use_greeting: bool) -> Vec<Templa
         format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="{name}"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
@@ -980,7 +982,8 @@ class SampleBench"
     fn android_app_gets_manifest_and_activity() {
         let o = NewOptions { targets: vec![TargetKind::Android], ..opts("droid") };
         let files = template(&o).unwrap();
-        assert!(files.iter().any(|f| f.path == Path::new("android/AndroidManifest.xml")));
+        let manifest = &files.iter().find(|f| f.path == Path::new("android/AndroidManifest.xml")).unwrap().contents;
+        assert!(manifest.contains(r#"<uses-permission android:name="android.permission.INTERNET" />"#), "{manifest}");
         assert!(files.iter().any(|f| f.path == Path::new("src-android/MainActivity.kt")));
         let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
         assert!(!main.contains("fun main()"), "android-only apps have no main()");
