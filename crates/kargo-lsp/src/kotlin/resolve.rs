@@ -2687,7 +2687,9 @@ pub fn matching_lt(lx: &Lexed, gt: usize) -> Option<usize> {
 }
 
 /// The `>` closing type arguments at `lt`, when what follows makes them type arguments (a
-/// call, a callable reference, a member access or the end of a type).
+/// call, a callable reference, a member access or the end of a type: the `>` of an outer
+/// type, a `,`, `=`, `?`, a closing bracket, or a new line). None of those can follow the `>`
+/// of a comparison, which needs a right operand.
 pub fn matching_gt(lx: &Lexed, lt: usize) -> Option<usize> {
     let mut depth = 0;
     for k in lt..lx.tokens.len().min(lt + 64) {
@@ -2696,9 +2698,19 @@ pub fn matching_gt(lx: &Lexed, lt: usize) -> Option<usize> {
             Tok::Gt => {
                 depth -= 1;
                 if depth == 0 {
-                    return matches!(lx.kind(k + 1), Some(Tok::LParen | Tok::ColonColon | Tok::Dot | Tok::LBrace) | None)
-                        .then_some(k)
-                        .filter(|_| !lx.tokens.get(k + 1).is_some_and(|t| t.nl && t.kind == Tok::LBrace));
+                    let ends_type = match lx.tokens.get(k + 1) {
+                        None => true,
+                        Some(next) if next.kind == Tok::LBrace => !next.nl,
+                        Some(next) => {
+                            matches!(next.kind, Tok::LParen | Tok::ColonColon | Tok::Dot)
+                                || matches!(
+                                    next.kind,
+                                    Tok::Gt | Tok::Comma | Tok::Eq | Tok::Question | Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::Semi
+                                )
+                                || next.nl
+                        }
+                    };
+                    return ends_type.then_some(k);
                 }
             }
             Tok::Ident | Tok::Dot | Tok::Comma | Tok::Question | Tok::Arrow | Tok::Colon => {}
