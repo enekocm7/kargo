@@ -863,8 +863,13 @@ impl<'a> Generator<'a> {
             }
         }
         if options.iter().map(Vec::len).product::<usize>() > MAX_VARIANTS {
-            for o in &mut options {
-                o.truncate(1);
+            // One overload: the first option of an optional parameter is "left out", which would drop every
+            // parameter, so it keeps its type with a default. `Double` takes the fractions a number can have.
+            for (o, p) in options.iter_mut().zip(&sig.params) {
+                let kept = o.iter().filter(|(_, m)| *m != Mode::Omitted);
+                let (ty, mode) =
+                    kept.clone().find(|(k, _)| *k == KT::Num).or_else(|| kept.clone().next()).cloned().unwrap_or_else(|| o[0].clone());
+                *o = vec![(ty, if p.optional && !p.rest { Mode::Optional } else { mode })];
             }
         }
         let names = param_names(&sig.params);
