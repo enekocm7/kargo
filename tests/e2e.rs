@@ -2216,6 +2216,20 @@ fun appName(): String = stringResource(Res.string.app_name)
 }
 
 #[test]
+fn android_expect_actual() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs the Android SDK)");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["droid", "--target", "android"]);
+    t.write("droid/src/Platform.kt", "package com.example.droid\n\nexpect fun platformName(): String\n");
+    t.write("droid/src-android/Platform.kt", "package com.example.droid\n\nactual fun platformName(): String = \"android\"\n");
+    t.kargo("droid").arg("build").assert().success();
+}
+
+#[test]
 fn android_app_with_a_library_module() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
