@@ -65,6 +65,17 @@ spring-boot = { version = "4.1.1", starters = ["web", "data-jpa", "validation", 
 "org.postgresql:postgresql" = { scope = "runtime" }
 ```
 
+### Renamed starters
+
+Spring Boot 4 renamed some starters, and the old names don't exist in its BOM. `spring-boot-starter-aop` is now `spring-boot-starter-aspectj`, so `starters = ["aop"]` is an error that names the replacement before any download starts:
+
+```console
+$ kargo build
+error: the Spring Boot starter `aop` of `[frameworks] spring-boot` does not exist in Spring Boot 4.1.1; it is called `aspectj` there (`starters = ["aspectj"]`)
+```
+
+Kargo checks the starters of `starters` and the `org.springframework.boot:spring-boot-starter-*` coordinates in your dependency tables against the Spring Boot version, in both directions: on Spring Boot 3 it is `aop`, and `aspectj` is the error. Starters Kargo doesn't know about are passed on as they are, so a misspelled one still fails as a missing artifact. Look for it among the `spring-boot-starter-*` artifacts on [Maven Central](https://central.sonatype.com/namespace/org.springframework.boot).
+
 ## JPA entities
 
 With `data-jpa` (or `jpa = true`), Kargo enables the `noarg` and `allopen` compiler plugins for `@Entity`, `@MappedSuperclass` and `@Embeddable`, so Kotlin classes work as JPA entities:

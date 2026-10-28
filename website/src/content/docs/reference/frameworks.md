@@ -147,7 +147,7 @@ spring-boot = { version = "4.1.1", starters = ["web", "data-jpa"], jpa = true }
 | Key | Default | Meaning |
 |---|---|---|
 | `version` | `4.1.1` | The Spring Boot version, which picks the BOM |
-| `starters` | `["web"]` | Each name adds `spring-boot-starter-<name>`; the empty string is `spring-boot-starter` |
+| `starters` | `["web"]` | Each name adds `spring-boot-starter-<name>`; the empty string is `spring-boot-starter`. A starter renamed in the chosen version (`aop` is `aspectj` in Spring Boot 4) is an error that names its replacement |
 | `jpa` | `true` when `data-jpa` is a starter | The JPA `noarg` and `allopen` presets |
 
 JVM only. Adds the Spring Boot BOM, the starters, `kotlin-reflect`, Jackson's Kotlin module for the web starters, `spring-boot-starter-test` for tests, the `allopen` (Spring preset) and `noarg` compiler plugins, and the flags `-Xjsr305=strict` and `-java-parameters` (`-parameters` for `javac`).

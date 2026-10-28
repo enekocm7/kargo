@@ -174,10 +174,60 @@ fn multiplatform_compose(c: &mut Contributions, compose: &ComposeConfig, version
 /// The group of Jackson's Kotlin module in the Spring Boot BOM of version `spring`: Spring Boot 4
 /// moved to Jackson 3 (`tools.jackson`), earlier versions manage the `com.fasterxml.jackson` one.
 pub fn spring_jackson_group(spring: &str) -> &'static str {
-    match spring.split('.').next().and_then(|major| major.parse::<u32>().ok()) {
+    match spring_major(spring) {
         Some(major) if major < 4 => "com.fasterxml.jackson.module",
         _ => "tools.jackson.module",
     }
+}
+
+/// The major version of a Spring Boot version, when it starts with one.
+fn spring_major(spring: &str) -> Option<u32> {
+    spring.split('.').next().and_then(|major| major.parse().ok())
+}
+
+/// Starters that Spring Boot renamed: `(old, new, first major version with the new name)`, without
+/// the `spring-boot-starter-` prefix. The old name stops resolving from that version on, and the new
+/// one doesn't exist before it.
+const RENAMED_STARTERS: &[(&str, &str, u32)] = &[("aop", "aspectj", 4)];
+
+/// The starter that replaces `starter` (without its prefix) in Spring Boot `spring`, when `starter`
+/// was renamed and doesn't exist in that version.
+fn renamed_starter(starter: &str, spring: &str) -> Option<&'static str> {
+    let major = spring_major(spring)?;
+    RENAMED_STARTERS.iter().find_map(|&(old, new, since)| match (major >= since, starter) {
+        (true, s) if s == old => Some(new),
+        (false, s) if s == new => Some(old),
+        _ => None,
+    })
+}
+
+/// Fails with the replacement when a starter of `[frameworks] spring-boot` or a
+/// `org.springframework.boot:spring-boot-starter-*` dependency was renamed and doesn't exist in
+/// Spring Boot `spring`, instead of leaving it to fail as a missing artifact on download.
+fn check_spring_starters(manifest: &Manifest, starters: &[String], spring: &str) -> Result<()> {
+    for starter in starters {
+        if let Some(replacement) = renamed_starter(starter, spring) {
+            bail!(
+                "the Spring Boot starter `{starter}` of `[frameworks] spring-boot` does not exist in Spring Boot {spring}; \
+                 it is called `{replacement}` there (`starters = [\"{replacement}\"]`)"
+            );
+        }
+    }
+    let declared =
+        manifest.dependencies.iter().chain(&manifest.dev_dependencies).chain(manifest.targets.jvm.iter().flat_map(|t| &t.dependencies));
+    for dependency in declared {
+        let module = &dependency.module;
+        let Some(starter) = module.artifact.strip_prefix("spring-boot-starter-").filter(|_| module.group == "org.springframework.boot")
+        else {
+            continue;
+        };
+        if let Some(replacement) = renamed_starter(starter, spring) {
+            bail!(
+                "`{module}` does not exist in Spring Boot {spring}; the starter is called `org.springframework.boot:spring-boot-starter-{replacement}` there"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Computes contributions for `target`. Android is handled by the Gradle
@@ -360,6 +410,7 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
             bail!("Spring Boot is only supported on the JVM target");
         }
         let v = spring.version.as_deref().unwrap_or(SPRING_BOOT_VERSION);
+        check_spring_starters(manifest, spring.starters.as_deref().unwrap_or(&[]), v)?;
         let mut bom = dep("org.springframework.boot:spring-boot-dependencies", Some(v));
         bom.bom = true;
         c.dependencies.push(bom);
@@ -728,6 +779,24 @@ spring-boot = {{ version = \"{version}\" }}
         assert_eq!(jackson("3.3.1"), "com.fasterxml.jackson.module");
         assert_eq!(jackson("4.0.0"), "tools.jackson.module");
         assert_eq!(jackson(SPRING_BOOT_VERSION), "tools.jackson.module");
+    }
+
+    #[test]
+    fn spring_boot_renamed_starters_name_the_replacement() {
+        let fail = |toml: &str| contributions(&manifest(toml), TargetKind::Jvm, Path::new(".")).unwrap_err().to_string();
+        let message = fail("[frameworks]\nspring-boot = { starters = [\"web\", \"aop\"] }\n");
+        assert!(message.contains("`aop`") && message.contains("`aspectj`"), "{message}");
+
+        let message = fail("[frameworks]\nspring-boot = true\n[dependencies]\n\"org.springframework.boot:spring-boot-starter-aop\" = {}\n");
+        assert!(message.contains("spring-boot-starter-aspectj"), "{message}");
+
+        let message = fail("[frameworks]\nspring-boot = { version = \"3.5.0\", starters = [\"aspectj\"] }\n");
+        assert!(message.contains("`aspectj`") && message.contains("`aop`"), "{message}");
+
+        let ok = manifest("[frameworks]\nspring-boot = { starters = [\"web\", \"aspectj\"] }\n");
+        assert!(contributions(&ok, TargetKind::Jvm, Path::new(".")).is_ok());
+        let ok = manifest("[frameworks]\nspring-boot = { version = \"3.5.0\", starters = [\"aop\"] }\n");
+        assert!(contributions(&ok, TargetKind::Jvm, Path::new(".")).is_ok());
     }
 
     #[test]
