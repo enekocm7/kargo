@@ -209,7 +209,11 @@ impl<'a> Analyzer<'a> {
                     return one(site(self.infer(u, tok + 1, self.right_end(u, tok + 1, PREFIX)), name, Vec::new()));
                 }
                 let Some(prec) = binary_prec(word) else { return Vec::new() };
+                // The brackets of type arguments are no comparisons.
                 if word == "<" && matching_gt(lx, tok).is_some() {
+                    return Vec::new();
+                }
+                if word == ">" && matching_lt(lx, tok).is_some_and(|lt| matching_gt(lx, lt) == Some(tok)) {
                     return Vec::new();
                 }
                 let start = self.left_start(u, tok, prec);

@@ -3408,6 +3408,29 @@ fn reports_operators_that_cannot_work() {
 }
 
 #[test]
+fn type_arguments_are_no_comparisons() {
+    // The `>` closing type arguments is no `compareTo` call (issue #374).
+    let page = "data class Page<T>(val content: List<T> = emptyList(), val page: Int = 0)\n";
+    assert!(operator_problems(page).is_empty(), "{:?}", operator_problems(page));
+    let call = format!("{page}fun <T> local(block: () -> T): T = block()\nfun f() {{\n    val a = local<Page<String>> {{ Page() }}\n}}\n");
+    assert!(operator_problems(&call).is_empty(), "{:?}", operator_problems(&call));
+    let call = format!("{page}fun f() {{\n    val a = Page<String>()\n    val b = Page<List<String>>(listOf())\n}}\n");
+    assert!(operator_problems(&call).is_empty(), "{:?}", operator_problems(&call));
+    // Type arguments in annotations, parameters, return types and nested arguments.
+    let types = format!(
+        "{page}fun g(p: Page<String>, q: Map<String, Page<Int>>?): Page<List<String>> = Page()
+val x: Page<String> = Page()
+val y: List<Page<String>> = listOf()
+class H(val p: Page<String>, val q: Page<Int>)
+"
+    );
+    assert!(operator_problems(&types).is_empty(), "{:?}", operator_problems(&types));
+    // A real comparison of a class without `compareTo` is still reported.
+    let compare = "class Money(val c: Int)\nfun f(a: Money, b: Money) {\n    val x = a > b\n}\n";
+    assert!(operator_problems(compare).iter().any(|m| m.contains("no operator function `compareTo`")));
+}
+
+#[test]
 fn prefers_the_operator_when_a_name_ends_at_it() {
     let f = with_operators("val x = a$0[0]");
     let (u, offset) = f.cursor();
