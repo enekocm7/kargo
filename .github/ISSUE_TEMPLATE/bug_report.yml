@@ -1,0 +1,78 @@
+name: Bug report
+description: Kargo fails, crashes, builds the wrong thing or behaves differently from its documentation
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please search the [open issues](https://github.com/enekocm7/kargo/issues?q=is%3Aissue) and the [FAQ](https://enekocm7.github.io/kargo/reference/faq/) first.
+
+        Questions about how to do something belong in a *Question* issue. Do not post passwords, tokens or other secrets: remove them from `kargo.toml`, logs and `kargo doctor` output.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you run, what did you expect, and what did you get instead? Include the full output of the failing command, copied as text, not a screenshot.
+      placeholder: |
+        I ran `kargo build -t wasm` and expected ..., but Kargo printed ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest project and the exact commands that show the problem. A `kargo.toml` and one source file are usually enough; a link to a repository that reproduces it is better. A project made with `kargo new` and one change is the ideal.
+      placeholder: |
+        1. `kargo new demo && cd demo`
+        2. Add `...` to `kargo.toml`
+        3. Run `kargo ...`
+    validations:
+      required: true
+  - type: textarea
+    id: manifest
+    attributes:
+      label: kargo.toml
+      description: The manifest of the project (or the relevant part of it), and `~/.kargo/config.toml` or `.kargo/config.toml` if you use mirrors, a proxy or a vendor directory.
+      render: toml
+  - type: dropdown
+    id: targets
+    attributes:
+      label: Targets involved
+      description: Select every target the problem shows up on, or leave it empty if it has nothing to do with one.
+      multiple: true
+      options:
+        - JVM
+        - Wasm
+        - JavaScript
+        - Kotlin/Native
+        - Android
+        - Compose
+        - Dependency resolution / kargo.lock
+        - Language server (kargo lsp) / editor plugin
+        - Packaging / publishing
+  - type: input
+    id: version
+    attributes:
+      label: Kargo version
+      description: The output of `kargo -vV`. If you build from source, say which commit.
+      placeholder: kargo 0.1.2
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Environment (kargo doctor)
+      description: Run `kargo doctor --bug-report` in the project directory and paste the result. It reports the operating system, the JDK, the toolchains, the SDKs and the network, and shortens your home directory to `~`. It is already a Markdown code block, so paste it as it is.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Verbose output
+      description: For a build, resolution or toolchain problem, the output of the failing command with `-v` (`kargo -v build`). For a language server problem, the log of `kargo lsp --log-file <path>`. Trim it to what matters, or attach it as a file.
+      render: console
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Whether it worked in an earlier version, which editor you use, if it only happens with `--offline` or `--locked`, a workaround you found.

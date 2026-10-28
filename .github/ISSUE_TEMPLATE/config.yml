@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://enekocm7.github.io/kargo/
+    about: Guides, the command and kargo.toml references, the FAQ and the migration guides from Gradle, Maven and Cargo.

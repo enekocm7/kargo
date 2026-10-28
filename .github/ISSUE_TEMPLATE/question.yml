@@ -1,0 +1,29 @@
+name: Question or documentation problem
+description: Ask how to do something with Kargo, or report a documentation page that is wrong, unclear or missing
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you ask, look at the [documentation](https://enekocm7.github.io/kargo/), in particular the [FAQ](https://enekocm7.github.io/kargo/reference/faq/) and the migration guides ([from Gradle](https://enekocm7.github.io/kargo/migration/from-gradle/), [from Maven](https://enekocm7.github.io/kargo/migration/from-maven/)).
+
+        If something that should work does not, open a *Bug report* instead.
+  - type: textarea
+    id: question
+    attributes:
+      label: What do you want to know, or what is wrong in the documentation?
+      description: For a question, say what you are trying to achieve and what you tried. For a documentation problem, link the page and say what is wrong, unclear or missing.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Your `kargo.toml` (without secrets), the commands you ran and what they printed, if they help.
+      render: toml
+  - type: input
+    id: version
+    attributes:
+      label: Kargo version
+      description: The output of `kargo -vV`.
+      placeholder: kargo 0.1.2
