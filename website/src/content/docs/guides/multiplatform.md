@@ -93,6 +93,15 @@ $ kargo test --no-fail-fast   # keep testing the other targets when one fails
 
 `kargo test` stops at the first target that fails; `--no-fail-fast` (or `[test] fail-fast = false`) tests them all and prints a result per target. `kargo build --keep-going` builds every target and reports each failure. See [Testing every target](../testing/#testing-every-target).
 
+When the host can't build every target, or you rarely want to, list the ones `build`, `check` and `test` use without `-t`. The manifest keeps all its targets, and `-t` still picks any of them:
+
+```toml title="kargo.toml"
+[build]
+default-targets = ["jvm", "wasm"]
+```
+
+In a workspace, write it as `[workspace.build]`. See [`[build]`](../../reference/manifest/#build).
+
 :::tip
 `environment = "js"` runs the Wasm target on Node.js. For a web front end use `environment = "browser"`: `kargo run -t wasm` then serves a page instead, and `kargo test -t wasm` runs the tests in a headless browser. See [WebAssembly](../wasm/#browser-apps).
 :::

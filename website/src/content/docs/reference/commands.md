@@ -184,7 +184,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `--message-format <fmt>` | `human` (default) or `json`: print each compiler diagnostic as a JSON object on stdout. See [Machine-readable output](../machine-readable-output/#compiler-diagnostics) |
 | `-r, --release` | Use the release profile |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
-| `-t, --target <target>` | Only this target (repeatable) |
+| `-t, --target <target>` | Only this target (repeatable). Default: `[build] default-targets` (`[workspace.build]` in a workspace), else every enabled target |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
 | `-j, --jobs <n>` | How many workspace members, and targets of each, build at the same time: a number, or `auto` (also `0`) for the CPUs within the free memory. Default: `KARGO_JOBS`, then `[build] jobs`, then `auto`. `-j 1` builds one thing at a time, in a fixed order. See [parallelism](../../guides/build-performance/#limiting-parallelism) |
 | `--size-report` | Print Binaryen per-function metrics for a Wasm release build |

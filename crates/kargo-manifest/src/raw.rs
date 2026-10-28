@@ -83,12 +83,29 @@ struct RawToolchain {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawBuild {
     jobs: Option<Value>,
+    default_targets: Option<Vec<String>>,
 }
 
 impl RawBuild {
     fn validate(self, section: &str) -> Result<BuildSettings> {
         let jobs = self.jobs.map(|v| kargo_util::jobs::from_toml(&format!("[{section}] `jobs`"), &v)).transpose()?;
-        Ok(BuildSettings { jobs })
+        let default_targets = match self.default_targets {
+            Some(names) => {
+                let mut targets: Vec<TargetKind> = Vec::new();
+                for name in &names {
+                    let target: TargetKind = name.parse().with_context(|| format!("invalid [{section}] `default-targets`"))?;
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+                if targets.is_empty() {
+                    bail!("[{section}] `default-targets` is empty; leave it out to build every enabled target");
+                }
+                Some(targets)
+            }
+            None => None,
+        };
+        Ok(BuildSettings { jobs, default_targets })
     }
 }
 
@@ -2383,6 +2400,9 @@ impl RawManifest {
         let fmt = self.fmt.validate()?;
         let lint = self.lint.validate()?;
         let build = self.build.validate("build")?;
+        if let Some(missing) = build.default_targets.iter().flatten().find(|t| !targets.is_enabled(**t)) {
+            bail!("[build] `default-targets` names `{missing}`, which is not enabled; add a [target.{missing}] section");
+        }
 
         let publish = self.publish.validate(&repositories)?;
         for (key, url) in [("homepage", &self.package.homepage), ("repository", &self.package.repository)] {

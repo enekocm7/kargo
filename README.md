@@ -306,6 +306,7 @@ external-links = ["https://kotlinlang.org/api/kotlinx.coroutines/"]
 
 [build]
 jobs = 4                    # members and targets built at the same time (default "auto"; -j and KARGO_JOBS win)
+default-targets = ["jvm"]   # the targets build, check and test use without -t (default: all enabled)
 
 [fmt]                       # kargo fmt (ktlint); style rules go in .editorconfig
 exclude = ["src/generated/**"]
@@ -370,6 +371,7 @@ release-notes = "./tools/notes.sh"
 
 [workspace.build]                     # [build] for every member
 jobs = 2
+default-targets = ["jvm", "wasm"]    # what members build without -t, if they enable them
 ```
 
 A path dependency is built for the consumer's target: a jar for the JVM, a klib for Wasm, JS and Native, and for Android a Gradle subproject (an Android library, built in the same Gradle run as the app that uses it) or the JVM jar. It brings its own Maven dependencies: the `exported = true` ones (its API) to compile against, the others at runtime only. Test helpers in a package's `test-fixtures/` reach the tests of packages that depend on it with `test-fixtures = true`. `kargo new <dir>` inside a workspace adds the member, and `kargo new --workspace` creates one. Packages built together use one Kotlin version and one JDK.

@@ -197,13 +197,27 @@ How the commands that build run. Every key is optional.
 ```toml
 [build]
 jobs = 2
+default-targets = ["jvm", "wasm"]
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
+| `default-targets` | every enabled target | The targets `kargo build`, `check`, `test`, `bench`, `doc` and `fetch` use when you don't pass `-t`: any of `jvm`, `wasm`, `js`, `native` and `android`. The manifest keeps all its `[target.*]` sections, so `-t android` still builds Android. Each one must be enabled in the package, and the list can't be empty |
 | `jobs` | `"auto"` | How many workspace members, and targets and Native platforms of each, build at the same time: a number, or `"auto"` (also `0`) for the number of CPUs within the free memory. `-j` and `KARGO_JOBS` override it, and it overrides `[build] jobs` of `config.toml`. `kargo test`, `bench`, `doc`, `fmt` and `lint` handle one member at a time when no number of jobs is set |
 
-In a workspace, write it as `[workspace.build]` in the root `kargo.toml`; a member's own `[build]` applies only when the member builds on its own. See [Limiting parallelism](../../guides/build-performance/#limiting-parallelism).
+In a workspace, write `jobs` as `[workspace.build]` in the root `kargo.toml`; a member's own `jobs` applies only when the member builds on its own. See [Limiting parallelism](../../guides/build-performance/#limiting-parallelism).
+
+`default-targets` in `[workspace.build]` applies to every member that enables at least one of the listed targets (the others build all of theirs), so a workspace that enables Android and iOS in some members can build only the JVM and Wasm by default. A member's own `[build] default-targets` takes precedence over the workspace's. Where one is set, `-t` still picks any enabled target:
+
+```toml title="kargo.toml"
+[workspace.build]
+default-targets = ["jvm", "wasm"]
+```
+
+```sh
+kargo build -p app            # jvm and wasm
+kargo build -p app -t android # only android
+```
 
 ## `[doc]`
 
@@ -955,7 +969,7 @@ jobs = 2                             # members and targets built at the same tim
 | `[workspace.frameworks]` | `[frameworks]` entries members inherit with `name = { workspace = true }` |
 | `[workspace.plugins]` | `[plugins]` entries members inherit with `name = { workspace = true }`. A relative `command` stays relative to the workspace root |
 | `[workspace.tasks]` | Tasks that run at the workspace root. Members inherit them with `name = { workspace = true }`, which runs them in the member's directory |
-| `[workspace.build]` | [`[build]`](#build) for the whole workspace: `jobs` |
+| `[workspace.build]` | [`[build]`](#build) for the whole workspace: `jobs` and `default-targets` |
 
 A member inherits a key with `{ workspace = true }` (or the dotted `key.workspace = true`), and nothing else in the same entry, except for `[dependencies]` entries, which may add `scope`, `exported` and `test-fixtures`:
 
