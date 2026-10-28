@@ -281,6 +281,8 @@ pub struct Generator<'a> {
     /// Kotlin names of interfaces and classes, by their first declaration.
     names: HashMap<DeclId, String>,
     taken: HashSet<(String, String)>,
+    /// Names a variable holds, so an interface of the same name gets an `I` prefix.
+    shadowed: HashSet<(String, String)>,
     queue: Vec<(Vec<DeclId>, String)>,
     classes: HashMap<DeclId, ClassImport>,
     /// The Kotlin package of the npm package being generated, where extensions go: code that
@@ -306,6 +308,7 @@ impl<'a> Generator<'a> {
             out: Output::default(),
             names: HashMap::new(),
             taken: HashSet::new(),
+            shadowed: HashSet::new(),
             queue: Vec::new(),
             classes: HashMap::new(),
             root: String::new(),
@@ -380,6 +383,21 @@ impl<'a> Generator<'a> {
         let default = self.prog.default_export(module);
         let names = self.prog.export_names(module);
         let exports: Vec<(String, Option<Ent>)> = names.into_iter().map(|n| (n.clone(), self.prog.export(module, &n))).collect();
+
+        // A name exported as both a variable and an interface (`const ColorManagement` next to
+        // `interface ColorManagement`) cannot be both in one Kotlin package: the value keeps the
+        // name and the interface gets a `I`-prefixed one.
+        for (name, ent) in &exports {
+            let Some(Ent::Decls(decls)) = ent else { continue };
+            let has = |f: fn(&DeclKind) -> bool| decls.iter().any(|&d| f(&self.prog.decls[d].decl.kind));
+            if has(|k| matches!(k, DeclKind::Var(_))) && has(|k| matches!(k, DeclKind::Interface(i) if !i.is_class)) {
+                if let Some(simple) = identifier(name) {
+                    let key = (pkg.clone(), simple.trim_matches('`').to_owned());
+                    self.taken.insert(key.clone());
+                    self.shadowed.insert(key);
+                }
+            }
+        }
 
         if let Some(Ent::Decls(decls)) = default {
             for d in decls {
@@ -1058,6 +1076,7 @@ impl<'a> Generator<'a> {
         let base: String =
             parts.iter().map(|p| identifier(p).map(|s| s.trim_matches('`').to_owned()).unwrap_or_else(|| "Type".into())).collect();
         let base = if base == "default" { "Default".to_owned() } else { base };
+        let base = if self.shadowed.contains(&(pkg.clone(), base.clone())) { format!("I{base}") } else { base };
         let mut simple = base.clone();
         let mut n = 2;
         while !self.taken.insert((pkg.clone(), simple.clone())) {

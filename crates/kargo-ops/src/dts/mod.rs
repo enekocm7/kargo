@@ -27,7 +27,7 @@ pub use kotlin::{FACTORIES_DIR, function_name, kotlin_package};
 pub use program::types_name;
 
 /// Bumped whenever the generated Kotlin changes, so that declarations generated before are written again.
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
 
 /// What [`generate`] wrote.
 #[derive(Debug, Default)]
