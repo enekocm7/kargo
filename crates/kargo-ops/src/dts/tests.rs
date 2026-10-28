@@ -319,6 +319,32 @@ fn a_package_with_its_own_types_wins_over_types_packages() {
     assert!(default.contains("external fun leftPad(str: Double, len: Double, ch: String = definedExternally): String"), "{default}");
 }
 
+#[test]
+fn many_optional_numbers_keep_their_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    let nm = dir.path().join("node_modules");
+    write(&nm, "shapes/package.json", r#"{"name":"shapes","types":"index.d.ts"}"#);
+    write(
+        &nm,
+        "shapes/index.d.ts",
+        "export class Box {\n  constructor(width?: number, height?: number, depth?: number, a?: number, b?: number, c?: number);\n}\n\
+         export class Vec {\n  constructor(x?: number, y?: number, z?: number);\n}\n",
+    );
+    let out = generate(&["shapes".to_owned()], &[nm], &dir.path().join("out")).unwrap();
+    let exports = std::fs::read_to_string(&out.files[0]).unwrap();
+    assert!(
+        exports.contains(
+            "constructor(width: Double = definedExternally, height: Double = definedExternally, depth: Double = definedExternally, \
+             a: Double = definedExternally, b: Double = definedExternally, c: Double = definedExternally)"
+        ),
+        "{exports}"
+    );
+    assert!(
+        exports.contains("constructor(x: Double = definedExternally, y: Double = definedExternally, z: Double = definedExternally)"),
+        "{exports}"
+    );
+}
+
 /// The project's own modules: `js/sum.ts` with bodies and an arrow function, `js/shapes/point.ts`
 /// that it imports, and the types of a JavaScript module.
 fn local_modules(root: &Path) -> Vec<LocalModule> {
