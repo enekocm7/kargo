@@ -333,14 +333,22 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     class_path: Vec::new(),
                     implementation_title: Some(pkg.name.clone()),
                     implementation_version: Some(pkg.version.clone()),
+                    ..Default::default()
                 };
-                write_jar(&jar, &jvm.classes, &jar_manifest, &[])?;
+                let bundled = write_library_jar(ctx, &jar, &jvm, &jar_manifest)?;
                 let settings = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
                 let bytecode = settings.target_for(ctx.jvm_jdk()?.version)?;
                 let jvm_version = bytecode.strip_prefix("1.").unwrap_or(&bytecode).parse().ok();
                 let classpaths = jvm_classpaths(ctx, &setup)?;
-                let dependencies =
+                let mut dependencies =
                     published_dependencies(ctx, &setup.main, &setup.boms, target, &[&classpaths.compile, &classpaths.runtime])?;
+                // What the jar bundles is not a dependency of the library anymore.
+                dependencies.retain(|dep| {
+                    ![&classpaths.compile, &classpaths.runtime]
+                        .iter()
+                        .filter_map(|r| r.node(&dep.module))
+                        .any(|node| node.files.iter().any(|f| bundled.contains(f)))
+                });
                 platforms.push(PlatformPublication {
                     kind: PlatformKind::Jvm { jvm_version },
                     artifact: jar,
@@ -651,6 +659,17 @@ fn publish_to_central(ctx: &BuildContext, repo_dir: &Path, work: &Path, coordina
 
 /// What `kargo package` writes for a library: a jar of its own classes (no dependencies, no
 /// `Class-Path`) and a sources jar, in `target/<profile>/package`. Returns the jar.
+/// The jar of a library: its classes, or with `[package.shade]` also the dependencies, shaded. Returns the
+/// dependency jars it bundles.
+fn write_library_jar(ctx: &BuildContext, jar: &Path, jvm: &super::build::JvmBuild, manifest: &JarManifest) -> Result<Vec<PathBuf>> {
+    let Some(shade) = super::pkg_shade(ctx) else {
+        write_jar(jar, &jvm.classes, manifest, &[])?;
+        return Ok(Vec::new());
+    };
+    let deps: Vec<PathBuf> = jvm.runtime_classpath.iter().filter(|p| p.extension().is_some_and(|e| e == "jar")).cloned().collect();
+    super::shade_jar(ctx, jar, jvm, manifest, &deps, &shade)
+}
+
 pub fn package_library(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Result<PathBuf> {
     let ws = ctx.ws;
     let pkg = &ws.manifest().package;
@@ -663,8 +682,9 @@ pub fn package_library(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Resu
         class_path: Vec::new(),
         implementation_title: Some(pkg.name.clone()),
         implementation_version: Some(pkg.version.clone()),
+        ..Default::default()
     };
-    write_jar(&jar, &jvm.classes, &manifest, &[])?;
+    write_library_jar(ctx, &jar, jvm, &manifest)?;
     let work = ws.profile_dir(&ctx.profile).join("package-work");
     let mut dirs = vec![("", ws.common_sources()), ("", ws.target_sources(TargetKind::Jvm))];
     dirs.extend(crate::generate::dirs(ws, &ctx.profile, TargetKind::Jvm, GeneratedKind::Sources).into_iter().map(|dir| ("", dir)));

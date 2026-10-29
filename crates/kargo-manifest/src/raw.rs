@@ -198,6 +198,21 @@ struct RawPackage {
     native_image: RawNativeImage,
     #[serde(default)]
     installer: RawInstaller,
+    shade: Option<RawShade>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawShade {
+    #[serde(default)]
+    relocate: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+    minimize: Option<bool>,
+    #[serde(default)]
+    keep: Vec<String>,
+    merge_services: Option<bool>,
+    relocate_strings: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2468,6 +2483,7 @@ impl RawManifest {
             optimize: self.package.optimize.validate()?,
             native_image: self.package.native_image.validate(),
             installer: self.package.installer.validate()?,
+            shade: self.package.shade.map(RawShade::validate).transpose()?,
         };
         if let (Some(major), Some(jvm)) = (jdk.major(), &mut targets.jvm) {
             // The default target never exceeds the pinned JDK; an explicit one must not.
@@ -3118,6 +3134,49 @@ impl RawPublish {
             sources: self.sources.unwrap_or(true),
             javadoc,
             central_publishing,
+        })
+    }
+}
+
+impl RawShade {
+    fn validate(self) -> Result<ShadeSettings> {
+        fn package_name(name: &str) -> bool {
+            !name.is_empty()
+                && name.split('.').all(|part| {
+                    !part.is_empty()
+                        && !part.starts_with(|c: char| c.is_ascii_digit())
+                        && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+                })
+        }
+        let mut relocate = Vec::new();
+        for (from, to) in self.relocate {
+            if !package_name(&from) || !package_name(&to) {
+                bail!(
+                    "[package.shade] `relocate` maps package names such as \"com.google.common\" = \"com.example.shaded.guava\", got `{from}` = `{to}`"
+                );
+            }
+            if from == to {
+                bail!("[package.shade] `relocate` moves `{from}` to itself");
+            }
+            relocate.push((from, to));
+        }
+        // The longest prefix wins when a class matches more than one.
+        relocate.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        for (key, patterns) in [("exclude", &self.exclude), ("keep", &self.keep)] {
+            if let Some(bad) = patterns.iter().find(|p| p.trim().is_empty() || p.contains('/') || p.trim_end_matches(".*").contains('*')) {
+                bail!("[package.shade] `{key}` entries are class names or packages such as \"org.slf4j.*\", got `{bad}`");
+            }
+        }
+        if !self.keep.is_empty() && self.minimize != Some(true) {
+            bail!("[package.shade] `keep` lists what `minimize` keeps; set `minimize = true`");
+        }
+        Ok(ShadeSettings {
+            relocate,
+            exclude: self.exclude,
+            minimize: self.minimize.unwrap_or(false),
+            keep: self.keep,
+            merge_services: self.merge_services.unwrap_or(true),
+            relocate_strings: self.relocate_strings.unwrap_or(false),
         })
     }
 }

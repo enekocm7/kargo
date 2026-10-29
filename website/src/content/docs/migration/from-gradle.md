@@ -211,7 +211,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `optIn` | `[kotlin] opt-in` |
 | `allWarningsAsErrors = true` | `[kotlin] warnings-as-errors = true` |
 | `application { mainClass }` | `[target.jvm] main-class` |
-| `shadowJar` | `kargo package` (`--fat` for a library) |
+| `shadowJar` | `kargo package` (`--fat` for a library); `relocate`, `exclude`, `minimize()` and `mergeServiceFiles()` are [`[package.shade]`](../guides/distributing/#shading) |
 | `maven-publish` + `signing` (or `com.vanniktech.maven.publish`) | `kargo publish`, with `[publish]` and the POM fields in `[package]`; see [Publishing a library](../../guides/publishing/) |
 | `./gradlew publishToMavenLocal` | `kargo publish --local` |
 | `mavenLocal()` | `[repositories] local = "maven-local"` |

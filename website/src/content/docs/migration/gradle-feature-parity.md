@@ -109,7 +109,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Application distribution (`installDist`, `distZip`) | Planned | [#222](https://github.com/enekocm7/kargo/issues/222) |
 | jlink and jpackage | Supported | `--format jlink`, `--format installer` |
 | GraalVM native image | Supported | `--format native-image` |
-| Shadow relocation, resource merging, `minimize()` | Planned | [#225](https://github.com/enekocm7/kargo/issues/225) |
+| Shadow relocation, resource merging, `minimize()` | Supported | [`[package.shade]`](../../guides/distributing/#shading) |
 | ProGuard and R8 | Supported | [`[package.optimize]`](../../guides/distributing/) |
 | Docker and OCI images (Jib) | Planned | [#223](https://github.com/enekocm7/kargo/issues/223) |
 | `maven-publish` and `signing` | Supported | [`kargo publish`](../../guides/publishing/) |
@@ -144,7 +144,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 
 | Gradle plugin | In Kargo |
 |---|---|
-| Shadow (`shadowJar`) | `kargo package` (`--fat` for a library). Relocation is [#225](https://github.com/enekocm7/kargo/issues/225) |
+| Shadow (`shadowJar`) | `kargo package` (`--fat` for a library) with [`[package.shade]`](../../guides/distributing/#shading) for `relocate`, `exclude`, `minimize()` and service merging |
 | Kover, JaCoCo | [#218](https://github.com/enekocm7/kargo/issues/218). |
 | detekt | [`kargo lint`](../../guides/formatting-and-linting/), with `[lint] config` for your `detekt.yml` |
 | ktlint | [`kargo fmt`](../../guides/formatting-and-linting/) |

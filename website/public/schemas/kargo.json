@@ -52,6 +52,19 @@
             "metadata-repository": { "description": "Use the GraalVM reachability metadata repository for the dependencies.", "type": "boolean", "default": true }
           }
         },
+        "shade": {
+          "description": "Relocation, resource merging and minimizing of the jars `kargo package` bundles (fat jars and libraries).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "relocate": { "description": "Packages (or classes) to move, as `from = to` in dotted form. Class files, `META-INF/services` entries and resource paths are rewritten.", "type": "object", "additionalProperties": { "type": "string" }, "examples": [{ "com.google.common": "com.example.shaded.guava" }] },
+            "exclude": { "description": "Classes and resources of the dependencies that are left out of the jar: `pkg.*` or an exact class name.", "type": "array", "items": { "type": "string" }, "examples": [["org.slf4j.*"]] },
+            "minimize": { "description": "Remove the classes of dependencies that the project's classes do not reach.", "type": "boolean", "default": false },
+            "keep": { "description": "Classes and packages `minimize` keeps (`pkg.*` or an exact class name). Needs `minimize = true`.", "type": "array", "items": { "type": "string" } },
+            "merge-services": { "description": "Concatenate `META-INF/services/*`, `reference.conf`, `spring.factories` and similar files; false keeps the first one.", "type": "boolean", "default": true },
+            "relocate-strings": { "description": "Also rewrite string constants that name a relocated class, such as \"com.google.common.Foo\".", "type": "boolean", "default": false }
+          }
+        },
         "installer": {
           "description": "Options for `kargo package --format installer` and `--desktop` (jpackage).",
           "type": "object",

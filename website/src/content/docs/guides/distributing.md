@@ -181,6 +181,35 @@ Installers need numeric versions, so Kargo passes the numbers at the start of `[
 The Windows launcher of an installed application opens no console window, which suits desktop apps such as [Compose Desktop](../compose/) ones. For a command-line tool, set `console = true` so its output shows in the terminal.
 :::
 
+## Shading
+
+A fat jar puts the classes of every dependency into one jar, so two libraries that need different versions of the same package clash, and a library or plugin that bundles its dependencies can clash with the program that loads it. `[package.shade]` is Gradle's Shadow plugin: it moves a library's packages to other names and rewrites every reference to them.
+
+```toml title="kargo.toml"
+[package.shade]
+relocate = { "com.google.common" = "com.example.shaded.guava" }
+exclude = ["org.slf4j.*"]
+minimize = true
+```
+
+`[package.shade]` applies to `kargo package` (the fat jar, and for a library its own jar, which then carries the dependencies) and to `kargo publish`. See [`[package.shade]`](../../reference/manifest/#packageshade) for the keys.
+
+**Relocation.** A class that starts with a `relocate` key moves to the new name. Kargo rewrites the class names, descriptors and signatures in the class files, the file names, the entries of `META-INF/services` (their names and the classes they list) and the paths of resources under a relocated package. A name that merely starts with the same letters (`com.google.commonish`) does not move. String constants stay as they are, since most strings are not class names; `relocate-strings = true` rewrites the ones that spell a relocated class (`Class.forName("com.google.common.Foo")`). Names built at run time are out of reach.
+
+**Merging.** The same file in several jars is concatenated for `META-INF/services/*`, `reference.conf`, `META-INF/spring.factories`, `META-INF/spring/*.imports`, `spring.handlers` and `spring.schemas` (`merge-services = false` keeps the first). Any other file that two jars carry with different contents keeps the first, and `kargo package` warns with the names. The project's own files come first.
+
+**Minimize.** `minimize = true` keeps the project's classes and the classes of dependencies they reach, found through the names in the class files, including strings that spell a class, so `Class.forName` calls are kept. A service provider is kept when its service can be asked for. Classes that are only reached by reflection with a name built at run time need `keep`.
+
+**Also handled.** `META-INF/versions/*` of multi-release jars is kept and moves with its packages, and the manifest gets `Multi-Release: true`. The signature files of signed dependencies (`META-INF/*.SF`, `*.RSA`, `*.DSA`, `*.EC`) are dropped, since they would no longer match.
+
+:::caution[Kotlin metadata]
+Kotlin classes carry a `@Metadata` annotation that Kotlin's reflection and the compiler read. Kargo rewrites the class names inside it, so reflection finds the relocated classes, but the `.kotlin_module` files are copied as they are. Compiling against a relocated Kotlin library from another project is not supported; use the shaded jar at run time.
+:::
+
+### Libraries
+
+For a library, the jar `kargo package` and `kargo publish` write carries the dependencies it bundles, and the POM and Gradle metadata leave them out, so consumers don't get them twice. A dependency stays in the POM when the jar bundles none of its classes (everything excluded), or when it is a path dependency. See [Publishing](../publishing/).
+
 ## In a workspace
 
 Run `kargo package --format <format> -p <member>` at the root, or `kargo package --format <format>` in the member's directory. The output goes to `target/<profile>/<member>/jvm/package/`.

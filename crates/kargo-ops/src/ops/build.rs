@@ -580,6 +580,7 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
         class_path: lib_names.iter().map(|n| format!("lib/{n}")).collect(),
         implementation_title: Some(manifest.package.name.clone()),
         implementation_version: Some(manifest.package.version.clone()),
+        ..Default::default()
     };
     // The compile fingerprint doesn't cover the main class or the runtime classpath, so a change to
     // either alone shows up only in the manifest.

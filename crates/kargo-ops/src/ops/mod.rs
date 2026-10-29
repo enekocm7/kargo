@@ -682,6 +682,7 @@ fn fat_jar(ctx: &BuildContext, jvm: &build::JvmBuild, name: &str, bin_main: Opti
         class_path: Vec::new(),
         implementation_title: Some(pkg.name.clone()),
         implementation_version: Some(pkg.version.clone()),
+        ..Default::default()
     };
     let mut jars: Vec<PathBuf> = jvm.runtime_classpath.iter().filter(|p| p.extension().is_some_and(|e| e == "jar")).cloned().collect();
     if platforms.is_empty() {
@@ -691,8 +692,45 @@ fn fat_jar(ctx: &BuildContext, jvm: &build::JvmBuild, name: &str, bin_main: Opti
         jars.retain(|j| !crate::compose::is_skiko_runtime_jar(j));
         jars.extend(skiko_runtime_jars(ctx, jvm, platforms)?);
     }
-    write_jar(&dest, &jvm.classes, &manifest, &jars).context("failed to create the fat jar")?;
+    match &pkg_shade(ctx) {
+        Some(shade) => {
+            shade_jar(ctx, &dest, jvm, &manifest, &jars, shade).context("failed to create the fat jar")?;
+        }
+        None => write_jar(&dest, &jvm.classes, &manifest, &jars).context("failed to create the fat jar")?,
+    }
     Ok(dest)
+}
+
+/// `[package.shade]` of the package, if it has one.
+pub(crate) fn pkg_shade(ctx: &BuildContext) -> Option<kargo_manifest::ShadeSettings> {
+    ctx.ws.manifest().packaging.shade.clone()
+}
+
+/// Writes `dest` with `jars` bundled and `shade` applied, and says what needs attention. Returns the jars that
+/// put classes into it.
+pub(crate) fn shade_jar(
+    ctx: &BuildContext,
+    dest: &std::path::Path,
+    jvm: &build::JvmBuild,
+    manifest: &JarManifest,
+    jars: &[PathBuf],
+    shade: &kargo_manifest::ShadeSettings,
+) -> Result<Vec<PathBuf>> {
+    let report = kargo_compiler::shade::write_shaded_jar(dest, &jvm.classes, manifest, jars, shade)?;
+    if !report.duplicates.is_empty() {
+        let shown: Vec<&str> = report.duplicates.iter().take(10).map(String::as_str).collect();
+        let more = report.duplicates.len() - shown.len();
+        ctx.shell().warn(format!(
+            "{} files exist in more than one jar with different contents, the first one was kept: {}{}",
+            report.duplicates.len(),
+            shown.join(", "),
+            if more > 0 { format!(" and {more} more") } else { String::new() }
+        ));
+    }
+    if shade.minimize {
+        ctx.shell().note(format!("minimize removed {} classes of the dependencies", report.removed));
+    }
+    Ok(report.bundled)
 }
 
 /// The Skiko native library jars of `platforms`, in the version the build resolved for the host.

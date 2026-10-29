@@ -145,6 +145,10 @@ With more targets, it is the `<name>-android` module of a [multiplatform library
 
 Gradle resolves Android dependencies, not Kargo, so the POM lists the `[dependencies]` and `[target.android.dependencies]` with the versions `kargo.toml` declares. A dependency without a version (one a BOM manages) is left out with a warning. Path dependencies are published under their own coordinates: `<name>-android` for a multiplatform library with an Android target, its JVM module otherwise. An Android application is not published (`kargo package` builds its APK and App Bundle), nor yet a library with product flavors.
 
+## Shaded libraries
+
+With [`[package.shade]`](../distributing/#shading) in `kargo.toml`, the library jar carries its dependencies, with the `relocate` packages moved, and the POM and Gradle metadata drop the dependencies the jar bundles. Dependencies you want consumers to bring (`exclude = ["org.slf4j.*"]` leaves their classes out) stay in the POM.
+
 ## JVM shrinking and obfuscation
 
 For JVM jars, `kargo package --release` runs R8 after building the jar. Use `kargo package --optimize` to opt in with another profile. R8 can shrink, optimize and obfuscate independently through [`[package.optimize]`](../../reference/manifest/#packageoptimize). It preserves the selected main class and Kotlin metadata, reads optional ProGuard-compatible rules from `proguard-rules.pro`, and writes the minimized jar plus mapping and usage files to `target/<profile>/jvm/`.

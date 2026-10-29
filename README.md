@@ -173,6 +173,10 @@ group = "com.example"
 #                           # file-associations, notarize = { apple-id-env, password-env, team-id } (macOS)
 # type = ["msi", "dmg", "deb"]   # each OS builds its own
 
+# [package.shade]          # kargo package / publish: bundled jars (Shadow)
+# relocate = { "com.google.common" = "com.example.shaded.guava" }   # also: exclude, minimize, keep,
+#                           # merge-services, relocate-strings
+
 # [package.optimize]        # kargo package --release / --optimize (R8)
 # shrink = true
 # optimize = true
