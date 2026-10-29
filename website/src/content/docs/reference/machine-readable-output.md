@@ -8,6 +8,7 @@ Kargo's normal output is for people. Editors, scripts and CI systems can ask for
 | You want | Use |
 |---|---|
 | Compiler errors and warnings with file, line and column | `kargo build --message-format json` (also `check`, `test`, `run`) |
+| What to do about a failed command (`help`, `suggestions`) | `--message-format json`, see [Errors](#errors) |
 | The project model for an editor: roots, classpaths, compiler arguments | `kargo metadata` |
 | The tests of a project, with their source locations | `kargo test --list --format json` |
 | Each test's result as it runs, for a test explorer | `kargo test --message-format json` |
@@ -43,7 +44,24 @@ A `compiler-message` is one diagnostic from the Kotlin compiler (JVM, Wasm, JS o
 
 With [`warnings-as-errors`](../manifest/#kotlin), the compiler's `warnings found and -Werror specified` summary is the last `compiler-message`, after the diagnostics it counts. Kargo's own [warnings](../warnings/), such as a target without sources, are plain text on stderr, not JSON messages.
 
-`kargo build` and `kargo check` end with a `build-finished` message whose `success` says whether the build succeeded. The exit code is the same as without the flag: `101` when the build fails.
+`kargo build` and `kargo check` end with a `build-finished` message whose `success` says whether the build succeeded, and, when it did not and Kargo has advice for the failure, the optional `help` and `suggestions` of [errors](#errors). The exit code is the same as without the flag: `101` when the build fails.
+
+## Errors
+
+A failure that is not a compiler diagnostic, such as a typo in `kargo.toml`, is one more message with `--message-format json`:
+
+```console
+$ kargo build --message-format json 2>/dev/null
+{"help":"key `jvm-targt` in `[target.jvm]` is not known; did you mean `jvm-target`?","message":"failed to parse manifest at /home/me/app/kargo.toml: TOML parse error at line 6, column 1 ...","reason":"error","suggestions":["jvm-target"]}
+```
+
+| Field | Meaning |
+|---|---|
+| `message` | The error and its causes, joined with `: ` |
+| `help` | What to do next: the `help:` lines of the human output, one per line. Absent when there is no advice |
+| `suggestions` | The names that would fix the error, best first (the closest valid key, command, package, coordinate or version). Absent when there are none |
+
+When the build itself fails, `build-finished` (below) has the `help` and `suggestions` fields instead, and no `error` message comes before it. Both fields are optional: read them when present.
 
 `--message-format` takes `human` (the default) or `json`. With `kargo run` only the compiler output becomes JSON: the program's own output still goes to stdout as text after it. `kargo test` also reports each test as JSON ([Test results](#test-results)) and moves its human-readable report to stderr. Compiler output that isn't a diagnostic, such as Kotlin/Native's linker messages, goes to stderr. Android builds run through Gradle, so their diagnostics are not converted.
 

@@ -83,7 +83,12 @@ impl NewOptions {
         }
         for f in &self.frameworks {
             if !FRAMEWORK_NAMES.contains(&f.as_str()) && !PRESETS.contains(&f.as_str()) {
-                bail!("unknown framework `{f}` (available: {}, and the preset {})", FRAMEWORK_NAMES.join(", "), PRESETS.join(", "));
+                let known: Vec<&str> = FRAMEWORK_NAMES.iter().chain(PRESETS).copied().collect();
+                return Err(kargo_util::help::unknown(
+                    format!("unknown framework `{f}` (available: {}, and the preset {})", FRAMEWORK_NAMES.join(", "), PRESETS.join(", ")),
+                    f,
+                    &known,
+                ));
             }
         }
         let jvm_only = ["spring-boot", "lombok"];

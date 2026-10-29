@@ -45,6 +45,43 @@ Yes. A package can depend on another package on disk with `{ path = "../lib" }`,
 
 When a build fails for a reason outside your code (the JDK, a missing SDK, the network), start with [`kargo doctor`](../commands/#kargo-doctor). It checks the JDK, the toolchains, the Android SDK, Node.js and browsers, the repositories and the project in one go, and prints a fix for each problem it finds. `kargo doctor --bug-report` gives a block to paste into an issue.
 
+### Errors with a `help:` line
+
+Kargo's errors end with a `help:` line when it knows what to do next:
+
+```console
+$ kargo biuld
+error: no such command: `biuld`
+
+	View all installed commands with `kargo --help` and `kargo plugins`
+
+help: did you mean `build`?
+```
+
+A typo gets the closest valid name: a command, task or `kargo-<name>` plugin; a `-p` package; a `--framework`, `--with` or `--platforms` value; a target or Kotlin/Native platform in `kargo.toml` (`linuxX64` and `linux_x64` are the same name); a Maven coordinate (`kargo add org.jetbrains.kotlinx:kotlinx-corutines-core` finds `kotlinx-coroutines-core` in the repositories' directory listings, and a mistyped group too); and any `kargo.toml` key. An error that this page explains links to its entry with `help: see <link>`.
+
+With `--message-format json`, a failure carries the same advice in a `help` field and the names in `suggestions`: see [Machine-readable output](../machine-readable-output/#errors).
+
+### `unknown field ...` in `kargo.toml`
+
+Kargo rejects keys it doesn't know, so a typo is an error instead of a setting that silently does nothing. The error shows the line with a caret under the key, the table it was written in, and the closest valid key:
+
+```console
+$ kargo build
+error: failed to parse manifest at /home/me/app/kargo.toml
+
+Caused by:
+  TOML parse error at line 6, column 1
+  |
+6 | jvm-targt = "17"
+  | ^^^^^^^^^
+unknown field `jvm-targt`, expected one of `jvm-target`, `main-class`, `jvm-args`, `javac-args`, `dependencies`
+
+help: key `jvm-targt` in `[target.jvm]` is not known; did you mean `jvm-target`?
+```
+
+A value that is not valid (a `jvm-target` that is not a Java version, a `members` glob Kargo can't use) shows its line the same way, with `error at line L, column C` and carets under the value. `kargo lsp` reports the same mistakes in your editor as you type. See [`kargo.toml`](../manifest/).
+
 ### `no Java installation found on JAVA_HOME or PATH, and ...`
 
 Normally Kargo downloads a Temurin JDK when you have none. It doesn't with `--offline` or `--locked`, or when `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` turns automatic installs off. Run the `kargo toolchain install jdk <version>` command the error names, install a JDK and set `JAVA_HOME`, or pin one with `[toolchain] jdk = "21"`. See [Without a JDK](../../guides/toolchains/#without-a-jdk). `kargo doctor` shows which JDK the project would use, and a `JAVA_HOME` that points nowhere.

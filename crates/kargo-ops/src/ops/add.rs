@@ -65,6 +65,9 @@ pub fn add_to(
                 let versions = client
                     .versions(&spec.module)
                     .with_context(|| format!("could not determine the latest version of `{}`", spec.module))?;
+                if versions.is_empty() {
+                    return Err(client.module_not_found(&spec.module));
+                }
                 let latest = select_latest(&versions, "", opts.prerelease)
                     .with_context(|| format!("could not determine the latest version of `{}`: no published releases", spec.module))?;
                 // Variants such as `0.8.0-0.6.x-compat` can sort above the plain release; say which one was skipped.
@@ -83,7 +86,7 @@ pub fn add_to(
             let module = Artifact::new(spec.module.clone(), &version).with_extension("module");
             let exists = client.fetch(&client.artifact_path(&pom)?)?.is_some() || client.fetch(&client.artifact_path(&module)?)?.is_some();
             if !exists {
-                bail!("`{}:{version}` was not found in any repository", spec.module);
+                return Err(client.version_not_found(&spec.module, &version));
             }
         }
         let dep = NewDependency { version: Some(version.clone()), scope: opts.scope, classifier: spec.classifier.clone(), bom: opts.bom };
@@ -157,7 +160,11 @@ pub fn add_frameworks(config: &Config, ws: &Workspace, names: &[String]) -> Resu
     let mut editor = ManifestEditor::load(&ws.manifest_path())?;
     for name in names {
         if !crate::builtins::FRAMEWORK_NAMES.contains(&name.as_str()) {
-            bail!("unknown framework `{name}` (available: {})", crate::builtins::FRAMEWORK_NAMES.join(", "));
+            return Err(kargo_util::help::unknown(
+                format!("unknown framework `{name}` (available: {})", crate::builtins::FRAMEWORK_NAMES.join(", ")),
+                name,
+                crate::builtins::FRAMEWORK_NAMES,
+            ));
         }
         if name == "ktor" {
             bail!("ktor needs an engine; add `ktor = {{ server = \"netty\" }}` (or `client = \"cio\"`) under [frameworks]");

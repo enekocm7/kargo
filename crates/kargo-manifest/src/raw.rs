@@ -1904,7 +1904,11 @@ pub fn normalize_konan_target(name: &str) -> Result<String> {
         _ => snake,
     };
     if !KONAN_TARGETS.contains(&snake.as_str()) {
-        bail!("unknown Kotlin/Native platform `{name}` (expected one of: {})", KONAN_TARGETS.join(", "));
+        return Err(kargo_util::help::unknown(
+            format!("unknown Kotlin/Native platform `{name}` (expected one of: {})", KONAN_TARGETS.join(", ")),
+            &snake,
+            KONAN_TARGETS,
+        ));
     }
     Ok(snake)
 }

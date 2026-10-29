@@ -141,7 +141,11 @@ fn frameworks(settings: &Settings) -> Result<Vec<&'static str>> {
     let mut out: Vec<&'static str> = Vec::new();
     for name in &settings.frameworks {
         let Some(known) = FRAMEWORK_NAMES.iter().find(|f| *f == name) else {
-            bail!("unknown framework `{name}`; expected one of {}", FRAMEWORK_NAMES.join(", "));
+            return Err(kargo_util::help::unknown(
+                format!("unknown framework `{name}`; expected one of {}", FRAMEWORK_NAMES.join(", ")),
+                name,
+                FRAMEWORK_NAMES,
+            ));
         };
         if !out.contains(known) {
             out.push(known);

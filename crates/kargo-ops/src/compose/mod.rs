@@ -48,7 +48,13 @@ pub fn parse_platforms(values: &[String]) -> Result<Vec<&'static str>> {
         }
         match PLATFORMS.iter().find(|p| **p == value) {
             Some(p) => platforms.push(p),
-            None => bail!("unknown platform `{value}` for `--platforms` (expected `all` or some of: {})", PLATFORMS.join(", ")),
+            None => {
+                return Err(kargo_util::help::unknown(
+                    format!("unknown platform `{value}` for `--platforms` (expected `all` or some of: {})", PLATFORMS.join(", ")),
+                    value,
+                    &PLATFORMS,
+                ));
+            }
         }
     }
     platforms.sort_by_key(|p| PLATFORMS.iter().position(|q| q == p));
