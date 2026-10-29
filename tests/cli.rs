@@ -1382,6 +1382,12 @@ fn build_directory_lock_serializes_kargo_processes() {
     let lock_path = p.path().join("target/.kargo-lock");
     let held = std::fs::File::create(&lock_path).unwrap();
     held.lock().unwrap();
+    p.file(
+        "target/.kargo-lock.holder",
+        "4242
+build
+",
+    );
 
     // A hook's nested `kargo` is told the lock is its parent's and does not wait.
     p.kargo().arg("clean").env("KARGO_BUILD_LOCK", &lock_path).assert().success();
@@ -1410,7 +1416,7 @@ fn build_directory_lock_serializes_kargo_processes() {
     drop(held);
     assert!(child.wait().unwrap().success());
     let stderr = reader.join().unwrap();
-    assert!(stderr.contains("Blocking waiting for file lock on build directory"), "{stderr}");
+    assert!(stderr.contains("Blocking waiting for file lock on build directory, held by `kargo build` (process 4242)"), "{stderr}");
     assert!(!p.path().join("target/debug").exists());
 }
 

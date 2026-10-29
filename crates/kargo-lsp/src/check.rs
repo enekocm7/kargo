@@ -12,7 +12,7 @@
 //! optionally `"checkTargets": ["wasm", "native"]` to check only some of the enabled targets.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -54,6 +54,24 @@ pub fn manifest_for(file: &Path) -> Option<PathBuf> {
     file.ancestors().skip(1).map(|dir| dir.join(kargo_manifest::MANIFEST_NAME)).find(|m| m.is_file())
 }
 
+/// Called with the text of a `Blocking` status line of a check that waits for the build lock.
+#[derive(Clone, Default)]
+pub struct LockWait(pub Option<Arc<dyn Fn(&str) + Send + Sync>>);
+
+impl std::fmt::Debug for LockWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LockWait")
+    }
+}
+
+impl PartialEq for LockWait {
+    fn eq(&self, _: &LockWait) -> bool {
+        true
+    }
+}
+
+impl Eq for LockWait {}
+
 /// One `kargo check`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
@@ -62,6 +80,8 @@ pub struct Run {
     /// `--target`s; empty: every enabled target.
     pub targets: Vec<String>,
     pub offline: bool,
+    /// Told when the check waits for the build lock another process holds.
+    pub on_lock_wait: LockWait,
 }
 
 impl Run {
@@ -131,7 +151,24 @@ pub fn run_command(exe: &Path, run: &Run, cancel: &AtomicBool) -> Result<Output>
         })
     };
     let stdout = reader(Box::new(child.stdout.take().context("no stdout")?));
-    let stderr = reader(Box::new(child.stderr.take().context("no stderr")?));
+    let on_lock_wait = run.on_lock_wait.0.clone();
+    let stderr = {
+        let stream = child.stderr.take().context("no stderr")?;
+        thread::spawn(move || {
+            let mut text = String::new();
+            for line in std::io::BufReader::new(stream).lines() {
+                let Ok(line) = line else { break };
+                if let Some(wait) = line.trim_start().strip_prefix("Blocking")
+                    && let Some(on_lock_wait) = &on_lock_wait
+                {
+                    on_lock_wait(wait.trim());
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+            text
+        })
+    };
     loop {
         if child.try_wait()?.is_some() {
             break;
@@ -296,7 +333,8 @@ mod tests {
 
     #[test]
     fn builds_the_command_line() {
-        let run = Run { manifest: PathBuf::from("kargo.toml"), targets: vec!["wasm".into()], offline: true };
+        let run =
+            Run { manifest: PathBuf::from("kargo.toml"), targets: vec!["wasm".into()], offline: true, on_lock_wait: LockWait::default() };
         assert_eq!(
             run.args(),
             [

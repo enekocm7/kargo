@@ -52,7 +52,8 @@ impl FileLock {
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
-                shell.status("Blocking", format!("waiting for file lock on {what}"));
+                let by = holder(path).map(|h| format!(", held by {h}")).unwrap_or_default();
+                shell.status("Blocking", format!("waiting for file lock on {what}{by}"));
                 file.lock().with_context(|| format!("failed to lock {}", path.display()))?;
             }
             Err(TryLockError::Error(e)) => return Err(e).with_context(|| format!("failed to lock {}", path.display())),

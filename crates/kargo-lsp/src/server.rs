@@ -101,6 +101,8 @@ enum Event {
     Edited { id: Value, uri: String, original: String, outcome: Result<(String, Value)> },
     /// The check of the `kargo.toml` at `manifest` started as number `generation` finished.
     Checked { generation: u64, manifest: PathBuf, outcome: Result<check::Output> },
+    /// The check number `generation` waits for the build lock (`message` says who holds it).
+    CheckWaiting { generation: u64, message: String },
 }
 
 /// Runs the server until the editor sends `exit` or closes the stream. Returns whether the
@@ -141,12 +143,12 @@ pub(crate) fn serve_with(
     }
     for event in rx {
         if let Some(clean) = server.handle(event)? {
-            server.cancel_check();
+            server.stop_check();
             server.stop_backend();
             return Ok(clean);
         }
     }
-    server.cancel_check();
+    server.stop_check();
     server.stop_backend();
     Ok(false)
 }
@@ -198,6 +200,8 @@ struct Server {
     check_generation: u64,
     /// Stops the running check.
     check_cancel: Option<Arc<AtomicBool>>,
+    /// The worker of the latest check, joined when the server exits so its `kargo check` is stopped.
+    check_thread: Option<thread::JoinHandle<()>>,
     check_progress: Option<Progress>,
     /// The diagnostics of the last check of each `kargo.toml`, by [`check::uri_key`]: the URI
     /// to publish under and the diagnostics.
@@ -428,6 +432,7 @@ impl Server {
             runner,
             check_generation: 0,
             check_cancel: None,
+            check_thread: None,
             check_progress: None,
             checked: HashMap::new(),
             backend_pushed: HashMap::new(),
@@ -533,6 +538,12 @@ impl Server {
             }
             Event::Checked { generation, manifest, outcome } => {
                 self.checked_event(generation, manifest, outcome)?;
+                Ok(None)
+            }
+            Event::CheckWaiting { generation, message } => {
+                if generation == self.check_generation && self.check_cancel.is_some() {
+                    self.status("checking", true, Some(&message))?;
+                }
                 Ok(None)
             }
             Event::Hints { uri, hints } => {
@@ -1243,13 +1254,26 @@ impl Server {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.check_cancel = Some(Arc::clone(&cancel));
-        let run = check::Run { manifest: manifest.clone(), targets: self.check.targets.clone(), offline: self.config.offline() };
+        let waiting_tx = self.tx.clone();
+        let on_lock_wait = check::LockWait(Some(Arc::new(move |message: &str| {
+            let _ = waiting_tx.send(Event::CheckWaiting { generation, message: message.to_owned() });
+        })));
+        let run =
+            check::Run { manifest: manifest.clone(), targets: self.check.targets.clone(), offline: self.config.offline(), on_lock_wait };
         let (runner, tx) = (Arc::clone(&self.runner), self.tx.clone());
-        thread::spawn(move || {
+        self.check_thread = Some(thread::spawn(move || {
             let outcome = runner(&run, &cancel);
             let _ = tx.send(Event::Checked { generation, manifest, outcome });
-        });
+        }));
         Ok(())
+    }
+
+    /// Stops the running check and waits until its `kargo check` process is gone, so none outlives the server.
+    fn stop_check(&mut self) {
+        self.cancel_check();
+        if let Some(thread) = self.check_thread.take() {
+            let _ = thread.join();
+        }
     }
 
     /// Stops the running check, if any.
@@ -2177,7 +2201,7 @@ local = \"{url}\"
         editor.request(1, "initialize", params);
         open(&mut editor, &common_uri, SOURCE);
         save(&mut editor, &common_uri);
-        runs.recv_timeout(Duration::from_secs(10)).unwrap();
+        let run = runs.recv_timeout(Duration::from_secs(10)).unwrap();
         let status = |editor: &mut Editor| loop {
             let message = editor.recv();
             if message["method"] == "kargo/status" {
@@ -2185,6 +2209,9 @@ local = \"{url}\"
             }
         };
         assert_eq!(status(&mut editor), json!({ "task": "checking", "active": true }));
+        let waiting = "waiting for file lock on build directory, held by `kargo build` (process 7)";
+        (run.on_lock_wait.0.as_ref().unwrap())(waiting);
+        assert_eq!(status(&mut editor), json!({ "task": "checking", "active": true, "message": waiting }));
         gate.send(()).unwrap();
         assert_eq!(status(&mut editor), json!({ "task": "checking", "active": false, "message": "1 error" }));
         assert!(editor.finish());
