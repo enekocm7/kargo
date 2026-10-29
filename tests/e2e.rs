@@ -441,6 +441,8 @@ fn release_package_runs_the_r8_optimized_jar() {
     t.create(&["against-min"]);
     let manifest = std::fs::read_to_string(t.dir.path().join("against-min/kargo.toml")).unwrap();
     t.write("against-min/kargo.toml", &format!("{manifest}\n[package.optimize]\nobfuscate = false\n"));
+    // Without keep rules R8 inlines `greeting` into `main` and removes it, and shrinks the standard library the tests use.
+    t.write("against-min/proguard-rules.pro", "-keep class com.example.** { *; }\n-keep class kotlin.** { *; }\n");
     t.kargo("against-min").args(["test", "-t", "jvm", "--against-min"]).assert().success();
 }
 
@@ -1083,7 +1085,7 @@ fn wasm_release_removes_dead_code_and_reports_the_size() {
     let debug = std::fs::metadata(t.dir.path().join("slim/target/debug/wasm/slim.wasm")).unwrap().len();
 
     t.kargo("slim").args(["build", "--release"]).assert().success().stderr(
-        predicate::str::contains("Size slim.wasm").and(predicate::str::contains("gzipped")).and(predicate::str::contains("Binaryen").not()),
+        predicate::str::contains("Size slim.wasm").and(predicate::str::contains("gzip,")).and(predicate::str::contains("Binaryen").not()),
     );
     let release = std::fs::metadata(t.dir.path().join("slim/target/release/wasm/slim.wasm")).unwrap().len();
     assert!(release * 4 < debug, "dead code elimination should shrink the module a lot: {release} bytes in release, {debug} in debug");
@@ -1557,11 +1559,15 @@ fn kotlin_js_calls_npm_packages_through_generated_declarations() {
 /// `@JsExport` Kotlin function through the module's `.d.mts`.
 fn typescript_interop(t: &E2e, name: &str, target: &str) {
     t.create(&[name, "--target", target]);
+    // The template's test calls the `greeting` that `Main.kt` below replaces.
+    let _ = std::fs::remove_file(t.dir.path().join(format!("{name}/tests/GreetingTest.kt")));
     t.write(
         &format!("{name}/js/greeter.ts"),
-        "import { exclaim } from \"../{name}.mjs\";\n\n\
-         /** Greets `name`. */\nexport function greet(name: string, times: number): string {\n    \
-         return exclaim(`Hello, ${name}`) + \" x\" + times;\n}\n",
+        &format!(
+            "import {{ exclaim }} from \"../{name}.mjs\";\n\n\
+             /** Greets `name`. */\nexport function greet(name: string, times: number): string {{\n    \
+             return exclaim(`Hello, ${{name}}`) + \" x\" + times;\n}}\n"
+        ),
     );
     t.write(
         &format!("{name}/src/Main.kt"),
