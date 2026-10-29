@@ -6,7 +6,8 @@
 //!
 //! Configuration is layered: a small file Kargo writes first (it turns off
 //! `InvalidPackageDeclaration`, because Kargo projects keep sources directly in
-//! `src/` rather than in package directories), then the user's `detekt.yml` or
+//! `src/` rather than in package directories, and it skips `UnusedPrivateProperty`
+//! on `@JsModule` declarations), then the user's `detekt.yml` or
 //! `[lint] config` files, which override it.
 
 use std::path::{Path, PathBuf};
@@ -39,6 +40,12 @@ naming:
   InvalidPackageDeclaration:
     # Kargo projects keep sources directly in src/, not in package directories.
     active: false
+style:
+  UnusedPrivateProperty:
+    # The constructor parameters of a JavaScript module's class describe the JavaScript signature.
+    ignoreAnnotated:
+      - 'JsModule'
+      - 'JsNonModule'
 ";
 
 #[derive(Debug, Clone, Default)]
@@ -152,6 +159,12 @@ impl DetektArgs<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kargo_config_skips_unused_private_property_on_js_modules() {
+        assert!(KARGO_CONFIG.contains("UnusedPrivateProperty:"));
+        assert!(KARGO_CONFIG.contains("- 'JsModule'"));
+    }
 
     #[test]
     fn builds_detekt_arguments() {

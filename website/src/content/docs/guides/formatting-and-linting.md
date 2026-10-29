@@ -100,7 +100,7 @@ Silence a single finding with `@Suppress("FunctionOnlyReturningConstant")` on th
 
 ### Configuring detekt
 
-Put a `detekt.yml` at the project root. Kargo passes it to detekt on top of detekt's [default configuration](https://github.com/detekt/detekt/blob/v1.23.8/detekt-core/src/main/resources/default-detekt-config.yml), so the file only needs the rules you change:
+Put a `detekt.yml` at the project root. Kargo finds it automatically (no `[lint]` section needed) and passes it to detekt on top of detekt's [default configuration](https://github.com/detekt/detekt/blob/v1.23.8/detekt-core/src/main/resources/default-detekt-config.yml), so the file only needs the rules you change:
 
 ```yaml title="detekt.yml"
 style:
@@ -114,6 +114,10 @@ complexity:
 ```
 
 Kargo turns off one rule for you: `InvalidPackageDeclaration`, because Kargo projects keep sources directly in `src/` instead of in directories that mirror the package. Turn it back on in your `detekt.yml` if you lay out your sources by package.
+
+It also skips `UnusedPrivateProperty` on declarations annotated with `@JsModule` or `@JsNonModule`, whose constructor parameters describe a JavaScript signature. detekt cannot skip a rule by the `external` modifier alone, so for other `external` declarations use `@Suppress("UnusedPrivateProperty")`, or list their files in the rule's `excludes` in your `detekt.yml`. If you set `ignoreAnnotated` for that rule yourself, your list replaces Kargo's.
+
+A Kotlin/JS or Wasm project with scene or layout code often triggers many `MagicNumber` findings. Turn that rule off, as in the example above, or raise `ignoreNumbers`.
 
 To use other files or pin the version, add a `[lint]` section:
 
@@ -142,6 +146,8 @@ $ kargo lint --create-baseline
 ```
 
 Commit `detekt-baseline.xml`. Later runs of `kargo lint` ignore the issues it lists. Fix them over time and run `--create-baseline` again to shrink the file.
+
+The baseline records the issues left after your `detekt.yml` is applied, so change the configuration first and create the baseline afterwards: a rule you turn off later simply leaves stale entries, and a rule you turn on reports its findings as new issues. `--create-baseline` replaces the whole file.
 
 ## In CI
 
