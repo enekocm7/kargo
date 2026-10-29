@@ -280,7 +280,7 @@ fun main() {
 - **Where it runs.** The factories are JavaScript functions that Kargo generates next to the declarations (`target/<profile>/generated/npm/kargo-factories/<package>.mjs`) and copies to `js/kargo-factories/` next to the module, which `Factories.kt` imports with `@file:JsModule`. Like the modules in `js/`, they are ES modules.
 - **Skipped.** Classes, objects with methods or index signatures, and interfaces whose factory would clash with a function of the package (`declare function Theme(dark: boolean): Theme`) get none. The `external interface` stays either way, so objects a library returns still read their properties.
 
-A package without TypeScript declarations gets none, with a warning; declare what you use yourself with `@JsModule("<name>")` [external declarations](https://kotlinlang.org/docs/wasm-js-interop.html). The generated files are rewritten by the next build, so edit your own declarations instead of them.
+A package without TypeScript declarations gets none, with a warning; declare what you use yourself with `@JsModule("<name>")` [external declarations](https://kotlinlang.org/docs/wasm-js-interop.html); [Binding a package by hand](../js/#binding-a-package-by-hand) has a worked example for Kotlin/JS. The generated files are rewritten by the next build, so edit your own declarations instead of them.
 
 ### In the browser
 

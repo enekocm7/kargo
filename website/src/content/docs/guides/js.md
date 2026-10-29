@@ -168,7 +168,89 @@ $ kargo run
 
 The declarations go to `target/<profile>/generated/npm-js/` (`@types` packages to `target/<profile>/npm-types-js/`), with the same Kotlin packages, names and [type mapping](../wasm/#kotlin-declarations-for-npm-packages) as on Wasm: they use the interop types `JsAny`, `JsString`, `JsArray` and `Promise`, which Kotlin/JS shares with Kotlin/Wasm since Kotlin 2.2.20, so code that calls an npm package compiles for both targets. Kargo passes the opt-in `kotlin.js.ExperimentalWasmJsInterop` they need. With an older Kotlin, Kargo warns and generates none. Options objects are built with the same [factories](../wasm/#building-objects) (`make(Options(size = 2))`), copied to `target/<profile>/js/js/kargo-factories/`; they are ES modules, so use `module-kind = "es"` (the default) for a program that calls them.
 
-A package without TypeScript declarations gets none, with a warning: write the `external` declarations you need with `@JsModule`, or use `dynamic`. The Kotlin docs cover [JavaScript interop](https://kotlinlang.org/docs/js-interop.html) and [`@JsModule`](https://kotlinlang.org/docs/js-modules.html).
+A package that ships TypeScript declarations (a `.d.ts` file of its own) or has a `@types/<name>` package needs nothing more: Kargo generates the Kotlin declarations and you call it as above. A package with neither gets no declarations, with a warning, and you [bind it by hand](#binding-a-package-by-hand). Do the same when the generated declarations don't compile or don't fit what you need.
+
+### Binding a package by hand
+
+A binding is a Kotlin file of `external` declarations for the parts of the package you use. This one binds a small piece of three.js, a package with no declarations of its own in this example:
+
+```toml title="kargo.toml"
+[target.js]
+environment = "browser"
+
+[target.js.npm-dependencies]
+three = "0.170.0"
+```
+
+```kotlin title="src/three/Three.kt"
+@file:JsModule("three")
+
+package three
+
+external interface MaterialOptions {
+    var color: Int?
+    var wireframe: Boolean?
+}
+
+external class Scene {
+    fun add(obj: Object3D)
+}
+
+external open class Object3D {
+    val position: Vector3
+}
+
+external class Vector3 {
+    var x: Double
+    var y: Double
+    var z: Double
+}
+
+external class BoxGeometry(width: Double = definedExternally, height: Double = definedExternally, depth: Double = definedExternally)
+
+external class MeshBasicMaterial(parameters: MaterialOptions = definedExternally)
+
+external class Mesh(geometry: BoxGeometry, material: MeshBasicMaterial) : Object3D
+```
+
+```kotlin title="src/Main.kt"
+import three.*
+
+fun main() {
+    val options: MaterialOptions = js("({})")
+    options.color = 0xff8800
+    options.wireframe = true
+
+    val scene = Scene()
+    val cube = Mesh(BoxGeometry(1.0, 1.0, 1.0), MeshBasicMaterial(options))
+    cube.position.x = 2.0
+    scene.add(cube)
+}
+```
+
+- **`@file:JsModule("name")`.** It makes every declaration in the file part of the module `name`, so Kotlin/JS compiles `import { Scene } from "three"`. The string is what you would pass to `import`, including a subpath (`"three/addons/controls/OrbitControls.js"`). It must be the first line of the file, before `package`. Kotlin allows no other kind of declaration in such a file: every top-level declaration must be `external`, so keep helper functions in another file. Add `@JsName("Name")` to bind a class or function under a Kotlin name that differs from the JavaScript one, and `@JsNonModule` is not needed with ES modules.
+- **Classes and constructors.** An `external class` calls `new Name(...)`. A parameter the JavaScript constructor may omit gets the default `= definedExternally`: the argument is then left out of the call instead of passed as `undefined`, which is what libraries that check `arguments.length` expect. `external val` and `var` members read and write properties, `fun` members call methods. Only declare what you use; the rest of the class stays unbound. Pass `external interface` values as parameters and take them back as results.
+- **Options objects.** A JavaScript options object is an `external interface` whose properties are `var` and nullable (`Int?`), because the library treats a missing property differently from `null`. Interfaces have no constructor, so create the object with `js("({})")` and fill it in, as above. A property you never set is missing from the object. `js(...)` takes a string literal only, which Kotlin compiles into the call site; you can't pass it a variable.
+- **`JsAny` or `dynamic`.** Prefer typed `external` declarations. For a value you only pass back to the library (a handle, an event payload), declare the parameter and result as `JsAny` (`JsAny?` for nullable): Kotlin/JS and Kotlin/Wasm share it, so the same binding compiles for both targets, and it allows no member access. Use `dynamic` when you need to read or call something you haven't declared, such as `val config: dynamic = js("({})"); config.speed = 3`. It turns off type checking, so a typo fails when the code runs, and it exists on Kotlin/JS only. Convert with `.unsafeCast<T>()` when you know the type.
+- **Browser apps.** A bare name such as `"three"` means nothing to a browser. With the package in `[target.js.npm-dependencies]`, Kargo installs it and adds an [import map](https://developer.mozilla.org/docs/Web/HTML/Element/script/type/importmap) to the page, as described in [npm packages](#npm-packages). To load it from somewhere else, such as a CDN, write the map in your own `resources/index.html`; Kargo keeps a page that has an import map as it is:
+
+  ```html title="resources/index.html"
+  <!doctype html>
+  <html>
+    <head>
+      <script type="importmap">
+        { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+      </script>
+    </head>
+    <body>
+      <script type="module" src="./three-demo.mjs"></script>
+    </body>
+  </html>
+  ```
+
+  Replace `three-demo.mjs` with the module's file name (`<name>.mjs`, see [Module kinds](#module-kinds)). An import map is for ES modules, so this needs `module-kind = "es"`, the default; see [Wasm](../wasm/#in-the-browser) for more about packages in a browser.
+
+Kotlin/Wasm has no `dynamic` and restricts `js(...)` to the body of a top-level function, so a binding for [Wasm](../wasm/#kotlin-declarations-for-npm-packages) uses `JsAny` and small helper functions instead. The Kotlin docs cover [JavaScript interop](https://kotlinlang.org/docs/js-interop.html) and [`@JsModule`](https://kotlinlang.org/docs/js-modules.html).
 
 ## Your own JavaScript and TypeScript
 
