@@ -393,10 +393,12 @@ central-publishing = "manual"
 | Key | Default | Meaning |
 |---|---|---|
 | `repository` | none | Where `kargo publish` publishes without `--repository`: `maven-central`, `maven-local` or a [`[repositories]`](#repositories) entry |
-| `sign` | `true` for Maven Central, else `false` | Sign every file with GnuPG (`.asc`). Maven Central requires it |
+| `sign` | `true` for Maven Central, else `false` | Sign every file (`.asc`), in memory with `KARGO_SIGNING_KEY` or else with GnuPG. Maven Central requires it |
 | `sources` | `true` | Publish `-sources.jar` files |
 | `javadoc` | `true` (`"dokka"`) | The `-javadoc.jar`: `"dokka"` (or `true`) holds the HTML that [Dokka](../../guides/documentation/) generates, `"empty"` only a manifest (enough for Maven Central), `false` none |
 | `central-publishing` | `"manual"` | What Maven Central does with a validated upload: `"manual"` waits for you to release it in the Central Portal, `"automatic"` releases it |
+| `kind` | `"library"` | `"library"` publishes the jars and klibs; `"bom"` publishes only a POM whose `<dependencyManagement>` pins the versions of `[dependencies]` (a `bom = true` entry is imported) and of every module the path dependencies publish. Nothing is compiled |
+| `relocations` | `[]` | Former coordinates of the package (`"group:artifact"`). Each gets a relocation POM at the same version that sends Maven, Gradle and Kargo to the current coordinates |
 
 See [Publishing a library](../../guides/publishing/).
 
@@ -827,7 +829,7 @@ Maven Central is used first, and Google Maven is added automatically for Android
 | --- | --- | --- |
 | `<name>` | | A repository: its URL (`https://`, `http://` or `file:`), `"maven-local"`, or a table with the keys below |
 | `<name>.url` | | The URL. Leave it out for `maven-central` and `google` to configure the built-in repository |
-| `<name>.username-env`, `<name>.password-env` | none | Environment variables holding the user name and password (or token), sent with HTTP Basic authentication |
+| `<name>.username-env`, `<name>.password-env` | none | Environment variables holding the user name and password (or token), sent with HTTP Basic authentication. GitHub Packages, GitLab and AWS CodeArtifact URLs have [defaults](#hosted-repositories) |
 | `<name>.include-groups` | all groups | Groups this repository serves. No other repository is asked for them |
 | `<name>.exclude-groups` | none | Groups this repository is never asked for |
 | `defaults` | `true` | `false` leaves out Maven Central and Google Maven, so only the repositories you list are used |
@@ -857,6 +859,18 @@ local = "maven-local"
 ```
 
 `kargo publish --repository <name>` uploads to a repository listed here, with the same credentials.
+
+### Hosted repositories
+
+Kargo recognizes three hosted services by their URL. When their entry has neither `username-env` nor `password-env`, it takes the credentials from the variables their CI sets, if they are set:
+
+| Service | URL | Username | Password |
+| --- | --- | --- | --- |
+| GitHub Packages | `https://maven.pkg.github.com/<owner>/<repository>` | `$GITHUB_ACTOR` | `$GITHUB_TOKEN` |
+| GitLab | `https://<host>/api/v4/projects/<id>/packages/maven` (or `.../groups/<id>/-/packages/maven`) | `gitlab-ci-token` | `$CI_JOB_TOKEN` |
+| AWS CodeArtifact | `https://<domain>-<account>.d.codeartifact.<region>.amazonaws.com/maven/<repository>/` | `aws` | `$CODEARTIFACT_AUTH_TOKEN` |
+
+When one of them refuses an upload, the error says which variables or token scope it needs. Other services (Nexus, Artifactory, Reposilite, ...) take `username-env` and `password-env`.
 
 ## `[frameworks]`
 

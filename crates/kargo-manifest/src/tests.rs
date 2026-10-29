@@ -731,6 +731,8 @@ sign = true
 sources = false
 javadoc = "empty"
 central-publishing = "automatic"
+kind = "bom"
+relocations = ["org.old:lib"]
 "#,
     );
     assert_eq!(m.package.homepage.as_deref(), Some("https://example.com/lib"));
@@ -744,6 +746,8 @@ central-publishing = "automatic"
             sources: false,
             javadoc: Javadoc::Empty,
             central_publishing: CentralPublishing::Automatic,
+            kind: PublishKind::Bom,
+            relocations: vec![ModuleId::new("org.old", "lib")],
         }
     );
     for destination in ["maven-central", "maven-local"] {
@@ -758,6 +762,8 @@ central-publishing = "automatic"
     assert!(parse_err(&with("repository = \"nowhere\"")).contains("maven-central, maven-local"));
     assert!(parse_err(&with("javadoc = \"html\"")).contains("javadoc"));
     assert!(parse_err(&with("central-publishing = \"later\"")).contains("manual"));
+    assert!(parse_err(&with("kind = \"platform\"")).contains("\"library\" or \"bom\""));
+    assert!(parse_err(&with("relocations = [\"a:b\", \"a:b\"]")).contains("twice"));
     assert!(parse_err(&with("checksums = []")).contains("unknown field"));
     let bad_url = MINIMAL.replace("version = \"0.1.0\"", "version = \"0.1.0\"\nrepository = \"github.com/me/lib\"");
     assert!(parse_err(&bad_url).contains("`repository` must be an http(s):// URL"));

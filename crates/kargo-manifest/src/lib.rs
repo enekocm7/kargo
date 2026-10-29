@@ -1098,6 +1098,17 @@ pub enum CentralPublishing {
     Automatic,
 }
 
+/// What `kargo publish` publishes for a package (`[publish] kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PublishKind {
+    /// The package's jars and klibs (the default).
+    #[default]
+    Library,
+    /// A bill of materials: a POM whose `<dependencyManagement>` pins the versions of the package's
+    /// dependencies and path dependencies. Nothing is compiled.
+    Bom,
+}
+
 /// `[publish]`: options for `kargo publish`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishSettings {
@@ -1109,11 +1120,22 @@ pub struct PublishSettings {
     pub sources: bool,
     pub javadoc: Javadoc,
     pub central_publishing: CentralPublishing,
+    pub kind: PublishKind,
+    /// The former coordinates of the package: each gets a relocation POM pointing at the current ones.
+    pub relocations: Vec<ModuleId>,
 }
 
 impl Default for PublishSettings {
     fn default() -> Self {
-        Self { repository: None, sign: None, sources: true, javadoc: Javadoc::Dokka, central_publishing: CentralPublishing::Manual }
+        Self {
+            repository: None,
+            sign: None,
+            sources: true,
+            javadoc: Javadoc::Dokka,
+            central_publishing: CentralPublishing::Manual,
+            kind: PublishKind::Library,
+            relocations: Vec::new(),
+        }
     }
 }
 

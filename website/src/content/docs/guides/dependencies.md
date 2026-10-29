@@ -384,7 +384,7 @@ libs = "file:///home/me/libs"
 local = "maven-local"
 ```
 
-Credentials are never written in `kargo.toml`; Kargo reads them from the named environment variables.
+Credentials are never written in `kargo.toml`; Kargo reads them from the named environment variables. GitHub Packages, GitLab and AWS CodeArtifact repositories need no names: Kargo reads `GITHUB_TOKEN`, `CI_JOB_TOKEN` or `CODEARTIFACT_AUTH_TOKEN` (see [Hosted repositories](../../reference/manifest/#hosted-repositories)).
 
 To send every repository through a company mirror, or build from a copy of the dependencies kept in the project, see [Offline and corporate builds](../offline-and-mirrors/).
 

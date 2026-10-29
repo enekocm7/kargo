@@ -664,7 +664,9 @@
         "sign": { "description": "Sign every file with GnuPG (default: true for Maven Central).", "type": "boolean" },
         "sources": { "description": "Publish -sources.jar files.", "type": "boolean", "default": true },
         "javadoc": { "description": "The -javadoc.jar: \"dokka\" (or true), \"empty\" or false.", "anyOf": [{ "type": "boolean" }, { "enum": ["dokka", "empty"] }], "default": "dokka" },
-        "central-publishing": { "description": "What Maven Central does with a validated upload.", "enum": ["manual", "automatic"], "default": "manual" }
+        "central-publishing": { "description": "What Maven Central does with a validated upload.", "enum": ["manual", "automatic"], "default": "manual" },
+        "kind": { "description": "What is published: \"library\" (the jars and klibs) or \"bom\" (a POM that pins the versions of [dependencies] and of the path dependencies' modules).", "enum": ["library", "bom"], "default": "library" },
+        "relocations": { "description": "Former coordinates (group:artifact) of the package; each gets a relocation POM that points at the current ones.", "type": "array", "items": { "type": "string", "pattern": "^[^:\\s]+:[^:\\s]+$" }, "uniqueItems": true }
       }
     },
     "workspace": {
