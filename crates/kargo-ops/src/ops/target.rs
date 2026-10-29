@@ -118,8 +118,9 @@ pub fn edit(
         materialized_jvm = true;
     }
     let compose = manifest.frameworks.compose.is_some();
+    let html = manifest.frameworks.compose.as_ref().is_some_and(|c| c.html == Some(true));
     for &target in &new_targets {
-        editor.add_target(target, &compose_target_section(target, lib, &opts.package(), compose))?;
+        editor.add_target(target, &compose_target_section(target, lib, &opts.package(), compose, html))?;
     }
     let manifest = ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     Ok(Some(TargetEdit { targets: new_targets, lib, materialized_jvm, manifest }))

@@ -71,7 +71,7 @@ $ kargo run -t js
      Serving target/debug/js at http://127.0.0.1:8080/ (press Ctrl+C to stop)
 ```
 
-`kargo run` serves the app the way it serves a [Wasm browser app](../wasm/#browser-apps), with the same `--port` and `--open` options, and the same `port` key in `[target.js]` to change the default port 8080 (see [Choosing the port](../wasm/#choosing-the-port)). Kargo writes `index.html` next to the module, unless `resources/index.html` is your own page; everything below `resources/` is copied to `target/<profile>/js/`. The generated page loads `<name>.mjs` with `<script type="module">`, or `<name>.js` with a plain `<script>` for a UMD module.
+`kargo run` serves the app the way it serves a [Wasm browser app](../wasm/#browser-apps), with the same `--port` and `--open` options, and the same `port` key in `[target.js]` to change the default port 8080 (see [Choosing the port](../wasm/#choosing-the-port)). Kargo writes `index.html` next to the module, unless `resources/index.html` is your own page; everything below `resources/` is copied to `target/<profile>/js/`. The generated page loads `<name>.mjs` with `<script type="module">`, or `<name>.js` with a plain `<script>` for a UMD module. With [Compose HTML](../compose/#compose-html-dom-elements) the page has an empty `<div id="root"></div>` for `renderComposable` instead of the note about the console.
 
 `kargo run --watch` rebuilds the app on each change and reloads the open pages, see [Reload a browser app on change](../watch/#reload-a-browser-app-on-change).
 
@@ -96,7 +96,7 @@ A browser can't load a CommonJS module, so a `browser` application needs `es` or
 
 ## Release builds
 
-`kargo build --release` links with the compiler's dead code elimination (`-Xir-dce`): only what `main` and `@JsExport` reach stays, and no source map is written. For a library with one exported function that takes the module from about 560 KiB to under 1 KiB. Dev builds keep everything and write `<name>.mjs.map` with the Kotlin sources embedded.
+`kargo build --release` links with the compiler's dead code elimination (`-Xir-dce`): only what `main` and `@JsExport` reach stays, and no source map is written. For a library with one exported function that takes the module from about 560 KiB to under 1 KiB. Dev builds keep everything and write `<name>.mjs.map` with the Kotlin sources embedded. A release build of a browser app also prints the size of the module (raw, gzip and brotli) and of the whole output, like a [Wasm build](../wasm/); with `--message-format json` it is a `js-size` message.
 
 ## Libraries and npm packages
 
@@ -289,7 +289,7 @@ Dependencies only the JS target uses go in `[target.js.dependencies]`. Kargo res
 
 ## Frameworks
 
-`[frameworks]` serialization, coroutines and the Ktor client (`ktor = { client = "js" }`) work on the JS target. Compose for Web runs on Kotlin/Wasm; use [`[target.wasm]`](../compose/#compose-for-the-web) for it. The Ktor server, Lombok and Spring Boot need the JVM. See [Frameworks](../frameworks/).
+`[frameworks]` serialization, coroutines and the Ktor client (`ktor = { client = "js" }`) work on the JS target. Compose on the JS target is [Compose HTML](../compose/#compose-html-dom-elements): set `compose = { html = true }` and it renders DOM elements. Compose for Web, which draws on a canvas, runs on Kotlin/Wasm; use [`[target.wasm]`](../compose/#compose-for-the-web) for it. The Ktor server, Lombok and Spring Boot need the JVM. See [Frameworks](../frameworks/).
 
 ## Output files
 

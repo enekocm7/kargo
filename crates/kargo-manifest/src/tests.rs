@@ -814,6 +814,10 @@ fn framework_toggles() {
         parse_err(&with("compose = { strong-skipping = true, feature-flags = [\"-StrongSkipping\"] }"))
             .contains("keep only `strong-skipping`")
     );
+    let html = parse(&with("compose = { html = true, svg = true }"));
+    let compose = html.frameworks.compose.as_ref().unwrap();
+    assert_eq!((compose.html, compose.svg), (Some(true), Some(true)));
+    assert!(parse_err(&with("compose = { svg = true }")).contains("set `html = true` too"));
 }
 
 #[test]

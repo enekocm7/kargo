@@ -533,7 +533,7 @@ The Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/
 
 ## Limitations
 
-- **Compose for Web** needs `environment = "browser"`. See [Compose for the web](../compose/#compose-for-the-web).
+- **Compose for Web** needs `environment = "browser"`. See [Compose for the web](../compose/#compose-for-the-web). Compose HTML (DOM elements) does not run on Wasm; it is for the [JS target](../compose/#compose-html-dom-elements).
 - Libraries must publish a Wasm variant (`wasmJs` or `wasmWasi`). JVM-only libraries can't be used.
 - Test name filters are ignored on Wasm; all tests run.
 - Packages that only ship CommonJS can't be used in the `browser` environment without bundling them yourself.

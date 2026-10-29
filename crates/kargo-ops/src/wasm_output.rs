@@ -151,7 +151,7 @@ fn gzip(data: &[u8]) -> Result<Vec<u8>> {
     Ok(encoder.finish()?)
 }
 
-fn brotli(data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn brotli(data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     {
         let mut encoder = brotli::CompressorWriter::new(&mut out, 4096, 11, 22);
@@ -624,7 +624,7 @@ pub(crate) fn all_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The files of a build that get published or served: everything but the klib, the tests and bookkeeping.
-fn deliverables(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn deliverables(dir: &Path) -> Vec<PathBuf> {
     all_files(dir)
         .into_iter()
         .filter(|file| {
@@ -637,7 +637,7 @@ fn deliverables(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn gzipped_size(data: &[u8]) -> u64 {
+pub(crate) fn gzipped_size(data: &[u8]) -> u64 {
     struct Counter(u64);
     impl Write for Counter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -654,7 +654,7 @@ fn gzipped_size(data: &[u8]) -> u64 {
 }
 
 /// `1.5 MiB`, `27.1 KiB` or `512 B`.
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     let bytes_f = bytes as f64;
     if bytes_f >= KIB * KIB {

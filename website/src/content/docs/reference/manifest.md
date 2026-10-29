@@ -900,10 +900,14 @@ The other Compose keys are options of the Compose compiler, on the JVM and Andro
 | `feature-flags` | `[]` | `StrongSkipping`, `IntrinsicRemember`, `OptimizeNonSkippingGroups`, `PausableComposition`; a leading `-` disables one. Don't combine `StrongSkipping` with `strong-skipping` |
 | `metrics` | `false` | Write the compiler's metrics to `target/compose/<target>/metrics/` |
 | `reports` | `false` | Write the compiler's stability reports to `target/compose/<target>/reports/` |
+| `html` | `false` | Compose HTML on the js target |
+| `svg` | `false` | Add the SVG elements of Compose HTML (needs `html`) |
 
 See [Compose compiler options](../../guides/compose/#compiler-options).
 
-Compose works on the jvm (desktop) and android targets, on wasm with `environment = "browser"`, and on native with iOS `platforms` (`ios_arm64`, `ios_simulator_arm64`, `ios_x64`) and `kind = "framework"`. Other Wasm environments and Native platforms are errors, and so is the js target (Compose for Web runs on Kotlin/Wasm). See [Compose](../../guides/compose/).
+`html = true` turns on [Compose HTML](../../guides/compose/#compose-html-dom-elements) for the js target: it renders DOM elements, needs `[target.js]` with `environment = "browser"`, and adds `html-core` and the Compose runtime there. The other targets keep their own Compose. Without `html`, Compose on the js target is an error, and `html = true` with only `[target.wasm]` is one too.
+
+Compose works on the jvm (desktop) and android targets, on wasm with `environment = "browser"`, and on native with iOS `platforms` (`ios_arm64`, `ios_simulator_arm64`, `ios_x64`) and `kind = "framework"`. Other Wasm environments and Native platforms are errors, and so is the js target without `html = true` (Compose for Web, on a canvas, runs on Kotlin/Wasm; Compose HTML runs on the js target with a browser environment). See [Compose](../../guides/compose/).
 
 See [Built-in frameworks](../../guides/frameworks/).
 

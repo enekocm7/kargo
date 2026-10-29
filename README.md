@@ -40,7 +40,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 
 | Command | Description |
 |---|---|
-| `kargo new <dir> [--lib] [-t jvm,wasm,js,native,android] [-w compose,ktor,...] [--bench] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace; `-w compose-multiplatform` shares a Compose `App()` between the desktop and the browser |
+| `kargo new <dir> [--lib] [-t jvm,wasm,js,native,android] [-w compose,ktor,...] [--bench] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace; `-w compose-multiplatform` shares a Compose `App()` between the desktop and the browser, `-w compose-html` creates a Compose HTML (DOM) app for Kotlin/JS |
 | `kargo init [dir]` | Create a project in an existing directory |
 | `kargo import [dir] [--dry-run] [--no-build] [--from maven\|gradle]` | Convert a Maven or Gradle project: write the `kargo.toml` (a workspace for several modules), move the sources into Kargo's layout (`git mv` in a git repository), report what could not be translated and build the result; `--dry-run` prints the plan and changes nothing (see [importing a project](https://enekocm7.github.io/kargo/guides/importing/)) |
 | `kargo init-ci [--system github] [--junit] [--force]` | Write `.github/workflows/ci.yml` from `kargo.toml`: the steps of the CI guide, `setup-java` unless `[toolchain] jdk` is set, `setup-node` for Wasm and JS and an OS matrix for Kotlin/Native (see [continuous integration](https://enekocm7.github.io/kargo/guides/ci/)) |
@@ -432,6 +432,7 @@ $ kargo toolchain remove native 2.4.10
 serialization = true        # or { version = "1.11.0", formats = ["json", "cbor", "protobuf"] }
 coroutines = true           # or "1.11.0"
 compose = true              # Compose Multiplatform: desktop (JVM), web (Wasm browser), iOS (Native framework), Jetpack Compose (Android); Res from composeResources/
+# compose = { html = true }   # Compose HTML on [target.js] (browser): composables render DOM elements; svg = true adds SVG
 # compose = { stability-config = "compose-stability.conf", strong-skipping = true, feature-flags = [], metrics = true, reports = true }  # compiler options
 ktor = { server = "netty", client = "cio", server-plugins = ["cors"], client-plugins = ["logging"] }
 # ktor = { client = "cio", client-engines = { android = "okhttp", native = "darwin", wasm = "none" } }  # a client engine per target

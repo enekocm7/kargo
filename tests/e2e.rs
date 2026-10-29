@@ -1009,6 +1009,47 @@ fn js_browser_tests_run_in_a_headless_browser() {
 }
 
 #[test]
+fn compose_html_builds_and_tests_in_a_browser() {
+    require_e2e!();
+    if kargo_toolchain::browser::browser().is_err() {
+        eprintln!("skipping: no browser installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["htmlapp", "--with", "compose-html"]);
+    t.write(
+        "htmlapp/tests/DomTest.kt",
+        "package com.example.htmlapp\n\nimport androidx.compose.runtime.*\nimport kotlinx.browser.document\nimport kotlin.test.*\nimport org.jetbrains.compose.web.dom.Div\nimport org.jetbrains.compose.web.dom.Text\nimport org.jetbrains.compose.web.renderComposable\n\nclass DomTest {\n    @Test\n    fun rendersRealElements() {\n        val root = document.createElement(\"div\").also { document.body!!.appendChild(it) }\n        renderComposable(root) { Div(attrs = { id(\"hello\") }) { Text(greeting(\"DOM\")) } }\n        assertEquals(\"Hello, DOM!\", document.getElementById(\"hello\")?.textContent)\n    }\n}\n",
+    );
+    t.kargo("htmlapp")
+        .arg("test")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Running Kotlin/JS tests (headless browser)"))
+        .stdout(predicate::str::contains("DomTest.rendersRealElements ... ok"))
+        .stdout(predicate::str::contains("GreetingTest.greetsByName ... ok"));
+
+    t.kargo("htmlapp").arg("build").assert().success();
+    let page = std::fs::read_to_string(t.dir.path().join("htmlapp/target/debug/js/index.html")).unwrap();
+    assert!(page.contains("<div id=\"root\"></div>") && page.contains("src=\"./htmlapp.mjs\""), "{page}");
+
+    // The release bundle drops dead code and reports its size.
+    t.kargo("htmlapp")
+        .args(["build", "--release"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Size").and(predicate::str::contains("htmlapp.mjs")));
+    assert!(t.dir.path().join("htmlapp/target/release/js/htmlapp.mjs").is_file());
+
+    // Compose HTML is Kotlin/JS only.
+    t.write(
+        "htmlapp/kargo.toml",
+        "[package]\nname = \"htmlapp\"\nversion = \"0.1.0\"\n\n[target.wasm]\nenvironment = \"browser\"\n\n[frameworks]\ncompose = { html = true }\n",
+    );
+    t.kargo("htmlapp").arg("build").assert().failure().stderr(predicate::str::contains("Kotlin/JS only"));
+}
+
+#[test]
 fn js_library_builds_an_npm_package() {
     require_e2e!();
     let t = E2e::new();

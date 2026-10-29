@@ -846,7 +846,9 @@
                 "strong-skipping": { "description": "Strong skipping mode of the Compose compiler.", "type": "boolean", "default": true },
                 "feature-flags": { "description": "Compose compiler feature flags; prefix one with `-` to disable it.", "type": "array", "items": { "type": "string", "enum": ["StrongSkipping", "-StrongSkipping", "IntrinsicRemember", "-IntrinsicRemember", "OptimizeNonSkippingGroups", "-OptimizeNonSkippingGroups", "PausableComposition", "-PausableComposition"] } },
                 "metrics": { "description": "Write the Compose compiler's metrics to target/compose/<target>/metrics.", "type": "boolean", "default": false },
-                "reports": { "description": "Write the Compose compiler's stability reports to target/compose/<target>/reports.", "type": "boolean", "default": false }
+                "reports": { "description": "Write the Compose compiler's stability reports to target/compose/<target>/reports.", "type": "boolean", "default": false },
+                "html": { "description": "Compose HTML on [target.js] (environment = \"browser\"): composables render DOM elements. The other targets keep their own Compose.", "type": "boolean", "default": false },
+                "svg": { "description": "Add the SVG elements of Compose HTML (needs html = true).", "type": "boolean", "default": false }
               }
             },
             { "$ref": "#/definitions/inherit" }

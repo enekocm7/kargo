@@ -3,7 +3,7 @@ title: Compose
 description: Build user interfaces with Compose Multiplatform for the desktop, the web, iOS and Android, with Compose resources, hot reload, previews and installers.
 ---
 
-[Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) lets you build user interfaces in Kotlin for the desktop, the browser, iOS and Android, from shared code. Kargo sets up the compiler plugin, the Compose libraries of each target, Material 3 and Compose resources. It reloads a running desktop app when you save, renders `@Preview` functions to images, and packages desktop apps as installers.
+[Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) lets you build user interfaces in Kotlin for the desktop, the browser, iOS and Android, from shared code (and, on Kotlin/JS, [Compose HTML](#compose-html-dom-elements), which renders DOM elements). Kargo sets up the compiler plugin, the Compose libraries of each target, Material 3 and Compose resources. It reloads a running desktop app when you save, renders `@Preview` functions to images, and packages desktop apps as installers.
 
 ## Create the project
 
@@ -284,6 +284,79 @@ fun main() {
 - an `index.html` whose canvas fills the window, unless `resources/index.html` is your own page.
 
 Compose for Web needs `environment = "browser"`; with `js` or `wasi` the build stops with an error. A release build runs `wasm-opt` on the module and reports its size, as for any [Wasm app](../wasm/).
+
+## Compose HTML (DOM elements)
+
+[Compose HTML](https://github.com/JetBrains/compose-multiplatform/tree/master/html) (`org.jetbrains.compose.html`) renders real DOM elements from composables (`Div`, `Text`, `Button`, a style DSL), so the page can be styled with CSS, selected and read by assistive technology. It is not the same as [Compose for the web](#compose-for-the-web), which draws on a canvas. Compose HTML runs on **Kotlin/JS only**; Kotlin/Wasm doesn't support it. Create a project with the `compose-html` preset:
+
+```console
+$ kargo new counter --with compose-html
+$ cd counter
+$ kargo run
+     Serving target/debug/js at http://127.0.0.1:8080/ (press Ctrl+C to stop)
+```
+
+The preset writes the JS target for a browser and turns Compose HTML on:
+
+```toml title="kargo.toml"
+[target.js]
+environment = "browser"
+
+[frameworks]
+compose = { html = true }
+```
+
+```kotlin title="src/Main.kt"
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import org.jetbrains.compose.web.dom.Button
+import org.jetbrains.compose.web.dom.Div
+import org.jetbrains.compose.web.dom.Text
+import org.jetbrains.compose.web.renderComposable
+
+fun main() {
+    renderComposable(rootElementId = "root") {
+        var clicks by remember { mutableStateOf(0) }
+        Div { Text("Hello, Compose HTML!") }
+        Button(attrs = { onClick { clicks++ } }) { Text("Clicked $clicks times") }
+    }
+}
+```
+
+With `html = true`, the JS target gets the Compose compiler plugin, `org.jetbrains.compose.runtime:runtime` and `org.jetbrains.compose.html:html-core`, at the Compose version of `[frameworks.compose]`. `svg = true` adds `html-svg`. Material 3 and the canvas libraries aren't added, as they don't run on Kotlin/JS. The Compose compiler options (`stability-config`, `strong-skipping`, `feature-flags`, `metrics`, `reports`) apply as on every other target.
+
+The generated page has `<div id="root"></div>` before the script, so `renderComposable(rootElementId = "root")` finds its element; if you write your own `resources/index.html`, keep an element with the id you pass. `kargo run`, `--watch` and `kargo test` (in a headless browser) work as for any [browser app on the JS target](../js/#browser-apps). `kargo build --release` links with dead code elimination and prints a `Size` line with the size of the module (raw, gzip and brotli) and of the whole output, like a [Wasm build](../wasm/).
+
+Compose HTML needs `[target.js]` with `environment = "browser"`:
+
+- Compose on the JS target without `html = true` is an error that points here and to [Compose for the web](#compose-for-the-web).
+- `html = true` with only `[target.wasm]` is an error: add `[target.js]` (`kargo target add js`), or remove `html` to draw on a canvas.
+
+### With the other targets
+
+`html = true` changes the JS target only. In a project with several targets, the others keep their own Compose: the JVM and Wasm targets get Compose Multiplatform for desktop and canvas, Android gets Jetpack Compose. Put the Compose HTML entry point in `src-js/` and the canvas one in `src-wasm/`, share what doesn't draw (state, models, logic) in `src/`, and use `expect`/`actual` for the screens that differ:
+
+```toml title="kargo.toml"
+[target.js]
+environment = "browser"
+
+[target.wasm]
+environment = "browser"
+
+[frameworks]
+compose = { html = true }
+```
+
+```kotlin title="src/Screen.kt"
+import androidx.compose.runtime.Composable
+
+@Composable
+expect fun Screen(state: CounterState)
+```
+
+Libraries that exist only for Compose HTML (`org.jetbrains.compose.html:*`) belong in `[target.js.dependencies]`, so `kargo check` on the other targets doesn't resolve them. See [Multiplatform](../multiplatform/).
 
 ## iOS
 
