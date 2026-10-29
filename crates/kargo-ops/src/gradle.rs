@@ -30,9 +30,11 @@ use crate::ops::context::BuildContext;
 use crate::ops::test::{emit_report_event, emit_summary, human_out};
 use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::SourceSet;
+use kargo_compiler::diagnostics::Diagnostic;
 use kargo_compiler::testreport::{self, TestSummary};
 use kargo_manifest::{
-    AndroidConfig, AndroidSdkRequest, AndroidTarget, BuildConfigValue, Dependency, GeneratedKind, Manifest, Scope, TargetKind,
+    AndroidConfig, AndroidLint, AndroidNdk, AndroidSdkRequest, AndroidTarget, BuildConfigValue, Dependency, GeneratedKind, Manifest, Scope,
+    TargetKind,
 };
 use kargo_maven::Repository;
 use kargo_maven::repo::Content;
@@ -44,6 +46,15 @@ use kargo_util::process;
 use kargo_util::settings::Settings;
 
 pub const AGP_VERSION: &str = "9.4.1";
+
+/// The baseline of Android lint when `[target.android.lint] baseline` is not set.
+pub const DEFAULT_LINT_BASELINE: &str = "lint-baseline.xml";
+
+/// The `lint.xml` of Android lint when `[target.android.lint] config` is not set.
+const DEFAULT_LINT_CONFIG: &str = "lint.xml";
+
+/// The Gradle property that lets the `lint` block name a baseline that does not exist yet.
+pub const CREATE_BASELINE_PROPERTY: &str = "kargo.lint.createBaseline";
 pub const COMPOSE_BOM_VERSION: &str = "2026.09.00";
 pub const ACTIVITY_COMPOSE_VERSION: &str = "1.13.0";
 pub const JUNIT4_VERSION: &str = "4.13.2";
@@ -383,6 +394,12 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let _ = writeln!(s, "android {{");
     let _ = writeln!(s, "    namespace = {}", kts_string(&cfg.namespace));
     let _ = writeln!(s, "    compileSdk = {}", cfg.compile_sdk);
+    if let Some(version) = &cfg.build_tools {
+        let _ = writeln!(s, "    buildToolsVersion = {}", kts_string(version));
+    }
+    if let Some(version) = cfg.ndk.as_ref().and_then(|n| n.version.as_ref()) {
+        let _ = writeln!(s, "    ndkVersion = {}", kts_string(version));
+    }
     let _ = writeln!(s, "\n    defaultConfig {{");
     if is_app {
         let _ = writeln!(s, "        applicationId = {}", kts_string(cfg.application_id.as_deref().unwrap_or(&cfg.namespace)));
@@ -395,7 +412,12 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
         let _ = writeln!(s, "        consumerProguardFiles({})", kts_path(&root.join(file)));
     }
     build_config_fields(&mut s, "        ", &cfg.build_config);
+    manifest_placeholders(&mut s, "        ", &cfg.manifest_placeholders);
+    ndk_default_config(&mut s, cfg.ndk.as_ref());
     let _ = writeln!(s, "    }}");
+    external_native_build(&mut s, cfg.ndk.as_ref(), root);
+    android_resources(&mut s, cfg);
+    lint_options(&mut s, cfg, root);
     signing_and_build_types(&mut s, cfg, root, is_app);
     product_flavors(&mut s, cfg);
     let mut features = Vec::new();
@@ -593,6 +615,108 @@ fn has_build_config(cfg: &AndroidConfig) -> bool {
     !cfg.build_config.is_empty() || cfg.flavors.values().any(|f| !f.build_config.is_empty())
 }
 
+/// Renders the `${placeholders}` of `AndroidManifest.xml`.
+fn manifest_placeholders(s: &mut String, indent: &str, placeholders: &BTreeMap<String, BuildConfigValue>) {
+    for (name, value) in placeholders {
+        let _ = writeln!(s, "{indent}manifestPlaceholders[{}] = {}", kts_string(name), kts_string(&value.text()));
+    }
+}
+
+/// Renders `"a", "b"`: Kotlin strings separated by commas.
+fn kts_list(items: &[String]) -> String {
+    items.iter().map(|i| kts_string(i)).collect::<Vec<_>>().join(", ")
+}
+
+/// Renders the ABI filters and CMake arguments of `defaultConfig`.
+fn ndk_default_config(s: &mut String, ndk: Option<&AndroidNdk>) {
+    let Some(ndk) = ndk else { return };
+    if !ndk.abi_filters.is_empty() {
+        let _ = writeln!(s, "        ndk {{\n            abiFilters.addAll(listOf({}))\n        }}", kts_list(&ndk.abi_filters));
+    }
+    if ndk.cmake.is_some() && (!ndk.cmake_arguments.is_empty() || !ndk.cpp_flags.is_empty()) {
+        let _ = writeln!(s, "        externalNativeBuild {{\n            cmake {{");
+        if !ndk.cmake_arguments.is_empty() {
+            let _ = writeln!(s, "                arguments({})", kts_list(&ndk.cmake_arguments));
+        }
+        if !ndk.cpp_flags.is_empty() {
+            let _ = writeln!(s, "                cppFlags({})", kts_list(&ndk.cpp_flags));
+        }
+        let _ = writeln!(s, "            }}\n        }}");
+    }
+}
+
+/// Renders the CMake or ndk-build project that builds the native code.
+fn external_native_build(s: &mut String, ndk: Option<&AndroidNdk>, root: &Path) {
+    let Some(ndk) = ndk else { return };
+    if let Some(cmake) = &ndk.cmake {
+        let _ = writeln!(s, "\n    externalNativeBuild {{\n        cmake {{");
+        let _ = writeln!(s, "            path = file({})", kts_path(&root.join(cmake)));
+        if let Some(version) = &ndk.cmake_version {
+            let _ = writeln!(s, "            version = {}", kts_string(version));
+        }
+        let _ = writeln!(s, "        }}\n    }}");
+    } else if let Some(mk) = &ndk.ndk_build {
+        let _ = writeln!(s, "\n    externalNativeBuild {{\n        ndkBuild {{");
+        let _ = writeln!(s, "            path = file({})", kts_path(&root.join(mk)));
+        let _ = writeln!(s, "        }}\n    }}");
+    }
+}
+
+/// Renders the resource filters.
+fn android_resources(s: &mut String, cfg: &AndroidConfig) {
+    if !cfg.locales.is_empty() {
+        let _ = writeln!(s, "\n    androidResources {{\n        localeFilters.addAll(listOf({}))\n    }}", kts_list(&cfg.locales));
+    }
+}
+
+/// Renders the `lint` block: the baseline, the severity overrides and the reports.
+///
+/// The baseline and `lint.xml` are named explicitly, since AGP would look for them in the generated project
+/// instead of the package. A baseline that does not exist yet is only used with `-Pkargo.lint.createBaseline`
+/// (`kargo lint --android --create-baseline`), because AGP fails a lint run that has to create one.
+fn lint_options(s: &mut String, cfg: &AndroidConfig, root: &Path) {
+    let lint = &cfg.lint;
+    let _ = writeln!(s, "\n    lint {{");
+    let baseline = root.join(lint.baseline.as_deref().unwrap_or(Path::new(DEFAULT_LINT_BASELINE)));
+    let _ = writeln!(s, "        val baselineFile = file({})", kts_path(&baseline));
+    let _ = writeln!(
+        s,
+        "        if (baselineFile.exists() || providers.gradleProperty({}).isPresent) {{ baseline = baselineFile }}",
+        kts_string(CREATE_BASELINE_PROPERTY)
+    );
+    let config = root.join(lint.config.as_deref().unwrap_or(Path::new(DEFAULT_LINT_CONFIG)));
+    if lint.config.is_some() || config.is_file() {
+        let _ = writeln!(s, "        lintConfig = file({})", kts_path(&config));
+    }
+    if let Some(abort) = lint.abort_on_error {
+        let _ = writeln!(s, "        abortOnError = {abort}");
+    }
+    if lint.warnings_as_errors {
+        let _ = writeln!(s, "        warningsAsErrors = true");
+    }
+    if lint.check_dependencies {
+        let _ = writeln!(s, "        checkDependencies = true");
+    }
+    for (property, ids) in [
+        ("disable", &lint.disable),
+        ("enable", &lint.enable),
+        ("fatal", &lint.fatal),
+        ("error", &lint.error),
+        ("warning", &lint.warning),
+        ("informational", &lint.informational),
+        ("ignore", &lint.ignore),
+    ] {
+        if !ids.is_empty() {
+            let _ = writeln!(s, "        {property}.addAll(listOf({}))", kts_list(ids));
+        }
+    }
+    let reports = lint.reports();
+    for report in AndroidLint::REPORTS {
+        let _ = writeln!(s, "        {report}Report = {}", reports.contains(&report));
+    }
+    let _ = writeln!(s, "    }}");
+}
+
 fn build_config_fields(s: &mut String, indent: &str, fields: &BTreeMap<String, BuildConfigValue>) {
     for (name, value) in fields {
         let (ty, literal) = value.java();
@@ -677,6 +801,7 @@ fn product_flavors(s: &mut String, cfg: &AndroidConfig) {
             let _ = writeln!(s, "            minSdk = {min}");
         }
         build_config_fields(s, "            ", &flavor.build_config);
+        manifest_placeholders(s, "            ", &flavor.manifest_placeholders);
         let _ = writeln!(s, "        }}");
     }
     let _ = writeln!(s, "    }}");
@@ -1015,9 +1140,16 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The SDK packages an Android package builds with: its platform, the build-tools of its AGP, and platform-tools.
+/// The SDK packages an Android package builds with: its platform, the build-tools (`build-tools`, else those of
+/// its AGP), platform-tools, and the NDK and CMake it pins.
 pub(crate) fn sdk_packages(cfg: &AndroidConfig) -> Vec<String> {
-    android_sdk::packages_for(cfg.compile_sdk, android_sdk::build_tools_for_agp(agp_version(cfg)))
+    let build_tools = cfg.build_tools.as_deref().unwrap_or_else(|| android_sdk::build_tools_for_agp(agp_version(cfg)));
+    let mut packages = android_sdk::packages_for(cfg.compile_sdk, build_tools);
+    if let Some(ndk) = &cfg.ndk {
+        packages.extend(ndk.version.iter().map(|v| android_sdk::ndk_package(v)));
+        packages.extend(ndk.cmake_version.iter().map(|v| android_sdk::cmake_package(v)));
+    }
+    packages
 }
 
 /// The Android SDK the Android target of `ws` builds with. With `[toolchain] android-sdk = "<api>"` it is Kargo's,
@@ -1508,6 +1640,137 @@ pub fn check(ctx: &BuildContext, tests: bool) -> Result<()> {
     Ok(())
 }
 
+/// `kargo lint --android`: runs Android lint on the default variant (the build type of the profile with the first flavor
+/// of each dimension) and copies its reports to `target/<profile>/android/lint/`. With `--message-format json` the
+/// issues become `compiler-message`s. Returns `false` when lint reported errors.
+///
+/// With `create_baseline`, records the issues in the baseline file instead of reporting them.
+pub fn lint(ctx: &BuildContext, create_baseline: bool) -> Result<bool> {
+    let cfg = android_config(ctx)?;
+    let root = ctx.ws.root();
+    let baseline = cfg.lint.baseline.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_LINT_BASELINE));
+    if !create_baseline && cfg.lint.baseline.is_some() && !root.join(&baseline).is_file() {
+        bail!(
+            "[target.android.lint] baseline file `{}` does not exist; create it with `kargo lint --android --create-baseline`",
+            baseline.display()
+        );
+    }
+    announce(ctx, "Linting", TargetKind::Android, ", gradle, lint");
+    let variant = variant_name(&default_flavors(cfg, &[])?, build_type(&ctx.profile)?);
+    let reports = ctx.ws.work_dir("android").join("build/reports");
+    let stem = format!("lint-results-{variant}");
+    for old in lint_reports(&reports, &stem) {
+        let _ = std::fs::remove_file(old);
+    }
+    let mut args = Vec::new();
+    if create_baseline {
+        args.push(format!("updateLintBaseline{}", capitalize(&variant)));
+        args.push(format!("-P{CREATE_BASELINE_PROPERTY}"));
+    } else {
+        args.push(format!("lint{}", capitalize(&variant)));
+    }
+    let ok = gradle(ctx, &args)?;
+    if create_baseline {
+        if !ok {
+            bail!("Gradle `{}` failed", args[0]);
+        }
+        ctx.shell().status("Created", format!("baseline {}", baseline.display()));
+        return Ok(true);
+    }
+
+    let found = lint_reports(&reports, &stem);
+    if found.is_empty() {
+        bail!("Gradle `{}` failed before lint wrote a report; its output is above", args[0]);
+    }
+    let dest = ctx.ws.output_dir(&ctx.profile, TargetKind::Android).join("lint");
+    std::fs::create_dir_all(&dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    for file in &found {
+        let to = dest.join(file.file_name().context("a report without a file name")?);
+        std::fs::copy(file, &to).with_context(|| format!("failed to copy {} to {}", file.display(), to.display()))?;
+        ctx.shell().status("Report", to.display());
+        if kargo_compiler::diagnostics::is_json()
+            && file.extension().is_some_and(|e| e == "sarif")
+            && let Ok(text) = std::fs::read_to_string(file)
+        {
+            for diagnostic in parse_sarif(&text) {
+                kargo_compiler::diagnostics::emit(&diagnostic.to_json());
+            }
+        }
+    }
+    Ok(ok)
+}
+
+/// The reports Android lint wrote for the variant whose files start with `stem`, sorted.
+fn lint_reports(dir: &Path, stem: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.file_stem().is_some_and(|s| s.to_string_lossy() == stem)
+                && p.extension().is_some_and(|e| matches!(e.to_str(), Some("html" | "xml" | "sarif" | "txt")))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The issues of a SARIF report from Android lint, as compiler diagnostics (`note` results are `info`).
+fn parse_sarif(text: &str) -> Vec<Diagnostic> {
+    let Ok(sarif) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+    let mut out = Vec::new();
+    for result in sarif["runs"].as_array().into_iter().flatten().flat_map(|run| run["results"].as_array().into_iter().flatten()) {
+        let severity = match result["level"].as_str() {
+            Some("error") => "error",
+            Some("warning") => "warning",
+            _ => "info",
+        };
+        let mut message = result["message"]["text"].as_str().unwrap_or_default().to_owned();
+        if let Some(rule) = result["ruleId"].as_str() {
+            message = format!("{message} [{rule}]");
+        }
+        let location = &result["locations"][0]["physicalLocation"];
+        let file = location["artifactLocation"]["uri"].as_str().map(sarif_path);
+        let line = location["region"]["startLine"].as_u64().map(|l| l as u32);
+        let column = location["region"]["startColumn"].as_u64().map(|c| c as u32);
+        let rendered = match (&file, line, column) {
+            (Some(f), Some(l), Some(c)) => format!("{f}:{l}:{c}: {severity}: {message}"),
+            (Some(f), Some(l), None) => format!("{f}:{l}: {severity}: {message}"),
+            (Some(f), None, _) => format!("{f}: {severity}: {message}"),
+            (None, ..) => format!("{severity}: {message}"),
+        };
+        out.push(Diagnostic { severity: severity.to_owned(), message, file, line, column, rendered });
+    }
+    out
+}
+
+/// The file path of a SARIF location: `file:///C:/src/A.kt` is `C:/src/A.kt`, `file:///src/A.kt` is `/src/A.kt`.
+fn sarif_path(uri: &str) -> String {
+    let path = uri.strip_prefix("file://").unwrap_or(uri);
+    let mut decoded = Vec::with_capacity(path.len());
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                decoded.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                decoded.push(byte);
+                i += 1;
+            }
+        }
+    }
+    let path = String::from_utf8_lossy(&decoded).into_owned();
+    // `/C:/src` is a Windows path with a drive letter.
+    match path.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => path[1..].to_owned(),
+        _ => path,
+    }
+}
+
 /// `kargo test --target android`: runs local unit tests and reports the
 /// results Gradle writes as JUnit XML, copying those files to `report_dir` if given.
 pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: Option<&Path>) -> Result<bool> {
@@ -1872,6 +2135,119 @@ mod tests {
         let cfg = &ws.manifest().targets.android.as_ref().unwrap().config;
         assert_eq!(flavor_combinations(cfg), [Vec::<String>::new()]);
         assert!(default_flavors(cfg, &s(&["free"])).unwrap_err().to_string().contains("defines no flavors"));
+    }
+
+    #[test]
+    fn renders_placeholders_ndk_and_locales() {
+        let (dir, ws) = workspace(
+            "build-tools = \"36.0.0\"\nlocales = [\"en\", \"es\"]\nmanifest-placeholders = { MAPS_KEY = \"abc\", DEBUGGABLE = true }\n\
+             [target.android.ndk]\nversion = \"27.2.12479018\"\nabi-filters = [\"arm64-v8a\", \"x86_64\"]\n\
+             cmake = \"cpp/CMakeLists.txt\"\ncmake-version = \"3.22.1\"\ncmake-arguments = [\"-DANDROID_STL=c++_shared\"]\ncpp-flags = [\"-std=c++17\"]\n\
+             [target.android.flavors.free]\ndimension = \"tier\"\nmanifest-placeholders = { MAPS_KEY = \"free\" }\n",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains("    buildToolsVersion = \"36.0.0\""), "{text}");
+        assert!(text.contains("    ndkVersion = \"27.2.12479018\""), "{text}");
+        assert!(text.contains("manifestPlaceholders[\"MAPS_KEY\"] = \"abc\""), "{text}");
+        assert!(text.contains("manifestPlaceholders[\"DEBUGGABLE\"] = \"true\""), "{text}");
+        let free = text.split("create(\"free\") {").nth(1).unwrap().split('}').next().unwrap();
+        assert!(free.contains("manifestPlaceholders[\"MAPS_KEY\"] = \"free\""), "{text}");
+        assert!(text.contains("abiFilters.addAll(listOf(\"arm64-v8a\", \"x86_64\"))"), "{text}");
+        assert!(text.contains("arguments(\"-DANDROID_STL=c++_shared\")") && text.contains("cppFlags(\"-std=c++17\")"), "{text}");
+        let cmake = kts_path(&dir.path().join("cpp/CMakeLists.txt"));
+        assert!(text.contains(&format!("path = file({cmake})")) && text.contains("version = \"3.22.1\""), "{text}");
+        assert!(text.contains("androidResources {\n        localeFilters.addAll(listOf(\"en\", \"es\"))"), "{text}");
+
+        let (_d, ws) = workspace("[target.android.ndk]\nndk-build = \"jni/Android.mk\"\n");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains("ndkBuild {"), "{text}");
+        assert!(!text.contains("cmake {") && !text.contains("abiFilters") && !text.contains("ndkVersion"), "{text}");
+
+        let (_d, ws) = workspace("");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        for absent in ["manifestPlaceholders", "ndk", "externalNativeBuild", "androidResources", "buildToolsVersion"] {
+            assert!(!text.contains(absent), "{absent} in {text}");
+        }
+    }
+
+    #[test]
+    fn renders_the_lint_block() {
+        let (dir, ws) = workspace("");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        let baseline = kts_path(&dir.path().join("lint-baseline.xml"));
+        assert!(text.contains(&format!("val baselineFile = file({baseline})")), "{text}");
+        // A baseline that does not exist is only used to create it: AGP fails a run that has to.
+        assert!(text.contains("baselineFile.exists() || providers.gradleProperty(\"kargo.lint.createBaseline\").isPresent"), "{text}");
+        assert!(!text.contains("lintConfig") && !text.contains("abortOnError") && !text.contains("warningsAsErrors"), "{text}");
+        for (report, on) in [("html", true), ("xml", true), ("sarif", true), ("text", false)] {
+            assert!(text.contains(&format!("{report}Report = {on}")), "{text}");
+        }
+
+        let (dir, ws) = workspace(
+            "[target.android.lint]\nbaseline = \"config/baseline.xml\"\nabort-on-error = false\nwarnings-as-errors = true\n\
+             check-dependencies = true\ndisable = [\"MissingTranslation\", \"UnusedResources\"]\nerror = [\"HardcodedText\"]\n\
+             ignore = [\"IconDensities\"]\nreports = [\"xml\", \"text\"]\n",
+        );
+        std::fs::write(dir.path().join("lint.xml"), "<lint/>").unwrap();
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains(&format!("file({})", kts_path(&dir.path().join("config/baseline.xml")))), "{text}");
+        assert!(text.contains(&format!("lintConfig = file({})", kts_path(&dir.path().join("lint.xml")))), "{text}");
+        assert!(
+            text.contains("abortOnError = false") && text.contains("warningsAsErrors = true") && text.contains("checkDependencies = true")
+        );
+        assert!(text.contains("disable.addAll(listOf(\"MissingTranslation\", \"UnusedResources\"))"), "{text}");
+        assert!(
+            text.contains("error.addAll(listOf(\"HardcodedText\"))") && text.contains("ignore.addAll(listOf(\"IconDensities\"))"),
+            "{text}"
+        );
+        for (report, on) in [("html", false), ("xml", true), ("sarif", true), ("text", true)] {
+            assert!(text.contains(&format!("{report}Report = {on}")), "{text}");
+        }
+    }
+
+    #[test]
+    fn pins_the_sdk_packages_of_the_ndk() {
+        let (_d, ws) = workspace("");
+        let cfg = &ws.manifest().targets.android.as_ref().unwrap().config;
+        let plain = sdk_packages(cfg);
+        assert_eq!(plain.len(), 3);
+        let (_d, ws) = workspace(
+            "build-tools = \"35.0.0\"\n[target.android.ndk]\nversion = \"27.2.12479018\"\ncmake = \"CMakeLists.txt\"\ncmake-version = \"3.22.1\"\n",
+        );
+        let cfg = &ws.manifest().targets.android.as_ref().unwrap().config;
+        let packages = sdk_packages(cfg);
+        assert_eq!(packages[1], "build-tools;35.0.0");
+        assert_eq!(&packages[3..], ["ndk;27.2.12479018", "cmake;3.22.1"]);
+    }
+
+    #[test]
+    fn reads_lint_issues_from_sarif() {
+        let sarif = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Android Lint"}},"results":[
+            {"ruleId":"HardcodedText","level":"warning","message":{"text":"Hardcoded string"},
+             "locations":[{"physicalLocation":{"artifactLocation":{"uri":"file:///C:/my%20app/res/layout/main.xml"},
+                           "region":{"startLine":12,"startColumn":5}}}]},
+            {"ruleId":"MissingPermission","level":"error","message":{"text":"Missing permission"},
+             "locations":[{"physicalLocation":{"artifactLocation":{"uri":"file:///home/me/app/src/A.kt"},"region":{"startLine":3}}}]},
+            {"ruleId":"OldTargetApi","level":"note","message":{"text":"Target is old"}}]}]}"#;
+        let issues = parse_sarif(sarif);
+        assert_eq!(issues.len(), 3);
+        assert_eq!(issues[0].severity, "warning");
+        assert_eq!(issues[0].message, "Hardcoded string [HardcodedText]");
+        assert_eq!(issues[0].file.as_deref(), Some("C:/my app/res/layout/main.xml"));
+        assert_eq!((issues[0].line, issues[0].column), (Some(12), Some(5)));
+        assert_eq!(issues[0].rendered, "C:/my app/res/layout/main.xml:12:5: warning: Hardcoded string [HardcodedText]");
+        assert_eq!(
+            (issues[1].severity.as_str(), issues[1].file.as_deref(), issues[1].column),
+            ("error", Some("/home/me/app/src/A.kt"), None)
+        );
+        assert_eq!((issues[2].severity.as_str(), issues[2].file.as_deref()), ("info", None));
+        assert_eq!(issues[2].rendered, "info: Target is old [OldTargetApi]");
+        assert!(parse_sarif("not json").is_empty());
     }
 
     #[test]

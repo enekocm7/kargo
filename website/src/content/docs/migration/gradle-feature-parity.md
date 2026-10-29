@@ -127,7 +127,11 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Devices and emulators | Supported | `kargo run -t android`, `kargo devices`, `kargo android` |
 | Android SDK management | Supported | `kargo toolchain install android-sdk` |
 | Any Gradle task | Supported | `kargo android <gradle args>` |
-| Lint, App Bundles, baseline profiles, NDK | Planned | [#228](https://github.com/enekocm7/kargo/issues/228) |
+| Android lint, baselines and SARIF reports | Supported | [Lint](../../guides/android/#lint) |
+| App Bundles (`.aab`) | Supported | `kargo package -t android` ([Release builds](../../guides/android/#release-builds)) |
+| NDK, CMake, ndk-build, prebuilt `.so` libraries | Supported | [Native code](../../guides/android/#native-code) |
+| Manifest placeholders, resource locale filters | Supported | [Manifest placeholders](../../guides/android/#manifest-placeholders), [Resources](../../guides/android/#resources) |
+| Custom build types, baseline profiles, macrobenchmarks, Play uploads | Planned | [#228](https://github.com/enekocm7/kargo/issues/228) |
 | Hand-written Gradle files | Not planned | Kargo generates the Gradle project; put the settings in `kargo.toml` |
 
 ## IDE support and CI

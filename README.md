@@ -54,7 +54,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo doc [--open] [-t <target>] [-j <n>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
 | `kargo preview [<name>...] [--list] [--width <dp>] [--height <dp>] [--density <n>] [--out-dir <dir>]` | Render the `@Preview` composables of a Compose Desktop app to PNG files in `target/preview`, off screen |
 | `kargo fmt [--check] [-j <n>]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
-| `kargo lint [--create-baseline] [-j <n>]` | Analyze Kotlin sources with detekt |
+| `kargo lint [--create-baseline] [--android [--release] [--message-format json]] [-j <n>]` | Analyze Kotlin sources with detekt; `--android` runs Android lint instead, with its baseline and SARIF reports |
 | `kargo add --path <dir> [--dev] [-t <target>]` | Depend on another Kargo package on disk, built from source |
 | `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor\|ksp] [--bom]` | Add dependencies (latest release when no version is given) |
 | `kargo add --npm <package[@version]>... [--dev] [-t wasm\|js] [--types]` | Add npm packages to `[target.wasm.npm-dependencies]` or `[target.js.npm-dependencies]` (latest release from the npm registry when no version is given) |
@@ -246,6 +246,16 @@ min-sdk = 24                # target-sdk = 36, compile-sdk = [toolchain] android
 # agp-version = "9.4.1"     # gradle-version defaults to what AGP needs (9.6.0)
 # minify = true             # R8 for release builds; proguard-files = ["android/proguard-rules.pro"]
 # build-config = { API_URL = "https://api.example.com" }   # BuildConfig fields
+# manifest-placeholders = { MAPS_API_KEY = "abc" }          # ${MAPS_API_KEY} in AndroidManifest.xml
+# locales = ["en", "es"]                                    # keep only these languages' resources
+
+# [target.android.ndk]              # native code: version, abi-filters, cmake or ndk-build
+# abi-filters = ["arm64-v8a", "x86_64"]
+# cmake = "src-android/cpp/CMakeLists.txt"
+
+# [target.android.lint]             # kargo lint --android: baseline, severities, reports
+# baseline = "lint-baseline.xml"
+# disable = ["MissingTranslation"]
 
 # [target.android.signing.release]  # passwords come from environment variables
 # store-file = "release.jks"

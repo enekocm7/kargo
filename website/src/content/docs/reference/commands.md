@@ -486,15 +486,18 @@ Without `--check`, files are rewritten in place, and the command exits with code
 
 ## `kargo lint`
 
-Analyze the Kotlin files in `src/`, `src-<target>/`, `tests/` and `tests-<target>/` with detekt. Exits with code 101 if detekt reports issues.
+Analyze the Kotlin files in `src/`, `src-<target>/`, `tests/` and `tests-<target>/` with detekt, or with `--android` an Android app with Android lint. Exits with code 101 if detekt (or Android lint) reports issues.
 
 ```sh
 kargo lint [--create-baseline]
+kargo lint --android [--release] [--create-baseline] [--message-format json]
 ```
 
 | Option | Meaning |
 |---|---|
-| `--create-baseline` | Record the current issues in the baseline file (`detekt-baseline.xml` by default) instead of reporting them |
+| `--create-baseline` | Record the current issues in the baseline file (`detekt-baseline.xml` by default; `lint-baseline.xml` with `--android`) instead of reporting them |
+| `--android` | Run the Android Gradle Plugin's lint on the Android target instead of detekt, configured by [`[target.android.lint]`](../manifest/#targetandroidlint). It lints the debug variant (the first flavor of each dimension), or with `--release` the release one, and copies the reports to `target/<profile>/android/lint/`. See [Lint](../../guides/android/#lint) |
+| `--message-format json` | With `--android`: print each issue as a `compiler-message` JSON line on stdout, like the compilers' diagnostics |
 | `-p, --package <name>`, `--workspace` | Which packages to analyze |
 | `-j, --jobs <n>` | How many packages are analyzed at the same time, as for `kargo fmt` |
 

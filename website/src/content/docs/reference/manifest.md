@@ -629,6 +629,16 @@ gradle-version = "..."           # Gradle version that runs the build
 minify = true                    # R8 for release builds
 proguard-files = ["android/proguard-rules.pro"]
 build-config = { API_URL = "https://api.example.com", LOGGING = false }
+manifest-placeholders = { MAPS_API_KEY = "abc" }
+locales = ["en", "es"]           # keep only these languages' resources
+
+[target.android.ndk]             # native code
+abi-filters = ["arm64-v8a", "x86_64"]
+cmake = "src-android/cpp/CMakeLists.txt"
+
+[target.android.lint]
+baseline = "lint-baseline.xml"
+disable = ["MissingTranslation"]
 
 [target.android.signing.release]
 store-file = "release.jks"
@@ -657,6 +667,9 @@ application-id-suffix = ".free"
 | `proguard-files` | `[]`. R8 rule files for release builds, relative to the project root, after AGP's `proguard-android-optimize.txt` |
 | `consumer-proguard-files` | `[]`. Libraries only: R8 rules shipped in the AAR for the apps that use it |
 | `build-config` | `{}`. `BuildConfig` fields: a string becomes a `String`, a boolean a `boolean`, an integer an `int` (a `long` beyond 32 bits) |
+| `manifest-placeholders` | `{}`. Values for the `${name}` placeholders of `AndroidManifest.xml`, as text. A flavor's own value wins. See [Manifest placeholders](../../guides/android/#manifest-placeholders) |
+| `locales` | `[]` (every language). Keep only the resources of these languages: `en`, `pt-rBR`, or a BCP 47 tag such as `b+sr+Latn` |
+| `build-tools` | The build-tools of `agp-version` (`36.0.0` for AGP 9.x). A Kargo-managed SDK installs this version |
 | `flavor-dimensions` | The dimensions of `flavors`. Required, in priority order, when the flavors use more than one |
 
 `[target.android.signing.<build-type>]` signs the `debug` or `release` build type (applications only). Passwords are never written to `kargo.toml` or the generated Gradle files: Gradle reads them from the environment variables you name when it runs.
@@ -679,6 +692,32 @@ application-id-suffix = ".free"
 | `version-code` | Overrides `version-code` |
 | `min-sdk` | Overrides `min-sdk` |
 | `build-config` | More `BuildConfig` fields for this flavor |
+| `manifest-placeholders` | More manifest placeholders for this flavor |
+
+`[target.android.ndk]` builds native code with the NDK, or packages prebuilt libraries (`android/jniLibs/<abi>/lib*.so`, always packaged):
+
+| Key | Meaning |
+|---|---|
+| `version` | The NDK version (`27.2.12479018`). A Kargo-managed SDK installs it |
+| `abi-filters` | The ABIs to package: `armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64`. Default: all of them |
+| `cmake` | The `CMakeLists.txt` that builds the native code, relative to the project root |
+| `cmake-version` | The CMake version (`3.22.1`). A Kargo-managed SDK installs it |
+| `cmake-arguments` | `[]`. Arguments for CMake, such as `-DANDROID_STL=c++_shared` |
+| `cpp-flags` | `[]`. Flags for the C++ compiler |
+| `ndk-build` | The `Android.mk` that builds the native code with ndk-build, instead of `cmake` |
+
+`[target.android.lint]` configures Android lint, run by [`kargo lint --android`](../commands/#kargo-lint) and `kargo android lint`:
+
+| Key | Default |
+|---|---|
+| `baseline` | `lint-baseline.xml`, used when the file exists. A `baseline` that does not exist is an error (create it with `kargo lint --android --create-baseline`) |
+| `config` | `lint.xml` in the project root, used when it exists. A `lint.xml` sets the severity of issues per path |
+| `abort-on-error` | `true`. Lint errors fail the build |
+| `warnings-as-errors` | `false` |
+| `check-dependencies` | `false`. Also check the Android libraries the package depends on |
+| `disable`, `enable` | `[]`. Issue ids (`MissingTranslation`) that are not checked, or that are checked although they are off by default |
+| `fatal`, `error`, `warning`, `informational`, `ignore` | `[]`. Issue ids reported at that severity |
+| `reports` | `["html", "xml", "sarif"]`. Also `text`. SARIF is always written, since `--message-format json` reads it |
 
 See [Release builds](../../guides/android/#release-builds) and [Product flavors](../../guides/android/#product-flavors).
 

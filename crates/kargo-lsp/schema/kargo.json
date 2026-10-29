@@ -419,11 +419,48 @@
             "version-name": { "type": "string" },
             "agp-version": { "description": "Android Gradle Plugin version.", "type": "string", "default": "9.4.1" },
             "gradle-version": { "description": "Gradle version that runs the build. Default: the minimum `agp-version` requires.", "type": "string" },
+            "build-tools": { "description": "The build-tools version. Default: the one the Android Gradle Plugin uses. Installed with a Kargo-managed SDK.", "type": "string", "examples": ["36.0.0"] },
             "minify": { "description": "Shrink, obfuscate and optimize release builds with R8.", "type": "boolean", "default": false },
             "shrink-resources": { "description": "Remove unused resources from release builds. Needs `minify`. Default: `minify`, for applications.", "type": "boolean" },
             "proguard-files": { "description": "ProGuard/R8 rule files for release builds, relative to the project root.", "type": "array", "items": { "type": "string" }, "examples": [["android/proguard-rules.pro"]] },
             "consumer-proguard-files": { "description": "ProGuard/R8 rules a library ships to the apps that use it (libraries only).", "type": "array", "items": { "type": "string" } },
             "build-config": { "$ref": "#/definitions/android-build-config" },
+            "manifest-placeholders": { "$ref": "#/definitions/android-manifest-placeholders" },
+            "locales": { "description": "Keep only the resources of these languages (`en`, `pt-rBR`, or BCP 47 tags such as `b+sr+Latn`).", "type": "array", "items": { "type": "string" }, "examples": [["en", "es"]] },
+            "ndk": {
+              "description": "Native code: the NDK, the ABIs and a CMake or ndk-build project.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": { "description": "The NDK version. Installed with a Kargo-managed SDK.", "type": "string", "examples": ["27.2.12479018"] },
+                "abi-filters": { "description": "The ABIs to package. Default: all of them.", "type": "array", "items": { "enum": ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"] } },
+                "cmake": { "description": "The CMakeLists.txt that builds the native code, relative to the project root.", "type": "string", "examples": ["src-android/cpp/CMakeLists.txt"] },
+                "cmake-version": { "description": "The CMake version. Installed with a Kargo-managed SDK.", "type": "string", "examples": ["3.22.1"] },
+                "cmake-arguments": { "description": "Arguments passed to CMake.", "type": "array", "items": { "type": "string" }, "examples": [["-DANDROID_STL=c++_shared"]] },
+                "cpp-flags": { "description": "Flags passed to the C++ compiler.", "type": "array", "items": { "type": "string" }, "examples": [["-std=c++17"]] },
+                "ndk-build": { "description": "The Android.mk that builds the native code with ndk-build, relative to the project root. Not with `cmake`.", "type": "string" }
+              }
+            },
+            "lint": {
+              "description": "Android lint, run by `kargo lint --android` and `kargo android lint`.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "baseline": { "description": "The baseline of known issues, relative to the project root. Default: lint-baseline.xml, when it exists.", "type": "string", "examples": ["lint-baseline.xml"] },
+                "config": { "description": "A lint.xml with per-issue configuration. Default: lint.xml in the project root, when it exists.", "type": "string" },
+                "abort-on-error": { "description": "Fail the build on lint errors.", "type": "boolean", "default": true },
+                "warnings-as-errors": { "description": "Treat warnings as errors.", "type": "boolean", "default": false },
+                "check-dependencies": { "description": "Also check the Android libraries the package depends on.", "type": "boolean", "default": false },
+                "disable": { "description": "Issue ids that are not checked.", "type": "array", "items": { "type": "string" }, "examples": [["MissingTranslation"]] },
+                "enable": { "description": "Issue ids that are checked although they are off by default.", "type": "array", "items": { "type": "string" } },
+                "fatal": { "description": "Issue ids reported as fatal.", "type": "array", "items": { "type": "string" } },
+                "error": { "description": "Issue ids reported as errors.", "type": "array", "items": { "type": "string" } },
+                "warning": { "description": "Issue ids reported as warnings.", "type": "array", "items": { "type": "string" } },
+                "informational": { "description": "Issue ids reported as informational.", "type": "array", "items": { "type": "string" } },
+                "ignore": { "description": "Issue ids that are ignored.", "type": "array", "items": { "type": "string" } },
+                "reports": { "description": "The reports to write. SARIF is always written, since `--message-format json` reads it.", "type": "array", "items": { "enum": ["html", "xml", "sarif", "text"] }, "default": ["html", "xml", "sarif"] }
+              }
+            },
             "signing": {
               "description": "Signing configurations by build type. Passwords come from environment variables.",
               "type": "object",
@@ -447,7 +484,8 @@
                   "version-name-suffix": { "description": "Appended to the version name.", "type": "string" },
                   "version-code": { "type": "integer", "minimum": 1 },
                   "min-sdk": { "type": "integer", "minimum": 1 },
-                  "build-config": { "$ref": "#/definitions/android-build-config" }
+                  "build-config": { "$ref": "#/definitions/android-build-config" },
+                  "manifest-placeholders": { "$ref": "#/definitions/android-manifest-placeholders" }
                 }
               }
             },
@@ -981,6 +1019,12 @@
       "type": "object",
       "additionalProperties": { "type": ["string", "boolean", "integer"] },
       "examples": [{ "API_URL": "https://api.example.com" }]
+    },
+    "android-manifest-placeholders": {
+      "description": "Values for the `${placeholders}` of AndroidManifest.xml.",
+      "type": "object",
+      "additionalProperties": { "type": ["string", "boolean", "integer"] },
+      "examples": [{ "MAPS_API_KEY": "abc" }]
     },
     "android-signing": {
       "description": "The keystore that signs this build type.",

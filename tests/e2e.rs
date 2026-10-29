@@ -2376,6 +2376,56 @@ fn android_expect_actual() {
 }
 
 #[test]
+fn android_lint_placeholders_and_locales() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs the Android SDK)");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["droid", "--target", "android"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("droid/kargo.toml")).unwrap();
+    assert!(manifest.contains("min-sdk = 24\n"), "{manifest}");
+    let manifest =
+        manifest.replace("min-sdk = 24\n", "min-sdk = 24\nmanifest-placeholders = { MAPS_KEY = \"abc123\" }\nlocales = [\"en\"]\n");
+    let manifest = format!("{manifest}\n[target.android.lint]\nabort-on-error = false\nreports = [\"xml\", \"sarif\"]\n");
+    t.write("droid/kargo.toml", &manifest);
+    let android_manifest = t.dir.path().join("droid/android/AndroidManifest.xml");
+    let xml = std::fs::read_to_string(&android_manifest).unwrap();
+    let xml = xml.replace("</application>", "<meta-data android:name=\"maps.key\" android:value=\"${MAPS_KEY}\" /></application>");
+    t.write("droid/android/AndroidManifest.xml", &xml);
+
+    t.kargo("droid").arg("build").assert().success();
+    // Gradle substituted the placeholder in the merged manifest.
+    fn merged_manifests(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                merged_manifests(&path, out);
+            } else if path.file_name().is_some_and(|n| n == "AndroidManifest.xml") {
+                out.extend(std::fs::read_to_string(path));
+            }
+        }
+    }
+    let mut merged = Vec::new();
+    merged_manifests(&t.dir.path().join("droid/target/android/build/intermediates/merged_manifests"), &mut merged);
+    assert!(merged.iter().any(|m| m.contains("abc123") && !m.contains("${MAPS_KEY}")), "{merged:?}");
+
+    t.kargo("droid")
+        .args(["lint", "--android"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Linting droid v0.1.0 (android, gradle, lint)"));
+    let reports = t.dir.path().join("droid/target/debug/android/lint");
+    assert!(reports.join("lint-results-debug.sarif").is_file(), "no SARIF report in {}", reports.display());
+    assert!(reports.join("lint-results-debug.xml").is_file());
+
+    t.kargo("droid").args(["lint", "--android", "--create-baseline"]).assert().success();
+    assert!(t.dir.path().join("droid/lint-baseline.xml").is_file());
+    t.kargo("droid").args(["lint", "--android", "--message-format", "json"]).assert().success();
+}
+
+#[test]
 fn android_app_with_a_library_module() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
