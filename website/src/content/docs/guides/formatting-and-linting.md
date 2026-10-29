@@ -42,7 +42,14 @@ error: formatting check failed; `kargo fmt` fixes what ktlint can correct automa
 
 ### Configuring ktlint
 
-ktlint follows the [ktlint_official](https://pinterest.github.io/ktlint/latest/rules/code-styles/) code style by default. Change the style, line length or individual rules in an `.editorconfig` file at the project root. ktlint finds it on its own:
+ktlint follows the [ktlint_official](https://pinterest.github.io/ktlint/latest/rules/code-styles/) code style by default, which puts every parameter of a long signature on its own line. To use `intellij_idea` or `android_studio` instead, set `code-style` in `[fmt]`:
+
+```toml title="kargo.toml"
+[fmt]
+code-style = "intellij_idea"
+```
+
+`kargo fmt` and the editor's *Format Document* both pass it to ktlint. Line length and individual rules go in an `.editorconfig` file at the project root, which ktlint finds on its own (it can set the style too, as `ktlint_code_style`):
 
 ```ini title=".editorconfig"
 root = true
@@ -52,6 +59,8 @@ ktlint_code_style = intellij_idea
 max_line_length = 120
 ktlint_standard_no-wildcard-imports = disabled
 ```
+
+ktlint cannot replace a wildcard import (`import three.*`) with the imports it stands for, so `kargo fmt` reports it as a problem it can't fix. Either replace it by hand (your editor's *organize imports* action does it) or allow wildcards with `ktlint_standard_no-wildcard-imports = disabled`, as above.
 
 See [ktlint's configuration docs](https://pinterest.github.io/ktlint/latest/rules/configuration-ktlint/) for every property.
 
@@ -65,6 +74,7 @@ ktlint = "1.8.0"
 
 | Key | Default | Meaning |
 |---|---|---|
+| `code-style` | `.editorconfig`, else `ktlint_official` | ktlint code style: `ktlint_official`, `intellij_idea` or `android_studio` |
 | `exclude` | `[]` | Globs, relative to the project root, of files ktlint skips |
 | `ktlint` | `1.8.0` | Exact ktlint version |
 

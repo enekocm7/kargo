@@ -68,7 +68,7 @@ pub fn fmt(ctx: &BuildContext, opts: &FmtOptions) -> Result<bool> {
         ctx.shell().status("Formatting", format!("{} v{} (ktlint {version})", pkg.name, pkg.version));
     }
     let mut cmd = ktlint_command(jdk, &jar);
-    cmd.current_dir(ws.root()).args(ktlint_args(opts.check, ctx.shell().verbosity()));
+    cmd.current_dir(ws.root()).args(ktlint_args(opts.check, ctx.shell().verbosity(), settings));
     cmd.stdin(Stdio::piped());
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let mut child = cmd.spawn().with_context(|| format!("failed to start ktlint (`{}`)", cmd.get_program().to_string_lossy()))?;
@@ -119,7 +119,7 @@ pub fn format_text(config: &Config, project: &Project, package: usize, file: &Pa
 
     let mut cmd = ktlint_command(&jdk, &jar);
     // No log at all: ktlint writes it to stdout, where only the formatted text may be.
-    cmd.current_dir(ws.root()).args(["--format", "--stdin", "--log-level=none"]);
+    cmd.current_dir(ws.root()).args(["--format", "--stdin", "--log-level=none"]).args(code_style_arg(settings));
     // The virtual location of the text: where ktlint looks for `.editorconfig` files.
     cmd.arg(format!("--stdin-path={}", file.display()));
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -176,14 +176,20 @@ pub(crate) fn kotlin_roots(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
-fn ktlint_args(check: bool, verbosity: Verbosity) -> Vec<String> {
+fn ktlint_args(check: bool, verbosity: Verbosity, settings: &FmtSettings) -> Vec<String> {
     let mut args = vec!["--relative".to_owned(), "--patterns-from-stdin".to_owned()];
+    args.extend(code_style_arg(settings));
     if !check {
         args.push("--format".to_owned());
     }
     // Kargo prints its own hint on failure, so ktlint's "use `ktlint --format`" warning is noise.
     args.push(if verbosity == Verbosity::Verbose { "--log-level=info" } else { "--log-level=error" }.to_owned());
     args
+}
+
+/// `--code-style=<style>` when `[fmt] code-style` is set.
+fn code_style_arg(settings: &FmtSettings) -> Option<String> {
+    settings.code_style.as_ref().map(|style| format!("--code-style={style}"))
 }
 
 /// ktlint globs, relative to the project root: every Kotlin file of each root, then the exclusions.
@@ -203,7 +209,7 @@ mod tests {
 
     #[test]
     fn builds_ktlint_patterns() {
-        let settings = FmtSettings { ktlint_version: None, exclude: vec!["src/generated/**".to_owned()] };
+        let settings = FmtSettings { ktlint_version: None, code_style: None, exclude: vec!["src/generated/**".to_owned()] };
         let roots = [PathBuf::from("src"), PathBuf::from("tests-jvm")];
         assert_eq!(
             ktlint_patterns(&roots, &settings),
@@ -213,7 +219,11 @@ mod tests {
 
     #[test]
     fn exclude_patterns_match_like_ktlints() {
-        let settings = FmtSettings { ktlint_version: None, exclude: vec!["src/generated/**".to_owned(), "**/*Generated.kt".to_owned()] };
+        let settings = FmtSettings {
+            ktlint_version: None,
+            code_style: None,
+            exclude: vec!["src/generated/**".to_owned(), "**/*Generated.kt".to_owned()],
+        };
         let root = Path::new("/p");
         assert!(excluded(root, Path::new("/p/src/generated/A.kt"), &settings).unwrap());
         assert!(excluded(root, Path::new("/p/src/UserGenerated.kt"), &settings).unwrap());
@@ -231,9 +241,16 @@ mod tests {
 
     #[test]
     fn check_mode_does_not_rewrite_files() {
-        assert!(ktlint_args(false, Verbosity::Normal).contains(&"--format".to_owned()));
-        assert!(!ktlint_args(true, Verbosity::Normal).contains(&"--format".to_owned()));
-        assert!(ktlint_args(true, Verbosity::Normal).contains(&"--log-level=error".to_owned()));
-        assert!(ktlint_args(true, Verbosity::Verbose).contains(&"--log-level=info".to_owned()));
+        assert!(ktlint_args(false, Verbosity::Normal, &FmtSettings::default()).contains(&"--format".to_owned()));
+        assert!(!ktlint_args(true, Verbosity::Normal, &FmtSettings::default()).contains(&"--format".to_owned()));
+        assert!(ktlint_args(true, Verbosity::Normal, &FmtSettings::default()).contains(&"--log-level=error".to_owned()));
+        assert!(ktlint_args(true, Verbosity::Verbose, &FmtSettings::default()).contains(&"--log-level=info".to_owned()));
+    }
+
+    #[test]
+    fn passes_the_code_style() {
+        let settings = FmtSettings { code_style: Some("intellij_idea".to_owned()), ..FmtSettings::default() };
+        assert!(ktlint_args(false, Verbosity::Normal, &settings).contains(&"--code-style=intellij_idea".to_owned()));
+        assert_eq!(code_style_arg(&FmtSettings::default()), None);
     }
 }

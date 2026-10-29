@@ -315,7 +315,8 @@ external-links = ["https://kotlinlang.org/api/kotlinx.coroutines/"]
 jobs = 4                    # members and targets built at the same time (default "auto"; -j and KARGO_JOBS win)
 default-targets = ["jvm"]   # the targets build, check and test use without -t (default: all enabled)
 
-[fmt]                       # kargo fmt (ktlint); style rules go in .editorconfig
+[fmt]                       # kargo fmt (ktlint); other style rules go in .editorconfig
+code-style = "intellij_idea" # ktlint_official (default), intellij_idea or android_studio
 exclude = ["src/generated/**"]
 
 [lint]                      # kargo lint (detekt); detekt.yml is picked up when present
