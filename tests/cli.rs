@@ -3613,7 +3613,23 @@ fn js_target_options_are_validated() {
         .assert()
         .failure()
         .code(101)
-        .stderr(predicate::str::contains("Compose for Web runs on Kotlin/Wasm"));
+        .stderr(predicate::str::contains("runs on Kotlin/Wasm").and(predicate::str::contains("`html = true`")));
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "web",
+            "[target.js]
+[frameworks]
+compose = { html = true }
+",
+        ),
+    );
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("set `environment = \"browser\"` in [target.js]"));
 }
 
 #[test]
@@ -5003,6 +5019,38 @@ fn desktop_packaging_checks_its_flags_first() {
         &manifest("app", &format!("[package.installer]\ntype = [\"{other_os}\"]\nnotarize = {{ keychain-profile = \"p\" }}\n")),
     );
     p.kargo().args(["package", "--format", "installer"]).assert().failure().stderr(predicate::str::contains("needs `signing-identity`"));
+}
+
+#[test]
+fn new_compose_html_project() {
+    let p = Project::new();
+    p.kargo().args(["new", "web", "--with", "compose-html", "--no-vcs"]).assert().success();
+    let root = p.path().join("web");
+    let manifest = std::fs::read_to_string(root.join("kargo.toml")).unwrap();
+    assert!(manifest.contains("[target.js]\nenvironment = \"browser\"") && manifest.contains("compose = { html = true }"), "{manifest}");
+    assert!(!manifest.contains("[target.jvm]"), "{manifest}");
+    let main = std::fs::read_to_string(root.join("src/Main.kt")).unwrap();
+    assert!(main.contains("renderComposable(rootElementId = \"root\")"), "{main}");
+
+    // Compose HTML does not run on Wasm: a project with only that target says what to do.
+    let wasm = Project::new();
+    wasm.file(
+        "kargo.toml",
+        "[package]\nname = \"w\"\nversion = \"0.1.0\"\n[target.wasm]\nenvironment = \"browser\"\n[frameworks]\ncompose = { html = true }\n",
+    );
+    wasm.file("src/Main.kt", "fun main() {}\n");
+    wasm.kargo()
+        .args(["--offline", "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Kotlin/JS only").and(predicate::str::contains("kargo target add js")));
+
+    let both = Project::new();
+    both.kargo()
+        .args(["new", "x", "--with", "compose-html", "-t", "js,wasm", "--no-vcs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("js target only"));
 }
 
 #[test]

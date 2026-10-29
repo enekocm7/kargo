@@ -27,6 +27,9 @@ pub fn finish(ctx: &BuildContext, build: &JsBuild) -> Result<()> {
     }
     if build.environment == JsEnvironment::Browser && build.kind == JsKind::Application {
         assemble_site(ctx, build)?;
+        if ctx.ws.profile(&ctx.profile)?.optimize {
+            report_size(ctx, build);
+        }
     } else {
         // The page of an earlier build, which linking leaves alone (unlike on Wasm, the directory holds the npm packages).
         let _ = crate::wasm_output::copy_site_files(&build.dir, None, &[]);
@@ -55,7 +58,9 @@ fn assemble_site(ctx: &BuildContext, build: &JsBuild) -> Result<()> {
     let html = if own_page {
         std::fs::read_to_string(&index)?
     } else {
-        default_page(&ctx.ws.manifest().package.name, &build.name, build.module_kind)
+        let manifest = ctx.ws.manifest();
+        let compose_html = manifest.frameworks.compose.as_ref().is_some_and(|c| c.html == Some(true));
+        default_page(&manifest.package.name, &build.name, build.module_kind, compose_html)
     };
     // A UMD module loads with a plain `<script>`, which cannot use an import map.
     let imports = match (&build.node_modules, build.module_kind) {
@@ -66,11 +71,20 @@ fn assemble_site(ctx: &BuildContext, build: &JsBuild) -> Result<()> {
     Ok(())
 }
 
-/// The page `kargo run` serves when the project has no `resources/index.html`.
-fn default_page(package: &str, module: &str, kind: JsModuleKind) -> String {
+/// The element Compose HTML's `renderComposable(rootElementId = "root")` renders into.
+pub const COMPOSE_ROOT_ID: &str = "root";
+
+/// The page `kargo run` serves when the project has no `resources/index.html`. With Compose HTML it
+/// holds the root element the app renders into instead of the note about the console.
+fn default_page(package: &str, module: &str, kind: JsModuleKind, compose_html: bool) -> String {
     let script = match kind {
         JsModuleKind::Es => format!("<script type=\"module\" src=\"./{module}.mjs\"></script>"),
         JsModuleKind::CommonJs | JsModuleKind::Umd => format!("<script src=\"./{module}.js\"></script>"),
+    };
+    let content = if compose_html {
+        format!("<div id=\"{COMPOSE_ROOT_ID}\"></div>")
+    } else {
+        format!("<p>{package} is running. What it prints with <code>println</code> appears in the browser's developer console.</p>")
     };
     format!(
         r#"<!doctype html>
@@ -81,12 +95,41 @@ fn default_page(package: &str, module: &str, kind: JsModuleKind) -> String {
   <title>{package}</title>
 </head>
 <body>
-  <p>{package} is running. What it prints with <code>println</code> appears in the browser's developer console.</p>
+  {content}
   {script}
 </body>
 </html>
 "#
     )
+}
+
+/// Prints how big the release module and the whole output are, like the Wasm build does.
+fn report_size(ctx: &BuildContext, build: &JsBuild) {
+    use crate::wasm_output::{brotli, deliverables, gzipped_size, human_size};
+    let Ok(module) = std::fs::read(&build.module) else { return };
+    let (raw, gzip) = (module.len() as u64, gzipped_size(&module));
+    let brotli = brotli(&module).map(|b| b.len() as u64).unwrap_or(0);
+    let files = deliverables(&build.dir);
+    let total: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    let shown = build.dir.strip_prefix(ctx.ws.root()).unwrap_or(&build.dir);
+    let file = build.module.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    ctx.shell().status(
+        "Size",
+        format!(
+            "{file} {} ({} gzip, {} brotli), {} files {} in {}",
+            human_size(raw),
+            human_size(gzip),
+            human_size(brotli),
+            files.len(),
+            human_size(total),
+            shown.display()
+        ),
+    );
+    if kargo_compiler::diagnostics::is_json() {
+        kargo_compiler::diagnostics::emit(&serde_json::json!({
+            "reason": "js-size", "target": "js", "path": build.module, "bytes": raw, "gzip_bytes": gzip, "brotli_bytes": brotli
+        }));
+    }
 }
 
 /// Writes the test runner next to the test module `module` (an ES module, `<module>.mjs`) in `dir`,
@@ -216,8 +259,12 @@ mod tests {
 
     #[test]
     fn pages_load_the_module() {
-        assert!(default_page("app", "app", JsModuleKind::Es).contains("<script type=\"module\" src=\"./app.mjs\"></script>"));
-        assert!(default_page("app", "app", JsModuleKind::Umd).contains("<script src=\"./app.js\"></script>"));
+        assert!(default_page("app", "app", JsModuleKind::Es, false).contains("<script type=\"module\" src=\"./app.mjs\"></script>"));
+        assert!(default_page("app", "app", JsModuleKind::Umd, false).contains("<script src=\"./app.js\"></script>"));
+        assert!(!default_page("app", "app", JsModuleKind::Es, false).contains("id=\"root\""));
+        let compose = default_page("app", "app", JsModuleKind::Es, true);
+        let (root, script) = (compose.find("<div id=\"root\"></div>").unwrap(), compose.find("<script").unwrap());
+        assert!(root < script, "the root element comes before the script: {compose}");
         let dir = tempfile::tempdir().unwrap();
         write_test_files(dir.path(), "app-test", true, Some("MathTest"), &BTreeMap::new()).unwrap();
         let page = std::fs::read_to_string(dir.path().join("index.html")).unwrap();

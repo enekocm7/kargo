@@ -116,6 +116,8 @@ See the [Spring Boot guide](../spring-boot/).
 ```toml
 [frameworks]
 compose = true
+# Compose HTML on [target.js] (DOM elements); svg = true adds the SVG elements
+compose = { html = true, svg = false }
 # or
 compose = { version = "1.12.1", material3 = true, resources-package = "com.example.res", public-resources = false }
 # Compose compiler options
@@ -124,12 +126,13 @@ compose = { stability-config = "compose-stability.conf", strong-skipping = true,
 
 - On the **JVM** it sets up [Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) for desktop: the Compose compiler plugin, the desktop runtime for your OS and Material 3 (disable with `material3 = false`). `kargo run --hot-reload` reloads the running app (and works for [any JVM program](../watch/#hot-reload-a-jvm-program)), and `kargo preview` renders `@Preview` functions to PNG.
 - On **Wasm** (`environment = "browser"`) it builds a Compose for Web app, with Skiko's runtime next to the module.
+- On **JS** (`environment = "browser"`) with `html = true` (and `svg = true` for the SVG elements) it builds a [Compose HTML](../compose/#compose-html-dom-elements) app, which renders DOM elements instead of drawing on a canvas. Without `html`, Compose on the JS target is an error.
 - On **Native** (iOS platforms, `kind = "framework"`) it builds a Compose for iOS framework.
 - On **Android** it enables Jetpack Compose in the generated Gradle project.
 - On both, a `composeResources/` directory gets the generated `Res` class of Compose Multiplatform resources (`Res.drawable.*`, `Res.string.*`, ...) and the resources runtime. `resources-package` and `public-resources` set the package and the visibility of `Res`.
 - `stability-config`, `strong-skipping`, `feature-flags`, `metrics` and `reports` set the options of the Compose compiler on both targets; see [Compose compiler options](../compose/#compiler-options).
 - `kargo package --desktop` builds an installer (or with `--platforms all` a jar for every OS) of a desktop application.
-- `kargo new <dir> --with compose-multiplatform` creates a project with a shared `App()` for the jvm and wasm targets. See [Compose](../compose/).
+- `kargo new <dir> --with compose-multiplatform` creates a project with a shared `App()` for the jvm and wasm targets, and `--with compose-html` a Compose HTML app for the js target. See [Compose](../compose/).
 
 See the [Compose Desktop guide](../compose/).
 
@@ -161,6 +164,6 @@ Frameworks combine. A few rules apply:
 
 - Pick `spring-boot` **or** `ktor` for a server, not both.
 - `spring-boot` projects are applications, so they can't be created with `--lib`.
-- `spring-boot`, `lombok` and `compose` can't be used in projects that enable the Wasm or Native targets for that code, and none of them works on the JS target (Compose for Web runs on Wasm).
+- `spring-boot`, `lombok` and `compose` can't be used in projects that enable the Wasm or Native targets for that code, and none of them works on the JS target, except Compose with `html = true` (Compose for Web, on a canvas, runs on Wasm).
 
 Something not covered here? Any compiler plugin can be added by hand; see [Tasks and plugins](../tasks-and-plugins/#compiler-plugins).

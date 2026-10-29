@@ -941,7 +941,8 @@ struct NewArgs {
     #[arg(short, long = "target", value_enum, value_delimiter = ',', default_value = "jvm")]
     targets: Vec<TargetArg>,
     /// Built-in frameworks to enable: compose, serialization, coroutines, ktor, lombok, spring-boot, benchmark;
-    /// or compose-multiplatform, Compose on the jvm (desktop) and wasm (browser) targets with a shared App()
+    /// or compose-multiplatform, Compose on the jvm (desktop) and wasm (browser) targets with a shared App();
+    /// or compose-html, Compose HTML (DOM elements) on the js (browser) target
     #[arg(short = 'w', long = "with", value_delimiter = ',', add = ArgValueCandidates::new(complete::new_frameworks))]
     frameworks: Vec<String>,
     /// Add a sample benchmark in benches/ (the same as `--with benchmark`)

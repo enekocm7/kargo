@@ -1136,6 +1136,11 @@ pub struct ComposeConfig {
     pub metrics: Option<bool>,
     /// Write the Compose compiler's stability reports to `target/compose/<target>/reports`.
     pub reports: Option<bool>,
+    /// Compose HTML on the Kotlin/JS target: composables render DOM elements (`org.jetbrains.compose.html`)
+    /// instead of drawing on a canvas. The other targets keep their own Compose.
+    pub html: Option<bool>,
+    /// Add `html-svg`, the SVG elements of Compose HTML (needs `html`).
+    pub svg: Option<bool>,
 }
 
 /// The feature flags of the Compose compiler that `[frameworks.compose] feature-flags` accepts.
@@ -2363,6 +2368,9 @@ impl RawManifest {
                         "[frameworks.compose] sets both `strong-skipping` and the `StrongSkipping` feature flag; keep only `strong-skipping`"
                     );
                 }
+            }
+            if compose.svg == Some(true) && compose.html != Some(true) {
+                bail!("[frameworks.compose] `svg` adds the SVG elements of Compose HTML; set `html = true` too");
             }
             if let Some(empty) = compose.stability_config.iter().find(|p| p.trim().is_empty()) {
                 bail!(

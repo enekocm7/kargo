@@ -312,6 +312,13 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
                 }
             }
             TargetKind::Wasm => {
+                if compose.html == Some(true) && manifest.targets.js.is_none() {
+                    bail!(
+                        "Compose HTML (`html = true` in [frameworks.compose]) renders DOM elements and runs on Kotlin/JS only, not on Kotlin/Wasm; \
+                         add the JS target with `kargo target add js` (`environment = \"browser\"`), or remove `html` to draw Compose Multiplatform \
+                         on a canvas with [target.wasm]"
+                    );
+                }
                 let env = manifest.targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
                 if env != WasmEnvironment::Browser {
                     bail!(
@@ -322,7 +329,20 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
                 multiplatform_compose(&mut c, compose, v, project_dir);
             }
             TargetKind::Js => {
-                bail!("Compose for Web runs on Kotlin/Wasm; build it with [target.wasm] environment = \"browser\" instead of [target.js]")
+                if compose.html != Some(true) {
+                    bail!(
+                        "Compose Multiplatform for web draws on a canvas and runs on Kotlin/Wasm; build it with [target.wasm] environment = \"browser\", \
+                         or set `html = true` in [frameworks.compose] to render DOM elements with Compose HTML on [target.js]"
+                    );
+                }
+                if manifest.targets.js.as_ref().is_none_or(|j| j.environment != JsEnvironment::Browser) {
+                    bail!("Compose HTML renders into a page; set `environment = \"browser\"` in [target.js]");
+                }
+                c.dependencies.push(dep("org.jetbrains.compose.runtime:runtime", Some(v)));
+                c.dependencies.push(dep("org.jetbrains.compose.html:html-core", Some(v)));
+                if compose.svg == Some(true) {
+                    c.dependencies.push(dep("org.jetbrains.compose.html:html-svg", Some(v)));
+                }
             }
             TargetKind::Native => {
                 let native = manifest.targets.native.as_ref();
@@ -700,6 +720,42 @@ mod tests {
         let executable = manifest("[target.native]\nplatforms = [\"ios_arm64\"]\n[frameworks]\ncompose = true\n");
         let err = contributions(&executable, TargetKind::Native, Path::new(".")).unwrap_err().to_string();
         assert!(err.contains("kind = \"framework\""), "{err}");
+    }
+
+    #[test]
+    fn compose_html_is_kotlin_js_only() {
+        let html = manifest("[target.js]\nenvironment = \"browser\"\n[frameworks]\ncompose = { html = true, svg = true }\n");
+        let c = contributions(&html, TargetKind::Js, Path::new(".")).unwrap();
+        let deps = coords(&c.dependencies);
+        for module in
+            ["org.jetbrains.compose.runtime:runtime", "org.jetbrains.compose.html:html-core", "org.jetbrains.compose.html:html-svg"]
+        {
+            assert!(deps.contains(&module.to_owned()), "{deps:?}");
+        }
+        assert!(!deps.iter().any(|d| d.contains("material3") || d.contains("foundation")), "{deps:?}");
+        assert_eq!(c.plugins[0].id.as_deref(), Some(COMPOSE_PLUGIN_ID));
+        let no_svg = manifest("[target.js]\nenvironment = \"browser\"\n[frameworks]\ncompose = { html = true }\n");
+        let deps = coords(&contributions(&no_svg, TargetKind::Js, Path::new(".")).unwrap().dependencies);
+        assert!(!deps.iter().any(|d| d.contains("html-svg")), "{deps:?}");
+
+        let node = manifest("[target.js]\n[frameworks]\ncompose = { html = true }\n");
+        let err = contributions(&node, TargetKind::Js, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("environment = \"browser\""), "{err}");
+        let canvas = manifest("[target.js]\nenvironment = \"browser\"\n[frameworks]\ncompose = true\n");
+        let err = contributions(&canvas, TargetKind::Js, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("html = true") && err.contains("[target.wasm]"), "{err}");
+
+        // Only Wasm: no JS target to render the DOM.
+        let wasm = manifest("[target.wasm]\nenvironment = \"browser\"\n[frameworks]\ncompose = { html = true }\n");
+        let err = contributions(&wasm, TargetKind::Wasm, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("Kotlin/JS only") && err.contains("kargo target add js"), "{err}");
+        // A mixed project: JS renders the DOM, Wasm keeps drawing on a canvas.
+        let mixed = manifest(
+            "[target.js]\nenvironment = \"browser\"\n[target.wasm]\nenvironment = \"browser\"\n[frameworks]\ncompose = { html = true }\n",
+        );
+        let deps = coords(&contributions(&mixed, TargetKind::Wasm, Path::new(".")).unwrap().dependencies);
+        assert!(deps.contains(&"org.jetbrains.compose.foundation:foundation".to_owned()), "{deps:?}");
+        assert!(!deps.iter().any(|d| d.contains("html-core")), "{deps:?}");
     }
 
     #[test]

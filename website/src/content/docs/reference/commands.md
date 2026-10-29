@@ -100,7 +100,7 @@ kargo new <path> [options]
 |---|---|---|
 | `--lib` | | Library template instead of an application |
 | `-t, --target <list>` | `jvm` | Comma-separated targets to enable |
-| `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot`, `benchmark`; or the preset `compose-multiplatform`: Compose on the jvm and wasm (browser) targets, besides the `--target`s you give, with a shared `App()` in `src/App.kt`. See [Compose](../../guides/compose/#one-ui-for-every-target) |
+| `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot`, `benchmark`; or the presets `compose-multiplatform`: Compose on the jvm and wasm (browser) targets, besides the `--target`s you give, with a shared `App()` in `src/App.kt` (see [Compose](../../guides/compose/#one-ui-for-every-target)), and `compose-html`: a Compose HTML app on the js (browser) target instead of the default jvm one (see [Compose HTML](../../guides/compose/#compose-html-dom-elements)) |
 | `--bench` | | Add the `benchmark` framework and a sample benchmark in `benches/SampleBench.kt`, as `--with benchmark` does. See [Benchmarking](../../guides/benchmarking/) |
 | `--group <group>` | `com.example` | Maven group, also the base Kotlin package |
 | `--name <name>` | directory name | Package name |

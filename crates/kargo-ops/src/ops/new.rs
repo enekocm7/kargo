@@ -39,9 +39,20 @@ impl NewOptions {
     }
 
     /// The options with the presets of `--with` replaced by what they stand for: `compose-multiplatform`
-    /// is Compose on the JVM (desktop) and Wasm (browser) targets, besides the targets already given.
+    /// is Compose on the JVM (desktop) and Wasm (browser) targets, besides the targets already given;
+    /// `compose-html` is Compose with `html = true` on the JS (browser) target instead of the default JVM one.
+    /// `compose-html` stays in the list beside `compose`, as the mark that the project renders DOM elements.
     pub fn with_presets(&self) -> NewOptions {
         let mut opts = self.clone();
+        if opts.has(COMPOSE_HTML) {
+            if !opts.has("compose") {
+                opts.frameworks.insert(0, "compose".to_owned());
+            }
+            // `--with compose-html` alone means a Compose HTML app, not a JVM one that also has the browser target.
+            if opts.targets == [TargetKind::Jvm] {
+                opts.targets = vec![TargetKind::Js];
+            }
+        }
         if let Some(i) = opts.frameworks.iter().position(|f| f == COMPOSE_MULTIPLATFORM) {
             opts.frameworks.remove(i);
             opts.frameworks.retain(|f| f != COMPOSE_MULTIPLATFORM);
@@ -85,7 +96,7 @@ impl NewOptions {
             if !FRAMEWORK_NAMES.contains(&f.as_str()) && !PRESETS.contains(&f.as_str()) {
                 let known: Vec<&str> = FRAMEWORK_NAMES.iter().chain(PRESETS).copied().collect();
                 return Err(kargo_util::help::unknown(
-                    format!("unknown framework `{f}` (available: {}, and the preset {})", FRAMEWORK_NAMES.join(", "), PRESETS.join(", ")),
+                    format!("unknown framework `{f}` (available: {}, and the presets {})", FRAMEWORK_NAMES.join(", "), PRESETS.join(", ")),
                     f,
                     &known,
                 ));
@@ -100,6 +111,17 @@ impl NewOptions {
         }
         if self.has("compose") && self.lib && self.targets.iter().any(|t| matches!(t, TargetKind::Wasm | TargetKind::Native)) {
             bail!("the Compose templates of the wasm and native targets are apps (a web page, an iOS framework); drop --lib");
+        }
+        if self.has(COMPOSE_HTML) {
+            if self.targets != [TargetKind::Js] {
+                bail!(
+                    "`compose-html` renders DOM elements and runs on the js target only; use `--with compose-html -t js`, or \
+                     `--with compose-multiplatform` for Compose on a canvas, and enable `html = true` later for a project with both"
+                );
+            }
+            if self.lib {
+                bail!("the `compose-html` template is a web page; drop --lib");
+            }
         }
         if self.has("spring-boot") && self.has("ktor") {
             bail!("pick either `spring-boot` or `ktor`, not both");
@@ -117,8 +139,11 @@ impl NewOptions {
 /// The `--with` value that sets up Compose Multiplatform: see [`NewOptions::with_presets`].
 pub const COMPOSE_MULTIPLATFORM: &str = "compose-multiplatform";
 
+/// The `--with` value that sets up Compose HTML on Kotlin/JS: see [`NewOptions::with_presets`].
+pub const COMPOSE_HTML: &str = "compose-html";
+
 /// The values of `--with` that stand for frameworks and targets together.
-pub const PRESETS: &[&str] = &[COMPOSE_MULTIPLATFORM];
+pub const PRESETS: &[&str] = &[COMPOSE_MULTIPLATFORM, COMPOSE_HTML];
 
 /// Kotlin hard keywords plus Java keywords and literals: none of them can be a
 /// package segment in the generated Kotlin (or, with Lombok and Android, Java) code.
@@ -224,9 +249,14 @@ pub fn target_section(target: TargetKind, lib: bool, namespace: &str) -> String 
 }
 
 /// [`target_section`], or with Compose the tables its templates need: Compose for Web draws on a
-/// page, and Compose for iOS is a framework for an Xcode project.
-pub fn compose_target_section(target: TargetKind, lib: bool, namespace: &str, compose: bool) -> String {
+/// page, Compose HTML (`html`) renders into one from Kotlin/JS, and Compose for iOS is a framework for
+/// an Xcode project.
+pub fn compose_target_section(target: TargetKind, lib: bool, namespace: &str, compose: bool, html: bool) -> String {
     match target {
+        TargetKind::Js if compose && html => "[target.js]
+environment = \"browser\"
+"
+        .to_owned(),
         TargetKind::Wasm if compose => "[target.wasm]\nenvironment = \"browser\"\n".to_owned(),
         TargetKind::Native if compose => {
             "[target.native]\nplatforms = [\"ios_arm64\", \"ios_simulator_arm64\"]\nkind = \"framework\"\n".to_owned()
@@ -261,7 +291,7 @@ fn manifest_on(opts: &NewOptions, macos: bool) -> String {
     let jvm_only = opts.targets == [TargetKind::Jvm];
     if !jvm_only {
         for &target in &opts.targets {
-            let section = compose_target_section(target, opts.lib, &opts.package(), opts.has("compose"));
+            let section = compose_target_section(target, opts.lib, &opts.package(), opts.has("compose"), opts.has(COMPOSE_HTML));
             if target == TargetKind::Native && opts.has("compose") && !macos {
                 let _ = writeln!(s, "\n# Kotlin/Native builds iOS frameworks only on macOS with Xcode. Uncomment this on a Mac.");
                 for line in section.lines() {
@@ -276,6 +306,10 @@ fn manifest_on(opts: &NewOptions, macos: bool) -> String {
         let _ = writeln!(s, "\n[frameworks]");
         for f in &opts.frameworks {
             match f.as_str() {
+                COMPOSE_HTML => {}
+                "compose" if opts.has(COMPOSE_HTML) => {
+                    let _ = writeln!(s, "compose = {{ html = true }}");
+                }
                 "ktor" => {
                     let _ = writeln!(s, "ktor = {{ server = \"netty\" }}");
                 }
@@ -437,6 +471,32 @@ fn serializable_source(opts: &NewOptions) -> String {
 
 fn main_source(opts: &NewOptions) -> String {
     let pkg = opts.package();
+    if opts.has(COMPOSE_HTML) {
+        return format!(
+            r#"package {pkg}
+
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import org.jetbrains.compose.web.dom.Button
+import org.jetbrains.compose.web.dom.Div
+import org.jetbrains.compose.web.dom.Text
+import org.jetbrains.compose.web.renderComposable
+
+fun greeting(name: String) = "Hello, $name!"
+
+// `kargo run` serves the page at http://127.0.0.1:8080/; Kargo's page has the `root` element.
+fun main() {{
+    renderComposable(rootElementId = "root") {{
+        var clicks by remember {{ mutableStateOf(0) }}
+        Div {{ Text(greeting("Compose HTML")) }}
+        Button(attrs = {{ onClick {{ clicks++ }} }}) {{ Text("Clicked $clicks times") }}
+    }}
+}}
+"#
+        );
+    }
     if opts.has("spring-boot") {
         return format!(
             r#"package {pkg}
@@ -970,6 +1030,28 @@ class SampleBench"
         let compose_lib = NewOptions { frameworks: vec!["compose".into()], targets: vec![TargetKind::Wasm], lib: true, ..opts("a") };
         assert!(template(&compose_lib).is_err());
         assert!(template(&NewOptions { targets: vec![], ..opts("a") }).is_err());
+    }
+
+    #[test]
+    fn compose_html_preset() {
+        let o = NewOptions { frameworks: vec![COMPOSE_HTML.into()], ..opts("web") };
+        let files = template(&o).unwrap();
+        let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string().replace('\\', "/")).collect();
+        assert!(paths.iter().any(|p| p == "src/Main.kt") && paths.iter().any(|p| p == "tests/GreetingTest.kt"), "{paths:?}");
+        let m = Manifest::parse(&files[0].contents).unwrap();
+        assert_eq!(m.targets.enabled(), [TargetKind::Js], "the default JVM target gives way to JS");
+        assert_eq!(m.targets.js.unwrap().environment, kargo_manifest::JsEnvironment::Browser);
+        let compose = m.frameworks.compose.unwrap();
+        assert_eq!(compose.html, Some(true));
+        let manifest = &files[0].contents;
+        assert!(manifest.contains("compose = { html = true }") && !manifest.contains("compose-html"), "{manifest}");
+        let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
+        assert!(main.contains("renderComposable(rootElementId = \"root\")") && main.contains("fun greeting("), "{main}");
+
+        for (targets, lib) in [(vec![TargetKind::Js, TargetKind::Wasm], false), (vec![TargetKind::Js], true)] {
+            let err = template(&NewOptions { targets, lib, ..o.clone() }).unwrap_err().to_string();
+            assert!(err.contains("compose-html"), "{err}");
+        }
     }
 
     #[test]
