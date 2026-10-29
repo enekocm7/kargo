@@ -495,7 +495,7 @@ kargo lint [--create-baseline]
 | `-p, --package <name>`, `--workspace` | Which packages to analyze |
 | `-j, --jobs <n>` | How many packages are analyzed at the same time, as for `kargo fmt` |
 
-detekt reads `detekt.yml`; configure the rest with [`[lint]`](../manifest/#lint). See [Formatting and linting](../../guides/formatting-and-linting/).
+detekt reads `detekt.yml` from the project root automatically; configure the rest with [`[lint]`](../manifest/#lint). See [Formatting and linting](../../guides/formatting-and-linting/).
 
 ## `kargo add`
 
