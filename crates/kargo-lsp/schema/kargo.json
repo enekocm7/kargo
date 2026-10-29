@@ -666,7 +666,23 @@
         "javadoc": { "description": "The -javadoc.jar: \"dokka\" (or true), \"empty\" or false.", "anyOf": [{ "type": "boolean" }, { "enum": ["dokka", "empty"] }], "default": "dokka" },
         "central-publishing": { "description": "What Maven Central does with a validated upload.", "enum": ["manual", "automatic"], "default": "manual" },
         "kind": { "description": "What is published: \"library\" (the jars and klibs) or \"bom\" (a POM that pins the versions of [dependencies] and of the path dependencies' modules).", "enum": ["library", "bom"], "default": "library" },
-        "relocations": { "description": "Former coordinates (group:artifact) of the package; each gets a relocation POM that points at the current ones.", "type": "array", "items": { "type": "string", "pattern": "^[^:\\s]+:[^:\\s]+$" }, "uniqueItems": true }
+        "relocations": { "description": "Former coordinates (group:artifact) of the package; each gets a relocation POM that points at the current ones.", "type": "array", "items": { "type": "string", "pattern": "^[^:\\s]+:[^:\\s]+$" }, "uniqueItems": true },
+        "npm": {
+          "description": "Where and how `kargo publish --npm` publishes the npm package of a Wasm or JS library (`kind = \"library\"`). Credentials are never set here: use NPM_TOKEN or your .npmrc. With this table set, `kargo publish` publishes to npm too.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "registry": { "description": "The registry URL. Default: your .npmrc for the package, else https://registry.npmjs.org. `--registry` overrides it.", "type": "string", "format": "uri", "examples": ["https://npm.pkg.github.com"] },
+            "scope": { "description": "The scope of a package name that has none: `scope = \"acme\"` publishes `hello` as `@acme/hello`.", "type": "string", "examples": ["acme"] },
+            "access": { "description": "Who may install the package. Default: the registry's (public for unscoped names, restricted for scoped ones).", "enum": ["public", "restricted"] },
+            "tag": { "description": "The dist-tag of the version instead of `latest`, such as `next`. Needed for a pre-release version. `--tag` overrides it.", "type": "string", "examples": ["next"] },
+            "provenance": { "description": "Publish with provenance (npm and pnpm, on GitHub Actions or GitLab CI).", "type": "boolean", "default": false },
+            "keywords": { "description": "The `keywords` of package.json.", "type": "array", "items": { "type": "string" }, "examples": [["kotlin", "wasm"]] },
+            "bugs": { "description": "The `bugs` URL of package.json. Default: the issues page of a GitHub or GitLab [package] repository.", "type": "string", "format": "uri" },
+            "side-effects": { "description": "The `sideEffects` of package.json: false (bundlers may drop unused imports), true, or the files that have side effects. Default: not written.", "anyOf": [{ "type": "boolean" }, { "type": "array", "items": { "type": "string" } }] },
+            "engines": { "description": "The `engines` of package.json.", "type": "object", "additionalProperties": { "type": "string" }, "examples": [{ "node": ">=20" }] }
+          }
+        }
       }
     },
     "workspace": {

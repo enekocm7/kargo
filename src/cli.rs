@@ -19,7 +19,7 @@ use kargo_ops::ops::context::BuildContext;
 use kargo_ops::ops::doc::DocOptions;
 use kargo_ops::ops::fmt::FmtOptions;
 use kargo_ops::ops::lint::LintOptions;
-use kargo_ops::ops::publish::PublishOptions;
+use kargo_ops::ops::publish::{Only, PublishOptions};
 use kargo_ops::ops::run::{Program, RunOptions, Running, Start};
 use kargo_ops::ops::test::{ListFormat, TestOptions};
 use kargo_ops::ops::toolchain::{self as toolchain_ops, ToolKind};
@@ -739,6 +739,26 @@ impl PackageArgs {
     fn selection(&self) -> Selection {
         Selection { packages: self.packages.clone(), workspace: self.workspace, exclude: self.exclude.clone() }
     }
+}
+
+/// What `kargo publish` publishes and the npm settings of the command line.
+#[derive(Debug, Args, Default)]
+struct PublishNpmArgs {
+    /// Publish only the npm package of a Wasm or Kotlin/JS library, not to Maven
+    #[arg(long, conflicts_with = "maven")]
+    npm: bool,
+    /// Publish only to Maven, even when [publish.npm] is set
+    #[arg(long)]
+    maven: bool,
+    /// With --npm: the npm registry URL (default: [publish.npm] registry, your .npmrc, or registry.npmjs.org)
+    #[arg(long, value_name = "URL", requires = "npm")]
+    registry: Option<String>,
+    /// With --npm: the dist-tag of the version, such as `next` (default: [publish.npm] tag, else `latest`)
+    #[arg(long, value_name = "TAG", requires = "npm")]
+    tag: Option<String>,
+    /// With --npm: a one-time password for registries that ask for one
+    #[arg(long, value_name = "CODE", requires = "npm")]
+    otp: Option<String>,
 }
 
 /// `-p` for commands that work on one package.
@@ -1517,22 +1537,29 @@ OS by default, with Skiko's native library next to the app so macOS signs and no
         package: OnePackageArg,
     },
     /// Build a library and publish it to a Maven repository
-    #[command(long_about = "Build a library with the release profile and publish it to a Maven repository.
+    #[command(long_about = "Build a library with the release profile and publish it to a Maven repository or npm.
 
 Publishes the jar or klibs of every target (except Android) with a POM, Gradle module metadata,
 sources and javadoc jars, checksums and, when signing is on, GnuPG signatures. The destination is
 `--repository <name>` (a [repositories] entry, `maven-central` or `maven-local`), `--local`, or
-`repository` in [publish].")]
+`repository` in [publish].
+
+A Wasm or Kotlin/JS library (`kind = \"library\"`) is also an npm package. `--npm` publishes it
+with npm, pnpm or bun, to the registry of [publish.npm] or your .npmrc. The token is `NPM_TOKEN`
+or the one in your .npmrc. A package with [publish.npm] set publishes to Maven and npm; `--maven`
+and `--npm` pick one.")]
     Publish {
         /// Where to publish: a [repositories] entry, `maven-central` or `maven-local` (default: [publish] repository)
-        #[arg(long, value_name = "NAME", conflicts_with = "local")]
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["local", "npm"])]
         repository: Option<String>,
         /// Publish to the local Maven repository (~/.m2/repository), like `--repository maven-local`
-        #[arg(long)]
+        #[arg(long, conflicts_with = "npm")]
         local: bool,
-        /// Build, stage and sign everything in target/release/publish, but upload nothing
+        /// Build, stage and sign everything in target/release/publish (npm: pack and list the files), but upload nothing
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        npm: PublishNpmArgs,
         #[command(flatten)]
         packages: PackageArgs,
     },
@@ -3489,29 +3516,46 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             ops::packaging::retrace(&ctx, &mapping, stack_trace.as_deref())?;
             Ok(0)
         }
-        Command::Publish { repository, local, dry_run, packages } => {
+        Command::Publish { repository, local, dry_run, npm, packages } => {
             let project = load_project(global)?;
             let repository = if local { Some(kargo_maven::repo::MAVEN_LOCAL.to_owned()) } else { repository };
-            let opts = PublishOptions { repository, dry_run };
+            let only = match (npm.npm, npm.maven) {
+                (true, _) => Only::Npm,
+                (_, true) => Only::Maven,
+                _ => Only::Configured,
+            };
+            let opts = PublishOptions {
+                repository,
+                dry_run,
+                only,
+                npm: ops::publish_npm::NpmOptions { registry: npm.registry, tag: npm.tag, otp: npm.otp, dry_run },
+            };
             let mut selected = project.select(&packages.selection())?;
             if packages.workspace || (packages.packages.is_empty() && selected.len() > 1) {
                 // Publishing a whole workspace skips the members that opt out; naming one with `-p` is an error.
                 selected.retain(|&i| {
-                    let keep = project.package(i).manifest().package.publish;
-                    if !keep {
+                    let manifest = project.package(i).manifest();
+                    let keep = manifest.package.publish && (only != Only::Npm || ops::publish_npm::is_npm_library(manifest));
+                    if !manifest.package.publish {
                         shell.note(format!("skipping `{}`, which has `publish = false`", project.package(i).name()));
+                    } else if !keep {
+                        shell.note(format!("skipping `{}`, which builds no npm package", project.package(i).name()));
                     }
                     keep
                 });
                 if selected.is_empty() {
-                    bail!("no member of the workspace can be published; they all have `publish = false`");
+                    bail!(if only == Only::Npm {
+                        "no member of the workspace builds an npm package; set `kind = \"library\"` under [target.wasm] or [target.js]"
+                    } else {
+                        "no member of the workspace can be published; they all have `publish = false`"
+                    });
                 }
             }
             let ordered = ops::publish::publish_order(&project, &selected);
             let ctx = context(config, &project, ordered[0], global, ProfileKind::Release)?;
             for index in ordered {
                 warn_manifest(shell, &project, project.package(index));
-                ops::publish::publish(&ctx.for_package(index), &opts)?;
+                ops::publish::publish_package(&ctx.for_package(index), &opts)?;
             }
             Ok(0)
         }
@@ -4317,7 +4361,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "publish", "--repository", "company", "--dry-run", "--workspace"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Publish { repository: Some(ref r), local: false, dry_run: true, ref packages } if r == "company" && packages.workspace
+            Command::Publish { repository: Some(ref r), local: false, dry_run: true, ref packages, .. } if r == "company" && packages.workspace
         ));
         assert!(Cli::try_parse_from(["kargo", "publish", "--local", "--repository", "company"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "new", "app", "--target", "jvm,wasm", "--with", "serialization,coroutines"]).unwrap();

@@ -905,10 +905,11 @@ Uses the mapping file produced by optimized packaging to restore obfuscated stac
 
 ## `kargo publish`
 
-Build a library with the release profile and publish it to a Maven repository: the local one (`~/.m2/repository`), a [`[repositories]`](../manifest/#repositories) entry, or Maven Central. See [Publishing a library](../../guides/publishing/).
+Build a library with the release profile and publish it to a Maven repository: the local one (`~/.m2/repository`), a [`[repositories]`](../manifest/#repositories) entry, or Maven Central. A Wasm or Kotlin/JS library can also be published to an npm registry with `--npm`. See [Publishing a library](../../guides/publishing/).
 
 ```sh
 kargo publish [--repository <name> | --local] [--dry-run]
+kargo publish --npm [--registry <url>] [--tag <tag>] [--otp <code>] [--dry-run]
 ```
 
 Every target is published, Android only for a library (`kind = "library"`): a JVM-only library as one Maven module (`<name>.jar`), an Android-only library as one module with the AAR of its release build (`<name>.aar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-android`, `<name>-wasm-js`, `<name>-js`, `<name>-linuxx64`, ...). See [Android libraries](../../guides/publishing/#android-libraries). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first. A package with `kind = "bom"` in [`[publish]`](../manifest/#publish) is published as a [BOM](../../guides/publishing/#boms), a POM only, without compiling anything, and each entry of `relocations` gets a [relocation POM](../../guides/publishing/#renamed-artifacts).
@@ -917,10 +918,17 @@ Every target is published, Android only for a library (`kind = "library"`): a JV
 |---|---|
 | `--repository <name>` | Where to publish: a `[repositories]` entry, `maven-central` or `maven-local`. Defaults to `repository` in [`[publish]`](../manifest/#publish) |
 | `--local` | Publish to the local Maven repository, like `--repository maven-local` |
-| `--dry-run` | Build, stage and sign everything, list each module with its files and their SHA-256, but upload nothing |
+| `--dry-run` | Build, stage and sign everything, list each module with its files and their SHA-256 (npm: pack the package and list its files with their sizes), but upload nothing |
+| `--npm` | Publish only the npm package of a Wasm or Kotlin/JS library, not to Maven. Cannot be used with `--repository`, `--local` or `--maven` |
+| `--maven` | Publish only to Maven, even when [`[publish.npm]`](../manifest/#publishnpm) is set |
+| `--registry <url>` | With `--npm`: the registry. Defaults to `registry` in `[publish.npm]`, then your `.npmrc`, then `https://registry.npmjs.org` |
+| `--tag <tag>` | With `--npm`: the dist-tag of the version, such as `next`. Defaults to `tag` in `[publish.npm]`, else `latest` |
+| `--otp <code>` | With `--npm`: a one-time password, for registries that ask for one |
 | `-p, --package <name>`, `--workspace` | Which packages to publish. Path dependencies are published before the packages that use them; members with `publish = false` are skipped when the whole workspace is published |
 
 The package needs a `group` in `[package]`. Maven Central also needs `description`, `license`, `authors` and `repository`, a release (non-SNAPSHOT) version, and signatures; Kargo checks them before building.
+
+A package with [`[publish.npm]`](../manifest/#publishnpm) publishes to npm too, after Maven: `kargo publish` runs both, and `--npm` or `--maven` picks one. `--npm` builds the library with the release profile and publishes the directory with the `package.json` Kargo writes (`target/release/wasm` or `target/release/js`) with npm, pnpm or bun: the `package-manager` of the target, else the first of the three on `PATH`. Before anything is built it checks the package name and version (a pre-release needs a dist-tag), that the registry does not have the version yet, and the provenance setup; afterwards that every file `package.json` points at exists. The tarball is written to `target/release/npm/<name>/` and its files are listed, so `--dry-run` shows exactly what a publish uploads. In a workspace, `--npm` skips the members that build no npm package, and members are published after the ones they refer to. The token comes from [`NPM_TOKEN`](../environment/) or your `.npmrc`, never from `kargo.toml`. See [Publishing to npm](../../guides/publishing/#publishing-to-npm).
 
 A release already in the destination repository is not uploaded again: when its files match (by SHA-1), the module is skipped and the command succeeds; when they differ, it fails and asks for a new version. SNAPSHOT versions and the local Maven repository are overwritten.
 

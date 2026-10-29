@@ -304,6 +304,24 @@ struct RawPublish {
     kind: Option<String>,
     #[serde(default)]
     relocations: Vec<String>,
+    npm: Option<RawPublishNpm>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawPublishNpm {
+    registry: Option<String>,
+    scope: Option<String>,
+    access: Option<String>,
+    tag: Option<String>,
+    #[serde(default)]
+    provenance: bool,
+    #[serde(default)]
+    keywords: Vec<String>,
+    bugs: Option<String>,
+    side_effects: Option<Value>,
+    #[serde(default)]
+    engines: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3149,6 +3167,7 @@ impl RawPublish {
             }
             relocations.push(module);
         }
+        let npm = self.npm.map(RawPublishNpm::validate).transpose()?;
         Ok(PublishSettings {
             repository: self.repository,
             sign: self.sign,
@@ -3157,6 +3176,77 @@ impl RawPublish {
             central_publishing,
             kind,
             relocations,
+            npm,
+        })
+    }
+}
+
+impl RawPublishNpm {
+    fn validate(self) -> Result<NpmPublishSettings> {
+        for (key, url) in [("registry", &self.registry), ("bugs", &self.bugs)] {
+            if let Some(url) = url
+                && !(url.starts_with("http://") || url.starts_with("https://"))
+            {
+                bail!("[publish.npm] `{key}` must be an http(s):// URL, got `{url}`");
+            }
+        }
+        let scope = match self.scope {
+            None => None,
+            Some(scope) => {
+                let bare = scope.strip_prefix('@').unwrap_or(&scope);
+                let valid = !bare.is_empty()
+                    && !bare.starts_with(['.', '_'])
+                    && bare.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_' | '~'));
+                if !valid {
+                    bail!(
+                        "[publish.npm] `scope` must be lowercase letters, digits, `-`, `.`, `_` and `~`, such as \"acme\", got `{scope}`"
+                    );
+                }
+                Some(bare.to_owned())
+            }
+        };
+        let access = match self.access.as_deref() {
+            None => None,
+            Some("public") => Some(NpmAccess::Public),
+            Some("restricted") => Some(NpmAccess::Restricted),
+            Some(other) => bail!("[publish.npm] `access` must be \"public\" or \"restricted\", got `{other}`"),
+        };
+        if let Some(tag) = &self.tag
+            && (tag.is_empty() || tag.contains(|c: char| c.is_whitespace() || c == '/' || c == '@'))
+        {
+            bail!("[publish.npm] `tag` must be a dist-tag such as \"next\", got `{tag}`");
+        }
+        if self.keywords.iter().any(|k| k.trim().is_empty()) {
+            bail!("[publish.npm] `keywords` must not contain an empty keyword");
+        }
+        let side_effects = match self.side_effects {
+            None => None,
+            Some(Value::Boolean(flag)) => Some(NpmSideEffects::Flag(flag)),
+            Some(Value::Array(files)) => {
+                let files = files
+                    .into_iter()
+                    .map(|f| match f {
+                        Value::String(s) if !s.trim().is_empty() => Ok(s),
+                        _ => bail!("[publish.npm] `side-effects` lists file patterns such as [\"./polyfill.mjs\"]"),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Some(NpmSideEffects::Files(files))
+            }
+            Some(_) => bail!("[publish.npm] `side-effects` must be true, false or a list of file patterns"),
+        };
+        if let Some((name, _)) = self.engines.iter().find(|(name, version)| name.trim().is_empty() || version.trim().is_empty()) {
+            bail!("[publish.npm] `engines` needs a name and a version range for every entry, such as `node = \">=20\"` (check `{name}`)");
+        }
+        Ok(NpmPublishSettings {
+            registry: self.registry.map(|r| r.trim_end_matches('/').to_owned()),
+            scope,
+            access,
+            tag: self.tag,
+            provenance: self.provenance,
+            keywords: self.keywords,
+            bugs: self.bugs,
+            side_effects,
+            engines: self.engines,
         })
     }
 }

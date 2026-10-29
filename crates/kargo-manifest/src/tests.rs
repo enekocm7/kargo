@@ -748,6 +748,7 @@ relocations = ["org.old:lib"]
             central_publishing: CentralPublishing::Automatic,
             kind: PublishKind::Bom,
             relocations: vec![ModuleId::new("org.old", "lib")],
+            npm: None,
         }
     );
     for destination in ["maven-central", "maven-local"] {
@@ -767,6 +768,52 @@ relocations = ["org.old:lib"]
     assert!(parse_err(&with("checksums = []")).contains("unknown field"));
     let bad_url = MINIMAL.replace("version = \"0.1.0\"", "version = \"0.1.0\"\nrepository = \"github.com/me/lib\"");
     assert!(parse_err(&bad_url).contains("`repository` must be an http(s):// URL"));
+}
+
+#[test]
+fn npm_publishing_settings() {
+    assert_eq!(parse(MINIMAL).publish.npm, None);
+    assert_eq!(parse(&format!("{MINIMAL}\n[publish.npm]\n")).publish.npm, Some(NpmPublishSettings::default()));
+
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[publish.npm]
+registry = "https://npm.example.com/"
+scope = "@acme"
+access = "restricted"
+tag = "next"
+provenance = true
+keywords = ["kotlin", "wasm"]
+bugs = "https://example.com/bugs"
+side-effects = ["./polyfill.mjs"]
+engines = {{ node = ">=20" }}
+"#
+    ));
+    assert_eq!(
+        m.publish.npm,
+        Some(NpmPublishSettings {
+            registry: Some("https://npm.example.com".into()),
+            scope: Some("acme".into()),
+            access: Some(NpmAccess::Restricted),
+            tag: Some("next".into()),
+            provenance: true,
+            keywords: vec!["kotlin".into(), "wasm".into()],
+            bugs: Some("https://example.com/bugs".into()),
+            side_effects: Some(NpmSideEffects::Files(vec!["./polyfill.mjs".into()])),
+            engines: BTreeMap::from([("node".to_owned(), ">=20".to_owned())]),
+        })
+    );
+    let flag = parse(&format!("{MINIMAL}\n[publish.npm]\nside-effects = false\n"));
+    assert_eq!(flag.publish.npm.unwrap().side_effects, Some(NpmSideEffects::Flag(false)));
+
+    let with = |p: &str| format!("{MINIMAL}\n[publish.npm]\n{p}\n");
+    assert!(parse_err(&with("registry = \"npm.example.com\"")).contains("`registry` must be an http(s):// URL"));
+    assert!(parse_err(&with("scope = \"Acme Corp\"")).contains("`scope`"));
+    assert!(parse_err(&with("access = \"private\"")).contains("\"public\" or \"restricted\""));
+    assert!(parse_err(&with("tag = \"my tag\"")).contains("dist-tag"));
+    assert!(parse_err(&with("side-effects = \"yes\"")).contains("side-effects"));
+    assert!(parse_err(&with("engines = { node = \"\" }")).contains("`engines`"));
+    assert!(parse_err(&with("token = \"abc\"")).contains("unknown field"));
 }
 
 #[test]

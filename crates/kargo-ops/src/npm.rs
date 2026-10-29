@@ -362,6 +362,24 @@ fn install_into(ctx: &BuildContext, deps: &BTreeMap<String, String>, dir: &Path,
 
 /// The package manager configured for `target`, or else the first of npm, pnpm and bun on `PATH`.
 fn find_package_manager(ctx: &BuildContext, target: TargetKind, deps: &BTreeMap<String, String>) -> Result<(PackageManager, PathBuf)> {
+    find_manager(ctx, target, || {
+        format!(
+            "your {} dependencies need the npm packages {}; install Node.js (it includes npm), pnpm or bun and put it on PATH",
+            if target == TargetKind::Js { "Kotlin/JS" } else { "Wasm" },
+            package_list(deps)
+        )
+    })
+}
+
+/// The package manager `kargo publish --npm` publishes with: the one of `[target.<target>] package-manager`, else
+/// the first of npm, pnpm and bun on `PATH`.
+pub fn publisher(ctx: &BuildContext, target: TargetKind) -> Result<(PackageManager, PathBuf)> {
+    find_manager(ctx, target, || {
+        "publishing to npm needs npm, pnpm or bun; install Node.js (it includes npm), pnpm or bun and put it on PATH".to_owned()
+    })
+}
+
+fn find_manager(ctx: &BuildContext, target: TargetKind, none_found: impl FnOnce() -> String) -> Result<(PackageManager, PathBuf)> {
     if let (_, Some(manager)) = settings(ctx.ws.manifest(), target) {
         let exe = find_on_path(manager.as_str()).with_context(|| {
             format!(
@@ -370,13 +388,7 @@ fn find_package_manager(ctx: &BuildContext, target: TargetKind, deps: &BTreeMap<
         })?;
         return Ok((manager, exe));
     }
-    PackageManager::ALL.into_iter().find_map(|m| find_on_path(m.as_str()).map(|exe| (m, exe))).with_context(|| {
-        format!(
-            "your {} dependencies need the npm packages {}; install Node.js (it includes npm), pnpm or bun and put it on PATH",
-            if target == TargetKind::Js { "Kotlin/JS" } else { "Wasm" },
-            package_list(deps)
-        )
-    })
+    PackageManager::ALL.into_iter().find_map(|m| find_on_path(m.as_str()).map(|exe| (m, exe))).with_context(none_found)
 }
 
 /// The packages as `name@version`, for messages.

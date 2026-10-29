@@ -1,6 +1,8 @@
 //! `kargo publish`: builds a library with the release profile and publishes it to a Maven
 //! repository: the local one (`~/.m2/repository`), a `[repositories]` entry (a directory or an
-//! HTTP repository such as Nexus, Artifactory or GitHub Packages), or Maven Central.
+//! HTTP repository such as Nexus, Artifactory or GitHub Packages), or Maven Central. The npm
+//! package of a Wasm or Kotlin/JS library goes to an npm registry ([`super::publish_npm`]);
+//! [`publish_package`] runs whichever of the two the package and the flags ask for.
 //!
 //! Every module is first staged in `target/release/publish/repository` with its POM, Gradle module
 //! metadata, sources and javadoc jars, signatures and checksums (see [`crate::publication`]), then
@@ -40,6 +42,45 @@ pub struct PublishOptions {
     pub repository: Option<String>,
     /// Build, stage and sign everything, but upload nothing.
     pub dry_run: bool,
+    /// Which of Maven and npm to publish to.
+    pub only: Only,
+    /// The npm registry, dist-tag and one-time password of the command line (`--registry`, `--tag`, `--otp`).
+    pub npm: super::publish_npm::NpmOptions,
+}
+
+/// Which kinds of repository `kargo publish` publishes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Only {
+    /// Maven when a repository is given or set in `[publish]`, npm when `[publish.npm]` is set: both when both are.
+    #[default]
+    Configured,
+    /// `--maven`.
+    Maven,
+    /// `--npm`.
+    Npm,
+}
+
+/// Where a package is published, as (Maven, npm).
+pub fn destinations(manifest: &Manifest, opts: &PublishOptions) -> (bool, bool) {
+    let npm_set = manifest.publish.npm.is_some();
+    match opts.only {
+        Only::Maven => (true, false),
+        Only::Npm => (false, true),
+        // A package with nothing configured goes down the Maven path, which says what to configure.
+        Only::Configured => (opts.repository.is_some() || manifest.publish.repository.is_some() || !npm_set, npm_set),
+    }
+}
+
+/// `kargo publish` for one package: to Maven, to npm, or to both. Maven goes first.
+pub fn publish_package(ctx: &BuildContext, opts: &PublishOptions) -> Result<()> {
+    let (maven, npm) = destinations(ctx.ws.manifest(), opts);
+    if maven {
+        publish(ctx, opts)?;
+    }
+    if npm {
+        super::publish_npm::publish(ctx, &super::publish_npm::NpmOptions { dry_run: opts.dry_run, ..opts.npm.clone() })?;
+    }
+    Ok(())
 }
 
 /// Where a package is published.
@@ -90,6 +131,10 @@ pub fn publish_order(project: &Project, selected: &[usize]) -> Vec<usize> {
         seen.push(index);
         for (_, dep) in project.package(index).path_dependencies() {
             visit(project, selected, *dep, seen, out);
+        }
+        // An npm package is published after the packages it depends on.
+        for dep in crate::npm_package::member_dependencies(project, index) {
+            visit(project, selected, dep, seen, out);
         }
         if selected.contains(&index) {
             out.push(index);

@@ -390,7 +390,7 @@ greeter-core.d.mts  greeter-core.import-object.mjs  greeter-core.js-builtins.mjs
 greeter-core.mjs    greeter-core.wasm               package.json
 ```
 
-`target/<profile>/wasm/` is now an npm package. Publish it with `npm publish target/release/wasm`, or pack it with `npm pack`, and use it like any other:
+`target/<profile>/wasm/` is now an npm package. Publish it with [`kargo publish --npm`](../publishing/#publishing-to-npm) (or `npm publish target/release/wasm` by hand), or pack it with `npm pack`, and use it like any other:
 
 ```js
 import { greet } from "@acme/greeter";
@@ -400,7 +400,7 @@ console.log(greet("npm")); // Hello, npm!
 
 - **`@JsExport`** marks the top-level functions that JavaScript can call. In Kotlin 2.4 Kotlin/Wasm exports functions only; the annotation does not apply to classes. Everything else is removed from release builds.
 - **`greeter-core.d.mts`** holds TypeScript declarations for the exported functions (`export declare function greet(name: string): string;`).
-- **`package.json`** is written for you: `name`, `version`, `description`, `license` and `author` come from `[package]`, `type` is `module`, and `main`, `module`, `types` and `exports` point at the files above. Its `dependencies` list the [npm packages](#npm-packages) the library needs, both those its Kotlin libraries ask for and your `npm-dependencies`.
+- **`package.json`** is written for you: `name`, `version`, `description`, `license`, `homepage`, `repository` and `author` come from `[package]` (and `keywords`, `bugs`, `sideEffects` and `engines` from [`[publish.npm]`](../../reference/manifest/#publishnpm)), `type` is `module`, and `main`, `module`, `types` and `exports` point at the files above. Its `dependencies` list the [npm packages](#npm-packages) the library needs, both those its Kotlin libraries ask for and your `npm-dependencies`.
 - A library has no `main`, so `kargo run` refuses to run it. `kargo test` runs its tests like any other Wasm target, on Node.js or in a headless browser, according to `environment`.
 - The module finds its `.wasm` next to itself, so keep the files together. `kind = "library"` needs `environment = "js"` or `"browser"`; a `wasi` module is not an npm package.
 

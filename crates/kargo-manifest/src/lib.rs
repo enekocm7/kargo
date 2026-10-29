@@ -1123,6 +1123,57 @@ pub struct PublishSettings {
     pub kind: PublishKind,
     /// The former coordinates of the package: each gets a relocation POM pointing at the current ones.
     pub relocations: Vec<ModuleId>,
+    /// `[publish.npm]`: where and how `kargo publish --npm` publishes a Wasm or JS library; `None` when the table is absent.
+    pub npm: Option<NpmPublishSettings>,
+}
+
+/// Who may install an npm package (`access` of `[publish.npm]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpmAccess {
+    Public,
+    Restricted,
+}
+
+impl NpmAccess {
+    /// The name written in `access` and passed to `--access`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NpmAccess::Public => "public",
+            NpmAccess::Restricted => "restricted",
+        }
+    }
+}
+
+/// The `sideEffects` field of an npm package (`side-effects` of `[publish.npm]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NpmSideEffects {
+    /// `true` or `false`: whether importing any file of the package has side effects.
+    Flag(bool),
+    /// Only these files (globs, relative to the package) have side effects.
+    Files(Vec<String>),
+}
+
+/// `[publish.npm]`: what `kargo publish --npm` does with the package of a Wasm or JS library.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NpmPublishSettings {
+    /// The registry URL; `None` uses the `.npmrc` setting for the package, else <https://registry.npmjs.org>.
+    pub registry: Option<String>,
+    /// The scope (without the `@`) of an unscoped package name.
+    pub scope: Option<String>,
+    /// Who may install the package; `None` leaves the registry's default (public for unscoped names).
+    pub access: Option<NpmAccess>,
+    /// The dist-tag the version gets instead of `latest`, such as `next`.
+    pub tag: Option<String>,
+    /// Publish with provenance (`--provenance`), which needs a supported CI provider.
+    pub provenance: bool,
+    /// The `keywords` of `package.json`.
+    pub keywords: Vec<String>,
+    /// The `bugs` URL of `package.json`; `None` derives it from `[package] repository` for GitHub and GitLab.
+    pub bugs: Option<String>,
+    /// The `sideEffects` of `package.json`; `None` leaves it out.
+    pub side_effects: Option<NpmSideEffects>,
+    /// The `engines` of `package.json`, such as `node = ">=20"`.
+    pub engines: BTreeMap<String, String>,
 }
 
 impl Default for PublishSettings {
@@ -1135,6 +1186,7 @@ impl Default for PublishSettings {
             central_publishing: CentralPublishing::Manual,
             kind: PublishKind::Library,
             relocations: Vec::new(),
+            npm: None,
         }
     }
 }
@@ -2337,8 +2389,9 @@ fn validate_module_name(target: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// npm package names: lowercase, URL-safe, optionally scoped (`@scope/name`).
-fn validate_npm_name(target: &str, name: &str) -> Result<()> {
+/// Whether `name` is an npm package name: lowercase, URL-safe, at most 214 characters, optionally
+/// scoped (`@scope/name`).
+pub fn is_npm_name(name: &str) -> bool {
     let part_ok = |part: &str| {
         !part.is_empty()
             && !part.starts_with(['.', '_'])
@@ -2348,7 +2401,11 @@ fn validate_npm_name(target: &str, name: &str) -> Result<()> {
         Some(scoped) => scoped.split_once('/').is_some_and(|(scope, rest)| part_ok(scope) && part_ok(rest)),
         None => part_ok(name),
     };
-    if !valid || name.len() > 214 {
+    valid && name.len() <= 214
+}
+
+fn validate_npm_name(target: &str, name: &str) -> Result<()> {
+    if !is_npm_name(name) {
         bail!(
             "invalid [target.{target}] npm-name `{name}` (use lowercase letters, digits, `-`, `.`, `_` and `~`, optionally scoped like `@scope/name`)"
         );

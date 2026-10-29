@@ -230,7 +230,7 @@ Without it, the build stops with a message that names this command. The SDK land
 
 ### Publishing releases
 
-`kargo publish` uploads a library from CI, with the Maven Central token and the signing key in secrets. Kargo signs with `KARGO_SIGNING_KEY` in memory, so the runner needs no GnuPG, and it takes the credentials of GitHub Packages, GitLab and CodeArtifact from `GITHUB_TOKEN`, `CI_JOB_TOKEN` and `CODEARTIFACT_AUTH_TOKEN` (see [Hosted repositories](../../reference/manifest/#hosted-repositories)). A re-run job doesn't fail on a release it already uploaded to such a repository: unchanged modules are skipped. See [Publishing from CI](../publishing/#publishing-from-ci) for a complete workflow.
+`kargo publish` uploads a library from CI, with the Maven Central token and the signing key in secrets. Kargo signs with `KARGO_SIGNING_KEY` in memory, so the runner needs no GnuPG, and it takes the credentials of GitHub Packages, GitLab and CodeArtifact from `GITHUB_TOKEN`, `CI_JOB_TOKEN` and `CODEARTIFACT_AUTH_TOKEN` (see [Hosted repositories](../../reference/manifest/#hosted-repositories)). A re-run job doesn't fail on a release it already uploaded to such a repository: unchanged modules are skipped. See [Publishing from CI](../publishing/#publishing-from-ci) for a complete workflow. `kargo publish --npm` publishes a Wasm or Kotlin/JS library to npm with `NPM_TOKEN` in a secret; with `provenance = true` in [`[publish.npm]`](../../reference/manifest/#publishnpm), give the job `permissions: id-token: write`, and Kargo fails before building when it is missing. See [Publishing to npm](../publishing/#publishing-to-npm).
 
 ## Other CI systems
 

@@ -43,6 +43,7 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `KARGO_MAVEN_LOCAL` | The local Maven repository that `kargo publish --local` writes and `"maven-local"` in `[repositories]` reads (default `~/.m2/repository`) |
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | The two parts of a Central Portal user token, for [publishing to Maven Central](../../guides/publishing/#maven-central) |
 | `KARGO_MAVEN_CENTRAL_URL` | The Central Portal to publish to (default `https://central.sonatype.com`) |
+| `NPM_TOKEN` | The access token `kargo publish --npm` publishes with. Kargo writes it to a temporary `.npmrc` (readable by its owner only) for the upload and removes it afterwards; without it, your own `.npmrc` is used. See [Publishing to npm](../../guides/publishing/#publishing-to-npm) |
 | `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API that [`kargo lsp` completes coordinates from](../../guides/editors/#dependency-completion-and-update-hints) (default `https://search.maven.org/solrsearch/select`) |
 | `KARGO_SIGNING_KEY` | An ASCII-armored secret key (`gpg --export-secret-keys --armor <id>`), as is or base64-encoded, that `kargo publish` [signs with](../../guides/publishing/#signing) in memory, without GnuPG. Without it, GnuPG's own keyring is used |
 | `KARGO_SIGNING_KEY_ID` | The key to sign with, by fingerprint or key ID (`gpg --local-user` with GnuPG); default: the newest signing subkey, else the primary key (GnuPG's default key without `KARGO_SIGNING_KEY`) |

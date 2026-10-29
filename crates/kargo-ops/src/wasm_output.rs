@@ -43,7 +43,14 @@ pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> R
         let manifest = ctx.ws.manifest();
         let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
         let dependencies = crate::npm::dependencies(ctx, kargo_manifest::TargetKind::Wasm, &build.libraries)?;
-        let json = package_json(&manifest.package, wasm.npm_package_name(&manifest.package), &build.name, &dependencies);
+        let dependencies = crate::npm_package::published_dependencies(ctx.project, ctx.ws, dependencies);
+        let json = package_json(
+            &manifest.package,
+            wasm.npm_package_name(&manifest.package),
+            &build.name,
+            &dependencies,
+            manifest.publish.npm.as_ref(),
+        );
         std::fs::write(build.dir.join("package.json"), json).context("failed to write package.json")?;
     }
     if build.environment == WasmEnvironment::Browser && build.kind == WasmKind::Application {
@@ -432,46 +439,27 @@ fn resolve_extension(dir: &Path, entry: &str) -> String {
 // --- The library package ----------------------------------------------------------------------
 
 /// The `package.json` of a library: the compiled module, its TypeScript declarations and the
-/// npm packages it imports, so `npm publish target/release/wasm` works as it is.
-///
-/// Written by hand because the order matters: TypeScript takes the first condition of `exports`
-/// that matches, so `types` has to come before `default`.
-fn package_json(package: &kargo_manifest::Package, npm_name: String, module: &str, dependencies: &BTreeMap<String, String>) -> String {
-    let quoted = |s: &str| serde_json::to_string(s).expect("a string serializes");
-    // A JSON value, indented to sit one level down.
-    let nested = |value: serde_json::Value| serde_json::to_string_pretty(&value).expect("a JSON value serializes").replace('\n', "\n  ");
-    let entry = quoted(&format!("./{module}.mjs"));
-    let types = quoted(&format!("./{module}.d.mts"));
-
-    let mut fields: Vec<(&str, String)> = vec![("name", quoted(&npm_name)), ("version", quoted(&package.version))];
-    if let Some(description) = &package.description {
-        fields.push(("description", quoted(description)));
+/// npm packages it imports, so `npm publish target/release/wasm` works as it is (`kargo publish
+/// --npm` does that with the checks and credentials of `[publish.npm]`).
+fn package_json(
+    package: &kargo_manifest::Package,
+    npm_name: String,
+    module: &str,
+    dependencies: &BTreeMap<String, String>,
+    settings: Option<&kargo_manifest::NpmPublishSettings>,
+) -> String {
+    crate::npm_package::LibraryPackage {
+        name: crate::npm_package::scoped_name(npm_name, settings),
+        package,
+        settings,
+        module,
+        extension: "mjs",
+        types_extension: "d.mts",
+        es: true,
+        files: vec!["*.mjs".to_owned(), "*.wasm".to_owned(), "*.d.mts".to_owned()],
+        dependencies,
     }
-    if let Some(license) = &package.license {
-        fields.push(("license", quoted(license)));
-    }
-    if let Some(author) = package.authors.first() {
-        fields.push(("author", quoted(author)));
-    }
-    if package.authors.len() > 1 {
-        fields.push(("contributors", nested(serde_json::json!(&package.authors[1..]))));
-    }
-    fields.extend([
-        ("type", quoted("module")),
-        ("main", entry.clone()),
-        ("module", entry.clone()),
-        ("types", types.clone()),
-        (
-            "exports",
-            format!("{{\n    \".\": {{\n      \"types\": {types},\n      \"default\": {entry}\n    }},\n    \"./package.json\": \"./package.json\"\n  }}"),
-        ),
-        ("files", nested(serde_json::json!(["*.mjs", "*.wasm", "*.d.mts"]))),
-    ]);
-    if !dependencies.is_empty() {
-        fields.push(("dependencies", nested(serde_json::json!(dependencies))));
-    }
-    let body: Vec<String> = fields.iter().map(|(key, value)| format!("  \"{key}\": {value}")).collect();
-    format!("{{\n{}\n}}\n", body.join(",\n"))
+    .json()
 }
 
 // --- wasm-opt ---------------------------------------------------------------------------------
@@ -654,7 +642,7 @@ fn gzipped_size(data: &[u8]) -> u64 {
 }
 
 /// `1.5 MiB`, `27.1 KiB` or `512 B`.
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     let bytes_f = bytes as f64;
     if bytes_f >= KIB * KIB {
@@ -803,9 +791,8 @@ mod tests {
             publish: true,
         };
         let deps = map(&[("@js-joda/core", "3.2.0")]);
-        let text = package_json(&package, "@acme/hello".to_owned(), "hello", &deps);
-        assert!(text.find("\"types\": \"./hello.d.mts\",\n      \"default\"").is_some(), "`types` comes first in `exports`:\n{text}");
-        assert!(text.ends_with("}\n") && text.find("\"name\"").unwrap() < text.find("\"version\"").unwrap(), "{text}");
+        let text = package_json(&package, "@acme/hello".to_owned(), "hello", &deps, None);
+        assert!(text.find("\"types\": \"./hello.d.mts\",\n      \"import\"").is_some(), "`types` comes first in `exports`:\n{text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["name"], "@acme/hello");
         assert_eq!(json["version"], "1.2.3");
@@ -820,8 +807,14 @@ mod tests {
         assert_eq!(json["author"], "Ada");
         assert_eq!(json["contributors"][0], "Grace");
 
+        let settings = kargo_manifest::NpmPublishSettings { scope: Some("acme".into()), ..Default::default() };
+        let scoped: serde_json::Value =
+            serde_json::from_str(&package_json(&package, "hello".to_owned(), "hello", &deps, Some(&settings))).unwrap();
+        assert_eq!(scoped["name"], "@acme/hello", "`scope` names a package that has none");
+
         let bare = kargo_manifest::Package { description: None, authors: vec![], license: None, ..package };
-        let json: serde_json::Value = serde_json::from_str(&package_json(&bare, "hello".to_owned(), "hello", &BTreeMap::new())).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&package_json(&bare, "hello".to_owned(), "hello", &BTreeMap::new(), None)).unwrap();
         assert!(json.get("dependencies").is_none() && json.get("author").is_none() && json.get("license").is_none());
     }
 

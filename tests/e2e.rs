@@ -1077,6 +1077,48 @@ fn wasm_library_builds_an_npm_package() {
 }
 
 #[test]
+fn publish_a_wasm_library_to_npm_dry_run() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: npm is not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["greeter", "--lib", "--target", "wasm"]);
+    t.write(
+        "greeter/kargo.toml",
+        "[package]\nname = \"greeter\"\nversion = \"0.3.0\"\ndescription = \"Greets\"\nlicense = \"MIT\"\n\
+         repository = \"https://github.com/acme/greeter\"\n\n[target.wasm]\nkind = \"library\"\nmodule-name = \"greeter-core\"\n\
+         wasm-opt = false\npackage-manager = \"npm\"\n\n[publish.npm]\nscope = \"acme\"\naccess = \"public\"\nkeywords = [\"kotlin\"]\n",
+    );
+    t.write(
+        "greeter/src/Greeter.kt",
+        "package com.example.greeter\n\n@OptIn(ExperimentalJsExport::class)\n@JsExport\nfun greet(name: String): String = \"Hello, $name!\"\n",
+    );
+    // No registry is reachable from a test, so the check for the version on the registry only warns in a dry run.
+    t.kargo("greeter").args(["publish", "--npm", "--dry-run"]).env("NPM_CONFIG_REGISTRY", "http://127.0.0.1:9").assert().success().stderr(
+        predicate::str::contains("Packaging @acme/greeter v0.3.0 (npm)")
+            .and(predicate::str::contains("greeter-core.wasm"))
+            .and(predicate::str::contains("greeter-core.d.mts"))
+            .and(predicate::str::contains("package.json"))
+            .and(predicate::str::contains("aborting upload of @acme/greeter")),
+    );
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(t.dir.path().join("greeter/target/release/wasm/package.json")).unwrap()).unwrap();
+    assert_eq!(package["name"], "@acme/greeter");
+    assert_eq!(package["keywords"], serde_json::json!(["kotlin"]));
+    assert_eq!(package["bugs"]["url"], "https://github.com/acme/greeter/issues");
+    assert!(
+        t.dir
+            .path()
+            .join("greeter/target/release/npm/acme-greeter")
+            .read_dir()
+            .unwrap()
+            .any(|e| { e.unwrap().file_name().to_string_lossy().ends_with(".tgz") })
+    );
+}
+
+#[test]
 fn wasm_release_removes_dead_code_and_reports_the_size() {
     require_e2e!();
     let t = E2e::new();

@@ -44,7 +44,36 @@ pub fn manifest(manifest: &Manifest, is_builtin_command: impl Fn(&str) -> bool) 
             "task `{name}` is hidden by the built-in `kargo {name}` command; run the task with `kargo task {name}` or rename it"
         ));
     }
+    messages.extend(npm_publishing(manifest));
     messages
+}
+
+/// Warnings about `[publish.npm]`: a table that has no package to publish, and an npm package without the
+/// fields registries show on its page.
+fn npm_publishing(manifest: &Manifest) -> Vec<String> {
+    if manifest.publish.npm.is_none() {
+        return Vec::new();
+    }
+    if !crate::ops::publish_npm::is_npm_library(manifest) {
+        return vec![
+            "[publish.npm] is ignored: no npm package is built; set `kind = \"library\"` under [target.wasm] or [target.js] to publish one"
+                .to_owned(),
+        ];
+    }
+    let pkg = &manifest.package;
+    let missing: Vec<&str> =
+        [("description", pkg.description.is_some()), ("license", pkg.license.is_some()), ("repository", pkg.repository.is_some())]
+            .into_iter()
+            .filter_map(|(key, set)| (!set).then_some(key))
+            .collect();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "the npm package has no {}; registries show them on the package's page, so set {} in [package]",
+        missing.join(", no "),
+        if missing.len() == 1 { "it" } else { "them" }
+    )]
 }
 
 /// Warns about a `kargo.lock` in the package's own directory that a workspace's shared lockfile has
@@ -182,6 +211,32 @@ mod tests {
             assert_eq!(messages.len(), 1, "{version}");
             assert!(messages[0].contains(&format!("package version `{version}` does not look like a version")), "{messages:?}");
         }
+    }
+
+    #[test]
+    fn npm_packages_without_metadata_warn() {
+        let library = "[target.wasm]\nkind = \"library\"\nenvironment = \"js\"\n[publish.npm]\n";
+        let messages = manifest(&package("1.0.0", library), |_| false);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].contains("no description, no license, no repository"), "{messages:?}");
+
+        let described = format!("description = \"Greets\"\nlicense = \"MIT\"\n{library}");
+        let messages = manifest(&package("1.0.0", &described), |_| false);
+        assert!(messages[0].contains("no repository") && messages[0].contains("set it in [package]"), "{messages:?}");
+
+        let complete = format!("description = \"Greets\"\nlicense = \"MIT\"\nrepository = \"https://github.com/acme/app\"\n{library}");
+        assert!(manifest(&package("1.0.0", &complete), |_| false).is_empty());
+        let without_table = "[target.wasm]\nkind = \"library\"\nenvironment = \"js\"\n";
+        assert!(manifest(&package("1.0.0", without_table), |_| false).is_empty(), "only a project that publishes to npm is told");
+    }
+
+    #[test]
+    fn publish_npm_without_a_library_warns() {
+        let messages = manifest(&package("1.0.0", "[publish.npm]\n"), |_| false);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].starts_with("[publish.npm] is ignored"), "{messages:?}");
+        let application = "[target.wasm]\nenvironment = \"browser\"\n[publish.npm]\n";
+        assert_eq!(manifest(&package("1.0.0", application), |_| false).len(), 1, "an application is not an npm package");
     }
 
     #[test]
