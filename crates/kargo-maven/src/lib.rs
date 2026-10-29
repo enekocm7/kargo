@@ -9,6 +9,7 @@ pub mod pom;
 pub mod repo;
 pub mod resolver;
 pub mod snapshot;
+mod suggest;
 #[cfg(test)]
 mod testserver;
 pub mod version;

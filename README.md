@@ -97,7 +97,9 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo version` | Print the Kargo version (`-v` adds the release and the target it was built for), like `kargo --version` |
 | `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
 
-Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--vendored`, `--refresh`, `--require-checksums`, `--manifest-path`.
+Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--vendored`, `--refresh`, `--require-checksums`, `--manifest-path`, `--color`.
+
+Errors say what to do next: a mistyped command, package, framework, platform, `kargo.toml` key or dependency coordinate gets a `help: did you mean ...?` line, manifest errors show the line with a caret, and errors the FAQ explains link to its entry.
 
 Behind a company firewall, `~/.kargo/config.toml` (or a project's `.kargo/config.toml`) sends downloads through mirrors and a proxy:
 
@@ -481,6 +483,7 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory |
 | `KARGO_OFFLINE` | Same as `--offline` |
+| `NO_COLOR` | Turns off the colors of Kargo's output, as `--color never` does |
 | `KARGO_REQUIRE_CHECKSUMS` | Same as `--require-checksums` |
 | `KARGO_VENDORED` | Same as `--vendored` |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | Proxy for Kargo's downloads (overridden by `[http] proxy` in `config.toml`) |

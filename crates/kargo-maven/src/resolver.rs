@@ -382,7 +382,7 @@ impl<'a> Resolver<'a> {
             return Ok(info);
         }
         if pom.is_none() {
-            bail!("{module}:{version} was not found in any repository");
+            return Err(self.client.version_not_found(module, version));
         }
         let web_runtime = matches!(self.platform, Platform::Wasm(_)) && WASM_RUNTIME_JARS.contains(&module.to_string().as_str());
         if self.platform != Platform::Jvm && !web_runtime {
@@ -552,9 +552,9 @@ impl<'a> Resolver<'a> {
             return Ok(best.clone());
         }
         let available = self.client.versions(module)?;
-        available.into_iter().filter(|v| satisfies_all(v)).max().with_context(|| {
+        available.into_iter().filter(|v| satisfies_all(v)).max().ok_or_else(|| {
             let ranges: Vec<String> = requests.ranges.iter().map(ToString::to_string).collect();
-            format!("no version of {module} satisfies all requirements: {}", ranges.join(", "))
+            self.client.no_version_matches(module, &ranges.join(", "))
         })
     }
 

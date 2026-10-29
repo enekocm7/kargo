@@ -29,8 +29,9 @@ use kargo_ops::warnings;
 use kargo_ops::workspace::{ProfileKind, Project, Selection, Workspace};
 use kargo_toolchain::ServerKind;
 use kargo_util::config::Config;
+use kargo_util::help;
 use kargo_util::jobs::Jobs;
-use kargo_util::shell::{Shell, Verbosity};
+use kargo_util::shell::{self, Shell, Verbosity};
 
 use crate::complete::{self, ShellArg};
 
@@ -115,6 +116,27 @@ struct GlobalArgs {
     /// Path to kargo.toml
     #[arg(long, global = true, value_name = "PATH")]
     manifest_path: Option<PathBuf>,
+    /// When to color Kargo's output (NO_COLOR turns it off with `auto`)
+    #[arg(long, global = true, value_enum, value_name = "WHEN", default_value = "auto")]
+    color: ColorArg,
+}
+
+/// `--color`: when Kargo's own output uses colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ColorArg {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorArg {
+    fn apply(self) {
+        shell::set_color(match self {
+            ColorArg::Auto => shell::Color::Auto,
+            ColorArg::Always => shell::Color::Always,
+            ColorArg::Never => shell::Color::Never,
+        });
+    }
 }
 
 /// The CI system `kargo init-ci` writes a workflow for.
@@ -900,7 +922,12 @@ fn set_message_format(format: MessageFormatArg) {
 /// With `--message-format json`, ends the output with `{"reason":"build-finished",...}`.
 fn build_finished<T>(format: MessageFormatArg, result: Result<T>) -> Result<T> {
     if format == MessageFormatArg::Json {
-        kargo_compiler::diagnostics::emit(&serde_json::json!({ "reason": "build-finished", "success": result.is_ok() }));
+        let mut message = serde_json::json!({ "reason": "build-finished", "success": result.is_ok() });
+        if let Err(err) = &result {
+            advice_fields(err, &mut message);
+        }
+        BUILD_FINISHED.store(true, std::sync::atomic::Ordering::Relaxed);
+        kargo_compiler::diagnostics::emit(&message);
     }
     result
 }
@@ -1786,6 +1813,7 @@ fn run() -> ExitCode {
     } else {
         Verbosity::Normal
     };
+    cli.global.color.apply();
     let shell = Shell::new(verbosity);
     match execute(cli, &shell) {
         Ok(code) => match u8::try_from(code) {
@@ -2000,6 +2028,37 @@ fn report_error(shell: &Shell, err: &anyhow::Error) {
     for cause in err.chain().skip(1) {
         eprintln!("\nCaused by:\n  {cause}");
     }
+    let help = help::help_lines(err);
+    if !help.is_empty() {
+        eprintln!();
+    }
+    for line in help {
+        shell.help(line);
+    }
+    if kargo_compiler::diagnostics::is_json() && !BUILD_FINISHED.load(std::sync::atomic::Ordering::Relaxed) {
+        kargo_compiler::diagnostics::emit(&error_message(err));
+    }
+}
+
+/// Whether `build-finished` was printed, which already says the command failed.
+static BUILD_FINISHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Adds the advice of a failure to a JSON message: `help` and `suggestions`, each only when there is one.
+fn advice_fields(err: &anyhow::Error, message: &mut serde_json::Value) {
+    let lines = help::help_lines(err);
+    if !lines.is_empty() {
+        message["help"] = serde_json::json!(lines.join("\n"));
+    }
+    if let Some(advice) = help::advice(err).filter(|a| !a.suggestions().is_empty()) {
+        message["suggestions"] = serde_json::json!(advice.suggestions());
+    }
+}
+
+/// The `error` message of `--message-format json` for a failure before (or outside) a build.
+fn error_message(err: &anyhow::Error) -> serde_json::Value {
+    let mut message = serde_json::json!({ "reason": "error", "message": format!("{err:#}") });
+    advice_fields(err, &mut message);
+    message
 }
 
 fn load_workspace(global: &GlobalArgs) -> Result<Workspace> {
@@ -4129,36 +4188,6 @@ fn info_json(config: &Config, ws: &Workspace) -> Result<serde_json::Value> {
     }))
 }
 
-/// The candidate closest to `name` when it is near enough to be a typo (as Cargo suggests commands):
-/// at most a third of the name's length (at least one) away, counting a swap of neighbors as one edit.
-fn closest_match<'a>(name: &str, candidates: &'a [String]) -> Option<&'a str> {
-    let limit = name.chars().count().max(3) / 3;
-    candidates.iter().map(|c| (edit_distance(name, c), c)).filter(|(d, _)| *d <= limit).min_by_key(|(d, _)| *d).map(|(_, c)| c.as_str())
-}
-
-/// Optimal string alignment distance: insertions, deletions, substitutions and swaps of neighbors.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let mut rows = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, row) in rows.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    for (j, cell) in rows[0].iter_mut().enumerate() {
-        *cell = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (rows[i - 1][j] + 1).min(rows[i][j - 1] + 1).min(rows[i - 1][j - 1] + cost);
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(rows[i - 2][j - 2] + 1);
-            }
-            rows[i][j] = best;
-        }
-    }
-    rows[a.len()][b.len()]
-}
-
 /// `kargo <name>`: a task from the manifest, else a `kargo-<name>` executable.
 fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<i32> {
     let (name, args) = argv.split_first().context("missing subcommand")?;
@@ -4178,8 +4207,16 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<i
         if let Some(project) = &project {
             known.extend(task_names(project));
         }
-        let suggestion = closest_match(name, &known).map(|s| format!("\n\n\tDid you mean `{s}`?")).unwrap_or_default();
-        bail!("no such command: `{name}`{suggestion}\n\n\tView all installed commands with `kargo --help` and `kargo plugins`");
+        let message = format!(
+            "no such command: `{name}`
+
+	View all installed commands with `kargo --help` and `kargo plugins`"
+        );
+        let suggestions: Vec<String> = help::nearest(name, &known, 3).into_iter().map(str::to_owned).collect();
+        return Err(match help::closest(name, &known) {
+            Some(close) => help::helpful(message, format!("did you mean `{close}`?"), suggestions),
+            None => anyhow::anyhow!(message),
+        });
     };
     let cwd = std::env::current_dir()?;
     let code = kargo_ops::plugins::run_subcommand(config, name, &program, args, &cwd)?;
@@ -4195,17 +4232,6 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
-    }
-
-    #[test]
-    fn suggests_the_closest_command() {
-        let known: Vec<String> = ["build", "bench", "run", "test", "tree", "check"].map(String::from).to_vec();
-        assert_eq!(closest_match("biuld", &known), Some("build"));
-        assert_eq!(closest_match("chek", &known), Some("check"));
-        assert_eq!(closest_match("tset", &known), Some("test"));
-        assert_eq!(closest_match("definitely-not-a-command", &known), None);
-        assert_eq!(closest_match("x", &known), None);
-        assert_eq!(edit_distance("kitten", "sitting"), 3);
     }
 
     #[test]

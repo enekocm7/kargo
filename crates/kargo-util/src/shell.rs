@@ -14,6 +14,26 @@ pub enum Verbosity {
     Verbose,
 }
 
+/// When output uses colors (`--color`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Color {
+    /// Colors on a terminal, unless `NO_COLOR` is set.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+/// Applies `--color` to everything Kargo prints through `anstream`.
+pub fn set_color(color: Color) {
+    let choice = match color {
+        Color::Auto => anstream::ColorChoice::Auto,
+        Color::Always => anstream::ColorChoice::Always,
+        Color::Never => anstream::ColorChoice::Never,
+    };
+    choice.write_global();
+}
+
 /// Writes status messages to stderr, leaving stdout for program output.
 #[derive(Debug, Clone, Default)]
 pub struct Shell {
@@ -62,6 +82,11 @@ impl Shell {
         if self.verbosity >= Verbosity::Normal {
             self.print_left(NOTE, "note", message);
         }
+    }
+
+    /// A line of advice under an error: `help: did you mean `build`?`. Printed with the error, even in quiet mode.
+    pub fn help(&self, message: impl Display) {
+        self.print_left(NOTE, "help", message);
     }
 
     /// Errors are always printed, even in quiet mode.

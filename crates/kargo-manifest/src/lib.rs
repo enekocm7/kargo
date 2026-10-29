@@ -20,6 +20,7 @@
 //! ```
 
 pub mod edit;
+mod errors;
 mod raw;
 pub mod script;
 
@@ -123,7 +124,11 @@ impl FromStr for TargetKind {
             "js" | "javascript" => Ok(TargetKind::Js),
             "native" => Ok(TargetKind::Native),
             "android" => Ok(TargetKind::Android),
-            other => bail!("unknown target `{other}` (expected one of: jvm, wasm, js, native, android)"),
+            other => Err(kargo_util::help::unknown(
+                format!("unknown target `{other}` (expected one of: jvm, wasm, js, native, android)"),
+                other,
+                &["jvm", "wasm", "js", "native", "android", "wasm-js", "javascript"],
+            )),
         }
     }
 }
@@ -2044,6 +2049,10 @@ impl Manifest {
     }
 
     pub fn parse_in(text: &str, workspace: Option<&WorkspaceManifest>) -> Result<Self> {
+        Self::parse_raw(text, workspace).map_err(|err| errors::explain(text, err))
+    }
+
+    fn parse_raw(text: &str, workspace: Option<&WorkspaceManifest>) -> Result<Self> {
         if is_workspace(text)? {
             bail!("this is a workspace manifest ([workspace]), not a package; select a member with `-p <name>`");
         }
@@ -2130,8 +2139,11 @@ impl WorkspaceManifest {
 
     /// Parses a workspace manifest whose directory is `root`.
     pub fn parse(text: &str, root: &Path) -> Result<Self> {
-        let raw: raw::RawWorkspaceManifest = toml::from_str(text)?;
-        raw.validate(root)
+        let parse = || -> Result<Self> {
+            let raw: raw::RawWorkspaceManifest = toml::from_str(text)?;
+            raw.validate(root)
+        };
+        parse().map_err(|err| errors::explain(text, err))
     }
 
     /// Whether `[workspace.dependencies]` declares `name`.

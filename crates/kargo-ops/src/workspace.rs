@@ -539,10 +539,14 @@ impl Project {
     }
 
     fn find(&self, name: &str) -> Result<usize> {
-        self.packages
-            .iter()
-            .position(|p| p.name() == name)
-            .with_context(|| format!("package `{name}` is not part of this project; its members are: {}", self.member_names()))
+        self.packages.iter().position(|p| p.name() == name).ok_or_else(|| {
+            let names: Vec<&str> = self.packages.iter().map(Workspace::name).collect();
+            kargo_util::help::unknown(
+                format!("package `{name}` is not part of this project; its members are: {}", self.member_names()),
+                name,
+                &names,
+            )
+        })
     }
 
     /// The packages a command applies to: the `-p` packages, every member with `--workspace`,

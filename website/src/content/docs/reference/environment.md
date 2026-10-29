@@ -18,6 +18,7 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `KARGO_INSTALL_ROOT` | Same as `--root` of [`kargo install`](../commands/#kargo-install) and `kargo uninstall`: install below `<root>/bin` and `<root>/install` instead of `$KARGO_HOME` |
 | `KARGO_TARGET_DIR` | Build output directory (default `target/` next to the project's or workspace's `kargo.toml`) |
 | `KARGO_OFFLINE` | Same as `--offline` |
+| `NO_COLOR` | Any non-empty value turns off the colors of Kargo's output, as `--color never` does (`--color always` still wins). `CLICOLOR_FORCE` turns them on when the output is not a terminal |
 | `KARGO_VENDORED` | Same as `--vendored`: resolve dependencies only from the repository [`kargo vendor`](../commands/#kargo-vendor) wrote |
 | `KARGO_REQUIRE_CHECKSUMS` | Same as `--require-checksums`: fail on a download whose repository publishes no checksum for it (see [`kargo.lock`](../lockfile/#requiring-published-checksums)) |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | The proxy for Kargo's downloads, and the hosts that bypass it (lowercase forms too). `[http] proxy` in `config.toml` overrides them; see [Offline and corporate builds](../../guides/offline-and-mirrors/#proxies-and-certificates) |

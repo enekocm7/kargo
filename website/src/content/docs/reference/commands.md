@@ -49,12 +49,15 @@ These work with every command.
 | `--require-checksums` | Fail on a download whose repository publishes no `.sha256` or `.sha1` for it, instead of accepting it unverified (also `KARGO_REQUIRE_CHECKSUMS=1`). Files `kargo.lock` pins are checked against it instead. See [Requiring published checksums](../lockfile/#requiring-published-checksums) |
 | `--system-gradle` | Run Android builds with the `gradle` on `PATH` instead of a Kargo-managed Gradle (also `KARGO_SYSTEM_GRADLE=1`). A project `gradlew` still wins |
 | `--manifest-path <PATH>` | Use this `kargo.toml` instead of searching from the current directory |
+| `--color <WHEN>` | When Kargo's own output uses colors: `auto` (the default: on a terminal, and off when `NO_COLOR` is set), `always` or `never`. The compilers' and your program's output is not affected |
 | `-V`, `--version` | Print the version. With `-v` (`kargo -vV`) also the release and the target it was built for (`host: x86_64-unknown-linux-gnu`). When a newer release exists, a note on stderr says so, at most once a day (see [`kargo self`](#kargo-self)) |
 | `-h`, `--help` | Print help |
 
 **Exit codes:** `0` on success, `101` when a build or test fails or Kargo reports an error (as in Cargo). `kargo run` exits with your program's exit code (`128 + n` when a signal `n` killed it on Linux and macOS). See [Continuous integration](../../guides/ci/).
 
 Targets are `jvm`, `wasm`, `js`, `native` and `android`.
+
+**Errors that help:** a mistyped command, `-p` package, `--framework`, `--platforms` value, `kargo.toml` key or target, or a `kargo add` coordinate, ends with `help: did you mean ...?`. An error with an entry in the [FAQ](../faq/) adds `help: see <link>`. See [Errors with a `help:` line](../faq/#errors-with-a-help-line).
 
 ## Package selection
 
@@ -527,6 +530,8 @@ kargo add --cinterop <name> [--header <file>]... [--pkg-config <package>]
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 `kargo add --path` refuses a dependency that would form a cycle, reuse another package's name or bring a second Kotlin version, and leaves `kargo.toml` unchanged.
+
+When the module does not exist in any repository, `kargo add` looks for the real name in the repositories' directory listings and suggests it (`help: did you mean `org.jetbrains.kotlinx:kotlinx-coroutines-core`?`), also for a mistyped group. When the module exists but not the version, the error lists the nearby versions and marks the pre-releases among them.
 
 Without a version, the latest release is used. Plain versions win over variants that some libraries publish next to them, such as `0.8.0-0.6.x-compat` or `33.0.0-jre`; Kargo prints a note naming the variant it skipped. When a library publishes only variants, the newest one is used.
 

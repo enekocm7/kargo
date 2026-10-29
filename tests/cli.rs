@@ -1348,8 +1348,8 @@ fn external_subcommands_from_kargo_home() {
         .arg("biuld")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no such command: `biuld`").and(predicate::str::contains("Did you mean `build`?")));
-    p.kargo().arg("definitely-not-a-command").assert().failure().stderr(predicate::str::contains("Did you mean").not());
+        .stderr(predicate::str::contains("no such command: `biuld`").and(predicate::str::contains("help: did you mean `build`?")));
+    p.kargo().arg("definitely-not-a-command").assert().failure().stderr(predicate::str::contains("did you mean").not());
 }
 
 #[test]
@@ -2905,7 +2905,10 @@ fn json_message_format_ends_with_build_finished() {
         let text = String::from_utf8(out).unwrap();
         // stdout holds only JSON messages.
         let messages: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-        assert_eq!(messages.last().unwrap(), &serde_json::json!({"reason": "build-finished", "success": false}), "{text}");
+        // `help` (here the FAQ entry about offline mode) and `suggestions` are optional.
+        let last = messages.last().unwrap();
+        assert_eq!((&last["reason"], &last["success"]), (&serde_json::json!("build-finished"), &serde_json::json!(false)), "{text}");
+        assert!(last.as_object().unwrap().keys().all(|k| ["reason", "success", "help", "suggestions"].contains(&k.as_str())), "{text}");
     }
 }
 
@@ -6276,4 +6279,161 @@ fn outdated_and_upgrade_cover_npm_packages() {
     assert!(p.read("kargo.toml").contains("\"chart.js\" = \"4.4.1\""), "{}", p.read("kargo.toml"));
     kargo_npm(&p, &registry).args(["upgrade", "ranged"]).assert().success().stderr(predicate::str::contains("not a single version"));
     kargo_npm(&p, &registry).arg("outdated").assert().success().stderr(predicate::str::contains("Fresh"));
+}
+
+#[test]
+fn a_mistyped_manifest_key_suggests_the_valid_one_and_shows_the_line() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "\n[target.jvm]\njvm-targt = \"17\"\n"));
+    p.kargo().arg("info").assert().failure().stderr(
+        predicate::str::contains("failed to parse manifest at")
+            .and(predicate::str::contains("unknown field `jvm-targt`"))
+            .and(predicate::str::contains("line 6, column 1"))
+            .and(predicate::str::contains("6 | jvm-targt = \"17\""))
+            .and(predicate::str::contains("help: key `jvm-targt` in `[target.jvm]` is not known; did you mean `jvm-target`?")),
+    );
+
+    // A table is a key of the table around it.
+    p.file("kargo.toml", &manifest("app", "\n[target.jvmm]\n"));
+    p.kargo().arg("info").assert().failure().stderr(predicate::str::contains("in `[target]` is not known; did you mean `jvm`?"));
+
+    // A key in an inline table of a dependency is located too.
+    p.file("kargo.toml", &manifest("app", "\n[dependencies]\n\"org.acme:widget\" = { version = \"1\", scop = \"test\" }\n"));
+    p.kargo()
+        .arg("info")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error at line 6, column 38").and(predicate::str::contains("did you mean `scope`?")));
+}
+
+#[test]
+fn an_invalid_manifest_value_shows_its_line() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "\n[target.jvm]\njvm-target = \"abc\"\n"));
+    p.kargo().arg("info").assert().failure().stderr(
+        predicate::str::contains("error at line 6, column 15")
+            .and(predicate::str::contains("6 | jvm-target = \"abc\""))
+            .and(predicate::str::contains("^^^"))
+            .and(predicate::str::contains("invalid [target.jvm] jvm-target `abc`"))
+            // The FAQ explains this one.
+            .and(predicate::str::contains("help: see https://enekocm7.github.io/kargo/reference/faq/#")),
+    );
+
+    p.file("kargo.toml", "[workspace]\nmembers = [\"libs/**\"]\n");
+    p.kargo()
+        .arg("info")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error at line 2, column 13").and(predicate::str::contains("2 | members = [\"libs/**\"]")));
+}
+
+#[test]
+fn a_mistyped_target_or_platform_suggests_the_valid_one() {
+    let p = Project::new();
+    // On the command line clap suggests the value.
+    p.file("kargo.toml", &manifest("app", ""));
+    p.kargo().args(["build", "-t", "jvmm"]).assert().failure().stderr(predicate::str::contains("a similar value exists: 'jvm'"));
+    // In the manifest Kargo does.
+    p.file("kargo.toml", &manifest("app", "\n[target.jvm]\n[build]\ndefault-targets = [\"nativ\"]\n"));
+    p.kargo()
+        .arg("info")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown target `nativ`").and(predicate::str::contains("help: did you mean `native`?")));
+    p.file("kargo.toml", &manifest("app", "\n[target.native]\nplatforms = [\"linuxX65\"]\n"));
+    p.kargo().arg("info").assert().failure().stderr(
+        predicate::str::contains("unknown Kotlin/Native platform `linuxX65`")
+            .and(predicate::str::contains("help: did you mean `linux_x64`?")),
+    );
+}
+
+#[test]
+fn a_mistyped_framework_or_package_suggests_the_valid_one() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"core\"]\n");
+    p.file("app/kargo.toml", &manifest("app", ""));
+    p.file("core/kargo.toml", &manifest("core", ""));
+    p.kargo().args(["build", "-p", "cor"]).assert().failure().stderr(
+        predicate::str::contains("package `cor` is not part of this project").and(predicate::str::contains("help: did you mean `core`?")),
+    );
+    p.kargo().args(["add", "-p", "app", "--framework", "serialisation"]).assert().failure().stderr(
+        predicate::str::contains("unknown framework `serialisation`").and(predicate::str::contains("help: did you mean `serialization`?")),
+    );
+    p.kargo()
+        .args(["new", "x", "--with", "corutines"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("help: did you mean `coroutines`?"));
+}
+
+#[test]
+fn a_mistyped_coordinate_suggests_the_real_one() {
+    let repo = LocalRepo::new();
+    repo.publish("org.jetbrains.kotlinx:kotlinx-coroutines-core", "1.9.0", &[]).publish(
+        "org.jetbrains.kotlinx:kotlinx-datetime",
+        "0.6.0",
+        &[],
+    );
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &format!("\n[repositories]\ndefaults = false\nlocal = \"{}\"\n", repo.url())));
+
+    p.kargo().args(["add", "org.jetbrains.kotlinx:kotlinx-corutines-core"]).assert().failure().stderr(
+        predicate::str::contains("`org.jetbrains.kotlinx:kotlinx-corutines-core` was not found in any repository")
+            .and(predicate::str::contains("help: did you mean `org.jetbrains.kotlinx:kotlinx-coroutines-core`?")),
+    );
+    // With a version, and in a mistyped group.
+    p.kargo()
+        .args(["add", "org.jetbrains.kotlinx:kotlinx-datetim:0.6.0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("help: did you mean `org.jetbrains.kotlinx:kotlinx-datetime`?"));
+    p.kargo()
+        .args(["add", "org.jetbrains.kotlnx:kotlinx-datetime"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("help: did you mean `org.jetbrains.kotlinx:kotlinx-datetime`?"));
+    assert!(!p.read("kargo.toml").contains("kotlinx"));
+}
+
+#[test]
+fn a_missing_version_lists_the_nearby_ones() {
+    let repo = LocalRepo::new();
+    for version in ["1.3.0", "1.4.2", "1.5.0-RC1", "2.0.0"] {
+        repo.publish("com.acme:widget", version, &[]);
+    }
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &format!("\n[repositories]\ndefaults = false\nlocal = \"{}\"\n", repo.url())));
+    p.kargo().args(["add", "com.acme:widget:1.5"]).assert().failure().stderr(
+        predicate::str::contains("`com.acme:widget:1.5` was not found in any repository").and(predicate::str::contains(
+            "help: available: 1.3.0, 1.4.2, 1.5.0-RC1 (pre-release), 2.0.0; a pre-release needs its exact version",
+        )),
+    );
+}
+
+#[test]
+fn errors_with_a_faq_entry_link_to_it_and_json_carries_the_advice() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "\n[dependencies]\n\"com.acme:widget\" = \"1.0\"\n"));
+    p.kargo().args(["build", "--locked"]).assert().failure().stderr(predicate::str::contains("but --locked was passed").and(
+        predicate::str::contains(
+            "help: see https://enekocm7.github.io/kargo/reference/faq/#kargolock-needs-to-be-updated--but---locked-was-passed",
+        ),
+    ));
+    // A failure before the build is an `error` message, with the advice as fields.
+    p.file("kargo.toml", &manifest("app", "\n[target.jvm]\njvm-targt = \"17\"\n"));
+    let out = p.kargo().args(["build", "--message-format", "json"]).assert().failure().get_output().stdout.clone();
+    let message: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(message["reason"], "error");
+    assert!(message["message"].as_str().unwrap().contains("unknown field `jvm-targt`"));
+    assert!(message["help"].as_str().unwrap().contains("did you mean `jvm-target`?"));
+    assert_eq!(message["suggestions"], serde_json::json!(["jvm-target"]));
+}
+
+#[test]
+fn color_is_off_for_a_pipe_and_follows_the_flag() {
+    let p = Project::new();
+    let stderr = |args: &[&str]| String::from_utf8(p.kargo().args(args).assert().failure().get_output().stderr.clone()).unwrap();
+    assert!(!stderr(&["biuld"]).contains('\u{1b}'));
+    assert!(stderr(&["--color", "always", "biuld"]).contains('\u{1b}'));
+    assert!(!stderr(&["--color", "never", "biuld"]).contains('\u{1b}'));
 }

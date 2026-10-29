@@ -868,6 +868,28 @@ impl MavenClient {
         Ok(versions)
     }
 
+    /// The names of the subdirectories of the repository-relative directory `rel` in every repository, sorted: the
+    /// artifacts of a group, or the next part of a group. Best effort: a repository that cannot list directories
+    /// (or is unreachable, or Kargo is offline) adds nothing.
+    pub fn list_directories(&self, rel: &str) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for repo in &self.repos {
+            if repo.is_local() {
+                let Ok(entries) = std::fs::read_dir(repo.local_root().join(rel)) else { continue };
+                names.extend(entries.flatten().filter(|e| e.path().is_dir()).filter_map(|e| e.file_name().into_string().ok()));
+            } else if !self.offline {
+                let url = format!("{}/{}/", repo.url, rel.trim_matches('/'));
+                let Ok(Some(response)) = self.get(repo, &url) else { continue };
+                if let Ok(page) = response.into_body().read_to_string() {
+                    names.extend(crate::suggest::directories_in(&page));
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// The text of `repo`'s `maven-metadata.xml` at `rel`, kept in `cached` and re-checked when older
     /// than [`METADATA_TTL`] or after `--refresh`. `subject` names what the metadata is about.
     fn repo_metadata(&self, repo: &Repository, rel: &str, cached: &Path, subject: &dyn std::fmt::Display) -> Option<String> {
