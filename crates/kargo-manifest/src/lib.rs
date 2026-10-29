@@ -1348,6 +1348,25 @@ pub struct PackagingSettings {
     pub optimize: OptimizeSettings,
     pub native_image: NativeImageSettings,
     pub installer: InstallerSettings,
+    /// `[package.shade]`, when present.
+    pub shade: Option<ShadeSettings>,
+}
+
+/// `[package.shade]`: relocation, resource merging and minimizing of the jars `kargo package` bundles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadeSettings {
+    /// Package (or class) prefixes in dotted form and where they move to, longest prefix first.
+    pub relocate: Vec<(String, String)>,
+    /// Classes and resources of the bundled dependencies that are left out of the jar (`pkg.*` or an exact name).
+    pub exclude: Vec<String>,
+    /// Remove the classes of dependencies that the project's classes do not reach.
+    pub minimize: bool,
+    /// Classes and packages `minimize` keeps (`pkg.*` or an exact name).
+    pub keep: Vec<String>,
+    /// Concatenate `META-INF/services/*`, `reference.conf`, `spring.factories` and similar files; `false`: the first one wins.
+    pub merge_services: bool,
+    /// Also rewrite string constants that name a relocated class (`"com.google.common.Foo"`).
+    pub relocate_strings: bool,
 }
 
 /// `[package.optimize]`: R8's JVM class-file shrinking and obfuscation settings.

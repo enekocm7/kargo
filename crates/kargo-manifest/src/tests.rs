@@ -1949,6 +1949,34 @@ category = "Development"
 }
 
 #[test]
+fn shade_table() {
+    assert_eq!(parse(MINIMAL).packaging.shade, None);
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[package.shade]
+relocate = {{ "com.google" = "shaded.google", "com.google.common" = "com.example.shaded.guava" }}
+exclude = ["org.slf4j.*"]
+minimize = true
+keep = ["com.example.Plugin"]
+"#
+    ));
+    let shade = m.packaging.shade.unwrap();
+    assert_eq!(shade.relocate[0], ("com.google.common".to_owned(), "com.example.shaded.guava".to_owned()), "longest prefix first");
+    assert_eq!(shade.relocate[1].0, "com.google");
+    assert_eq!(shade.exclude, ["org.slf4j.*"]);
+    assert!(shade.minimize && shade.merge_services && !shade.relocate_strings);
+    let empty = parse(&format!("{MINIMAL}\n[package.shade]\n")).packaging.shade.unwrap();
+    assert!(empty.relocate.is_empty() && !empty.minimize && empty.merge_services);
+
+    let with = |body: &str| format!("{MINIMAL}\n[package.shade]\n{body}");
+    assert!(parse_err(&with("relocate = { \"com/x\" = \"y\" }")).contains("package names"));
+    assert!(parse_err(&with("relocate = { \"a.b\" = \"a.b\" }")).contains("to itself"));
+    assert!(parse_err(&with("exclude = [\"a/b\"]")).contains("exclude"));
+    assert!(parse_err(&with("keep = [\"a.B\"]")).contains("minimize"));
+    assert!(parse_err(&with("bogus = 1")).contains("bogus"));
+}
+
+#[test]
 fn desktop_installers() {
     let m = parse(&format!(
         r#"{MINIMAL}

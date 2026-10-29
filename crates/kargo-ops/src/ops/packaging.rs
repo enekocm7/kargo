@@ -82,6 +82,7 @@ impl App<'_> {
             class_path: Vec::new(),
             implementation_title: Some(pkg.name.clone()),
             implementation_version: Some(pkg.version.clone()),
+            ..Default::default()
         };
         write_jar(&lib.join(&names[0]), &self.jvm.classes, &manifest, &[]).context("failed to create the program's jar")?;
         for (jar, name) in deps.iter().zip(&names[1..]) {
@@ -202,6 +203,7 @@ pub(super) fn optimize_jar(ctx: &BuildContext, input: &Path, name: &str, main_cl
         class_path: Vec::new(),
         implementation_title: Some(name.to_owned()),
         implementation_version: Some(ctx.ws.manifest().package.version.clone()),
+        ..Default::default()
     };
     write_jar(&out, Path::new(""), &manifest, std::slice::from_ref(&r8_out)).context("failed to write the optimized jar manifest")?;
     let _ = std::fs::remove_file(&r8_out);

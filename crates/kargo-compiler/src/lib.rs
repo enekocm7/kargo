@@ -12,6 +12,7 @@ pub mod jvm;
 pub mod ksp;
 pub mod mainclass;
 pub mod native;
+pub mod shade;
 pub mod testreport;
 pub mod wasm;
 

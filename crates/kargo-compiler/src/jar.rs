@@ -15,6 +15,8 @@ pub struct JarManifest {
     pub class_path: Vec<String>,
     pub implementation_title: Option<String>,
     pub implementation_version: Option<String>,
+    /// `Multi-Release: true`, for jars that carry `META-INF/versions/`.
+    pub multi_release: bool,
 }
 
 impl JarManifest {
@@ -28,6 +30,9 @@ impl JarManifest {
         }
         if let Some(v) = &self.implementation_version {
             lines.push(format!("Implementation-Version: {v}"));
+        }
+        if self.multi_release {
+            lines.push("Multi-Release: true".to_owned());
         }
         if !self.class_path.is_empty() {
             lines.push(format!("Class-Path: {}", self.class_path.join(" ")));
@@ -58,22 +63,23 @@ impl JarManifest {
     }
 }
 
-fn options() -> SimpleFileOptions {
+pub(crate) fn options() -> SimpleFileOptions {
     // A fixed timestamp keeps jars reproducible.
     SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).last_modified_time(zip::DateTime::default())
 }
 
 /// Files whose contents must be concatenated when merging jars.
-fn is_mergeable(name: &str) -> bool {
+pub(crate) fn is_mergeable(name: &str) -> bool {
     name.starts_with("META-INF/services/")
         || name == "META-INF/spring.factories"
         || name.starts_with("META-INF/spring/") && name.ends_with(".imports")
+        || name == "reference.conf"
         || name == "META-INF/spring.handlers"
         || name == "META-INF/spring.schemas"
 }
 
 /// Signature files of signed dependencies become invalid in a fat jar.
-fn is_signature(name: &str) -> bool {
+pub(crate) fn is_signature(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     upper.starts_with("META-INF/")
         && !upper[9..].contains('/')

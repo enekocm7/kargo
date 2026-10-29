@@ -57,6 +57,28 @@ jdeps = true
 | `modules` | `[]` | JDK modules to add to the ones `jdeps` finds, such as modules the program only loads through reflection or a service loader |
 | `jdeps` | `true` | Ask `jdeps` which modules the program and its dependencies use. `false` puts only `modules` in the runtime, so it then needs at least one |
 
+### `[package.shade]`
+
+Relocation, resource merging and minimizing of the jars `kargo package` bundles: the fat jar and, for a library, the library jar. See [Shading](../../guides/distributing/#shading).
+
+```toml
+[package.shade]
+relocate = { "com.google.common" = "com.example.shaded.guava" }
+exclude = ["org.slf4j.*"]
+minimize = true
+keep = ["com.example.Plugin"]
+merge-services = true
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `relocate` | `{}` | Packages (or classes) to move, `from = to` in dotted form. Class files, `META-INF/services` entries and resource paths are rewritten; the longest `from` wins |
+| `exclude` | `[]` | Classes and resources of the dependencies that are left out of the jar: `pkg.*` or an exact class name |
+| `minimize` | `false` | Remove the classes of dependencies that the project's classes do not reach |
+| `keep` | `[]` | Classes and packages (`pkg.*` or a class name) `minimize` keeps. Needs `minimize = true` |
+| `merge-services` | `true` | Concatenate `META-INF/services/*`, `reference.conf`, `spring.factories` and similar files. `false`: the first one wins |
+| `relocate-strings` | `false` | Also rewrite string constants that name a relocated class, such as `"com.google.common.Foo"` |
+
 ### `[package.optimize]`
 
 R8 settings for shrinking JVM jars. `kargo package --release` enables this automatically; pass `--optimize` to enable it with another profile. The minimized jar, mapping and removed-code report are written under `target/<profile>/jvm/`.
