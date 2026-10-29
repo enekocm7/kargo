@@ -116,6 +116,14 @@ server.port=8081
 spring.jpa.hibernate.ddl-auto=update
 ```
 
+## Reload while you edit
+
+```sh
+kargo run --hot
+```
+
+Kargo rebuilds when you save a file and swaps the changed classes into the running application. A controller, service or repository method that changed runs its new body on the next request, with the same beans, connection pool and Hibernate session factory. A change that the JVM cannot apply in place, such as a new method or field, restarts the application, and so does a new dependency. On [JetBrains Runtime](https://github.com/JetBrains/JetBrainsRuntime) (set it as the project's JDK) those reload instead. Spring reads annotations and wires beans when the application starts, though, so a new `@GetMapping` method, a changed annotation or a new `@Bean` takes effect after the restart, and on JetBrains Runtime only after you stop the application with Ctrl+C and run it again. See [Hot reload a JVM program](../watch/#hot-reload-a-jvm-program).
+
 ## Testing
 
 `spring-boot-starter-test` is added to the tests automatically:

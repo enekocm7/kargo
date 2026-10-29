@@ -95,6 +95,21 @@ $ curl localhost:8080/todos
 [{"id":1,"title":"Try Kargo","done":false}]
 ```
 
+## Reload while you edit
+
+```sh
+kargo run --hot
+```
+
+Kargo rebuilds when you save a file and swaps the changed classes into the running server, without restarting it. Change what a route returns, save, and the next `curl` shows it:
+
+```console
+$ curl localhost:8080/todos
+[{"id":1,"title":"Try Kargo","done":false}]
+```
+
+The server keeps its port, its in-memory data and its open connections, since the process is the same. What the application builds when it starts is not run again: the route table and the installed plugins are created once, when the module starts, so a new route or plugin only appears after you stop the server with Ctrl+C and run it again. The code inside the existing handlers reloads. See [Hot reload a JVM program](../watch/#hot-reload-a-jvm-program) for what reloads and what restarts. Ktor's own development mode (`autoreload`) is not needed.
+
 ## Test it
 
 `ktor-server-test-host` is already on the test classpath. It runs your module in memory, without opening a port:

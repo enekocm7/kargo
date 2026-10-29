@@ -1,5 +1,5 @@
-//! JetBrains Runtime (JBR), the JDK whose `-XX:+AllowEnhancedClassRedefinition` lets Compose Hot
-//! Reload replace classes whose methods and fields changed, not only method bodies. Downloaded on
+//! JetBrains Runtime (JBR), the JDK whose `-XX:+AllowEnhancedClassRedefinition` lets `kargo run
+//! --hot-reload` replace classes whose methods and fields changed, not only method bodies. Downloaded on
 //! demand into `~/.kargo/toolchains/jbr/<version>`, looked up with the foojay Disco API like GraalVM.
 
 use std::path::{Path, PathBuf};
@@ -15,6 +15,12 @@ use crate::jdk::Jdk;
 
 /// The JVM option that turns on JBR's enhanced class redefinition.
 pub const ENHANCED_REDEFINITION: &str = "-XX:+AllowEnhancedClassRedefinition";
+
+/// Whether `jdk` is a JetBrains Runtime, which accepts [`ENHANCED_REDEFINITION`]. Other JVMs fail to start with
+/// it, so it is only passed to a JDK whose `release` file names JetBrains as its implementor.
+pub fn is_jetbrains_runtime(jdk: &Jdk) -> bool {
+    std::fs::read_to_string(jdk.home.join("release")).is_ok_and(|release| release.contains("JetBrains"))
+}
 
 /// Records the Java feature version of an installation, so it can be found without probing `java`.
 const MAJOR_FILE: &str = "kargo-jbr-major";
@@ -146,4 +152,20 @@ fn install(config: &Config, major: u32) -> Result<Jdk> {
     let home = find_home(&dir).with_context(|| format!("the downloaded JetBrains Runtime {version} has no bin/java"))?;
     std::fs::write(dir.join(MAJOR_FILE), major.to_string())?;
     Ok(Jdk { home, version: major })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jetbrains_runtime_is_told_by_its_release_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let jdk = Jdk { home: dir.path().to_path_buf(), version: 21 };
+        assert!(!is_jetbrains_runtime(&jdk), "a JDK without a release file");
+        std::fs::write(dir.path().join("release"), "IMPLEMENTOR=\"Eclipse Adoptium\"\n").unwrap();
+        assert!(!is_jetbrains_runtime(&jdk));
+        std::fs::write(dir.path().join("release"), "IMPLEMENTOR=\"JetBrains s.r.o.\"\n").unwrap();
+        assert!(is_jetbrains_runtime(&jdk));
+    }
 }

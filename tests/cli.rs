@@ -5029,21 +5029,27 @@ fn new_compose_multiplatform_project() {
 }
 
 #[test]
-fn preview_and_hot_reload_need_compose() {
+fn preview_needs_compose() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("app", "")).file("src/Main.kt", "fun main() {}\n");
     p.kargo().args(["--offline", "preview", "--list"]).assert().failure().stderr(predicate::str::contains("enable Compose"));
-    p.kargo()
-        .args(["--offline", "run", "--hot-reload"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("`--hot-reload` reloads the composables of a Compose Desktop app; enable Compose"));
-    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.native]\n[frameworks]\ncompose = true\n"));
+}
+
+#[test]
+fn hot_reload_needs_a_jvm_program_of_the_project() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.native]\n")).file("src/Main.kt", "fun main() {}\n");
     p.kargo()
         .args(["--offline", "run", "--hot-reload", "-t", "native"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("only works for the jvm target"));
+    p.kargo()
+        .args(["--offline", "run", "--hot", "--example", "demo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--hot-reload` reloads the project's own program"));
+    p.kargo().args(["--offline", "run", "--hot", "--debug"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]

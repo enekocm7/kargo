@@ -36,7 +36,7 @@ With `--offline` or `--locked`, Kargo never chooses and downloads a JDK by itsel
 | JDK (pinned `[toolchain] jdk = "21"`) | The same commands | Yes, on first use. Not with `--offline` |
 | GraalVM (`[toolchain] graalvm`) | `package --format native-image`, `run --native-agent` | Yes, when pinned. With `system`, Kargo looks on `GRAALVM_HOME`, `JAVA_HOME` and `PATH` |
 | GraalVM reachability metadata | `package --format native-image` | Yes |
-| JetBrains Runtime | `run --hot-reload` | Yes, the JBR of the project's Java version, into `~/.kargo/toolchains/jbr/`. Offline, the app runs on the project's JDK instead. See [Hot reload](../compose/#hot-reload) |
+| JetBrains Runtime | `run --hot-reload` of a Compose app | Yes, the JBR of the project's Java version, into `~/.kargo/toolchains/jbr/`. Offline, the app runs on the project's JDK instead. Other programs run on the project's JDK, with enhanced redefinition when it is a JBR. See [Hot reload](../compose/#hot-reload) |
 | Kotlin/Native | Builds of the `native` target | Yes |
 | Gradle | Builds of the `android` target without a `gradlew` | Yes |
 | Android SDK (`[toolchain] android-sdk = "36"`) | Builds of the `android` target | Yes, once its licenses are accepted: Kargo asks on a terminal, and elsewhere stops and names `kargo toolchain install android-sdk --accept-licenses`. With `system`, Kargo uses `ANDROID_HOME` and installs nothing. See [Android SDK](../android/#android-sdk) |

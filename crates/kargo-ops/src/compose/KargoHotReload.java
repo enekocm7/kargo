@@ -1,5 +1,6 @@
 // The Java agent behind `kargo run --hot-reload`. Kargo builds it into a jar the first time it is
-// needed and starts the program with `-javaagent:<jar>=<state directory>`.
+// needed and starts the program with `-javaagent:<jar>=<state directory>`. It works for any JVM
+// program; a Compose Desktop app also gets its composition rebuilt.
 //
 // The state directory holds:
 //   classes  the class directories to watch, one per line
@@ -7,12 +8,14 @@
 //   result   "<number> ok <classes>" or "<number> restart <reason>", the agent's answer
 //   agent.log what the agent did, for when a reload does not do what you expect
 //
-// On each new request the agent redefines the loaded classes whose class files changed, between
-// Compose's HotReloader.saveStateAndDispose and loadStateAndCompose on the UI thread, so the
-// composition is rebuilt with the new code and keeps its remembered state. Classes that are not
+// On each new request the agent redefines the loaded classes whose class files changed. When the
+// program uses Compose, that happens between Compose's HotReloader.saveStateAndDispose and
+// loadStateAndCompose on the UI thread, so the composition is rebuilt with the new code and keeps
+// its remembered state; any other program is redefined where the agent runs, and the code that
+// runs next uses the new methods. Classes that are not
 // loaded yet need nothing: the class loader reads the new file when they are first used. A change
-// the JVM cannot apply in place (a new field without JetBrains Runtime) answers "restart", and Kargo
-// starts the program again.
+// the JVM cannot apply in place (a new field or method without JetBrains Runtime) answers
+// "restart", and Kargo starts the program again.
 package kargo.hotreload;
 
 import java.awt.EventQueue;
@@ -32,6 +35,9 @@ import java.util.Map;
 import java.util.stream.Stream;
 
 public final class KargoHotReload {
+    /** Whether the program uses Compose, whose composition has to be saved and rebuilt around a reload. */
+    private static final boolean COMPOSE = composePresent();
+
     private final Instrumentation instrumentation;
     private final Path state;
     private final List<Path> classDirs = new ArrayList<>();
@@ -101,8 +107,10 @@ public final class KargoHotReload {
         Runnable swap = () -> {
             Object token = null;
             try {
-                token = hotReloader("saveStateAndDispose", new Object());
-                log("saved the composition state");
+                if (COMPOSE) {
+                    token = hotReloader("saveStateAndDispose", new Object());
+                    log("saved the composition state");
+                }
                 instrumentation.redefineClasses(definitions.toArray(new ClassDefinition[0]));
                 log("redefined the classes");
             } catch (Throwable t) {
@@ -117,7 +125,7 @@ public final class KargoHotReload {
                 }
             }
         };
-        if (EventQueue.isDispatchThread() || java.awt.GraphicsEnvironment.isHeadless()) {
+        if (!COMPOSE || EventQueue.isDispatchThread() || java.awt.GraphicsEnvironment.isHeadless()) {
             swap.run();
         } else {
             EventQueue.invokeAndWait(swap);
@@ -128,6 +136,15 @@ public final class KargoHotReload {
             throw t instanceof Exception ? (Exception) t : new RuntimeException(t);
         }
         return definitions.size();
+    }
+
+    private static boolean composePresent() {
+        try {
+            Class.forName("androidx.compose.runtime.HotReloader", false, ClassLoader.getSystemClassLoader());
+            return true;
+        } catch (ClassNotFoundException | LinkageError e) {
+            return false;
+        }
     }
 
     /** Calls a private function of Compose's `HotReloader.Companion`, which IDE tooling calls the same way. */

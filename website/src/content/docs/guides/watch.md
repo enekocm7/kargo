@@ -38,7 +38,51 @@ On Unix, a program is first sent SIGTERM and given five seconds to exit, so a se
 
 `--watch` starts JVM, Native, Wasm and JS programs the same way (Wasm and JS programs run on Node.js). It does not run Android apps, which run inside Gradle. Wasm and JS browser apps are [served and reloaded](#reload-a-browser-app-on-change) instead of restarted. `--watch` conflicts with `--debug`, because a debugger would have to attach again after every restart.
 
-For a Compose Desktop app, `kargo run --hot-reload` watches the same way but does not restart the app: it swaps the changed classes into the running one, which keeps its state. See [Hot reload](../compose/#hot-reload).
+For a JVM program, `kargo run --hot` watches the same way but does not restart it: it swaps the changed classes into the running one, which keeps its state. See [Hot reload a JVM program](#hot-reload-a-jvm-program).
+
+## Hot reload a JVM program
+
+A restart loses the program's state and takes seconds. `kargo run --hot` (`--hot-reload` for short: both are the same flag) keeps the JVM process alive and swaps the code that changed into it:
+
+```console
+$ kargo run --hot
+     Watching 3 files for changes (press Ctrl+C to stop)
+   Compiling watchdemo v0.1.0 (jvm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.44s
+     Running `java com.example.watchdemo.MainKt`
+tick 4812 first
+tick 4812 first
+     Changed src/Main.kt
+   Compiling watchdemo v0.1.0 (jvm)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+    Reloaded 1 class in 38 ms
+tick 4812 second
+```
+
+It watches and rebuilds like [`--watch`](#restart-a-program-on-change), with the same options (`--clear`, `--ignore`), and a build that fails leaves the program as it was. After a successful build, Kargo tells a small Java agent that the program starts with (`-javaagent`) to redefine the loaded classes whose files changed, using the JVM's class redefinition API (the one debuggers use for "hot swap"). The next call of a changed function runs the new body in the same process, so fields, caches, connections and threads stay as they are. The line `Reloaded 3 classes in 180 ms` says what happened.
+
+What reloads depends on the JVM:
+
+| Change | Standard JDK | JetBrains Runtime |
+| --- | --- | --- |
+| The body of a function, a lambda or an accessor, and a new class it uses | Reloads | Reloads |
+| A new function, lambda or field, or a changed signature or supertype | Restarts | Reloads |
+| A new dependency, a changed JVM option or `kargo.toml` edit that changes the command line | Restarts | Restarts |
+
+When a change cannot be applied in place, Kargo says why and starts the program again, the way `--watch` does:
+
+```console
+        note: restarting the app, as the change cannot be reloaded: UnsupportedOperationException: class redefinition failed: attempted to add a method
+     Running `java com.example.watchdemo.MainKt`
+```
+
+The program runs on the JDK of your project. If that JDK is [JetBrains Runtime](https://github.com/JetBrains/JetBrainsRuntime), Kargo turns on its enhanced class redefinition (`-XX:+AllowEnhancedClassRedefinition`); set `[toolchain] jdk` or `JAVA_HOME` to one to get it. A Compose Desktop app is the exception: Kargo downloads JetBrains Runtime for it, see [Compose hot reload](../compose/#hot-reload).
+
+A running program does not run code again just because its class changed. A value computed once at startup, such as a route table, a `val` in an `object` or a bean wired when the application started, keeps its old value until the program restarts; press Ctrl+C and run it again when that matters. Servers built on a framework mostly call into your handlers on each request, so their handlers reload; see [Ktor](../ktor/#reload-while-you-edit) and [Spring Boot](../spring-boot/#reload-while-you-edit).
+
+The program runs from a copy of its classes in `target/<profile>/jvm/hot-reload/`, which Kargo updates only after a build succeeds (the compiler rewrites `classes/` while a program is loading from it). `agent.log` there records each reload.
+
+`--hot` works for the jvm target and the project's own program (`--main` and `--bin` too), not for an `--example`. It conflicts with `--debug`. It also does not reload code that comes from jars, such as a path dependency's classes.
 
 ## Reload a browser app on change
 
@@ -60,7 +104,7 @@ The server starts once, so the address stays the same, and `--port` and `--open`
 
 A build that fails prints its errors and leaves the page as it is; the next successful build reloads it. The pages listen to a server-sent events stream on `/__kargo/reload`, which the served HTML pages get a small script for. Kargo adds the script to the pages it serves and not to the files in `target/`, and only with `--watch`.
 
-The page reloads completely, so its state is lost. [Compose Desktop hot reload](../compose/#hot-reload) swaps code without a restart, but it is for the JVM.
+The page reloads completely, so its state is lost. [Hot reload](#hot-reload-a-jvm-program) swaps code without a restart, but it is for the JVM.
 
 ## Rerun tests on change
 
