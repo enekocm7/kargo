@@ -2397,6 +2397,9 @@ fn create_package(shell: &Shell, dir: &Path, args: NewArgs) -> Result<i32> {
     let kind = if opts.lib { "library" } else { "application" };
     ops::new::create(dir, &opts)?;
     shell.status("Created", format!("{kind} `{}` package", opts.name));
+    if ops::new::ios_disabled(&opts) {
+        shell.note("the iOS target is commented out in kargo.toml: iOS frameworks need macOS with Xcode");
+    }
     if let Some(root) = workspace
         && let Some(member) = ops::new::add_to_workspace(&root, dir)?
     {
