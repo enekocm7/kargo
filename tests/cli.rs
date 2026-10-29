@@ -2388,6 +2388,23 @@ fn doctor_reports_project_problems_and_fails() {
     assert_eq!(lock[0]["message"], "does not lock com.example:lib", "{report:#}");
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_apple_native_platform_is_skipped_off_macos_and_doctor_warns() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("ios", "[target.native]\nplatforms = [\"ios_arm64\"]\nkind = \"framework\"\n"));
+    p.file("src/Lib.kt", "fun hello() = \"hi\"\n");
+
+    p.kargo()
+        .args(["build", "-t", "native"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skipping native ios_arm64: Apple platforms need macOS with Xcode"));
+
+    let java_home = fake_java_home(p.home.path(), 21);
+    doctor(&p, &java_home).assert().stdout(predicate::str::contains("which this host cannot build"));
+}
+
 #[test]
 fn doctor_names_the_process_that_holds_the_build_directory_lock_once_for_a_workspace() {
     let p = Project::new();

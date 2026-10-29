@@ -47,7 +47,7 @@ $ ./target/release/native/linux_x64/tool.kexe   # tool.exe on Windows
 | watchOS / tvOS | `watchos_arm64`, `watchos_simulator_arm64`, `tvos_arm64`, `tvos_simulator_arm64` |
 | Android NDK | `android_arm64`, `android_arm32`, `android_x64` |
 
-Apple targets can only be built on macOS. `kargo run` runs the build for the host platform, so include `host` in `platforms` if you want to run the program locally.
+Apple targets can only be built on macOS. On another host, `kargo build` and `kargo check` skip them with a note (`skipping native ios_arm64: Apple platforms need macOS with Xcode`) instead of failing, so a project that lists iOS platforms still builds its other targets, and `kargo doctor` warns about each platform the host cannot build. `kargo run` runs the build for the host platform, so include `host` in `platforms` if you want to run the program locally.
 
 ## Output kinds
 

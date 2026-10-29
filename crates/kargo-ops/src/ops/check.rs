@@ -17,8 +17,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, add_npm_declarations, announce, compile_jvm, finished, hook_env, js_libraries, native_cinterop, native_cinterop_defs,
-    native_libraries, native_platforms, native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
+    BuildOptions, add_npm_declarations, announce, buildable_native_platforms, compile_jvm, finished, hook_env, js_libraries,
+    native_cinterop, native_cinterop_defs, native_libraries, native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
@@ -203,6 +203,10 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     if !main_sources.kotlin_files().is_empty() {
         native_programs(ctx, native, &main_sources)?;
     }
+    let platforms = buildable_native_platforms(ctx)?;
+    if platforms.is_empty() {
+        return Ok(());
+    }
     native_cinterop_defs(ctx)?;
     let setup = ctx.setup(TargetKind::Native)?;
     let toolchain = ctx.native_toolchain()?;
@@ -211,7 +215,6 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     let out = check_dir(ctx, TargetKind::Native);
     let fp_dir = out.join(".fingerprint");
 
-    let platforms = native_platforms(ctx)?;
     let checked = super::parallel_jobs(&platforms, |konan_target| -> Result<()> {
         let what = format!(", {konan_target}");
         // A klib holds the analyzed IR; producing one skips code generation and linking.

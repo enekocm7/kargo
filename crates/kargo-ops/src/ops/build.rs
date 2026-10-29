@@ -859,6 +859,28 @@ pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// The reason `konan_target` cannot be built on this host, if there is one.
+pub fn native_host_limit(konan_target: &str) -> Option<&'static str> {
+    if buildable_on_host(konan_target) {
+        None
+    } else if konan_target.starts_with("macos") {
+        Some("macOS binaries need macOS with Xcode")
+    } else {
+        Some("Apple platforms need macOS with Xcode")
+    }
+}
+
+/// The platforms of the Native target this host can build. The others get a note, so a project
+/// with an iOS target still builds its other targets on Windows and Linux.
+pub fn buildable_native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {
+    let (buildable, skipped): (Vec<String>, Vec<String>) = native_platforms(ctx)?.into_iter().partition(|t| buildable_on_host(t));
+    if let Some(first) = skipped.first() {
+        let reason = native_host_limit(first).unwrap_or_default();
+        ctx.shell().note(format!("skipping native {}: {reason}", skipped.join(", ")));
+    }
+    Ok(buildable)
+}
+
 /// The resolved Maven klibs of one Kotlin/Native platform.
 pub fn native_resolution(ctx: &BuildContext, setup: &TargetSetup, konan_target: &str, include_dev: bool) -> Result<Resolution> {
     let key = format!("native-{konan_target}/{}", if include_dev { "test" } else { "main" });
@@ -1057,6 +1079,10 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     if srcs.kotlin_files().is_empty() {
         return Ok(Vec::new());
     }
+    let platforms = buildable_native_platforms(ctx)?;
+    if platforms.is_empty() {
+        return Ok(Vec::new());
+    }
     let programs = native_programs(ctx, native, &srcs)?;
     native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
@@ -1064,7 +1090,6 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     let profile = ctx.ws.profile(&ctx.profile)?;
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
 
-    let platforms = native_platforms(ctx)?;
     // A framework's name is a Swift module name, which cannot have dashes.
     let own_name = match native.kind {
         NativeKind::Framework => manifest.package.name.replace('-', "_"),
