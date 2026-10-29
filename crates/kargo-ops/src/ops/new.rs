@@ -230,7 +230,18 @@ pub fn compose_target_section(target: TargetKind, lib: bool, namespace: &str, co
     }
 }
 
+/// Whether `kargo new` leaves the iOS target of a Compose project commented out: Kotlin/Native builds
+/// iOS frameworks only on macOS, so anywhere else an enabled table would fail every `kargo build`.
+pub fn ios_disabled(opts: &NewOptions) -> bool {
+    let opts = opts.with_presets();
+    !cfg!(target_os = "macos") && opts.has("compose") && opts.targets.contains(&TargetKind::Native)
+}
+
 pub fn manifest(opts: &NewOptions) -> String {
+    manifest_on(opts, cfg!(target_os = "macos"))
+}
+
+fn manifest_on(opts: &NewOptions, macos: bool) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "[package]");
     let _ = writeln!(s, "name = \"{}\"", opts.name);
@@ -246,6 +257,13 @@ pub fn manifest(opts: &NewOptions) -> String {
     if !jvm_only {
         for &target in &opts.targets {
             let section = compose_target_section(target, opts.lib, &opts.package(), opts.has("compose"));
+            if target == TargetKind::Native && opts.has("compose") && !macos {
+                let _ = writeln!(s, "\n# Kotlin/Native builds iOS frameworks only on macOS with Xcode. Uncomment this on a Mac.");
+                for line in section.lines() {
+                    let _ = writeln!(s, "# {line}");
+                }
+                continue;
+            }
             let _ = write!(s, "\n{section}");
         }
     }
@@ -663,9 +681,13 @@ class MainActivity : Activity() {{
 
 /// All files of a new project.
 pub fn template(opts: &NewOptions) -> Result<Vec<TemplateFile>> {
+    template_on(opts, cfg!(target_os = "macos"))
+}
+
+fn template_on(opts: &NewOptions, macos: bool) -> Result<Vec<TemplateFile>> {
     let opts = &opts.with_presets();
     opts.validate()?;
-    let mut files = vec![file(MANIFEST_NAME, manifest(opts)), file(".gitignore", gitignore())];
+    let mut files = vec![file(MANIFEST_NAME, manifest_on(opts, macos)), file(".gitignore", gitignore())];
 
     let android_only = opts.targets == [TargetKind::Android];
     if opts.compose_multiplatform() {
@@ -965,7 +987,7 @@ class SampleBench"
 
         // The preset adds to the targets asked for; Native becomes an iOS framework, Android shows App().
         let all = NewOptions { targets: vec![TargetKind::Android, TargetKind::Native], ..o.clone() };
-        let files = template(&all).unwrap();
+        let files = template_on(&all, true).unwrap();
         let m = Manifest::parse(&files[0].contents).unwrap();
         assert_eq!(m.targets.enabled(), [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Native, TargetKind::Android]);
         let native = m.targets.native.unwrap();
@@ -976,6 +998,12 @@ class SampleBench"
         let activity = &files.iter().find(|f| f.path == Path::new("src-android/MainActivity.kt")).unwrap().contents;
         assert!(activity.contains("setContent { App() }"), "{activity}");
         assert!(files.iter().any(|f| f.path == Path::new("src-native/MainViewController.kt")));
+
+        // Off macOS the iOS table is commented out, so `kargo build` does not start a Native build that fails.
+        let files = template_on(&all, false).unwrap();
+        let m = Manifest::parse(&files[0].contents).unwrap();
+        assert_eq!(m.targets.enabled(), [TargetKind::Jvm, TargetKind::Wasm, TargetKind::Android]);
+        assert!(files[0].contents.contains("# [target.native]"), "{}", files[0].contents);
     }
 
     #[test]

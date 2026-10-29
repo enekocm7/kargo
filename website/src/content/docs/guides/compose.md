@@ -319,7 +319,7 @@ struct ComposeView: UIViewControllerRepresentable {
 
 Compose for iOS reads resources from a `compose-resources` folder in the app bundle. Kargo writes that folder to `target/<profile>/native/compose-resources/`; add it to the app target's Copy Bundle Resources phase as a folder reference.
 
-The platforms can be `ios_arm64`, `ios_simulator_arm64` and `ios_x64`. Building them needs macOS with Xcode.
+The platforms can be `ios_arm64`, `ios_simulator_arm64` and `ios_x64`. Building them needs macOS with Xcode. On any other host, `kargo new -t native` writes the `[target.native]` table commented out, so `kargo build` does not start a build that fails; uncomment it on a Mac.
 
 ## Distributing
 
