@@ -994,7 +994,7 @@ With `{ "status": true }` in the editor's `initializationOptions`, `kargo lsp` s
 | `resolving` | The project is imported again after `kargo.toml` or `kargo.lock` changed, which resolves its dependencies |
 | `checking` | [Check on save](#check-on-save) runs `kargo check` |
 
-`active` is `true` when the job starts and `false` when it ends; an ending `resolving` or `checking` has a `message` (`done`, `failed`, or the number of errors).
+`active` is `true` when the job starts and `false` when it ends; an ending `resolving` or `checking` has a `message` (`done`, `failed`, or the number of errors). A `checking` job that waits for the build lock another Kargo process holds sends `active: true` again with a `message` such as ``waiting for file lock on build directory, held by `kargo build` (process 1234)``, so the editor can show why diagnostics are late. When the editor closes the stream or sends `exit`, `kargo lsp` stops a running `kargo check` before it exits.
 
 To see what the editor asks and how long each answer takes, start the server with a log file:
 

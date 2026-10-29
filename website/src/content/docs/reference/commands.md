@@ -75,13 +75,13 @@ Commands that build or resolve a project (`build`, `check`, `run`, `test`, `doc`
 
 ```console
 $ kargo build
-    Blocking waiting for file lock on build directory
+    Blocking waiting for file lock on build directory, held by `kargo run` (process 1234)
    Compiling my-app v0.1.0 (jvm)
 ```
 
 `kargo run` releases the lock once the build is done, so a long-running program doesn't block other commands. Downloads to the shared cache in `~/.kargo` don't need the lock: each file is written to a temporary name and renamed into place, so two projects can fetch the same artifact at the same time.
 
-The process that holds the lock writes its command and process id to `target/.kargo-lock.holder` and removes the file when it releases the lock, so [`kargo doctor`](#kargo-doctor) can name it. A workspace has one `target/`, so one process holds the lock for all its members.
+The process that holds the lock writes its command and process id to `target/.kargo-lock.holder` and removes the file when it releases the lock, so the waiting command and [`kargo doctor`](#kargo-doctor) can name it. A workspace has one `target/`, so one process holds the lock for all its members.
 
 ---
 
