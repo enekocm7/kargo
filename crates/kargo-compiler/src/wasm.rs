@@ -218,7 +218,8 @@ impl WasmCompilation<'_> {
         if self.optimize {
             args.push("-Xir-dce".to_owned());
         }
-        if self.declarations {
+        // The compiler fails on declarations in WASI mode, which has no JavaScript to describe.
+        if self.declarations && self.environment != WasmEnvironment::Wasi {
             args.push("-Xgenerate-dts".to_owned());
         }
         if let Some(enabled) = self.array_range_checks {

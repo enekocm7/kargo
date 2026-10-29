@@ -27,7 +27,10 @@ pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> R
     if ctx.ws.profile(&ctx.profile)?.optimize {
         optimize(ctx, build, size_report)?;
         if !ctx.ws.manifest().targets.wasm.as_ref().unwrap().debug_info {
-            minify_glue(build)?;
+            for file in minify_glue(build)? {
+                ctx.shell()
+                    .verbose("Skipping", format!("the minification of {}: its syntax is not supported by the minifier", file.display()));
+            }
             for file in all_files(&build.dir).into_iter().filter(|p| p.extension().is_some_and(|e| e == "map")) {
                 let _ = std::fs::remove_file(file);
             }
@@ -53,16 +56,39 @@ pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> R
     Ok(())
 }
 
-fn minify_glue(build: &WasmBuild) -> Result<()> {
+/// Minifies the `.mjs` and `.js` files of the build and returns the ones it left as they were: the minifier does not
+/// parse all the syntax the Kotlin compiler writes (dynamic `import()`), and unminified glue still runs.
+fn minify_glue(build: &WasmBuild) -> Result<Vec<PathBuf>> {
     let session = minify_js::Session::new();
+    let mut skipped = Vec::new();
     for file in all_files(&build.dir).into_iter().filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("mjs" | "js"))) {
-        let source = std::fs::read(&file)?;
+        let source = terminate_imports(&String::from_utf8_lossy(&std::fs::read(&file)?)).into_bytes();
         let mut minified = Vec::new();
-        minify_js::minify(&session, minify_js::TopLevelMode::Module, &source, &mut minified)
-            .map_err(|e| anyhow::anyhow!("failed to minify {}: {e:?}", file.display()))?;
+        if minify_js::minify(&session, minify_js::TopLevelMode::Module, &source, &mut minified).is_err() {
+            skipped.push(file);
+            continue;
+        }
         std::fs::write(file, minified)?;
     }
-    Ok(())
+    Ok(skipped)
+}
+
+/// Adds the semicolon the Kotlin compiler leaves off one-line `import` statements: the minifier's parser does not
+/// apply automatic semicolon insertion before a following `let`.
+fn terminate_imports(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() + 16);
+    for line in source.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let trimmed = body.trim_end();
+        let one_line_import =
+            trimmed.starts_with("import ") && trimmed.contains(" from ") && (trimmed.ends_with('\'') || trimmed.ends_with('"'));
+        out.push_str(trimmed);
+        if one_line_import {
+            out.push(';');
+        }
+        out.push_str(&line[body.len()..]);
+    }
+    out
 }
 
 fn hash_assets(build: &mut WasmBuild) -> Result<()> {
@@ -863,6 +889,23 @@ mod tests {
         minify_glue(&build).unwrap();
         let code = std::fs::read_to_string(build.module).unwrap();
         assert!(!code.contains("return name + '!' ;"), "{code}");
+    }
+
+    #[test]
+    fn imports_without_a_semicolon_are_minified() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.mjs"), "import { a } from './a.mjs'\n\nlet value;\nexport const b = a;\n").unwrap();
+        let build = WasmBuild {
+            module: dir.path().join("app.mjs"),
+            klib: dir.path().join("app.klib"),
+            environment: WasmEnvironment::Js,
+            kind: WasmKind::Application,
+            name: "app".to_owned(),
+            dir: dir.path().to_path_buf(),
+            libraries: vec![],
+            node_modules: None,
+        };
+        minify_glue(&build).unwrap();
     }
 
     #[test]
