@@ -480,6 +480,21 @@ fn toolchains(config: &Config, project: Option<&Project>, out: &mut Vec<Check>) 
                 "the first native build downloads it; or run `kargo toolchain install`",
             )),
         }
+        for member in project.members() {
+            let m = project.package(*member).manifest();
+            let Some(native) = m.targets.native.as_ref() else { continue };
+            for platform in &native.platforms {
+                let Ok(konan_target) = kargo_toolchain::native::resolve_platform(platform) else { continue };
+                if let Some(limit) = super::build::native_host_limit(&konan_target) {
+                    out.push(Check::warning(
+                        s,
+                        format!("native {konan_target}"),
+                        format!("{} enables {konan_target}, which this host cannot build: {limit}", m.package.name),
+                        "`kargo build` skips it here; build on macOS, or take it out of `platforms`",
+                    ));
+                }
+            }
+        }
     }
 }
 
