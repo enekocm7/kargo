@@ -9,6 +9,7 @@
 //! - `running`: exists while the app runs (`am start` creates it, `am force-stop` and the end of `logcat` remove it).
 //! - `am-fails`, `crash`, `emulator-fails`: switches for the failure cases.
 //! - `no-default`: `am start` only resolves an activity started by name (`-n`), as with a launcher filter without a DEFAULT category.
+//! - `FAKE_LINT_SARIF` (environment): the SARIF report that `gradle lint<Variant>` writes to `build/reports`; `FAKE_LINT_FAIL` makes that task fail.
 //! - `no-resolve`: `cmd package resolve-activity` fails (an old device). `no-launcher`: no activity has the LAUNCHER category.
 
 use std::io::Read;
@@ -31,8 +32,27 @@ fn main() {
             let mut log = std::fs::read_to_string(state.join("log")).unwrap_or_default();
             log.push_str(&format!("gradle-env ANDROID_SERIAL={}\n", std::env::var("ANDROID_SERIAL").unwrap_or_else(|_| "none".into())));
             std::fs::write(state.join("log"), log).unwrap();
+            gradle_lint(&args);
         }
         other => panic!("unknown tool {other}"),
+    }
+}
+
+/// A lint task writes the report in `FAKE_LINT_SARIF` (when set) the way AGP does, and fails when `FAKE_LINT_FAIL` is set.
+fn gradle_lint(args: &[String]) {
+    let Some(task) = args.iter().find_map(|a| a.strip_prefix("lint")).filter(|v| !v.is_empty() && !v.starts_with('-')) else {
+        return;
+    };
+    let project = args.iter().position(|a| a == "--project-dir").and_then(|i| args.get(i + 1)).expect("--project-dir");
+    let variant = format!("{}{}", task[..1].to_lowercase(), &task[1..]);
+    if let Ok(sarif) = std::env::var("FAKE_LINT_SARIF") {
+        let reports = PathBuf::from(project).join("build/reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join(format!("lint-results-{variant}.sarif")), sarif).unwrap();
+        std::fs::write(reports.join(format!("lint-results-{variant}.html")), "<html/>").unwrap();
+    }
+    if std::env::var_os("FAKE_LINT_FAIL").is_some() {
+        std::process::exit(1);
     }
 }
 

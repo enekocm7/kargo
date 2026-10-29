@@ -747,6 +747,8 @@ pub struct AndroidConfig {
     pub agp_version: Option<String>,
     /// Gradle version that runs the Android build (default: the one `agp-version` requires).
     pub gradle_version: Option<String>,
+    /// The build-tools version (default: the one the Android Gradle Plugin uses).
+    pub build_tools: Option<String>,
     /// Shrink, obfuscate and optimize release builds with R8.
     #[serde(default)]
     pub minify: bool,
@@ -761,6 +763,17 @@ pub struct AndroidConfig {
     /// `BuildConfig` fields of every variant.
     #[serde(default)]
     pub build_config: BTreeMap<String, BuildConfigValue>,
+    /// Values for the `${placeholders}` of `AndroidManifest.xml`, in every variant.
+    #[serde(default)]
+    pub manifest_placeholders: BTreeMap<String, BuildConfigValue>,
+    /// Keep only the resources of these languages (`en`, `es`, `pt-rBR`, or BCP 47 tags such as `b+sr+Latn`).
+    #[serde(default)]
+    pub locales: Vec<String>,
+    /// Native code: the NDK, the ABIs and a CMake or ndk-build project.
+    pub ndk: Option<AndroidNdk>,
+    /// Android lint.
+    #[serde(default)]
+    pub lint: AndroidLint,
     /// Signing configurations by build type (`debug` or `release`).
     #[serde(default)]
     pub signing: BTreeMap<String, AndroidSigning>,
@@ -825,6 +838,96 @@ pub struct AndroidFlavor {
     pub min_sdk: Option<u32>,
     #[serde(default)]
     pub build_config: BTreeMap<String, BuildConfigValue>,
+    /// More manifest placeholders for this flavor.
+    #[serde(default)]
+    pub manifest_placeholders: BTreeMap<String, BuildConfigValue>,
+}
+
+/// `[target.android.ndk]`: native code built with the NDK.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AndroidNdk {
+    /// The NDK version, such as `27.2.12479018`. Kargo installs it with a managed SDK.
+    pub version: Option<String>,
+    /// The ABIs to package: `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64` (default: all of them).
+    #[serde(default)]
+    pub abi_filters: Vec<String>,
+    /// The `CMakeLists.txt` that builds the native code, relative to the project root.
+    pub cmake: Option<PathBuf>,
+    /// The CMake version (`3.22.1`). Kargo installs it with a managed SDK.
+    pub cmake_version: Option<String>,
+    /// Arguments passed to CMake (`-DANDROID_STL=c++_shared`).
+    #[serde(default)]
+    pub cmake_arguments: Vec<String>,
+    /// Flags passed to the C++ compiler.
+    #[serde(default)]
+    pub cpp_flags: Vec<String>,
+    /// The `Android.mk` that builds the native code with ndk-build, relative to the project root.
+    pub ndk_build: Option<PathBuf>,
+}
+
+impl AndroidNdk {
+    /// The ABIs of Android devices.
+    pub const ABIS: [&str; 4] = ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"];
+}
+
+/// `[target.android.lint]`: how Android lint (`kargo lint --android`, `kargo android lint`) runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AndroidLint {
+    /// The baseline of known issues, relative to the project root (default: `lint-baseline.xml`, when it exists).
+    pub baseline: Option<PathBuf>,
+    /// A `lint.xml` with per-issue configuration (default: `lint.xml` in the project root, when it exists).
+    pub config: Option<PathBuf>,
+    /// Fail the build on lint errors (default: true).
+    pub abort_on_error: Option<bool>,
+    /// Treat warnings as errors.
+    #[serde(default)]
+    pub warnings_as_errors: bool,
+    /// Also check the Android libraries the package depends on.
+    #[serde(default)]
+    pub check_dependencies: bool,
+    /// Issue ids that are not checked.
+    #[serde(default)]
+    pub disable: Vec<String>,
+    /// Issue ids that are checked although they are off by default.
+    #[serde(default)]
+    pub enable: Vec<String>,
+    /// Issue ids reported as fatal.
+    #[serde(default)]
+    pub fatal: Vec<String>,
+    /// Issue ids reported as errors.
+    #[serde(default)]
+    pub error: Vec<String>,
+    /// Issue ids reported as warnings.
+    #[serde(default)]
+    pub warning: Vec<String>,
+    /// Issue ids reported as informational.
+    #[serde(default)]
+    pub informational: Vec<String>,
+    /// Issue ids that are ignored.
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    /// The reports to write: `html`, `xml`, `sarif` and `text` (default: `html`, `xml` and `sarif`).
+    pub reports: Option<Vec<String>>,
+}
+
+impl AndroidLint {
+    /// The report formats lint writes.
+    pub const REPORTS: [&str; 4] = ["html", "xml", "sarif", "text"];
+
+    /// The reports lint writes: `reports`, else HTML, XML and SARIF. SARIF is always among them, since
+    /// `--message-format json` reads it.
+    pub fn reports(&self) -> Vec<&str> {
+        let mut reports: Vec<&str> = match &self.reports {
+            Some(list) => list.iter().map(String::as_str).collect(),
+            None => vec!["html", "xml", "sarif"],
+        };
+        if !reports.contains(&"sarif") {
+            reports.push("sarif");
+        }
+        reports
+    }
 }
 
 /// The value of a `BuildConfig` field; its Java type follows from the TOML type.
@@ -837,6 +940,15 @@ pub enum BuildConfigValue {
 }
 
 impl BuildConfigValue {
+    /// The value as the text of a manifest placeholder.
+    pub fn text(&self) -> String {
+        match self {
+            BuildConfigValue::Bool(b) => b.to_string(),
+            BuildConfigValue::Int(i) => i.to_string(),
+            BuildConfigValue::String(s) => s.clone(),
+        }
+    }
+
     /// The Java type and the Java literal of the field.
     pub fn java(&self) -> (&'static str, String) {
         match self {
@@ -1003,6 +1115,13 @@ fn validate_android(config: &AndroidConfig) -> Result<()> {
         bail!("[target.android] `consumer-proguard-files` only applies to libraries; use `proguard-files` for an application");
     }
     validate_build_config(&config.build_config, "target.android")?;
+    validate_placeholders(&config.manifest_placeholders, "target.android")?;
+    validate_android_resources(config)?;
+    validate_android_ndk(config)?;
+    validate_android_lint(&config.lint)?;
+    if config.build_tools.as_deref().is_some_and(|v| !is_dotted_version(v)) {
+        bail!("[target.android] `build-tools` must be a version such as \"36.0.0\"");
+    }
     for (build_type, signing) in &config.signing {
         if !AndroidConfig::BUILD_TYPES.contains(&build_type.as_str()) {
             bail!("[target.android.signing.{build_type}] is not a build type; use `debug` or `release`");
@@ -1051,6 +1170,73 @@ fn validate_android(config: &AndroidConfig) -> Result<()> {
             );
         }
         validate_build_config(&flavor.build_config, &format!("target.android.flavors.{name}"))?;
+        validate_placeholders(&flavor.manifest_placeholders, &format!("target.android.flavors.{name}"))?;
+    }
+    Ok(())
+}
+
+/// Whether `v` is dotted numbers (`36.0.0`, `27.2.12479018`), optionally with a suffix such as `-rc1`.
+fn is_dotted_version(v: &str) -> bool {
+    let core = v.split('-').next().unwrap_or(v);
+    !core.is_empty() && core.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn validate_placeholders(placeholders: &BTreeMap<String, BuildConfigValue>, section: &str) -> Result<()> {
+    for name in placeholders.keys() {
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+            bail!("[{section}.manifest-placeholders] `{name}` is not a placeholder name: use letters, digits, `_`, `.` and `-`");
+        }
+    }
+    Ok(())
+}
+
+fn validate_android_resources(config: &AndroidConfig) -> Result<()> {
+    for locale in &config.locales {
+        let ok = !locale.is_empty() && locale.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '_'));
+        if !ok {
+            bail!("[target.android] `locales` entry `{locale}` is not a language such as `en`, `pt-rBR` or `b+sr+Latn`");
+        }
+    }
+    Ok(())
+}
+
+fn validate_android_ndk(config: &AndroidConfig) -> Result<()> {
+    let Some(ndk) = &config.ndk else { return Ok(()) };
+    for abi in &ndk.abi_filters {
+        if !AndroidNdk::ABIS.contains(&abi.as_str()) {
+            bail!("[target.android.ndk] `abi-filters` entry `{abi}` is not an Android ABI; use {}", AndroidNdk::ABIS.join(", "));
+        }
+    }
+    if ndk.cmake.is_some() && ndk.ndk_build.is_some() {
+        bail!("[target.android.ndk] set `cmake` or `ndk-build`, not both");
+    }
+    if ndk.cmake.is_none() && (ndk.cmake_version.is_some() || !ndk.cmake_arguments.is_empty() || !ndk.cpp_flags.is_empty()) {
+        bail!("[target.android.ndk] `cmake-version`, `cmake-arguments` and `cpp-flags` need `cmake = \"CMakeLists.txt\"`");
+    }
+    for (key, version) in [("version", &ndk.version), ("cmake-version", &ndk.cmake_version)] {
+        if version.as_deref().is_some_and(|v| !is_dotted_version(v)) {
+            bail!("[target.android.ndk] `{key}` must be a version such as \"27.2.12479018\"");
+        }
+    }
+    Ok(())
+}
+
+fn validate_android_lint(lint: &AndroidLint) -> Result<()> {
+    for (key, ids) in [
+        ("disable", &lint.disable),
+        ("enable", &lint.enable),
+        ("fatal", &lint.fatal),
+        ("error", &lint.error),
+        ("warning", &lint.warning),
+        ("informational", &lint.informational),
+        ("ignore", &lint.ignore),
+    ] {
+        if let Some(id) = ids.iter().find(|id| id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+            bail!("[target.android.lint] `{key}` entry `{id}` is not a lint issue id such as `MissingTranslation`");
+        }
+    }
+    if let Some(report) = lint.reports.iter().flatten().find(|r| !AndroidLint::REPORTS.contains(&r.as_str())) {
+        bail!("[target.android.lint] `reports` entry `{report}` is not a report format; use {}", AndroidLint::REPORTS.join(", "));
     }
     Ok(())
 }

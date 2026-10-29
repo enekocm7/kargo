@@ -1273,11 +1273,20 @@ enum Command {
         #[command(flatten)]
         jobs: JobsArg,
     },
-    /// Analyze Kotlin sources with detekt
+    /// Analyze Kotlin sources with detekt, or an Android app with Android lint
     Lint {
         /// Record the current issues in the baseline file instead of reporting them
         #[arg(long)]
         create_baseline: bool,
+        /// Run Android lint (the Android Gradle Plugin's) instead of detekt
+        #[arg(long)]
+        android: bool,
+        /// With --android: how to print the issues Android lint found
+        #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "android")]
+        message_format: MessageFormatArg,
+        /// With --android: lint the release variant instead of the debug one
+        #[arg(long, requires = "android")]
+        release: bool,
         #[command(flatten)]
         packages: PackageArgs,
         #[command(flatten)]
@@ -2939,14 +2948,21 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 Ok(FAILURE)
             }
         }
-        Command::Lint { create_baseline, packages, jobs } => {
+        Command::Lint { create_baseline, android, message_format, release, packages, jobs } => {
+            set_message_format(message_format);
             let project = load_project(global)?;
             let one_by_one = Packages { jobs: jobs.jobs, one_by_default: true, dev: false, keep_going: None };
-            let ok = build_packages(config, &project, &packages.selection(), global, ProfileKind::Dev, one_by_one, |ctx| {
-                ops::lint::lint(ctx, &LintOptions { create_baseline })
+            let profile = if release { ProfileKind::Release } else { ProfileKind::Dev };
+            let ok = build_packages(config, &project, &packages.selection(), global, profile, one_by_one, |ctx| {
+                if android { kargo_ops::gradle::lint(ctx, create_baseline) } else { ops::lint::lint(ctx, &LintOptions { create_baseline }) }
             })?;
             if ok.iter().all(|ok| *ok) {
                 Ok(0)
+            } else if android {
+                shell.error(
+                    "Android lint found errors; fix them, list them in [target.android.lint], or record them with `kargo lint --android --create-baseline`",
+                );
+                Ok(FAILURE)
             } else {
                 shell.error(
                     "detekt found issues; fix them, suppress them with `@Suppress`, or record them with `kargo lint --create-baseline`",
@@ -4425,7 +4441,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "fetch", "--tools"]).unwrap();
         assert!(matches!(cli.command, Command::Fetch { sources: false, tools: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "lint", "--create-baseline"]).unwrap();
-        assert!(matches!(cli.command, Command::Lint { create_baseline: true, .. }));
+        assert!(matches!(cli.command, Command::Lint { create_baseline: true, android: false, .. }));
     }
 
     #[test]

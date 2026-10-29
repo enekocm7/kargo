@@ -218,8 +218,10 @@ note: accepted the license `android-sdk-license` above for platforms;android-36,
 Kargo installs three packages into one SDK directory, `~/.kargo/toolchains/android-sdk`:
 
 - the platform of the API level (`platforms;android-36`; from API 37 on, `platforms;android-37.0`),
-- the build-tools version the Android Gradle Plugin in use expects (36.0.0 for AGP 9.x),
-- `platform-tools`, which has `adb` for `kargo run`.
+- the build-tools version the Android Gradle Plugin in use expects (36.0.0 for AGP 9.x), or the `build-tools` you pin under `[target.android]`,
+- `platform-tools`, which has `adb` for `kargo run`,
+
+and, when `[target.android.ndk]` names them, the NDK (`ndk;27.2.12479018`) and CMake (`cmake;3.22.1`) of [native code](#native-code).
 
 The emulator, `avdmanager` and a system image come with `--emulator` (see [Virtual devices and the emulator](#virtual-devices-and-the-emulator)).
 
@@ -386,6 +388,100 @@ flavor-dimensions = ["tier", "env"]
 ```
 
 Sources and resources are shared by all flavors; to build something only in one flavor, read a `build-config` field. Any other Gradle task of a flavor runs through `kargo android`, for example `kargo android assembleFreeRelease`.
+
+## Manifest placeholders
+
+`AndroidManifest.xml` can use `${name}` placeholders, which Gradle replaces with values from `kargo.toml`. They keep keys and other per-variant values out of the manifest:
+
+```toml title="kargo.toml"
+[target.android]
+namespace = "com.example.myapp"
+manifest-placeholders = { MAPS_API_KEY = "debug-key", APP_LABEL = "My app" }
+
+[target.android.flavors.paid]
+dimension = "tier"
+manifest-placeholders = { APP_LABEL = "My app Pro" }
+```
+
+```xml title="android/AndroidManifest.xml"
+<application android:label="${APP_LABEL}">
+    <meta-data android:name="com.google.android.geo.API_KEY" android:value="${MAPS_API_KEY}" />
+</application>
+```
+
+A value can be a string, a boolean or an integer; it is substituted as text. A flavor's value replaces the shared one. Gradle also fills `${applicationId}` itself.
+
+## Resources
+
+`locales` keeps only the resources of the languages you ship, which drops the translations that libraries such as Material and AndroidX bring in:
+
+```toml title="kargo.toml"
+[target.android]
+namespace = "com.example.myapp"
+locales = ["en", "es", "pt-rBR"]
+```
+
+Vector drawables, `res/` qualifiers and resource shrinking (`minify` with `shrink-resources`, see [Release builds](#release-builds)) work as in any Android project: put the files in `android/res/`.
+
+## Native code
+
+`[target.android.ndk]` builds C and C++ with the NDK through CMake or ndk-build. The code is yours; Kargo only passes the build to Gradle:
+
+```toml title="kargo.toml"
+[target.android]
+namespace = "com.example.myapp"
+
+[target.android.ndk]
+version = "27.2.12479018"                        # downloaded with the managed SDK
+abi-filters = ["arm64-v8a", "x86_64"]            # default: all four ABIs
+cmake = "src-android/cpp/CMakeLists.txt"
+cmake-version = "3.22.1"
+cmake-arguments = ["-DANDROID_STL=c++_shared"]
+cpp-flags = ["-std=c++17"]
+```
+
+```kotlin title="src-android/Native.kt"
+object Native {
+    init { System.loadLibrary("native") }
+    external fun hello(): String
+}
+```
+
+Use `ndk-build = "jni/Android.mk"` instead of `cmake` for an ndk-build project. Libraries you built elsewhere go in `android/jniLibs/<abi>/lib<name>.so` and are packaged without any key; `abi-filters` limits which ABIs end up in the APK. With `[toolchain] android-sdk` set, Kargo installs the `version` of the NDK and the `cmake-version` of CMake with the platform, after the license is accepted (see [Android SDK](#android-sdk)); otherwise your SDK needs them, or AGP downloads them when you accepted the licenses.
+
+## Lint
+
+`kargo lint --android` runs the Android Gradle Plugin's lint on the debug variant (the first flavor of each dimension), or with `--release` the release one:
+
+```console
+$ kargo lint --android
+     Linting myapp v0.1.0 (android, gradle, lint)
+      Report /home/me/myapp/target/debug/android/lint/lint-results-debug.html
+      Report /home/me/myapp/target/debug/android/lint/lint-results-debug.sarif
+      Report /home/me/myapp/target/debug/android/lint/lint-results-debug.xml
+error: Android lint found errors; fix them, list them in [target.android.lint], or record them with `kargo lint --android --create-baseline`
+```
+
+It exits with code 101 when lint reports errors, so a CI job fails on them. The HTML, XML and SARIF reports are copied to `target/<profile>/android/lint/`; upload the SARIF file to code scanning, or read the XML in other tools. With `--message-format json`, each issue is a `compiler-message` line on stdout (`severity`, `message` with the issue id, `file`, `line` and `column`), like the compilers' diagnostics.
+
+Configure it under `[target.android.lint]`:
+
+```toml title="kargo.toml"
+[target.android.lint]
+baseline = "lint-baseline.xml"
+warnings-as-errors = true
+disable = ["MissingTranslation"]
+error = ["HardcodedText"]
+reports = ["html", "sarif"]
+```
+
+To adopt lint on an existing app without fixing everything first, record today's issues as a baseline and commit it. Later runs report only new issues:
+
+```sh
+kargo lint --android --create-baseline
+```
+
+`lint-baseline.xml` is used when it exists; name another file with `baseline`. A `lint.xml` in the project root (or `config`) is passed to lint, for severity per path. `kargo android lint` runs Gradle's `lint` task with the same settings, and `kargo android lintRelease` or `lintFreeDebug` lint other variants. For the settings of detekt on your Kotlin code, see [Formatting and linting](../formatting-and-linting/).
 
 ## Running any Gradle task
 

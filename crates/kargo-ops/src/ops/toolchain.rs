@@ -43,10 +43,7 @@ fn project_gradle(project: &Manifest) -> Result<Option<String>> {
 fn project_android_sdk(project: &Manifest) -> Option<Vec<String>> {
     let android = project.targets.android.as_ref()?;
     project.toolchain.android_sdk.api_level()?;
-    Some(android_sdk::packages_for(
-        android.config.compile_sdk,
-        android_sdk::build_tools_for_agp(crate::gradle::agp_version(&android.config)),
-    ))
+    Some(crate::gradle::sdk_packages(&android.config))
 }
 
 /// The Konan targets of the project's `[target.native] platforms`, `host` resolved; none
@@ -333,7 +330,8 @@ pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, vers
                 }
             };
             let agp = android.map_or(crate::gradle::AGP_VERSION, |a| crate::gradle::agp_version(&a.config));
-            let build_tools = android_sdk::build_tools_for_agp(agp);
+            let build_tools =
+                android.and_then(|a| a.config.build_tools.as_deref()).unwrap_or_else(|| android_sdk::build_tools_for_agp(agp));
             let sdk = android_sdk::ensure(
                 config,
                 &android_sdk::packages_for(api, build_tools),

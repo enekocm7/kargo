@@ -58,6 +58,16 @@ pub fn build_tools_package(version: &str) -> String {
     format!("build-tools;{version}")
 }
 
+/// The package of NDK `version`.
+pub fn ndk_package(version: &str) -> String {
+    format!("ndk;{version}")
+}
+
+/// The package of CMake `version`.
+pub fn cmake_package(version: &str) -> String {
+    format!("cmake;{version}")
+}
+
 /// The packages that build for platform `api` with the given build-tools.
 pub fn packages_for(api: u32, build_tools: &str) -> Vec<String> {
     vec![platform_package(api), build_tools_package(build_tools), PLATFORM_TOOLS.to_owned()]

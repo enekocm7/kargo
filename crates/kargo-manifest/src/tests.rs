@@ -657,6 +657,72 @@ dimension = "tier"
 }
 
 #[test]
+fn android_lint_ndk_and_resources() {
+    let m = parse(&format!(
+        r#"{MINIMAL}
+[target.android]
+namespace = "com.example.app"
+build-tools = "36.0.0"
+locales = ["en", "pt-rBR"]
+manifest-placeholders = {{ MAPS_KEY = "abc", DEBUGGABLE = true, PORT = 8080 }}
+
+[target.android.ndk]
+version = "27.2.12479018"
+abi-filters = ["arm64-v8a", "x86_64"]
+cmake = "src-android/cpp/CMakeLists.txt"
+cmake-version = "3.22.1"
+cmake-arguments = ["-DANDROID_STL=c++_shared"]
+cpp-flags = ["-std=c++17"]
+
+[target.android.lint]
+baseline = "config/lint-baseline.xml"
+warnings-as-errors = true
+disable = ["MissingTranslation"]
+error = ["HardcodedText"]
+reports = ["html", "xml"]
+
+[target.android.flavors.free]
+dimension = "tier"
+manifest-placeholders = {{ MAPS_KEY = "free-key" }}
+"#
+    ));
+    let cfg = &m.targets.android.as_ref().unwrap().config;
+    assert_eq!(cfg.build_tools.as_deref(), Some("36.0.0"));
+    assert_eq!(cfg.locales, ["en", "pt-rBR"]);
+    assert_eq!(cfg.manifest_placeholders["DEBUGGABLE"].text(), "true");
+    assert_eq!(cfg.manifest_placeholders["PORT"].text(), "8080");
+    assert_eq!(cfg.flavors["free"].manifest_placeholders["MAPS_KEY"].text(), "free-key");
+    let ndk = cfg.ndk.as_ref().unwrap();
+    assert_eq!(ndk.abi_filters, ["arm64-v8a", "x86_64"]);
+    assert_eq!(ndk.cmake.as_deref(), Some(Path::new("src-android/cpp/CMakeLists.txt")));
+    assert_eq!(ndk.cmake_version.as_deref(), Some("3.22.1"));
+    assert_eq!(cfg.lint.baseline.as_deref(), Some(Path::new("config/lint-baseline.xml")));
+    assert!(cfg.lint.warnings_as_errors);
+    assert_eq!(cfg.lint.reports(), ["html", "xml", "sarif"], "SARIF is always written: `--message-format json` reads it");
+    assert_eq!(AndroidLint::default().reports(), ["html", "xml", "sarif"]);
+}
+
+#[test]
+fn android_lint_ndk_and_resources_are_validated() {
+    let android = |t: &str| parse_err(&format!("{MINIMAL}\n[target.android]\nnamespace = \"a\"\n{t}"));
+    assert!(android("build-tools = \"latest\"").contains("`build-tools` must be a version"));
+    assert!(android("locales = [\"en US\"]").contains("`locales` entry"));
+    assert!(android("manifest-placeholders = { \"a b\" = 1 }").contains("not a placeholder name"));
+    assert!(android("manifest-placeholders = { RATIO = 1.5 }").contains("manifest-placeholders"));
+    assert!(android("[target.android.ndk]\nabi-filters = [\"mips\"]").contains("not an Android ABI"));
+    assert!(android("[target.android.ndk]\ncmake = \"a\"\nndk-build = \"b\"").contains("`cmake` or `ndk-build`, not both"));
+    assert!(android("[target.android.ndk]\ncmake-arguments = [\"-DX=1\"]").contains("need `cmake"));
+    assert!(android("[target.android.ndk]\nversion = \"r27\"").contains("`version` must be a version"));
+    assert!(android("[target.android.ndk]\nunknown = 1").contains("unknown field"));
+    assert!(android("[target.android.lint]\ndisable = [\"Missing Translation\"]").contains("not a lint issue id"));
+    assert!(android("[target.android.lint]\nreports = [\"pdf\"]").contains("not a report format"));
+    assert!(
+        android("[target.android.flavors.free]\ndimension = \"t\"\nmanifest-placeholders = { \"\" = 1 }")
+            .contains("not a placeholder name")
+    );
+}
+
+#[test]
 fn konan_target_normalization() {
     assert_eq!(raw::normalize_konan_target("macosArm64").unwrap(), "macos_arm64");
     assert_eq!(raw::normalize_konan_target("iosSimulatorArm64").unwrap(), "ios_simulator_arm64");

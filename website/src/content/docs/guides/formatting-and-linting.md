@@ -16,6 +16,8 @@ $ kargo lint
 
 Projects created by `kargo new` already pass both.
 
+For an Android app, `kargo lint --android` runs the Android Gradle Plugin's lint instead, with a baseline and SARIF reports; see [Android lint](../android/#lint).
+
 ## Which files
 
 Both commands look at every `.kt` and `.kts` file in `src/`, `src-<target>/`, `tests/` and `tests-<target>/`, for all targets whether or not they are enabled. `target/` and other directories are never touched.

@@ -1980,6 +1980,92 @@ fn android_gradle_tasks_that_use_a_device_get_the_chosen_one() {
     cmd.args(["--system-gradle", "android", "installDebug"]).assert().failure().stderr(predicate::str::contains("more than one device"));
 }
 
+const LINT_SARIF: &str = r#"{"version":"2.1.0","runs":[{"results":[
+  {"ruleId":"HardcodedText","level":"warning","message":{"text":"Hardcoded string"},
+   "locations":[{"physicalLocation":{"artifactLocation":{"uri":"file:///src/res/layout/main.xml"},"region":{"startLine":12,"startColumn":5}}}]}]}]}"#;
+
+#[test]
+fn android_lint_runs_the_default_variant_and_keeps_the_reports() {
+    let p = Project::new();
+    android_app(&p);
+    let fake = common::FakeAndroid::new("");
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.env("FAKE_LINT_SARIF", LINT_SARIF)
+        .args(["--system-gradle", "lint", "--android", "--message-format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""reason":"compiler-message""#))
+        .stdout(predicate::str::contains(r#""severity":"warning""#))
+        .stdout(predicate::str::contains("Hardcoded string [HardcodedText]"))
+        .stderr(predicate::str::contains("Linting droid"));
+    assert!(fake.log().contains("lintDebug"), "{}", fake.log());
+    for report in ["lint-results-debug.sarif", "lint-results-debug.html"] {
+        assert!(p.path().join("target/debug/android/lint").join(report).is_file(), "{report}");
+    }
+    let gradle = std::fs::read_to_string(p.path().join("target/android/build.gradle.kts")).unwrap();
+    assert!(gradle.contains("lint {") && gradle.contains("sarifReport = true"), "{gradle}");
+
+    // Lint errors fail the command with its own advice; a Gradle failure before any report names Gradle.
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.env("FAKE_LINT_SARIF", LINT_SARIF)
+        .env("FAKE_LINT_FAIL", "1")
+        .args(["--system-gradle", "lint", "--android"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Android lint found errors"))
+        .stderr(predicate::str::contains("kargo lint --android --create-baseline"));
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.env_remove("FAKE_LINT_SARIF")
+        .env("FAKE_LINT_FAIL", "1")
+        .args(["--system-gradle", "lint", "--android", "--release"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed before lint wrote a report"));
+    assert!(fake.log().contains("lintRelease"), "{}", fake.log());
+}
+
+#[test]
+fn android_lint_records_and_requires_its_baseline() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest("droid", "[target.android]\nnamespace = \"com.example.droid\"\ncompile-sdk = 36\n[target.android.lint]\nbaseline = \"config/lint.xml\"\n"),
+    );
+    p.file("android/AndroidManifest.xml", "<manifest/>");
+    p.file("src/Main.kt", "fun main() {}\n");
+    let fake = common::FakeAndroid::new("");
+    // A configured baseline has to exist: AGP would fail the run that creates it.
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "lint", "--android"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("baseline file `config/lint.xml` does not exist"))
+        .stderr(predicate::str::contains("kargo lint --android --create-baseline"));
+    assert!(fake.log().is_empty(), "Gradle must not run: {}", fake.log());
+
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    cmd.args(["--system-gradle", "lint", "--android", "--create-baseline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Created baseline config/lint.xml"));
+    let log = fake.log();
+    assert!(log.contains("updateLintBaselineDebug") && log.contains("-Pkargo.lint.createBaseline"), "{log}");
+}
+
+#[test]
+fn android_lint_needs_the_android_target() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.jvm]\n"));
+    p.file("src/Main.kt", "fun main() {}\n");
+    p.kargo().args(["lint", "--android"]).assert().failure().stderr(predicate::str::contains("the Android target is not enabled"));
+    p.kargo().args(["lint", "--message-format", "json"]).assert().failure().stderr(predicate::str::contains("--android"));
+}
+
 #[test]
 fn android_creates_lists_starts_and_deletes_virtual_devices() {
     let p = Project::new();
