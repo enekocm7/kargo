@@ -211,16 +211,16 @@ $ kargo run --hot-reload
      Changed src/App.kt
    Compiling counter v0.1.0 (jvm)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.64s
-    Reloaded 2 classes
+    Reloaded 2 classes in 210 ms
 ```
 
-`--hot-reload` works like [`--watch`](../../reference/commands/#kargo-run-r): Kargo rebuilds when a file changes. The desktop app keeps running, though. Kargo swaps the classes that changed into it and Compose recomposes the window with the new code, keeping what `remember` holds, such as the click count. A build that fails leaves the app as it was.
+`--hot-reload` (or `--hot`) works like [`--watch`](../../reference/commands/#kargo-run-r): Kargo rebuilds when a file changes. The desktop app keeps running, though. Kargo swaps the classes that changed into it and Compose recomposes the window with the new code, keeping what `remember` holds, such as the click count. A build that fails leaves the app as it was.
 
 The app runs on [JetBrains Runtime](https://github.com/JetBrains/JetBrainsRuntime) (JBR) with `-XX:+AllowEnhancedClassRedefinition`, so new functions, fields and classes reload too. Kargo downloads the JBR of your project's Java version into `~/.kargo/toolchains/jbr/` the first time (about 300 MB) and checks it against the SHA-512 checksum JetBrains publishes. Offline, or where there is no JBR, the app runs on the project's JDK with a warning, and only changes inside function bodies reload.
 
 Kargo restarts the app instead when a change cannot be applied in place, and when the command line changes, as with a new dependency or JVM option. The app runs from a copy of its classes in `target/<profile>/jvm/hot-reload/`, which also holds `agent.log`, a record of each reload.
 
-`--hot-reload` needs `[frameworks] compose` and the jvm target. It takes the options of `--watch` (`--clear`, `--ignore`), and not `--debug` or `--native-agent`.
+`--hot-reload` needs the jvm target. It takes the options of `--watch` (`--clear`, `--ignore`), and not `--debug` or `--native-agent`. Without Compose it still swaps classes into any other JVM program, on your project's own JDK; see [Hot reload a JVM program](../watch/#hot-reload-a-jvm-program).
 
 ## Previews
 

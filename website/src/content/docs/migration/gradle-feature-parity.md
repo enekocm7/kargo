@@ -67,7 +67,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Build profiles and environments | Supported | `[profile.<name>]`, `[env]` |
 | Code generation | Supported | [`[[generate]]`](../../guides/code-generation/) |
 | Watch mode (`--continuous`) | Supported | [`kargo watch`](../../guides/watch/), `run --watch`, `test --watch` |
-| Hot reload | Planned | [#231](https://github.com/enekocm7/kargo/issues/231) for the JVM, servers and Wasm. Compose Desktop has `kargo run --hot-reload` today |
+| Hot reload | Partial | `kargo run --hot` swaps changed classes into a running JVM program or server and recomposes Compose Desktop ([#231](https://github.com/enekocm7/kargo/issues/231), [#220](https://github.com/enekocm7/kargo/issues/220)). Wasm and JS browser apps reload their page with `--watch`. Spring Boot DevTools and Ktor `autoreload` are not wired in |
 
 ## Kotlin
 

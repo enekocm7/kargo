@@ -218,13 +218,16 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
     }
     if opts.hot_reload {
         if target != TargetKind::Jvm {
-            bail!("`--hot-reload` reloads a Compose Desktop app and only works for the jvm target, not {target}");
+            bail!(
+                "`--hot-reload` swaps changed classes into a running JVM program and only works for the jvm target, not {target}; \
+                 `--watch` rebuilds the other targets"
+            );
         }
-        if !crate::compose::enabled(ctx.ws.manifest()) {
-            bail!("`--hot-reload` reloads the composables of a Compose Desktop app; enable Compose with `[frameworks] compose = true`");
+        if matches!(program, Program::Example(_) | Program::File(_)) {
+            bail!("`--hot-reload` reloads the project's own program; an example or a file is compiled on its own, so use `--watch`");
         }
-        if opts.native_agent {
-            bail!("`--hot-reload` runs the app on JetBrains Runtime, and `--native-agent` on GraalVM; use one of them");
+        if opts.native_agent && crate::compose::enabled(ctx.ws.manifest()) {
+            bail!("`--hot-reload` runs a Compose app on JetBrains Runtime, and `--native-agent` on GraalVM; use one of them");
         }
     }
     if *program != Program::Default && !matches!(target, TargetKind::Jvm | TargetKind::Native) {
@@ -501,9 +504,9 @@ impl Running {
         let alive = self.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
         if let (true, Some(running), Some(new)) = (alive, &self.hot_reload, &launch.hot_reload) {
             if running == new {
+                let start = Instant::now();
                 match running.request() {
-                    Answer::Reloaded(0) => shell.status("Reloaded", "no loaded class changed"),
-                    Answer::Reloaded(n) => shell.status("Reloaded", format!("{n} class{}", if n == 1 { "" } else { "es" })),
+                    Answer::Reloaded(n) => shell.status("Reloaded", reloaded(n, start.elapsed())),
                     Answer::Restart(reason) => {
                         shell.note(format!("restarting the app, as the change cannot be reloaded: {reason}"));
                         return self.restart(launch, shell);
@@ -549,12 +552,27 @@ impl Drop for Running {
     }
 }
 
-/// The JDK `--hot-reload` runs the app on: JetBrains Runtime of the project's Java version, whose
-/// enhanced class redefinition reloads new functions and fields too. Without one (offline, or no
-/// download for this platform) the project's JDK, which reloads changed function bodies only.
+/// The status line of a reload of `classes` classes that took `elapsed`.
+fn reloaded(classes: usize, elapsed: std::time::Duration) -> String {
+    match classes {
+        0 => "no loaded class changed".to_owned(),
+        1 => format!("1 class in {} ms", elapsed.as_millis()),
+        n => format!("{n} classes in {} ms", elapsed.as_millis()),
+    }
+}
+
+/// The JDK `--hot-reload` runs the app on. A Compose app gets JetBrains Runtime of the project's Java
+/// version, whose enhanced class redefinition reloads new functions and fields too; without one
+/// (offline, or no download for this platform) it gets the project's JDK, which reloads changed
+/// function bodies only. Any other app runs on the project's JDK, which is not replaced by a download
+/// but does use enhanced redefinition when it is JetBrains Runtime itself.
 /// Returns the JDK and whether it is JetBrains Runtime.
 fn hot_reload_jdk(ctx: &BuildContext) -> Result<(kargo_toolchain::Jdk, bool)> {
     let jdk = ctx.jdk()?.clone();
+    if !crate::compose::enabled(ctx.ws.manifest()) {
+        let jbr = kargo_toolchain::jbr::is_jetbrains_runtime(&jdk);
+        return Ok((jdk, jbr));
+    }
     match kargo_toolchain::jbr::resolve(ctx.config, jdk.version) {
         Ok(jbr) => Ok((jbr, true)),
         Err(e) => {
@@ -852,6 +870,14 @@ mod tests {
     fn file_program_names() {
         assert_eq!(file_program_name(Path::new("tools/migrate.kt")), "migrate");
         assert_eq!(file_program_name(Path::new("my tool.main.kt")), "my_tool_main");
+    }
+
+    #[test]
+    fn reloads_are_reported_with_their_time() {
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(reloaded(0, ms(40)), "no loaded class changed");
+        assert_eq!(reloaded(1, ms(40)), "1 class in 40 ms");
+        assert_eq!(reloaded(3, ms(180)), "3 classes in 180 ms");
     }
 
     #[test]

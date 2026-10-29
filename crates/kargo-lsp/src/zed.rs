@@ -79,6 +79,7 @@ pub fn tasks(metadata: &Value) -> Value {
         (&["build"][..], ROOT),
         (&["build", "--release"][..], ROOT),
         (&["check", "--tests"][..], ROOT),
+        (&["run", "--hot-reload"][..], HERE),
         (&["test"][..], ROOT),
         (&["test"][..], HERE),
         (&["clean"][..], ROOT),
@@ -89,7 +90,7 @@ pub fn tasks(metadata: &Value) -> Value {
         (&["remove", "$ZED_SELECTED_TEXT"][..], HERE),
     ] {
         let mut label = format!("kargo {}", args.join(" "));
-        if cwd == HERE && args == ["test"] {
+        if cwd == HERE && (args == ["test"] || args == ["run", "--hot-reload"]) {
             label.push_str(" (this package)");
         }
         tasks.push(task(label, words(args), cwd, &[]));
@@ -180,7 +181,14 @@ mod tests {
         assert_eq!(test["cwd"], "$ZED_DIRNAME");
         assert_eq!(labels_tagged(&tasks, "kotlin-test-class-nested").len(), 1);
         let all: Vec<&str> = tasks.as_array().unwrap().iter().map(|t| t["label"].as_str().unwrap()).collect();
-        for label in ["kargo test -t wasm", "kargo task hello", "kargo build", "kargo fetch --sources", "kargo add $ZED_SELECTED_TEXT"] {
+        for label in [
+            "kargo test -t wasm",
+            "kargo task hello",
+            "kargo build",
+            "kargo run --hot-reload (this package)",
+            "kargo fetch --sources",
+            "kargo add $ZED_SELECTED_TEXT",
+        ] {
             assert!(all.contains(&label), "{label} in {all:?}");
         }
     }

@@ -1011,8 +1011,8 @@ struct RunArgs {
     /// Rebuild and restart the program when its files change, or reload the open pages of a browser app (Ctrl+C stops it)
     #[arg(long, conflicts_with = "debug")]
     watch: bool,
-    /// Like --watch, but a Compose Desktop app keeps running and reloads the changed code in place
-    #[arg(long, conflicts_with = "debug")]
+    /// Like --watch, but a JVM program keeps running and the changed classes are swapped into it (Compose recomposes)
+    #[arg(long, visible_alias = "hot", conflicts_with = "debug")]
     hot_reload: bool,
     #[command(flatten)]
     watch_args: WatchArgs,

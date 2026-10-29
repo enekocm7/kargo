@@ -73,6 +73,7 @@ In a project with 300 source files, changing one file rebuilds in about 0.4 seco
 - **Clean rebuilds.** Changing compiler options, compiler plugins, `[frameworks]` or the Kotlin version recompiles the target from scratch once. A clean build takes somewhat longer than without incremental compilation, because the compiler also records what each file depends on.
 - **Deleted files.** Their classes are removed from `target/` on the next successful build.
 - **Java sources.** Kotlin compiles incrementally; `javac` still compiles all Java sources of a target whenever it rebuilds.
+- **Running programs.** `kargo run --watch` builds this way on every change and restarts the program. `kargo run --hot` also keeps it running: the changed classes are swapped into the live JVM, so a method-body change reaches the running program in about the time of the incremental build. See [Hot reload](../watch/#hot-reload-a-jvm-program).
 - **Where the state lives.** The caches are in `target/<profile>/jvm/.fingerprint/<name>.ic/`, so `kargo clean` removes them.
 
 - **Path dependencies.** A [path dependency](../workspaces/)'s jar counts by its ABI: its public declarations, their signatures and constants, and the bodies of `inline` functions. A change to a private function, or to the body of a function that isn't `inline`, rebuilds the dependency but none of its JVM consumers, which run the new code from its new jar. See [Incremental builds across members](../workspaces/#incremental-builds-across-members).

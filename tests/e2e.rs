@@ -3068,6 +3068,66 @@ fn jvm_run_watch_restarts_the_program_after_a_change() {
 }
 
 #[test]
+fn jvm_hot_reload_swaps_a_method_body_without_a_restart() {
+    require_e2e!();
+    use std::io::BufRead;
+    let t = E2e::new();
+    t.create(&["app"]);
+    // The program exits once `stop` exists: on Windows, killing `kargo` would leave it running.
+    let program = |word: &str| {
+        format!(
+            "fun message() = \"{word}\"\n\nfun main() {{\n    val pid = ProcessHandle.current().pid()\n    while (!java.io.File(\"stop\").exists()) {{\n        \
+             println(\"tick $pid ${{message()}}\")\n        Thread.sleep(100)\n    }}\n}}\n"
+        )
+    };
+    t.write("app/src/Main.kt", &program("first"));
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("kargo"))
+        .args(["run", "--hot"])
+        .current_dir(t.dir.path().join("app"))
+        .env_remove("KARGO_TARGET_DIR")
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    for stream in [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stream).lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        });
+    }
+    // The lines seen before one that contains `needle`, which is returned last.
+    let wait_for = |needle: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            if let Ok(line) = rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                let found = line.contains(needle);
+                seen.push(line);
+                if found {
+                    return seen;
+                }
+            }
+        }
+        panic!("`{needle}` never appeared:\n{}", seen.join("\n"));
+    };
+    let pid = |lines: &[String]| lines.last().and_then(|l| l.split_whitespace().nth(1)).map(str::to_owned).unwrap();
+    let first = pid(&wait_for("first"));
+    t.write("app/src/Main.kt", &program("second"));
+    let swapped = wait_for("second");
+    let after = wait_for("Reloaded");
+    std::fs::write(t.dir.path().join("app/stop"), "").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(pid(&swapped), first, "the same process printed the new behavior:\n{swapped:?}");
+    assert!(!swapped.iter().chain(&after).any(|l| l.contains("Running")), "the program was restarted:\n{swapped:?}\n{after:?}");
+}
+
+#[test]
 fn custom_profiles_have_their_own_output_jvm_args_and_dependencies() {
     require_e2e!();
     let t = E2e::new();

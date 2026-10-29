@@ -122,7 +122,7 @@ compose = { version = "1.12.1", material3 = true, resources-package = "com.examp
 compose = { stability-config = "compose-stability.conf", strong-skipping = true, feature-flags = ["OptimizeNonSkippingGroups"], metrics = true, reports = true }
 ```
 
-- On the **JVM** it sets up [Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) for desktop: the Compose compiler plugin, the desktop runtime for your OS and Material 3 (disable with `material3 = false`). `kargo run --hot-reload` reloads the running app, and `kargo preview` renders `@Preview` functions to PNG.
+- On the **JVM** it sets up [Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) for desktop: the Compose compiler plugin, the desktop runtime for your OS and Material 3 (disable with `material3 = false`). `kargo run --hot-reload` reloads the running app (and works for [any JVM program](../watch/#hot-reload-a-jvm-program)), and `kargo preview` renders `@Preview` functions to PNG.
 - On **Wasm** (`environment = "browser"`) it builds a Compose for Web app, with Skiko's runtime next to the module.
 - On **Native** (iOS platforms, `kind = "framework"`) it builds a Compose for iOS framework.
 - On **Android** it enables Jetpack Compose in the generated Gradle project.
