@@ -47,6 +47,20 @@ pub fn manifest(manifest: &Manifest, is_builtin_command: impl Fn(&str) -> bool) 
     messages
 }
 
+/// Warns about a `kargo.lock` in the package's own directory that a workspace's shared lockfile has
+/// replaced (the package was a standalone project before it joined the workspace).
+pub fn stale_lockfile(ws: &Workspace) -> Vec<String> {
+    let own = ws.root().join("kargo.lock");
+    if ws.lockfile_path() == own || !own.is_file() {
+        return Vec::new();
+    }
+    vec![format!(
+        "`{}` is ignored: the package is locked in the workspace's `{}`; delete the stale file",
+        slash(&own),
+        slash(&ws.lockfile_path())
+    )]
+}
+
 /// Maven accepts any version string, but versions that start with a number and use only
 /// letters, digits and `.-_+` (`1.0`, `2.1.0-SNAPSHOT`, `2024.03`) work everywhere.
 fn looks_like_version(version: &str) -> bool {
