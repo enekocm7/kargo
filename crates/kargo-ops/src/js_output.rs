@@ -20,7 +20,9 @@ pub fn finish(ctx: &BuildContext, build: &JsBuild) -> Result<()> {
         let manifest = ctx.ws.manifest();
         let js = manifest.targets.js.as_ref().context("the JS target is not enabled")?;
         let dependencies = crate::npm::dependencies(ctx, TargetKind::Js, &build.libraries)?;
-        let json = package_json(&manifest.package, js.npm_package_name(&manifest.package), build, &dependencies);
+        let dependencies = crate::npm_package::published_dependencies(ctx.project, ctx.ws, dependencies);
+        let json =
+            package_json(&manifest.package, js.npm_package_name(&manifest.package), build, &dependencies, manifest.publish.npm.as_ref());
         std::fs::write(build.dir.join("package.json"), json).context("failed to write package.json")?;
     } else {
         remove_library_package_json(&build.dir)?;
@@ -151,52 +153,31 @@ pub fn write_test_files(dir: &Path, module: &str, browser: bool, filter: Option<
 }
 
 /// The `package.json` of a library: the compiled module, its TypeScript declarations and the npm
-/// packages it imports, so `npm publish target/release/js` works as it is.
-///
-/// Written by hand because the order matters: TypeScript takes the first condition of `exports`
-/// that matches, so `types` has to come before `default`.
-fn package_json(package: &kargo_manifest::Package, npm_name: String, build: &JsBuild, dependencies: &BTreeMap<String, String>) -> String {
-    let quoted = |s: &str| serde_json::to_string(s).expect("a string serializes");
-    let nested = |value: serde_json::Value| serde_json::to_string_pretty(&value).expect("a JSON value serializes").replace('\n', "\n  ");
-    let module = &build.name;
+/// packages it imports, so `npm publish target/release/js` works as it is (`kargo publish --npm`
+/// does that with the checks and credentials of `[publish.npm]`).
+fn package_json(
+    package: &kargo_manifest::Package,
+    npm_name: String,
+    build: &JsBuild,
+    dependencies: &BTreeMap<String, String>,
+    settings: Option<&kargo_manifest::NpmPublishSettings>,
+) -> String {
     let (extension, types_extension) = match build.module_kind {
         JsModuleKind::Es => ("mjs", "d.mts"),
         JsModuleKind::CommonJs | JsModuleKind::Umd => ("js", "d.ts"),
     };
-    let entry = quoted(&format!("./{module}.{extension}"));
-    let types = quoted(&format!("./{module}.{types_extension}"));
-
-    let mut fields: Vec<(&str, String)> = vec![("name", quoted(&npm_name)), ("version", quoted(&package.version))];
-    if let Some(description) = &package.description {
-        fields.push(("description", quoted(description)));
+    crate::npm_package::LibraryPackage {
+        name: crate::npm_package::scoped_name(npm_name, settings),
+        package,
+        settings,
+        module: &build.name,
+        extension,
+        types_extension,
+        es: build.module_kind == JsModuleKind::Es,
+        files: vec![format!("*.{extension}"), format!("*.{extension}.map"), format!("*.{types_extension}")],
+        dependencies,
     }
-    if let Some(license) = &package.license {
-        fields.push(("license", quoted(license)));
-    }
-    if let Some(author) = package.authors.first() {
-        fields.push(("author", quoted(author)));
-    }
-    if package.authors.len() > 1 {
-        fields.push(("contributors", nested(serde_json::json!(&package.authors[1..]))));
-    }
-    let module_type = if build.module_kind == JsModuleKind::Es { "module" } else { "commonjs" };
-    fields.extend([("type", quoted(module_type)), ("main", entry.clone())]);
-    if build.module_kind == JsModuleKind::Es {
-        fields.push(("module", entry.clone()));
-    }
-    fields.extend([
-        ("types", types.clone()),
-        (
-            "exports",
-            format!("{{\n    \".\": {{\n      \"types\": {types},\n      \"default\": {entry}\n    }},\n    \"./package.json\": \"./package.json\"\n  }}"),
-        ),
-        ("files", nested(serde_json::json!([format!("*.{extension}"), format!("*.{extension}.map"), format!("*.{types_extension}")]))),
-    ]);
-    if !dependencies.is_empty() {
-        fields.push(("dependencies", nested(serde_json::json!(dependencies))));
-    }
-    let body: Vec<String> = fields.iter().map(|(key, value)| format!("  \"{key}\": {value}")).collect();
-    format!("{{\n{}\n}}\n", body.join(",\n"))
+    .json()
 }
 
 #[cfg(test)]
@@ -224,18 +205,23 @@ mod tests {
         )
         .unwrap();
         let deps = BTreeMap::from([("left-pad".to_owned(), "^1.3.0".to_owned())]);
-        let json = package_json(&manifest.package, "@acme/greeter".into(), &build(JsModuleKind::Es), &deps);
+        let json = package_json(&manifest.package, "@acme/greeter".into(), &build(JsModuleKind::Es), &deps, None);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["name"], "@acme/greeter");
         assert_eq!(value["type"], "module");
         assert_eq!(value["main"], "./greeter.mjs");
         assert_eq!(value["types"], "./greeter.d.mts");
         assert_eq!(value["dependencies"]["left-pad"], "^1.3.0");
-        assert!(json.find("\"types\": \"./greeter.d.mts\",\n      \"default\"").is_some(), "types comes first:\n{json}");
+        assert!(json.find("\"types\": \"./greeter.d.mts\",\n      \"import\"").is_some(), "types comes first:\n{json}");
 
-        let cjs: serde_json::Value =
-            serde_json::from_str(&package_json(&manifest.package, "greeter".into(), &build(JsModuleKind::CommonJs), &BTreeMap::new()))
-                .unwrap();
+        let cjs: serde_json::Value = serde_json::from_str(&package_json(
+            &manifest.package,
+            "greeter".into(),
+            &build(JsModuleKind::CommonJs),
+            &BTreeMap::new(),
+            None,
+        ))
+        .unwrap();
         assert_eq!(
             (cjs["type"].as_str(), cjs["main"].as_str(), cjs["types"].as_str()),
             (Some("commonjs"), Some("./greeter.js"), Some("./greeter.d.ts"))

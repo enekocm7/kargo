@@ -83,16 +83,32 @@ impl Npmrc {
         url.trim_end_matches('/').to_owned()
     }
 
+    /// Makes `url` the registry of every package, over what the files and the environment said.
+    pub fn set_registry(&mut self, url: &str) {
+        self.registry = Some(url.trim_end_matches('/').to_owned());
+        self.scoped.clear();
+    }
+
+    /// Uses `token` for `registry`, over what the files said.
+    pub fn set_token(&mut self, registry: &str, token: &str) {
+        self.tokens.insert(auth_key(registry), token.to_owned());
+    }
+
     /// The token for `registry`: the entry whose `//host/path/` is the longest prefix of the URL.
     pub fn token_for(&self, registry: &str) -> Option<&str> {
-        let bare = registry.split_once("://").map_or(registry, |(_, rest)| rest);
-        let bare = format!("//{}/", bare.trim_end_matches('/'));
+        let bare = auth_key(registry);
         self.tokens
             .iter()
             .filter(|(prefix, _)| bare.starts_with(prefix.as_str()))
             .max_by_key(|(prefix, _)| prefix.len())
             .map(|(_, t)| t.as_str())
     }
+}
+
+/// The `//host/path/` an `.npmrc` writes a registry's token under: the URL without its scheme, with a trailing slash.
+pub fn auth_key(registry: &str) -> String {
+    let bare = registry.split_once("://").map_or(registry, |(_, rest)| rest);
+    format!("//{}/", bare.trim_end_matches('/'))
 }
 
 /// Replaces `${NAME}` with the variable, or with nothing when it is not set.
@@ -237,6 +253,31 @@ impl<'a> Registry<'a> {
         }
         let json: Value = response.body_mut().read_to_string().ok().and_then(|b| serde_json::from_str(&b).ok()).unwrap_or_default();
         json["objects"].as_array().into_iter().flatten().filter_map(|o| o["package"]["name"].as_str().map(str::to_owned)).collect()
+    }
+
+    /// The versions of `name` the registry has, or `None` when it has no such package (a new one). Unlike
+    /// [`Registry::package`] this always asks the registry: a cached answer could miss a version published since.
+    pub fn published_versions(&self, name: &str) -> Result<Option<Vec<String>>> {
+        let registry = self.url_for(name);
+        let url = format!("{registry}/{}", name.replacen('/', "%2F", 1));
+        let agent = kargo_util::http::agent(self.config, Duration::from_secs(60));
+        let mut request = agent.get(&url).header("Accept", "application/json");
+        if let Some(token) = self.npmrc.token_for(&registry) {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let mut response = request
+            .call()
+            .with_context(|| format!("failed to reach the npm registry at {registry}; check your network connection and the registry"))?;
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Ok(None),
+            401 | 403 => bail!("the registry {registry} refused access to `{name}`; check the token (`NPM_TOKEN` or your .npmrc)"),
+            status => bail!("the npm registry {registry} answered {status} for `{name}`"),
+        }
+        let body = response.body_mut().read_to_string().with_context(|| format!("failed to read the answer of {registry} for `{name}`"))?;
+        let json: Value =
+            serde_json::from_str(&body).with_context(|| format!("the npm registry {registry} sent invalid JSON for `{name}`"))?;
+        Ok(Some(json.get("versions").and_then(Value::as_object).map(|v| v.keys().cloned().collect()).unwrap_or_default()))
     }
 
     fn cache_path(&self, registry: &str, name: &str) -> PathBuf {

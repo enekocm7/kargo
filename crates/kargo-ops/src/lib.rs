@@ -16,6 +16,7 @@ pub mod js_sources;
 pub mod lockfile;
 pub mod native_interop;
 pub mod npm;
+pub mod npm_package;
 pub mod npm_registry;
 pub mod npm_semver;
 pub mod ops;

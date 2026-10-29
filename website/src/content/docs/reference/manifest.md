@@ -402,6 +402,34 @@ central-publishing = "manual"
 
 See [Publishing a library](../../guides/publishing/).
 
+### `[publish.npm]`
+
+Where and how `kargo publish --npm` publishes the npm package of a [Wasm](../../guides/wasm/#libraries) or [Kotlin/JS](../../guides/js/) library (`kind = "library"`). The table makes `kargo publish` publish to npm as well as to Maven; every key is optional.
+
+```toml title="kargo.toml"
+[publish.npm]
+scope = "acme"
+access = "public"
+tag = "next"
+provenance = true
+keywords = ["kotlin", "wasm"]
+engines = { node = ">=20" }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `registry` | your `.npmrc`, else `https://registry.npmjs.org` | The registry URL. `--registry` overrides it |
+| `scope` | none | The scope of a package name that has none: `scope = "acme"` publishes `hello` as `@acme/hello`. A name that is scoped already (`npm-name = "@other/hello"`) keeps its own |
+| `access` | the registry's | `"public"` or `"restricted"`. npm makes scoped packages restricted, which needs a paid account, so set `"public"` for an open-source package |
+| `tag` | `latest` | The dist-tag the version gets, such as `next`. A pre-release version (`1.0.0-beta.1`) needs one. `--tag` overrides it |
+| `provenance` | `false` | Publish with [provenance](../../guides/publishing/#provenance) (npm and pnpm; an error with bun, which can't sign; GitHub Actions or GitLab CI) |
+| `keywords` | `[]` | The `keywords` of `package.json` |
+| `bugs` | the issues page of a GitHub or GitLab `repository` | The `bugs` URL |
+| `side-effects` | not written | `false`, `true` or a list of files: the `sideEffects` that tell bundlers whether unused imports can be dropped |
+| `engines` | none | The `engines` of `package.json`, as `name = "range"` |
+
+The rest of `package.json` comes from [`[package]`](#package): `description`, `license`, `authors`, `homepage` and `repository`. Credentials are never read from `kargo.toml`: use [`NPM_TOKEN`](../environment/) or your own `.npmrc`. See [Publishing to npm](../../guides/publishing/#publishing-to-npm).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.

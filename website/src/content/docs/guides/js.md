@@ -128,10 +128,10 @@ $ ls target/release/js
 greeter.d.mts  greeter.mjs  package.json
 ```
 
-`target/<profile>/js/` is an npm package: publish it with `npm publish target/release/js`.
+`target/<profile>/js/` is an npm package: publish it with [`kargo publish --npm`](../publishing/#publishing-to-npm), which checks the package, the version and the credentials first (or with `npm publish target/release/js` by hand).
 
 - **Declarations.** `<name>.d.mts` (`<name>.d.ts` for CommonJS and UMD) holds the TypeScript declarations of the `@JsExport` declarations (`export declare function greet(name: string): string;`). Unlike Wasm, Kotlin/JS exports classes and objects too. An ES module exports them by name (`import { greet } from "@acme/greeter"`); CommonJS and UMD modules put them in objects named after their Kotlin package (`require("@acme/greeter").com.example.greeter.greet`).
-- **`package.json`** comes from `[package]` (`name`, `version`, `description`, `license`, `author`), with `type` (`module`, or `commonjs` for the other kinds), `main`, `types`, `exports`, `files`, and the [npm packages](#npm-packages) the library needs as `dependencies`.
+- **`package.json`** comes from `[package]` (`name`, `version`, `description`, `license`, `homepage`, `repository`, `author`) and [`[publish.npm]`](../../reference/manifest/#publishnpm) (`keywords`, `bugs`, `sideEffects`, `engines`), with `type` (`module`, or `commonjs` for the other kinds), `main`, `types`, `exports`, `files`, and the [npm packages](#npm-packages) the library needs as `dependencies`.
 - A library has no `main`, so `kargo run` refuses to run it; `kargo test` runs its tests.
 
 To publish a Kotlin library for other Kotlin projects, use [`kargo publish`](../publishing/): it publishes the klib as the `<name>-js` module, with the Gradle module metadata (`org.jetbrains.kotlin.platform.type = js`, `org.jetbrains.kotlin.js.compiler = ir`) that Gradle and Kargo builds select it by.

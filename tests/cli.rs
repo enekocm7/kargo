@@ -3817,6 +3817,133 @@ fn publish_requires_published_path_dependencies() {
         .stderr(predicate::str::contains("depends on `core`, which has `publish = false`"));
 }
 
+const NPM_LIBRARY: &str = "description = \"Greets\"\nlicense = \"MIT\"\nrepository = \"https://github.com/acme/hello\"\n\n[target.wasm]\nkind = \"library\"\nenvironment = \"js\"\npackage-manager = \"npm\"\n";
+
+/// A directory with an `npm` that does nothing, to put in front of `PATH`: the checks of `kargo publish --npm`
+/// that run before the build find a package manager without needing Node.js.
+fn fake_npm_path() -> (tempfile::TempDir, std::ffi::OsString) {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "npm.cmd" } else { "npm" });
+    let script = if cfg!(windows) { ["@echo off", "exit /b 0"] } else { ["#!/bin/sh", "exit 0"] }.join("\n");
+    std::fs::write(&exe, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths(
+        std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+    )
+    .unwrap();
+    (dir, path)
+}
+
+#[test]
+fn publish_npm_checks_the_package_before_building() {
+    let p = Project::new();
+    let registry = FakeRegistry::start(vec![("hello", vec![("latest", "1.0.0")], vec![("0.9.0", false), ("1.0.0", false)])]);
+    let (_npm, path) = fake_npm_path();
+    let kargo = || {
+        let mut cmd = kargo_npm(&p, &registry);
+        cmd.env("PATH", &path).env_remove("NPM_TOKEN");
+        cmd
+    };
+
+    // A package that builds no npm package says what makes one.
+    p.file("kargo.toml", &manifest("hello", ""));
+    kargo().args(["publish", "--npm"]).assert().failure().code(101).stderr(predicate::str::contains("builds no npm package"));
+    p.file("kargo.toml", &manifest("hello", "\n[target.wasm]\nenvironment = \"browser\"\n"));
+    kargo().args(["publish", "--npm"]).assert().failure().stderr(predicate::str::contains("kind = \"library\""));
+
+    // A version that is on the registry is never published again, even by a dry run.
+    p.file("kargo.toml", &manifest("hello", NPM_LIBRARY).replace("0.1.0", "1.0.0"));
+    kargo()
+        .args(["publish", "--npm", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("hello v1.0.0 is already on the registry").and(predicate::str::contains("bump `version`")));
+    assert!(registry.requests().iter().any(|(path, _)| path == "hello"), "{:?}", registry.requests());
+
+    // A pre-release needs a dist-tag; the version has to be SemVer.
+    p.file("kargo.toml", &manifest("hello", NPM_LIBRARY).replace("0.1.0", "1.1.0-beta.1"));
+    kargo().args(["publish", "--npm"]).assert().failure().stderr(predicate::str::contains("pass `--tag next`"));
+    p.file("kargo.toml", &manifest("hello", NPM_LIBRARY).replace("0.1.0", "1.1-SNAPSHOT"));
+    kargo().args(["publish", "--npm"]).assert().failure().stderr(predicate::str::contains("is not a version npm accepts"));
+
+    // Provenance needs a CI run that can sign.
+    p.file("kargo.toml", &format!("{}\n[publish.npm]\nprovenance = true\n", manifest("hello", NPM_LIBRARY).replace("0.1.0", "1.1.0")));
+    kargo()
+        .args(["publish", "--npm"])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITLAB_CI")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("id-token: write"));
+
+    p.file("kargo.toml", &manifest("hello", &format!("publish = false\n{NPM_LIBRARY}")));
+    kargo().args(["publish", "--npm"]).assert().failure().stderr(predicate::str::contains("`publish = false`"));
+}
+
+#[test]
+fn publish_goes_to_npm_when_the_manifest_configures_it() {
+    let p = Project::new();
+    let registry = FakeRegistry::start(vec![("@acme/hello", vec![("latest", "1.0.0")], vec![("1.0.0", false)])]);
+    let (_npm, path) = fake_npm_path();
+    // `[publish.npm]` alone picks npm, and its `scope` names the package, so the registry is asked for the scoped name.
+    p.file("kargo.toml", &format!("{}\n[publish.npm]\nscope = \"acme\"\n", manifest("hello", NPM_LIBRARY).replace("0.1.0", "1.0.0")));
+    kargo_npm(&p, &registry)
+        .env("PATH", &path)
+        .arg("publish")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("@acme/hello v1.0.0 is already on the registry"));
+    assert!(registry.requests().iter().any(|(path, _)| path == "@acme/hello"), "{:?}", registry.requests());
+
+    // `--maven` ignores it: this package has no Maven repository, so Maven says so.
+    kargo_npm(&p, &registry)
+        .env("PATH", &path)
+        .args(["publish", "--maven"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("set `group` in [package]"));
+}
+
+#[test]
+fn publish_npm_flags_go_together() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("hello", NPM_LIBRARY));
+    for args in
+        [&["publish", "--npm", "--maven"][..], &["publish", "--npm", "--local"], &["publish", "--npm", "--repository", "maven-local"]]
+    {
+        p.kargo().args(args).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+    }
+    for flag in ["--registry=https://npm.example.com", "--tag=next", "--otp=123456"] {
+        p.kargo().args(["publish", flag]).assert().failure().stderr(predicate::str::contains("--npm"));
+    }
+    p.file("kargo.toml", &manifest("hello", &format!("{NPM_LIBRARY}\n[publish.npm]\naccess = \"private\"\n")));
+    p.kargo().args(["publish", "--npm"]).assert().failure().stderr(predicate::str::contains("\"public\" or \"restricted\""));
+}
+
+#[test]
+fn publish_npm_in_a_workspace_skips_what_is_no_npm_package() {
+    let p = Project::new();
+    let registry = FakeRegistry::start(vec![("hello", vec![("latest", "0.1.0")], vec![("0.1.0", false)])]);
+    let (_npm, path) = fake_npm_path();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\", \"hello\"]\n");
+    p.file("app/kargo.toml", &manifest("app", ""));
+    p.file("hello/kargo.toml", &manifest("hello", NPM_LIBRARY));
+    kargo_npm(&p, &registry).env("PATH", &path).args(["publish", "--npm", "--workspace"]).assert().failure().stderr(
+        predicate::str::contains("skipping `app`, which builds no npm package").and(predicate::str::contains("hello v0.1.0 is already")),
+    );
+
+    p.file("hello/kargo.toml", &manifest("hello", ""));
+    kargo_npm(&p, &registry)
+        .args(["publish", "--npm", "--workspace"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no member of the workspace builds an npm package"));
+}
+
 #[test]
 fn publish_a_bom_with_relocations_once() {
     let p = Project::new();
