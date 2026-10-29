@@ -249,12 +249,14 @@ Options for `kargo fmt`. Every key is optional. ktlint's style rules go in `.edi
 
 ```toml
 [fmt]
+code-style = "intellij_idea"
 exclude = ["src/generated/**"]
 ktlint = "1.8.0"
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
+| `code-style` | `.editorconfig`, else `ktlint_official` | ktlint code style: `ktlint_official`, `intellij_idea` or `android_studio` |
 | `exclude` | `[]` | Globs, relative to the project root, of files ktlint skips |
 | `ktlint` | `1.8.0` | Exact ktlint version |
 

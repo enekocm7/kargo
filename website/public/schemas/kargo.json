@@ -581,6 +581,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "code-style": { "description": "ktlint code style. Without it, `.editorconfig` and ktlint's default (`ktlint_official`) apply.", "type": "string", "enum": ["ktlint_official", "intellij_idea", "android_studio"] },
         "exclude": { "description": "Globs of files ktlint skips.", "type": "array", "items": { "type": "string" } },
         "ktlint": { "description": "Exact ktlint version.", "type": "string", "default": "1.8.0" }
       }

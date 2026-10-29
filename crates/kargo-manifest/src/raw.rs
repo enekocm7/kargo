@@ -125,6 +125,7 @@ struct RawDoc {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawFmt {
     ktlint: Option<String>,
+    code_style: Option<String>,
     #[serde(default)]
     exclude: Vec<String>,
 }
@@ -3292,7 +3293,12 @@ impl RawFmt {
                 bail!("[fmt] `exclude` entries must be globs relative to the project root such as \"src/generated/**\", got `{pattern}`");
             }
         }
-        Ok(FmtSettings { ktlint_version: self.ktlint, exclude: self.exclude })
+        if let Some(style) = &self.code_style
+            && !FmtSettings::CODE_STYLES.contains(&style.as_str())
+        {
+            bail!("[fmt] `code-style` must be one of {}, got `{style}`", FmtSettings::CODE_STYLES.join(", "));
+        }
+        Ok(FmtSettings { ktlint_version: self.ktlint, code_style: self.code_style, exclude: self.exclude })
     }
 }
 

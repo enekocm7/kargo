@@ -1587,8 +1587,15 @@ pub struct DocSettings {
 pub struct FmtSettings {
     /// ktlint version; `None` uses Kargo's pinned default.
     pub ktlint_version: Option<String>,
+    /// ktlint code style (`ktlint_official`, `intellij_idea` or `android_studio`); `None` leaves it to `.editorconfig` and ktlint's default.
+    pub code_style: Option<String>,
     /// Globs, relative to the project root, of files ktlint skips.
     pub exclude: Vec<String>,
+}
+
+impl FmtSettings {
+    /// The values ktlint accepts for its code style.
+    pub const CODE_STYLES: [&'static str; 3] = ["ktlint_official", "intellij_idea", "android_studio"];
 }
 
 /// `[lint]`: options for `kargo lint` (detekt).
