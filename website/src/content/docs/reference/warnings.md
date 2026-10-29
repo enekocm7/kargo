@@ -109,6 +109,14 @@ warning: package version `not.a.version.x` does not look like a version (expecte
 
 [`[package] version`](../manifest/#package) names the jar (`app-1.0.0.jar`) and is the version in its Maven coordinates. Maven accepts almost any string, so Kargo does too, apart from [ranges, wildcards and spaces](../manifest/#package), which are errors. But a version that doesn't start with a digit, or uses anything but letters, digits and `.`, `-`, `_` and `+`, is rarely intended. `0.1.0`, `1.0-SNAPSHOT`, `2.1.0-rc.1` and `2024.03` are fine; `v1.0`, `latest` and `1/2` are not.
 
+## Stale member lockfile
+
+```text
+warning: package `app`: `app/kargo.lock` is ignored: the package is locked in the workspace's `kargo.lock`; delete the stale file
+```
+
+A [workspace](../../guides/workspaces/) locks all its members in one `kargo.lock` at its root. A member that was a standalone project before keeps its old `kargo.lock`, which Kargo no longer reads or writes. Delete it; running `kargo fetch` at the workspace root pins the member in the shared lockfile.
+
 ## Warnings as errors
 
 With [`[kotlin] warnings-as-errors = true`](../manifest/#kotlin) the Kotlin compiler reports its warnings as errors. It prints a summary of that, `error: warnings found and -Werror specified`, ahead of the diagnostics it counts. Kargo holds the line back and prints it after them, as the last line of the compiler's output, so the diagnostics are never announced before you can see them:

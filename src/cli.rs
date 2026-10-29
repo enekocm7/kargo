@@ -1992,6 +1992,7 @@ fn report_editor_files(shell: &Shell, root: &Path, written: &kargo_lsp::project:
 fn warn_manifest(shell: &Shell, project: &Project, ws: &Workspace) {
     let builtins = builtin_commands();
     warnings::emit(shell, project, ws, warnings::manifest(ws.manifest(), |name| builtins.iter().any(|b| b == name)));
+    warnings::emit(shell, project, ws, warnings::stale_lockfile(ws));
 }
 
 fn report_error(shell: &Shell, err: &anyhow::Error) {

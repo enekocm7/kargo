@@ -2663,6 +2663,25 @@ fn daemon_status_and_stop() {
 }
 
 #[test]
+fn warns_about_a_member_lockfile_the_workspace_lockfile_replaced() {
+    let repo = LocalRepo::new();
+    repo.publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        "[workspace]
+members = [\"app\"]
+",
+    )
+    .file("app/kargo.toml", &manifest("app", ""))
+    .file("app/kargo.lock", "");
+    p.kargo()
+        .args(["tree", "--workspace", "--offline"])
+        .assert()
+        .stderr(predicate::str::contains("package `app`: `").and(predicate::str::contains("kargo.lock` is ignored")));
+}
+
+#[test]
 fn workspace_members_share_one_lockfile_and_resolve_path_dependencies() {
     let repo = LocalRepo::new();
     repo.publish("g:util", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
