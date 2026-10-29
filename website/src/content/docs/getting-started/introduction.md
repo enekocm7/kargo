@@ -40,4 +40,4 @@ For the JVM, Wasm, JS and Native targets **Kargo does not use Gradle**. It downl
 
 - **People new to Kotlin** who want to write code without learning a build system first. Start with [Your first Kotlin app](../../guides/first-app/).
 - **Rust developers** who already know Cargo's workflow. See [For Rust developers](../../migration/from-cargo/).
-- **Gradle and Maven users** who want something simpler for apps, services, CLIs and libraries. See the [migration guides](../../migration/from-gradle/).
+- **Gradle and Maven users** who want something simpler for apps, services, CLIs and libraries. See the [migration guides](../../migration/from-gradle/) and the [Gradle feature parity](../../migration/gradle-feature-parity/) list of what Kargo does and doesn't do.

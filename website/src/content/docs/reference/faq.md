@@ -7,7 +7,7 @@ description: Answers to common questions and fixes for common errors.
 
 ### Does Kargo replace Gradle?
 
-For JVM, Wasm, JS and Native projects, yes: Kargo calls the Kotlin compilers directly and Gradle is not involved. Android builds still use the Android Gradle Plugin, but Kargo generates and runs that Gradle project for you.
+For JVM, Wasm, JS and Native projects, yes: Kargo calls the Kotlin compilers directly and Gradle is not involved. Android builds still use the Android Gradle Plugin, but Kargo generates and runs that Gradle project for you. [Gradle feature parity](../../migration/gradle-feature-parity/) lists what Gradle can do and the status of each feature in Kargo.
 
 ### Can I use any Maven library?
 
