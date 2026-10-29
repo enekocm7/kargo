@@ -44,10 +44,13 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | The two parts of a Central Portal user token, for [publishing to Maven Central](../../guides/publishing/#maven-central) |
 | `KARGO_MAVEN_CENTRAL_URL` | The Central Portal to publish to (default `https://central.sonatype.com`) |
 | `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API that [`kargo lsp` completes coordinates from](../../guides/editors/#dependency-completion-and-update-hints) (default `https://search.maven.org/solrsearch/select`) |
-| `KARGO_SIGNING_KEY` | An ASCII-armored secret key (`gpg --export-secret-keys --armor <id>`), as is or base64-encoded, that `kargo publish` [signs with](../../guides/publishing/#signing). Without it, GnuPG's own keyring is used |
-| `KARGO_SIGNING_KEY_ID` | The key to sign with (`gpg --local-user`); default: GnuPG's default key |
-| `KARGO_SIGNING_KEY_PASSPHRASE` | The signing key's passphrase |
-| `KARGO_GPG` | The `gpg` executable (default: `gpg` on `PATH`) |
+| `KARGO_SIGNING_KEY` | An ASCII-armored secret key (`gpg --export-secret-keys --armor <id>`), as is or base64-encoded, that `kargo publish` [signs with](../../guides/publishing/#signing) in memory, without GnuPG. Without it, GnuPG's own keyring is used |
+| `KARGO_SIGNING_KEY_ID` | The key to sign with, by fingerprint or key ID (`gpg --local-user` with GnuPG); default: the newest signing subkey, else the primary key (GnuPG's default key without `KARGO_SIGNING_KEY`) |
+| `KARGO_SIGNING_KEY_PASSPHRASE`, `KARGO_SIGNING_PASSWORD` | The signing key's passphrase |
+| `KARGO_GPG` | The `gpg` executable (default: `gpg` on `PATH`). With `KARGO_SIGNING_KEY`, makes GnuPG sign instead of Kargo |
+| `GITHUB_ACTOR`, `GITHUB_TOKEN` | Credentials of a [GitHub Packages](../manifest/#hosted-repositories) repository without `username-env` and `password-env` |
+| `CI_JOB_TOKEN` | Credentials (user `gitlab-ci-token`) of a [GitLab](../manifest/#hosted-repositories) package registry without `username-env` and `password-env` |
+| `CODEARTIFACT_AUTH_TOKEN` | Credentials (user `aws`) of an [AWS CodeArtifact](../manifest/#hosted-repositories) repository without `username-env` and `password-env` |
 | `COMPLETE` | Set by the `kargo completions` scripts when they ask Kargo for candidates; don't set it yourself |
 
 ## Variables Kargo sets

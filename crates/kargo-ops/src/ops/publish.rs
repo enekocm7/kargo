@@ -23,7 +23,9 @@ use crate::publication::{
 use crate::signing::Signer;
 use crate::workspace::{Project, Workspace};
 use kargo_compiler::jar::{JarManifest, write_jar};
-use kargo_manifest::{CentralPublishing, Dependency, GeneratedKind, Hook, Javadoc, MAVEN_CENTRAL_DESTINATION, Manifest, Scope, TargetKind};
+use kargo_manifest::{
+    CentralPublishing, Dependency, GeneratedKind, Hook, Javadoc, MAVEN_CENTRAL_DESTINATION, Manifest, PublishKind, Scope, TargetKind,
+};
 use kargo_maven::central::{self, Portal, PublishingType};
 use kargo_maven::deploy::{DeployFile, Deployer};
 use kargo_maven::repo::MAVEN_LOCAL;
@@ -121,9 +123,10 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     })?;
     let destination = Destination::resolve(manifest, &name)?;
     let central = matches!(destination, Destination::Central);
+    let bom = manifest.publish.kind == PublishKind::Bom;
     let sign = manifest.publish.sign.unwrap_or(central);
     if central {
-        check_central(ws, sign)?;
+        check_central(ws, sign, bom)?;
         if !opts.dry_run {
             central::credentials_from_env()?;
         }
@@ -142,17 +145,91 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
             bail!("`{}` depends on `{}`, which has no `group` in [package]; set one so it can be published too", pkg.name, dep.name);
         }
     }
-    let targets = publishable_targets(ctx)?;
+    let root = ModuleId::new(&group, &pkg.name);
+    if manifest.publish.relocations.contains(&root) {
+        bail!("[publish] `relocations` lists `{root}`, the package's own coordinates; list the coordinates it was published under before");
+    }
     // Fail on a missing key before compiling anything.
     let signer = if sign { Some(Signer::from_env(ctx.shell())?) } else { None };
 
+    let work = ws.profile_dir(&ctx.profile).join("publish");
+    remove_dir_all_if_exists(&work)?;
+    let repo_dir = work.join("repository");
+    let lone = Publication { group: group.clone(), package: pkg, platforms: Vec::new(), common_sources: None, common_javadoc: None };
+    let mut staged = if bom {
+        ctx.shell().status("Packaging", format!("{} v{} (bom)", pkg.name, pkg.version));
+        vec![lone.stage_bom(&repo_dir, &bom_constraints(ctx)?)?]
+    } else {
+        stage_library(ctx, &group, &work, &repo_dir)?
+    };
+    for from in &manifest.publish.relocations {
+        staged.push(lone.stage_relocation(&repo_dir, from)?);
+    }
+    let staged = finish_files(ctx, staged, signer.as_ref())?;
+    let files: usize = staged.iter().map(|m| m.files.len()).sum();
+
+    if opts.dry_run {
+        list_staged(ctx, &staged)?;
+        ctx.shell().status("Packaged", format!("{files} files in {}", repo_dir.display()));
+        finished(ctx, start);
+        ctx.shell().warn(format!("aborting upload to {} due to dry run", destination.describe()));
+        return Ok(staged);
+    }
+
+    let coordinates = format!("{group}:{}:{}", pkg.name, pkg.version);
+    match &destination {
+        Destination::Central => publish_to_central(ctx, &repo_dir, &work, &coordinates, files)?,
+        Destination::Local(repo) | Destination::Repository(repo) => {
+            let local = matches!(destination, Destination::Local(_));
+            let deployer = if local { Deployer::maven_local(&ctx.client, repo) } else { Deployer::new(&ctx.client, repo) };
+            let mut uploaded = 0;
+            for module in &staged {
+                // A release in a shared repository is never overwritten; publishing it again is a no-op.
+                if !local && !kargo_maven::coord::is_snapshot(&module.version) {
+                    match published_already(ctx, repo, module)? {
+                        Some(true) => {
+                            ctx.shell().status("Skipping", format!("{} v{} (already published, unchanged)", module.module, module.version));
+                            continue;
+                        }
+                        Some(false) => bail!(
+                            "{}:{} is already published to {} with different contents; a release cannot change, so bump \
+                             `version` in [package] (or publish a -SNAPSHOT version while it is in progress)",
+                            module.module,
+                            module.version,
+                            destination.describe()
+                        ),
+                        None => {}
+                    }
+                }
+                ctx.shell().status("Uploading", format!("{} v{} ({} files)", module.module, module.version, module.files.len()));
+                let paths: Vec<PathBuf> = module.files.iter().map(|f| module.dir.join(f)).collect();
+                let files: Vec<DeployFile> =
+                    module.files.iter().zip(&paths).map(|(name, path)| DeployFile { name: name.clone(), path }).collect();
+                deployer.deploy(&module.module, &module.version, &files)?;
+                uploaded += 1;
+            }
+            if uploaded == 0 {
+                ctx.shell().status("Unchanged", format!("{coordinates} is already in {}", destination.describe()));
+            } else {
+                ctx.shell().status("Published", format!("{coordinates} to {}", destination.describe()));
+            }
+        }
+    }
+    finished(ctx, start);
+    Ok(staged)
+}
+
+/// Builds every publishable target and stages the library's modules in `repo_dir`.
+fn stage_library(ctx: &BuildContext, group: &str, work: &Path, repo_dir: &Path) -> Result<Vec<StagedModule>> {
+    let ws = ctx.ws;
+    let manifest = ws.manifest();
+    let pkg = &manifest.package;
+    let targets = publishable_targets(ctx)?;
     super::build::prepare_native_hooks(ctx, &targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ws, Hook::PreBuild, &env)?;
     super::build::generate_sources(ctx, &targets)?;
     warn_about_sources(ctx, &targets);
-    let work = ws.profile_dir(&ctx.profile).join("publish");
-    remove_dir_all_if_exists(&work)?;
     let jars = work.join("jars");
     std::fs::create_dir_all(&jars).with_context(|| format!("failed to create {}", jars.display()))?;
     let platforms = build_platforms(ctx, &targets, &jars)?;
@@ -169,7 +246,7 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     };
     let sources = manifest.publish.sources;
     let mut publication = Publication {
-        group: group.clone(),
+        group: group.to_owned(),
         package: pkg,
         platforms: Vec::new(),
         common_sources: if sources && multiplatform {
@@ -195,44 +272,139 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
         platform.javadoc = javadoc.clone();
         publication.platforms.push(platform);
     }
+    publication.stage(repo_dir)
+}
 
-    let repo_dir = work.join("repository");
-    let staged = publication.stage(&repo_dir)?;
-    let staged = finish_files(ctx, staged, signer.as_ref())?;
-    let files: usize = staged.iter().map(|m| m.files.len()).sum();
-
-    if opts.dry_run {
-        for module in &staged {
-            for file in &module.files {
-                ctx.shell().verbose("Staged", module.dir.join(file).display());
-            }
-        }
-        ctx.shell().status("Packaged", format!("{files} files in {}", repo_dir.display()));
-        finished(ctx, start);
-        ctx.shell().warn(format!("aborting upload to {} due to dry run", destination.describe()));
-        return Ok(staged);
+/// What a bill of materials pins: every `[dependencies]` entry at its declared version (BOMs are
+/// imported), and every module that a path dependency publishes, at that package's version.
+fn bom_constraints(ctx: &BuildContext) -> Result<Vec<PublishedDependency>> {
+    let manifest = ctx.ws.manifest();
+    let mut out = Vec::new();
+    for dep in &manifest.dependencies {
+        let version = dep.version.clone().with_context(|| {
+            format!("`{}` has no version; every dependency of a BOM (`kind = \"bom\"` in [publish]) needs one", dep.name)
+        })?;
+        out.push(PublishedDependency {
+            module: dep.module.clone(),
+            pom_module: dep.module.clone(),
+            version,
+            scope: DependencyScope::Compile,
+            classifier: dep.classifier.clone(),
+            extension: dep.extension.clone(),
+            exclusions: Vec::new(),
+            transitive: true,
+            bom: dep.bom,
+        });
     }
-
-    let coordinates = format!("{group}:{}:{}", pkg.name, pkg.version);
-    match &destination {
-        Destination::Central => publish_to_central(ctx, &repo_dir, &work, &coordinates, files)?,
-        Destination::Local(repo) | Destination::Repository(repo) => {
-            let deployer = match &destination {
-                Destination::Local(_) => Deployer::maven_local(&ctx.client, repo),
-                _ => Deployer::new(&ctx.client, repo),
-            };
-            for module in &staged {
-                ctx.shell().status("Uploading", format!("{} v{} ({} files)", module.module, module.version, module.files.len()));
-                let paths: Vec<PathBuf> = module.files.iter().map(|f| module.dir.join(f)).collect();
-                let files: Vec<DeployFile> =
-                    module.files.iter().zip(&paths).map(|(name, path)| DeployFile { name: name.clone(), path }).collect();
-                deployer.deploy(&module.module, &module.version, &files)?;
-            }
-            ctx.shell().status("Published", format!("{coordinates} to {}", destination.describe()));
+    for (_, index) in ctx.ws.path_dependencies().iter().filter(|(d, _)| !d.dev) {
+        let other = ctx.project.package(*index).manifest();
+        for module in published_modules(other)? {
+            out.push(PublishedDependency {
+                module: module.clone(),
+                pom_module: module,
+                version: other.package.version.clone(),
+                scope: DependencyScope::Compile,
+                classifier: None,
+                extension: None,
+                exclusions: Vec::new(),
+                transitive: true,
+                bom: other.publish.kind == PublishKind::Bom,
+            });
         }
     }
-    finished(ctx, start);
-    Ok(staged)
+    if out.is_empty() {
+        bail!(
+            "the BOM `{}` manages no versions; add the libraries it pins to [dependencies], or the workspace members as path dependencies",
+            manifest.package.name
+        );
+    }
+    Ok(out)
+}
+
+/// The modules `kargo publish` writes for a package: its root module, plus one per platform for a
+/// multiplatform library.
+fn published_modules(manifest: &Manifest) -> Result<Vec<ModuleId>> {
+    let pkg = &manifest.package;
+    let group = pkg.group.clone().with_context(|| format!("`{}` has no `group` in [package]", pkg.name))?;
+    let root = ModuleId::new(&group, &pkg.name);
+    if manifest.publish.kind == PublishKind::Bom {
+        return Ok(vec![root]);
+    }
+    let android_library = manifest.targets.android.as_ref().is_some_and(|a| a.config.kind == "library");
+    let mut kinds = Vec::new();
+    for target in manifest.targets.enabled() {
+        match target {
+            TargetKind::Jvm => kinds.push(PlatformKind::Jvm { jvm_version: None }),
+            TargetKind::Wasm => {
+                let environment = manifest.targets.wasm.as_ref().map(|w| w.environment.platform().to_owned()).unwrap_or_default();
+                kinds.push(PlatformKind::Wasm { environment });
+            }
+            TargetKind::Js => kinds.push(PlatformKind::Js),
+            TargetKind::Native => {
+                for platform in manifest.targets.native.iter().flat_map(|n| &n.platforms) {
+                    let konan_target = kargo_toolchain::native::resolve_platform(platform)?;
+                    if !kinds.contains(&PlatformKind::Native { konan_target: konan_target.clone() }) {
+                        kinds.push(PlatformKind::Native { konan_target });
+                    }
+                }
+            }
+            TargetKind::Android if android_library => kinds.push(PlatformKind::Android),
+            TargetKind::Android => {}
+        }
+    }
+    let multiplatform = is_multiplatform(&kinds);
+    let mut out = vec![root];
+    if multiplatform {
+        out.extend(kinds.iter().map(|kind| platform_module(&group, &pkg.name, kind, true)));
+    }
+    Ok(out)
+}
+
+/// Prints every staged module with its files and their SHA-256, for `--dry-run`.
+fn list_staged(ctx: &BuildContext, staged: &[StagedModule]) -> Result<()> {
+    for module in staged {
+        ctx.shell().status("Staged", format!("{}:{}", module.module, module.version));
+        for file in module.files.iter().filter(|f| !is_checksum(f)) {
+            let path = module.dir.join(file);
+            if file.ends_with(".asc") {
+                ctx.shell().status("", file);
+                continue;
+            }
+            let sha256 = hash::sha256_file(&path).with_context(|| format!("failed to hash {}", path.display()))?;
+            ctx.shell().status("", format!("{file}  sha256:{sha256}"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is a checksum next to another file.
+fn is_checksum(name: &str) -> bool {
+    [".md5", ".sha1", ".sha256", ".sha512"].iter().any(|ext| name.ends_with(ext))
+}
+
+/// Whether `module`'s version is in `repo` already: `Some(true)` with the same files (by SHA-1),
+/// `Some(false)` with others, `None` when it is not there.
+fn published_already(ctx: &BuildContext, repo: &Repository, module: &StagedModule) -> Result<Option<bool>> {
+    let dir = format!("{}/{}", module.module.repo_dir(), module.version);
+    let Some(pom) = module.files.iter().find(|f| f.ends_with(".pom")) else { return Ok(None) };
+    if ctx.client.read_text_from(repo, &format!("{dir}/{pom}.sha1"))?.is_none()
+        && ctx.client.read_text_from(repo, &format!("{dir}/{pom}"))?.is_none()
+    {
+        return Ok(None);
+    }
+    // Signatures differ on every run; the files they sign are what must match.
+    for file in module.files.iter().filter(|f| !is_checksum(f) && !f.ends_with(".asc")) {
+        let local = hash::sha1_file(&module.dir.join(file)).with_context(|| format!("failed to hash {file}"))?;
+        let remote = match ctx.client.read_text_from(repo, &format!("{dir}/{file}.sha1"))? {
+            Some(text) => text.split_whitespace().next().unwrap_or_default().to_ascii_lowercase(),
+            None => return Ok(Some(false)),
+        };
+        if remote != local {
+            ctx.shell().verbose("Changed", format!("{dir}/{file}"));
+            return Ok(Some(false));
+        }
+    }
+    Ok(Some(true))
 }
 
 /// The targets that are published: every enabled one, but Android only for a library.
@@ -255,7 +427,7 @@ fn publishable_targets(ctx: &BuildContext) -> Result<Vec<TargetKind>> {
 }
 
 /// The fields Maven Central requires in every POM, checked before anything is built.
-fn check_central(ws: &Workspace, sign: bool) -> Result<()> {
+fn check_central(ws: &Workspace, sign: bool, bom: bool) -> Result<()> {
     let manifest = ws.manifest();
     let pkg = &manifest.package;
     let mut missing = Vec::new();
@@ -280,7 +452,8 @@ fn check_central(ws: &Workspace, sign: bool) -> Result<()> {
     if !sign {
         bail!("Maven Central requires signed files; remove `sign = false` from [publish]");
     }
-    if manifest.publish.javadoc == Javadoc::Off || !manifest.publish.sources {
+    // A BOM is only a POM, which needs neither.
+    if !bom && (manifest.publish.javadoc == Javadoc::Off || !manifest.publish.sources) {
         bail!("Maven Central requires sources and javadoc jars; remove `sources = false` and `javadoc = false` from [publish]");
     }
     Ok(())

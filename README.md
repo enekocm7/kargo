@@ -70,7 +70,7 @@ The scripts download the archive for your platform from the [GitHub release](htt
 | `kargo audit [-t <target>] [--deny low\|medium\|high\|critical\|none] [--tooling] [--fix] [--format json]` | Check every resolved Maven module and npm package against the [OSV](https://osv.dev) advisory database: a table by severity with the fixed version, the advisory link and the dependency path. Exits with 101 on advisories at or above `--deny` (default `high`) that `[audit] ignore` does not list; `--tooling` adds the compiler and other build tools, `--fix` raises the versions `kargo.toml` declares. The only command that contacts the advisory service; answers are cached for a day and `--offline` uses the cache |
 | `kargo package [--release \| --profile <name>] [-t jvm\|android] [--bin <name>] [--fat] [--optimize] [--format jar\|jlink\|native-image\|installer] [--message-format json] [--desktop [--platforms all]] [-j <n>]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `--release` runs R8 to shrink and obfuscate the JVM jar (`--optimize` opts in for other profiles), writing a retrace mapping and usage report; JSON mode prints its report and artifact path as JSON lines. `--format jlink` builds the jars, a Java runtime trimmed by `jlink` and launchers, which run without an installed Java; `native-image` a GraalVM native executable; `installer` a `jpackage` installer (`.msi`, `.dmg`, `.deb`, ...) for the host OS, all into `target/<profile>/jvm/package/` (see [distributing applications](https://enekocm7.github.io/kargo/guides/distributing/)). `--desktop` packages a [Compose Desktop](https://enekocm7.github.io/kargo/guides/compose/) app: an installer with what Compose needs (signed and notarized on macOS), or with `--format jar --platforms all` a jar that runs on every OS. `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
 | `kargo retrace <mapping.txt> [stacktrace.txt]` | Retrace an R8-obfuscated JVM stack trace; reads stdin if no stack trace file is given |
-| `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (jar, klibs or an Android library's AAR, with POM, Gradle module metadata, sources/javadoc jars, checksums, GnuPG signatures) to Maven Central, a `[repositories]` entry or `~/.m2` |
+| `kargo publish [--repository <name> \| --local] [--dry-run]` | Publish a library (jar, klibs or an Android library's AAR, with POM, Gradle module metadata, sources/javadoc jars, checksums, OpenPGP signatures), a BOM or relocation POMs to Maven Central, a `[repositories]` entry or `~/.m2`; an unchanged release is skipped, a changed one refused |
 | `kargo install --path <dir> \| --git <url> [--tag \| --branch \| --rev] \| <group:artifact[:version]> [--bin <name>] [--format jar\|jlink] [--force] [--list]` | Install a Kotlin command-line tool: build a project (release profile), a git repository or download an application from Maven, and put a launcher in `~/.kargo/bin`. A JVM tool runs its fat jar with the JDK it was built with (`--format jlink`: with a trimmed runtime, so no Java is needed); a Native tool is copied as it is. Every entry point is installed, or the `--bin` ones. `kargo install --force <name>` upgrades it from where it came from, `--list` shows what is installed, `--root <dir>` installs elsewhere (see [installing tools](https://enekocm7.github.io/kargo/guides/installing-tools/)) |
 | `kargo uninstall <name>...` | Remove programs installed with `kargo install` |
 | `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars (or Javadoc jars, for libraries without sources) for editors, `--tools` the Dokka, ktlint, detekt and R8 tools |
@@ -294,10 +294,12 @@ include-groups = ["com.corp.*"]   # also: exclude-groups; `[repositories.maven-c
 
 [publish]                   # kargo publish; every key is optional
 repository = "maven-central"  # default destination: maven-central, maven-local or a [repositories] entry
-# sign = true               # GnuPG signatures; default: on for Maven Central only
+# sign = true               # OpenPGP signatures (KARGO_SIGNING_KEY in memory, else GnuPG); default: on for Maven Central only
 # sources = true
 # javadoc = "dokka"         # or "empty" (a manifest only) or false
 # central-publishing = "manual"   # or "automatic": release as soon as Maven Central validates the upload
+# kind = "bom"              # publish a BOM (a POM pinning [dependencies] and path dependencies) instead of a library
+# relocations = ["org.old:lib"]   # former coordinates: each gets a relocation POM pointing here
 
 [env]                       # variables for kargo run/test, tasks and hooks; .env files and the shell override them
 APP_NAME = "demo"
@@ -509,7 +511,8 @@ Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kar
 | `KARGO_MAVEN_LOCAL` | The local Maven repository for `kargo publish --local` and `"maven-local"` (default `~/.m2/repository`) |
 | `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | Central Portal user token for `kargo publish` to Maven Central (`KARGO_MAVEN_CENTRAL_URL` overrides the Portal) |
 | `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API `kargo lsp` completes coordinates from |
-| `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_PASSPHRASE`, `KARGO_SIGNING_KEY_ID`, `KARGO_GPG` | Signing key (ASCII-armored), its passphrase, which key, and the `gpg` to sign published files with |
+| `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_PASSPHRASE` (or `KARGO_SIGNING_PASSWORD`), `KARGO_SIGNING_KEY_ID`, `KARGO_GPG` | Signing key (ASCII-armored; signs in memory, without GnuPG), its passphrase, which key, and the `gpg` to sign with instead |
+| `GITHUB_ACTOR`/`GITHUB_TOKEN`, `CI_JOB_TOKEN`, `CODEARTIFACT_AUTH_TOKEN` | Default credentials of GitHub Packages, GitLab and AWS CodeArtifact repositories without `username-env`/`password-env` |
 | `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
 
 ## Development

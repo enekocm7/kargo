@@ -301,6 +301,9 @@ struct RawPublish {
     sources: Option<bool>,
     javadoc: Option<Value>,
     central_publishing: Option<String>,
+    kind: Option<String>,
+    #[serde(default)]
+    relocations: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2287,6 +2290,10 @@ impl RawManifest {
                 Some(url) => bail!("repository `{name}` must have an http(s):// or file: URL, or be \"maven-local\", got `{url}`"),
             };
             repo.credentials = credentials_from_env(name, raw.username_env.as_deref(), raw.password_env.as_deref())?;
+            // GitHub Packages, GitLab and CodeArtifact take the variables their CI sets.
+            if raw.username_env.is_none() && raw.password_env.is_none() {
+                repo.credentials = kargo_maven::repo::host_preset(&repo.url).and_then(|preset| preset.credentials());
+            }
             for pattern in raw.include_groups.iter().chain(&raw.exclude_groups) {
                 kargo_maven::repo::validate_group_pattern(pattern).with_context(|| format!("invalid repository `{name}`"))?;
             }
@@ -3128,12 +3135,28 @@ impl RawPublish {
             Some("automatic") => CentralPublishing::Automatic,
             Some(other) => bail!("[publish] `central-publishing` must be \"manual\" or \"automatic\", got `{other}`"),
         };
+        let kind = match self.kind.as_deref() {
+            None | Some("library") => PublishKind::Library,
+            Some("bom") => PublishKind::Bom,
+            Some(other) => bail!("[publish] `kind` must be \"library\" or \"bom\", got `{other}`"),
+        };
+        let mut relocations = Vec::new();
+        for text in &self.relocations {
+            let module: ModuleId =
+                text.parse().map_err(|e| anyhow::anyhow!("[publish] `relocations`: {e}; write the old coordinates as `group:artifact`"))?;
+            if relocations.contains(&module) {
+                bail!("[publish] `relocations` lists `{module}` twice");
+            }
+            relocations.push(module);
+        }
         Ok(PublishSettings {
             repository: self.repository,
             sign: self.sign,
             sources: self.sources.unwrap_or(true),
             javadoc,
             central_publishing,
+            kind,
+            relocations,
         })
     }
 }

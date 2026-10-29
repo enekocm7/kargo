@@ -295,7 +295,8 @@ impl Publication<'_> {
                 writer.write(None, "module", &metadata)?;
             }
             let packaging = (platform.kind.extension() != "jar").then_some(platform.kind.extension());
-            let pom = self.pom(&module, packaging, &platform.dependencies, &platform.pom_properties(), gradle_metadata);
+            let pom =
+                self.pom(&module, packaging, &platform.dependencies, &platform.pom_properties(), Pom { gradle_metadata, ..Pom::default() });
             writer.write(None, "pom", &pom)?;
             staged.push(writer.finish());
         }
@@ -307,10 +308,28 @@ impl Publication<'_> {
                 writer.copy(Some("javadoc"), "jar", javadoc)?;
             }
             writer.write(None, "module", &self.root_metadata(sources))?;
-            writer.write(None, "pom", &self.pom(&root, Some("pom"), &[], &[], true))?;
+            writer.write(None, "pom", &self.pom(&root, Some("pom"), &[], &[], Pom { gradle_metadata: true, ..Pom::default() }))?;
             staged.push(writer.finish());
         }
         Ok(staged)
+    }
+
+    /// Writes a bill of materials into `repo`: a POM-only module whose `<dependencyManagement>` pins
+    /// the versions of `constraints` and imports the BOMs among them.
+    pub fn stage_bom(&self, repo: &Path, constraints: &[PublishedDependency]) -> Result<StagedModule> {
+        let root = self.root();
+        let mut writer = ModuleWriter::new(repo, &root, self.version())?;
+        writer.write(None, "pom", &self.pom(&root, Some("pom"), constraints, &[], Pom { bom: true, ..Pom::default() }))?;
+        Ok(writer.finish())
+    }
+
+    /// Writes a relocation POM at `from` (the package's former coordinates, same version) that sends
+    /// Maven, Gradle and Kargo to the package's root module.
+    pub fn stage_relocation(&self, repo: &Path, from: &ModuleId) -> Result<StagedModule> {
+        let mut writer = ModuleWriter::new(repo, from, self.version())?;
+        let root = self.root();
+        writer.write(None, "pom", &self.pom(from, Some("pom"), &[], &[], Pom { relocation: Some(&root), ..Pom::default() }))?;
+        Ok(writer.finish())
     }
 
     fn component(&self, module: &ModuleId, url: Option<String>) -> Value {
@@ -409,15 +428,14 @@ impl Publication<'_> {
         module_json(self.component(module, url), variants)
     }
 
-    /// The POM of `module`. With `gradle_metadata`, it carries the marker that tells Gradle (and
-    /// Kargo) to read the `.module` next to it instead.
+    /// The POM of `module`.
     fn pom(
         &self,
         module: &ModuleId,
         packaging: Option<&str>,
         dependencies: &[PublishedDependency],
         properties: &[(&str, &str)],
-        gradle_metadata: bool,
+        Pom { gradle_metadata, bom, relocation }: Pom,
     ) -> String {
         let pkg = self.package;
         let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -481,9 +499,31 @@ impl Publication<'_> {
             element(&mut x, 2, "url", repository.trim_end_matches(".git"));
             x.push_str("  </scm>\n");
         }
+        if let Some(target) = relocation {
+            x.push_str("  <distributionManagement>\n    <relocation>\n");
+            element(&mut x, 3, "groupId", &target.group);
+            element(&mut x, 3, "artifactId", &target.artifact);
+            element(&mut x, 3, "message", &format!("{module} moved to {target}"));
+            x.push_str("    </relocation>\n  </distributionManagement>\n");
+        }
         let (boms, libraries): (Vec<_>, Vec<_>) = dependencies.iter().partition(|d| d.bom);
-        if !boms.is_empty() {
+        // A bill of materials manages its libraries instead of depending on them.
+        let (managed, libraries) = if bom { (libraries, Vec::new()) } else { (Vec::new(), libraries) };
+        if !boms.is_empty() || !managed.is_empty() {
             x.push_str("  <dependencyManagement>\n    <dependencies>\n");
+            for dep in managed {
+                x.push_str("      <dependency>\n");
+                element(&mut x, 4, "groupId", &dep.pom_module.group);
+                element(&mut x, 4, "artifactId", &dep.pom_module.artifact);
+                element(&mut x, 4, "version", &dep.version);
+                if let Some(classifier) = &dep.classifier {
+                    element(&mut x, 4, "classifier", classifier);
+                }
+                if let Some(extension) = dep.extension.as_deref().filter(|e| *e != "jar") {
+                    element(&mut x, 4, "type", extension);
+                }
+                x.push_str("      </dependency>\n");
+            }
             for bom in boms {
                 x.push_str("      <dependency>\n");
                 element(&mut x, 4, "groupId", &bom.pom_module.group);
@@ -531,6 +571,17 @@ impl Publication<'_> {
         x.push_str("</project>\n");
         x
     }
+}
+
+/// What kind of POM [`Publication::pom`] writes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Pom<'a> {
+    /// Carry the marker that tells Gradle (and Kargo) to read the `.module` next to it instead.
+    gradle_metadata: bool,
+    /// A bill of materials: the libraries go into `<dependencyManagement>`.
+    bom: bool,
+    /// A relocation POM pointing at this module.
+    relocation: Option<&'a ModuleId>,
 }
 
 /// `org.gradle.status`: `integration` for a SNAPSHOT, else `release`.
@@ -1007,6 +1058,53 @@ mod tests {
         // No variant lists the zip, so no consumer compiles against it.
         let module = std::fs::read_to_string(wasm.dir.join("mathlib-wasm-js-1.2.0.module")).unwrap();
         assert!(!module.contains("web-resources"), "{module}");
+    }
+
+    #[test]
+    fn stages_a_bom_that_manages_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = Package { name: "acme-bom".into(), ..package() };
+        let publication =
+            Publication { group: "com.acme".into(), package: &pkg, platforms: Vec::new(), common_sources: None, common_javadoc: None };
+        let mut netty = dep("io.netty:netty-bom", "io.netty:netty-bom", "4.2.7.Final", DependencyScope::Compile);
+        netty.bom = true;
+        let constraints = [
+            dep("com.acme:core", "com.acme:core", "1.2.0", DependencyScope::Compile),
+            dep("com.squareup.okio:okio", "com.squareup.okio:okio", "3.16.0", DependencyScope::Compile),
+            netty,
+        ];
+        let staged = publication.stage_bom(&dir.path().join("repo"), &constraints).unwrap();
+        assert_eq!(staged.files, ["acme-bom-1.2.0.pom"]);
+        let text = std::fs::read_to_string(staged.dir.join("acme-bom-1.2.0.pom")).unwrap();
+        let pom = kargo_maven::pom::Pom::parse(&text).unwrap();
+        assert_eq!(pom.packaging.as_deref(), Some("pom"));
+        assert!(pom.dependencies.is_empty(), "a BOM depends on nothing");
+        let managed: Vec<(String, Option<String>, Option<String>)> =
+            pom.dependency_management.iter().map(|d| (d.artifact.clone(), d.version.clone(), d.scope.clone())).collect();
+        assert_eq!(
+            managed,
+            [
+                ("core".into(), Some("1.2.0".into()), None),
+                ("okio".into(), Some("3.16.0".into()), None),
+                ("netty-bom".into(), Some("4.2.7.Final".into()), Some("import".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn stages_a_relocation_pom() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package();
+        let publication =
+            Publication { group: "com.acme".into(), package: &pkg, platforms: Vec::new(), common_sources: None, common_javadoc: None };
+        let staged = publication.stage_relocation(&dir.path().join("repo"), &ModuleId::new("org.old", "math")).unwrap();
+        assert_eq!(staged.module, ModuleId::new("org.old", "math"));
+        assert_eq!(staged.files, ["math-1.2.0.pom"]);
+        let text = std::fs::read_to_string(staged.dir.join("math-1.2.0.pom")).unwrap();
+        let pom = kargo_maven::pom::Pom::parse(&text).unwrap();
+        assert_eq!(pom.relocation, Some((Some("com.acme".into()), Some("mathlib".into()), None)));
+        assert_eq!((pom.group.as_deref(), pom.version.as_deref()), (Some("org.old"), Some("1.2.0")));
+        assert!(text.contains("<licenses>") && text.contains("<scm>"), "Maven Central checks relocation POMs too");
     }
 
     #[test]

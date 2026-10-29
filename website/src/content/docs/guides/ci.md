@@ -230,7 +230,7 @@ Without it, the build stops with a message that names this command. The SDK land
 
 ### Publishing releases
 
-`kargo publish` uploads a library from CI, with the Maven Central token and the signing key in secrets. See [Publishing from CI](../publishing/#publishing-from-ci) for a complete workflow.
+`kargo publish` uploads a library from CI, with the Maven Central token and the signing key in secrets. Kargo signs with `KARGO_SIGNING_KEY` in memory, so the runner needs no GnuPG, and it takes the credentials of GitHub Packages, GitLab and CodeArtifact from `GITHUB_TOKEN`, `CI_JOB_TOKEN` and `CODEARTIFACT_AUTH_TOKEN` (see [Hosted repositories](../../reference/manifest/#hosted-repositories)). A re-run job doesn't fail on a release it already uploaded to such a repository: unchanged modules are skipped. See [Publishing from CI](../publishing/#publishing-from-ci) for a complete workflow.
 
 ## Other CI systems
 

@@ -23,6 +23,9 @@ anyhow = "1"
 base64 = "0.23.1"
 brotli = "9.1.1"
 minify-js = "0.6.0"
+# OpenPGP signatures of `kargo publish` without GnuPG.
+pgp = { version = "0.21.0", default-features = false }
+rand = { version = "0.8.6", default-features = false, features = ["getrandom"] }
 clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 # Pinned exactly: dynamic completion is behind clap_complete's `unstable-dynamic` feature.
 clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }

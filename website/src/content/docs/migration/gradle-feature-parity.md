@@ -114,7 +114,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Docker and OCI images (Jib) | Planned | [#223](https://github.com/enekocm7/kargo/issues/223) |
 | `maven-publish` and `signing` | Supported | [`kargo publish`](../../guides/publishing/) |
 | Maven Central Portal | Supported | `kargo publish` |
-| Publishing extras (BOMs, in-memory keys, repository presets) | Planned | [#224](https://github.com/enekocm7/kargo/issues/224) |
+| Publishing extras: `java-platform` BOMs, in-memory PGP keys, repository presets, relocation POMs, idempotent re-publishing | Supported | [BOMs](../../guides/publishing/#boms), [Signing](../../guides/publishing/#signing), [Hosted repositories](../../reference/manifest/#hosted-repositories); S3 repositories are a gap ([#224](https://github.com/enekocm7/kargo/issues/224)) |
 | Dokka | Supported | [`kargo doc`](../../guides/documentation/) |
 | Installing tools from Maven or git | Supported | [`kargo install`](../../guides/installing-tools/) |
 

@@ -1,9 +1,11 @@
-//! Signing published files with GnuPG: a detached, ASCII-armored signature (`<file>.asc`) next
-//! to every file, which Maven Central requires.
+//! Signing published files: a detached, ASCII-armored OpenPGP signature (`<file>.asc`) next to
+//! every file, which Maven Central requires.
 //!
 //! On CI the key usually comes from the environment: `KARGO_SIGNING_KEY` holds an exported
-//! secret key (`gpg --export-secret-keys --armor <id>`, as is or base64-encoded), which is
-//! imported into a throwaway GnuPG home. Without it, the user's own keyring and agent are used.
+//! secret key (`gpg --export-secret-keys --armor <id>`, as is or base64-encoded), and Kargo signs
+//! with it in memory, without GnuPG (like Gradle's in-memory PGP keys). With `KARGO_GPG` set as
+//! well, the key is imported into a throwaway GnuPG home instead. Without a key, GnuPG signs with
+//! the user's own keyring and agent.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,9 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
+use pgp::composed::{ArmorOptions, Deserializable, DetachedSignature, SignedSecretKey};
+use pgp::crypto::hash::HashAlgorithm;
+use pgp::types::{KeyDetails, Password};
 
 use kargo_util::process;
 use kargo_util::shell::Shell;
@@ -21,11 +26,135 @@ pub const KEY_ENV: &str = "KARGO_SIGNING_KEY";
 pub const KEY_ID_ENV: &str = "KARGO_SIGNING_KEY_ID";
 /// The key's passphrase, if it has one.
 pub const PASSPHRASE_ENV: &str = "KARGO_SIGNING_KEY_PASSPHRASE";
-/// The `gpg` executable; `gpg` on `PATH` otherwise.
+/// Another name for [`PASSPHRASE_ENV`], the one Gradle users know.
+pub const PASSWORD_ENV: &str = "KARGO_SIGNING_PASSWORD";
+/// The `gpg` executable; `gpg` on `PATH` otherwise. With `KARGO_SIGNING_KEY`, it makes GnuPG sign
+/// instead of Kargo itself.
 pub const GPG_ENV: &str = "KARGO_GPG";
 
 /// Signs files with one key.
 pub struct Signer {
+    backend: Backend,
+}
+
+enum Backend {
+    GnuPg(GnuPg),
+    InMemory(Box<InMemoryKey>),
+}
+
+impl Signer {
+    /// A signer configured from `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_ID`, `KARGO_SIGNING_KEY_PASSPHRASE`
+    /// (or `KARGO_SIGNING_PASSWORD`) and `KARGO_GPG`.
+    pub fn from_env(shell: &Shell) -> Result<Self> {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let key = var(KEY_ENV);
+        let passphrase = var(PASSPHRASE_ENV).or_else(|| var(PASSWORD_ENV));
+        if let (Some(key), None) = (&key, var(GPG_ENV)) {
+            return Self::in_memory(key, var(KEY_ID_ENV).as_deref(), passphrase);
+        }
+        let gpg = match var(GPG_ENV) {
+            Some(path) => PathBuf::from(path),
+            None => process::find_on_path("gpg").context(
+                "signing needs a key: export KARGO_SIGNING_KEY (`gpg --export-secret-keys --armor <KEY_ID>`) or install GnuPG \
+                 (https://gnupg.org/download/) to sign with your keyring, or set `sign = false` in [publish]",
+            )?,
+        };
+        Self::new(shell, gpg, key.as_deref(), var(KEY_ID_ENV), passphrase)
+    }
+
+    /// A signer that signs in memory with an exported secret key, without GnuPG.
+    pub fn in_memory(key: &str, key_id: Option<&str>, passphrase: Option<String>) -> Result<Self> {
+        Ok(Self { backend: Backend::InMemory(Box::new(InMemoryKey::new(key, key_id, passphrase)?)) })
+    }
+
+    /// A signer using `gpg`; with `key`, that secret key is imported into a temporary GnuPG home.
+    pub fn new(shell: &Shell, gpg: PathBuf, key: Option<&str>, key_id: Option<String>, passphrase: Option<String>) -> Result<Self> {
+        Ok(Self { backend: Backend::GnuPg(GnuPg::new(shell, gpg, key, key_id, passphrase)?) })
+    }
+
+    /// Writes `<file>.asc`, a detached ASCII-armored signature of `file`, and returns its path.
+    pub fn sign(&self, file: &Path) -> Result<PathBuf> {
+        let mut asc = file.as_os_str().to_owned();
+        asc.push(".asc");
+        let asc = PathBuf::from(asc);
+        match &self.backend {
+            Backend::GnuPg(gpg) => gpg.sign(file, &asc)?,
+            Backend::InMemory(key) => key.sign(file, &asc)?,
+        }
+        Ok(asc)
+    }
+}
+
+/// A secret key read from `KARGO_SIGNING_KEY`, which signs without GnuPG.
+struct InMemoryKey {
+    key: SignedSecretKey,
+    /// Which key of `key` signs: `None` for the primary key, else the index of a secret subkey.
+    subkey: Option<usize>,
+    passphrase: Password,
+}
+
+impl InMemoryKey {
+    fn new(text: &str, key_id: Option<&str>, passphrase: Option<String>) -> Result<Self> {
+        let armored = armored_key(text)?;
+        let (key, _) = SignedSecretKey::from_string(&armored)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("could not read the secret key in {KEY_ENV}; set {GPG_ENV} to sign with GnuPG instead"))?;
+        let subkey = signing_key(&key, key_id)?;
+        let encrypted = match subkey {
+            None => key.primary_key.secret_params().is_encrypted(),
+            Some(i) => key.secret_subkeys[i].key.secret_params().is_encrypted(),
+        };
+        if encrypted && passphrase.is_none() {
+            bail!("the key in {KEY_ENV} is protected by a passphrase; export it as {PASSPHRASE_ENV}");
+        }
+        let passphrase = passphrase.map(Password::from).unwrap_or_else(Password::empty);
+        Ok(Self { key, subkey, passphrase })
+    }
+
+    fn sign(&self, file: &Path, asc: &Path) -> Result<()> {
+        let data = std::fs::File::open(file).with_context(|| format!("failed to read {}", file.display()))?;
+        let data = std::io::BufReader::new(data);
+        let rng = rand::rngs::OsRng;
+        let signature = match self.subkey {
+            None => DetachedSignature::sign_binary_data(rng, &self.key.primary_key, &self.passphrase, HashAlgorithm::Sha512, data),
+            Some(i) => {
+                DetachedSignature::sign_binary_data(rng, &self.key.secret_subkeys[i].key, &self.passphrase, HashAlgorithm::Sha512, data)
+            }
+        };
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let signature = signature.map_err(|e| anyhow::anyhow!("{e}")).with_context(|| {
+            format!("could not sign {name} with the key in {KEY_ENV}; check {PASSPHRASE_ENV} if the key has a passphrase")
+        })?;
+        let text = signature.to_armored_string(ArmorOptions::default()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        std::fs::write(asc, text).with_context(|| format!("failed to write {}", asc.display()))
+    }
+}
+
+/// The key of `key` that signs, like GnuPG picks it: the one `key_id` names (a fingerprint or key
+/// ID, matched at its end), else the newest subkey that can sign, else the primary key.
+fn signing_key(key: &SignedSecretKey, key_id: Option<&str>) -> Result<Option<usize>> {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02X}")).collect::<String>();
+    let ids = |fingerprint: String, key_id: String| [fingerprint, key_id];
+    if let Some(wanted) = key_id {
+        let wanted: String =
+            wanted.trim().trim_start_matches("0x").chars().filter(|c| !c.is_whitespace()).collect::<String>().to_uppercase();
+        let matches = |names: [String; 2]| !wanted.is_empty() && names.iter().any(|n| n.ends_with(&wanted));
+        if matches(ids(format!("{:X}", key.primary_key.fingerprint()), hex(key.primary_key.legacy_key_id().as_ref()))) {
+            return Ok(None);
+        }
+        if let Some(i) =
+            key.secret_subkeys.iter().position(|s| matches(ids(format!("{:X}", s.key.fingerprint()), hex(s.key.legacy_key_id().as_ref()))))
+        {
+            return Ok(Some(i));
+        }
+        bail!("the key in {KEY_ENV} has no key `{wanted}` ({KEY_ID_ENV}); list its keys with `gpg --list-secret-keys --keyid-format long`");
+    }
+    let signing = key.secret_subkeys.iter().rposition(|s| s.signatures.iter().any(|sig| sig.key_flags().sign()));
+    Ok(signing)
+}
+
+/// Signs with the `gpg` executable.
+struct GnuPg {
     gpg: PathBuf,
     /// A temporary GnuPG home holding the key from `KARGO_SIGNING_KEY`, removed on drop.
     home: Option<PathBuf>,
@@ -34,22 +163,8 @@ pub struct Signer {
     shell: Shell,
 }
 
-impl Signer {
-    /// A signer configured from `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_ID`, `KARGO_SIGNING_KEY_PASSPHRASE` and `KARGO_GPG`.
-    pub fn from_env(shell: &Shell) -> Result<Self> {
-        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
-        let gpg = match var(GPG_ENV) {
-            Some(path) => PathBuf::from(path),
-            None => process::find_on_path("gpg").context(
-                "signing needs GnuPG, but `gpg` is not on PATH; install GnuPG (https://gnupg.org/download/), \
-                 set KARGO_GPG to its path, or set `sign = false` in [publish]",
-            )?,
-        };
-        Self::new(shell, gpg, var(KEY_ENV).as_deref(), var(KEY_ID_ENV), var(PASSPHRASE_ENV))
-    }
-
-    /// A signer using `gpg`; with `key`, that secret key is imported into a temporary GnuPG home.
-    pub fn new(shell: &Shell, gpg: PathBuf, key: Option<&str>, key_id: Option<String>, passphrase: Option<String>) -> Result<Self> {
+impl GnuPg {
+    fn new(shell: &Shell, gpg: PathBuf, key: Option<&str>, key_id: Option<String>, passphrase: Option<String>) -> Result<Self> {
         let mut signer = Self { gpg, home: None, key_id, passphrase, shell: shell.clone() };
         if let Some(key) = key {
             let key = armored_key(key)?;
@@ -77,11 +192,7 @@ impl Signer {
         cmd
     }
 
-    /// Writes `<file>.asc`, a detached ASCII-armored signature of `file`, and returns its path.
-    pub fn sign(&self, file: &Path) -> Result<PathBuf> {
-        let mut asc = file.as_os_str().to_owned();
-        asc.push(".asc");
-        let asc = PathBuf::from(asc);
+    fn sign(&self, file: &Path, asc: &Path) -> Result<()> {
         let mut cmd = self.command();
         cmd.args(["--yes", "--armor", "--detach-sign"]);
         if let Some(id) = &self.key_id {
@@ -99,10 +210,9 @@ impl Signer {
             }
             None => b"",
         };
-        cmd.arg("--output").arg(&asc).arg(file);
+        cmd.arg("--output").arg(asc).arg(file);
         let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.run(cmd, input, &format!("sign {name}"))?;
-        Ok(asc)
+        self.run(cmd, input, &format!("sign {name}"))
     }
 
     fn run(&self, mut cmd: Command, input: &[u8], what: &str) -> Result<()> {
@@ -131,7 +241,7 @@ impl Signer {
     }
 }
 
-impl Drop for Signer {
+impl Drop for GnuPg {
     fn drop(&mut self) {
         if let Some(home) = self.home.take() {
             // Stop the agent the imported key started, then remove the key.
@@ -237,15 +347,89 @@ mod tests {
 
         let file = dir.path().join("lib-1.0.jar");
         std::fs::write(&file, "jar").unwrap();
-        let signer = Signer::new(&shell, gpg, Some(&key), None, None).unwrap();
+        let signer = Signer::new(&shell, gpg.clone(), Some(&key), None, None).unwrap();
         let asc = signer.sign(&file).unwrap();
         assert_eq!(asc, dir.path().join("lib-1.0.jar.asc"));
         assert!(std::fs::read_to_string(&asc).unwrap().starts_with("-----BEGIN PGP SIGNATURE-----"));
-        let mut verify = signer.command();
+        let Backend::GnuPg(gnupg) = &signer.backend else { panic!("signs with GnuPG") };
+        let mut verify = gnupg.command();
         verify.arg("--verify").arg(&asc).arg(&file);
         assert!(verify.output().unwrap().status.success());
-        let home = signer.home.clone().unwrap();
+        let home = gnupg.home.clone().unwrap();
         drop(signer);
         assert!(!home.exists(), "the imported key is removed");
+
+        // The same exported key signs in memory, and GnuPG accepts the signature.
+        let file = dir.path().join("lib-1.0.pom");
+        std::fs::write(&file, "<project/>").unwrap();
+        let asc = Signer::in_memory(&key, None, None).unwrap().sign(&file).unwrap();
+        let checker = Signer::new(&shell, gpg, Some(&key), None, None).unwrap();
+        let Backend::GnuPg(gnupg) = &checker.backend else { unreachable!() };
+        let verified = gnupg.command().arg("--verify").arg(&asc).arg(&file).output().unwrap();
+        assert!(verified.status.success(), "{}", String::from_utf8_lossy(&verified.stderr));
+    }
+
+    /// A key with a primary key that only certifies and a signing subkey, like `gpg --full-generate-key` makes.
+    fn generated_key(passphrase: Option<&str>) -> SignedSecretKey {
+        use pgp::composed::{EncryptionCaps, KeyType, SecretKeyParamsBuilder, SubkeyParamsBuilder};
+        let mut subkey = SubkeyParamsBuilder::default();
+        subkey.key_type(KeyType::Ed25519Legacy).can_sign(true).can_encrypt(EncryptionCaps::None).can_authenticate(false);
+        if let Some(passphrase) = passphrase {
+            subkey.passphrase(Some(passphrase.to_owned()));
+        }
+        let mut params = SecretKeyParamsBuilder::default();
+        params
+            .key_type(KeyType::Ed25519Legacy)
+            .can_certify(true)
+            .can_sign(false)
+            .can_encrypt(EncryptionCaps::None)
+            .primary_user_id("Kargo Test <test@example.com>".into())
+            .subkeys(vec![subkey.build().unwrap()]);
+        if let Some(passphrase) = passphrase {
+            params.passphrase(Some(passphrase.to_owned()));
+        }
+        params.build().unwrap().generate(rand::rngs::OsRng).unwrap()
+    }
+
+    #[test]
+    fn signs_in_memory_with_the_signing_subkey() {
+        let key = generated_key(None);
+        let armored = key.to_armored_string(ArmorOptions::default()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib-1.0.jar");
+        std::fs::write(&file, "jar").unwrap();
+        // Base64-encoded, as CI secrets often are.
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&armored);
+        let asc = Signer::in_memory(&encoded, None, None).unwrap().sign(&file).unwrap();
+        let text = std::fs::read_to_string(&asc).unwrap();
+        assert!(text.starts_with("-----BEGIN PGP SIGNATURE-----"), "{text}");
+        let (signature, _) = DetachedSignature::from_string(&text).unwrap();
+        let public = key.secret_subkeys[0].key.public_key();
+        signature.verify(public, b"jar").unwrap();
+        assert!(signature.verify(public, b"other").is_err());
+
+        // KARGO_SIGNING_KEY_ID picks a key by the end of its fingerprint or key ID.
+        let primary = format!("{:X}", key.primary_key.fingerprint());
+        let signer = Signer::in_memory(&armored, Some(&primary[primary.len() - 16..].to_lowercase()), None).unwrap();
+        let Backend::InMemory(chosen) = &signer.backend else { unreachable!() };
+        assert_eq!(chosen.subkey, None);
+        let err = Signer::in_memory(&armored, Some("DEADBEEF"), None).err().unwrap().to_string();
+        assert!(err.contains("no key `DEADBEEF`"), "{err}");
+    }
+
+    #[test]
+    fn in_memory_keys_with_a_passphrase_need_it() {
+        let key = generated_key(Some("s3cret"));
+        let armored = key.to_armored_string(ArmorOptions::default()).unwrap();
+        let err = Signer::in_memory(&armored, None, None).err().unwrap().to_string();
+        assert!(err.contains(PASSPHRASE_ENV), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib-1.0.jar");
+        std::fs::write(&file, "jar").unwrap();
+        let wrong = Signer::in_memory(&armored, None, Some("nope".into())).unwrap().sign(&file);
+        assert!(format!("{:#}", wrong.unwrap_err()).contains("could not sign lib-1.0.jar"));
+        let asc = Signer::in_memory(&armored, None, Some("s3cret".into())).unwrap().sign(&file).unwrap();
+        let (signature, _) = DetachedSignature::from_string(&std::fs::read_to_string(asc).unwrap()).unwrap();
+        signature.verify(key.secret_subkeys[0].key.public_key(), b"jar").unwrap();
     }
 }

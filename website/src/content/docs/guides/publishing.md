@@ -39,7 +39,7 @@ Set a default in `[publish]` so a plain `kargo publish` knows where to go:
 repository = "maven-central"
 ```
 
-`--dry-run` builds, stages and signs everything in `target/release/publish/repository` (a Maven repository layout you can inspect) and stops before uploading.
+`--dry-run` builds, stages and signs everything in `target/release/publish/repository` (a Maven repository layout you can inspect), prints each module's coordinates with its files and their SHA-256 (`Staged com.example:mathlib:1.0.0`, then `mathlib-1.0.0.jar  sha256:...` and so on), and stops before uploading.
 
 ### The local Maven repository
 
@@ -69,9 +69,26 @@ repository = "company"
 
 Kargo uploads every file with an HTTP `PUT`, like `mvn deploy`, and adds the version to the module's `maven-metadata.xml`. A `file:` URL is written as a directory. A SNAPSHOT version keeps its plain `-SNAPSHOT` file names and is overwritten by the next publish.
 
-:::note[GitHub Packages]
-Use `https://maven.pkg.github.com/<owner>/<repository>` as the URL, your user name as the username and a token with the `write:packages` scope as the password.
-:::
+A release is never overwritten. Before uploading a module, Kargo compares its files with the ones already in the repository (by their `.sha1`): when the same version is there with the same contents, the module is skipped, so a CI job that runs twice succeeds; when the contents differ, `kargo publish` fails and asks you to bump `version`. Signatures are not compared, since every run signs anew. The local Maven repository is overwritten, like `mvn install` does.
+
+### GitHub Packages, GitLab and CodeArtifact
+
+These services need no `username-env` and `password-env` in CI: Kargo recognizes their URLs and reads the variables their CI sets (see [Hosted repositories](../../reference/manifest/#hosted-repositories)):
+
+```toml title="kargo.toml"
+[repositories]
+github = "https://maven.pkg.github.com/example/mathlib"           # GITHUB_ACTOR and GITHUB_TOKEN
+gitlab = "https://gitlab.com/api/v4/projects/42/packages/maven"   # CI_JOB_TOKEN
+codeartifact = "https://acme-123456789012.d.codeartifact.eu-west-1.amazonaws.com/maven/releases/"   # CODEARTIFACT_AUTH_TOKEN
+```
+
+In GitHub Actions, give the job `permissions: packages: write`. For CodeArtifact, fetch a token first:
+
+```sh
+export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain acme --domain-owner 123456789012 --query authorizationToken --output text)
+```
+
+Set `username-env` and `password-env` to use other credentials, such as a personal access token on your machine. Kargo doesn't upload to `s3://` buckets; put a Maven repository server in front of them, or publish to a `file:` directory and sync it.
 
 ## What gets published
 
@@ -145,6 +162,46 @@ With more targets, it is the `<name>-android` module of a [multiplatform library
 
 Gradle resolves Android dependencies, not Kargo, so the POM lists the `[dependencies]` and `[target.android.dependencies]` with the versions `kargo.toml` declares. A dependency without a version (one a BOM manages) is left out with a warning. Path dependencies are published under their own coordinates: `<name>-android` for a multiplatform library with an Android target, its JVM module otherwise. An Android application is not published (`kargo package` builds its APK and App Bundle), nor yet a library with product flavors.
 
+## BOMs
+
+A bill of materials (BOM) is a POM that only pins versions, so the users of a family of libraries can align them all at once. Make a package a BOM with `kind = "bom"` in `[publish]`; its `[dependencies]` and path dependencies are the versions it pins:
+
+```toml title="bom/kargo.toml"
+[package]
+name = "mathlib-bom"
+version = "1.0.0"
+group = "com.example"
+
+[dependencies]
+mathlib = { path = "../mathlib" }
+mathlib-geometry = { path = "../geometry" }
+"com.squareup.okio:okio" = "3.16.0"
+"io.netty:netty-bom" = { version = "4.2.7.Final", bom = true }
+
+[publish]
+kind = "bom"
+```
+
+`kargo publish` compiles nothing for a BOM: it writes `mathlib-bom-1.0.0.pom` with `<packaging>pom</packaging>` and a `<dependencyManagement>` section listing each library at its version, each path dependency's modules (the root module and, for a [multiplatform library](#multiplatform-libraries), every platform module) at that package's version, and each `bom = true` entry as an import. Every dependency needs an explicit version.
+
+Consumers import it like any other BOM: `{ version = "1.0.0", bom = true }` in Kargo, `platform("com.example:mathlib-bom:1.0.0")` in Gradle, and `<scope>import</scope>` in Maven. In a workspace, `kargo publish --workspace` publishes the libraries first and the BOM after them.
+
+## Renamed artifacts
+
+When a library changes its `group` or `name`, list its former coordinates in `relocations`:
+
+```toml title="kargo.toml"
+[package]
+name = "mathlib"
+version = "2.0.0"
+group = "com.example"
+
+[publish]
+relocations = ["io.github.ada:mathlib"]
+```
+
+Each one gets a relocation POM at the same version (`io/github/ada/mathlib/2.0.0/mathlib-2.0.0.pom`), published with the library, that sends Maven, Gradle and Kargo to `com.example:mathlib`. Users of the old coordinates who move to 2.0.0 get the new library without changing their build. A relocation points at the package's root module.
+
 ## Shaded libraries
 
 With [`[package.shade]`](../distributing/#shading) in `kargo.toml`, the library jar carries its dependencies, with the `relocate` packages moved, and the POM and Gradle metadata drop the dependencies the jar bundles. Dependencies you want consumers to bring (`exclude = ["org.slf4j.*"]` leaves their classes out) stay in the POM.
@@ -183,17 +240,19 @@ sources = true      # the default
 
 ## Signing
 
-Maven Central requires an [OpenPGP](https://central.sonatype.org/publish/requirements/gpg/) signature for every file. Kargo signs with [GnuPG](https://gnupg.org/download/), so `gpg` has to be installed. Signing is on for Maven Central and off elsewhere; `sign = true` or `sign = false` in `[publish]` overrides that.
+Maven Central requires an [OpenPGP](https://central.sonatype.org/publish/requirements/gpg/) signature for every file. Signing is on for Maven Central and off elsewhere; `sign = true` or `sign = false` in `[publish]` overrides that.
 
-On your machine, Kargo signs with your default key and GnuPG asks for its passphrase. On CI, pass the key in environment variables instead:
+On CI, pass the key in environment variables, and Kargo signs in memory, with no GnuPG installation (like Gradle's in-memory keys):
 
 | Variable | Value |
 |---|---|
 | `KARGO_SIGNING_KEY` | The secret key, exported with `gpg --export-secret-keys --armor <KEY_ID>` (as is, or base64-encoded) |
-| `KARGO_SIGNING_KEY_PASSPHRASE` | Its passphrase, if it has one |
-| `KARGO_SIGNING_KEY_ID` | The key to use, when it isn't the default one |
+| `KARGO_SIGNING_KEY_PASSPHRASE` | Its passphrase, if it has one (`KARGO_SIGNING_PASSWORD` works too) |
+| `KARGO_SIGNING_KEY_ID` | The key to sign with, by fingerprint or key ID, when it isn't the newest signing subkey (or the primary key, without one) |
 
-Kargo imports `KARGO_SIGNING_KEY` into a temporary GnuPG home that it deletes afterwards, so your own keyring is untouched. Remember to publish the public key to a key server (`gpg --keyserver keyserver.ubuntu.com --send-keys <KEY_ID>`); Maven Central checks signatures against it.
+Without `KARGO_SIGNING_KEY`, Kargo signs with [GnuPG](https://gnupg.org/download/): your default key, whose passphrase GnuPG asks for. Set `KARGO_GPG` to the `gpg` executable to have GnuPG sign with `KARGO_SIGNING_KEY` too; Kargo then imports it into a temporary GnuPG home that it deletes afterwards, so your own keyring is untouched.
+
+Remember to publish the public key to a key server (`gpg --keyserver keyserver.ubuntu.com --send-keys <KEY_ID>`); Maven Central checks signatures against it.
 
 ## Maven Central
 
@@ -237,7 +296,7 @@ Maven Central takes uploads through the [Central Portal](https://central.sonatyp
    note: release it at https://central.sonatype.com/publishing/deployments, or set `central-publishing = "automatic"` in [publish]
    ```
 
-Kargo checks the requirements before it builds anything: `description`, `license`, `authors` and `repository` in `[package]`, a version that isn't a SNAPSHOT, signing, and sources and javadoc jars. It uploads all modules as one bundle and waits until the Portal has validated them, printing the Portal's errors if it rejects them.
+Kargo checks the requirements before it builds anything: `description`, `license`, `authors` and `repository` in `[package]`, a version that isn't a SNAPSHOT, signing, and sources and javadoc jars (except for a [BOM](#boms), which is only a POM). It uploads all modules as one bundle and waits until the Portal has validated them, printing the Portal's errors if it rejects them.
 
 By default the deployment then waits in the Portal until you press **Publish**, so you can check it first. With `central-publishing = "automatic"` in `[publish]`, it is released as soon as it is valid.
 
@@ -289,4 +348,4 @@ jobs:
           KARGO_SIGNING_KEY_PASSPHRASE: ${{ secrets.SIGNING_KEY_PASSPHRASE }}
 ```
 
-`gpg` is preinstalled on GitHub's runners. See [Continuous integration](../ci/) for caching.
+Kargo signs with `SIGNING_KEY` itself, so the job needs no GnuPG. When the job publishes to a repository of your own rather than Maven Central, running it again for the same tag skips the modules already uploaded. See [Continuous integration](../ci/) for caching.

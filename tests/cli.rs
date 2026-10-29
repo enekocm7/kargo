@@ -3716,6 +3716,94 @@ fn publish_requires_published_path_dependencies() {
 }
 
 #[test]
+fn publish_a_bom_with_relocations_once() {
+    let p = Project::new();
+    let repo = LocalRepo::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"core\", \"bom\"]\n\n[workspace.package]\nversion = \"1.0.0\"\n");
+    // A multiplatform library: the BOM pins its root module and each platform module.
+    p.file(
+        "core/kargo.toml",
+        "[package]\nname = \"core\"\nversion.workspace = true\ngroup = \"com.acme\"\n\n[target.jvm]\n[target.wasm]\n",
+    );
+    let bom = |okio: &str| {
+        format!(
+            "[package]\nname = \"acme-bom\"\nversion.workspace = true\ngroup = \"com.acme\"\n\n\
+             [dependencies]\ncore = {{ path = \"../core\" }}\n\"com.squareup.okio:okio\" = \"{okio}\"\n\
+             \"io.netty:netty-bom\" = {{ version = \"4.2.7.Final\", bom = true }}\n\n\
+             [repositories]\nstaging = \"{}\"\n\n[publish]\nkind = \"bom\"\nrepository = \"staging\"\nrelocations = [\"org.acme:bom\"]\n",
+            repo.url()
+        )
+    };
+    p.file("bom/kargo.toml", &bom("3.16.0"));
+
+    // A dry run lists every module with its files and checksums, and uploads nothing.
+    p.kargo().args(["publish", "-p", "acme-bom", "--dry-run"]).assert().success().stderr(
+        predicate::str::contains("Staged com.acme:acme-bom:1.0.0")
+            .and(predicate::str::contains("acme-bom-1.0.0.pom  sha256:"))
+            .and(predicate::str::contains("Staged org.acme:bom:1.0.0"))
+            .and(predicate::str::contains("aborting upload")),
+    );
+    assert!(!repo.dir.path().join("com").exists());
+
+    p.kargo()
+        .args(["publish", "-p", "acme-bom"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Published com.acme:acme-bom:1.0.0 to `staging`"));
+    let pom = std::fs::read_to_string(repo.dir.path().join("com/acme/acme-bom/1.0.0/acme-bom-1.0.0.pom")).unwrap();
+    assert!(pom.contains("<packaging>pom</packaging>"), "{pom}");
+    let managed = pom.split("<dependencyManagement>").nth(1).unwrap();
+    for module in [
+        "<artifactId>core</artifactId>",
+        "<artifactId>core-jvm</artifactId>",
+        "<artifactId>core-wasm-js</artifactId>",
+        "<artifactId>okio</artifactId>",
+    ] {
+        assert!(managed.contains(module), "the BOM pins {module}:\n{pom}");
+    }
+    assert!(managed.contains("<scope>import</scope>"), "a BOM dependency is imported:\n{pom}");
+    assert!(!pom.contains("<dependencies>\n    <dependency>"), "a BOM depends on nothing:\n{pom}");
+    let relocation = std::fs::read_to_string(repo.dir.path().join("org/acme/bom/1.0.0/bom-1.0.0.pom")).unwrap();
+    assert!(relocation.contains("<relocation>") && relocation.contains("<artifactId>acme-bom</artifactId>"), "{relocation}");
+
+    // Publishing the same release again changes nothing; publishing other contents under it fails.
+    p.kargo().args(["publish", "-p", "acme-bom"]).assert().success().stderr(
+        predicate::str::contains("already published, unchanged").and(predicate::str::contains("Unchanged com.acme:acme-bom:1.0.0")),
+    );
+    p.file("bom/kargo.toml", &bom("3.17.0"));
+    p.kargo()
+        .args(["publish", "-p", "acme-bom"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("already published to `staging`").and(predicate::str::contains("with different contents")));
+    assert!(!std::fs::read_to_string(repo.dir.path().join("com/acme/acme-bom/1.0.0/acme-bom-1.0.0.pom")).unwrap().contains("3.17.0"));
+}
+
+#[test]
+fn publish_validates_boms_and_relocations() {
+    let p = Project::new();
+    let kargo = || {
+        let mut cmd = p.kargo();
+        cmd.env("KARGO_MAVEN_LOCAL", p.path().join("m2"));
+        cmd
+    };
+    p.file("kargo.toml", &manifest("bom", "group = \"com.acme\"\n\n[publish]\nkind = \"platform\"\n"));
+    kargo().args(["publish", "--local"]).assert().failure().stderr(predicate::str::contains("`kind` must be \"library\" or \"bom\""));
+    p.file("kargo.toml", &manifest("bom", "group = \"com.acme\"\n\n[publish]\nkind = \"bom\"\n"));
+    kargo().args(["publish", "--local"]).assert().failure().stderr(predicate::str::contains("manages no versions"));
+    p.file(
+        "kargo.toml",
+        &manifest("bom", "group = \"com.acme\"\n\n[dependencies]\n\"com.squareup.okio:okio\" = {}\n\n[publish]\nkind = \"bom\"\n"),
+    );
+    kargo().args(["publish", "--local"]).assert().failure().stderr(predicate::str::contains("needs one"));
+    p.file("kargo.toml", &manifest("bom", "group = \"com.acme\"\n\n[publish]\nrelocations = [\"just-a-name\"]\n"));
+    kargo().args(["publish", "--local"]).assert().failure().stderr(predicate::str::contains("`group:artifact`"));
+    p.file("kargo.toml", &manifest("bom", "group = \"com.acme\"\n\n[publish]\nkind = \"bom\"\nrelocations = [\"com.acme:bom\"]\n"));
+    kargo().args(["publish", "--local"]).assert().failure().stderr(predicate::str::contains("the package's own coordinates"));
+}
+
+#[test]
 fn publish_takes_android_libraries_but_not_applications() {
     let p = Project::new();
     p.file("kargo.toml", &format!("{}\n[target.android]\n", manifest("droid", "group = \"com.acme\"\n")));

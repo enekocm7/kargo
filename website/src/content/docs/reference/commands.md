@@ -911,16 +911,18 @@ Build a library with the release profile and publish it to a Maven repository: t
 kargo publish [--repository <name> | --local] [--dry-run]
 ```
 
-Every target is published, Android only for a library (`kind = "library"`): a JVM-only library as one Maven module (`<name>.jar`), an Android-only library as one module with the AAR of its release build (`<name>.aar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-android`, `<name>-wasm-js`, `<name>-js`, `<name>-linuxx64`, ...). See [Android libraries](../../guides/publishing/#android-libraries). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first.
+Every target is published, Android only for a library (`kind = "library"`): a JVM-only library as one Maven module (`<name>.jar`), an Android-only library as one module with the AAR of its release build (`<name>.aar`), anything else as a multiplatform library with a root module and one module per platform (`<name>-jvm`, `<name>-android`, `<name>-wasm-js`, `<name>-js`, `<name>-linuxx64`, ...). See [Android libraries](../../guides/publishing/#android-libraries). Each module gets a POM, Gradle module metadata, a sources jar and a javadoc jar, the checksums `.md5`, `.sha1`, `.sha256` and `.sha512`, and `.asc` signatures when [signing](../../guides/publishing/#signing) is on. Everything is staged in `target/release/publish/repository` first. A package with `kind = "bom"` in [`[publish]`](../manifest/#publish) is published as a [BOM](../../guides/publishing/#boms), a POM only, without compiling anything, and each entry of `relocations` gets a [relocation POM](../../guides/publishing/#renamed-artifacts).
 
 | Option | Meaning |
 |---|---|
 | `--repository <name>` | Where to publish: a `[repositories]` entry, `maven-central` or `maven-local`. Defaults to `repository` in [`[publish]`](../manifest/#publish) |
 | `--local` | Publish to the local Maven repository, like `--repository maven-local` |
-| `--dry-run` | Build, stage and sign everything, but upload nothing |
+| `--dry-run` | Build, stage and sign everything, list each module with its files and their SHA-256, but upload nothing |
 | `-p, --package <name>`, `--workspace` | Which packages to publish. Path dependencies are published before the packages that use them; members with `publish = false` are skipped when the whole workspace is published |
 
 The package needs a `group` in `[package]`. Maven Central also needs `description`, `license`, `authors` and `repository`, a release (non-SNAPSHOT) version, and signatures; Kargo checks them before building.
+
+A release already in the destination repository is not uploaded again: when its files match (by SHA-1), the module is skipped and the command succeeds; when they differ, it fails and asks for a new version. SNAPSHOT versions and the local Maven repository are overwritten.
 
 A package with a main class also gets a `kargo.main-class` property in the POM of its JVM module, which `kargo install group:artifact` reads to know what to run.
 

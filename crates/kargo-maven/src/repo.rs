@@ -44,6 +44,78 @@ pub struct Credentials {
     pub password: String,
 }
 
+/// A hosted repository Kargo recognizes by its URL, with the variables its CI sets for credentials.
+/// A `[repositories]` entry of such a host without `username-env` and `password-env` uses them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostPreset {
+    /// The service's name, for messages.
+    pub name: &'static str,
+    pub username: PresetUser,
+    /// The variable holding the token or password.
+    pub password_env: &'static str,
+    /// What to do when the host refuses the credentials (or there are none).
+    pub hint: &'static str,
+}
+
+/// Where a preset takes its username from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetUser {
+    Env(&'static str),
+    Fixed(&'static str),
+}
+
+const GITHUB_PACKAGES: HostPreset = HostPreset {
+    name: "GitHub Packages",
+    username: PresetUser::Env("GITHUB_ACTOR"),
+    password_env: "GITHUB_TOKEN",
+    hint: "export GITHUB_ACTOR and GITHUB_TOKEN (a token with the `write:packages` scope; in GitHub Actions, give the job \
+           `permissions: packages: write`), or set `username-env` and `password-env`",
+};
+
+const GITLAB: HostPreset = HostPreset {
+    name: "GitLab",
+    username: PresetUser::Fixed("gitlab-ci-token"),
+    password_env: "CI_JOB_TOKEN",
+    hint: "GitLab CI jobs authenticate with CI_JOB_TOKEN; elsewhere set `username-env` and `password-env` to a deploy token \
+           or to your username and a personal access token with the `api` scope",
+};
+
+const CODEARTIFACT: HostPreset = HostPreset {
+    name: "AWS CodeArtifact",
+    username: PresetUser::Fixed("aws"),
+    password_env: "CODEARTIFACT_AUTH_TOKEN",
+    hint: "export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain <domain> --domain-owner <account> \
+           --query authorizationToken --output text); the token expires after 12 hours",
+};
+
+/// The preset of a repository URL's host, if Kargo knows it.
+pub fn host_preset(url: &str) -> Option<HostPreset> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h).split(':').next().unwrap_or(host).to_ascii_lowercase();
+    if host == "maven.pkg.github.com" {
+        Some(GITHUB_PACKAGES)
+    } else if host.contains(".codeartifact.") && host.ends_with(".amazonaws.com") {
+        Some(CODEARTIFACT)
+    } else if (path.starts_with("api/v4/projects/") || path.starts_with("api/v4/groups/")) && path.contains("/packages/maven") {
+        Some(GITLAB)
+    } else {
+        None
+    }
+}
+
+impl HostPreset {
+    /// The credentials its variables hold, when they are set.
+    pub fn credentials(&self) -> Option<Credentials> {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let username = match self.username {
+            PresetUser::Env(name) => var(name)?,
+            PresetUser::Fixed(name) => name.to_owned(),
+        };
+        Some(Credentials { username, password: var(self.password_env)? })
+    }
+}
+
 /// Which groups a repository serves: `include-groups` and `exclude-groups` in `[repositories]`. A group
 /// that some repository includes is asked of that repository only, so a private group is never looked
 /// up on (or taken from) a public repository. A pattern is a group (`com.corp`), or a group and every
@@ -812,6 +884,10 @@ impl MavenClient {
             let response = result.with_context(|| format!("failed to upload to {url}"))?;
             return match response.status().as_u16() {
                 200..=299 => Ok(()),
+                status @ (401 | 403) if host_preset(&repo.url).is_some() => {
+                    let preset = host_preset(&repo.url).expect("checked above");
+                    bail!("{} refused the upload of {url} to `{}` (HTTP {status}); {}", preset.name, repo.name, preset.hint)
+                }
                 401 | 403 if repo.credentials.is_none() => bail!(
                     "`{}` refused the upload of {url} (HTTP {}); set `username-env` and `password-env` for [repositories.{}] in kargo.toml and export those variables",
                     repo.name,
@@ -1515,6 +1591,18 @@ mod tests {
         a.exclude_groups.clear();
         let c = Content { include_groups: vec!["org.corp".to_owned()], exclude_groups: Vec::new() };
         assert_eq!(a.union(&c).include_groups, ["com.corp", "org.corp"]);
+    }
+
+    #[test]
+    fn recognizes_hosted_repositories() {
+        let name = |url: &str| host_preset(url).map(|p| p.name);
+        assert_eq!(name("https://maven.pkg.github.com/acme/lib"), Some("GitHub Packages"));
+        assert_eq!(name("https://gitlab.com/api/v4/projects/42/packages/maven"), Some("GitLab"));
+        assert_eq!(name("https://git.corp.example/api/v4/groups/7/-/packages/maven"), Some("GitLab"));
+        assert_eq!(name("https://corp-123456789012.d.codeartifact.eu-west-1.amazonaws.com/maven/releases/"), Some("AWS CodeArtifact"));
+        assert_eq!(name("https://repo.corp.example/maven-releases"), None);
+        assert_eq!(name("file:///tmp/repo"), None);
+        assert_eq!(GITLAB.username, PresetUser::Fixed("gitlab-ci-token"));
     }
 
     #[test]
