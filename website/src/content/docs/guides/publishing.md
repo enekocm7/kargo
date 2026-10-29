@@ -349,8 +349,8 @@ Kargo checks what it can before it compiles anything, and fails with what to cha
 
 - `version` is a SemVer version (`1.2.3`; not `1.0-SNAPSHOT`), and a pre-release (`1.2.3-beta.1`) is published under a dist-tag, with `--tag next` or `tag` in `[publish.npm]`, so it does not become `latest`.
 - The name is a valid npm name (lowercase, URL-safe, scoped like `@scope/name` or made so by `scope`).
-- The registry does not have this version yet. A published version never changes; bump `version`. A dry run only warns when the registry can't be reached, and `--offline` skips the check.
-- With `provenance = true`: the package manager is npm or pnpm, and the job can sign (see [Provenance](#provenance)).
+- The registry does not have this version yet. A published version never changes; bump `version`. `--dry-run` runs this check too, so it fails on a version that is already published, which tells you before the real publish does. A dry run only warns when the registry can't be reached, and with `--offline` a dry run skips the check (a real publish refuses to run offline).
+- With `provenance = true`: the package manager is npm or pnpm, not bun, and the job can sign (see [Provenance](#provenance)).
 
 After the build it checks that the `package.json` is the one of this version, that the files it names as `main`, `module` and `types` exist and that every pattern in `files` matches a file. A package without a `description`, `license` or `repository` still publishes, with a [warning](../../reference/warnings/#npm-packages-without-metadata).
 
@@ -376,6 +376,8 @@ Credentials are never read from `kargo.toml`. Kargo takes them from:
 1. **`NPM_TOKEN`**, an access token that can publish. Kargo writes it to a temporary `.npmrc` in the package's directory (readable by its owner only on Linux and macOS) with the registry, runs the package manager and deletes the file, also when the upload fails. The token is not in the command line or in Kargo's output.
 2. **Your own `.npmrc`** (`~/.npmrc` or the project's) when `NPM_TOKEN` is not set, as with a plain `npm publish`. `npm login` works.
 
+When neither gives a token for the registry, Kargo prints a warning and still tries the upload instead of failing: it only reads `_authToken` entries, and other ways of logging in (such as `_auth`) are left to the package manager, which reports the real error if they don't work.
+
 The registry is `--registry`, else `registry` in `[publish.npm]`, else the one your `.npmrc` names for the package (`registry=` and `@scope:registry=`), else `https://registry.npmjs.org`. For GitHub Packages:
 
 ```toml title="kargo.toml"
@@ -388,7 +390,7 @@ A registry that asks for a one-time password (two-factor authentication) fails w
 
 ### Provenance
 
-`provenance = true` publishes with [npm provenance](https://docs.npmjs.com/generating-provenance-statements): the registry shows that the package was built from your repository by a CI run. It needs npm or pnpm (bun can't sign) and a job that can: on GitHub Actions give it the `id-token: write` permission, and on GitLab CI a `SIGSTORE_ID_TOKEN`. Kargo fails before building when the job is missing it. A dry run does not check it. See [Publishing from CI](#publishing-from-ci).
+`provenance = true` publishes with [npm provenance](https://docs.npmjs.com/generating-provenance-statements): the registry shows that the package was built from your repository by a CI run. It needs npm or pnpm: bun can't publish with provenance, so Kargo refuses `provenance = true` when the package manager is bun (set `package-manager = "npm"` or `"pnpm"` under the target, or turn provenance off). It also needs a job that can sign: on GitHub Actions give it the `id-token: write` permission, and on GitLab CI a `SIGSTORE_ID_TOKEN`. Kargo fails before building when the job is missing it. A dry run does not check it. See [Publishing from CI](#publishing-from-ci).
 
 ### Maven and npm together
 

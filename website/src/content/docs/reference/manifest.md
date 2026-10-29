@@ -422,7 +422,7 @@ engines = { node = ">=20" }
 | `scope` | none | The scope of a package name that has none: `scope = "acme"` publishes `hello` as `@acme/hello`. A name that is scoped already (`npm-name = "@other/hello"`) keeps its own |
 | `access` | the registry's | `"public"` or `"restricted"`. npm makes scoped packages restricted, which needs a paid account, so set `"public"` for an open-source package |
 | `tag` | `latest` | The dist-tag the version gets, such as `next`. A pre-release version (`1.0.0-beta.1`) needs one. `--tag` overrides it |
-| `provenance` | `false` | Publish with [provenance](../../guides/publishing/#provenance) (npm and pnpm; GitHub Actions or GitLab CI) |
+| `provenance` | `false` | Publish with [provenance](../../guides/publishing/#provenance) (npm and pnpm; an error with bun, which can't sign; GitHub Actions or GitLab CI) |
 | `keywords` | `[]` | The `keywords` of `package.json` |
 | `bugs` | the issues page of a GitHub or GitLab `repository` | The `bugs` URL |
 | `side-effects` | not written | `false`, `true` or a list of files: the `sideEffects` that tell bundlers whether unused imports can be dropped |
