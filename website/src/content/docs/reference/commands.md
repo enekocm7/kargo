@@ -1164,7 +1164,7 @@ kargo self uninstall [--purge]
 
 Releases come from `https://github.com/enekocm7/kargo/releases`. `KARGO_RELEASES_URL` points Kargo at a mirror, or at a directory with `file://`, which must be laid out like the release downloads: `latest/download/VERSION`, `download/v<version>/SHA256SUMS` and `download/v<version>/kargo-<version>-<target>.tar.gz` (`.zip` on Windows). `--offline` makes `kargo self update` fail, except for a `file://` mirror.
 
-**The update notice.** `kargo --version` looks the newest version up at most once a day (with a two-second timeout; the answer is remembered in `~/.kargo/update-check.json`) and, when it is newer than the running one, prints a note on stderr: ``note: update available: kargo 0.1.2 (this is kargo 0.1.1); run `kargo self update` ``, also at most once a day. Nothing is printed or fetched with `--offline`, with `-q`, when `KARGO_NO_UPDATE_CHECK` is set, in CI (`CI` is set) or when stderr is not a terminal. No other command checks.
+**The update notice.** `kargo --version` looks the newest version up at most once a day (with a two-second timeout; the answer is remembered in `~/.kargo/update-check.json`) and, when it is newer than the running one, prints a note on stderr: ``note: update available: kargo 0.1.3 (this is kargo 0.1.2); run `kargo self update` ``, also at most once a day. Nothing is printed or fetched with `--offline`, with `-q`, when `KARGO_NO_UPDATE_CHECK` is set, in CI (`CI` is set) or when stderr is not a terminal. No other command checks.
 
 ## `kargo daemon`
 
@@ -1182,7 +1182,7 @@ Check the machine and the project for what keeps builds from working, and say ho
 ```console
 $ kargo doctor
 Kargo
-  ok       version: kargo 0.1.2 (x86_64-unknown-linux-gnu)
+  ok       version: kargo 0.1.3 (x86_64-unknown-linux-gnu)
   ok       KARGO_HOME: /home/me/.kargo (writable)
   ok       disk space: 120.4 GiB free
   ok       compiler daemons: none running
@@ -1233,10 +1233,10 @@ Print the version of Kargo, like [`kargo --version`](#global-flags). It never re
 
 ```console
 $ kargo version
-kargo 0.1.2
+kargo 0.1.3
 $ kargo -v version
-kargo 0.1.2
-release: 0.1.2
+kargo 0.1.3
+release: 0.1.3
 host: x86_64-unknown-linux-gnu
 ```
 

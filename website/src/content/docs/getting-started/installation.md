@@ -29,7 +29,7 @@ Both read options from the environment, because `irm | iex` cannot take argument
 
 | Option | `install.sh` | `install.ps1` |
 |---|---|---|
-| Install a version instead of the latest | `KARGO_VERSION=0.1.2` or `--version 0.1.2` | `$env:KARGO_VERSION = '0.1.2'` |
+| Install a version instead of the latest | `KARGO_VERSION=0.1.3` or `--version 0.1.3` | `$env:KARGO_VERSION = '0.1.3'` |
 | Leave `PATH` alone | `--no-modify-path` | `$env:KARGO_NO_MODIFY_PATH = '1'` |
 | Edit `PATH` without asking | `--yes` | `$env:KARGO_YES = '1'` |
 | Install somewhere else than `~/.kargo` | `KARGO_HOME=/opt/kargo` | `$env:KARGO_HOME = 'D:\kargo'` |
@@ -37,7 +37,7 @@ Both read options from the environment, because `irm | iex` cannot take argument
 To pass flags through the pipe, use `sh -s --`:
 
 ```sh
-curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.2 sh -s -- --no-modify-path
+curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.3 sh -s -- --no-modify-path
 ```
 
 The scripts install builds for Linux (x86_64 and aarch64, glibc 2.35 or newer, or a static musl build on other distributions and Alpine), macOS (Intel and Apple Silicon) and Windows (x64 and arm64).
@@ -69,7 +69,7 @@ Unpack the archive and put `kargo` on your `PATH`. To verify what you downloaded
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify kargo-0.1.2-x86_64-unknown-linux-gnu.tar.gz --repo enekocm7/kargo
+gh attestation verify kargo-0.1.3-x86_64-unknown-linux-gnu.tar.gz --repo enekocm7/kargo
 ```
 
 ### From source
@@ -94,7 +94,7 @@ cargo install --locked --path .
 kargo self update
 ```
 
-downloads the latest release, verifies its checksum and replaces the running binary (`kargo self update --version 0.1.2` installs a particular version, `--check` only tells you whether there is a newer one). Kargo installed from source with Cargo is updated by running `cargo install` again, and one installed by a package manager by that package manager. See [`kargo self`](../../reference/commands/#kargo-self).
+downloads the latest release, verifies its checksum and replaces the running binary (`kargo self update --version 0.1.3` installs a particular version, `--check` only tells you whether there is a newer one). Kargo installed from source with Cargo is updated by running `cargo install` again, and one installed by a package manager by that package manager. See [`kargo self`](../../reference/commands/#kargo-self).
 
 Kargo looks for a newer release when you run `kargo --version`, at most once a day, and prints a note on stderr when there is one. `KARGO_NO_UPDATE_CHECK=1` turns that off; it never runs offline, in CI, or when stderr is not a terminal.
 
@@ -102,7 +102,7 @@ Kargo looks for a newer release when you run `kargo --version`, at most once a d
 
 ```console
 $ kargo --version
-kargo 0.1.2
+kargo 0.1.3
 $ kargo --help
 Cargo for Kotlin: a build tool and package manager
 ...
