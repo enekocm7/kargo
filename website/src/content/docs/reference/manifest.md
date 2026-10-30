@@ -1019,6 +1019,8 @@ env = { KEY = "value" }
 
 Hooks: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run`, `post-package`. On Windows a `command` ending in `.sh` runs through `sh`.
 
+`command` is a program name or path that Kargo starts directly, not a shell string: put its arguments in `args`. (`run` of a task and of a `[[generate]]` step is a shell string.)
+
 ## `[tasks]`
 
 ```toml

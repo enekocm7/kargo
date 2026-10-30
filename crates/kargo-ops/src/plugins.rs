@@ -80,13 +80,21 @@ pub fn run_hook(shell: &Shell, ws: &Workspace, hook: Hook, env: &[(String, Strin
             .current_dir(ws.root())
             .envs(env.iter().map(|(k, v)| (k, v)))
             .envs(plugin.env.iter());
-        let status = process::status(shell, &mut cmd, &format!("plugin `{}`", plugin.name))?;
+        let status = match process::status(shell, &mut cmd, &format!("plugin `{}`", plugin.name)) {
+            Ok(status) => status,
+            Err(err) if plugin.platform_command().contains(char::is_whitespace) => bail!("{err:#}{COMMAND_HINT}"),
+            Err(err) => return Err(err),
+        };
         if !status.success() {
             bail!("plugin `{}` failed at {hook} ({})", plugin.name, process::describe_status(status));
         }
     }
     Ok(())
 }
+
+/// Added to the start failure of a plugin whose `command` has whitespace: it is a program name,
+/// not a shell string like `run` of a task or `[[generate]]` step, so the arguments belong in `args`.
+const COMMAND_HINT: &str = "; `command` is a program name, not a shell string; put arguments in `args = [...]`";
 
 /// Builds the command for a hook plugin. Windows can't start a `.sh` script
 /// directly, so there it runs through `sh` (from Git for Windows, for example).
@@ -228,6 +236,20 @@ mod tests {
         let ws = workspace(dir.path(), &format!("[plugins.bad]\ncommand = \"./{cmd}\"\nhooks = [\"pre-test\"]\n"));
         let err = run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PreTest, &[]).unwrap_err();
         assert!(err.to_string().contains("plugin `bad` failed"), "{err}");
+    }
+
+    #[test]
+    fn command_with_spaces_that_cannot_start_hints_at_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(dir.path(), "[plugins.lint-hook]\ncommand = \"./no such program --flag\"\nhooks = [\"post-build\"]\n");
+        let err = run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &[]).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("failed to start plugin `lint-hook`"), "{message}");
+        assert!(message.contains("program name") && message.contains("`args = [...]`"), "{message}");
+
+        let ws = workspace(dir.path(), "[plugins.lint-hook]\ncommand = \"./missing\"\nhooks = [\"post-build\"]\n");
+        let err = run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &[]).unwrap_err();
+        assert!(!err.to_string().contains("program name"), "{err}");
     }
 
     #[test]
