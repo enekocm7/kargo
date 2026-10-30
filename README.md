@@ -1,7 +1,11 @@
 # Kargo
-[![Crates.io](https://img.shields.io/crates/v/kargo-cli.svg)](https://crates.io/crates/kargo-cli)
 
-**Kargo is Cargo for Kotlin**: one `kargo.toml`, one CLI, to create, build, run and test Kotlin projects for the **JVM**, **WebAssembly**, **JavaScript**, **Kotlin/Native** and **Android**, with Maven dependencies, a lockfile, built-in frameworks, tasks and plugins.
+[![Crates.io](https://img.shields.io/crates/v/kargo-cli.svg)](https://crates.io/crates/kargo-cli)
+[![Release](https://github.com/enekocm7/kargo/actions/workflows/release.yml/badge.svg)](https://github.com/enekocm7/kargo/actions/workflows/release.yml)
+[![Docs](https://github.com/enekocm7/kargo/actions/workflows/website.yml/badge.svg)](https://enekocm7.github.io/kargo/)
+[![License](https://img.shields.io/github/license/enekocm7/kargo)](LICENSE)
+
+**Kargo is Cargo for Kotlin.** One `kargo.toml` and one CLI create, build, run, test and publish Kotlin projects for the **JVM**, **WebAssembly**, **JavaScript**, **Kotlin/Native** and **Android**.
 
 ```console
 $ kargo new hello && cd hello
@@ -14,583 +18,93 @@ Hello, Kotlin!
 $ kargo test
 ```
 
+No Gradle scripts, no plugins to wire up. If you have used Cargo, you already know how it works.
+
 ## Install
 
-Prebuilt binaries need no Rust toolchain:
-
 ```sh
-curl -fsSL https://enekocm7.github.io/kargo/install.sh | sh        # Linux and macOS
+curl -fsSL https://enekocm7.github.io/kargo/install.sh | sh     # Linux and macOS
 ```
 
 ```powershell
-irm https://enekocm7.github.io/kargo/install.ps1 | iex             # Windows
+irm https://enekocm7.github.io/kargo/install.ps1 | iex          # Windows
 ```
 
-The scripts download the archive for your platform from the [GitHub release](https://github.com/enekocm7/kargo/releases), check its SHA-256, put `kargo` in `~/.kargo/bin` and offer to add that directory to your `PATH` (`KARGO_VERSION` picks a version, `--no-modify-path` leaves `PATH` alone). Releases have builds for Linux, macOS and Windows on x86_64 and aarch64, with `SHA256SUMS` and build provenance attestations. `nix run github:enekocm7/kargo` and `cargo binstall kargo-cli` work too; manifests for Homebrew, Scoop, winget and the AUR are built with each release but not yet listed in those registries. From source: `cargo install --locked kargo-cli` from crates.io, or `cargo install --locked --git https://github.com/enekocm7/kargo kargo-cli` for the latest commit (Rust 1.89 or newer; the crate is `kargo-cli`, the command is `kargo`). Update with `kargo self update`, remove with `kargo self uninstall`. See the [installation guide](https://enekocm7.github.io/kargo/getting-started/installation/).
+You don't need Rust or a JDK: Kargo downloads a JDK when you have none. Nix, `cargo binstall`, `cargo install` and the other options are in the [installation guide](https://enekocm7.github.io/kargo/getting-started/installation/). Update later with `kargo self update`.
 
-## How it works
+## Why Kargo
 
-* **No Gradle for JVM, Wasm, JS and Native.** Kargo downloads `kotlin-compiler-embeddable` and `kotlin-native-prebuilt` from Maven Central and drives the compilers directly. Kargo also downloads a JDK when you have none (or the one `[toolchain] jdk = "21"` pins), so beyond Kargo itself you only need Node.js to run Wasm programs (plus npm, pnpm or bun when a Wasm library needs npm packages, which Kargo installs for you). Release Wasm builds also download pinned, checksum-verified Binaryen automatically for reproducible optimization, compression and size budgets. A Wasm project can also target browsers (`environment = "browser"`: `kargo run` serves the page, `kargo test` uses a headless browser) or be an npm library (`kind = "library"`). `[target.js]` compiles the same code to JavaScript with Kotlin/JS, for Node.js and browsers, as a program or an npm library (ES, CommonJS or UMD modules with TypeScript declarations).
-* **Real Maven resolution.** POM inheritance, properties, BOM imports, exclusions, version ranges, relocations, and **Gradle module metadata**, so Kotlin Multiplatform libraries resolve to the right `.jar` or `.klib` for each target. Conflicts are resolved like Gradle: the highest version wins, unless `force = true`.
-* **`kargo.lock`** pins every resolved version and the SHA-256 of every artifact, and of the tools the build runs: the Kotlin compiler, compiler plugins, the JUnit launcher, KSP, Dokka, ktlint, detekt and R8. Checksums are verified against the repository's `.sha256` (else `.sha1`) files on download and before a cached artifact is first locked (`--require-checksums` fails on artifacts with neither), and every artifact a build uses is checked against the lockfile, so a corrupt cached file fails the build instead of being used. npm packages for Wasm and JS install with `--ignore-scripts`. `-SNAPSHOT` versions resolve through the repository's `maven-metadata.xml` to the newest timestamped build, which the lockfile pins until `kargo update`.
-* **Incremental:** a target is skipped when its sources, classpath and flags are unchanged. When something changed, only the affected Kotlin/JVM files are recompiled, in a warm compiler daemon, so an edit rebuilds in well under a second.
-* **Android** is built by the Android Gradle Plugin. Kargo generates the Gradle project under `target/android` from `kargo.toml`, so you never edit Gradle files, and downloads the Gradle version that plugin needs (a project `gradlew` wins; `gradle-version` pins another). Coming from Gradle? [Gradle feature parity](https://enekocm7.github.io/kargo/migration/gradle-feature-parity/) lists what Kargo does, does differently or doesn't do yet.
+- **No Gradle for JVM, Wasm, JS and Native.** Kargo drives the Kotlin compilers directly, and downloads them (and a JDK) for you.
+- **Real Maven resolution.** POM inheritance, BOMs, exclusions, version ranges and Gradle module metadata, so Kotlin Multiplatform libraries resolve to the right artifact for each target.
+- **Reproducible by default.** `kargo.lock` pins every resolved version and the SHA-256 of every artifact and tool.
+- **Fast incremental builds.** Unchanged targets are skipped, and changed Kotlin/JVM files recompile in a warm compiler daemon, often in well under a second.
+- **Android without Gradle files.** Kargo generates the Gradle project from `kargo.toml` and drives the Android Gradle Plugin for you.
+- **Familiar UX.** Cargo-style output, `kargo add`, `kargo tree`, `kargo why`, workspaces, tasks and `kargo-<name>` plugins.
 
-## Commands
-
-| Command | Description |
-|---|---|
-| `kargo new <dir> [--lib] [-t jvm,wasm,js,native,android] [-w compose,ktor,...] [--bench] [--workspace]` | Create a project (inside a workspace, it joins the `members`), or with `--workspace` an empty workspace; `-w compose-multiplatform` shares a Compose `App()` between the desktop and the browser, `-w compose-html` creates a Compose HTML (DOM) app for Kotlin/JS |
-| `kargo init [dir]` | Create a project in an existing directory |
-| `kargo import [dir] [--dry-run] [--no-build] [--from maven\|gradle]` | Convert a Maven or Gradle project: write the `kargo.toml` (a workspace for several modules), move the sources into Kargo's layout (`git mv` in a git repository), report what could not be translated and build the result; `--dry-run` prints the plan and changes nothing (see [importing a project](https://enekocm7.github.io/kargo/guides/importing/)) |
-| `kargo init-ci [--system github] [--junit] [--force]` | Write `.github/workflows/ci.yml` from `kargo.toml`: the steps of the CI guide, `setup-java` unless `[toolchain] jdk` is set, `setup-node` for Wasm and JS and an OS matrix for Kotlin/Native (see [continuous integration](https://enekocm7.github.io/kargo/guides/ci/)) |
-| `kargo build [--release \| --profile <name>] [-t <target>] [--keep-going] [--xcframework] [-j <n>] [--size-report] [--message-format json]` | Compile all (or selected) targets, and print the resolved version of each framework (with Spring Boot's Spring Framework, Spring Security and Jackson versions); `--size-report` prints Binaryen metrics for Wasm release modules; `--keep-going` builds every target (and every workspace member whose dependencies built) and reports each failure; `--xcframework` combines Apple frameworks into an XCFramework; `-j <n>` (or `KARGO_JOBS`, `[build] jobs`) sets how many workspace members and targets build at once, `auto` by default (the CPUs within the free memory), and `-j 1` builds one at a time in a fixed order; `--message-format json` prints compiler diagnostics as JSON, including Wasm sizes |
-| `kargo check [--tests] [--release \| --profile <name>] [-t <target>] [--keep-going] [-j <n>]` | Type-check without packaging or linking |
-| `kargo run [<file>.kt \| <file>.kts \| -e <code>] [-t <target>] [--main <class> \| --bin <name> \| --example <name>] [--port <n>] [--open] [--debug[=<port>]] [--native-agent] [--flavor <name>] [--env-file <path>] [--no-env-file] [--watch \| --hot-reload [--clear] [--ignore <glob>]] [-j <n>] [-- args]` | Build and run; `--main` (alias `--entry-point` on Native) picks another `main`, `--bin` a `[[bin]]`, `--example` runs `examples/<name>.kt`; a `.kt` file path compiles that file against the project it is in and runs it without adding it to the build, while a script, a `.kt` file with a front matter or one outside any project runs as `kargo script` runs it (`-e` too); for a Wasm or JS browser app it serves the page on `127.0.0.1` (`--port` or `port` in `[target.wasm]` / `[target.js]`, default 8080) and `--open` opens it; `--debug` starts the JVM waiting for a JDWP debugger (port 5005); `--native-agent` runs it on GraalVM with the tracing agent, recording ``kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`` configuration in `native-image/`; `--flavor` picks the Android product flavor to install; `--watch` rebuilds and restarts the program when its files change (a failed build leaves the running one alone; a browser app is served and its open pages reload), see [watch mode](https://enekocm7.github.io/kargo/guides/watch/); `--hot-reload` (`--hot`) keeps a JVM program running and swaps the changed classes into it (a Compose Desktop app recomposes), see [hot reload](https://enekocm7.github.io/kargo/guides/watch/#hot-reload-a-jvm-program) |
-| `kargo script <file> [args]...` / `kargo script -e <code> [args]...` | Run a single Kotlin file without a project: a `.kts` script with `@file:DependsOn` and other `@file:` annotations, or a `.kt` file with a `/* kargo ... */` front matter; dependencies resolve and cache like a project's, and a second run of an unchanged script starts without compiling; `-e` runs code from the command line; `--` separates arguments that start with `-` |
-| `kargo test [filter] [--no-run] [--against-min] [--no-fail-fast] [--report junit] [--debug[=<port>]] [--list [--format json]] [--env-file <path>] [--no-env-file] [-t <target>] [-j <n>] [--watch [--clear] [--ignore <glob>]]` | Compile and run tests; `--against-min` runs JVM tests with the R8-optimized jar on the runtime classpath; `--watch` runs them again on every change; `filter` matches `package.Class.method` names (JVM, Native); `--no-fail-fast` tests every target and prints a result per target; `--report junit` writes JUnit XML to `target/<profile>/<target>/test-reports`; `--debug` waits for a debugger before running the JVM tests; `--list` prints the tests without running them (JVM, Native); `--message-format json` reports each test as JSON |
-| `kargo bench [filter] [--no-run] [--save <name>] [--baseline <name>] [--format json] [--warmup <NxT>] [--iterations <NxT>] [--forks <n>] [--mode <mode>] [--time-unit <unit>] [--env-file <path>] [--no-env-file] [--profile <name>] [-j <n>]` | Run the JVM benchmarks in `benches/` with JMH (kotlinx-benchmark annotations), always optimized (the `release` profile, or `[profile.bench]`); `--save` stores the results as a baseline in `target/bench/`, `--baseline` compares with one (`1.20 ms -> 1.05 ms (-12.5%, p < 0.05)`); `--format json` prints JMH's JSON results |
-| `kargo watch [-x <command>]... [command] [--clear] [--ignore <glob>]` | Run a kargo command again whenever the project's files change, such as `kargo watch check` or `kargo watch -x "test -t jvm" -x run`; the commands run in order, and `--ignore` takes gitignore-style patterns |
-| `kargo doc [--open] [-t <target>] [-j <n>]` | Generate API documentation from KDoc with Dokka into `target/debug/doc` |
-| `kargo preview [<name>...] [--list] [--width <dp>] [--height <dp>] [--density <n>] [--out-dir <dir>]` | Render the `@Preview` composables of a Compose Desktop app to PNG files in `target/preview`, off screen |
-| `kargo fmt [--check] [-j <n>]` | Format Kotlin sources with ktlint (`--check` only reports, for CI) |
-| `kargo lint [--create-baseline] [--android [--release] [--message-format json]] [-j <n>]` | Analyze Kotlin sources with detekt; `--android` runs Android lint instead, with its baseline and SARIF reports |
-| `kargo add --path <dir> [--dev] [-t <target>]` | Depend on another Kargo package on disk, built from source |
-| `kargo add <group:artifact[:version]>... [--dev] [-t <target>] [--scope runtime\|provided\|processor\|ksp] [--bom]` | Add dependencies (latest release when no version is given) |
-| `kargo add --npm <package[@version]>... [--dev] [-t wasm\|js] [--types]` | Add npm packages to `[target.wasm.npm-dependencies]` or `[target.js.npm-dependencies]` (latest release from the npm registry when no version is given) |
-| `kargo add --framework serialization,coroutines` | Enable built-in frameworks |
-| `kargo add --cinterop <name> [--header <file>] [--pkg-config <package>]` | Add a C library: `[target.native.cinterop.<name>]` and `interop/<name>.def` |
-| `kargo remove <group:artifact>... [--dev] [-t <target>]` | Remove dependencies |
-| `kargo remove --npm <package>... [--dev] [-t wasm\|js]` | Remove npm packages |
-| `kargo target add\|remove\|list <target>... [--lib\|--app]` | Enable or disable targets in an existing project (keeps `kargo.toml` formatting, scaffolds `src-<target>/` and Android files), or list them |
-| `kargo outdated [--pre]` | List dependencies in `kargo.toml`, npm packages included, with newer compatible / latest versions |
-| `kargo upgrade [<group:artifact>...] [--incompatible] [--dry-run]` | Raise versions in `kargo.toml`, preserving formatting |
-| `kargo tree [-c compile\|runtime\|test] [--depth N] [--duplicates] [-i <group:artifact>] [--format json]` | Show the dependency graph; `--invert` shows what depends on one module, up to `kargo.toml` |
-| `kargo why <group:artifact[:version]> [-t <target>] [-c compile\|runtime\|test] [--all-paths] [--format json]` | Explain why a module is on the classpath and why at its version: every version requested and by whom, what decided (highest wins, `force = true`, a range, `kargo.lock`), and the path from `kargo.toml` |
-| `kargo audit [-t <target>] [--deny low\|medium\|high\|critical\|none] [--tooling] [--fix] [--format json]` | Check every resolved Maven module and npm package against the [OSV](https://osv.dev) advisory database: a table by severity with the fixed version, the advisory link and the dependency path. Exits with 101 on advisories at or above `--deny` (default `high`) that `[audit] ignore` does not list; `--tooling` adds the compiler and other build tools, `--fix` raises the versions `kargo.toml` declares. The only command that contacts the advisory service; answers are cached for a day and `--offline` uses the cache |
-| `kargo package [--release \| --profile <name>] [-t jvm\|android] [--bin <name>] [--fat] [--optimize] [--format jar\|jlink\|native-image\|installer] [--message-format json] [--desktop [--platforms all]] [-j <n>]` | Build a self-contained fat jar (JVM); `--bin` launches that `[[bin]]`. A library gets its own jar and sources jar instead (`--fat` for the fat jar). `--release` runs R8 to shrink and obfuscate the JVM jar (`--optimize` opts in for other profiles), writing a retrace mapping and usage report; JSON mode prints its report and artifact path as JSON lines. `--format jlink` builds the jars, a Java runtime trimmed by `jlink` and launchers, which run without an installed Java; `native-image` a GraalVM native executable; `installer` a `jpackage` installer (`.msi`, `.dmg`, `.deb`, ...) for the host OS, all into `target/<profile>/jvm/package/` (see [distributing applications](https://enekocm7.github.io/kargo/guides/distributing/)). `--desktop` packages a [Compose Desktop](https://enekocm7.github.io/kargo/guides/compose/) app: an installer with what Compose needs (signed and notarized on macOS), or with `--format jar --platforms all` a jar that runs on every OS. `-t android` builds the (signed) App Bundles and APKs, or AARs, of every flavor into `target/<profile>/android/` |
-| `kargo retrace <mapping.txt> [stacktrace.txt]` | Retrace an R8-obfuscated JVM stack trace; reads stdin if no stack trace file is given |
-| `kargo publish [--repository <name> \| --local \| --npm] [--dry-run]` | Publish a library (jar, klibs or an Android library's AAR, with POM, Gradle module metadata, sources/javadoc jars, checksums, OpenPGP signatures), a BOM or relocation POMs to Maven Central, a `[repositories]` entry or `~/.m2`; an unchanged release is skipped, a changed one refused; with `--npm` (or `[publish.npm]`) the npm package of a Wasm or Kotlin/JS library goes to an npm registry with npm, pnpm or bun (`--registry`, `--tag`, `--otp`; `--dry-run` packs it and lists the files), after checks of the name, the version and the registry |
-| `kargo install --path <dir> \| --git <url> [--tag \| --branch \| --rev] \| <group:artifact[:version]> [--bin <name>] [--format jar\|jlink] [--force] [--list]` | Install a Kotlin command-line tool: build a project (release profile), a git repository or download an application from Maven, and put a launcher in `~/.kargo/bin`. A JVM tool runs its fat jar with the JDK it was built with (`--format jlink`: with a trimmed runtime, so no Java is needed); a Native tool is copied as it is. Every entry point is installed, or the `--bin` ones. `kargo install --force <name>` upgrades it from where it came from, `--list` shows what is installed, `--root <dir>` installs elsewhere (see [installing tools](https://enekocm7.github.io/kargo/guides/installing-tools/)) |
-| `kargo uninstall <name>...` | Remove programs installed with `kargo install` |
-| `kargo fetch [--sources] [--tools]` | Pre-download everything; `--sources` also downloads the libraries' sources jars (or Javadoc jars, for libraries without sources) for editors, `--tools` the Dokka, ktlint, detekt and R8 tools |
-| `kargo generate [name...] [-t <target>] [--release \| --profile <name>] [--force]` | Run the `[[generate]]` steps of `kargo.toml` without building: protobuf and gRPC, OpenAPI clients, a `BuildConfig`, any tool that writes sources. A step writes into `target/generated/<profile>/<name>/` (`$KARGO_GEN_DIR`), which is compiled with the sources, and runs again only when its `inputs` change. `build`, `check`, `test`, `run` and `package` run the steps they need first (see [code generation](https://enekocm7.github.io/kargo/guides/code-generation/)) |
-| `kargo vendor [path] [--toolchains] [--sync]` | Copy every dependency (and with `--toolchains` the Kotlin compiler and Kotlin/Native) into `vendor/` as a Maven repository; `kargo build --vendored` (or `[source] vendored = true` in `.kargo/config.toml`) then resolves from it alone (see [offline and corporate builds](https://enekocm7.github.io/kargo/guides/offline-and-mirrors/)) |
-| `kargo inspect <group:artifact[:version]> [class...] [-c compile\|runtime\|test] [--visibility public\|protected\|package\|private]` | Show where a dependency's jar is in the cache and list its classes, or print the members of classes as `javap` does |
-| `kargo classpath [-t target] [-s compile\|runtime\|test] [--format path\|lines\|json]` | Print the resolved jars (or klibs) of a target, the ones the build compiles with |
-| `kargo ide [--kls\|--zed]` | Write `workspace.json` (Kotlin LSP) or `kls-classpath` (kotlin-language-server) for editors that run the server themselves, or `.zed/tasks.json` with Kargo tasks for Zed's run buttons; kept current by later commands |
-| `kargo metadata [--no-deps] [--fingerprint]` | Print the project as versioned JSON for editors and language servers: roots, classpaths, compiler arguments and plugins, entry points, tasks |
-| `kargo lsp [--server kargo\|kotlin-lsp\|kls\|none] [--log-file <path>]` | Language server for editors over stdio: `kargo.toml` diagnostics, completion, hover (including Maven coordinates, versions and newer-version hints) and code actions (quick fixes, add a dependency, framework or target, upgrade), `kargo/runnables`, `kargo/testTree`, `kargo/status` notifications, Kotlin code intelligence (completion, hover, signature help, go to definition and implementation, references, call and type hierarchies, rename, semantic highlighting, inlay hints, folding and selection ranges, on-type formatting, linked editing of type parameters, document links, inline values while debugging, unused code and deprecated usages as you type, formatting with ktlint (also as a code action), code actions: import, organize imports, add a missing dependency, implement members, add the missing branches of a `when`, add `actual` declarations, remove an unused import or variable, replace a deprecated call with its `ReplaceWith`; refactorings: extract and inline a variable or function, move or remove a parameter, move a declaration to another package or file) from Kargo's own Kotlin server, built in and aware of every target's source sets, standard library and libraries, or from a Kotlin language server Kargo downloads and keeps importing the project into (multiplatform packages as source sets, so `expect`/`actual` link up; `--klib-targets` adds Wasm and Native), and `kargo check` on save (`checkOnSave`, on with Kargo's own server) with errors for every target |
-| `kargo dap` | Debug adapter for editors over stdio: kotlin-debug-adapter on the project's JDK, launching `kargo run` or `kargo test` with `--debug` and mapping Kargo's source layout so breakpoints and stack frames find your files |
-| `kargo update [<group:artifact>...] [--precise <ver>] [--dry-run]` | Re-resolve `kargo.lock` (everything, or only the named modules) |
-| `kargo task [--env-file <path>] [name] [args]`, `kargo <task>` | List (also `kargo task --list` and `kargo --help`) or run tasks; `--env-file` picks the `.env` files of a package task |
-| `kargo env [--release \| --profile <name>] [--show-values] [--check]` | Show the environment `kargo run` and `kargo test` use: each variable, where it comes from, and its value (hidden unless `--show-values`); `--check` fails on unset required variables and on keys of `.env.example` that nothing sets |
-| `kargo plugins` | List compiler, hook and subcommand plugins |
-| `kargo android <gradle args>` | Run any Gradle task in the generated Android project |
-| `kargo android devices\|avd\|emulator\|connect\|pair\|disconnect`, `kargo devices` | List devices, emulators and virtual devices; create, delete and start virtual devices; connect over Wi-Fi. `kargo run -t android --device <serial\|avd>` picks the device (a list to choose from when several are connected; it asks before it starts or creates an emulator), launches with `am start -W` and shows the app's log |
-| `kargo toolchain list\|install\|remove\|available\|which` | Manage JDKs, GraalVMs, Kotlin/Native and Gradle distributions, the Android SDK, the Kotlin language servers behind `kargo lsp` and the debug adapter behind `kargo dap` |
-| `kargo self update [--version <v>] [--check]` | Update Kargo to the latest release (or `--version`), checking the archive's SHA-256 against the release's `SHA256SUMS`; `--check` only says whether a newer one exists. A Kargo installed by Homebrew, Scoop, winget, Nix, SDKMAN!, Cargo or a system package manager is not replaced: its update command is printed instead. `KARGO_RELEASES_URL` points at a mirror |
-| `kargo self uninstall [--purge]` | Remove the binary and the `PATH` entries the install scripts added; `--purge` also deletes `~/.kargo` |
-| `kargo daemon status\|stop` | Show or stop the background compiler daemons |
-| `kargo doctor [--fix] [--format json] [--bug-report]` | Check the JDK, toolchains, Android SDK, Node.js and browsers, network and repositories, and the project (manifest warnings, `kargo.lock` in sync), each with a one-line fix; exits with 1 on errors. `--fix` removes interrupted toolchain installs |
-| `kargo clean`, `kargo info [--format json]` | Remove `target/` (except its `.kargo-lock` and `.kargo-lock.holder`; `--release` or `--profile` only that profile's output and generated files), show project information |
-| `kargo version` | Print the Kargo version (`-v` adds the release and the target it was built for), like `kargo --version` |
-| `kargo completions <shell>` | Print a completion script (bash, zsh, fish, powershell, elvish) |
-
-Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--locked`, `--vendored`, `--refresh`, `--require-checksums`, `--manifest-path`, `--color`.
-
-Errors say what to do next: a mistyped command, package, framework, platform, `kargo.toml` key or dependency coordinate gets a `help: did you mean ...?` line, manifest errors show the line with a caret, and errors the FAQ explains link to its entry.
-
-Behind a company firewall, `~/.kargo/config.toml` (or a project's `.kargo/config.toml`) sends downloads through mirrors and a proxy:
-
-```toml
-[mirrors]
-"*" = "https://artifactory.corp/maven-virtual"   # replaces Maven Central, Google and [repositories]
-
-[mirrors.credentials."https://artifactory.corp"]
-username-env = "ART_USER"
-password-env = "ART_TOKEN"
-
-[toolchain-mirrors]                              # JDK, GraalVM and Gradle downloads, by URL prefix
-"https://services.gradle.org/distributions" = "https://artifactory.corp/gradle"
-
-[http]
-proxy = "http://proxy.corp:3128"                 # else HTTPS_PROXY / NO_PROXY
-cainfo = "/etc/ssl/certs/corp-ca.pem"
-```
-
-`kargo --help` lists the common commands, then the project's tasks, and `kargo` alone prints the same help; `kargo --list` lists every built-in command with its description. Commands left out of `--help` still work, and `kargo help <command>` shows each one's options. A mistyped command suggests the closest one (`kargo biuld` → `Did you mean build?`).
-
-In a workspace, `build`, `check`, `test`, `doc`, `fmt`, `lint`, `tree`, `fetch` and `publish` take `-p <member>` (repeatable), `--workspace` and `--exclude <member>`; `run`, `package`, `install`, `add`, `remove`, `target`, `outdated` and `upgrade` take `-p <member>`. Members build in dependency order, independent ones in parallel, and a JVM member recompiles only when the ABI of a member it uses changes.
-
-## Project layout
-
-```text
-kargo.toml
-kargo.lock
-src/                 common sources (.kt, and .java on the JVM)
-src-jvm/             target-specific sources: src-wasm/, src-js/, src-native/, src-android/
-tests/               common tests (kotlin.test)
-tests-jvm/ ...       target-specific tests
-test-fixtures/       test helpers the tests of dependent packages can use (`test-fixtures = true`)
-benches/             common benchmarks for kargo bench (JVM); benches-jvm/ for JVM-only ones
-resources/           JVM resources (test-resources/ for tests); the files and index.html of a Wasm or JS browser app
-composeResources/    Compose images, fonts, strings and files, read through the generated Res class
-js/                  your own JavaScript and TypeScript modules for Wasm and JS (`js-sources`); Kotlin gets declarations
-android/             AndroidManifest.xml, res/, assets/, jniLibs/
-interop/             cinterop .def files for C libraries (Kotlin/Native)
-c/                   C/C++ sources compiled into the native binaries ([target.native.c-sources])
-examples/            example programs: kargo run --example <name>
-target/              build output: target/<debug|release|name>/<target>/ (a custom profile's name);
-                     target/generated/<profile>/<step>/ holds what [[generate]] steps write
-```
-
-A workspace is a directory whose `kargo.toml` has a `[workspace]` with `members` (each a package like the one above, or a glob such as `libs/*`). Members share the workspace's `kargo.lock` and `target/`, and build into `target/<profile>/<member>/<target>/`.
-
-`expect` declarations in `src/` can have `actual` implementations in `src-<target>/`. On the JVM, `.java` files next to your Kotlin files are compiled together with them (set `[target.jvm] main-class` if your `main` is in Java).
-
-Kargo warns about projects that build but are probably not what you meant: a target with no sources (`no Kotlin or Java sources found in src/ or src-jvm/ for the jvm target`), Kotlin scripts (`.kts`), which are never compiled or run, a task hidden by a built-in command, and a package version that doesn't look like a version (`not.a.version.x`). Warnings go to stderr, never change the exit code, and `-q` hides them.
-
-## `kargo.toml`
+## A `kargo.toml`
 
 ```toml
 [package]
-name = "my-app"
+name = "hello"
 version = "0.1.0"
 group = "com.example"
-# description, authors = ["Ada <ada@example.com>"], license = "MIT", homepage, repository: the POM of `kargo publish`
-# publish = false           # keep `kargo publish` away from this package
-
-# [package.`kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`]           # kargo package --format jlink / installer
-# modules = ["java.naming"] # JDK modules jdeps can't see (reflection, service loaders)
-
-# [package.`kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`]    # kargo package --format native-image
-# args = ["--enable-url-protocols=https"]   # also: static (musl, Linux), initialize-at-build-time, metadata-repository
-
-# [package.installer]       # kargo package --format installer / --desktop (jpackage)
-# vendor = "Example Inc."   # also: name, description, app-version, type, icon, license-file, menu, shortcut,
-#                           # console, upgrade-uuid (Windows), bundle-id, signing-identity (macOS), category (Linux),
-#                           # file-associations, notarize = { apple-id-env, password-env, team-id } (macOS)
-# type = ["msi", "dmg", "deb"]   # each OS builds its own
-
-# [package.shade]          # kargo package / publish: bundled jars (Shadow)
-# relocate = { "com.google.common" = "com.example.shaded.guava" }   # also: exclude, minimize, keep,
-#                           # merge-services, relocate-strings
-
-# [package.optimize]        # kargo package --release / --optimize (R8)
-# shrink = true
-# optimize = true
-# obfuscate = true
-# rules = "proguard-rules.pro"
 
 [kotlin]
 version = "2.4.21"
-opt-in = ["kotlin.ExperimentalStdlibApi"]
-compiler-args = ["-Xcontext-parameters"]
-# language-version, api-version, warnings-as-errors, ksp (KSP version, default 2.3.12)
 
-# Targets: no [target] section means a JVM project.
-[target.jvm]
-jvm-target = "25"                     # 8 (or 1.8) and up, at most your JDK's version; default: 25, or your JDK's version if it is older
-# main-class = "com.example.MainKt"   # detected from a top-level `fun main` or a `@JvmStatic fun main` in an object; set it for a Java main
-# jvm-args = ["-Xmx1g"]
-# javac-args = ["-Xlint:all"]         # extra javac options for Java sources
+[target.jvm]                # no [target] at all means a JVM project
+[target.wasm]               # add more targets with `kargo target add`
 
-[target.wasm]
-environment = "js"          # or "browser" (serves a page, tests in a headless browser) or "wasi"
-# kind = "library"          # an npm package of @JsExport functions: package.json, .mjs, .wasm, .d.mts
-# module-name = "hello"     # name of the .mjs and .wasm files; default: the package name
-# npm-name = "@acme/hello"  # npm name of a library; default: the lowercase package name
-# package-manager = "pnpm"  # npm, pnpm or bun for npm packages of Wasm libraries; default: first on PATH
-# wasm-opt = false          # release builds run wasm-opt from PATH if there is one; or the path of one
-# web-resources = ["web/raylib.mjs", "web/raylib.wasm"]  # a library's files, copied next to every browser app using it
-# web-init = "web/init.mjs" # a library's script the generated page imports before the app module
-# js-sources = ["js"]       # your own .js/.ts modules: copied or compiled with tsc to js/, declared in Kotlin as js.<path>
-# port = 5173               # the port `kargo run` serves a browser app on; default 8080 (`--port` overrides it)
-
-# [target.wasm.npm-dependencies]
-# "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for; Kotlin gets declarations from their .d.ts
-#                           # (`kargo add --npm left-pad` writes the entry; [target.wasm.dev-npm-dependencies] is for tests only)
-
-[target.js]                 # Kotlin/JS (the IR compiler)
-environment = "node"        # or "browser" (serves a page, tests in a headless browser)
-# kind = "library"          # an npm package of @JsExport declarations: package.json, the module, .d.ts
-# module-kind = "es"        # es (<name>.mjs, default), commonjs or umd (<name>.js)
-# module-name = "hello"     # name of the compiled files; default: the package name
-# npm-name = "@acme/hello"  # npm name of a library; default: the lowercase package name
-# package-manager = "pnpm"  # npm, pnpm or bun; default: first on PATH
-# js-sources = ["js"]       # your own .js/.ts modules, as for Wasm
-
-# [target.js.npm-dependencies]
-# "left-pad" = "1.3.0"      # npm packages besides those your Kotlin/JS libraries ask for; Kotlin gets declarations from their .d.ts
-
-[target.native]
-platforms = ["host"]        # or linux_x64, macos_arm64, mingw_x64, ios_arm64, ...
-kind = "executable"         # library, shared, static, framework (Apple; kargo build --xcframework)
-
-[target.native.platform.mingw_x64]  # linker options for one platform
-linker-options = ["-lws2_32"]
-
-[target.native.c-sources]   # compile c/**/*.c with the Kotlin/Native clang and link it in
-
-[target.native.cinterop.sqlite]   # C library bindings; def defaults to interop/sqlite.def
-headers = ["sqlite3.h"]           # no .def file needed
-package = "sqlite3"
-pkg-config = "sqlite3"            # flags from sqlite3.pc; link = "static" embeds the library
-# also: def, compiler-options, linker-options, static-libraries, library-paths, frameworks,
-#       header-filter, excluded-functions, strict-enums, modules, and platform.<platform> tables
-
-[target.android]
-namespace = "com.example.app"   # default: <group>.<name>
-min-sdk = 24                # target-sdk = 36, compile-sdk = [toolchain] android-sdk or 37, kind = "application" | "library"
-# agp-version = "9.4.1"     # gradle-version defaults to what AGP needs (9.6.0)
-# minify = true             # R8 for release builds; proguard-files = ["android/proguard-rules.pro"]
-# build-config = { API_URL = "https://api.example.com" }   # BuildConfig fields
-# manifest-placeholders = { MAPS_API_KEY = "abc" }          # ${MAPS_API_KEY} in AndroidManifest.xml
-# locales = ["en", "es"]                                    # keep only these languages' resources
-
-# [target.android.ndk]              # native code: version, abi-filters, cmake or ndk-build
-# abi-filters = ["arm64-v8a", "x86_64"]
-# cmake = "src-android/cpp/CMakeLists.txt"
-
-# [target.android.lint]             # kargo lint --android: baseline, severities, reports
-# baseline = "lint-baseline.xml"
-# disable = ["MissingTranslation"]
-
-# [target.android.signing.release]  # passwords come from environment variables
-# store-file = "release.jks"
-# store-password-env = "KS_PASS"
-# key-alias = "upload"
-
-# [target.android.flavors.free]     # product flavors: kargo run -t android --flavor free
-# dimension = "tier"
-# application-id-suffix = ".free"
+[frameworks]
+serialization = true
+coroutines = true
 
 [dependencies]
 "org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"
-guava = { group = "com.google.guava", version = "33.4.0-jre", exclude = ["com.google.code.findbugs:jsr305"] }
-logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" }
-"org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
-mathlib = { path = "../mathlib" }   # another Kargo package, built from source
-lwjgl-natives = { coords = "org.lwjgl:lwjgl:3.3.6", classifier = "natives-windows", scope = "runtime" }  # a classifier jar, next to the module's own
-# Other keys: classifier, extension, force, transitive, workspace = true, exported = true (part of the API of this package)
-"com.google.auto.value:auto-value" = { version = "1.11.0", scope = "processor" }  # javac annotation processor
-"com.squareup.moshi:moshi-kotlin-codegen" = { version = "1.15.2", scope = "ksp" }  # KSP processor (JVM, Android)
-# Scopes: compile (default), runtime, provided, processor, ksp. Other keys: classifier, extension, force, transitive
-
-[target.jvm.dependencies]   # per-target dependencies
-
-[[bin]]                     # more programs: kargo run --bin migrate, kargo package --bin migrate
-name = "migrate"
-path = "src/tools/Migrate.kt"   # the file with its `main`; or main = "<JVM class>" / entry-point = "<native function>"
-
-[[generate]]                # code written before compiling, from other files (kargo generate); output: target/generated/<profile>/<name>/
-name = "protos"
-builtin = "protobuf"        # downloads protoc; grpc = true adds the gRPC stubs. Or run = "<command>", or tool = "group:artifact:version"
-inputs = ["proto/**/*.proto"]   # the step runs again only when these change (default for protobuf)
-# builtin = "build-config" writes an object with VERSION, GROUP, NAME, GIT_SHA and PROFILE, plus fields = { API_URL = "..." }
-
-[dev-dependencies]          # test-only dependencies
-
-[repositories]              # Maven Central comes first; Google Maven is added for Android/Compose
-jitpack = "https://jitpack.io"
-company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
-local = "maven-local"       # ~/.m2/repository, where `kargo publish --local` and `mvn install` put libraries
-# defaults = false          # leave out Maven Central and Google Maven (everything through your own mirror)
-
-[repositories.corp]         # include-groups: only this repository serves these groups (no dependency confusion)
-url = "https://nexus.corp/maven"
-include-groups = ["com.corp.*"]   # also: exclude-groups; `[repositories.maven-central]` configures the built-in one
-
-[publish]                   # kargo publish; every key is optional
-repository = "maven-central"  # default destination: maven-central, maven-local or a [repositories] entry
-# sign = true               # OpenPGP signatures (KARGO_SIGNING_KEY in memory, else GnuPG); default: on for Maven Central only
-# sources = true
-# javadoc = "dokka"         # or "empty" (a manifest only) or false
-# central-publishing = "manual"   # or "automatic": release as soon as Maven Central validates the upload
-# kind = "bom"              # publish a BOM (a POM pinning [dependencies] and path dependencies) instead of a library
-# relocations = ["org.old:lib"]   # former coordinates: each gets a relocation POM pointing here
-# [publish.npm]            # kargo publish --npm: a Wasm or JS library (kind = "library") to an npm registry; the token is NPM_TOKEN or your .npmrc, never kargo.toml
-# scope = "acme"            #   hello is published as @acme/hello
-# access = "public"         #   or "restricted"; registry = "https://..."; tag = "next"; provenance = true
-# keywords = ["kotlin"]     #   also bugs, side-effects and engines: fields of package.json
-
-[env]                       # variables for kargo run/test, tasks and hooks; .env files and the shell override them
-APP_NAME = "demo"
-DATABASE_URL = { required = true }   # fails early unless the shell or a .env file sets it
-
-[profile.release]
-compiler-args = []          # also: debug, optimize
-
-[profile.staging]           # kargo build --profile staging
-inherits = "release"        # the profile it starts from (default "dev")
-jvm-args = ["-Xmx1g"]       # for kargo run, test and bench; also: dependencies, env
-
-[doc]                       # kargo doc (Dokka); every key is optional
-includes = ["docs/module.md"]
-source-link = "https://github.com/me/my-app/blob/main"
-external-links = ["https://kotlinlang.org/api/kotlinx.coroutines/"]
-
-[build]
-jobs = 4                    # members and targets built at the same time (default "auto"; -j and KARGO_JOBS win)
-default-targets = ["jvm"]   # the targets build, check and test use without -t (default: all enabled)
-
-[fmt]                       # kargo fmt (ktlint); other style rules go in .editorconfig
-code-style = "intellij_idea" # ktlint_official (default), intellij_idea or android_studio
-exclude = ["src/generated/**"]
-
-[lint]                      # kargo lint (detekt); detekt.yml is picked up when present
-config = ["config/detekt.yml"]
-baseline = "detekt-baseline.xml"
-
-[test]                      # kargo test
-fail-fast = false           # test every target even if one fails (default: true)
-timeout = "10m"             # stop the whole test run after this long (optional)
-test-timeout = "30s"        # fail a JVM test that runs longer than this (optional)
-jvm-args = ["-Xmx1g"]       # extra JVM arguments for the test process
-
-[bench]                     # kargo bench (JMH); every key is optional
-warmup = "5x1s"             # warmup iterations: a count and how long each lasts (default 3x1s)
-iterations = "5x1s"         # measured iterations (default 5x1s)
-forks = 2                   # JVMs per benchmark (default 2; 0 runs in the launcher's JVM)
-mode = "avgt"               # thrpt, avgt, sample, ss or all (default avgt)
-time-unit = "us"            # ns, us, ms, s, m, h or d (default: whichever reads best)
-jvm-args = ["-Xmx2g"]       # extra JVM arguments for the benchmark JVMs
-
-[audit]                     # kargo audit (OSV advisories); every key is optional
-deny = "high"               # lowest severity that fails: low, medium, high, critical or none (default high)
-ignore = [                  # advisories that do not apply, each with a reason and an optional expiry
-    { id = "GHSA-xxxx-xxxx-xxxx", reason = "we never parse untrusted YAML", until = 2026-12-31 },
-]
 ```
 
-Editors complete and validate `kargo.toml` with its JSON Schema, `https://enekocm7.github.io/kargo/schemas/kargo.json`: put `#:schema <url>` on the first line for Taplo-based editors (Even Better TOML, Zed, Helix), or map the URL to `kargo.toml` in your editor. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/).
+Every key is in the [manifest reference](https://enekocm7.github.io/kargo/reference/manifest/).
 
-IntelliJ IDEA and Android Studio are the best supported editors, since Kotlin is JetBrains' own language. Their plugin in [`editors/jetbrains`](editors/jetbrains) that imports the project from `kargo metadata` (modules, source roots and the libraries of `kargo.toml`, including Kotlin/Native and Wasm klibs and the npm packages of Wasm targets) so the IDE resolves your dependencies, runs `kargo lsp` for `kargo.toml` and adds a New Project wizard, run configurations, Run/Debug gutter icons, a test tree, JVM debugging and a Kargo tool window. See [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#intellij-idea-and-android-studio).
+## Targets and frameworks
 
-VS Code gets an extension in [`editors/vscode`](editors/vscode) that runs `kargo lsp` for Kotlin and `kargo.toml`, runs the `kargo` commands as tasks with their compiler errors in the Problems view, shows the tests in a test explorer, puts Run and Debug buttons above `fun main` and the tests, and debugs through `kargo dap`; see [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#visual-studio-code). Zed gets an extension in [`editors/zed`](editors/zed) that runs `kargo lsp` for Kotlin and `kargo.toml`, debugs programs and tests through `kargo dap`, and adds a `/kargo-metadata` slash command; `kargo ide --zed` writes the tasks behind its run buttons. Neovim gets a plugin in [`editors/neovim`](editors/neovim) that runs `kargo lsp` for Kotlin and `kargo.toml`, runs the Kargo commands with their errors in the quickfix list, lists the runnables of a package, adds a neotest adapter for the tests and sets up nvim-dap for debugging; see [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#neovim). Emacs gets a package in [`editors/emacs`](editors/emacs) that runs `kargo lsp` from Eglot or lsp-mode, runs `kargo build`, `check`, `run` and `test` through `compile` with their errors linked to the source, runs a test, a class or a file and lists the results, shows build errors in Flymake, debugs through Dape and adds a Transient menu; see [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#emacs). Other editors run `kargo lsp` for Kotlin and `kargo.toml`; see [Editor integration](https://enekocm7.github.io/kargo/guides/editors/#other-editors). Outside IntelliJ IDEA, Kotlin code is served by [Kargo's own Kotlin server](https://enekocm7.github.io/kargo/guides/kotlin-server/), written in Rust and built into `kargo`: completion, hover, go to definition, references, rename and formatting (ktlint, as `kargo fmt`) against your sources (every target's source sets), each target's standard library, the JDK's sources and your dependencies (from their sources jars, which it downloads in the background, or from their compiled classes and klibs until then and when they have none), with `kargo check` errors on save. `kargo lsp --server kotlin-lsp` runs JetBrains' Kotlin LSP instead.
-
-### Workspaces
-
-```toml
-# kargo.toml at the workspace root: no [package]
-[workspace]
-members = ["apps/*", "libs/*"]        # directories or globs; one kargo.lock and one target/ for all
-exclude = ["libs/attic"]
-default-members = ["apps/server"]     # what commands work on at the root (default: every member)
-
-[workspace.package]                   # members inherit these with `version.workspace = true`
-version = "1.2.0"
-group = "com.example"
-
-[workspace.kotlin]
-version = "2.4.21"                    # every member builds with this Kotlin version
-opt-in = ["kotlin.RequiresOptIn"]     # also language-version, compiler-args, jvm-target, ...
-
-[workspace.dependencies]              # members inherit these with `name = { workspace = true }`
-"org.jetbrains.kotlinx:kotlinx-datetime" = "0.7.1"
-mathlib = { path = "libs/mathlib" }
-
-[workspace.frameworks]                # and these with `serialization.workspace = true` in [frameworks]
-serialization = true
-
-[workspace.tasks]                     # `kargo <task>` at the root; [workspace.plugins] work like [plugins]
-release-notes = "./tools/notes.sh"
-
-[workspace.build]                     # [build] for every member
-jobs = 2
-default-targets = ["jvm", "wasm"]    # what members build without -t, if they enable them
-```
-
-A path dependency is built for the consumer's target: a jar for the JVM, a klib for Wasm, JS and Native, and for Android a Gradle subproject (an Android library, built in the same Gradle run as the app that uses it) or the JVM jar. It brings its own Maven dependencies: the `exported = true` ones (its API) to compile against, the others at runtime only. Test helpers in a package's `test-fixtures/` reach the tests of packages that depend on it with `test-fixtures = true`. `kargo new <dir>` inside a workspace adds the member, and `kargo new --workspace` creates one. Packages built together use one Kotlin version and one JDK.
-
-### Toolchains
-
-```toml
-[toolchain]
-jdk = "21"            # newest Temurin 21; or an exact release like "21.0.5+11"; default "system"
-graalvm = "25"        # GraalVM CE for native images (or "oracle-25"); default "system" (GRAALVM_HOME, then PATH)
-android-sdk = "36"    # Kargo installs Android platform 36, its build-tools and platform-tools; default "system" (ANDROID_HOME)
-kargo = ">=0.1.2"       # the Kargo versions the project builds with; an older Kargo stops and points to `kargo self update`
-typescript = "^6"     # the TypeScript compiler for the .ts modules of js/; default: the newest release, pinned in kargo.lock
-```
-
-With `jdk = "system"` (the default), Kargo uses `JAVA_HOME` or `java` on `PATH`; on a machine with neither, it downloads Temurin 21 (or the LTS the project's `jvm-target` and Kotlin version need) into `~/.kargo/toolchains/jdk/` and uses that, except with `--offline` or `--locked`. Every toolchain a command needs installs on first use like this; `KARGO_AUTO_INSTALL=0` or `[toolchain] auto-install = false` in `config.toml` turns it off, and the error then names the `kargo toolchain install` command to run (see [what installs automatically](https://enekocm7.github.io/kargo/guides/toolchains/#what-installs-automatically)). Any other value makes Kargo download that Temurin JDK from Adoptium on first use. The download is verified against the published SHA-256 and installed under `~/.kargo/toolchains/jdk/<release>`; it is then used for compiling, running and testing, and passed to Gradle for Android builds. A major version picks the newest installed release of it. Kargo also checks that `jvm-target` is not newer than the JDK that builds the project (pinned or system), and that the Kotlin compiler can run on it: compilers older than Kotlin 2.1.10 can't run on JDK 25 or newer, so pin `jdk = "21"` or upgrade Kotlin.
-
-`graalvm` is only used by `kargo package --format `kargo package [--release | --profile <name>] [-t jvm|android] [--bin <name>] [--fat] [--format jar|jlink|native-image|installer] [--desktop [--platforms all]]`` and `kargo run --native-agent`. Kargo looks the release up with the foojay Disco API, downloads it on first use, verifies its SHA-256 and installs it under `~/.kargo/toolchains/graalvm/<distribution>-<version>`, next to the GraalVM reachability metadata repository that native images of the dependencies use.
-
-Kotlin/Native distributions are tied to `[kotlin] version`. They are installed under `~/.kargo/toolchains/kotlin-native/<version>` on the first native build. Their LLVM and sysroot dependencies go to `~/.kargo/toolchains/konan` instead of `~/.konan` (override with `KONAN_DATA_DIR`); `kargo toolchain install` downloads them for every `[target.native]` platform the host can build, so later builds work offline. Debug builds link a precompiled standard library that the compiler builds on first use (one to two minutes) into the distribution's `klib/cache`, which roughly halves rebuild times; `KARGO_NATIVE_CACHE=false` turns it off.
-
-Android builds run on a Gradle that Kargo downloads from `services.gradle.org` (checksum-verified, under `~/.kargo/toolchains/gradle/<version>`): the version the Android Gradle Plugin in use requires, or `[target.android] gradle-version`. A `gradlew` in the project root takes precedence, `--system-gradle` uses the `gradle` on `PATH`, and `target/android` gets a Gradle wrapper so it opens in Android Studio.
-
-`android-sdk = "36"` makes Kargo install the Android SDK too: that platform, the build-tools of the AGP in use and platform-tools, from `dl.google.com` (verified against the SHA-1 of Google's repository manifest) into `~/.kargo/toolchains/android-sdk`, and `compile-sdk` defaults to it. The packages are under Google's license terms, which Kargo shows and asks you to accept (`kargo toolchain install android-sdk --accept-licenses` in CI); it never accepts them by itself. With `"system"` (the default) it uses `ANDROID_HOME`, `ANDROID_SDK_ROOT` or Android Studio's SDK, and names the `sdkmanager` packages it lacks (see [Android SDK](https://enekocm7.github.io/kargo/guides/android/#android-sdk)).
-
-The `.ts` modules of `js/` (Wasm and JS targets) are compiled with the newest `typescript` npm package unless `typescript` pins one (an exact version, a range such as `"^6"`, or a tag). The version it resolves to is recorded in `kargo.lock` and shown in the build output (`tsc 7.0.2`); `kargo update` looks for a newer one.
-
-Toolchains are locked while they install, so concurrent Kargo processes sharing `~/.kargo` install each one once, and downloads retry transient network failures. See [Parallel installs and retries](https://enekocm7.github.io/kargo/guides/toolchains/#parallel-installs-and-retries).
-
-```console
-$ kargo toolchain available          # JDK versions you can install (LTS marked); `available android-sdk`: Android platforms
-$ kargo toolchain install jdk 21     # or: jdk 21.0.5+11, graalvm 25, native 2.4.21, gradle 9.6.0, android-sdk 36, kotlin-lsp, kls, kotlin-debug-adapter
-$ kargo toolchain install            # whatever the current project needs (a JDK too, when there is none; Kotlin/Native's LLVM and sysroots)
-$ kargo toolchain list               # installed JDKs/GraalVMs/Kotlin/Native/Gradle/Android SDK packages, disk usage, what the project uses
-$ kargo toolchain which              # toolchains resolved for this project
-$ kargo toolchain remove jdk 17      # all JDK 17 releases (or one release)
-$ kargo toolchain remove native 2.4.10
-```
-
-### Built-in frameworks
-
-```toml
-[frameworks]
-serialization = true        # or { version = "1.11.0", formats = ["json", "cbor", "protobuf"] }
-coroutines = true           # or "1.11.0"
-compose = true              # Compose Multiplatform: desktop (JVM), web (Wasm browser), iOS (Native framework), Jetpack Compose (Android); Res from composeResources/
-# compose = { html = true }   # Compose HTML on [target.js] (browser): composables render DOM elements; svg = true adds SVG
-# compose = { stability-config = "compose-stability.conf", strong-skipping = true, feature-flags = [], metrics = true, reports = true }  # compiler options
-ktor = { server = "netty", client = "cio", server-plugins = ["cors"], client-plugins = ["logging"] }
-# ktor = { client = "cio", client-engines = { android = "okhttp", native = "darwin", wasm = "none" } }  # a client engine per target
-lombok = true               # Lombok for Java sources + the Kotlin Lombok plugin
-spring-boot = { starters = ["web", "data-jpa"] }   # BOM, starters, allopen/noarg presets, -Xjsr305=strict
-benchmark = true            # kotlinx-benchmark annotations and JMH for the benchmarks in benches/ (kargo bench)
-```
-
-Each framework adds its libraries, compiler plugin and compiler flags for every target that supports it.
-
-## Extending Kargo
-
-### Tasks
-
-```toml
-[tasks]
-proto = "protoc --kotlin_out=src-jvm proto/*.proto"
-gen = { run = ["mkdir -p build", "./gen.sh"], description = "Generate code", hooks = ["pre-build"] }
-ci = { depends-on = ["proto", "gen"], run = "kargo fmt --check" }
-envs = { run = "echo $KARGO_PKG_NAME", shell = "sh" }                  # POSIX on every OS
-dirs = { run = "ls", windows-run = "dir" }                               # per-OS commands
-```
-
-Run them with `kargo task ci` or just `kargo ci`. Built-in commands such as `kargo build` or `kargo fmt` take precedence over a task of the same name, which then runs only as `kargo task build`; Kargo warns about such a task, and `kargo task` and `kargo --help` mark it. Dependencies run first, and cycles are rejected. Tasks run in the platform shell (`sh` on Unix, `cmd` on Windows) with `KARGO_*` variables set. `shell = "sh"` runs a task in `sh` everywhere, using Git for Windows' `sh` on Windows (`bash`, `cmd`, `powershell` and `pwsh` are also accepted). On Windows, `windows-run` replaces `run` when it is set; otherwise `run` is used everywhere.
-
-### Plugins
-
-* **Compiler plugins** from Maven:
-  ```toml
-  [plugins.power-assert]
-  maven = "org.jetbrains.kotlin:kotlin-power-assert-compiler-plugin-embeddable:2.4.21"
-  id = "org.jetbrains.kotlin.powerassert"
-  options = { function = "kotlin.assert" }
-  ```
-* **Hook plugins**: any executable, run at `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run` or `post-package`:
-  ```toml
-  [plugins.notify]
-  command = "./scripts/notify.sh"   # paths are relative to the project; bare names use PATH
-  args = ["--quiet"]                # the hook name is appended as the last argument
-  windows-command = "./scripts/notify.bat"   # optional: used instead of `command` on Windows
-  hooks = ["post-build"]
-  ```
-  `command` is run directly, not through a shell. On Windows a `.sh` script runs through `sh` (from Git for Windows); anything else must be a real executable (`.exe`, `.bat`, `.cmd`). `windows-command` and `windows-args` replace `command` and `args` on Windows; when they are not set, `command` and `args` are used everywhere.
-  `[[generate]]` steps get the same variables plus `KARGO_GEN_DIR` (their output directory), `KARGO_GEN_ROOT`, `KARGO_GEN_NAME` and `KARGO_GEN_KIND`. Hooks receive `KARGO_HOOK`, `KARGO_MANIFEST_DIR`, `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PROFILE`, `KARGO_TARGET_DIR`, `KARGO_KOTLIN_VERSION`, `KARGO_WORKSPACE_DIR` (in a workspace) and `KARGO_BUILD_LOCK` (so a `kargo` call inside a hook doesn't wait on the build-directory lock its parent holds). After a JVM build they also get `KARGO_CLASSPATH` and `KARGO_JVM_JAR`, after `kargo package` they get `KARGO_PACKAGE`, and after tests they get `KARGO_TEST_RESULT`.
-* **Subcommands**: an executable named `kargo-<name>` in `~/.kargo/bin` or on `PATH` becomes `kargo <name>`, just like Cargo.
-
-## Environment
-
-| Variable | Purpose |
+| Target | What you get |
 |---|---|
-| `KARGO_HOME` | Cache and toolchains (default `~/.kargo`) |
-| `KARGO_RELEASES_URL` | Where `kargo self update`, `install.sh` and `install.ps1` look for releases (default `https://github.com/enekocm7/kargo/releases`; a mirror, or a directory with `file://`) |
-| `KARGO_OSV_URL` | Where `kargo audit` reads security advisories (default `https://api.osv.dev`; another server with the OSV API) |
-| `NPM_CONFIG_REGISTRY`, `NPM_CONFIG_USERCONFIG` | The npm registry (default: the `.npmrc` registry, else registry.npmjs.org) and user `.npmrc` that `kargo add --npm`, `kargo outdated` and `kargo upgrade` use |
-| `KARGO_NO_UPDATE_CHECK` | Any non-empty value stops `kargo --version` from mentioning newer releases (it checks at most once a day, never offline or in CI) |
-| `KARGO_INSTALL_ROOT` | Where `kargo install` puts launchers (`<root>/bin`) and programs (`<root>/install`); default: `KARGO_HOME` |
-| `KARGO_TARGET_DIR` | Build output directory |
-| `KARGO_OFFLINE` | Same as `--offline` |
-| `NO_COLOR` | Turns off the colors of Kargo's output, as `--color never` does |
-| `KARGO_REQUIRE_CHECKSUMS` | Same as `--require-checksums` |
-| `KARGO_VENDORED` | Same as `--vendored` |
-| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | Proxy for Kargo's downloads (overridden by `[http] proxy` in `config.toml`) |
-| `KARGO_SYSTEM_GRADLE` | Same as `--system-gradle`: Android builds use the `gradle` on `PATH` |
-| `KARGO_ANDROID_DEVICE` | Same as `--device` of `kargo run -t android`: the serial or virtual device name to run on |
-| `KARGO_AUTO_INSTALL` | `0` stops commands from downloading the toolchains they need (a JDK when none is on `JAVA_HOME` or `PATH`, a pinned JDK or GraalVM, Kotlin/Native, Gradle, the language servers); `1` turns installs on over `[toolchain] auto-install = false` in `config.toml` |
-| `KARGO_COMPILER_JVM_OPTS` | Extra JVM options for the Kotlin compiler daemon |
-| `KARGO_JOBS` | Same as `-j`: how many workspace members and targets build at the same time (a number or `auto`); overrides `[build] jobs` |
-| `SOURCE_DATE_EPOCH` | The time (seconds since 1970) that a `build-config` generator with `build-time = true` writes as `BUILD_TIME`, instead of the current time |
-| `KARGO_DAEMON` | `false` turns off the compiler daemon |
-| `KARGO_INCREMENTAL` | `false` turns off incremental compilation |
-| `KARGO_NATIVE_CACHE` | `false` turns off the precompiled Kotlin/Native standard library cache for debug builds |
-| `KONAN_DATA_DIR` | Kotlin/Native dependency cache (default `~/.kargo/toolchains/konan`) |
-| `JAVA_HOME`, `ANDROID_HOME` | JDK and Android SDK locations (`ANDROID_HOME`, then `ANDROID_SDK_ROOT`, when `[toolchain] android-sdk` is `system`) |
-| `GRAALVM_HOME` | GraalVM for native images when `[toolchain] graalvm` is `system` (the default) |
-| `BROWSER` | Browser for `kargo doc --open` and `kargo run --open` |
-| `KARGO_BROWSER`, `KARGO_BROWSER_ARGS`, `KARGO_BROWSER_TIMEOUT` | Browser, extra arguments and silence timeout (seconds) for Wasm and JS browser tests |
-| `KARGO_MAVEN_LOCAL` | The local Maven repository for `kargo publish --local` and `"maven-local"` (default `~/.m2/repository`) |
-| `KARGO_MAVEN_CENTRAL_USERNAME`, `KARGO_MAVEN_CENTRAL_PASSWORD` | Central Portal user token for `kargo publish` to Maven Central (`KARGO_MAVEN_CENTRAL_URL` overrides the Portal) |
-| `NPM_TOKEN` | Access token for `kargo publish --npm`, written to a temporary `.npmrc` for the upload (else your own `.npmrc` is used) |
-| `KARGO_MAVEN_SEARCH_URL` | The Maven Central search API `kargo lsp` completes coordinates from |
-| `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_PASSPHRASE` (or `KARGO_SIGNING_PASSWORD`), `KARGO_SIGNING_KEY_ID`, `KARGO_GPG` | Signing key (ASCII-armored; signs in memory, without GnuPG), its passphrase, which key, and the `gpg` to sign with instead |
-| `GITHUB_ACTOR`/`GITHUB_TOKEN`, `CI_JOB_TOKEN`, `CODEARTIFACT_AUTH_TOKEN` | Default credentials of GitHub Packages, GitLab and AWS CodeArtifact repositories without `username-env`/`password-env` |
-| `COMPLETE` | Set by the `kargo completions` scripts; don't set it yourself |
+| [JVM](https://enekocm7.github.io/kargo/getting-started/quick-start/) | Kotlin and Java sources, fat jars, R8, jlink images, GraalVM native images and installers |
+| [WebAssembly](https://enekocm7.github.io/kargo/guides/wasm/) | Node.js, WASI and browser apps, or npm libraries |
+| [JavaScript](https://enekocm7.github.io/kargo/guides/js/) | Kotlin/JS for Node.js and browsers, ES, CommonJS or UMD modules with TypeScript declarations |
+| [Kotlin/Native](https://enekocm7.github.io/kargo/guides/native/) | Executables and libraries for Linux, macOS, Windows and iOS, with C interop and XCFrameworks |
+| [Android](https://enekocm7.github.io/kargo/guides/android/) | Apps and libraries through the Android Gradle Plugin, with flavors, signing, devices and emulators |
 
-## Development
+Built-in [frameworks](https://enekocm7.github.io/kargo/guides/frameworks/) add their libraries, compiler plugins and flags with one line: `serialization`, `coroutines`, [`compose`](https://enekocm7.github.io/kargo/guides/compose/) (desktop, web, iOS and Android), [`ktor`](https://enekocm7.github.io/kargo/guides/ktor/), [`spring-boot`](https://enekocm7.github.io/kargo/guides/spring-boot/), `lombok` and `benchmark`. Start from one with `kargo new my-app --with ktor`.
 
-Kargo is a Cargo workspace:
+## Everyday commands
 
-| Crate | Responsibility |
+| Command | What it does |
 |---|---|
-| `kargo-util` | Terminal output, configuration (including `config.toml`: mirrors, proxy, CA bundle, vendoring, jobs), the number of parallel jobs, the HTTP agent, filesystem/hash/process helpers |
-| `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, resolver, uploads and the Maven Central Portal |
-| `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
-| `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, JetBrains Runtime for hot reload, Kotlin compiler, Kotlin/Native, Gradle distributions, the Android SDK, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
-| `kargo-compiler` | JVM/Wasm/JS/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
-| `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, `[[generate]]` steps (`generate.rs`), Android/Gradle, project warnings, publications and signing, npm packages and their Kotlin declarations, Compose Desktop and Compose resources, `kargo self` (`ops/self_update.rs`), `kargo import` (`ops/import/`), commands |
-| `kargo-lsp` | `kargo lsp`: `kargo.toml` diagnostics, completion and hover from the JSON Schema, dependency coordinate and version completion and update hints, code actions, Kargo's own Kotlin server (`kotlin/`: lexer, declaration parser, Java declarations and the JDK's sources, libraries without sources from class files, Kotlin metadata and klibs, index, resolver, completion, hover, signature help, navigation, implementations, call and type hierarchies, rename (also KDoc, labels, packages, files and `kargo.toml` entry points), KDoc links (navigation, hints) and generated KDoc, semantic tokens, inlay hints, folding and selection ranges, formatting, code actions, refactorings), project import for other Kotlin language servers, runnables, check on save; `kargo dap`, the debug adapter; Zed tasks for `kargo ide --zed` |
-| `kargo` | The CLI binary |
+| `kargo new <dir>` | Create a project (`--lib`, `-t jvm,wasm,js,native,android`, `--with compose,ktor,...`) |
+| `kargo build` | Compile every target (`--release` for an optimized build) |
+| `kargo run` | Build and run the program, or serve a browser app (`--watch` restarts it on changes) |
+| `kargo test` | Compile and run the tests of every target |
+| `kargo add <group:artifact>` | Add a dependency, at its latest version unless you give one |
+| `kargo package` | Build a fat jar, a runtime image, a native image, an installer or Android bundles |
+| `kargo publish` | Publish a library to Maven Central, a Maven repository or npm |
 
-```bash
-cargo test --workspace                       # unit + CLI integration tests (offline)
-KARGO_E2E=1 cargo test --test e2e            # end-to-end: JVM, Wasm, JS, Spring, Ktor, Compose, pinned JDK
-KARGO_E2E=1 KARGO_E2E_NATIVE=1 KARGO_E2E_ANDROID=1 cargo test --test e2e
-KARGO_E2E=1 KARGO_E2E_GUI=1 cargo test --test e2e compose_hot_reload   # Compose hot reload; opens a window
+There are many more: `check`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `bench`, `import` for Maven and Gradle projects, `script` for single files, and others. See the [commands reference](https://enekocm7.github.io/kargo/reference/commands/), or run `kargo --list`.
+
+## Learn more
+
+- [Documentation](https://enekocm7.github.io/kargo/): start with the [quick start](https://enekocm7.github.io/kargo/getting-started/quick-start/).
+- [Guides](https://enekocm7.github.io/kargo/guides/dependencies/): dependencies, workspaces, testing, toolchains, CI, offline builds and more.
+- [Editor support](https://enekocm7.github.io/kargo/guides/editors/): plugins for IntelliJ IDEA and Android Studio, VS Code, Zed, Neovim and Emacs, and `kargo lsp` for every other editor.
+- Coming from Gradle or Maven? `kargo import` converts your project. See [migrating from Gradle](https://enekocm7.github.io/kargo/migration/from-gradle/) and the [feature parity table](https://enekocm7.github.io/kargo/migration/gradle-feature-parity/).
+
+## Contributing
+
+Issues and pull requests are welcome. Kargo is written in Rust:
+
+```sh
+cargo build
+cargo test --workspace
 ```
 
-Pushing a tag `v<version>` (equal to the version in `Cargo.toml`) runs `.github/workflows/release.yml`: it builds eight targets, publishes the archives, `SHA256SUMS` and `VERSION` with generated release notes and build provenance attestations, and renders the Homebrew, Scoop, winget and AUR files with `packaging/render.sh`. `website/public/install.sh` and `install.ps1` are the install scripts (try them against a local release directory with `KARGO_RELEASES_URL=file:///...`), and `flake.nix` builds Kargo for Nix. See [Releases](https://enekocm7.github.io/kargo/reference/contributing/#releases).
-
-The JetBrains plugin in `editors/jetbrains` is a Gradle project written in Kotlin, built on [LSP4IJ](https://github.com/redhat-developer/lsp4ij):
-
-```bash
-cd editors/jetbrains
-./gradlew buildPlugin test                   # the plugin zip in build/distributions
-./gradlew runIde                             # an IDE with the plugin installed
-```
-
-The Zed extension in `editors/zed` is a Rust crate of its own, compiled to WebAssembly:
-
-```bash
-cd editors/zed
-cargo test                                   # unit tests, on the host
-cargo build --release --target wasm32-wasip2 # what Zed builds; install it with zed: install dev extension
-```
-
-The VS Code extension in `editors/vscode` is TypeScript, built with Node.js 22 or newer:
-
-```bash
-cd editors/vscode
-npm ci
-npm test                                     # unit tests
-npm run test:integration                     # VS Code with the extension and a new project; needs kargo on PATH
-npm run package                              # kargo-vscode.vsix, to install from VS Code
-```
-
-The Emacs package in `editors/emacs` is Emacs Lisp, with no dependencies for its tests:
-
-```bash
-cd editors/emacs
-emacs -Q --batch -L . -l test/kargo-tests.el -f ert-run-tests-batch-and-exit   # needs Emacs 29.1 or newer
-```
-
-The Neovim plugin in `editors/neovim` is Lua, with no dependencies for its tests:
-
-```bash
-cd editors/neovim
-nvim --headless -u NONE -l tests/run.lua     # unit tests; needs Neovim 0.11 or newer
-```
+The [contributing guide](https://enekocm7.github.io/kargo/reference/contributing/) covers the architecture, the end-to-end tests, the editor plugins, the website and releases.
