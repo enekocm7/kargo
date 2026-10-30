@@ -17,7 +17,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::build::{
-    finished, jvm_classpaths, jvm_compile_classpath, native_cinterop, native_libraries, native_platforms, select_targets, wasm_libraries,
+    default_targets, finished, jvm_classpaths, jvm_compile_classpath, native_cinterop, native_libraries, native_platforms, select_targets,
+    wasm_libraries,
 };
 use super::context::BuildContext;
 use kargo_manifest::{DocSettings, GeneratedKind, TargetKind};
@@ -69,7 +70,19 @@ pub fn doc(ctx: &BuildContext, opts: &DocOptions) -> Result<PathBuf> {
     Ok(index)
 }
 
-/// Runs Dokka for `targets` and returns the directory holding the HTML (`target/<profile>/doc`).
+/// The directory the HTML for `targets` goes to: `target/<profile>/doc` for the default targets, and
+/// `target/<profile>/doc-<targets>` for any other set, so documenting some targets keeps the rest.
+fn output_dir(ctx: &BuildContext, targets: &[TargetKind]) -> PathBuf {
+    let mut names: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut default: Vec<&str> = default_targets(ctx).iter().map(|t| t.as_str()).collect();
+    default.sort_unstable();
+    let dir = if names == default { "doc".to_owned() } else { format!("doc-{}", names.join("-")) };
+    ctx.ws.profile_dir(&ctx.profile).join(dir)
+}
+
+/// Runs Dokka for `targets` and returns the directory holding the HTML (see [`output_dir`]).
 pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
     let ws = ctx.ws;
     let manifest = ws.manifest();
@@ -90,7 +103,7 @@ pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
     let (cli, plugins) = dokka(ctx, dokka_version)?;
 
     let pkg = &manifest.package;
-    let out = ws.profile_dir(&ctx.profile).join("doc");
+    let out = output_dir(ctx, targets);
     let work = ws.profile_dir(&ctx.profile).join("dokka");
     std::fs::create_dir_all(&work).with_context(|| format!("failed to create {}", work.display()))?;
     remove_dir_all_if_exists(&out)?;

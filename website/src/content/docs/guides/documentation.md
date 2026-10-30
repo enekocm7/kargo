@@ -37,6 +37,8 @@ kargo doc                 # every enabled target
 kargo doc --target jvm    # only the JVM API
 ```
 
+The documentation of every default target goes to `target/debug/doc/`. Any other set of targets gets its own directory, `target/debug/doc-<targets>/` (`doc-jvm/` for `--target jvm`, `doc-jvm-wasm/` for two), so documenting one target doesn't replace the site of the others. The `Generated` line shows which one was written.
+
 With one target, `src/` and `src-<target>/` form a single source set. With several, `src/` becomes a `common` source set that the `src-jvm/`, `src-wasm/`, `src-native/` and `src-android/` source sets depend on. Each declaration is then shown with the platforms it is available on, and an `expect` declaration is shown together with its `actual` implementations.
 
 ```console

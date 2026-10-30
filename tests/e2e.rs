@@ -1562,6 +1562,11 @@ fn doc_multiplatform() {
     t.kargo("mpp-doc").arg("doc").assert().success().stderr(predicate::str::contains("(common, jvm, wasm)"));
     let index = std::fs::read_to_string(t.dir.path().join("mpp-doc/target/debug/doc/index.html")).unwrap();
     assert!(index.contains("Documented on every platform."));
+    // Documenting some targets leaves the documentation of the others alone.
+    let combined = index;
+    t.kargo("mpp-doc").args(["doc", "-t", "wasm"]).assert().success().stderr(predicate::str::contains("doc-wasm"));
+    assert!(t.dir.path().join("mpp-doc/target/debug/doc-wasm/index.html").is_file());
+    assert_eq!(std::fs::read_to_string(t.dir.path().join("mpp-doc/target/debug/doc/index.html")).unwrap(), combined);
 }
 
 /// Applies the `TextEdit`s of an LSP reply to ASCII `text`.
