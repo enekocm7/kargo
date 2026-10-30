@@ -598,11 +598,14 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
 /// The compiler arguments that make the Kotlin files of `common` and of `platform` two fragments of one
 /// multiplatform compilation (with the Kotlin files of `groups` between them), so `expect` and `actual`
 /// declarations match. Empty unless at least two of them have Kotlin files.
+///
+/// The file paths are in the platform's own form (`C:\a\b.kt` on Windows), because Gradle gives the
+/// compiler its sources that way and the compiler matches the two as strings.
 fn fragment_args(common: &[PathBuf], groups: Vec<kargo_compiler::SourceGroup>, platform: &Path) -> Vec<String> {
     let files = |dirs: &[PathBuf]| dirs.iter().flat_map(|d| kargo_util::fs::collect_files(d, &["kt"])).collect::<Vec<_>>();
     let mut set = SourceSet::new(files(common), files(&[platform.to_path_buf()]), TargetKind::Android.as_str());
     set.groups = groups;
-    set.fragment_args()
+    set.fragment_args_with(|p| p.to_string_lossy().into_owned())
 }
 
 /// The Gradle line of a `[profile.<profile>.dependencies]` entry, in the configuration of its build
@@ -2291,7 +2294,8 @@ mod tests {
             let file = dir.path().join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(&file, "").unwrap();
-            kargo_util::process::slash(&file)
+            // The form `collect_files` gives, with the separators of the platform.
+            file.to_string_lossy().replace('/', std::path::MAIN_SEPARATOR_STR)
         };
         // Only `src/`: nothing to match, so no fragments.
         let common = write("src/Platform.kt");
@@ -2307,7 +2311,7 @@ mod tests {
         assert!(text.contains("\"-Xfragment-refines=android:common\""), "{text}");
         let sources = |files: [(&str, &str); 2]| {
             let list: Vec<String> = files.iter().map(|(fragment, file)| format!("{fragment}:{file}")).collect();
-            format!("\"-Xfragment-sources={}\"", list.join(","))
+            kts_string(&format!("-Xfragment-sources={}", list.join(",")))
         };
         assert!(text.contains(&sources([("common", &common), ("android", &actual)])), "{text}");
         assert!(text.contains(&sources([("common", &common_test), ("android", &actual_test)])), "{text}");
@@ -2327,7 +2331,8 @@ targets = [\"jvm\", \"android\"]
             let file = dir.path().join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(&file, "").unwrap();
-            kargo_util::process::slash(&file)
+            // The form `collect_files` gives, with the separators of the platform.
+            file.to_string_lossy().replace('/', std::path::MAIN_SEPARATOR_STR)
         };
         let common = write("src/Platform.kt");
         let shared = write("src-jvmAndAndroid/Shared.kt");
@@ -2343,7 +2348,7 @@ targets = [\"jvm\", \"android\"]
         assert!(text.contains("\"-Xfragments=common,jvmAndAndroid,android\""), "{text}");
         assert!(text.contains("\"-Xfragment-refines=jvmAndAndroid:common\""), "{text}");
         assert!(text.contains("\"-Xfragment-refines=android:jvmAndAndroid\""), "{text}");
-        let sources = format!("\"-Xfragment-sources=common:{common},jvmAndAndroid:{shared},android:{actual}\"");
+        let sources = kts_string(&format!("-Xfragment-sources=common:{common},jvmAndAndroid:{shared},android:{actual}"));
         assert!(text.contains(&sources), "{text}");
     }
 

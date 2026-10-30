@@ -108,6 +108,13 @@ impl SourceSet {
     /// (or `common`), and the platform refines the narrowest groups. A fragment without Kotlin files
     /// is left out, and the fragments that refined it refine what it refined.
     pub fn fragment_args(&self) -> Vec<String> {
+        self.fragment_args_with(slash)
+    }
+
+    /// [`fragment_args`](Self::fragment_args) with the file paths written by `path`. The compiler matches
+    /// the paths of `-Xfragment-sources` to the sources it is given as strings, so they must be written the
+    /// way the caller passes the sources: `slash` for Kargo's own compiler calls, the native form for Gradle.
+    pub fn fragment_args_with(&self, path: impl Fn(&Path) -> String) -> Vec<String> {
         let is_kt = |p: &&PathBuf| p.extension().is_some_and(|e| e == "kt");
         struct Fragment<'a> {
             name: &'a str,
@@ -181,7 +188,8 @@ impl SourceSet {
                 args.push(format!("-Xfragment-refines={}:{parent}", fragment.name));
             }
         }
-        let sources: Vec<String> = used.iter().flat_map(|f| f.files.iter().map(move |p| format!("{}:{}", f.name, slash(p)))).collect();
+        let path = &path;
+        let sources: Vec<String> = used.iter().flat_map(|f| f.files.iter().map(move |p| format!("{}:{}", f.name, path(p)))).collect();
         args.push(format!("-Xfragment-sources={}", sources.join(",")));
         args
     }
@@ -354,6 +362,13 @@ mod tests {
         assert!(SourceSet::new(vec!["a.kt".into()], vec!["X.java".into()], "jvm").fragment_args().is_empty());
         assert_eq!(set.java_files(), [PathBuf::from("b/X.java")]);
         assert_eq!(set.kotlin_files().len(), 2);
+    }
+
+    #[test]
+    fn fragment_args_write_the_paths_the_caller_chooses() {
+        let set = SourceSet::new(vec!["p/src/a.kt".into()], vec!["p/src-jvm/b.kt".into()], "jvm");
+        let args = set.fragment_args_with(|p| p.to_string_lossy().replace('/', "|"));
+        assert_eq!(args[3], "-Xfragment-sources=common:p|src|a.kt,jvm:p|src-jvm|b.kt");
     }
 
     #[test]
