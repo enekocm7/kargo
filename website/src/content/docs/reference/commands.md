@@ -123,6 +123,10 @@ The generated code lives in the package `<group>.<name>`, with the name lowercas
 
 Kargo runs `git init` in the new directory when `git` is on the `PATH`, unless you pass `--no-vcs` or the directory is already inside a git repository (a monorepo or an `examples/` folder), in which case the project joins that repository instead of nesting a new one. A `.gitignore` is written either way, unless one already exists.
 
+:::tip
+In a folder that is not a git repository, every `kargo new` creates its own repository. To generate a set of throwaway or test projects side by side, pass `--no-vcs` (`kargo new a --no-vcs`, `kargo new b --no-vcs`), or run `git init` once in the parent folder first so the projects join it.
+:::
+
 ## `kargo init`
 
 Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten. A directory that already has a `kargo.toml` is refused; use [`kargo target add`](#kargo-target) to enable more targets in it.
