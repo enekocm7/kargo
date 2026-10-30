@@ -81,7 +81,7 @@ merge-services = true
 
 ### `[package.optimize]`
 
-R8 settings for shrinking JVM jars. `kargo package --release` enables this automatically; pass `--optimize` to enable it with another profile. The minimized jar, mapping and removed-code report are written under `target/<profile>/jvm/`.
+R8 settings for shrinking JVM jars. `kargo package --release` enables this automatically; pass `--optimize` to enable it with another profile. The minimized `<name>-<version>-min.jar`, mapping and removed-code report are written under `target/<profile>/jvm/`, next to the unshrunk `<name>-<version>-all.jar`. A release package cannot skip R8; to ship the program unshrunk, use the `-all.jar`.
 
 ```toml
 [package.optimize]

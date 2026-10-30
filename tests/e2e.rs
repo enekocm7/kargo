@@ -428,10 +428,13 @@ fn release_package_runs_the_r8_optimized_jar() {
     t.write("optimized/src/Main.kt", "package sample\nfun main() = println(\"optimized app\")\n");
     t.write("optimized/kargo.toml", "[package]\nname = \"optimized\"\nversion = \"0.1.0\"\n[target.jvm]\nmain-class = \"sample.MainKt\"\n");
 
-    let output = t.kargo("optimized").args(["package", "--release"]).assert().success().get_output().stdout.clone();
-    let jar = String::from_utf8(output).unwrap();
+    let assert = t.kargo("optimized").args(["package", "--release"]).assert().success();
+    let output = assert.get_output().clone();
+    let jar = String::from_utf8(output.stdout).unwrap();
     let jar = PathBuf::from(jar.trim());
     assert!(jar.file_name().unwrap().to_string_lossy().ends_with("-min.jar"), "{}", jar.display());
+    assert!(jar.with_file_name("optimized-0.1.0-all.jar").is_file());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("without R8"), "{}", String::from_utf8_lossy(&output.stderr));
     let out = StdCommand::new("java").arg("-jar").arg(&jar).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("optimized app"));
