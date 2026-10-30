@@ -21,7 +21,7 @@ In an existing project, `kargo target add native` writes this section for you: `
 
 You don't need to install anything. On the first native build Kargo downloads the Kotlin/Native distribution that matches `[kotlin] version` into `~/.kargo/toolchains/kotlin-native/<version>`, plus its LLVM toolchain and sysroot into `~/.kargo/toolchains/konan`. The first build therefore takes a few minutes; later builds are quick.
 
-Output goes to `target/<profile>/native/<platform>/`.
+Output goes to `target/<profile>/native/<platform>/` (`target\<profile>\native\<platform>\` on Windows). `host` is the platform of the machine you build on: `linux_x64`, `macos_arm64`, `mingw_x64` and so on. Executables end in `.kexe`, except on Windows, where the platform is `mingw_x64` and they end in `.exe`.
 
 ```console
 $ kargo new tool -t native
@@ -30,7 +30,14 @@ $ kargo run
    Compiling tool v0.1.0 (native)
 Hello, Kotlin!
 $ kargo build --release
-$ ./target/release/native/linux_x64/tool.kexe   # tool.exe on Windows
+$ ./target/release/native/linux_x64/tool.kexe
+```
+
+On Windows:
+
+```console
+> kargo build --release
+> .\target\release\native\mingw_x64\tool.exe
 ```
 
 ## Platforms
@@ -71,7 +78,7 @@ name = "migrate"
 path = "src/tools/Migrate.kt"   # or entry-point = "com.example.tools.main"
 ```
 
-`kargo build` then also links `target/<profile>/native/<platform>/bin/migrate.kexe` (`migrate.exe` on Windows), and `kargo run --bin migrate` runs it. See [Several programs in one project](../multiple-programs/).
+`kargo build` then also links `target/<profile>/native/<platform>/bin/migrate.kexe` (`target\<profile>\native\mingw_x64\bin\migrate.exe` on Windows), and `kargo run --bin migrate` runs it. See [Several programs in one project](../multiple-programs/).
 
 ## Using C libraries
 
@@ -127,7 +134,7 @@ note: building the Kotlin/Native standard library cache for linux_x64 (one time 
 - **One-time cost.** The first build that needs the cache builds it, which adds one to two minutes. It's kept per Kotlin/Native version and platform in `~/.kargo/toolchains/kotlin-native/<version>/klib/cache`, a few tens of megabytes each, and `kargo toolchain remove native <version>` removes it with the distribution.
 - **Debug builds only.** `--release` (any profile with `optimize = true`) optimizes the whole program, standard library included, so it can't use precompiled code and builds as slowly as before. `kargo check` and `kind = "library"` build a klib, which doesn't link the standard library.
 - **Debug info.** Builds with `debug = true` (the default in `dev`) and builds without it each get their own cache.
-- **Turning it off.** Set `KARGO_NATIVE_CACHE=false` (or `0`, `no`, `off`) to compile without it, for example when the toolchain directory is read-only. Switching it doesn't trigger a rebuild, because the output is the same.
+- **Turning it off.** Set `KARGO_NATIVE_CACHE=false` (or `0`, `no`, `off`) to compile without it, for example when the toolchain directory is read-only. In PowerShell that is `$env:KARGO_NATIVE_CACHE = "false"`, in `cmd` `set KARGO_NATIVE_CACHE=false`. Switching it doesn't trigger a rebuild, because the output is the same.
 - **CI.** The cache is under `~/.kargo`, so a cached `~/.kargo` [keeps it between runs](../ci/#kotlinnative-cache). A job that starts from an empty home pays for building it on every run; set `KARGO_NATIVE_CACHE=false` there.
 
 ## Moving the toolchain

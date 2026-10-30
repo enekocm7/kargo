@@ -49,6 +49,8 @@ $ kargo run
 SQLite 3.45.1
 ```
 
+On Windows the platform is `mingw_x64`, so Kargo prints `target\debug\native\mingw_x64\app.exe` instead.
+
 The bindings use `kotlinx.cinterop` APIs, which need `@OptIn(ExperimentalForeignApi::class)`, or `opt-in = ["kotlinx.cinterop.ExperimentalForeignApi"]` in `[kotlin]`.
 
 `kargo add --cinterop sqlite --header sqlite3.h --pkg-config sqlite3` writes the `[target.native.cinterop.sqlite]` entry and an `interop/sqlite.def` to start from.
@@ -304,6 +306,8 @@ int main(void) {
 ```sh
 cc main.c -Itarget/debug/native/linux_x64/include -Ltarget/debug/native/linux_x64 -lmathlib -o main
 ```
+
+On Windows the directory is `target\debug\native\mingw_x64`, and the files are `mathlib.dll` and `mathlib_api.h`.
 
 Functions marked `@CName` get that plain C name. Everything else public is reachable through the structure that the header's `..._symbols()` function returns. The files are named `lib<name>.so`, `lib<name>.dylib`, `<name>.dll` (with `<name>_api.h`) or `lib<name>.a`.
 
