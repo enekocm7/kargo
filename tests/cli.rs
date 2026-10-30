@@ -1113,6 +1113,21 @@ fn tasks_list_run_and_dependencies() {
 }
 
 #[test]
+fn task_shorthand_drops_a_leading_double_dash_like_kargo_task() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tasky", "[tasks]\nsay = \"echo\"\n"));
+    let output = |args: &[&str]| String::from_utf8(p.kargo().args(args).assert().success().get_output().stdout.clone()).unwrap();
+    let said = |args: &[&str]| output(args).trim().to_owned();
+
+    assert_eq!(said(&["task", "say", "--", "a", "b"]), "a b");
+    assert_eq!(said(&["say", "--", "a", "b"]), "a b");
+    assert_eq!(said(&["say", "a", "b"]), "a b");
+    // A second `--` reaches the task in both forms.
+    assert_eq!(said(&["task", "say", "--", "--", "a"]), "-- a");
+    assert_eq!(said(&["say", "--", "--", "a"]), "-- a");
+}
+
+#[test]
 fn help_and_task_list_show_project_tasks() {
     let p = Project::new();
     p.kargo().arg("--help").assert().success().stdout(predicate::str::contains("Tasks").not());

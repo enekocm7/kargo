@@ -1119,6 +1119,8 @@ kargo task [--env-file <path>] [--no-env-file] <name> [args]
 kargo <name> [args]      # shorthand
 ```
 
+A first `--` after the task name is dropped in both forms, so `kargo task <name> -- <args>` and `kargo <name> -- <args>` pass the same arguments; a second `--` is passed on (`kargo say -- -- a` gives the task `-- a`).
+
 A package task starts with the [project environment](../../guides/environment/): `--env-file <path>` (repeatable) and `--no-env-file` choose its `.env` files, as they do for `kargo run`. They can come before the name or right after it, where they are taken from the front of the arguments: `kargo deploy --env-file .env.staging --dry-run` passes only `--dry-run` to the task. Workspace tasks run at the root and get no project environment.
 
 In a workspace, a member's directory runs that member's tasks, and the root runs a `[workspace.tasks]` task; a name that only members define runs in every member that has it, in dependency order. See [Workspace tasks](../../guides/workspaces/#tasks-and-plugins).

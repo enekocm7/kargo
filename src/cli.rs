@@ -4297,7 +4297,8 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<i
     let (name, args) = argv.split_first().context("missing subcommand")?;
     let project = load_project(global).ok();
     if let Some(project) = &project
-        && run_task(config, project, name, args, &EnvOptions::default())?
+        // `kargo task <name> -- <args>` has clap drop the first `--`, so the shorthand does the same.
+        && run_task(config, project, name, args.strip_prefix(&["--".to_owned()]).unwrap_or(args), &EnvOptions::default())?
     {
         return Ok(0);
     }
@@ -4433,6 +4434,8 @@ mod tests {
         assert!(matches!(cli.command, Command::External(ref v) if v == &["my-plugin", "--x"]));
         let cli = Cli::try_parse_from(["kargo", "task", "gen", "--watch"]).unwrap();
         assert!(matches!(cli.command, Command::Task { ref args, .. } if args == &["--watch"]));
+        let cli = Cli::try_parse_from(["kargo", "task", "gen", "--", "--", "a"]).unwrap();
+        assert!(matches!(cli.command, Command::Task { ref args, .. } if args == &["--", "a"]));
         let cli = Cli::try_parse_from(["kargo", "toolchain", "install", "jdk", "21"]).unwrap();
         assert!(matches!(
             cli.command,
