@@ -78,7 +78,7 @@ What a script gets:
 
 - **Its file.** `script` is relative to the project root, like `cwd`; for a task in `[workspace.tasks]` it is relative to the workspace root, and a workspace task that a member inherits keeps running the workspace's file. A file that does not exist fails the task with a message that names it.
 - **Its environment.** The variables of a shell command: `KARGO_TASK`, `KARGO_HOOK` and the `KARGO_*` variables [listed below](#hook-variables) when the task runs as a hook, the project's `[env]` and `.env` files, and the task's own `env`.
-- **Its arguments.** Anything after the task name in `kargo task <name> <args>` or `kargo <name> <args>` is the script's `args`. Only the task you ran gets them, not the tasks it depends on.
+- **Its arguments.** Anything after the task name in `kargo task <name> <args>` or `kargo <name> <args>` is the script's `args`; a first `--` is dropped, so `kargo gen -- a b` gives `["a", "b"]` in both forms. Only the task you ran gets them, not the tasks it depends on.
 - **Its directory.** The project root, or the task's `cwd`.
 - **Its dependencies and JDK.** From its own header, as for any [Kotlin script](../scripts/#declare-what-the-script-needs): it does not read the project's `[dependencies]` or `[toolchain]`. Add `@file:Jdk("21")` when it needs a particular JDK. The dependencies resolve with Kargo's resolver, so `--offline` and `[mirrors]` apply.
 - **A cache.** Kargo compiles the script on its first run and starts the compiled classes after that, so a `pre-build` task costs a JVM startup, not a compile, until the script changes. See [How runs are cached](../scripts/#how-runs-are-cached).
@@ -127,6 +127,8 @@ On Windows Kargo uses the `sh` from [Git for Windows](https://gitforwindows.org/
 With `pwsh` (PowerShell 7.3 or newer) a command that exits with a non-zero code stops the task, and that exit code becomes the task's, like with `sh` and `cmd`. Windows PowerShell 5.1 (`shell = "powershell"`) keeps running after a failing native command, so only cmdlet errors and the exit code of the script's last native command fail the task; use `pwsh`, or check `$LASTEXITCODE` after each command, when a step in the middle must stop the task.
 
 Arguments after `--` in `kargo task <name> -- <args>` reach the last command as written. In `cmd` a `%` in them is escaped so `%NAME%` stays literal text.
+
+The shorthand agrees: `kargo <name> -- <args>` and `kargo task <name> -- <args>` pass the same arguments, because both drop the first `--` after the task name, and a `--` is optional (`kargo <name> <args>`). It only matters when an argument starts with `-` and you want it kept out of Kargo's own flags. When the task needs a literal `--` as its first argument, write a second one: `kargo say -- -- a` gives `-- a`.
 
 **Give Windows its own commands.** When there is no shared shell, put the Windows version in `windows-run`:
 
