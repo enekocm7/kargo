@@ -48,11 +48,19 @@ Built-in commands take precedence: a task named `build`, `test` or `fmt` runs on
 | `cwd` | Working directory, relative to the project root |
 | `hooks` | Lifecycle hooks that run this task automatically |
 
-Commands run with `sh -c` on Unix and `cmd /C` on Windows. They receive `KARGO_TASK` plus the `KARGO_*` variables listed below.
+Commands run with `sh -c` on Unix and `cmd /C` on Windows, unless `shell` says otherwise. They receive `KARGO_TASK` plus the `KARGO_*` variables listed below.
 
 ### Windows
 
-By default tasks run in `cmd` on Windows, so Unix syntax such as `$KARGO_PKG_NAME`, `mkdir -p` or `./gen.sh` doesn't work there: `cmd` expands `%KARGO_PKG_NAME%` instead. You have two ways to write tasks that work everywhere.
+By default tasks run in `cmd` on Windows, so Unix syntax such as `$KARGO_PKG_NAME`, `mkdir -p` or `./gen.sh` doesn't work there: `cmd` expands `%KARGO_PKG_NAME%` instead. The same goes for the variables from `[env]` and `.env` files: they are in the task's environment, but each shell reads them in its own syntax.
+
+| Shell | Reads the variable `GREETING` as |
+|---|---|
+| `sh`, `bash` | `$GREETING` |
+| `cmd` (the default on Windows) | `%GREETING%` |
+| `powershell`, `pwsh` | `$env:GREETING` |
+
+With `[env] GREETING = "hi"`, `echo $GREETING` in a `cmd` task prints `$GREETING`, because `cmd` doesn't expand it. You have two ways to write tasks that work everywhere.
 
 **Use one shell on every platform.** Set `shell = "sh"` and write POSIX commands once:
 

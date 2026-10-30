@@ -216,4 +216,6 @@ A [`build-config` generator](../code-generation/#buildconfig) can also write the
 
 The variables are not written into your build output, except those you list in `expose`. Read the others at run time with `System.getenv` (JVM), `platform.posix.getenv` (Native) or `process.env` (Node.js).
 
+A task command reads them in the syntax of its shell: `$NAME` in `sh`, `%NAME%` in `cmd`, which is the default on Windows, and `$env:NAME` in PowerShell. See [Windows](../tasks-and-plugins/#windows) for tasks that run the same everywhere.
+
 Only the variables themselves are listed in [`kargo.toml`](../../reference/manifest/#env), and `kargo env` is in the [command reference](../../reference/commands/#kargo-env).
