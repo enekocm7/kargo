@@ -506,6 +506,8 @@ kargo lint --android [--release] [--create-baseline] [--message-format json]
 | `-p, --package <name>`, `--workspace` | Which packages to analyze |
 | `-j, --jobs <n>` | How many packages are analyzed at the same time, as for `kargo fmt` |
 
+detekt prints each issue as `path/File.kt:line:column: message [Rule]`, with the path relative to the project root and `/` separators, like `kargo fmt --check`.
+
 detekt reads `detekt.yml` from the project root automatically; configure the rest with [`[lint]`](../manifest/#lint). See [Formatting and linting](../../guides/formatting-and-linting/).
 
 ## `kargo add`
