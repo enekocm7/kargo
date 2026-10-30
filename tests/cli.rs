@@ -88,6 +88,33 @@ fn add_framework_benchmark_scaffolds_a_sample_once() {
 }
 
 #[test]
+fn remove_framework_disables_what_add_framework_enabled() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tool", ""));
+    p.kargo().args(["add", "--framework", "serialization,coroutines"]).assert().success();
+    assert!(p.read("kargo.toml").contains("serialization = true"));
+
+    p.kargo()
+        .args(["remove", "--framework", "serialization"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing framework `serialization`"));
+    let text = p.read("kargo.toml");
+    assert!(!text.contains("serialization") && text.contains("coroutines = true"), "{text}");
+
+    // The last framework takes `[frameworks]` with it; one that is not enabled, or unknown, is an error.
+    p.kargo().args(["rm", "-F", "coroutines"]).assert().success();
+    assert!(!p.read("kargo.toml").contains("[frameworks]"));
+    p.kargo()
+        .args(["remove", "--framework", "coroutines"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("framework `coroutines` is not enabled"));
+    p.kargo().args(["remove", "--framework", "serialisation"]).assert().failure().stderr(predicate::str::contains("serialization"));
+    p.kargo().args(["remove", "--framework", "lombok", "--dev"]).assert().failure().code(2);
+}
+
+#[test]
 fn new_inside_a_git_repository_does_not_nest_one() {
     let Some(git) = common::which("git") else { return };
     let p = Project::new();
