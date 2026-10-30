@@ -1,6 +1,7 @@
 //! Remote Maven repositories and the local download cache.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -505,14 +506,18 @@ impl MavenClient {
         if self.missing.lock().expect("lock poisoned").contains(rel) {
             return Ok(None);
         }
-        for (repo, key) in &candidates {
+        for (asked, (repo, key)) in candidates.iter().enumerate() {
             let cached = self.cache_path(key);
-            match self.fetch_from(repo, plain, key, &cached, pinned)? {
-                Fetch::Found => {
+            match self.fetch_from(repo, plain, key, &cached, pinned) {
+                Ok(Fetch::Found) => {
                     self.serve(plain, &cached);
                     return Ok(Some(cached));
                 }
-                Fetch::Missing => continue,
+                Ok(Fetch::Missing) => continue,
+                // The repositories after this one are not asked: a build must not take from a later repository
+                // what an earlier one that is down may hold.
+                Err(e) if is_unreachable(&e) => return Err(unreachable_error(plain, &candidates, asked, e)),
+                Err(e) => return Err(e),
             }
         }
         if self.offline && !self.repos.iter().all(Repository::is_local) {
@@ -767,7 +772,7 @@ impl MavenClient {
     fn get(&self, repo: &Repository, url: &str) -> Result<Option<ureq::http::Response<ureq::Body>>> {
         let host = host_of(url);
         if self.unreachable.lock().expect("lock poisoned").contains(host) {
-            bail!("{}", unreachable_message(host));
+            return Err(Unreachable { host: host.to_owned() }.into());
         }
         let mut attempt = 0;
         let response = loop {
@@ -787,7 +792,7 @@ impl MavenClient {
                 {
                     self.unreachable.lock().expect("lock poisoned").insert(host.to_owned());
                     return Err(anyhow::Error::new(result.unwrap_err()))
-                        .with_context(|| unreachable_message(host))
+                        .with_context(|| Unreachable { host: host.to_owned() })
                         .with_context(|| format!("failed to connect to {url}"));
                 }
                 break result.with_context(|| format!("failed to connect to {url}"))?;
@@ -1176,8 +1181,39 @@ fn host_of(url: &str) -> &str {
     authority.rsplit_once('@').map_or(authority, |(_, host)| host)
 }
 
-fn unreachable_message(host: &str) -> String {
-    format!("cannot reach {host}; run `kargo fetch` while online, or use `--offline`")
+/// The error of a request to a host that could not be reached (DNS, TLS, refused connection), which
+/// [`MavenClient::fetch_with`] tells apart from a repository that answered.
+#[derive(Debug)]
+struct Unreachable {
+    host: String,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot reach {}; check the network connection and the repository URL, or use `--offline`", self.host)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// Whether `err` is a failure to reach a repository's host.
+fn is_unreachable(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Unreachable>().is_some()
+}
+
+/// The error for `rel` when `repo` could not be reached: what each repository asked before it answered, and the
+/// ones left unasked, one line each. The file may be in the repository that is down, so this is no "not found".
+fn unreachable_error(rel: &str, candidates: &[(&Repository, String)], asked: usize, cause: anyhow::Error) -> anyhow::Error {
+    let mut message = format!("`{rel}` was not found everywhere it could be asked for:");
+    for (i, (repo, _)) in candidates.iter().enumerate() {
+        let status = match i.cmp(&asked) {
+            std::cmp::Ordering::Less => "not found".to_owned(),
+            std::cmp::Ordering::Equal => "could not be reached".to_owned(),
+            std::cmp::Ordering::Greater => "not asked".to_owned(),
+        };
+        let _ = write!(message, "\n  {} ({}): {status}", repo.name, host_of(&repo.url));
+    }
+    cause.context(message)
 }
 
 /// Whether `url` names a file a repository may legitimately not have: a checksum, Gradle module
@@ -1649,6 +1685,29 @@ mod tests {
 
         let err = client.fetch("org/example/lib/1.0/lib-1.0.pom").unwrap_err();
         assert!(format!("{err:#}").contains("cannot reach 127.0.0.1"), "{err:#}");
+    }
+
+    #[test]
+    fn an_unreachable_repository_is_listed_next_to_the_ones_that_answered() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (server, _, _) = http_client(Vec::new(), false);
+        let (other, _, _) = http_client(Vec::new(), false);
+        let cache = tempfile::tempdir().unwrap();
+        let config = Config::new(cache.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let client = MavenClient::new(
+            &config,
+            vec![
+                Repository::new("central", &server.url),
+                Repository::new("down", format!("http://127.0.0.1:{port}/maven2")),
+                Repository::new("later", &other.url),
+            ],
+        );
+        let err = format!("{:#}", client.fetch("com/example/nothere/1.0/nothere-1.0.pom").unwrap_err());
+        assert!(err.contains("central (127.0.0.1:"), "{err}");
+        assert!(err.contains("): not found\n  down (127.0.0.1:"), "{err}");
+        assert!(err.contains("): could not be reached\n  later (127.0.0.1:"), "{err}");
+        assert!(err.contains("): not asked"), "{err}");
+        assert!(err.contains("cannot reach 127.0.0.1"), "{err}");
     }
 
     /// A client of a repository served over HTTP with `files` (path below the root -> content); anything else is a 404.

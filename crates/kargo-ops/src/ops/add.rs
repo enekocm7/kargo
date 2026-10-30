@@ -183,6 +183,27 @@ pub fn add_frameworks(config: &Config, ws: &Workspace, names: &[String]) -> Resu
     Ok(())
 }
 
+/// `kargo remove --framework`: takes built-in frameworks out of `[frameworks]`. A framework that is not
+/// enabled is an error, like a dependency that is not declared, and nothing is written then.
+pub fn remove_frameworks(config: &Config, ws: &Workspace, names: &[String]) -> Result<()> {
+    let mut editor = ManifestEditor::load(&ws.manifest_path())?;
+    for name in names {
+        if !crate::builtins::FRAMEWORK_NAMES.contains(&name.as_str()) {
+            return Err(kargo_util::help::unknown(
+                format!("unknown framework `{name}` (available: {})", crate::builtins::FRAMEWORK_NAMES.join(", ")),
+                name,
+                crate::builtins::FRAMEWORK_NAMES,
+            ));
+        }
+        if !editor.remove_framework(name)? {
+            bail!("framework `{name}` is not enabled in [frameworks]");
+        }
+        config.shell().status("Removing", format!("framework `{name}`"));
+    }
+    ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
+    editor.save()
+}
+
 /// Writes `benches/SampleBench.kt` for a package that has no benchmarks yet.
 fn scaffold_bench(config: &Config, ws: &Workspace, manifest: &Manifest) -> Result<()> {
     if !manifest.targets.is_enabled(TargetKind::Jvm) {

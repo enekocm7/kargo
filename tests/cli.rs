@@ -88,6 +88,33 @@ fn add_framework_benchmark_scaffolds_a_sample_once() {
 }
 
 #[test]
+fn remove_framework_disables_what_add_framework_enabled() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tool", ""));
+    p.kargo().args(["add", "--framework", "serialization,coroutines"]).assert().success();
+    assert!(p.read("kargo.toml").contains("serialization = true"));
+
+    p.kargo()
+        .args(["remove", "--framework", "serialization"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing framework `serialization`"));
+    let text = p.read("kargo.toml");
+    assert!(!text.contains("serialization") && text.contains("coroutines = true"), "{text}");
+
+    // The last framework takes `[frameworks]` with it; one that is not enabled, or unknown, is an error.
+    p.kargo().args(["rm", "-F", "coroutines"]).assert().success();
+    assert!(!p.read("kargo.toml").contains("[frameworks]"));
+    p.kargo()
+        .args(["remove", "--framework", "coroutines"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("framework `coroutines` is not enabled"));
+    p.kargo().args(["remove", "--framework", "serialisation"]).assert().failure().stderr(predicate::str::contains("serialization"));
+    p.kargo().args(["remove", "--framework", "lombok", "--dev"]).assert().failure().code(2);
+}
+
+#[test]
 fn new_inside_a_git_repository_does_not_nest_one() {
     let Some(git) = common::which("git") else { return };
     let p = Project::new();
@@ -6952,6 +6979,28 @@ fn a_missing_version_lists_the_nearby_ones() {
         predicate::str::contains("`com.acme:widget:1.5` was not found in any repository").and(predicate::str::contains(
             "help: available: 1.3.0, 1.4.2, 1.5.0-RC1 (pre-release), 2.0.0; a pre-release needs its exact version",
         )),
+    );
+}
+
+#[test]
+fn an_unreachable_repository_is_listed_with_the_ones_that_answered() {
+    let repo = LocalRepo::new();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "\n[repositories]\ndefaults = false\nlocal = \"{}\"\nbad = \"http://127.0.0.1:{port}/maven\"\n\n[dependencies]\n\"com.example:nothere\" = \"1.0\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["build"]).assert().failure().stderr(
+        predicate::str::contains("local (")
+            .and(predicate::str::contains("): not found"))
+            .and(predicate::str::contains(&format!("bad (127.0.0.1:{port}): could not be reached"))),
     );
 }
 

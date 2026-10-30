@@ -123,6 +123,10 @@ The generated code lives in the package `<group>.<name>`, with the name lowercas
 
 Kargo runs `git init` in the new directory when `git` is on the `PATH`, unless you pass `--no-vcs` or the directory is already inside a git repository (a monorepo or an `examples/` folder), in which case the project joins that repository instead of nesting a new one. A `.gitignore` is written either way, unless one already exists.
 
+:::tip
+In a folder that is not a git repository, every `kargo new` creates its own repository. To generate a set of throwaway or test projects side by side, pass `--no-vcs` (`kargo new a --no-vcs`, `kargo new b --no-vcs`), or run `git init` once in the parent folder first so the projects join it.
+:::
+
 ## `kargo init`
 
 Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten. A directory that already has a `kargo.toml` is refused; use [`kargo target add`](#kargo-target) to enable more targets in it.
@@ -572,11 +576,12 @@ Kargo asks the registry's HTTP API itself, so no package manager has to be insta
 
 ## `kargo remove` (`rm`)
 
-Remove dependencies from `kargo.toml`.
+Remove dependencies or built-in frameworks from `kargo.toml`.
 
 ```sh
 kargo remove <group:artifact or key>... [--dev] [-t <target>]
 kargo remove --npm <package>... [--dev] [-t <wasm|js>]
+kargo remove -F <framework,...>
 ```
 
 | Option | Meaning |
@@ -584,6 +589,7 @@ kargo remove --npm <package>... [--dev] [-t <wasm|js>]
 | `--dev` | Remove from `[dev-dependencies]` (with `--npm`: from `[target.<target>.dev-npm-dependencies]`) |
 | `-t, --target <target>` | Remove from `[target.<target>.dependencies]` (with `--npm`: from the npm packages of that target) |
 | `--npm` | Remove npm packages. Without `-t`, the package is removed from the only target that declares it; its `@types/<package>` goes with it. An emptied table is removed |
+| `-F, --framework <list>` | Disable built-in frameworks instead: removes each from `[frameworks]`, whether it is written as `name = true` or as a table with options, and the `[frameworks]` table when nothing is left in it. A framework that is not enabled is an error, and nothing is written |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 Path dependencies are removed by their key: `kargo remove mathlib`. Without an option, the dependency is removed from `[dependencies]`.

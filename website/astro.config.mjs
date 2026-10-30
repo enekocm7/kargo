@@ -5,13 +5,20 @@ import starlight from '@astrojs/starlight';
 // The Pages workflow sets SITE and BASE_PATH from actions/configure-pages: on
 // enekocm7.github.io the site lives under /kargo, while a custom domain (or a
 // local build) serves it from the root.
+const base = process.env.BASE_PATH || '';
+
 export default defineConfig({
 	site: process.env.SITE || undefined,
-	base: process.env.BASE_PATH || undefined,
+	base: base || undefined,
 	// The IntelliJ IDEA and Zed pages were merged into the editor integration page.
+	// The shorter names `tasks` and `kotlin-scripts` are what people guess for the
+	// pages that are called `tasks-and-plugins` and `scripts`. Astro does not add
+	// the base path to the target of a redirect, so it is added here.
 	redirects: {
-		'/guides/jetbrains': '/guides/editors/#intellij-idea-and-android-studio',
-		'/guides/zed': '/guides/editors/#zed',
+		'/guides/jetbrains': `${base}/guides/editors/#intellij-idea-and-android-studio`,
+		'/guides/zed': `${base}/guides/editors/#zed`,
+		'/guides/tasks': `${base}/guides/tasks-and-plugins/`,
+		'/guides/kotlin-scripts': `${base}/guides/scripts/`,
 	},
 	integrations: [
 		starlight({

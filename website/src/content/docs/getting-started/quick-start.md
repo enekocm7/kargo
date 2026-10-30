@@ -125,7 +125,7 @@ kargo init                               # set up the current directory instead
 | `kargo run` | `kargo r` | Build and run |
 | `kargo test` | `kargo t` | Build and run tests |
 | `kargo add <coords>` | | Add a dependency |
-| `kargo remove <coords>` | `kargo rm` | Remove a dependency |
+| `kargo remove <coords>` | `kargo rm` | Remove a dependency (`-F <framework>`: disable a framework) |
 | `kargo outdated` | | List dependencies with newer versions |
 | `kargo upgrade` | | Raise versions in `kargo.toml` |
 | `kargo tree` | | Show the dependency graph |

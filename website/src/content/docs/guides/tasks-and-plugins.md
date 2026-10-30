@@ -87,7 +87,7 @@ A script that exits with a non-zero code, or throws, fails the task, and the bui
 
 ### Shell commands
 
-`run` is a shell command or a list of commands, run in order. They run with `sh -c` on Unix and `cmd /C` on Windows, and receive `KARGO_TASK` plus the `KARGO_*` variables listed below. Arguments after the task name are appended to the last command.
+`run` is a shell command or a list of commands, run in order. They run with `sh -c` on Unix and `cmd /C` on Windows, unless `shell` says otherwise, and receive `KARGO_TASK` plus the `KARGO_*` variables listed below. Arguments after the task name are appended to the last command.
 
 ```toml title="kargo.toml"
 [tasks]
@@ -104,7 +104,15 @@ kargo fmt --dry-run
 
 #### Windows
 
-Kotlin scripts run the same on every platform, so this only concerns shell tasks. By default they run in `cmd` on Windows, so Unix syntax such as `$KARGO_PKG_NAME`, `mkdir -p` or `./gen.sh` doesn't work there: `cmd` expands `%KARGO_PKG_NAME%` instead. Use `shell = "sh"` (needs the `sh` of Git for Windows or another one on `PATH`) or a `windows-run` with the Windows version of the commands, or write the task as a Kotlin script.
+Kotlin scripts run the same on every platform, so this only concerns shell tasks. By default they run in `cmd` on Windows, so Unix syntax such as `$KARGO_PKG_NAME`, `mkdir -p` or `./gen.sh` doesn't work there: `cmd` expands `%KARGO_PKG_NAME%` instead. The same goes for the variables from `[env]` and `.env` files: they are in the task's environment, but each shell reads them in its own syntax.
+
+| Shell | Reads the variable `GREETING` as |
+|---|---|
+| `sh`, `bash` | `$GREETING` |
+| `cmd` (the default on Windows) | `%GREETING%` |
+| `powershell`, `pwsh` | `$env:GREETING` |
+
+With `[env] GREETING = "hi"`, `echo $GREETING` in a `cmd` task prints `$GREETING`, because `cmd` doesn't expand it. Use `shell = "sh"` (needs the `sh` of Git for Windows or another one on `PATH`) or a `windows-run` with the Windows version of the commands, or write the task as a Kotlin script.
 
 **Use one shell on every platform.** Set `shell = "sh"` and write POSIX commands once:
 

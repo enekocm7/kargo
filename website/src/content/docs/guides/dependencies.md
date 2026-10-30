@@ -475,6 +475,18 @@ See the [kargo.lock reference](../../reference/lockfile/) for the format.
 
 ## When the network fails
 
-Kargo retries a request up to five times when the server answers HTTP 408, 429, 500, 502, 503 or 504, or the connection times out or drops. DNS, TLS and invalid URL errors fail at once. After such a failure Kargo remembers the host for the rest of the run and every further request to it fails immediately with "cannot reach <host>; run `kargo fetch` while online, or use `--offline`", instead of retrying for each module.
+Kargo retries a request up to five times when the server answers HTTP 408, 429, 500, 502, 503 or 504, or the connection times out or drops. DNS, TLS and invalid URL errors fail at once. After such a failure Kargo remembers the host for the rest of the run and every further request to it fails immediately with "cannot reach <host>; check the network connection and the repository URL, or use `--offline`", instead of retrying for each module.
+
+When a file is missing and a repository cannot be reached, the error lists every repository with what happened to it, so a typo in a coordinate is not mistaken for a network problem:
+
+```console
+error: failed to resolve com.example:nothere:1.0
+Caused by:
+  `com/example/nothere/1.0/nothere-1.0.pom` was not found everywhere it could be asked for:
+    maven-central (repo.maven.apache.org): not found
+    bad (nonexistent-host.invalid): could not be reached
+```
+
+The repositories are asked in order and Kargo stops at the unreachable one, since the file may be there: the ones after it show as `not asked`, and Kargo never takes from a later repository what an earlier one that is down may hold.
 
 A failed request for a module's `maven-metadata.xml` keeps the cached copy, so `kargo add`, `kargo outdated` and `kargo upgrade` still work from it; Kargo prints `using cached metadata from <age> ago`. The cached copy is deleted only when the repository says the file does not exist. A `403` for a `.sha256`, `.sha1`, `.module` or `maven-metadata.xml` file counts as absent, because repositories on object storage answer 403 for missing keys.
