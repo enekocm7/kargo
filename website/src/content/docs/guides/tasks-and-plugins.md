@@ -127,7 +127,15 @@ A failing hook fails the build.
 | `hooks` | Lifecycle hooks that run the plugin |
 | `env` | Extra environment variables |
 
-`command` is started directly, not through a shell. On Windows a `command` ending in `.sh` runs through `sh` (from Git for Windows or on `PATH`), so the example above works on every platform. Other commands must be real executables there (`.exe`, `.bat` or `.cmd`).
+`command` is started directly, not through a shell, so it is a program name (or a path) and never a command line. Put the arguments in `args`: `command = "cmd"` with `args = ["/c", "exit", "7"]` works, `command = "cmd /c exit 7"` does not, and Kargo says so when it cannot start a `command` that contains spaces. This differs from `run` of a task and `[[generate]]` step, which is a shell string.
+
+| | `command` of a plugin | `run` of a task or generate step |
+|---|---|---|
+| Started | Directly, as a program | Through a shell (`sh`, or `cmd` on Windows; see `shell`) |
+| Arguments | In `args` | Written in the string |
+| Pipes, `&&`, `$VAR` | Not available | Available |
+
+On Windows a `command` ending in `.sh` runs through `sh` (from Git for Windows or on `PATH`), so the example above works on every platform. Other commands must be real executables there (`.exe`, `.bat` or `.cmd`).
 
 To run something else on Windows, set `windows-command` (and `windows-args` if the arguments differ):
 
