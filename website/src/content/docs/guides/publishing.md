@@ -210,6 +210,15 @@ With [`[package.shade]`](../distributing/#shading) in `kargo.toml`, the library 
 
 For JVM jars, `kargo package --release` runs R8 after building the jar. Use `kargo package --optimize` to opt in with another profile. R8 can shrink, optimize and obfuscate independently through [`[package.optimize]`](../../reference/manifest/#packageoptimize). It preserves the selected main class and Kotlin metadata, reads optional ProGuard-compatible rules from `proguard-rules.pro`, and writes the minimized jar plus mapping and usage files to `target/<profile>/jvm/`.
 
+A release package therefore leaves two jars there, and `kargo package` prints the path of the second:
+
+| Jar | Contents |
+|---|---|
+| `<name>-<version>-all.jar` | The fat jar as built, not shrunk |
+| `<name>-<version>-min.jar` | The same jar after R8, with your rules applied |
+
+Run the `-min.jar` before you ship it: R8 only keeps what the built-in rules and your `proguard-rules.pro` say it reaches, so a class loaded by reflection or a service file can be missing. If it fails, add keep rules, or ship the `-all.jar`.
+
 ```toml
 [package.optimize]
 shrink = true

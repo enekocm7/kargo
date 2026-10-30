@@ -244,6 +244,13 @@ pub(super) fn optimize_jar(ctx: &BuildContext, input: &Path, name: &str, main_cl
     }
     if !kargo_compiler::diagnostics::is_json() {
         ctx.shell().status("Mapping", mapping.display());
+        ctx.shell().note(format!(
+            "{} is the shrunk jar, which `kargo package` prints; {} is the same program without R8. \
+             If the shrunk jar fails on a class loaded by reflection, add keep rules to {}",
+            out.display(),
+            input.display(),
+            settings.rules.display()
+        ));
     }
     Ok(out)
 }

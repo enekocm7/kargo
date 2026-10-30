@@ -881,6 +881,15 @@ The entries are the ones the build compiles with, in the same order: path depend
 
 Build a self-contained, runnable fat jar with all runtime dependencies, path dependencies included: `target/<profile>/jvm/<name>-<version>-all.jar` (`target/<profile>/<name>/jvm/` in a workspace). The path of the jar is printed on stdout.
 
+With `--release` (or `--optimize`), Kargo also shrinks that jar with R8 into `<name>-<version>-min.jar` and prints the path of the `-min.jar` instead. Both jars stay in the directory:
+
+| Jar | What it is | Use it when |
+|---|---|---|
+| `<name>-<version>-all.jar` | The fat jar as built, every dependency class included | You want the program exactly as compiled, or the shrunk jar fails because of a class loaded by reflection |
+| `<name>-<version>-min.jar` | The same jar after R8 removed unused code and renamed what is left, using the rules of [`[package.optimize]`](../manifest/#packageoptimize) and `proguard-rules.pro` | You ship a release and have run it to check that the keep rules cover your app |
+
+See [JVM shrinking and obfuscation](../../guides/publishing/#jvm-shrinking-and-obfuscation).
+
 `--format` ships a JVM application another way. Each prints the path of what it built on stdout:
 
 | Format | Builds |
@@ -905,7 +914,7 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
 | `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library (JVM) |
 | `--format <format>` | `jar` (default), `jlink`, `native-image` or `installer` (JVM) |
-| `--optimize` | Shrink and obfuscate the JVM jar with R8; also enabled automatically with `--release` |
+| `--optimize` | Shrink and obfuscate the JVM jar with R8 into `-min.jar`, next to the `-all.jar`; also enabled automatically with `--release` |
 | `--message-format json` | Print compiler diagnostics, optimization reports and package paths as JSON lines |
 | `--desktop` | Package the [Compose Desktop](../../guides/compose/#distributing) application: an installer for this OS unless `--format` says otherwise, with the JDK modules, options and Skiko native library Compose needs. Needs `[frameworks] compose` |
 | `--platforms <list>` | With `--desktop --format jar`: the platforms whose Skiko natives the jar carries instead of only the host's, so it runs on each of them. `all`, or some of `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`, `linux-x64`, `linux-arm64` |

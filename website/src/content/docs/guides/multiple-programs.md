@@ -112,16 +112,16 @@ run a [[bin]] with `kargo run --bin <name>`; available bins: migrate, report
 `kargo package --bin <name>` builds a fat jar that launches that bin, named after it:
 
 ```console
-$ kargo package --release --bin migrate
+$ kargo package --bin migrate
    Compiling app v0.1.0 (jvm)
-   Packaging migrate v0.1.0 (/home/me/app/target/release/jvm/migrate-0.1.0-all.jar)
-    Finished `release` profile [optimized] target(s) in 2.71s
-/home/me/app/target/release/jvm/migrate-0.1.0-all.jar
-$ java -jar target/release/jvm/migrate-0.1.0-all.jar up
+   Packaging migrate v0.1.0 (/home/me/app/target/debug/jvm/migrate-0.1.0-all.jar)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.71s
+/home/me/app/target/debug/jvm/migrate-0.1.0-all.jar
+$ java -jar target/debug/jvm/migrate-0.1.0-all.jar up
 migrating up
 ```
 
-Without `--bin`, `kargo package` launches the project's own main class as before.
+Without `--bin`, `kargo package` launches the project's own main class as before. With `--release`, the `-all.jar` stays and an R8-shrunk `migrate-0.1.0-min.jar` is written next to it; see [`kargo package`](../../reference/commands/#kargo-package).
 
 ## Examples
 

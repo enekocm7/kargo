@@ -6,7 +6,7 @@ description: Ship a JVM application as a runtime image that needs no Java, a Gra
 `kargo package` builds a fat jar, which runs anywhere with `java -jar`, but only where the right Java is installed. To ship a program to people who don't have Java, `--format` builds something else:
 
 ```console
-$ kargo package --release                         # target/release/jvm/hello-0.1.0-all.jar
+$ kargo package --release                         # target/release/jvm/hello-0.1.0-min.jar (R8-shrunk), next to hello-0.1.0-all.jar
 $ kargo package --release --format jlink          # the jars, a trimmed Java runtime and launchers
 $ kargo package --release --format native-image   # a GraalVM native executable
 $ kargo package --release --format installer      # .msi on Windows, .dmg on macOS, .deb on Linux
