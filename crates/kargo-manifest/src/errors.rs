@@ -28,7 +28,11 @@ pub(crate) fn explain(text: &str, err: Error) -> Error {
         };
     };
 
-    let table = span.and_then(|span| table_of(text, span.start)).or_else(|| table_from_message(&full));
+    // With a span the table is known from the text (none for a top-level table); the message is the fallback for validation errors.
+    let table = match &span {
+        Some(span) => table_of(text, span.start),
+        None => table_from_message(&full),
+    };
     let place = table.as_deref().map(|t| format!(" in `[{t}]`")).unwrap_or_default();
     let expected: Vec<&str> = unknown.expected.iter().map(String::as_str).collect();
     let suggestions: Vec<String> = help::nearest(&unknown.name, &expected, 3).into_iter().map(str::to_owned).collect();
@@ -237,6 +241,19 @@ version = \"0.1.0\"
         let advice = help::advice(&err).expect("advice");
         assert_eq!(advice.suggestions(), ["jvm"]);
         assert!(advice.help().unwrap().contains("in `[target]`"), "{:?}", advice.help());
+    }
+
+    #[test]
+    fn a_misspelled_top_level_table_is_not_placed_in_itself() {
+        let err = parse(
+            "
+[dependncies]
+",
+        );
+        let advice = help::advice(&err).expect("advice");
+        assert_eq!(advice.suggestions(), ["dependencies"]);
+        let help_line = advice.help().unwrap();
+        assert!(help_line.starts_with("key `dependncies` is not known; did you mean `dependencies`?"), "{help_line}");
     }
 
     #[test]
