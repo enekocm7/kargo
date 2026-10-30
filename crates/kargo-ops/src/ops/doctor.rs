@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use kargo_manifest::{AndroidSdkRequest, GraalvmRequest, JdkRequest, JsEnvironment, Manifest, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{
+    AndroidSdkRequest, GraalvmRequest, JdkRequest, JsEnvironment, Manifest, PackageManager, Scope, TargetKind, WasmEnvironment,
+};
 use kargo_maven::repo::{Repository, effective_repositories};
 use kargo_toolchain::archive::human_size;
 use kargo_toolchain::{GradleDistribution, Jdk, LanguageServer, NativeToolchain, ServerKind, android_sdk, graalvm, jdks};
@@ -167,10 +169,8 @@ pub fn diagnose(config: &Config, project: ProjectState, is_builtin_command: &dyn
     let manifest = loaded.map(|p| p.package(p.current().unwrap_or(p.members()[0])).manifest());
     jdk(config, manifest, &mut checks);
     toolchains(config, loaded, &mut checks);
-    if let Some(p) = loaded {
-        android(config, p, &mut checks);
-        web(config, p, &mut checks);
-    }
+    android(config, loaded, &mut checks);
+    web(loaded, config, &mut checks);
     network(config, loaded, &mut checks);
     match project {
         ProjectState::None => {}
@@ -512,9 +512,14 @@ fn incomplete(root: &Path, complete: &[PathBuf], what: &str) -> Vec<(String, Pat
     out
 }
 
-fn android(config: &Config, project: &Project, out: &mut Vec<Check>) {
+/// The Android checks of the project, or, outside a project or without the Android target, what the machine has
+/// for Android builds.
+fn android(config: &Config, project: Option<&Project>, out: &mut Vec<Check>) {
     let s = Section::Android;
-    let Some(ws) = project.members().iter().map(|&i| project.package(i)).find(|ws| ws.manifest().targets.android.is_some()) else {
+    let package = project
+        .and_then(|project| project.members().iter().map(|&i| project.package(i)).find(|ws| ws.manifest().targets.android.is_some()));
+    let Some(ws) = package else {
+        machine_android(config, out);
         return;
     };
     let m = ws.manifest();
@@ -579,6 +584,24 @@ fn android(config: &Config, project: &Project, out: &mut Vec<Check>) {
             )),
         },
         Err(e) => out.push(Check::error(s, "Gradle", chain(&e), "change `gradle-version` or `agp-version` under [target.android]")),
+    }
+}
+
+/// The Android SDK the machine has, for a project that does not build for Android: nothing is wrong without one, but
+/// `kargo new --target android` or a new `[target.android]` needs it.
+fn machine_android(config: &Config, out: &mut Vec<Check>) {
+    let s = Section::Android;
+    let managed = config.android_sdk_dir();
+    if let Some(sdk) = crate::gradle::android_sdk() {
+        out.push(Check::ok(s, "Android SDK", format!("{} (ANDROID_HOME or the default location)", sdk.display())));
+    } else if !android_sdk::installed(&managed).is_empty() {
+        out.push(Check::ok(s, "Android SDK", format!("Kargo-managed at {}", managed.display())));
+    } else {
+        out.push(Check::ok(
+            s,
+            "Android SDK",
+            "not found; only Android builds need it. Set ANDROID_HOME to an SDK, or run `kargo toolchain install android-sdk` to have Kargo install one",
+        ));
     }
 }
 
@@ -649,14 +672,14 @@ fn devices(config: &Config, manifest: &Manifest, out: &mut Vec<Check>) {
     }
 }
 
-fn web(config: &Config, project: &Project, out: &mut Vec<Check>) {
+/// The Node.js and package manager checks of the project's Wasm and JS targets, or, outside a project or without
+/// them, what the machine has.
+fn web(project: Option<&Project>, config: &Config, out: &mut Vec<Check>) {
     let s = Section::Web;
-    let manifests: Vec<&Manifest> = project.members().iter().map(|&i| project.package(i).manifest()).collect();
+    let manifests: Vec<&Manifest> = project.map_or_else(Vec::new, |p| p.members().iter().map(|&i| p.package(i).manifest()).collect());
     let wasm: Vec<_> = manifests.iter().filter_map(|m| m.targets.wasm.as_ref()).collect();
     let js: Vec<_> = manifests.iter().filter_map(|m| m.targets.js.as_ref()).collect();
-    if wasm.is_empty() && js.is_empty() {
-        return;
-    }
+    let used = !wasm.is_empty() || !js.is_empty();
     let needs_node =
         wasm.iter().any(|w| w.environment != WasmEnvironment::Browser) || js.iter().any(|j| j.environment != JsEnvironment::Browser);
     let needs_browser =
@@ -669,12 +692,54 @@ fn web(config: &Config, project: &Project, out: &mut Vec<Check>) {
             "`node` is not on PATH; `kargo run` and `kargo test` need it",
             "install Node.js (https://nodejs.org) and put `node` on PATH",
         )),
-        None => out.push(Check::warning(
+        None if used => out.push(Check::warning(
             s,
             "Node.js",
             "`node` is not on PATH; npm dependencies and TypeScript sources need it",
             "install Node.js (https://nodejs.org) and put `node` on PATH",
         )),
+        None => out.push(Check::ok(
+            s,
+            "Node.js",
+            "not found; only Wasm and JS projects need it (for Node.js environments, npm dependencies and TypeScript sources)",
+        )),
+    }
+
+    // The package manager of `package-manager`, or the first of npm, pnpm and bun that is installed.
+    let configured: Vec<PackageManager> =
+        wasm.iter().filter_map(|w| w.package_manager).chain(js.iter().filter_map(|j| j.package_manager)).collect();
+    let needs_packages = wasm.iter().any(|w| !w.npm_dependencies.is_empty()) || js.iter().any(|j| !j.npm_dependencies.is_empty());
+    for manager in &configured {
+        if kargo_util::process::find_on_path(manager.as_str()).is_none() {
+            out.push(Check::error(
+                s,
+                manager.as_str(),
+                format!("`package-manager` is `{manager}`, but `{manager}` is not on PATH"),
+                format!("install {manager}, or choose npm, pnpm or bun in `package-manager`"),
+            ));
+        }
+    }
+    let found: Vec<(PackageManager, PathBuf)> =
+        PackageManager::ALL.into_iter().filter_map(|m| kargo_util::process::find_on_path(m.as_str()).map(|exe| (m, exe))).collect();
+    if let Some((manager, exe)) = found.iter().find(|(m, _)| configured.contains(m)).or(found.first()) {
+        out.push(Check::ok(s, "package manager", format!("{manager} at {}", exe.display())));
+    } else if configured.is_empty() {
+        const FIX: &str = "install Node.js (it includes npm), pnpm or bun and put it on PATH";
+        const NEEDED: &str = "no npm, pnpm or bun on PATH, which installs npm dependencies";
+        if needs_packages {
+            out.push(Check::error(s, "package manager", NEEDED, FIX));
+        } else if used {
+            out.push(Check::warning(s, "package manager", format!("{NEEDED} (libraries that depend on npm packages need one)"), FIX));
+        } else {
+            out.push(Check::ok(
+                s,
+                "package manager",
+                "none of npm, pnpm and bun found; only Wasm and JS projects with npm dependencies need one",
+            ));
+        }
+    }
+    if !used {
+        return;
     }
     match kargo_toolchain::browser::browser() {
         Ok(browser) => out.push(Check::ok(s, "browser", browser.exe.display().to_string())),
