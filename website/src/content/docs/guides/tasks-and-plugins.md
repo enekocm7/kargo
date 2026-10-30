@@ -163,11 +163,21 @@ cp "$KARGO_PACKAGE" "dist/$KARGO_PKG_NAME.jar"
 echo "copied to dist/$KARGO_PKG_NAME.jar"
 ```
 
+```bat title="scripts\publish.bat"
+@echo off
+if not exist dist mkdir dist
+copy /Y "%KARGO_PACKAGE%" "dist\%KARGO_PKG_NAME%.jar" || exit /b 1
+echo copied to dist\%KARGO_PKG_NAME%.jar
+```
+
 ```toml
 [plugins.publish]
 command = "./scripts/publish.sh"
+windows-command = "./scripts/publish.bat"
 hooks = ["post-package"]
 ```
+
+The hook variables are ordinary environment variables: `%KARGO_PACKAGE%` in `cmd`, `$env:KARGO_PACKAGE` in PowerShell.
 
 ## Compiler plugins
 
@@ -220,6 +230,19 @@ find src* tests* -name '*.kt' | xargs wc -l | tail -1
 $ chmod +x ~/.kargo/bin/kargo-loc
 $ kargo loc
      412 total
+```
+
+On Windows the file needs an extension: `kargo-<name>.exe`, `.bat` or `.cmd`, in `%USERPROFILE%\.kargo\bin` or on your `PATH`. There is no `chmod`; a batch file is enough:
+
+```bat title="%USERPROFILE%\.kargo\bin\kargo-loc.bat"
+@echo off
+rem Count lines of Kotlin in the project
+powershell -NoProfile -Command "(Get-ChildItem -Recurse -Include *.kt src*,tests* | Get-Content | Measure-Object -Line).Lines"
+```
+
+```console
+> kargo loc
+412
 ```
 
 If a task and a subcommand share a name, the task wins.
