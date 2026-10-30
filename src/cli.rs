@@ -2039,7 +2039,7 @@ fn tasks_help() -> Option<String> {
 }
 
 fn task_description(task: &kargo_manifest::Task, builtins: &[String]) -> String {
-    let mut desc = task.description.clone().unwrap_or_else(|| task.platform_run().join(" && "));
+    let mut desc = task.description.clone().unwrap_or_else(|| task.summary());
     if !task.hooks.is_empty() {
         let hooks: Vec<&str> = task.hooks.iter().map(|h| h.as_str()).collect();
         desc.push_str(&format!(" [hooks: {}]", hooks.join(", ")));
@@ -3676,7 +3676,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     Ok(0)
                 }
                 Some(name) => {
-                    if !run_task(shell, &project, &name, &args, &env.options())? {
+                    if !run_task(config, &project, &name, &args, &env.options())? {
                         bail!("no task named `{name}`; available tasks: {}", task_names(&project).join(", "));
                     }
                     Ok(0)
@@ -3977,21 +3977,22 @@ fn task_package(project: &Project) -> Option<usize> {
 /// Runs the task `name`: the current package's, else the workspace's (`[workspace.tasks]`, at the
 /// workspace root), else, at the root of a workspace, the task of every member that has one (in
 /// dependency order, each in its member's directory). Returns `false` when no task has that name.
-fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String], env: &EnvOptions) -> Result<bool> {
+fn run_task(config: &Config, project: &Project, name: &str, args: &[String], env: &EnvOptions) -> Result<bool> {
+    let shell = config.shell();
     let (env, args) = split_task_args(env.clone(), args)?;
     let package = task_package(project);
     if let Some(index) = package {
         let ws = project.package(index);
         if ws.manifest().tasks.contains_key(name) {
             let vars = task_env(shell, project, ws, &env)?;
-            kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &vars)?;
+            kargo_ops::tasks::run(config, ws.root(), &ws.manifest().tasks, name, args, &vars)?;
             return Ok(true);
         }
     }
     let Some(workspace) = project.workspace_manifest() else { return Ok(false) };
     if workspace.tasks.contains_key(name) {
         let env = kargo_ops::plugins::workspace_env(project);
-        kargo_ops::tasks::run(shell, project.root(), &workspace.tasks, name, args, &env)?;
+        kargo_ops::tasks::run(config, project.root(), &workspace.tasks, name, args, &env)?;
         return Ok(true);
     }
     if package.is_some() {
@@ -4005,7 +4006,7 @@ fn run_task(shell: &Shell, project: &Project, name: &str, args: &[String], env: 
     for &index in &members {
         let ws = project.package(index);
         let vars = task_env(shell, project, ws, &env)?;
-        kargo_ops::tasks::run(shell, ws.root(), &ws.manifest().tasks, name, args, &vars)
+        kargo_ops::tasks::run(config, ws.root(), &ws.manifest().tasks, name, args, &vars)
             .with_context(|| format!("task `{name}` of `{}` failed", ws.name()))?;
     }
     Ok(!members.is_empty())
@@ -4082,7 +4083,7 @@ fn list_plugins(config: &Config, global: &GlobalArgs) {
             println!("Hook plugins:");
             for p in &m.process_plugins {
                 let hooks: Vec<&str> = p.hooks.iter().map(|h| h.as_str()).collect();
-                println!("    {:16} {} [{}]", p.name, p.platform_command(), hooks.join(", "));
+                println!("    {:16} {} [{}]", p.name, p.program(), hooks.join(", "));
             }
         }
     }
@@ -4296,7 +4297,7 @@ fn external(config: &Config, global: &GlobalArgs, argv: Vec<String>) -> Result<i
     let (name, args) = argv.split_first().context("missing subcommand")?;
     let project = load_project(global).ok();
     if let Some(project) = &project
-        && run_task(config.shell(), project, name, args, &EnvOptions::default())?
+        && run_task(config, project, name, args, &EnvOptions::default())?
     {
         return Ok(0);
     }

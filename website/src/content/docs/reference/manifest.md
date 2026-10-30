@@ -1005,7 +1005,17 @@ id = "org.jetbrains.kotlin.powerassert"
 options = { function = "kotlin.assert" }
 ```
 
-A hook plugin:
+A hook plugin written as a Kotlin script, which runs the same on every platform:
+
+```toml
+[plugins.notify]
+script = "scripts/notify.kts"   # a .kts script or a .kt file, relative to the project root
+args = ["--quiet"]
+hooks = ["post-build"]
+env = { KEY = "value" }
+```
+
+A hook plugin that runs an executable:
 
 ```toml
 [plugins.notify]
@@ -1019,6 +1029,8 @@ env = { KEY = "value" }
 
 Hooks: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run`, `post-package`. On Windows a `command` ending in `.sh` runs through `sh`.
 
+`script` is a Kotlin file that [`kargo script`](../../guides/scripts/) runs, with the hook's environment and the project root as its working directory. `args` and then the hook name are its arguments. It takes the place of `command`, so a plugin has one of them, and `windows-command` goes with `command` only. In `[workspace.plugins]` a relative `script` stays relative to the workspace root.
+
 `command` is a program name or path that Kargo starts directly, not a shell string: put its arguments in `args`. (`run` of a task and of a `[[generate]]` step is a shell string.)
 
 ## `[tasks]`
@@ -1029,7 +1041,10 @@ simple = "echo hi"
 full = { run = ["cmd1", "cmd2"], description = "...", depends-on = ["simple"], env = { K = "v" }, cwd = "sub", hooks = ["pre-build"] }
 posix = { run = "echo $KARGO_PKG_NAME", shell = "sh" }
 portable = { run = "echo $KARGO_PKG_NAME", windows-run = "echo %KARGO_PKG_NAME%" }
+gen = { script = "scripts/gen.kts", description = "Generate code", hooks = ["pre-build"] }
 ```
+
+`script` is a Kotlin file that [`kargo script`](../../guides/scripts/) runs instead of `run`: a `.kts` script or a `.kt` file with a front matter. It is relative to the project root (the workspace root for a task of `[workspace.tasks]`, and for one a member inherits), and the arguments after the task name are its `args`. A task has a `script` or a `run`: `windows-run` and `shell` go with `run`, and the manifest rejects the combination. A task of only `depends-on` runs its dependencies.
 
 `shell` picks the shell the commands run in: `sh`, `bash`, `cmd`, `powershell` or `pwsh`. The default is `sh` on Unix and `cmd` on Windows. `windows-run` (a command or a list) replaces `run` on Windows. When it is not set, `run` is used on every platform.
 
@@ -1111,7 +1126,7 @@ jobs = 2                             # members and targets built at the same tim
 | `[workspace.kotlin]` | `version`, `language-version`, `api-version`, `ksp`, `opt-in`, `compiler-args`, `warnings-as-errors` and `jvm-target` (the default `[target.jvm] jvm-target`) for every member. A member's own `opt-in` and `compiler-args` are added to these; its other `[kotlin]` keys take precedence, except `version`, which must match |
 | `[workspace.dependencies]` | Dependency entries members inherit with `name = { workspace = true }` |
 | `[workspace.frameworks]` | `[frameworks]` entries members inherit with `name = { workspace = true }` |
-| `[workspace.plugins]` | `[plugins]` entries members inherit with `name = { workspace = true }`. A relative `command` stays relative to the workspace root |
+| `[workspace.plugins]` | `[plugins]` entries members inherit with `name = { workspace = true }`. A relative `command` or `script` stays relative to the workspace root |
 | `[workspace.tasks]` | Tasks that run at the workspace root. Members inherit them with `name = { workspace = true }`, which runs them in the member's directory |
 | `[workspace.build]` | [`[build]`](#build) for the whole workspace: `jobs` and `default-targets` |
 

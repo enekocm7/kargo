@@ -607,11 +607,11 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
 fn package_android(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     let start = std::time::Instant::now();
     let mut env = build::hook_env(ctx, &EnvOptions::default())?;
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreBuild, &env)?;
     let files = crate::gradle::package(ctx)?;
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostBuild, &env)?;
     env.push(("KARGO_PACKAGE".to_owned(), files[0].to_string_lossy().into_owned()));
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostPackage, &env)?;
     build::finished(ctx, start);
     Ok(files)
 }
@@ -633,11 +633,11 @@ fn package_jvm(
     };
     let start = std::time::Instant::now();
     let env = build::hook_env(ctx, &EnvOptions::default())?;
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreBuild, &env)?;
     build::generate_sources(ctx, &[TargetKind::Jvm])?;
     build::warn_about_sources(ctx, &[TargetKind::Jvm]);
     let jvm = build_jvm(ctx)?;
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostBuild, &env)?;
     let pkg = &ctx.ws.manifest().package;
     let name = bin.unwrap_or(&pkg.name);
     let app = |bin_main: Option<String>| -> Result<packaging::App> {
@@ -668,7 +668,7 @@ fn package_jvm(
     }
     let mut env = env;
     env.push(("KARGO_PACKAGE".to_owned(), files[0].to_string_lossy().into_owned()));
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostPackage, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostPackage, &env)?;
     build::finished(ctx, start);
     Ok(files)
 }

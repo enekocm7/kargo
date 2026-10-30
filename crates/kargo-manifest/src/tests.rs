@@ -957,6 +957,87 @@ fn task_errors() {
 }
 
 #[test]
+fn tasks_and_plugins_can_run_kotlin_scripts() {
+    let m = parse(&format!(
+        "{MINIMAL}
+[tasks]
+gen = {{ script = \"scripts/gen.kts\", hooks = [\"pre-build\"], env = {{ CHANNEL = \"releases\" }} }}
+notes = {{ script = \"scripts/notes.kt\", depends-on = [\"gen\"] }}
+ci = {{ depends-on = [\"gen\"] }}
+
+[plugins.notify]
+script = \"scripts/notify.kts\"
+args = [\"--quiet\"]
+hooks = [\"post-build\"]
+"
+    ));
+    assert_eq!(m.tasks["gen"].script.as_deref(), Some(Path::new("scripts/gen.kts")));
+    assert!(m.tasks["gen"].run.is_empty());
+    assert_eq!(m.tasks["gen"].summary(), "kargo script scripts/gen.kts");
+    assert_eq!(m.tasks["notes"].script.as_deref(), Some(Path::new("scripts/notes.kt")));
+    assert_eq!(m.tasks["ci"].script, None);
+    let notify = &m.process_plugins[0];
+    assert_eq!((notify.script.as_deref(), notify.command.as_str()), (Some(Path::new("scripts/notify.kts")), ""));
+    assert_eq!(notify.platform_args(), ["--quiet"]);
+    assert_eq!(notify.program(), Path::new("scripts/notify.kts").display().to_string());
+}
+
+#[test]
+fn script_errors() {
+    let task = |t: &str| parse_err(&format!("{MINIMAL}\n[tasks]\n{t}\n"));
+    let plugin = |p: &str| parse_err(&format!("{MINIMAL}\n[plugins.x]\nhooks = [\"post-build\"]\n{p}\n"));
+    assert!(task("a = { script = \"a.kts\", run = \"echo\" }").contains("`script` runs a Kotlin script, so it cannot go with `run`"));
+    assert!(task("a = { script = \"a.kts\", windows-run = \"echo\" }").contains("`windows-run`"));
+    assert!(task("a = { script = \"a.kts\", shell = \"sh\" }").contains("`shell`"));
+    assert!(task("a = { script = \"a.sh\" }").contains("must be the path of a .kts script or a .kt file, not `a.sh`"));
+    assert!(task("a = { script = \"\" }").contains("`script` must be"));
+    assert!(task("a = { script = 1 }").contains("invalid task `a`"));
+
+    assert!(plugin("script = \"a.kts\"\ncommand = \"c\"").contains("either `command` or `script`"));
+    assert!(plugin("script = \"a.kts\"\nwindows-command = \"c\"").contains("`windows-command` goes with `command`"));
+    assert!(plugin("script = \"a.kts\"\nmaven = \"a:b:1\"").contains("not both"));
+    assert!(plugin("script = \"a.sh\"").contains("must be the path of a .kts script"));
+    assert!(plugin("script = \"a.kts\"\nid = \"z\"").contains("only apply to `maven`"));
+    let no_hook = parse_err(&format!("{MINIMAL}\n[plugins.x]\nscript = \"a.kts\"\n"));
+    assert!(no_hook.contains("a `script` plugin needs at least one hook"), "{no_hook}");
+}
+
+#[test]
+fn an_inherited_script_stays_the_workspaces_file() {
+    let ws = WorkspaceManifest::parse(
+        "[workspace]
+members = [\"app\"]
+
+[workspace.plugins]
+notify = { script = \"tools/notify.kts\", hooks = [\"post-build\"] }
+
+[workspace.tasks]
+codegen = { script = \"tools/gen.kts\", depends-on = [\"prepare\"] }
+prepare = { script = \"tools/prepare.kts\" }
+",
+        Path::new("/ws"),
+    )
+    .unwrap();
+    let m = Manifest::parse_in(
+        "[package]
+name = \"app\"
+version = \"1.0.0\"
+
+[plugins]
+notify.workspace = true
+
+[tasks]
+codegen.workspace = true
+",
+        Some(&ws),
+    )
+    .unwrap();
+    assert_eq!(m.process_plugins[0].script.as_deref(), Some(Path::new("/ws").join("tools/notify.kts").as_path()));
+    assert_eq!(m.tasks["codegen"].script.as_deref(), Some(Path::new("/ws").join("tools/gen.kts").as_path()));
+    assert_eq!(m.tasks["prepare"].script.as_deref(), Some(Path::new("/ws").join("tools/prepare.kts").as_path()), "a dependency too");
+}
+
+#[test]
 fn version_validation() {
     assert!(
         parse_err(
@@ -1961,6 +2042,33 @@ mod script {
         assert!(is_kargo_script("#!/usr/bin/env -S kargo script\nprintln(1)", true));
         assert!(is_kargo_script("#!/usr/local/bin/kargo script\n", true));
         assert!(!is_kargo_script("#!/usr/bin/env kotlin\n", true));
+    }
+
+    #[test]
+    fn lists_the_scripts_of_tasks_and_plugins() {
+        let text = "[package]
+name = \"a\"
+version = \"1\"
+[tasks]
+gen = { script = \"scripts/gen.kts\" }
+build = \"echo\"
+[plugins.n]
+script = \"n.kt\"
+hooks = [\"post-build\"]
+[workspace.tasks]
+rel = { script = \"rel.kts\" }
+";
+        assert_eq!(
+            manifest_scripts(text),
+            [std::path::Path::new("scripts/gen.kts"), std::path::Path::new("n.kt"), std::path::Path::new("rel.kts")]
+        );
+        assert!(
+            manifest_scripts(
+                "[tasks
+"
+            )
+            .is_empty()
+        );
     }
 
     #[test]

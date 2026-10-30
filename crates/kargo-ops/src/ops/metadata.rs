@@ -129,7 +129,28 @@ fn package(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
     let tasks: Vec<Value> = m
         .tasks
         .values()
-        .map(|t| json!({ "name": t.name, "description": t.description, "run": t.platform_run(), "depends-on": t.depends_on }))
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "run": t.platform_run(),
+                "script": t.script.as_ref().map(|s| path(&ws.root().join(s))),
+                "depends-on": t.depends_on,
+            })
+        })
+        .collect();
+    let hook_plugins: Vec<Value> = m
+        .process_plugins
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "command": p.script.is_none().then(|| p.platform_command()),
+                "script": p.script.as_ref().map(|s| path(&ws.root().join(s))),
+                "args": p.platform_args(),
+                "hooks": p.hooks.iter().map(|h| h.as_str()).collect::<Vec<_>>(),
+            })
+        })
         .collect();
     let examples: Vec<Value> = ws
         .examples()
@@ -163,6 +184,7 @@ fn package(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
         "examples": examples,
         "generators": m.generators.iter().map(|g| generator(ctx, g)).collect::<Vec<_>>(),
         "tasks": tasks,
+        "hook-plugins": hook_plugins,
         "targets": targets,
     }))
 }

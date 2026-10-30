@@ -369,7 +369,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let targets = opts.select(ctx)?;
     prepare_native_hooks(ctx, &targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreBuild, &env)?;
     generate_sources(ctx, &targets)?;
     warn_about_sources(ctx, &targets);
 
@@ -418,7 +418,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         cp.extend(jvm.runtime_classpath.iter().cloned());
         env.push(("KARGO_CLASSPATH".to_owned(), kargo_util::fs::join_paths(&cp)));
     }
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostBuild, &env)?;
     finished(ctx, start);
     Ok(results)
 }

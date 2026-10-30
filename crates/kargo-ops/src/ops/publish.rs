@@ -272,13 +272,13 @@ fn stage_library(ctx: &BuildContext, group: &str, work: &Path, repo_dir: &Path) 
     let targets = publishable_targets(ctx)?;
     super::build::prepare_native_hooks(ctx, &targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
-    crate::plugins::run_hook(ctx.shell(), ws, Hook::PreBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ws, Hook::PreBuild, &env)?;
     super::build::generate_sources(ctx, &targets)?;
     warn_about_sources(ctx, &targets);
     let jars = work.join("jars");
     std::fs::create_dir_all(&jars).with_context(|| format!("failed to create {}", jars.display()))?;
     let platforms = build_platforms(ctx, &targets, &jars)?;
-    crate::plugins::run_hook(ctx.shell(), ws, Hook::PostBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ws, Hook::PostBuild, &env)?;
 
     let kinds: Vec<PlatformKind> = platforms.iter().map(|p| p.kind.clone()).collect();
     let multiplatform = is_multiplatform(&kinds);

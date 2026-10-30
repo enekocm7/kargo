@@ -243,7 +243,7 @@ The whole test run passed its `[test] timeout`, so Kargo stopped it. A test that
 
 ### A task prints `$KARGO_PKG_NAME` literally on Windows, or a plugin fails with `not a valid Win32 application`
 
-Tasks run in `cmd` on Windows, which doesn't understand `$VAR`, `mkdir -p` or `./script.sh`. Add `shell = "sh"` to the task to run it in Git for Windows' `sh` everywhere, or give Windows its own commands with `windows-run`. A hook plugin's `.sh` script runs through `sh` automatically; for any other non-executable `command`, set `windows-command`. See [Tasks and plugins](../../guides/tasks-and-plugins/#windows).
+Shell tasks run in `cmd` on Windows, which doesn't understand `$VAR`, `mkdir -p` or `./script.sh`. The simplest fix is to write the task or plugin as a [Kotlin script](../../guides/tasks-and-plugins/#kotlin-scripts) (`script = "scripts/x.kts"`), which runs the same everywhere. Or add `shell = "sh"` to the task to run it in Git for Windows' `sh` everywhere, or give Windows its own commands with `windows-run`. A hook plugin's `.sh` script runs through `sh` automatically; for any other non-executable `command`, set `windows-command`. See [Tasks and plugins](../../guides/tasks-and-plugins/#windows).
 
 ### Ktor: `is the name of an engine`, or the wrong client engine on a target
 

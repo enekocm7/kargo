@@ -68,8 +68,32 @@ struct Script {
     settings: Settings,
 }
 
+/// Where a script runs and what its process environment adds to Kargo's own: the working directory
+/// and variables of a task or hook plugin. The default is the directory and environment `kargo` runs in.
+#[derive(Debug, Clone, Default)]
+pub struct Surroundings {
+    pub cwd: Option<PathBuf>,
+    pub env: Vec<(String, String)>,
+}
+
+impl Surroundings {
+    fn apply(&self, cmd: &mut Command) {
+        if let Some(cwd) = &self.cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd.envs(self.env.iter().map(|(k, v)| (k, v)));
+    }
+}
+
 /// Runs the script with `args` and returns its exit code.
 pub fn run(config: &Config, source: &Source, args: &[String]) -> Result<i32> {
+    run_in(config, source, args, &Surroundings::default())
+}
+
+/// Like [`run`], in the working directory and with the environment of `around`. The first run of a
+/// `.kts` script happens inside the Kotlin compiler, which gets them too. Pass `source` as an absolute
+/// path when `around` changes the directory.
+pub fn run_in(config: &Config, source: &Source, args: &[String], around: &Surroundings) -> Result<i32> {
     let shell = config.shell();
     let script = load(source)?;
     let kotlin = kotlin_version(&script.settings)?;
@@ -85,16 +109,16 @@ pub fn run(config: &Config, source: &Source, args: &[String]) -> Result<i32> {
     let jdk = jdks::resolve_for(config, &jdk_request, needs)?;
     if let Some(cached) = Cached::read(&entry) {
         shell.verbose("Cached", format!("`{}`", script.name));
-        return launch(config, &jdk, &cached.classes, &cached.classpath, &cached.main_class, args);
+        return launch(config, &jdk, &cached.classes, &cached.classpath, &cached.main_class, args, around);
     }
     jdk.require_version(MIN_JDK)?;
     check_compiler_jdk(&kotlin, &jdk)?;
 
     shell.status("Compiling", format!("`{}`", script.name));
-    let built = build(config, &script, &kotlin, &jdk, &repositories, &frameworks, &entry, args)?;
+    let built = build(config, &script, &kotlin, &jdk, &repositories, &frameworks, &entry, args, around)?;
     match built.ran {
         Some(code) => Ok(code),
-        None => launch(config, &jdk, &entry.join("classes"), &built.classpath, &built.main_class, args),
+        None => launch(config, &jdk, &entry.join("classes"), &built.classpath, &built.main_class, args, around),
     }
 }
 
@@ -363,6 +387,7 @@ fn build(
     frameworks: &[&str],
     entry: &Path,
     args: &[String],
+    around: &Surroundings,
 ) -> Result<Built> {
     let shell = config.shell();
     let client = MavenClient::new(config, repositories.to_vec());
@@ -435,7 +460,7 @@ fn build(
     } else {
         options.push(slash(&source));
     }
-    let status = kotlinc(shell, jdk, &compiler_classpath, &entry.join("kotlinc.args"), &options, &trailing)?;
+    let status = kotlinc(shell, jdk, &compiler_classpath, &entry.join("kotlinc.args"), &options, &trailing, around)?;
 
     // The compiler writes classes only when the code compiles, so their presence means a
     // successful build even when the script then exited with a failure.
@@ -462,7 +487,7 @@ fn build(
         launch_classpath.extend(classpath.iter().cloned());
         let mut options = kotlinc_options(&staging, &launch_classpath, jdk);
         options.push(slash(&launcher));
-        let status = kotlinc(shell, jdk, &compiler_classpath, &entry.join("launcher.args"), &options, &[])?;
+        let status = kotlinc(shell, jdk, &compiler_classpath, &entry.join("launcher.args"), &options, &[], around)?;
         if !status.success() || !staging.join(format!("{LAUNCHER_CLASS}.class")).is_file() {
             remove_dir_all_if_exists(&staging)?;
             bail!("could not build the launcher of `{}`", script.name);
@@ -509,11 +534,13 @@ fn kotlinc(
     argfile: &Path,
     options: &[String],
     trailing: &[String],
+    around: &Surroundings,
 ) -> Result<ExitStatus> {
     write_argfile(argfile, options)?;
     let mut cmd = Command::new(jdk.java());
     cmd.args(compiler_jvm_options(jdk)).arg("-cp").arg(join_paths(compiler_classpath)).arg(JVM_COMPILER_MAIN);
     cmd.arg(format!("@{}", argfile.display())).args(trailing);
+    around.apply(&mut cmd);
     process::status(shell, &mut cmd, "the Kotlin compiler")
 }
 
@@ -532,11 +559,20 @@ fn jvm_target(version: u32) -> String {
 }
 
 /// Runs a built program's main class, with the build's classes first on the class path.
-fn launch(config: &Config, jdk: &Jdk, classes: &Path, classpath: &[PathBuf], main: &str, args: &[String]) -> Result<i32> {
+fn launch(
+    config: &Config,
+    jdk: &Jdk,
+    classes: &Path,
+    classpath: &[PathBuf],
+    main: &str,
+    args: &[String],
+    around: &Surroundings,
+) -> Result<i32> {
     let mut path = vec![classes.to_path_buf()];
     path.extend(classpath.iter().cloned());
     let mut cmd = Command::new(jdk.java());
     cmd.args(jdk.default_run_args()).arg("-cp").arg(join_paths(&path)).arg(main).args(args);
+    around.apply(&mut cmd);
     config.shell().verbose("Running", format!("`{main}`"));
     let status = cmd.status().with_context(|| format!("failed to start {}", jdk.java().display()))?;
     Ok(kargo_util::process::exit_code_of(status))

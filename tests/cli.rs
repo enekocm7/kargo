@@ -1488,6 +1488,53 @@ fn completions() {
 }
 
 #[test]
+fn tasks_and_plugins_with_scripts_are_listed_and_check_their_files() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "scripted",
+            "[tasks]\ngen = { script = \"scripts/gen.kts\", hooks = [\"pre-build\"] }\nnotes = { script = \"scripts/notes.kt\", description = \"release notes\" }\n\n[plugins.notify]\nscript = \"scripts/notify.kts\"\nhooks = [\"post-build\"]\n",
+        ),
+    );
+    p.kargo()
+        .args(["task", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("kargo script scripts").and(predicate::str::contains("[hooks: pre-build]")))
+        .stdout(predicate::str::contains("release notes"));
+    p.kargo().arg("plugins").assert().success().stdout(predicate::str::contains("notify").and(predicate::str::contains("notify.kts")));
+
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let package = &metadata["packages"][0];
+    let gen_task = package["tasks"].as_array().unwrap().iter().find(|t| t["name"] == "gen").unwrap();
+    assert!(gen_task["script"].as_str().unwrap().ends_with("gen.kts"), "{gen_task}");
+    assert_eq!(gen_task["run"], serde_json::json!([]));
+    let notify = &package["hook-plugins"][0];
+    assert_eq!((notify["name"].as_str(), notify["command"].is_null()), (Some("notify"), true));
+    assert!(notify["script"].as_str().unwrap().ends_with("notify.kts"), "{notify}");
+    assert_eq!(notify["hooks"], serde_json::json!(["post-build"]));
+
+    // The files are checked when the task runs, before any compiler is needed.
+    p.kargo()
+        .args(["task", "gen"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("task `gen`: script `scripts").and(predicate::str::contains("not found")));
+}
+
+#[test]
+fn a_script_cannot_go_with_a_shell_command() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("clash", "[tasks]\ngen = { script = \"gen.kts\", run = \"echo\" }\n"));
+    p.kargo().arg("task").assert().failure().stderr(predicate::str::contains("`script` runs a Kotlin script, so it cannot go with `run`"));
+    p.file("kargo.toml", &manifest("clash", "[plugins.n]\nscript = \"n.kts\"\ncommand = \"n\"\nhooks = [\"post-build\"]\n"));
+    p.kargo().arg("info").assert().failure().stderr(predicate::str::contains("either `command` or `script`"));
+}
+
+#[test]
 fn failing_task_propagates_error() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("failing", "[tasks]\nboom = \"exit 9\"\n"));

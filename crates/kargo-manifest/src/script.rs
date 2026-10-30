@@ -4,6 +4,7 @@
 
 use std::fmt;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
@@ -88,6 +89,28 @@ pub struct Settings {
 /// file whose shebang runs `kargo script` is, because Kargo ignores the project's other scripts.
 pub fn is_kargo_script(text: &str, in_project: bool) -> bool {
     !in_project || shebang_runs_kargo_script(text)
+}
+
+/// The scripts a manifest's tasks and hook plugins run (`script`), as written, relative to the
+/// manifest's directory: the ones in `[tasks]` and `[plugins]` and in `[workspace.tasks]` and
+/// `[workspace.plugins]`. They are Kargo scripts whatever their first line says, so an editor can
+/// treat them as such. Read from the text alone, so it works for a manifest that does not validate.
+pub fn manifest_scripts(manifest: &str) -> Vec<PathBuf> {
+    let Ok(table) = manifest.parse::<toml::Table>() else { return Vec::new() };
+    let sections = [
+        table.get("tasks"),
+        table.get("plugins"),
+        table.get("workspace").and_then(|w| w.get("tasks")),
+        table.get("workspace").and_then(|w| w.get("plugins")),
+    ];
+    sections
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+        .flat_map(|entries| entries.values())
+        .filter_map(|entry| entry.get("script")?.as_str())
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn shebang_runs_kargo_script(text: &str) -> bool {

@@ -30,10 +30,34 @@ pub fn is_script_uri(uri: &str) -> bool {
 }
 
 /// Whether the `.kts` file at `path`, with `text`, is a Kargo script rather than another tool's
-/// build script inside a project (see `kargo_manifest::script::is_kargo_script`).
+/// build script inside a project (see `kargo_manifest::script::is_kargo_script`). The `script` of a
+/// task or hook plugin in the project's `kargo.toml` is one whatever its first line says.
 pub fn is_kargo_script(path: &Path, text: &str) -> bool {
-    let in_project = path.ancestors().skip(1).any(|dir| dir.join(kargo_manifest::MANIFEST_NAME).is_file());
-    kargo_manifest::script::is_kargo_script(text, in_project)
+    let manifests: Vec<&Path> = path.ancestors().skip(1).filter(|dir| dir.join(kargo_manifest::MANIFEST_NAME).is_file()).collect();
+    kargo_manifest::script::is_kargo_script(text, !manifests.is_empty()) || manifests.iter().any(|dir| runs_from_manifest(dir, path))
+}
+
+/// Whether the manifest in `dir` names `path` as the `script` of a task or hook plugin.
+fn runs_from_manifest(dir: &Path, path: &Path) -> bool {
+    let Ok(manifest) = std::fs::read_to_string(dir.join(kargo_manifest::MANIFEST_NAME)) else { return false };
+    let path = normalized(path);
+    kargo_manifest::script::manifest_scripts(&manifest).iter().any(|script| normalized(&dir.join(script)) == path)
+}
+
+/// `path` without its `.` and `..` components, which a `script` of `./scripts/../gen.kts` may have.
+fn normalized(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// What the cursor is on in an `@file:` annotation.
@@ -231,5 +255,26 @@ mod tests {
         assert!(is_kargo_script(&build, "#!/usr/bin/env -S kargo script\nprintln(1)"));
         let loose = dir.path().join("sub").join("fetch.kts");
         assert!(!is_kargo_script(&loose, "println(1)"), "a script under a project is governed by it");
+    }
+
+    #[test]
+    fn the_scripts_of_tasks_and_plugins_are_kargo_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("kargo.toml"),
+            "[package]
+name = \"app\"
+version = \"0.1.0\"
+[tasks]
+gen = { script = \"./scripts/gen.kts\" }
+[plugins.notify]
+script = \"scripts/notify.kts\"
+hooks = [\"post-build\"]
+",
+        )
+        .unwrap();
+        assert!(is_kargo_script(&dir.path().join("scripts").join("gen.kts"), "println(1)"));
+        assert!(is_kargo_script(&dir.path().join("scripts").join("notify.kts"), "println(1)"));
+        assert!(!is_kargo_script(&dir.path().join("scripts").join("other.kts"), "println(1)"));
     }
 }

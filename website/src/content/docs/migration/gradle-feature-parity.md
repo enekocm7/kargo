@@ -17,7 +17,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 
 - **One package per `kargo.toml`.** There is no `settings.gradle.kts` plus a script per module. A [workspace](../../guides/workspaces/) lists member packages, and members inherit shared settings and dependencies with `{ workspace = true }`.
 - **No scripting language in the build.** `kargo.toml` is data. There is no `build.gradle.kts` to compute things in, no `afterEvaluate`, no `allprojects {}`. Behavior that Gradle gets from a script comes from [frameworks](../../guides/frameworks/), [`[[generate]]` steps](../../guides/code-generation/) or tasks.
-- **Tasks are shell commands, plugins are executables.** A task is a command in `[tasks]` that you can run with `kargo <task>` or attach to a hook, and a plugin is a program called `kargo-<name>`. There is no task graph API and no plugin classpath. See [Tasks, hooks and plugins](../../guides/tasks-and-plugins/).
+- **Tasks are Kotlin scripts or shell commands, plugins are scripts or executables.** A task is a script or a command in `[tasks]` that you can run with `kargo <task>` or attach to a hook, a hook plugin is a script or a program, and a subcommand is a program called `kargo-<name>`. There is no task graph API and no plugin classpath. See [Tasks, hooks and plugins](../../guides/tasks-and-plugins/).
 - **Fixed lifecycle and layout.** `build`, `check`, `run`, `test` and `package` always exist, and sources live in `src/`, `tests/` and `resources/` (see [Project layout](../../getting-started/project-layout/)).
 - **Android still uses Gradle** underneath, but Kargo writes the Gradle project from your `kargo.toml`.
 
@@ -59,8 +59,8 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Composite builds (`includeBuild`) | Different | Path dependencies and workspaces; see [Local packages](../../guides/dependencies/#local-packages) |
 | Multi-project builds | Supported | [Workspaces](../../guides/workspaces/) |
 | Init scripts, `buildSrc`, convention plugins | Not planned | There is no build scripting. Share settings with `[workspace.*]` tables |
-| Custom tasks and task dependencies | Different | [`[tasks]` and hooks](../../guides/tasks-and-plugins/) |
-| Custom plugins in Kotlin or Groovy | Different | [Plugins](../../guides/tasks-and-plugins/) are executables named `kargo-<name>` |
+| Custom tasks and task dependencies | Different | [`[tasks]` and hooks](../../guides/tasks-and-plugins/), written as Kotlin scripts or shell commands |
+| Custom plugins in Kotlin or Groovy | Different | A hook plugin is a [Kotlin script](../../guides/tasks-and-plugins/#hooks) or an executable, and a subcommand is an executable named `kargo-<name>`. There is no plugin classpath |
 | Toolchains (`jvmToolchain`) | Supported | `[toolchain] jdk`; see [Toolchains](../../guides/toolchains/) |
 | Wrapper (`gradlew`) | Different | `[toolchain] kargo` sets the minimum Kargo version, and `kargo self update` updates it |
 | Offline mode, mirrors, proxies | Supported | [Offline builds and mirrors](../../guides/offline-and-mirrors/), `kargo vendor` |

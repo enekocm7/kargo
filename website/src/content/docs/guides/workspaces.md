@@ -258,7 +258,7 @@ mathlib = { workspace = true }
 "org.jetbrains.kotlinx:kotlinx-datetime" = { workspace = true, scope = "runtime" }
 ```
 
-An inherited dependency takes everything (version, exclusions, the path) from the workspace; the member may add `scope`, `exported` and `test-fixtures`. A `path` in `[workspace.dependencies]` is relative to the workspace root, and so is the `command` of a plugin in `[workspace.plugins]`. Any other inherited key is `{ workspace = true }` alone. `kargo upgrade` skips inherited entries; upgrade them in the workspace's `kargo.toml`.
+An inherited dependency takes everything (version, exclusions, the path) from the workspace; the member may add `scope`, `exported` and `test-fixtures`. A `path` in `[workspace.dependencies]` is relative to the workspace root, and so are the `command` of a plugin and the `script` of a plugin or task in `[workspace]` tables. Any other inherited key is `{ workspace = true }` alone. `kargo upgrade` skips inherited entries; upgrade them in the workspace's `kargo.toml`.
 
 ### Choosing packages
 
@@ -345,7 +345,7 @@ A member can inherit a workspace task (and the workspace tasks it `depends-on`),
 codegen.workspace = true
 ```
 
-`[workspace.plugins]` work the same way: a member uses one with `name = { workspace = true }` in `[plugins]`. Tasks and hooks of a member get `KARGO_WORKSPACE_DIR`, the workspace root, besides the [usual variables](../../reference/environment/#variables-kargo-sets). `kargo task --list` at the root lists the workspace's tasks and each member's.
+`[workspace.plugins]` work the same way: a member uses one with `name = { workspace = true }` in `[plugins]`. A task or plugin written as a [Kotlin script](../tasks-and-plugins/#kotlin-scripts) keeps running the workspace's file, since its `script` stays relative to the workspace root. Tasks and hooks of a member get `KARGO_WORKSPACE_DIR`, the workspace root, besides the [usual variables](../../reference/environment/#variables-kargo-sets). `kargo task --list` at the root lists the workspace's tasks and each member's.
 
 ### Android members
 

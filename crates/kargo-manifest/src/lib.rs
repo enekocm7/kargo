@@ -906,11 +906,14 @@ impl FromStr for Hook {
     }
 }
 
-/// An external executable that runs at lifecycle hooks.
+/// An external executable, or a Kotlin script, that runs at lifecycle hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessPlugin {
     pub name: String,
+    /// The executable; empty for a plugin that has a `script`.
     pub command: String,
+    /// A `.kts` script or `.kt` file `kargo script` runs instead of `command`.
+    pub script: Option<PathBuf>,
     /// Replaces `command` on Windows when set.
     pub windows_command: Option<String>,
     pub args: Vec<String>,
@@ -930,6 +933,14 @@ impl ProcessPlugin {
     pub fn platform_args(&self) -> &[String] {
         self.windows_args.as_deref().filter(|_| cfg!(windows)).unwrap_or(&self.args)
     }
+
+    /// What the plugin runs, for listings: its script, else its command for the current platform.
+    pub fn program(&self) -> String {
+        match &self.script {
+            Some(script) => script.display().to_string(),
+            None => self.platform_command().to_owned(),
+        }
+    }
 }
 
 /// A user-defined task.
@@ -941,6 +952,8 @@ pub struct Task {
     pub run: Vec<String>,
     /// Replaces `run` on Windows when set.
     pub windows_run: Option<Vec<String>>,
+    /// A `.kts` script or `.kt` file `kargo script` runs after the dependencies, instead of `run`.
+    pub script: Option<PathBuf>,
     /// The shell the commands run in; `None` is the platform shell (`sh` on Unix, `cmd` on Windows).
     pub shell: Option<TaskShell>,
     pub depends_on: Vec<String>,
@@ -987,6 +1000,14 @@ impl Task {
     /// The commands for the current platform: `windows-run` on Windows if set, else `run`.
     pub fn platform_run(&self) -> &[String] {
         self.windows_run.as_deref().filter(|_| cfg!(windows)).unwrap_or(&self.run)
+    }
+
+    /// What the task runs, for listings: its commands joined, else its script.
+    pub fn summary(&self) -> String {
+        match &self.script {
+            Some(script) => format!("kargo script {}", script.display()),
+            None => self.platform_run().join(" && "),
+        }
     }
 }
 

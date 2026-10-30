@@ -1015,7 +1015,7 @@
       }
     },
     "plugins": {
-      "description": "Compiler plugins (`maven`) and hook plugins (`command`).",
+      "description": "Compiler plugins (`maven`) and hook plugins (`script` or `command`).",
       "type": "object",
       "additionalProperties": {
         "type": "object",
@@ -1026,6 +1026,7 @@
           "options": { "description": "Compiler plugin options.", "type": "object", "additionalProperties": { "type": "string" } },
           "command": { "description": "A hook plugin's executable.", "type": "string" },
           "windows-command": { "description": "Used instead of `command` on Windows.", "type": "string" },
+          "script": { "description": "A hook plugin written in Kotlin: a .kts script or a .kt file (with a `/* kargo ... */` front matter), relative to the project root, that `kargo script` runs. The hook name is its last argument. Instead of `command`.", "type": "string", "pattern": "\\.kts?$", "examples": ["scripts/notify.kts"] },
           "args": { "type": "array", "items": { "type": "string" } },
           "windows-args": { "description": "Used instead of `args` on Windows.", "type": "array", "items": { "type": "string" } },
           "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } },
@@ -1035,7 +1036,7 @@
       }
     },
     "tasks": {
-      "description": "Commands run with `kargo <task>` or `kargo task <name>`.",
+      "description": "Shell commands or Kotlin scripts run with `kargo <task>` or `kargo task <name>`.",
       "type": "object",
       "additionalProperties": {
         "anyOf": [
@@ -1046,6 +1047,7 @@
             "properties": {
               "run": { "$ref": "#/definitions/commands" },
               "windows-run": { "$ref": "#/definitions/commands", "description": "Replaces `run` on Windows." },
+              "script": { "description": "A Kotlin script instead of `run`: a .kts script or a .kt file (with a `/* kargo ... */` front matter), relative to the project root (the workspace root for [workspace.tasks]), that `kargo script` runs. Arguments after `--` are its `args`.", "type": "string", "pattern": "\\.kts?$", "examples": ["scripts/gen.kts"] },
               "description": { "type": "string" },
               "shell": { "enum": ["sh", "bash", "cmd", "powershell", "pwsh"] },
               "depends-on": { "type": "array", "items": { "type": "string" } },
