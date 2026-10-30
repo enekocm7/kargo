@@ -999,7 +999,7 @@ struct NewArgs {
     /// Kotlin version
     #[arg(long, default_value = kargo_manifest::DEFAULT_KOTLIN_VERSION)]
     kotlin: String,
-    /// Do not initialize a git repository
+    /// Do not initialize a git repository (none is created inside an existing one either)
     #[arg(long)]
     no_vcs: bool,
     /// Create an empty workspace (a kargo.toml with [workspace]) instead of a package
