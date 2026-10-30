@@ -6909,6 +6909,28 @@ fn a_missing_version_lists_the_nearby_ones() {
 }
 
 #[test]
+fn an_unreachable_repository_is_listed_with_the_ones_that_answered() {
+    let repo = LocalRepo::new();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "\n[repositories]\ndefaults = false\nlocal = \"{}\"\nbad = \"http://127.0.0.1:{port}/maven\"\n\n[dependencies]\n\"com.example:nothere\" = \"1.0\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["build"]).assert().failure().stderr(
+        predicate::str::contains("local (")
+            .and(predicate::str::contains("): not found"))
+            .and(predicate::str::contains(&format!("bad (127.0.0.1:{port}): could not be reached"))),
+    );
+}
+
+#[test]
 fn errors_with_a_faq_entry_link_to_it_and_json_carries_the_advice() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("app", "\n[dependencies]\n\"com.acme:widget\" = \"1.0\"\n"));
