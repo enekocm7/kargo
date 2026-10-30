@@ -447,7 +447,7 @@ kargo doc [--open] [-t <target>]
 | Option | Meaning |
 |---|---|
 | `--open` | Open the documentation in a browser when it is generated (the browser in `BROWSER`, else the system default) |
-| `-t, --target <target>` | Only this target (repeatable); defaults to every enabled target |
+| `-t, --target <target>` | Only this target (repeatable); defaults to every enabled target. Documentation of a set other than the default goes to `target/debug/doc-<targets>/`, so it keeps `doc/` |
 | `-p, --package <name>`, `--workspace` | Which packages to document. In a workspace, each goes to `target/debug/<name>/doc/`, and `--open` opens the first |
 | `-j, --jobs <n>` | How many packages are documented at the same time, as for `kargo build`. Without `-j`, `KARGO_JOBS` or `[build] jobs`, one at a time |
 
