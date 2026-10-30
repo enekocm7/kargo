@@ -1158,6 +1158,10 @@ impl Collector<'_, '_> {
             };
             item["additionalTextEdits"] = json!([{ "range": text::range(text, at..at), "newText": new_text }]);
             item["labelDetails"]["description"] = json!(format!("import {fq}"));
+            // Candidates that share a simple name differ by package, so lead with it.
+            if !package.is_empty() {
+                item["detail"] = json!(format!("{package} · {sig}"));
+            }
         }
         self.items.push(item);
     }
@@ -3118,7 +3122,16 @@ pub fn resolve_item(an: &Analyzer, mut item: Value) -> Value {
         return item;
     }
     let sym = SymId { lib, unit: unit as u32, decl: decl as u32 };
-    if let Some(doc) = documentation(an, sym) {
+    let mut doc = documentation(an, sym);
+    if item["additionalTextEdits"].is_array() {
+        let source = if lib { "a library" } else { "this project" };
+        let origin = format!("`{}`  \nfrom {source}", an.fq(sym));
+        doc = Some(match doc {
+            Some(d) => format!("{origin}\n\n---\n\n{d}"),
+            None => origin,
+        });
+    }
+    if let Some(doc) = doc {
         item["documentation"] = json!({ "kind": "markdown", "value": doc });
     }
     item

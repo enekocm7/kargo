@@ -289,6 +289,7 @@ fn completion_inserts_calls_and_imports() {
     let import = &shout["additionalTextEdits"][0];
     assert_eq!(import["newText"], "\n\nimport app.util.shout");
     assert_eq!(import["range"]["start"]["line"], 0);
+    assert!(shout["detail"].as_str().unwrap().starts_with("app.util · "), "the package leads the detail: {shout}");
 
     let f = fixture(&[("src/Main.kt", "fun main() {\n    printl$0\n}\n")]);
     let println = f.items().into_iter().find(|i| i["label"] == "println").unwrap();
