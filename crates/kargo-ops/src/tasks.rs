@@ -1,4 +1,4 @@
-//! User-defined tasks from `[tasks]`: shell commands with dependencies that
+//! User-defined tasks from `[tasks]`: shell commands or Kotlin scripts with dependencies that
 //! can also attach to build lifecycle hooks.
 
 use std::collections::{BTreeMap, HashSet};
@@ -7,7 +7,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::script::{self, Source, Surroundings};
 use kargo_manifest::{Hook, Task, TaskShell};
+use kargo_util::config::Config;
 use kargo_util::process;
 use kargo_util::shell::Shell;
 
@@ -116,16 +118,41 @@ pub fn run_script(shell: &Shell, task_shell: TaskShell, script: &str, cwd: &Path
     Ok(())
 }
 
+/// Runs the Kotlin script at `script` (a task's or hook plugin's `script`, relative to `root`) as
+/// `kargo script` does, in `cwd` with `env` added to the environment and `args` as its arguments.
+pub fn run_kotlin_script(
+    config: &Config,
+    root: &Path,
+    script: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    what: &str,
+) -> Result<()> {
+    let path = root.join(script);
+    if !path.is_file() {
+        bail!("{what}: script `{}` not found; `script` is relative to {}", script.display(), root.display());
+    }
+    config.shell().verbose("Running", format!("`kargo script {}`", script.display()));
+    let around = Surroundings { cwd: Some(cwd.to_path_buf()), env: env.to_vec() };
+    let code = script::run_in(config, &Source::File(path), args, &around).with_context(|| format!("cannot run {what}"))?;
+    if code != 0 {
+        bail!("{what} failed: `{}` ended with exit code {code}", script.display());
+    }
+    Ok(())
+}
+
 /// Runs a task (and its dependencies). `args` are appended to the last command
-/// of the requested task.
+/// of the requested task, or are the arguments of its script.
 pub fn run(
-    shell: &Shell,
+    config: &Config,
     root: &Path,
     tasks: &BTreeMap<String, Task>,
     name: &str,
     args: &[String],
     env: &[(String, String)],
 ) -> Result<()> {
+    let shell = config.shell();
     let order = plan(tasks, name)?;
     for task in order {
         shell.status("Running", format!("task `{}`", task.name));
@@ -133,6 +160,11 @@ pub fn run(
         let mut task_env: Vec<(String, String)> = env.to_vec();
         task_env.push(("KARGO_TASK".to_owned(), task.name.clone()));
         task_env.extend(task.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        if let Some(script) = &task.script {
+            let args = if task.name == name { args } else { &[] };
+            run_kotlin_script(config, root, script, args, &cwd, &task_env, &format!("task `{}`", task.name))?;
+            continue;
+        }
         let task_shell = task.shell.unwrap_or_else(TaskShell::platform_default);
         let commands = task.platform_run();
         let last = commands.len().saturating_sub(1);
@@ -187,6 +219,10 @@ mod tests {
     use super::*;
     use kargo_manifest::Manifest;
 
+    fn quiet() -> Config {
+        Config::new(std::env::temp_dir().join("kargo-tasks-tests"), Shell::new(kargo_util::shell::Verbosity::Quiet))
+    }
+
     fn tasks(toml: &str) -> BTreeMap<String, Task> {
         Manifest::parse(&format!("[package]\nname = \"t\"\nversion = \"1\"\n[tasks]\n{toml}")).unwrap().tasks
     }
@@ -216,11 +252,11 @@ mod tests {
         let out = dir.path().join("out.txt");
         let script = if cfg!(windows) { "echo %GREETING% %KARGO_TASK%> out.txt" } else { "echo $GREETING $KARGO_TASK > out.txt" };
         let t = tasks(&format!("hello = {{ run = '{script}', env = {{ GREETING = \"hi\" }} }}\n"));
-        run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &t, "hello", &[], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "hello", &[], &[]).unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "hi hello");
 
         let failing = tasks("bad = \"exit 3\"\n");
-        let err = run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &failing, "bad", &[], &[]).unwrap_err();
+        let err = run(&quiet(), dir.path(), &failing, "bad", &[], &[]).unwrap_err();
         assert!(err.to_string().contains("exit code 3"), "{err}");
     }
 
@@ -231,7 +267,7 @@ mod tests {
             "pick = { run = \"echo unix> out.txt\", windows-run = \"echo windows> out.txt\" }
 ",
         );
-        run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &t, "pick", &[], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "pick", &[], &[]).unwrap();
         let expected = if cfg!(windows) { "windows" } else { "unix" };
         assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap().trim(), expected);
     }
@@ -247,7 +283,7 @@ mod tests {
             "posix = { run = 'echo \"$GREETING $KARGO_TASK\" > out.txt', shell = \"sh\", env = { GREETING = \"hi\" } }
 ",
         );
-        run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &t, "posix", &["it's".into()], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "posix", &["it's".into()], &[]).unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap().trim(), "hi posix it's");
     }
 
@@ -256,7 +292,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = tasks("say = \"echo\"\n");
         // Only checks that it runs successfully with arguments that need quoting.
-        run(&Shell::new(kargo_util::shell::Verbosity::Quiet), dir.path(), &t, "say", &["hello world".into(), "x".into()], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "say", &["hello world".into(), "x".into()], &[]).unwrap();
         assert_eq!(quote_for_shell(TaskShell::Sh, "plain-arg"), "plain-arg");
         assert_eq!(quote_for_shell(TaskShell::Sh, "it's"), r"'it'\''s'");
         assert_eq!(quote_for_shell(TaskShell::Cmd, "a \"b\""), "\"a \"\"b\"\"\"");
@@ -278,7 +314,7 @@ mod tests {
             "say = { run = \"echo > out.txt\", shell = \"cmd\" }
 ",
         );
-        let quiet = Shell::new(kargo_util::shell::Verbosity::Quiet);
+        let quiet = quiet();
         run(&quiet, dir.path(), &t, "say", &["%COMPUTERNAME%".into(), "a b".into()], &[]).unwrap();
         let written = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
         assert_eq!(written.trim(), "%COMPUTERNAME% \"a b\"");
@@ -291,7 +327,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let quiet = Shell::new(kargo_util::shell::Verbosity::Quiet);
+        let quiet = quiet();
         let fail = if cfg!(windows) { "cmd /c exit 3" } else { "sh -c 'exit 3'" };
         let t = tasks(&format!(
             "bad = {{ run = [\"{fail}\", \"echo done > out.txt\"], shell = \"pwsh\" }}
@@ -308,6 +344,19 @@ mod tests {
         let err = run(&quiet, dir.path(), &one_script, "bad", &[], &[]).unwrap_err();
         assert!(err.to_string().contains("exit code 3"), "{err}");
         assert!(!dir.path().join("out.txt").exists());
+    }
+
+    #[test]
+    fn a_missing_script_is_an_error_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tasks(
+            "gen = { script = \"scripts/gen.kts\" }
+ci = { depends-on = [\"gen\"], run = \"echo done > out.txt\" }
+",
+        );
+        let err = run(&quiet(), dir.path(), &t, "ci", &[], &[]).unwrap_err().to_string();
+        assert!(err.contains("task `gen`: script `scripts") && err.contains("not found"), "{err}");
+        assert!(!dir.path().join("out.txt").exists(), "the dependent task did not run");
     }
 
     #[test]

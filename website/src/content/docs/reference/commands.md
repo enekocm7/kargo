@@ -1104,7 +1104,7 @@ A required variable that nothing sets is listed as `missing (required)`; the lis
 
 ## `kargo task`
 
-List tasks, or run one. Extra arguments are appended to the task's last command.
+List tasks, or run one. Extra arguments are appended to the task's last command, or are the `args` of a task written as a [Kotlin script](../../guides/tasks-and-plugins/#kotlin-scripts) (`script = "..."`), which `kargo script` runs. The listing shows a script task as `kargo script <file>` when it has no description.
 
 ```sh
 kargo task               # list
@@ -1121,7 +1121,7 @@ Inside a project, `kargo --help` also lists its tasks. A task named like a built
 
 ## `kargo plugins`
 
-List hook plugins, compiler plugins and `kargo-*` subcommands.
+List hook plugins (with the executable or `script` each runs), compiler plugins and `kargo-*` subcommands.
 
 ## `kargo android`
 

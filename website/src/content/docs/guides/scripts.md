@@ -99,9 +99,33 @@ Compiler messages give the line numbers of your file. The path they show is Karg
 
 A `.kt` file without a front matter inside a project is different: `kargo run tools/migrate.kt` compiles it against the project's code and dependencies instead, without adding it to the build. See [Run a single file](../multiple-programs/#run-a-single-file).
 
+## Use a script as a task or hook
+
+Inside a project, a script is the recommended way to write a [task or a hook plugin](../tasks-and-plugins/): it runs the same on Windows, macOS and Linux, so there is no `windows-run` or `.bat` twin to keep. Point `script` at the file in `kargo.toml`:
+
+```toml title="kargo.toml"
+[tasks]
+gen = { script = "scripts/gen.kts", description = "Generate code", hooks = ["pre-build"] }
+
+[plugins.notify]
+script = "scripts/notify.kts"
+hooks = ["post-build"]
+```
+
+```console
+$ kargo task gen
+   Running task `gen`
+   Compiling `gen.kts`
+wrote generated/Version.kt
+```
+
+Kargo runs the file as `kargo script` would, with the project root (or the task's `cwd`) as the working directory and the task's or hook's environment: `KARGO_TASK`, `KARGO_HOOK`, `KARGO_PKG_*`, `KARGO_CLASSPATH`, `KARGO_PACKAGE`, the project's `[env]` and `.env` files, and the `env` of the task or plugin. The words after the task name are the script's `args`; a hook plugin's `args` come first, and the hook name is always last. A script that exits with a non-zero code or throws fails the task or the build.
+
+The script still takes its dependencies, Kotlin version and JDK from its own header, not from the project's `kargo.toml`. It compiles on its first run and starts from [the cache](#how-runs-are-cached) after that, so a `pre-build` script costs a JVM startup, not a compile. See [Tasks and plugins](../tasks-and-plugins/#kotlin-scripts) for the keys and a hook example.
+
 ## Editors
 
-The [language server](../editors/#language-server) treats a `.kts` file as a Kargo script when it lies outside any project, or when its shebang runs `kargo script`. A `.kts` file inside a project is a build script that Kargo does not run, so the server leaves it alone unless its shebang says otherwise. In Zed, a folder with only scripts needs a setting to start the server; see [Kargo scripts in Zed](../editors/#kargo-scripts-in-zed).
+The [language server](../editors/#language-server) treats a `.kts` file as a Kargo script when it lies outside any project, when its shebang runs `kargo script`, or when the project's `kargo.toml` runs it as the `script` of a task or hook plugin. Any other `.kts` file inside a project is a build script that Kargo does not run, so the server leaves it alone unless its shebang says otherwise. In Zed, a folder with only scripts needs a setting to start the server; see [Kargo scripts in Zed](../editors/#kargo-scripts-in-zed).
 
 For a Kargo script, the server completes the annotation names, the values of `@file:Jdk`, `@file:Framework` and `@file:Repository`, the coordinates and versions of `@file:DependsOn`, and the versions of `@file:Kotlin`. It shows what each annotation means on hover, and it reports a header that `kargo script` would reject, such as a dependency without a version, as a diagnostic on that annotation.
 

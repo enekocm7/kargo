@@ -1012,7 +1012,7 @@ Each request gets a line when it is answered, with its method, id and time, and 
 
 ### Kotlin scripts
 
-A `.kts` file outside a project, or one whose shebang runs `kargo script`, is a [Kotlin script](../scripts/). For those, `kargo lsp` completes the `@file:` annotations and their values, shows what each annotation means on hover, and reports a header that `kargo script` would reject as a diagnostic on that annotation. The rest of the file goes to the Kotlin server, as for any other Kotlin file, and the libraries of its `@file:DependsOn` declarations are loaded for that script alone. See [Kotlin scripts](../scripts/#editors).
+A `.kts` file outside a project, one whose shebang runs `kargo script`, or one that a task or hook plugin names as its `script`, is a [Kotlin script](../scripts/). For those, `kargo lsp` completes the `@file:` annotations and their values, shows what each annotation means on hover, and reports a header that `kargo script` would reject as a diagnostic on that annotation. The rest of the file goes to the Kotlin server, as for any other Kotlin file, and the libraries of its `@file:DependsOn` declarations are loaded for that script alone. See [Kotlin scripts](../scripts/#editors).
 
 ## Completion and validation in `kargo.toml`
 

@@ -1,7 +1,8 @@
 //! Extensibility:
 //!
-//! * **Hook plugins** (`[plugins.x] command = "..."`) run at lifecycle hooks
-//!   with build information passed through `KARGO_*` environment variables.
+//! * **Hook plugins** (`[plugins.x] command = "..."`, or `script = "..."` for a Kotlin script that
+//!   `kargo script` runs) run at lifecycle hooks with build information passed through `KARGO_*`
+//!   environment variables.
 //! * **Subcommand plugins**: any `kargo-<name>` executable in `~/.kargo/bin` or
 //!   on `PATH` becomes `kargo <name>`, just like Cargo.
 //! * **Compiler plugins** (`[plugins.x] maven = "..."`) are handled by the build.
@@ -17,7 +18,6 @@ use crate::workspace::{Project, Workspace};
 use kargo_manifest::{Hook, ProcessPlugin};
 use kargo_util::config::Config;
 use kargo_util::process;
-use kargo_util::shell::Shell;
 
 /// Environment shared with tasks and plugins.
 pub fn base_env(ws: &Workspace, profile: &str) -> Vec<(String, String)> {
@@ -63,17 +63,28 @@ pub fn has_hook(ws: &Workspace, hook: Hook) -> bool {
     !tasks::tasks_for_hook(&manifest.tasks, hook).is_empty() || manifest.process_plugins.iter().any(|p| p.hooks.contains(&hook))
 }
 
-pub fn run_hook(shell: &Shell, ws: &Workspace, hook: Hook, env: &[(String, String)]) -> Result<()> {
+pub fn run_hook(config: &Config, ws: &Workspace, hook: Hook, env: &[(String, String)]) -> Result<()> {
+    let shell = config.shell();
     let manifest = ws.manifest();
     let mut env = env.to_vec();
     env.push(("KARGO_HOOK".to_owned(), hook.as_str().to_owned()));
 
     for task in tasks::tasks_for_hook(&manifest.tasks, hook) {
-        tasks::run(shell, ws.root(), &manifest.tasks, &task.name, &[], &env)?;
+        tasks::run(config, ws.root(), &manifest.tasks, &task.name, &[], &env)?;
     }
 
     for plugin in manifest.process_plugins.iter().filter(|p| p.hooks.contains(&hook)) {
         shell.status("Plugin", format!("{} ({hook})", plugin.name));
+        if let Some(script) = &plugin.script {
+            // The hook name is the last argument of a script, as it is of a command.
+            let mut args = plugin.platform_args().to_vec();
+            args.push(hook.as_str().to_owned());
+            let mut env = env.clone();
+            env.extend(plugin.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let what = format!("plugin `{}`", plugin.name);
+            tasks::run_kotlin_script(config, ws.root(), script, &args, ws.root(), &env, &what)?;
+            continue;
+        }
         let mut cmd = plugin_command(ws.root(), plugin)?;
         cmd.args(plugin.platform_args())
             .arg(hook.as_str())
@@ -181,7 +192,11 @@ pub fn run_subcommand(config: &Config, name: &str, program: &Path, args: &[Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kargo_util::shell::Verbosity;
+    use kargo_util::shell::{Shell, Verbosity};
+
+    fn quiet() -> Config {
+        Config::new(std::env::temp_dir().join("kargo-plugins-tests"), Shell::new(Verbosity::Quiet))
+    }
 
     fn workspace(dir: &Path, extra: &str) -> Workspace {
         std::fs::write(dir.join("kargo.toml"), format!("[package]\nname = \"p\"\nversion = \"1.0\"\n{extra}")).unwrap();
@@ -213,7 +228,7 @@ mod tests {
                 "[tasks]\ngen = {{ run = '{task_cmd}', hooks = [\"pre-build\"] }}\n[plugins.notify]\ncommand = \"./{plugin}\"\nhooks = [\"post-build\"]\nenv = {{ EXTRA = \"yes\" }}\n"
             ),
         );
-        let shell = Shell::new(Verbosity::Quiet);
+        let shell = quiet();
         let env = base_env(&ws, "dev");
         run_hook(&shell, &ws, Hook::PreBuild, &env).unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("task.txt")).unwrap().trim(), "pre-build p");
@@ -234,7 +249,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let ws = workspace(dir.path(), &format!("[plugins.bad]\ncommand = \"./{cmd}\"\nhooks = [\"pre-test\"]\n"));
-        let err = run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PreTest, &[]).unwrap_err();
+        let err = run_hook(&quiet(), &ws, Hook::PreTest, &[]).unwrap_err();
         assert!(err.to_string().contains("plugin `bad` failed"), "{err}");
     }
 
@@ -242,13 +257,13 @@ mod tests {
     fn command_with_spaces_that_cannot_start_hints_at_args() {
         let dir = tempfile::tempdir().unwrap();
         let ws = workspace(dir.path(), "[plugins.lint-hook]\ncommand = \"./no such program --flag\"\nhooks = [\"post-build\"]\n");
-        let err = run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &[]).unwrap_err();
+        let err = run_hook(&quiet(), &ws, Hook::PostBuild, &[]).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("failed to start plugin `lint-hook`"), "{message}");
         assert!(message.contains("program name") && message.contains("`args = [...]`"), "{message}");
 
         let ws = workspace(dir.path(), "[plugins.lint-hook]\ncommand = \"./missing\"\nhooks = [\"post-build\"]\n");
-        let err = run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &[]).unwrap_err();
+        let err = run_hook(&quiet(), &ws, Hook::PostBuild, &[]).unwrap_err();
         assert!(!err.to_string().contains("program name"), "{err}");
     }
 
@@ -282,7 +297,7 @@ windows-command = \"./plugin.bat\"
 hooks = [\"post-build\"]
 ",
         );
-        run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &[]).unwrap();
+        run_hook(&quiet(), &ws, Hook::PostBuild, &[]).unwrap();
         let expected = if cfg!(windows) { "windows post-build" } else { "unix post-build" };
         assert_eq!(std::fs::read_to_string(dir.path().join("plugin.txt")).unwrap().trim(), expected);
     }
@@ -315,8 +330,23 @@ hooks = [\"post-build\"]
 ",
         );
         let env = [("KARGO_HOOK".to_owned(), "post-build".to_owned())];
-        run_hook(&Shell::new(Verbosity::Quiet), &ws, Hook::PostBuild, &env).unwrap();
+        run_hook(&quiet(), &ws, Hook::PostBuild, &env).unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("plugin.txt")).unwrap().trim(), "post-build post-build");
+    }
+
+    #[test]
+    fn a_missing_plugin_script_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(
+            dir.path(),
+            "[plugins.notify]
+script = \"scripts/notify.kts\"
+hooks = [\"post-build\"]
+",
+        );
+        assert!(has_hook(&ws, Hook::PostBuild));
+        let err = run_hook(&quiet(), &ws, Hook::PostBuild, &[]).unwrap_err().to_string();
+        assert!(err.contains("plugin `notify`: script `scripts") && err.contains("not found"), "{err}");
     }
 
     #[test]

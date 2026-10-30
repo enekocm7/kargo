@@ -236,7 +236,8 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `path-dependencies` | Each path dependency: the manifest key (`name`), the `package` it points to, `scope`, `dev`, the `target` it is limited to (or `null`), and whether it is `exported` and brings its `test-fixtures`. Together they are the module graph |
 | `bins` | The [`[[bin]]`](../manifest/#bin) tables, with `path` made absolute |
 | `examples` | The `examples/<name>.kt` programs, with their `name` and `path` |
-| `tasks` | Each [task](../../guides/tasks-and-plugins/): `name`, `description`, the commands it runs on this platform (`run`) and `depends-on` |
+| `tasks` | Each [task](../../guides/tasks-and-plugins/): `name`, `description`, the commands it runs on this platform (`run`), its Kotlin `script` (an absolute path, else `null`) and `depends-on` |
+| `hook-plugins` | Each hook plugin: `name`, its `command` (`null` for a script), its `script` (an absolute path, else `null`), `args` on this platform and `hooks` |
 | `generators` | Each [`[[generate]]` step](../../guides/code-generation/): `name`, `kind`, `targets`, `inputs`, `after`, how it works (`run` with its commands, `tool` with the coordinates, or `builtin` with `build-config` or `protobuf`) its `output-dir`, `target/generated/<profile>/<name>`, and the `roots` in it that hold the sources or resources |
 | `targets` | One entry per enabled target |
 

@@ -81,7 +81,7 @@ pub fn tasks() -> Vec<CompletionCandidate> {
             new
         })
         .map(|t| {
-            let help = t.description.clone().unwrap_or_else(|| t.platform_run().join(" && "));
+            let help = t.description.clone().unwrap_or_else(|| t.summary());
             CompletionCandidate::new(&t.name).help(Some(help.into())).tag(Some("Tasks".into()))
         })
         .collect()

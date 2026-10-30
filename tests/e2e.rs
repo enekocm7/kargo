@@ -662,6 +662,56 @@ fun main() = runBlocking {
     t.kargo("deps").args(["build", "--locked"]).assert().success();
 }
 
+/// A task and a hook plugin written as Kotlin scripts get the task's or hook's environment, the working
+/// directory, the arguments after `--` (or the hook name), and the build lock of the build that runs them.
+#[test]
+fn tasks_and_plugins_run_kotlin_scripts() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["scripted"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("scripted/kargo.toml")).unwrap();
+    t.write(
+        "scripted/kargo.toml",
+        &format!(
+            "{manifest}
+[tasks]
+hello = {{ script = \"scripts/hello.kts\", env = {{ CHANNEL = \"releases\" }} }}
+notes = {{ script = \"scripts/notes.kt\", depends-on = [\"hello\"] }}
+boom = {{ script = \"scripts/boom.kts\" }}
+
+[plugins.notify]
+script = \"scripts/notify.kts\"
+args = [\"--quiet\"]
+hooks = [\"post-build\"]
+env = {{ CHANNEL = \"builds\" }}
+"
+        ),
+    );
+    t.write(
+        "scripted/scripts/hello.kts",
+        "java.io.File(\"hello.txt\").writeText(listOf(System.getenv(\"KARGO_TASK\"), System.getenv(\"KARGO_PKG_NAME\"), System.getenv(\"CHANNEL\"), args.joinToString(\"|\")).joinToString(\" \"))\n",
+    );
+    t.write(
+        "scripted/scripts/notes.kt",
+        "/* kargo\n*/\nfun main(args: Array<String>) {\n    println(\"notes \" + args.joinToString(\"|\"))\n}\n",
+    );
+    t.write("scripted/scripts/boom.kts", "throw IllegalStateException(\"boom\")\n");
+    t.write(
+        "scripted/scripts/notify.kts",
+        "java.io.File(\"notify.txt\").writeText(args.joinToString(\"|\") + \" \" + System.getenv(\"CHANNEL\") + \" \" + (System.getenv(\"KARGO_BUILD_LOCK\") != null))\n",
+    );
+
+    t.kargo("scripted").args(["task", "hello", "--", "a", "b"]).assert().success();
+    assert_eq!(std::fs::read_to_string(t.dir.path().join("scripted/hello.txt")).unwrap(), "hello scripted releases a|b");
+    // Arguments go to the requested task only, and a `.kt` file runs as `kargo script` runs it.
+    t.kargo("scripted").args(["notes", "x"]).assert().success().stdout(predicate::str::diff("notes x\n").normalize());
+    assert_eq!(std::fs::read_to_string(t.dir.path().join("scripted/hello.txt")).unwrap(), "hello scripted releases ");
+    t.kargo("scripted").args(["task", "boom"]).assert().code(101).stderr(predicate::str::contains("task `boom` failed"));
+
+    t.kargo("scripted").arg("build").assert().success();
+    assert_eq!(std::fs::read_to_string(t.dir.path().join("scripted/notify.txt")).unwrap(), "--quiet|post-build builds true");
+}
+
 /// An `[source-sets.shared]` of the JVM and Wasm: its `actual` matches the `expect` of `src/`, and the
 /// set's tests run on both targets.
 #[test]

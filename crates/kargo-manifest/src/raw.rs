@@ -1772,6 +1772,7 @@ struct RawPlugin {
     options: BTreeMap<String, String>,
     command: Option<String>,
     windows_command: Option<String>,
+    script: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     windows_args: Option<Vec<String>>,
@@ -1787,6 +1788,7 @@ struct RawTask {
     description: Option<String>,
     run: Option<Value>,
     windows_run: Option<Value>,
+    script: Option<String>,
     shell: Option<String>,
     #[serde(default)]
     depends_on: Vec<String>,
@@ -1856,6 +1858,15 @@ fn parse_size(key: &str, value: &str) -> Result<u64> {
     }
 }
 
+/// Checks the `script` of a task or plugin: a `.kts` script or a `.kt` file, which `kargo script` runs.
+fn parse_script(what: &str, script: &str) -> Result<PathBuf> {
+    let is_kotlin = Path::new(script).extension().is_some_and(|ext| ext == "kts" || ext == "kt");
+    if script.trim().is_empty() || !is_kotlin {
+        bail!("{what}: `script` must be the path of a .kts script or a .kt file, not `{script}`");
+    }
+    Ok(PathBuf::from(script))
+}
+
 fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
     let mut tasks = BTreeMap::new();
     for (name, value) in table {
@@ -1868,6 +1879,14 @@ fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
             _ => bail!("invalid task `{name}`: expected a command string or a table"),
         };
         let what = format!("task `{name}`");
+        let script = raw.script.as_deref().map(|s| parse_script(&what, s)).transpose()?;
+        if script.is_some()
+            && let Some((_, key)) = [(raw.run.is_some(), "run"), (raw.windows_run.is_some(), "windows-run"), (raw.shell.is_some(), "shell")]
+                .into_iter()
+                .find(|(given, _)| *given)
+        {
+            bail!("task `{name}`: `script` runs a Kotlin script, so it cannot go with `{key}`; use `script` or `run`, not both");
+        }
         let run = parse_run(&what, "run", raw.run)?.unwrap_or_default();
         let windows_run = parse_run(&what, "windows-run", raw.windows_run)?;
         if windows_run.is_some() && run.is_empty() {
@@ -1880,8 +1899,8 @@ fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
                 format!("task `{name}`: unknown shell `{s}`; expected one of {}", known.join(", "))
             })?),
         };
-        if run.is_empty() && raw.depends_on.is_empty() {
-            bail!("task `{name}` has nothing to do: add `run` or `depends-on`");
+        if run.is_empty() && script.is_none() && raw.depends_on.is_empty() {
+            bail!("task `{name}` has nothing to do: add `run`, `script` or `depends-on`");
         }
         tasks.insert(
             name.clone(),
@@ -1890,6 +1909,7 @@ fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
                 description: raw.description,
                 run,
                 windows_run,
+                script,
                 shell,
                 depends_on: raw.depends_on,
                 env: raw.env,
@@ -1906,6 +1926,17 @@ fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
         }
     }
     Ok(tasks)
+}
+
+/// Makes the `script` of an inherited plugin or task absolute, so it stays the workspace's file
+/// whichever member runs it.
+fn absolutize_script(value: &mut Value, root: &Path) {
+    if let Some(Value::String(script)) = value.get("script")
+        && !Path::new(script).is_absolute()
+    {
+        let absolute = root.join(script).to_string_lossy().into_owned();
+        value.as_table_mut().expect("a plugin or task is a table").insert("script".to_owned(), Value::String(absolute));
+    }
 }
 
 /// Whether `value` is an inheritance marker: `{ workspace = true }`.
@@ -1953,6 +1984,9 @@ pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManife
                     value.as_table_mut().expect("a plugin is a table").insert("command".to_owned(), Value::String(absolute));
                 }
             }
+            if section == "plugins" || section == "tasks" {
+                absolutize_script(&mut value, &workspace.root);
+            }
             entries.insert(key, value);
         }
         // A task inherited from the workspace brings the workspace tasks it depends on.
@@ -1972,7 +2006,9 @@ pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManife
                     break;
                 }
                 for dep in missing {
-                    entries.insert(dep.clone(), workspace.raw_tasks[&dep].clone());
+                    let mut task = workspace.raw_tasks[&dep].clone();
+                    absolutize_script(&mut task, &workspace.root);
+                    entries.insert(dep, task);
                 }
             }
         }
@@ -2703,8 +2739,8 @@ impl RawManifest {
         let mut process_plugins = Vec::new();
         for (name, value) in &self.plugins {
             let raw: RawPlugin = value.clone().try_into().with_context(|| format!("invalid plugin `{name}`"))?;
-            match (&raw.maven, &raw.command) {
-                (Some(maven), None) => {
+            match (&raw.maven, &raw.command, &raw.script) {
+                (Some(maven), None, None) => {
                     if !raw.hooks.is_empty()
                         || !raw.args.is_empty()
                         || !raw.env.is_empty()
@@ -2712,7 +2748,7 @@ impl RawManifest {
                         || raw.windows_args.is_some()
                     {
                         bail!(
-                            "plugin `{name}`: `hooks`, `args`, `env`, `windows-command` and `windows-args` only apply to `command` plugins"
+                            "plugin `{name}`: `hooks`, `args`, `env`, `windows-command` and `windows-args` only apply to `command` and `script` plugins"
                         );
                     }
                     let artifact: CoordSpec = maven.parse().with_context(|| format!("invalid plugin `{name}`"))?;
@@ -2724,16 +2760,31 @@ impl RawManifest {
                     }
                     compiler_plugins.push(CompilerPlugin { name: name.clone(), artifact, id: raw.id, options: raw.options });
                 }
-                (None, Some(command)) => {
+                (None, command, script) => {
+                    if command.is_some() && script.is_some() {
+                        bail!("plugin `{name}`: specify either `command` or `script`, not both");
+                    }
+                    if command.is_none() && script.is_none() {
+                        if raw.windows_command.is_some() {
+                            bail!("plugin `{name}`: `windows-command` needs a `command` to use on other platforms");
+                        }
+                        bail!("plugin `{name}`: specify `maven = \"group:artifact:version\"`, `command = \"...\"` or `script = \"...\"`");
+                    }
                     if raw.id.is_some() || !raw.options.is_empty() {
                         bail!("plugin `{name}`: `id` and `options` only apply to `maven` compiler plugins");
                     }
+                    let kind = if script.is_some() { "script" } else { "command" };
                     if raw.hooks.is_empty() {
-                        bail!("plugin `{name}`: a `command` plugin needs at least one hook (e.g. hooks = [\"post-build\"])");
+                        bail!("plugin `{name}`: a `{kind}` plugin needs at least one hook (e.g. hooks = [\"post-build\"])");
                     }
+                    if script.is_some() && raw.windows_command.is_some() {
+                        bail!("plugin `{name}`: `windows-command` goes with `command`; a `script` runs the same on every platform");
+                    }
+                    let script = script.as_deref().map(|s| parse_script(&format!("plugin `{name}`"), s)).transpose()?;
                     process_plugins.push(ProcessPlugin {
                         name: name.clone(),
-                        command: command.clone(),
+                        command: command.clone().unwrap_or_default(),
+                        script,
                         windows_command: raw.windows_command,
                         args: raw.args,
                         windows_args: raw.windows_args,
@@ -2741,11 +2792,7 @@ impl RawManifest {
                         env: raw.env,
                     });
                 }
-                (Some(_), Some(_)) => bail!("plugin `{name}`: specify either `maven` or `command`, not both"),
-                (None, None) if raw.windows_command.is_some() => {
-                    bail!("plugin `{name}`: `windows-command` needs a `command` to use on other platforms")
-                }
-                (None, None) => bail!("plugin `{name}`: specify `maven = \"group:artifact:version\"` or `command = \"...\"`"),
+                (Some(_), ..) => bail!("plugin `{name}`: specify either `maven` or `command`/`script`, not both"),
             }
         }
 

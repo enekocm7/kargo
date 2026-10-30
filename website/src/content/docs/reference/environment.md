@@ -60,6 +60,7 @@ For tasks, hook plugins and `kargo-*` subcommands:
 
 | Variable | Value |
 |---|---|
+| `KARGO` | The path of the running `kargo` executable, so a task, hook or Kotlin script can run it again |
 | `KARGO_MANIFEST_DIR` | The project root (the workspace root for a `[workspace.tasks]` task run at the root) |
 | `KARGO_WORKSPACE_DIR` | The workspace root, in a workspace |
 | `KARGO_PKG_NAME`, `KARGO_PKG_VERSION`, `KARGO_PKG_GROUP` | From `[package]` |

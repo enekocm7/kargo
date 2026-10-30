@@ -108,7 +108,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         warnings::emit(ctx.shell(), ctx.project, ctx.ws, env.tracked_secret_warnings(ctx.ws.root()));
     }
     let env = hook_env(ctx, &opts.env)?;
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreTest, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreTest, &env)?;
     // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, warnings::ignored_files(ctx.ws));
 
@@ -169,7 +169,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     let ok = outcomes.iter().all(|(_, o)| *o == TargetOutcome::Passed);
     let mut env = env;
     env.push(("KARGO_TEST_RESULT".to_owned(), if ok { "success" } else { "failure" }.to_owned()));
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostTest, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostTest, &env)?;
     if opts.no_run {
         finished(ctx, start);
     }

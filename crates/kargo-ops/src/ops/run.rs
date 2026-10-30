@@ -326,7 +326,7 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
         TargetKind::Jvm => {
             let jvm = results.jvm.context("JVM build produced no output")?;
             let (main, mut classpath) = jvm_program(ctx, &jvm, &opts.program)?;
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
+            crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let hot_reload_state = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("hot-reload");
             if opts.hot_reload {
                 // The app reads its classes from a copy that changes only here, between builds: the
@@ -385,7 +385,7 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             cmd
         }
         TargetKind::Wasm => {
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
+            crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
             if wasm.environment == WasmEnvironment::Browser {
                 let configured = ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.port);
@@ -397,7 +397,7 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             cmd
         }
         TargetKind::Js => {
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
+            crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let js = results.js.context("there are no Kotlin/JS sources to run")?;
             if js.environment == JsEnvironment::Browser {
                 let configured = ctx.ws.manifest().targets.js.as_ref().and_then(|j| j.port);
@@ -415,12 +415,12 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
         TargetKind::Native => {
             let artifact =
                 if separate_native { build_native_program(ctx, &opts.program)? } else { native_artifact(ctx, &results, &opts.program)? };
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
+            crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             label = rel(&artifact);
             Command::new(&artifact)
         }
         TargetKind::Android => {
-            crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
+            crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let device = device.context("no Android device was chosen")?;
             if opts.android.watch {
                 // The app is installed and started; what keeps running is its log, which the next round replaces.
@@ -775,7 +775,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     let start = Instant::now();
     super::build::prepare_native_hooks(ctx, &[TargetKind::Native])?;
     let env = hook_env(ctx, &EnvOptions::default())?;
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreBuild, &env)?;
     let manifest = ctx.ws.manifest();
     manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let host = Host::current()?.konan_target.to_owned();
@@ -848,7 +848,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
         }
         _ => unreachable!("only `--main`, `--example` and a file link a separate executable"),
     };
-    crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PostBuild, &env)?;
+    crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostBuild, &env)?;
     finished(ctx, start);
     Ok(artifact)
 }
