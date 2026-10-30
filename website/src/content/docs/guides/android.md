@@ -199,7 +199,7 @@ Kargo can install the Android SDK the project needs, the way it installs a JDK. 
 android-sdk = "36"
 
 [target.android]
-namespace = "com.example.myapp"   # compile-sdk defaults to 36 now
+namespace = "com.example.myapp"   # compile-sdk defaults to android-sdk (36 here)
 ```
 
 ```console
