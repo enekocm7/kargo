@@ -2665,6 +2665,12 @@ fn doctor_outside_a_project_checks_the_machine_and_fixes_incomplete_installs() {
         assert_eq!(check[0]["fixable"], true);
     }
     assert_eq!(doctor_checks(&report, "repositories")[0]["message"], "not contacted (offline)");
+    // Android and Node.js are reported without a project too, but their absence is no problem.
+    for name in ["Android SDK", "Node.js", "package manager"] {
+        let check = doctor_checks(&report, name);
+        assert_eq!(check.len(), 1, "{name}: {report:#}");
+        assert_eq!(check[0]["status"], "ok", "{name}: {report:#}");
+    }
     // Outside a project there are no project checks.
     assert!(report["checks"].as_array().unwrap().iter().all(|c| c["section"] != "project"), "{report:#}");
 
@@ -2710,6 +2716,39 @@ fn doctor_reports_project_problems_and_fails() {
     let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     let lock = doctor_checks(&report, "kargo.lock");
     assert_eq!(lock[0]["message"], "does not lock com.example:lib", "{report:#}");
+}
+
+#[test]
+fn doctor_fails_a_node_project_without_node_or_a_package_manager() {
+    let p = Project::new();
+    let java_home = fake_java_home(p.home.path(), 21);
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "web",
+            "[target.wasm]
+environment = \"js\"
+
+[target.wasm.npm-dependencies]
+left-pad = \"1.3.0\"
+",
+        ),
+    );
+    p.file(
+        "src/main.kt",
+        "fun main() {}
+",
+    );
+
+    // Only the fake JDK is on PATH, so neither node nor a package manager is found.
+    let out = doctor(&p, &java_home).env("PATH", java_home.join("bin")).args(["--format", "json"]).assert().code(1);
+    let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    for name in ["Node.js", "package manager"] {
+        let check = doctor_checks(&report, name);
+        assert_eq!(check.len(), 1, "{name}: {report:#}");
+        assert_eq!(check[0]["status"], "error", "{name}: {report:#}");
+    }
+    assert!(doctor_checks(&report, "package manager")[0]["fix"].as_str().unwrap().contains("pnpm or bun"), "{report:#}");
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3887,7 +3926,7 @@ fn target_add_js_writes_a_node_target() {
     p.file("kargo.toml", &manifest("app", "[target.jvm]\n"));
     p.kargo().args(["target", "add", "js"]).assert().success();
     let text = p.read("kargo.toml");
-    assert!(text.contains("[target.js]\nenvironment = \"node\"\n"), "{text}");
+    assert!(text.contains("[target.js]\nenvironment = \"js\"\n"), "{text}");
     p.kargo()
         .args(["target", "list"])
         .assert()
