@@ -20,8 +20,8 @@ Kargo is a Cargo workspace of focused crates:
 | `kargo-util` | Terminal output, configuration (including `config.toml`: mirrors, proxy, CA bundle, vendoring, jobs), the number of parallel jobs, the HTTP agent, filesystem/hash/process helpers |
 | `kargo-maven` | Coordinates, Maven versions and ranges, POMs, Gradle module metadata, downloads, the resolver, uploads (`deploy.rs`) and the Maven Central Portal (`central.rs`) |
 | `kargo-manifest` | The `kargo.toml` model, validation and format-preserving edits |
-| `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, JetBrains Runtime for Compose hot reload, the Kotlin compiler, Kotlin/Native, Gradle distributions, the Android SDK, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
-| `kargo-compiler` | JVM/Wasm/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
+| `kargo-toolchain` | JDK detection and Temurin downloads, GraalVM downloads and the reachability metadata repository, JetBrains Runtime for hot reload, the Kotlin compiler, Kotlin/Native, Gradle distributions, the Android SDK, Kotlin language servers and the Kotlin debug adapter, browsers, archives |
+| `kargo-compiler` | JVM/Wasm/JS/Native compiler drivers, the compiler daemon, incremental compilation, ABI fingerprints of jars, jar packaging, entry points, test reports, compiler diagnostics |
 | `kargo-ops` | Build engine, lockfile, frameworks, tasks, plugins, `[[generate]]` steps (`generate.rs`), Android/Gradle, project warnings, publications (`publication.rs`) and GnuPG signing (`signing.rs`), npm installs (`npm.rs`), `kargo self` (`ops/self_update.rs`), `kargo import` (`ops/import/`), Kotlin declarations from TypeScript ones (`dts/`), C interop of the Native target (`native_interop.rs`, `pkg_config.rs`), Compose Desktop and the `Res` class of Compose resources (`compose/`), the benchmark results, their comparison and report (`bench.rs`), commands |
 | `kargo-lsp` | `kargo lsp`: the message loop in front of a Kotlin language server (`server.rs`), Kargo's own Kotlin server (`kotlin/`: the lexer, a parser for declarations and scopes in `syntax.rs`, the indexes in `index.rs`, name resolution and type inference in `resolve.rs`, completion, hover, navigation and rename in `features.rs`, code actions for Kotlin files in `actions.rs`, the standard library and sources jars in `library.rs`, libraries without sources as generated stubs in `compiled.rs`, documented from their Javadoc jars (standard doclet and Dokka pages) in `javadoc.rs`, read from class files in `classfile.rs` and from Kotlin metadata and klibs in `kmetadata.rs`, its message loop in `server.rs`), `kargo.toml` diagnostics, completion and hover (`manifest.rs`, `schema.rs`), Maven coordinate and version completion and newer-version hints (`deps.rs`), code actions and the `kargo/addDependency` / `kargo/addTarget` commands (`actions.rs`), `workspace.json`, `kls-classpath` and runnables from `kargo metadata` (`project.rs`), check on save (`check.rs`), the `kargo dap` debug adapter (`dap.rs`), Zed tasks for `kargo ide --zed` (`zed.rs`) |
 | `kargo` | The CLI binary |
@@ -101,11 +101,15 @@ cargo build --release --target wasm32-wasip2   # the extension Zed builds
 
 To try it, run *zed: install dev extension* in Zed and pick `editors/zed`. The *Zed extension* workflow formats, tests, builds and lints it on every change to `editors/zed`.
 
-## The VS Code extension
+## The Emacs package
 
 The [Emacs](../../guides/editors/#emacs) package in `editors/emacs` is Emacs Lisp for Emacs 29.1 or newer. `kargo.el` runs the commands through `compile`, `kargo-messages.el` reads their `--message-format json` output, `kargo-test.el` runs tests and lists the results, and `kargo-eglot.el`, `lsp-kargo.el`, `kargo-flymake.el`, `kargo-dape.el` and `kargo-transient.el` connect Eglot, lsp-mode, Flymake, Dape and Transient. `test/kargo-tests.el` runs with `emacs -Q --batch -L . -l test/kargo-tests.el -f ert-run-tests-batch-and-exit`: it needs no Kargo binary, since the messages are fixtures and the tests that run a command use a shell script that prints one, and it tests the lsp-mode and Dape files when those packages are installed. An Emacs workflow byte-compiles the package and runs the tests on every change to `editors/emacs`.
 
+## The Neovim plugin
+
 The [Neovim](../../guides/editors/#neovim) plugin in `editors/neovim` is plain Lua for Neovim 0.11 or newer, with no plugin dependencies of its own. `lsp/kargo.lua` is the server config, `lua/kargo/` the `:Kargo` command and its nvim-dap setup, and `lua/neotest-kargo/` the neotest adapter. `tests/run.lua` runs with `nvim --headless -u NONE -l tests/run.lua`: it stubs neotest, so it needs neither neotest nor a Kargo binary, and it reads fixture Kotlin sources and `--message-format json` output. A Neovim workflow runs the tests on every change to `editors/neovim`.
+
+## The VS Code extension
 
 The [Visual Studio Code](../../guides/editors/#visual-studio-code) extension in `editors/vscode` is a TypeScript project built with `tsc` against `@types/vscode`, using `vscode-languageclient` for `kargo lsp`. `src/extension.ts` activates in a folder with a `kargo.toml`, and each module does one part: `servers.ts` (the language server), `tasks.ts` (the `kargo` tasks and their terminal, which reads the compiler messages), `testing.ts` (the test explorer), `codeLens.ts` and `kotlinScan.ts` (the Run and Debug buttons), `debug.ts` (`kargo dap`), `actions.ts` and `selection.ts` (the commands and the status bar), `project.ts` and `metadata.ts` (`kargo metadata --no-deps`), and `maven.ts` (the dependency search).
 
@@ -133,3 +137,5 @@ npm run build      # static site in website/dist
 ```
 
 Pages are Markdown files in `website/src/content/docs/`. The sidebar is configured in `website/astro.config.mjs`. It groups pages by task (build and test, targets, frameworks, packaging, toolchains and CI, editors, migration, reference), not by folder, so a page's URL and its sidebar group can differ.
+
+A change that users can see is documented on this website in the same pull request. `README.md` is not a second copy of these pages: it is a short landing page (and the crate's page on crates.io) with the pitch, the install commands, a small `kargo.toml`, the targets and frameworks, a few everyday commands and links here. Update it only for headline changes, such as a new target or framework, new install commands or a change to one of the commands it lists, and keep the details on the website.

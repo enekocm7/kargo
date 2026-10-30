@@ -16,7 +16,7 @@ Design points that shape most changes:
 - **Kotlin/JS** (`[target.js]`) is a separate target from Wasm, also without Gradle.
 - **Built-in frameworks** (`[frameworks]`: serialization, coroutines, compose, ktor, lombok, spring-boot) contribute libraries, compiler plugins and compiler flags per target.
 
-Users get the full picture from `README.md` and the website in `website/`. Read them before changing behavior.
+Users get the full picture from the website in `website/`; `README.md` is a short landing page that links to it. Read the website before changing behavior.
 
 ## Repository layout
 
@@ -124,10 +124,10 @@ Match the surrounding code. In particular:
 
 **Every change that affects what a user sees, types, configures or gets must update the documentation in the same change.** That means commands, flags, aliases and their output; `kargo.toml` keys and defaults; frameworks; environment variables; the lockfile; the project layout; toolchains; tasks and plugins; target behavior; error messages worth explaining; and default versions.
 
-The docs are two things that must stay consistent:
+The docs are two things:
 
-1. **The website**, in `website/src/content/docs/` (Markdown, rendered by Starlight). This is the full documentation.
-2. **`README.md`**, which mirrors the headline content: the command table, `kargo.toml` overview, project layout, environment table and the crate table. Update its matching section whenever you update the website page for the same thing.
+1. **The website**, in `website/src/content/docs/` (Markdown, rendered by Starlight). This is the full documentation, and where every change is documented.
+2. **`README.md`**, a short landing page (also the crates.io page): the pitch, install commands, a small `kargo.toml`, the targets and frameworks, a handful of everyday commands and links to the website. It does not mirror the docs. Update it only for headline changes: a new target or framework, a changed install command, an everyday command (`new`, `build`, `run`, `test`, `add`, `package`, `publish`) that changes what its row says, or a page it links to that moves. Keep it short, and put details on the website instead.
 
 Refactors, internal tests and performance work with no visible effect don't need docs. Say so in your summary rather than leaving it implicit.
 
@@ -135,17 +135,17 @@ Refactors, internal tests and performance work with no visible effect don't need
 
 | If you change...                                                  | Update (under `website/src/content/docs/` unless noted)                                                                                                                                    |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A command, flag, alias or its output (`src/cli.rs`, `ops/`)       | `reference/commands.md`, the `README.md` command table, and the guide that uses it                                                                                                         |
-| A `kargo.toml` key, default or validation rule                    | `reference/manifest.md`, the `README.md` `kargo.toml` section, the relevant guide, and the JSON Schema `website/public/schemas/kargo.json`                                                 |
-| A built-in framework or its `kargo new --with` template           | `guides/frameworks.md`, the framework's own guide (`ktor.md`, `spring-boot.md`, `compose.md`), `reference/manifest.md`; keep the `--with` help text in `src/cli.rs` and the README in sync |
-| An environment variable Kargo reads or sets                       | `reference/environment.md` and the `README.md` environment table                                                                                                                           |
+| A command, flag, alias or its output (`src/cli.rs`, `ops/`)       | `reference/commands.md` and the guide that uses it                                                                                                         |
+| A `kargo.toml` key, default or validation rule                    | `reference/manifest.md`, the relevant guide, and the JSON Schema `website/public/schemas/kargo.json`                                                 |
+| A built-in framework or its `kargo new --with` template           | `guides/frameworks.md`, the framework's own guide (`ktor.md`, `spring-boot.md`, `compose.md`), `reference/manifest.md`; keep the `--with` help text in `src/cli.rs` in sync; a new framework also goes in the `README.md` list |
+| An environment variable Kargo reads or sets                       | `reference/environment.md`                                                                                                                           |
 | The lockfile format or resolution behavior                        | `reference/lockfile.md`, `guides/dependencies.md`                                                                                                                                          |
-| JDK or Kotlin/Native toolchain handling                           | `guides/toolchains.md`, `guides/native.md`, the `README.md` toolchains section                                                                                                             |
+| JDK or Kotlin/Native toolchain handling                           | `guides/toolchains.md`, `guides/native.md`                                                                                                             |
 | Tasks, hooks or plugins                                           | `guides/tasks-and-plugins.md`, `reference/environment.md` if hook variables change                                                                                                         |
-| A target (Wasm, JS, Native, Android, multiplatform)               | `guides/wasm.md`, `guides/js.md`, `guides/native.md`, `guides/android.md`, `guides/multiplatform.md`                                                                                                       |
+| A target (Wasm, JS, Native, Android, multiplatform)               | `guides/wasm.md`, `guides/js.md`, `guides/native.md`, `guides/android.md`, `guides/multiplatform.md`; a new target also goes in the `README.md` targets table                                                                                                       |
 | Test running or reporting                                         | `guides/testing.md`                                                                                                                                                                        |
 | Benchmarks (`kargo bench`, `[bench]`, `benches/`)                 | `guides/benchmarking.md`, `reference/commands.md`, `reference/manifest.md` (`[bench]`, `[frameworks] benchmark`), `guides/frameworks.md`, `guides/ci.md` if the CI advice changes                                                  |
-| Source layout or generated project files                          | `getting-started/project-layout.md`, `getting-started/quick-start.md`, the `README.md` layout block                                                                                        |
+| Source layout or generated project files                          | `getting-started/project-layout.md`, `getting-started/quick-start.md`                                                                                        |
 | JVM application formats (`--format jlink`, `native-image`, `installer`) or GraalVM | `guides/distributing.md`, `reference/manifest.md` (`[package.*]`, `[toolchain] graalvm`), `guides/toolchains.md`, `reference/commands.md` |
 | Install or build prerequisites                                    | `getting-started/installation.md`                                                                                                                                                          |
 | Exit codes, `--locked`, `--offline` or other CI-relevant behavior | `guides/ci.md`                                                                                                                                                                             |
@@ -157,10 +157,10 @@ Refactors, internal tests and performance work with no visible effect don't need
 | The Emacs package (`editors/emacs`) | The Emacs section of `guides/editors.md`, and the rest of that page where it mentions Emacs |
 | The VS Code extension (`editors/vscode`) | The Visual Studio Code section of `guides/editors.md`, and the rest of that page where it mentions the extension (its test explorer and debugging too)                                                          |
 | The Neovim plugin (`editors/neovim`) | The Neovim section of `guides/editors.md`, and the rest of that page where it mentions Neovim                                                                                                                 |
-| Release assets, installers, `kargo self` or package manager files | `getting-started/installation.md`, `reference/commands.md` (`kargo self`), `reference/contributing.md` (Releases), `reference/environment.md`, the `README.md` Install section and `guides/ci.md` |
+| Release assets, installers, `kargo self` or package manager files | `getting-started/installation.md`, `reference/commands.md` (`kargo self`), `reference/contributing.md` (Releases), `reference/environment.md`, `guides/ci.md`, and the `README.md` Install section if the install commands change |
 | A common failure or workaround                                    | `reference/faq.md`                                                                                                                                                                         |
-| Crates added, removed or re-scoped; build or test workflow        | `reference/contributing.md`, the `README.md` Development section, and this file                                                                                                            |
-| A default version (Kotlin, JVM target, framework versions)        | Search `website/src`, `website/public/schemas/kargo.json` and `README.md` for the old value and update every occurrence                                                                   |
+| Crates added, removed or re-scoped; build or test workflow        | `reference/contributing.md` and this file                                                                                                            |
+| A default version (Kotlin, JVM target, framework versions)        | Search `website/src`, `website/public/schemas/kargo.json` and `README.md` (its `kargo.toml` example) for the old value and update every occurrence                                                                   |
 
 When unsure, `grep -rn` the old command, flag, key or value across `website/src/content` and `README.md` and fix every hit.
 
