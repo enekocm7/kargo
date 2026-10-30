@@ -258,6 +258,8 @@ $ kargo preview --density 2
     Rendered target/preview/com.example.counter.AppPreview.png
 ```
 
+When the project has no previews, `kargo preview --list` prints the note `no @Preview functions found` on stderr and nothing on stdout.
+
 Without names it renders every preview; `kargo preview AppPreview` renders one, by its function or qualified name. Each image is `--width` by `--height` density-independent pixels (800 by 600 by default) times `--density`. It is drawn off screen, without a window, so `kargo preview` also works on a CI machine without a display. `--out-dir` writes the files somewhere other than `target/preview/`.
 
 Previews come from the JVM sources (`src/` and `src-jvm/`) and are drawn by Compose Desktop, so the project needs the jvm target. Any of the Compose `@Preview` annotations counts. A preview with parameters (`@PreviewParameter`) or inside a class is left out.
