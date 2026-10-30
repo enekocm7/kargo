@@ -10,8 +10,9 @@
 //! on `@JsModule` declarations), then the user's `detekt.yml` or
 //! `[lint] config` files, which override it.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -96,7 +97,15 @@ pub fn lint(ctx: &BuildContext, opts: &LintOptions) -> Result<bool> {
         cmd.arg("--sun-misc-unsafe-memory-access=allow");
     }
     cmd.current_dir(root).arg("-jar").arg(&jar).args(args.to_args());
-    let status = process::status(ctx.shell(), &mut cmd, "detekt")?;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
+    let output = cmd.output().with_context(|| format!("failed to start detekt (`{}`)", cmd.get_program().to_string_lossy()))?;
+    // detekt prints absolute paths, while ktlint prints paths relative to the project root.
+    let stdout = relativize(&String::from_utf8_lossy(&output.stdout), root);
+    let stderr = relativize(&String::from_utf8_lossy(&output.stderr), root);
+    let _ = std::io::stdout().write_all(stdout.as_bytes());
+    let _ = std::io::stderr().write_all(stderr.as_bytes());
+    let status = output.status;
     match status.code() {
         Some(0) => {
             if let (true, Some(baseline)) = (opts.create_baseline, &baseline) {
@@ -109,6 +118,34 @@ pub fn lint(ctx: &BuildContext, opts: &LintOptions) -> Result<bool> {
         Some(3) => bail!("detekt rejected its configuration; fix the files it names above"),
         _ => bail!("detekt failed ({}); see its output above", process::describe_status(status)),
     }
+}
+
+/// Rewrites lines that start with a path under `root` to start with the path relative to it, with
+/// `/` separators, as ktlint prints them. Other lines are left alone.
+fn relativize(text: &str, root: &Path) -> String {
+    let root = root.to_string_lossy();
+    let root = root.strip_prefix(r"\\?\").unwrap_or(&root);
+    let root = root.replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        match relative_line(line, root) {
+            Some(line) => out.push_str(&line),
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+fn relative_line(line: &str, root: &str) -> Option<String> {
+    let line = line.strip_prefix(r"\\?\").unwrap_or(line);
+    // The path ends at the first `:` that is not a drive letter's.
+    let skip = if line.as_bytes().get(1) == Some(&b':') { 2 } else { 0 };
+    let end = skip + line[skip..].find(':')?;
+    let path = line[..end].replace('\\', "/");
+    let rest = path.get(..root.len()).filter(|head| head.eq_ignore_ascii_case(root)).map(|_| &path[root.len()..])?;
+    let rest = rest.strip_prefix('/')?;
+    Some(format!("{rest}{}", &line[end..]))
 }
 
 /// The user's configuration files: `[lint] config`, else `detekt.yml` if it exists.
@@ -185,6 +222,16 @@ mod tests {
         assert!(args.to_args().ends_with(&["--create-baseline".to_owned()]));
         args.baseline = None;
         assert!(!args.to_args().contains(&"--baseline".to_owned()));
+    }
+
+    #[test]
+    fn prints_paths_relative_to_the_project() {
+        let text = "Overall debt: 1min\n\nF:\\p\\tests\\GreetingTest.kt:9:1: Line too long [MaxLineLength]\n/p/src/Main.kt:3:4: x\n/other/Main.kt:1:1: y\n";
+        assert_eq!(
+            relativize(text, Path::new(r"F:\p")),
+            "Overall debt: 1min\n\ntests/GreetingTest.kt:9:1: Line too long [MaxLineLength]\n/p/src/Main.kt:3:4: x\n/other/Main.kt:1:1: y\n"
+        );
+        assert_eq!(relativize("/p/src/Main.kt:3:4: x\n", Path::new("/p")), "src/Main.kt:3:4: x\n");
     }
 
     #[test]
