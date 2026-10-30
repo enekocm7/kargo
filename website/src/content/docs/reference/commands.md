@@ -576,11 +576,12 @@ Kargo asks the registry's HTTP API itself, so no package manager has to be insta
 
 ## `kargo remove` (`rm`)
 
-Remove dependencies from `kargo.toml`.
+Remove dependencies or built-in frameworks from `kargo.toml`.
 
 ```sh
 kargo remove <group:artifact or key>... [--dev] [-t <target>]
 kargo remove --npm <package>... [--dev] [-t <wasm|js>]
+kargo remove -F <framework,...>
 ```
 
 | Option | Meaning |
@@ -588,6 +589,7 @@ kargo remove --npm <package>... [--dev] [-t <wasm|js>]
 | `--dev` | Remove from `[dev-dependencies]` (with `--npm`: from `[target.<target>.dev-npm-dependencies]`) |
 | `-t, --target <target>` | Remove from `[target.<target>.dependencies]` (with `--npm`: from the npm packages of that target) |
 | `--npm` | Remove npm packages. Without `-t`, the package is removed from the only target that declares it; its `@types/<package>` goes with it. An emptied table is removed |
+| `-F, --framework <list>` | Disable built-in frameworks instead: removes each from `[frameworks]`, whether it is written as `name = true` or as a table with options, and the `[frameworks]` table when nothing is left in it. A framework that is not enabled is an error, and nothing is written |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 Path dependencies are removed by their key: `kargo remove mathlib`. Without an option, the dependency is removed from `[dependencies]`.

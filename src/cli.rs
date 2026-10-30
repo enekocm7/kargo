@@ -712,6 +712,28 @@ struct AddArgs {
     package: OnePackageArg,
 }
 
+/// The arguments of `kargo remove`, in a struct of their own for the same reason as [`AddArgs`].
+#[derive(Debug, clap::Args)]
+struct RemoveArgs {
+    /// group:artifact or the manifest key; with --npm, the package name
+    #[arg(required_unless_present = "frameworks")]
+    names: Vec<String>,
+    /// Remove from [dev-dependencies] (with --npm: from [target.<target>.dev-npm-dependencies])
+    #[arg(long, conflicts_with = "frameworks")]
+    dev: bool,
+    /// Remove from [target.<target>.dependencies] (with --npm: from the wasm or js target's npm packages)
+    #[arg(short, long, value_enum, conflicts_with = "frameworks")]
+    target: Option<TargetArg>,
+    /// Remove npm packages from [target.wasm.npm-dependencies] or [target.js.npm-dependencies]
+    #[arg(long, conflicts_with = "frameworks")]
+    npm: bool,
+    /// Disable built-in frameworks instead (comma-separated)
+    #[arg(short = 'F', long = "framework", value_delimiter = ',', add = ArgValueCandidates::new(complete::frameworks))]
+    frameworks: Vec<String>,
+    #[command(flatten)]
+    package: OnePackageArg,
+}
+
 #[derive(Debug, Args)]
 #[command(long_about = "Show the jar of a resolved dependency and its API, as `javap` would, without finding the jar by hand.
 
@@ -1343,24 +1365,9 @@ enum Command {
     },
     /// Add dependencies or built-in frameworks to kargo.toml
     Add(AddArgs),
-    /// Remove dependencies from kargo.toml
+    /// Remove dependencies or built-in frameworks from kargo.toml
     #[command(visible_alias = "rm")]
-    Remove {
-        /// group:artifact or the manifest key; with --npm, the package name
-        #[arg(required = true)]
-        names: Vec<String>,
-        /// Remove from [dev-dependencies] (with --npm: from [target.<target>.dev-npm-dependencies])
-        #[arg(long)]
-        dev: bool,
-        /// Remove from [target.<target>.dependencies] (with --npm: from the wasm or js target's npm packages)
-        #[arg(short, long, value_enum)]
-        target: Option<TargetArg>,
-        /// Remove npm packages from [target.wasm.npm-dependencies] or [target.js.npm-dependencies]
-        #[arg(long)]
-        npm: bool,
-        #[command(flatten)]
-        package: OnePackageArg,
-    },
+    Remove(RemoveArgs),
     /// Show dependencies in kargo.toml that have newer versions
     Outdated {
         /// Only these dependencies (group:artifact or the manifest key)
@@ -2599,7 +2606,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
             | Command::Bench { .. }
             | Command::Fetch { .. }
             | Command::Add(_)
-            | Command::Remove { .. }
+            | Command::Remove(_)
             | Command::Update { .. }
             | Command::Upgrade { .. }
             | Command::Audit { .. }
@@ -3088,8 +3095,14 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Remove { names, dev, target, npm, package } => {
+        Command::Remove(RemoveArgs { names, dev, target, npm, frameworks, package }) => {
             let ws = load_one(global, &package, "`kargo remove`")?;
+            if !frameworks.is_empty() {
+                ops::add::remove_frameworks(config, &ws, &frameworks)?;
+            }
+            if names.is_empty() {
+                return Ok(0);
+            }
             if npm {
                 ops::add_npm::remove(config, &ws, &names, target.map(Into::into), dev)?;
                 return Ok(0);
@@ -4479,7 +4492,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "upgrade", "-i", "g:a", "--dry-run"]).unwrap();
         assert!(matches!(cli.command, Command::Upgrade { ref names, incompatible: true, dry_run: true, .. } if names == &["g:a"]));
         let cli = Cli::try_parse_from(["kargo", "rm", "g:a", "-t", "wasm"]).unwrap();
-        assert!(matches!(cli.command, Command::Remove { target: Some(TargetArg::Wasm), .. }));
+        assert!(matches!(cli.command, Command::Remove(RemoveArgs { target: Some(TargetArg::Wasm), .. })));
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
         assert!(matches!(cli.command, Command::Doc { ref targets, open: true, .. } if matches!(targets[..], [TargetArg::Jvm])));
         let cli = Cli::try_parse_from(["kargo", "fmt", "--check"]).unwrap();

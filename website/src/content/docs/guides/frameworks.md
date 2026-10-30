@@ -15,6 +15,7 @@ From the command line:
 
 ```sh
 kargo add --framework serialization,coroutines
+kargo remove --framework coroutines         # disable one again
 kargo new myapp -w ktor,serialization       # when creating a project
 ```
 

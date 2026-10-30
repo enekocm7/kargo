@@ -418,6 +418,23 @@ impl ManifestEditor {
         }
     }
 
+    /// Removes a built-in framework from `[frameworks]`, whether it is written as `name = true`, an inline
+    /// table or a `[frameworks.name]` table, and drops `[frameworks]` when nothing is left in it. Returns
+    /// `false`, changing nothing, when the framework is not configured.
+    pub fn remove_framework(&mut self, name: &str) -> Result<bool> {
+        let Some(frameworks) = self.doc.get_mut("frameworks") else {
+            return Ok(false);
+        };
+        let frameworks = frameworks.as_table_like_mut().context("`frameworks` in the manifest is not a table")?;
+        if frameworks.remove(name).is_none() {
+            return Ok(false);
+        }
+        if frameworks.is_empty() {
+            self.doc.as_table_mut().remove("frameworks");
+        }
+        Ok(true)
+    }
+
     /// Renames the Kotlin declarations that entry points name: `[target.jvm] main-class`,
     /// `[target.native] entry-point` and the `main` and `entry-point` of `[[bin]]`. A name is
     /// changed when it is `old` or inside it (`old.`, `old$`), so a renamed package or class takes
@@ -730,6 +747,20 @@ members = [\"app\"]
         assert!(!ed.enable_framework("serialization").unwrap());
         let m = crate::Manifest::parse(&ed.contents()).unwrap();
         assert!(m.frameworks.serialization.is_some());
+    }
+
+    #[test]
+    fn removes_frameworks_in_every_form() {
+        let text = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[frameworks]\nserialization = true\ncoroutines = { }\n\n[frameworks.compose]\nhtml = true\n";
+        let mut ed = ManifestEditor::from_str(Path::new("kargo.toml"), text).unwrap();
+        assert!(ed.remove_framework("serialization").unwrap());
+        assert!(!ed.remove_framework("serialization").unwrap());
+        assert!(ed.remove_framework("compose").unwrap());
+        assert!(!ed.contents().contains("serialization") && !ed.contents().contains("compose"), "{}", ed.contents());
+        assert!(ed.contents().contains("[frameworks]"), "{}", ed.contents());
+        assert!(ed.remove_framework("coroutines").unwrap());
+        assert!(!ed.contents().contains("frameworks"), "{}", ed.contents());
+        assert!(!editor().remove_framework("lombok").unwrap(), "no [frameworks] table at all");
     }
 
     #[test]
