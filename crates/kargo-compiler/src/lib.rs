@@ -26,22 +26,40 @@ use kargo_util::hash::Fingerprint;
 use kargo_util::process::{self, slash};
 use kargo_util::shell::Shell;
 
-/// Sources of one compilation: common sources plus platform-specific ones.
+/// Sources of one compilation: common sources plus platform-specific ones, and the intermediate
+/// source sets between them (`[source-sets.<name>]`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceSet {
     pub common: Vec<PathBuf>,
     pub platform: Vec<PathBuf>,
     /// Fragment name for the platform sources (`jvm`, `wasm`, `native`).
     pub platform_name: String,
+    /// The intermediate source sets this compilation includes, wider ones first.
+    pub groups: Vec<SourceGroup>,
+}
+
+/// An intermediate fragment of a multiplatform compilation: the sources that several targets share.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceGroup {
+    pub name: String,
+    pub files: Vec<PathBuf>,
+    /// The groups this one refines directly. A group that refines none refines `common`.
+    pub refines: Vec<String>,
+}
+
+impl SourceGroup {
+    pub fn new(name: &str, files: Vec<PathBuf>, refines: &[&str]) -> Self {
+        Self { name: name.to_owned(), files, refines: refines.iter().map(|r| (*r).to_owned()).collect() }
+    }
 }
 
 impl SourceSet {
     pub fn new(common: Vec<PathBuf>, platform: Vec<PathBuf>, platform_name: &str) -> Self {
-        Self { common, platform, platform_name: platform_name.to_owned() }
+        Self { common, platform, platform_name: platform_name.to_owned(), groups: Vec::new() }
     }
 
     pub fn all(&self) -> impl Iterator<Item = &PathBuf> {
-        self.common.iter().chain(&self.platform)
+        self.common.iter().chain(self.groups.iter().flat_map(|g| &g.files)).chain(&self.platform)
     }
 
     pub fn kotlin_files(&self) -> Vec<PathBuf> {
@@ -53,33 +71,119 @@ impl SourceSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.common.is_empty() && self.platform.is_empty()
+        self.common.is_empty() && self.platform.is_empty() && self.groups.iter().all(|g| g.files.is_empty())
+    }
+
+    /// Whether Kotlin files sit beside the common ones, in the platform's directory or in an
+    /// intermediate source set, so the compilation has fragments. New generated files then join the
+    /// platform side instead of turning a `src/`-only compilation multiplatform.
+    pub fn has_platform_kotlin(&self) -> bool {
+        let is_kt = |p: &PathBuf| p.extension().is_some_and(|e| e == "kt");
+        self.platform.iter().any(is_kt) || self.groups.iter().any(|g| g.files.iter().any(is_kt))
     }
 
     /// Appends another source set (e.g. tests compiled together with main sources).
     pub fn extend(&mut self, other: &SourceSet) {
         self.common.extend(other.common.iter().cloned());
         self.platform.extend(other.platform.iter().cloned());
+        for group in &other.groups {
+            match self.groups.iter_mut().find(|g| g.name == group.name) {
+                Some(mine) => {
+                    mine.files.extend(group.files.iter().cloned());
+                    for parent in &group.refines {
+                        if !mine.refines.contains(parent) {
+                            mine.refines.push(parent.clone());
+                        }
+                    }
+                }
+                None => self.groups.push(group.clone()),
+            }
+        }
     }
 
-    /// Multiplatform arguments enabling `expect`/`actual` between common and
-    /// platform sources. Empty when only one side has Kotlin sources.
+    /// Multiplatform arguments enabling `expect`/`actual` between common, intermediate and platform
+    /// sources. Empty when only one side has Kotlin sources.
+    ///
+    /// The fragments are `common`, every group and the platform. A group refines the groups it names
+    /// (or `common`), and the platform refines the narrowest groups. A fragment without Kotlin files
+    /// is left out, and the fragments that refined it refine what it refined.
     pub fn fragment_args(&self) -> Vec<String> {
         let is_kt = |p: &&PathBuf| p.extension().is_some_and(|e| e == "kt");
-        let common: Vec<&PathBuf> = self.common.iter().filter(is_kt).collect();
-        let platform: Vec<&PathBuf> = self.platform.iter().filter(is_kt).collect();
-        if common.is_empty() || platform.is_empty() {
+        struct Fragment<'a> {
+            name: &'a str,
+            files: Vec<&'a PathBuf>,
+            refines: Vec<&'a str>,
+        }
+        // A group can also refine the platform fragment itself (the sets of some Native platforms refine `native`), so
+        // that it, and every group that refines it, is below the platform and not one of the platform's parents.
+        fn below(groups: &[SourceGroup], name: &str, platform: &str, depth: usize) -> bool {
+            groups
+                .iter()
+                .find(|g| g.name == name)
+                .is_some_and(|g| g.refines.iter().any(|r| r == platform || (depth > 0 && below(groups, r, platform, depth - 1))))
+        }
+        let leaves: Vec<&str> = self
+            .groups
+            .iter()
+            .filter(|g| !below(&self.groups, &g.name, &self.platform_name, self.groups.len()))
+            .filter(|g| !self.groups.iter().any(|o| o.refines.contains(&g.name)))
+            .map(|g| g.name.as_str())
+            .collect();
+        fn fragment(g: &SourceGroup) -> Fragment<'_> {
+            let is_kt = |p: &&PathBuf| p.extension().is_some_and(|e| e == "kt");
+            Fragment {
+                name: &g.name,
+                files: g.files.iter().filter(is_kt).collect(),
+                refines: g.refines.iter().map(String::as_str).collect(),
+            }
+        }
+        // A fragment comes after the ones it refines: common, the sets above the platform, the platform, the sets below it.
+        let is_below = |g: &&SourceGroup| below(&self.groups, &g.name, &self.platform_name, self.groups.len());
+        let mut all: Vec<Fragment> =
+            vec![Fragment { name: "common", files: self.common.iter().filter(is_kt).collect(), refines: Vec::new() }];
+        all.extend(self.groups.iter().filter(|g| !is_below(g)).map(fragment));
+        all.push(Fragment { name: &self.platform_name, files: self.platform.iter().filter(is_kt).collect(), refines: leaves });
+        all.extend(self.groups.iter().filter(is_below).map(fragment));
+
+        let present = |name: &str| all.iter().any(|f| f.name == name && !f.files.is_empty());
+        // The nearest fragments with files that `refines` leads to, `common` being the root.
+        fn resolve<'a>(all: &[Fragment<'a>], refines: &[&'a str], present: &dyn Fn(&str) -> bool, depth: usize) -> Vec<&'a str> {
+            let mut out: Vec<&str> = Vec::new();
+            let parents: Vec<&str> = if refines.is_empty() { vec!["common"] } else { refines.to_vec() };
+            for parent in parents {
+                let found: Vec<&str> = if present(parent) {
+                    vec![parent]
+                } else if depth == 0 || parent == "common" {
+                    Vec::new()
+                } else {
+                    let next = all.iter().find(|f| f.name == parent).map(|f| f.refines.clone()).unwrap_or_default();
+                    resolve(all, &next, present, depth - 1)
+                };
+                for name in found {
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
+            out
+        }
+        let used: Vec<&Fragment> = all.iter().filter(|f| !f.files.is_empty()).collect();
+        if used.len() < 2 {
             return Vec::new();
         }
-        let name = &self.platform_name;
-        let sources: Vec<String> =
-            common.iter().map(|p| format!("common:{}", slash(p))).chain(platform.iter().map(|p| format!("{name}:{}", slash(p)))).collect();
-        vec![
-            "-Xmulti-platform".to_owned(),
-            format!("-Xfragments=common,{name}"),
-            format!("-Xfragment-refines={name}:common"),
-            format!("-Xfragment-sources={}", sources.join(",")),
-        ]
+        let mut args =
+            vec!["-Xmulti-platform".to_owned(), format!("-Xfragments={}", used.iter().map(|f| f.name).collect::<Vec<_>>().join(","))];
+        for fragment in &used {
+            if fragment.name == "common" {
+                continue;
+            }
+            for parent in resolve(&all, &fragment.refines, &present, all.len()) {
+                args.push(format!("-Xfragment-refines={}:{parent}", fragment.name));
+            }
+        }
+        let sources: Vec<String> = used.iter().flat_map(|f| f.files.iter().map(move |p| format!("{}:{}", f.name, slash(p)))).collect();
+        args.push(format!("-Xfragment-sources={}", sources.join(",")));
+        args
     }
 }
 
@@ -250,6 +354,87 @@ mod tests {
         assert!(SourceSet::new(vec!["a.kt".into()], vec!["X.java".into()], "jvm").fragment_args().is_empty());
         assert_eq!(set.java_files(), [PathBuf::from("b/X.java")]);
         assert_eq!(set.kotlin_files().len(), 2);
+    }
+
+    #[test]
+    fn fragment_args_with_intermediate_source_sets() {
+        let kt = |p: &str| vec![PathBuf::from(p)];
+        let mut set = SourceSet::new(kt("c.kt"), kt("jvm.kt"), "jvm");
+        set.groups = vec![SourceGroup::new("nonWeb", kt("nw.kt"), &[]), SourceGroup::new("jvmAndAndroid", kt("ja.kt"), &["nonWeb"])];
+        assert_eq!(
+            set.fragment_args(),
+            [
+                "-Xmulti-platform",
+                "-Xfragments=common,nonWeb,jvmAndAndroid,jvm",
+                "-Xfragment-refines=nonWeb:common",
+                "-Xfragment-refines=jvmAndAndroid:nonWeb",
+                "-Xfragment-refines=jvm:jvmAndAndroid",
+                "-Xfragment-sources=common:c.kt,nonWeb:nw.kt,jvmAndAndroid:ja.kt,jvm:jvm.kt",
+            ]
+        );
+
+        // A source set with no Kotlin files drops out; what refined it refines what it refined.
+        set.groups[1].files.clear();
+        let args = set.fragment_args();
+        assert_eq!(args[1], "-Xfragments=common,nonWeb,jvm");
+        assert!(args.contains(&"-Xfragment-refines=jvm:nonWeb".to_owned()), "{args:?}");
+        set.groups[0].files.clear();
+        let args = set.fragment_args();
+        assert_eq!(args[1], "-Xfragments=common,jvm");
+        assert!(args.contains(&"-Xfragment-refines=jvm:common".to_owned()), "{args:?}");
+
+        // A platform that shares only an intermediate set with another has two fragments with no common.
+        let mut shared = SourceSet::new(Vec::new(), kt("jvm.kt"), "jvm");
+        shared.groups = vec![SourceGroup::new("jvmAndAndroid", kt("ja.kt"), &[])];
+        assert_eq!(
+            shared.fragment_args(),
+            [
+                "-Xmulti-platform",
+                "-Xfragments=jvmAndAndroid,jvm",
+                "-Xfragment-refines=jvm:jvmAndAndroid",
+                "-Xfragment-sources=jvmAndAndroid:ja.kt,jvm:jvm.kt",
+            ]
+        );
+        assert!(shared.has_platform_kotlin());
+        assert_eq!(shared.kotlin_files().len(), 2);
+    }
+
+    #[test]
+    fn source_sets_of_native_platforms_are_below_the_native_fragment() {
+        let kt = |p: &str| vec![PathBuf::from(p)];
+        let mut set = SourceSet::new(kt("c.kt"), kt("native.kt"), "native");
+        set.groups = vec![
+            SourceGroup::new("apple", kt("a.kt"), &["native"]),
+            SourceGroup::new("ios", kt("i.kt"), &["apple"]),
+            SourceGroup::new("nonJs", kt("n.kt"), &[]),
+        ];
+        let args = set.fragment_args();
+        assert_eq!(args[1], "-Xfragments=common,nonJs,native,apple,ios");
+        // The whole-target set sits above the platform fragment, the platform sets below it.
+        for edge in ["apple:native", "ios:apple", "nonJs:common", "native:nonJs"] {
+            assert!(args.contains(&format!("-Xfragment-refines={edge}")), "{edge} in {args:?}");
+        }
+        assert!(!args.iter().any(|a| a == "-Xfragment-refines=native:ios" || a == "-Xfragment-refines=native:apple"), "{args:?}");
+
+        // Without code in `src-native/` the platform sets refine what it refined.
+        set.platform.clear();
+        let args = set.fragment_args();
+        assert_eq!(args[1], "-Xfragments=common,nonJs,apple,ios");
+        assert!(args.contains(&"-Xfragment-refines=apple:nonJs".to_owned()), "{args:?}");
+        assert!(args.contains(&"-Xfragment-refines=ios:apple".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn extending_a_source_set_merges_groups_by_name() {
+        let kt = |p: &str| vec![PathBuf::from(p)];
+        let mut main = SourceSet::new(kt("c.kt"), Vec::new(), "jvm");
+        main.groups = vec![SourceGroup::new("shared", kt("a.kt"), &[])];
+        let mut tests = SourceSet::new(kt("ct.kt"), Vec::new(), "jvm");
+        tests.groups = vec![SourceGroup::new("shared", kt("at.kt"), &[]), SourceGroup::new("other", kt("o.kt"), &["shared"])];
+        main.extend(&tests);
+        assert_eq!(main.groups.len(), 2);
+        assert_eq!(main.groups[0].files, [PathBuf::from("a.kt"), PathBuf::from("at.kt")]);
+        assert_eq!(main.groups[1].refines, ["shared"]);
     }
 
     #[test]

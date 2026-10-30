@@ -857,7 +857,7 @@ In a package with several [targets](../multiplatform/), `workspace.json` has a m
 | `<name>.common.test` | `tests/` | |
 | `<name>.jvm.test` | `tests-jvm/`, `test-resources/` | `<name>.common.test` |
 
-Because `src-jvm/` refines `src/`, an `expect` declaration and its `actual` find each other: go to implementation on an `expect` lists its `actual` declarations, and neither side reports a missing or duplicate declaration. A package with one target keeps one module for its main code and one for its tests.
+A [source set of several targets](../multiplatform/#source-sets-for-several-targets) (`src-jvmAndAndroid/`) is analyzed together with each target's own directory. Because `src-jvm/` refines `src/`, an `expect` declaration and its `actual` find each other: go to implementation on an `expect` lists its `actual` declarations, and neither side reports a missing or duplicate declaration. A package with one target keeps one module for its main code and one for its tests.
 
 The Kotlin LSP analyzes JVM code only. Kargo therefore analyzes `src/` as JVM code with the JVM classpath, so common code resolves the standard library and your dependencies, but completion in `src/` also offers JVM-only APIs. `kargo check` still compiles `src/` for every target and reports what doesn't exist on one of them; turn on [check on save](#check-on-save) to see those errors in the editor.
 

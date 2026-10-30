@@ -2361,3 +2361,108 @@ fn build_default_targets() {
         WorkspaceManifest::parse("[workspace]\nmembers = []\n[workspace.build]\ndefault-targets = [\"jvm\"]\n", Path::new("/ws")).unwrap();
     assert_eq!(ws.build.default_targets, Some(vec![TargetKind::Jvm]));
 }
+
+#[test]
+fn source_sets() {
+    assert!(parse(MINIMAL).source_sets.is_empty());
+    let m = parse(&format!(
+        "{MINIMAL}[target.jvm]\n[target.android]\nnamespace = \"com.example\"\n[target.native]\n\
+         [source-sets.jvmAndAndroid]\ntargets = [\"jvm\", \"android\", \"jvm\"]\n\
+         [source-sets.nonWeb]\ntargets = [\"jvm\", \"android\", \"native\"]\n"
+    ));
+    assert_eq!(m.source_sets.len(), 2);
+    assert_eq!(m.source_sets[0].name, "jvmAndAndroid");
+    assert_eq!(m.source_sets[0].targets, [TargetKind::Jvm, TargetKind::Android]);
+    assert_eq!(m.source_sets[0].source_dir_name(), "src-jvmAndAndroid");
+
+    // The wider set comes first, and the narrower one refines it; the target refines the narrowest.
+    let jvm: Vec<_> = m.source_groups_for(TargetKind::Jvm).into_iter().map(|(g, parents)| (g.name.as_str(), parents)).collect();
+    assert_eq!(jvm, [("nonWeb", vec![]), ("jvmAndAndroid", vec!["nonWeb"])]);
+    let native: Vec<_> = m.source_groups_for(TargetKind::Native).into_iter().map(|(g, parents)| (g.name.as_str(), parents)).collect();
+    assert_eq!(native, [("nonWeb", vec![])]);
+    assert!(m.source_groups_for(TargetKind::Wasm).is_empty());
+}
+
+#[test]
+fn source_sets_skip_the_levels_between() {
+    let m = parse(&format!(
+        "{MINIMAL}[target.jvm]\n[source-sets.a]\ntargets = [\"jvm\", \"android\"]\n\
+         [source-sets.b]\ntargets = [\"jvm\", \"android\", \"native\"]\n\
+         [source-sets.c]\ntargets = [\"jvm\", \"android\", \"native\", \"js\"]\n"
+    ));
+    let jvm: Vec<_> = m.source_groups_for(TargetKind::Jvm).into_iter().map(|(g, parents)| (g.name.as_str(), parents)).collect();
+    assert_eq!(jvm, [("c", vec![]), ("b", vec!["c"]), ("a", vec!["b"])]);
+}
+
+#[test]
+fn invalid_source_sets_are_rejected() {
+    let with = |extra: &str| parse_err(&format!("{MINIMAL}[target.jvm]\n{extra}"));
+    assert!(with("[source-sets.jvm]\ntargets = [\"jvm\", \"android\"]\n").contains("clashes with the source directories of a target"));
+    assert!(with("[source-sets.common]\ntargets = [\"jvm\", \"android\"]\n").contains("clashes"));
+    assert!(with("[source-sets.\"1x\"]\ntargets = [\"jvm\", \"android\"]\n").contains("invalid [source-sets] name"));
+    assert!(with("[source-sets.x]\ntargets = [\"jvm\"]\n").contains("at least two different targets"));
+    assert!(with("[source-sets.x]\ntargets = [\"jvm\", \"ios\"]\n").contains("unknown target `ios`"));
+    assert!(with("[source-sets.x]\n").contains("at least two different targets"));
+    assert!(
+        with("[source-sets.x]\ntargets = [\"jvm\", \"js\"]\n[source-sets.y]\ntargets = [\"js\", \"jvm\"]\n")
+            .contains("[source-sets.y] has the same targets as [source-sets.x]")
+    );
+    assert!(with("[source-sets.x]\ntargets = [\"jvm\", \"js\"]\nfoo = 1\n").contains("unknown field"));
+}
+
+#[test]
+fn source_sets_of_native_platforms() {
+    let m = parse(&format!(
+        "{MINIMAL}[target.jvm]\n[target.native]\nplatforms = [\"host\"]\n\
+         [source-sets.apple]\nplatforms = [\"apple\"]\n\
+         [source-sets.ios]\nplatforms = [\"ios\"]\n\
+         [source-sets.iosDevice]\nplatforms = [\"iosArm64\"]\n\
+         [source-sets.linux]\ntargets = [\"native\"]\nplatforms = [\"linux-x64\", \"linux_arm64\"]\n\
+         [source-sets.nonJs]\ntargets = [\"jvm\", \"native\"]\n"
+    ));
+    let apple = m.source_sets.iter().find(|g| g.name == "apple").unwrap();
+    assert_eq!(apple.targets, [TargetKind::Native]);
+    assert_eq!(
+        apple.platforms,
+        [
+            "ios_arm64",
+            "ios_simulator_arm64",
+            "ios_x64",
+            "macos_arm64",
+            "macos_x64",
+            "tvos_arm64",
+            "tvos_simulator_arm64",
+            "watchos_arm64",
+            "watchos_simulator_arm64"
+        ]
+    );
+    let names = |groups: Vec<(&SourceGroup, Vec<&str>)>| -> Vec<(String, Vec<String>)> {
+        groups.into_iter().map(|(g, parents)| (g.name.clone(), parents.into_iter().map(str::to_owned).collect())).collect()
+    };
+    // A platform's sets nest by the platforms they hold; what is below `src-native/` refines no other set of its kind.
+    assert_eq!(
+        names(m.native_platform_groups(Some("ios_arm64"))),
+        [("apple".into(), vec![]), ("ios".into(), vec!["apple".into()]), ("iosDevice".into(), vec!["ios".into()])]
+    );
+    assert_eq!(names(m.native_platform_groups(Some("linux_x64"))), [("linux".into(), vec![])]);
+    assert!(m.native_platform_groups(Some("mingw_x64")).is_empty());
+    assert_eq!(m.native_platform_groups(None).len(), 4);
+    // The sets of whole targets leave the platform sets out, and `all_groups_for` has both.
+    assert_eq!(names(m.source_groups_for(TargetKind::Native)), [("nonJs".into(), vec![])]);
+    let all: Vec<&str> = m.all_groups_for(TargetKind::Native).iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(all, ["nonJs", "apple", "ios", "linux", "iosDevice"]);
+    assert_eq!(names(m.source_groups_for(TargetKind::Jvm)), [("nonJs".into(), vec![])]);
+}
+
+#[test]
+fn invalid_source_sets_of_native_platforms_are_rejected() {
+    let with = |extra: &str| parse_err(&format!("{MINIMAL}[target.native]\n{extra}"));
+    assert!(with("[source-sets.x]\nplatforms = [\"playstation\"]\n").contains("unknown Kotlin/Native platform `playstation`"));
+    assert!(with("[source-sets.x]\nplatforms = [\"host\"]\n").contains("`host` is the machine you build on"));
+    assert!(with("[source-sets.x]\ntargets = [\"jvm\"]\nplatforms = [\"apple\"]\n").contains("`targets` can only be [\"native\"]"));
+    assert!(
+        with("[source-sets.x]\nplatforms = [\"apple\"]\n[source-sets.y]\nplatforms = [\"macos\", \"ios\", \"tvos\", \"watchos\"]\n")
+            .contains("has the same targets as")
+    );
+    assert!(with("[source-sets.x]\ntargets = [\"native\"]\n").contains("code for some Native platforms needs `platforms`"));
+}

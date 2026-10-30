@@ -157,7 +157,9 @@ fn has_main(ws: &Workspace, m: &Manifest) -> bool {
     }
     let mut files = kargo_util::fs::collect_files(&ws.common_sources(), &["kt"]);
     for target in m.targets.enabled() {
-        files.extend(kargo_util::fs::collect_files(&ws.target_sources(target), &["kt"]));
+        for dir in ws.source_dirs(target).iter().skip(1) {
+            files.extend(kargo_util::fs::collect_files(dir, &["kt"]));
+        }
     }
     !kargo_compiler::mainclass::find_entry_points(&files).is_empty()
 }

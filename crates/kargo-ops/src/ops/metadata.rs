@@ -196,21 +196,49 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         dirs.extend(crate::generate::dirs(ws, &ctx.profile, kind, generated));
         dirs
     };
+    // The intermediate source sets (`[source-sets.<name>]`) this target compiles. Their directories come after
+    // the common and the target's in the root lists, so readers that pair those two keep working.
+    let mut groups = m.source_groups_for(kind);
+    if kind == TargetKind::Native {
+        // The sets of only some platforms refine `native`, the target's own fragment, when they refine no other set.
+        let platform_sets = m.native_platform_groups(None).into_iter();
+        groups.extend(platform_sets.map(|(g, parents)| (g, if parents.is_empty() { vec![TargetKind::Native.as_str()] } else { parents })));
+    }
+    let group_dirs =
+        |dir: fn(&crate::workspace::Workspace, &str) -> PathBuf| -> Vec<PathBuf> { groups.iter().map(|(g, _)| dir(ws, &g.name)).collect() };
+    let mut source_dirs = vec![ws.common_sources(), ws.target_sources(kind)];
+    source_dirs.extend(group_dirs(Workspace::group_sources));
+    // Test fixtures and benchmarks compile like tests, so editors treat them as test sources too.
+    let mut test_dirs = vec![
+        ws.common_tests(),
+        ws.target_tests(kind),
+        ws.common_test_fixtures(),
+        ws.target_test_fixtures(kind),
+        ws.common_benches(),
+        ws.target_benches(kind),
+    ];
+    test_dirs.extend(group_dirs(Workspace::group_tests));
+    test_dirs.extend(group_dirs(Workspace::group_test_fixtures));
+    let mut fixture_dirs = vec![ws.common_test_fixtures(), ws.target_test_fixtures(kind)];
+    fixture_dirs.extend(group_dirs(Workspace::group_test_fixtures));
     let mut out = json!({
         "kind": kind.as_str(),
-        "source-roots": roots(&with_generated(vec![ws.common_sources(), ws.target_sources(kind)], GeneratedKind::Sources)),
-        // Test fixtures and benchmarks compile like tests, so editors treat them as test sources too.
-        "test-roots": roots(&with_generated(
-            vec![
-                ws.common_tests(),
-                ws.target_tests(kind),
-                ws.common_test_fixtures(),
-                ws.target_test_fixtures(kind),
-                ws.common_benches(),
-                ws.target_benches(kind),
-            ],
-            GeneratedKind::TestSources,
-        )),
+        "source-roots": roots(&with_generated(source_dirs, GeneratedKind::Sources)),
+        "test-roots": roots(&with_generated(test_dirs, GeneratedKind::TestSources)),
+        // Each source set with every target it holds, whichever of them is enabled, and the directories
+        // that are also in the root lists above.
+        "source-sets": groups
+            .iter()
+            .map(|(g, refines)| json!({
+                "name": g.name,
+                "targets": g.targets.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+                "platforms": g.platforms,
+                "refines": refines,
+                "source-root": path(&ws.group_sources(&g.name)),
+                "test-root": path(&ws.group_tests(&g.name)),
+                "test-fixture-root": path(&ws.group_test_fixtures(&g.name)),
+            }))
+            .collect::<Vec<_>>(),
         // The output directories of the `[[generate]]` steps this target uses, by what they hold.
         "generated-roots": GeneratedKind::ALL
             .iter()
@@ -223,7 +251,7 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
                     .map(move |dir| json!({ "name": g.name, "kind": k.as_str(), "dir": path(&dir), "common": common }))
             })
             .collect::<Vec<_>>(),
-        "test-fixture-roots": roots(&[ws.common_test_fixtures(), ws.target_test_fixtures(kind)]),
+        "test-fixture-roots": roots(&fixture_dirs),
         "bench-roots": roots(&[ws.common_benches(), ws.target_benches(kind)]),
         "output-dir": path(&ws.output_dir(&ctx.profile, kind)),
     });

@@ -1651,6 +1651,78 @@ pub enum Notarization {
     KeychainProfile(String),
 }
 
+/// `[source-sets.<name>]`: an intermediate source set that several targets share, between `src/` and
+/// `src-<target>/`. Its code lives in `src-<name>/` (and `tests-<name>/`) and is compiled for every
+/// target in `targets`, so it can declare `expect`s that those targets' own directories `actual`ize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceGroup {
+    pub name: String,
+    /// The targets that compile this source set, in the order the manifest lists them.
+    pub targets: Vec<TargetKind>,
+    /// For a set of only some Native platforms (`targets` is then `native` alone): the Konan targets it is for,
+    /// sorted. Empty for a set of whole targets.
+    pub platforms: Vec<String>,
+}
+
+impl SourceGroup {
+    /// The directory next to `src/` that holds this set's sources: `src-<name>`.
+    pub fn source_dir_name(&self) -> String {
+        format!("src-{}", self.name)
+    }
+}
+
+impl Manifest {
+    /// The source sets of whole targets that `target` compiles, widest first (a set comes after every set that
+    /// holds more targets than it does), each with the names of the sets it refines directly. `src/` refines
+    /// nothing, and `src-<target>/` refines the sets that no other set of the list refines.
+    pub fn source_groups_for(&self, target: TargetKind) -> Vec<(&SourceGroup, Vec<&str>)> {
+        let groups: Vec<&SourceGroup> = self.source_sets.iter().filter(|g| g.platforms.is_empty() && g.targets.contains(&target)).collect();
+        refinements(groups, |outer, inner| {
+            outer.targets.len() > inner.targets.len() && inner.targets.iter().all(|t| outer.targets.contains(t))
+        })
+    }
+
+    /// The sets of only some Native platforms: those that include `konan_target`, or with `None` every one. Widest
+    /// first, each with the names of the sets it refines directly. A set that refines none is below `src-native/`,
+    /// which holds the code of all the platforms.
+    pub fn native_platform_groups(&self, konan_target: Option<&str>) -> Vec<(&SourceGroup, Vec<&str>)> {
+        let groups: Vec<&SourceGroup> = self
+            .source_sets
+            .iter()
+            .filter(|g| !g.platforms.is_empty() && konan_target.is_none_or(|t| g.platforms.iter().any(|p| p == t)))
+            .collect();
+        refinements(groups, |outer, inner| {
+            outer.platforms.len() > inner.platforms.len() && inner.platforms.iter().all(|p| outer.platforms.contains(p))
+        })
+    }
+
+    /// Every source set `target` has directories for: those of whole targets, then (for Native) those of some of
+    /// its platforms.
+    pub fn all_groups_for(&self, target: TargetKind) -> Vec<&SourceGroup> {
+        let mut groups: Vec<&SourceGroup> = self.source_groups_for(target).into_iter().map(|(g, _)| g).collect();
+        if target == TargetKind::Native {
+            groups.extend(self.native_platform_groups(None).into_iter().map(|(g, _)| g));
+        }
+        groups
+    }
+}
+
+/// Orders `groups` widest first and finds the sets each refines directly: the ones that are `wider` than it with no
+/// other set between them.
+fn refinements(mut groups: Vec<&SourceGroup>, wider: impl Fn(&SourceGroup, &SourceGroup) -> bool) -> Vec<(&SourceGroup, Vec<&str>)> {
+    let size = |g: &SourceGroup| if g.platforms.is_empty() { g.targets.len() } else { g.platforms.len() };
+    groups.sort_by(|a, b| size(b).cmp(&size(a)).then_with(|| a.name.cmp(&b.name)));
+    groups
+        .iter()
+        .map(|g| {
+            let above: Vec<&SourceGroup> = groups.iter().copied().filter(|o| wider(o, g)).collect();
+            // Direct parents: no other set sits between this one and the parent.
+            let direct = above.iter().filter(|p| !above.iter().any(|q| wider(p, q))).map(|p| p.name.as_str()).collect();
+            (*g, direct)
+        })
+        .collect()
+}
+
 /// `[build]` (`[workspace.build]` in a workspace): how the build commands run.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BuildSettings {
@@ -2102,6 +2174,8 @@ pub struct Manifest {
     pub package: Package,
     pub kotlin: KotlinSettings,
     pub targets: Targets,
+    /// `[source-sets.<name>]`: groups of targets that share `src-<name>/`, sorted by name.
+    pub source_sets: Vec<SourceGroup>,
     /// Extra programs from `[[bin]]`, in declaration order.
     pub bins: Vec<Bin>,
     /// The `[[generate]]` steps, in declaration order.

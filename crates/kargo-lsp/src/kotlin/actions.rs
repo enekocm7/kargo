@@ -586,6 +586,10 @@ pub fn known_module(fq: &str) -> Option<&'static str> {
 fn dependency_actions(an: &Analyzer, req: &Request, lines: &Range<usize>, out: &mut Vec<Value>) {
     let unit = an.unit(req.unit);
     let Origin::Source(set) = &unit.origin else { return };
+    // An intermediate source set has no dependency table of its own.
+    if set.group().is_some() {
+        return;
+    }
     let Some(manifest) = req.manifests.get(set.package) else { return };
     let declared = std::fs::read_to_string(manifest).unwrap_or_default();
     let section = match (set.kind, &set.target) {

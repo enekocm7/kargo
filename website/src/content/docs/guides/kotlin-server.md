@@ -331,13 +331,14 @@ A file sees the declarations Kargo compiles it with:
 |---|---|
 | `src/` | `src/` |
 | `src-<target>/` | `src/` and `src-<target>/` |
+| `src-<set>/` ([source set](../multiplatform/#source-sets-for-several-targets) of several targets) | `src/`, `src-<set>/` and the sets that hold all of its targets |
 | `tests/` | `src/` and `tests/` |
 | `tests-<target>/` | `src/`, `src-<target>/`, `tests/` and `tests-<target>/` |
 | `examples/` | `src/` |
 
 A package also sees the main code of its [path dependencies](../workspaces/), and theirs, without its `internal` declarations: those are visible only inside their own package, in all its source sets. Test fixtures count as test code. With [Compose resources](../compose/#resources), the generated `Res` class counts as code in `src/`. `kargo metadata` writes it when the server loads the project, and every build updates it. The `BuildConfig` class AGP generates for an [Android](../android/#build-config-fields) package counts as code in `src-android/`, once a `kargo build -t android` wrote it. A Kotlin file outside the source roots, open in the editor, sees the main code of every package.
 
-So in a [multiplatform](../multiplatform/) package, common code in `src/` completes and navigates to the `expect` declarations, and `src-jvm/` sees both sides. Code in `src-wasm/`, `src-js/` and `src-native/` gets the same completion, navigation and rename as JVM code, against your sources and the standard library.
+So in a [multiplatform](../multiplatform/) package, common code in `src/` completes and navigates to the `expect` declarations, and `src-jvm/` sees both sides. The code of a source set such as `src-jvmAndAndroid/` sees the libraries all of its targets have, and `src-jvm/` and `src-android/` see its declarations. A set of some Native platforms (`src-apple/`) sees `src/`, `src-native/` and the sets of more platforms, and `src-native/` does not see it. Code in `src-wasm/`, `src-js/` and `src-native/` gets the same completion, navigation and rename as JVM code, against your sources and the standard library.
 
 A Kargo script is not part of the project's sources, as Kargo does not compile it: other files don't see its declarations, and it doesn't count as a source of the project. The server notices new, changed and deleted `.kt` files, from the editor and on disk. When `kargo.toml` or `kargo.lock` change, it reads the project's layout again.
 

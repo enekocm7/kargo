@@ -17,8 +17,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, add_npm_declarations, announce, buildable_native_platforms, compile_jvm, finished, hook_env, js_libraries,
-    native_cinterop, native_cinterop_defs, native_libraries, native_programs, select_targets, sources, warn_about_sources, wasm_libraries,
+    BuildOptions, add_npm_declarations, announce, buildable_native_platforms, compile_jvm, finished, for_platform, hook_env, js_libraries,
+    native_cinterop, native_cinterop_defs, native_libraries, native_programs, sources, warn_about_sources, wasm_libraries,
+    without_platform_sets,
 };
 use super::context::BuildContext;
 use super::test::compile_jvm_tests;
@@ -45,7 +46,7 @@ fn check_dir(ctx: &BuildContext, target: TargetKind) -> PathBuf {
 
 pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     let start = Instant::now();
-    let targets = select_targets(ctx, &opts.build.targets)?;
+    let targets = opts.build.select(ctx)?;
     // Pre-build hooks may generate sources, so they run before checking.
     super::build::prepare_native_hooks(ctx, &targets)?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &hook_env(ctx, &EnvOptions::default())?)?;
@@ -201,7 +202,7 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     }
     // `kargo build` needs a single `main` (or a `[[bin]]` per `main`) for an executable; report a missing one here too.
     if !main_sources.kotlin_files().is_empty() {
-        native_programs(ctx, native, &main_sources)?;
+        native_programs(ctx, native, &without_platform_sets(ctx, main_sources.clone()))?;
     }
     let platforms = buildable_native_platforms(ctx)?;
     if platforms.is_empty() {
@@ -241,13 +242,17 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
             libs.extend(bindings.iter().cloned());
             libs
         };
-        let main = unit(&manifest.package.name, main_sources.clone(), with_bindings(native_libraries(ctx, &setup, konan_target, false)?));
+        let main = unit(
+            &manifest.package.name,
+            for_platform(ctx, main_sources.clone(), konan_target),
+            with_bindings(native_libraries(ctx, &setup, konan_target, false)?),
+        );
         main.compile(ctx.shell(), toolchain, &fp_dir, &|| announce(ctx, CHECKING, TargetKind::Native, &what))?;
 
         if tests && !test_sources.kotlin_files().is_empty() {
             // Like `kargo test`, tests are compiled together with the main sources.
-            let mut all = main_sources.clone();
-            all.extend(&test_sources);
+            let mut all = for_platform(ctx, main_sources.clone(), konan_target);
+            all.extend(&for_platform(ctx, test_sources.clone(), konan_target));
             let name = format!("{}-test", manifest.package.name);
             let test = unit(&name, all, with_bindings(native_libraries(ctx, &setup, konan_target, true)?));
             let what = format!("{what}, tests");

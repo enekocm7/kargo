@@ -37,8 +37,58 @@ pub struct BuildOptions {
     pub keep_going: bool,
     /// Combine the Apple frameworks into an XCFramework (`--xcframework`).
     pub xcframework: bool,
+    /// Also write `Package.swift` and a podspec next to the XCFramework (`--swift-package`, `--cocoapods`).
+    pub apple_files: crate::apple_package::AppleFiles,
     /// Print Binaryen's per-function Wasm metrics (release builds only).
     pub size_report: bool,
+    /// The kind of targets to use instead of `targets` or the defaults (`--target-set`).
+    pub target_set: TargetSet,
+}
+
+/// `--target-set`: the targets a command uses by where their code runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TargetSet {
+    /// The usual choice: `-t`, else `[build] default-targets`, else every enabled target.
+    #[default]
+    All,
+    /// Targets that build and run on this machine with no device, emulator or Apple hardware: JVM, Wasm, JS
+    /// and Native when this host's platform is one of `platforms`.
+    Host,
+    /// Targets whose apps run on a phone or an emulator: Android.
+    Device,
+}
+
+impl BuildOptions {
+    /// The targets this operation applies to: `targets`, else the `target_set`, else the defaults.
+    pub fn select(&self, ctx: &BuildContext) -> Result<Vec<TargetKind>> {
+        if !self.targets.is_empty() || self.target_set == TargetSet::All {
+            return select_targets(ctx, &self.targets);
+        }
+        let enabled = ctx.ws.manifest().targets.enabled();
+        let mut chosen = Vec::new();
+        for target in enabled {
+            let in_set = match (self.target_set, target) {
+                (TargetSet::Device, target) => target == TargetKind::Android,
+                (_, TargetKind::Android) => false,
+                (_, TargetKind::Native) => {
+                    let host = kargo_toolchain::native::Host::current()?.konan_target;
+                    native_platforms(ctx)?.iter().any(|p| p == host)
+                }
+                _ => true,
+            };
+            if in_set {
+                chosen.push(target);
+            }
+        }
+        if chosen.is_empty() {
+            let (name, why) = match self.target_set {
+                TargetSet::Device => ("device", "Android is the only target that runs on a device; add it with `kargo target add android`"),
+                _ => ("host", "Native counts only when this machine's platform is in `platforms` of [target.native]"),
+            };
+            bail!("no enabled target is in the {name} set: {why}");
+        }
+        Ok(chosen)
+    }
 }
 
 /// Outputs of the JVM target.
@@ -154,12 +204,61 @@ pub fn existing_sources(ctx: &BuildContext, target: TargetKind, tests: bool, ext
     let (common, platform) =
         if tests { (ws.common_tests(), ws.target_tests(target)) } else { (ws.common_sources(), ws.target_sources(target)) };
     let mut set = SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str());
+    set.groups = source_groups(ws, target, tests, extensions);
+    if target == TargetKind::Native {
+        set.groups.extend(platform_groups(ws, tests, extensions));
+    }
     add_generated_sources(&mut set, crate::generate::sources(ws, &ctx.profile, target, tests, extensions));
     if !tests {
         add_build_config(ctx, target, &mut set)?;
         add_compose_resources(ctx, target, &mut set)?;
     }
     Ok(set)
+}
+
+/// The intermediate source sets (`[source-sets.<name>]`) that `target` compiles, with their files.
+pub fn source_groups(ws: &Workspace, target: TargetKind, tests: bool, extensions: &[&str]) -> Vec<kargo_compiler::SourceGroup> {
+    ws.manifest()
+        .source_groups_for(target)
+        .into_iter()
+        .map(|(group, parents)| {
+            let dir = if tests { ws.group_tests(&group.name) } else { ws.group_sources(&group.name) };
+            kargo_compiler::SourceGroup::new(&group.name, collect_files(&dir, extensions), &parents)
+        })
+        .collect()
+}
+
+/// The source sets of only some Native platforms (`platforms` of `[source-sets.<name>]`), all of them: the files of
+/// the Native target's sources are in `src-native/`, the whole-target sets and these.
+fn platform_groups(ws: &Workspace, tests: bool, extensions: &[&str]) -> Vec<kargo_compiler::SourceGroup> {
+    ws.manifest()
+        .native_platform_groups(None)
+        .into_iter()
+        .map(|(group, parents)| {
+            let dir = if tests { ws.group_tests(&group.name) } else { ws.group_sources(&group.name) };
+            // A set that refines no other one is below the target's own fragment.
+            let refines = if parents.is_empty() { vec![TargetKind::Native.as_str()] } else { parents };
+            kargo_compiler::SourceGroup::new(&group.name, collect_files(&dir, extensions), &refines)
+        })
+        .collect()
+}
+
+/// `sources` of the Native target without the source sets of some platforms: the code every platform compiles, where
+/// the entry points of the programs are looked for (platform sets could hold a `main` each).
+pub fn without_platform_sets(ctx: &BuildContext, mut sources: SourceSet) -> SourceSet {
+    let platform_sets: Vec<&str> = ctx.ws.manifest().native_platform_groups(None).into_iter().map(|(g, _)| g.name.as_str()).collect();
+    sources.groups.retain(|g| !platform_sets.contains(&g.name.as_str()));
+    sources
+}
+
+/// `sources` of the Native target for one platform: without the source sets of other platforms, whose code does not
+/// compile for `konan_target`.
+pub fn for_platform(ctx: &BuildContext, mut sources: SourceSet, konan_target: &str) -> SourceSet {
+    let manifest = ctx.ws.manifest();
+    let own: Vec<&str> = manifest.native_platform_groups(Some(konan_target)).into_iter().map(|(g, _)| g.name.as_str()).collect();
+    let whole: Vec<&str> = manifest.source_groups_for(TargetKind::Native).into_iter().map(|(g, _)| g.name.as_str()).collect();
+    sources.groups.retain(|g| own.contains(&g.name.as_str()) || whole.contains(&g.name.as_str()));
+    sources
 }
 
 /// Adds the files of `[[generate]]` steps; see [`add_generated_source`].
@@ -172,7 +271,7 @@ fn add_generated_sources(sources: &mut SourceSet, paths: Vec<PathBuf>) {
 /// Adds a generated source file to the platform fragment, unless that would make a `src/`-only
 /// compilation multiplatform (as with KSP and npm declarations).
 fn add_generated_source(sources: &mut SourceSet, path: PathBuf) {
-    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
+    if sources.has_platform_kotlin() {
         sources.platform.push(path);
     } else {
         sources.common.push(path);
@@ -267,7 +366,7 @@ pub fn prepare_native_hooks(ctx: &BuildContext, targets: &[TargetKind]) -> Resul
 
 pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let start = Instant::now();
-    let targets = select_targets(ctx, &opts.targets)?;
+    let targets = opts.select(ctx)?;
     prepare_native_hooks(ctx, &targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.shell(), ctx.ws, Hook::PreBuild, &env)?;
@@ -298,7 +397,18 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
         announce_frameworks(ctx, |module| jvm.runtime_modules.iter().find(|(m, _)| m == module).map(|(_, version)| version.clone()));
     }
     if opts.xcframework {
-        create_xcframework(ctx, &results.native)?;
+        let xcframework = create_xcframework(ctx, &results.native)?;
+        if opts.apple_files.swift_package || opts.apple_files.cocoapods {
+            let frameworks: Vec<&str> = results
+                .native
+                .iter()
+                .filter(|b| b.kind == NativeKind::Framework && b.bin.is_none())
+                .map(|b| b.konan_target.as_str())
+                .collect();
+            for file in crate::apple_package::write(&xcframework, &ctx.ws.manifest().package, &frameworks, opts.apple_files)? {
+                ctx.shell().status("Writing", file.display());
+            }
+        }
     }
 
     let mut env = env;
@@ -444,9 +554,9 @@ pub(crate) fn run_jvm_ksp(
     let language_version = kotlin.language_version.clone().unwrap_or_else(|| kargo_compiler::ksp::language_version(&kotlin.version));
     let api_version = kotlin.api_version.clone().unwrap_or_else(|| language_version.clone());
     let (mut source_roots, dir, what) = if unit.test {
-        (vec![ws.common_tests(), ws.target_tests(TargetKind::Jvm)], "test", ", tests, ksp")
+        (ws.test_dirs(TargetKind::Jvm), "test", ", tests, ksp")
     } else {
-        (vec![ws.common_sources(), ws.target_sources(TargetKind::Jvm)], "main", ", ksp")
+        (ws.source_dirs(TargetKind::Jvm), "main", ", ksp")
     };
     // The processors see what `[[generate]]` steps wrote too, as classes in `src/` may use it.
     let generated = if unit.test { GeneratedKind::TestSources } else { GeneratedKind::Sources };
@@ -469,7 +579,7 @@ pub(crate) fn run_jvm_ksp(
     let generated = run.run(ctx.shell(), unit.jdk, &fp_dir, &|| announce(ctx, "Processing", TargetKind::Jvm, what))?;
     // Generated files join the platform fragment, unless that would turn a single-fragment
     // compilation (only `src/` has Kotlin) into a multiplatform one.
-    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
+    if sources.has_platform_kotlin() {
         sources.platform.extend(generated.sources);
     } else {
         sources.common.extend(generated.sources);
@@ -737,7 +847,7 @@ pub(crate) fn add_npm_declarations(
         return Ok(());
     }
     // As with KSP: the platform fragment, unless only `src/` has Kotlin, which then stays one fragment.
-    if sources.platform.iter().any(|p| p.extension().is_some_and(|e| e == "kt")) {
+    if sources.has_platform_kotlin() {
         sources.platform.extend(generated);
     } else {
         sources.common.extend(generated);
@@ -922,7 +1032,7 @@ pub fn native_klib(ctx: &BuildContext, konan_target: &str) -> Result<Option<Path
         name: &manifest.package.name,
         konan_target: konan_target.to_owned(),
         kind: NativeKind::Library,
-        sources: srcs,
+        sources: for_platform(ctx, srcs, konan_target),
         libraries,
         plugins: &plugins,
         kotlin_args: &kotlin_args,
@@ -1084,7 +1194,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     if platforms.is_empty() {
         return Ok(Vec::new());
     }
-    let programs = native_programs(ctx, native, &srcs)?;
+    let programs = native_programs(ctx, native, &without_platform_sets(ctx, srcs.clone()))?;
     native_cinterop_defs(ctx)?;
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
@@ -1103,6 +1213,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
         libraries.extend(native_cinterop(ctx, konan_target)?);
         let link = native_interop::native_link(ctx, konan_target)?;
         let exported = native_interop::exported_klibs(ctx, &setup, konan_target)?;
+        let platform_srcs = for_platform(ctx, srcs.clone(), konan_target);
         let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target);
         let mut builds = Vec::new();
         for program in &programs {
@@ -1119,7 +1230,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
                 name,
                 konan_target: konan_target.clone(),
                 kind: native.kind,
-                sources: srcs.clone(),
+                sources: platform_srcs.clone(),
                 libraries: libraries.clone(),
                 plugins: &plugins,
                 kotlin_args: &kotlin_args,

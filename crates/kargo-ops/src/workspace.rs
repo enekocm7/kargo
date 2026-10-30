@@ -7,6 +7,7 @@
 //! kargo.lock
 //! src/                 common sources (Kotlin, and Java for JVM)
 //! src-<target>/        target-specific sources (src-jvm, src-wasm, src-native, src-android)
+//! src-<set>/           sources of an intermediate source set (`[source-sets.<set>]`)
 //! tests/               common tests
 //! tests-<target>/      target-specific tests
 //! test-fixtures/       test code shared with dependent packages (`test-fixtures = true`)
@@ -255,6 +256,36 @@ impl Workspace {
         self.root.join(target.source_dir_name())
     }
 
+    /// The directory of the intermediate source set `name` (`[source-sets.<name>]`).
+    pub fn group_sources(&self, name: &str) -> PathBuf {
+        self.root.join(format!("src-{name}"))
+    }
+
+    pub fn group_tests(&self, name: &str) -> PathBuf {
+        self.root.join(format!("tests-{name}"))
+    }
+
+    pub fn group_test_fixtures(&self, name: &str) -> PathBuf {
+        self.root.join(format!("test-fixtures-{name}"))
+    }
+
+    /// The source directories `target` compiles, widest first: `src/`, the directories of the source
+    /// sets that include it and `src-<target>/`.
+    pub fn source_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        let mut dirs = vec![self.common_sources()];
+        dirs.extend(self.manifest().all_groups_for(target).iter().map(|g| self.group_sources(&g.name)));
+        dirs.push(self.target_sources(target));
+        dirs
+    }
+
+    /// Like [`Workspace::source_dirs`], for `tests/`.
+    pub fn test_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        let mut dirs = vec![self.common_tests()];
+        dirs.extend(self.manifest().all_groups_for(target).iter().map(|g| self.group_tests(&g.name)));
+        dirs.push(self.target_tests(target));
+        dirs
+    }
+
     pub fn common_tests(&self) -> PathBuf {
         self.root.join("tests")
     }
@@ -308,10 +339,14 @@ impl Workspace {
     pub fn source_roots(&self) -> Vec<PathBuf> {
         let mut dirs = vec![PathBuf::from("src")];
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(t.source_dir_name())));
+        let groups = &self.manifest().source_sets;
+        dirs.extend(groups.iter().map(|g| PathBuf::from(g.source_dir_name())));
         dirs.push(PathBuf::from("tests"));
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("tests-{}", t.as_str()))));
+        dirs.extend(groups.iter().map(|g| PathBuf::from(format!("tests-{}", g.name))));
         dirs.push(PathBuf::from("test-fixtures"));
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("test-fixtures-{}", t.as_str()))));
+        dirs.extend(groups.iter().map(|g| PathBuf::from(format!("test-fixtures-{}", g.name))));
         dirs.push(PathBuf::from("benches"));
         dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("benches-{}", t.as_str()))));
         dirs.push(PathBuf::from("examples"));

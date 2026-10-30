@@ -189,7 +189,19 @@ com.example.notes.model.Note
 
 `<target>` is `jvm` or `android`; in a workspace the directories are `target/compose/<member>/<target>/`. The options apply to both targets: on the JVM Kargo passes them to the compiler plugin, on Android it adds them to the generated Gradle project. Changing them rebuilds the package.
 
-The Compose compiler ships with Kotlin, so its version is always `[kotlin] version`: there is no separate compiler version to match. The runtime (`version`, default 1.12.1) can be any Compose Multiplatform release that supports that Kotlin version.
+### Kotlin and Compose versions
+
+The Compose compiler ships with Kotlin, so its version is always `[kotlin] version`: there is no separate compiler version to match. The runtime (`version`, default 1.12.1) must be a Compose Multiplatform release that supports that Kotlin version, and Kargo checks the pair before it builds, on every target (the JVM, Wasm, JS, Native and Android):
+
+| Kotlin | Compose Multiplatform | Result |
+|---|---|---|
+| older than 2.0 | any | Error: the Compose compiler plugin is part of Kotlin only from 2.0 on |
+| 2.0 or newer | older than 1.6.10 | Error: 1.6.10 is the first release for the Kotlin 2.0 compiler plugin |
+| 2.0.x | 1.8.0 or newer, which includes the default | Error: 1.8.0 moved the UI framework to K2 and needs Kotlin 2.1.0 or newer. Raise `[kotlin] version`, or pin an older release (below 1.8.0) with `version` |
+| older than 2.2.20 | 1.9.0 or newer, with `[target.wasm]` or `[target.native]` | [Warning](../../reference/warnings/#compose-for-ios-or-the-web-on-an-older-kotlin): JetBrains recommends Kotlin 2.2.20 for iOS and the web |
+| 2.1.0 or newer | 1.6.10 or newer | Fine |
+
+A pre-release such as `1.8.0-beta01` counts as the release it leads to. Libraries built on Compose Multiplatform must be compiled against at least the Kotlin version of the project, so check them when you raise the Compose version. See JetBrains' [compatibility table](https://kotlinlang.org/docs/multiplatform/compose-compatibility-and-versioning.html).
 
 ## Running
 

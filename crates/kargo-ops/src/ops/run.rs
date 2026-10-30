@@ -780,7 +780,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let host = Host::current()?.konan_target.to_owned();
     let setup = ctx.setup(TargetKind::Native)?;
-    let main_sources = sources(ctx, TargetKind::Native, false, &["kt"])?;
+    let main_sources = super::build::for_platform(ctx, sources(ctx, TargetKind::Native, false, &["kt"])?, &host);
     let example = match single_file(ctx, program)? {
         Some(single) => {
             let entry = find_entry_point_in(&single.file, true)?.native_entry();

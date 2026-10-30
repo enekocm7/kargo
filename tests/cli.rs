@@ -1266,6 +1266,149 @@ fn metadata_lists_the_benchmark_roots() {
 }
 
 #[test]
+fn metadata_lists_the_intermediate_source_sets() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "shared",
+            "[target.jvm]
+[target.wasm]
+[target.js]
+             [source-sets.everywhere]
+targets = [\"jvm\", \"wasm\", \"js\"]
+             [source-sets.web]
+targets = [\"wasm\", \"js\"]
+",
+        ),
+    );
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let targets = metadata["packages"][0]["targets"].as_array().unwrap();
+    let target = |kind: &str| targets.iter().find(|t| t["kind"] == kind).unwrap();
+    let tail = |roots: &serde_json::Value| -> Vec<String> {
+        roots.as_array().unwrap().iter().map(|r| r.as_str().unwrap().rsplit(['/', '\\']).next().unwrap().to_owned()).collect()
+    };
+    let names = |kind: &str| -> Vec<String> {
+        target(kind)["source-sets"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap().to_owned()).collect()
+    };
+    assert_eq!(names("jvm"), ["everywhere"]);
+    assert_eq!(names("wasm"), ["everywhere", "web"]);
+    // The common and the target's directories stay first, the sets' follow.
+    assert_eq!(tail(&target("jvm")["source-roots"]), ["src", "src-jvm", "src-everywhere"]);
+    assert_eq!(tail(&target("wasm")["source-roots"]), ["src", "src-wasm", "src-everywhere", "src-web"]);
+    assert!(tail(&target("js")["test-roots"]).contains(&"tests-web".to_owned()));
+    let web = &target("wasm")["source-sets"][1];
+    assert_eq!(web["targets"], serde_json::json!(["wasm", "js"]));
+    assert_eq!(web["refines"], serde_json::json!(["everywhere"]));
+    assert!(web["source-root"].as_str().unwrap().ends_with("src-web"));
+}
+
+#[test]
+fn metadata_lists_the_source_sets_of_native_platforms() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "shared",
+            "[target.jvm]
+[target.native]
+platforms = [\"host\"]
+             [source-sets.apple]
+platforms = [\"apple\"]
+[source-sets.ios]
+platforms = [\"ios\"]
+",
+        ),
+    );
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let targets = metadata["packages"][0]["targets"].as_array().unwrap();
+    let native = targets.iter().find(|t| t["kind"] == "native").unwrap();
+    let jvm = targets.iter().find(|t| t["kind"] == "jvm").unwrap();
+    assert!(jvm["source-sets"].as_array().unwrap().is_empty(), "the JVM compiles no Native set");
+    let sets = native["source-sets"].as_array().unwrap();
+    assert_eq!(sets.iter().map(|s| s["name"].as_str().unwrap()).collect::<Vec<_>>(), ["apple", "ios"]);
+    assert_eq!(sets[0]["targets"], serde_json::json!(["native"]));
+    assert!(sets[0]["platforms"].as_array().unwrap().iter().any(|p| p == "macos_arm64"));
+    assert_eq!(sets[0]["refines"], serde_json::json!(["native"]), "a set that refines no other one is below `src-native/`");
+    assert_eq!(sets[1]["refines"], serde_json::json!(["apple"]));
+    let roots: Vec<String> = native["source-roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().rsplit(['/', '\\']).next().unwrap().to_owned())
+        .collect();
+    assert_eq!(roots, ["src", "src-native", "src-apple", "src-ios"]);
+}
+
+#[test]
+fn source_sets_are_validated_in_the_manifest() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "shared",
+            "[source-sets.jvm]
+targets = [\"jvm\", \"wasm\"]
+",
+        ),
+    );
+    p.kargo()
+        .arg("build")
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("[source-sets.jvm] clashes with the source directories"));
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "shared",
+            "[source-sets.web]
+targets = [\"js\"]
+",
+        ),
+    );
+    p.kargo().arg("build").assert().failure().code(101).stderr(predicate::str::contains("needs at least two different targets"));
+}
+
+#[test]
+fn target_sets_pick_targets_by_where_they_run() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("sets", ""));
+    for command in ["build", "check", "test"] {
+        p.kargo()
+            .args([command, "--target-set", "device"])
+            .assert()
+            .failure()
+            .code(101)
+            .stderr(predicate::str::contains("no enabled target is in the device set"));
+    }
+    p.file(
+        "kargo.toml",
+        "[package]
+name = \"droid\"
+version = \"0.1.0\"
+
+[target.android]
+namespace = \"com.example.droid\"
+",
+    );
+    p.kargo()
+        .args(["test", "--target-set", "host"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no enabled target is in the host set"));
+    p.kargo()
+        .args(["build", "--target-set", "host", "-t", "android"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+    p.kargo().args(["build", "--target-set", "cloud"]).assert().failure().stderr(predicate::str::contains("possible values: host, device"));
+}
+
+#[test]
 fn short_help_marks_tasks_hidden_by_uncommon_commands() {
     let p = Project::new();
     p.file(

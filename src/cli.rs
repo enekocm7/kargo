@@ -190,6 +190,24 @@ impl From<TargetArg> for TargetKind {
     }
 }
 
+/// `--target-set`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TargetSetArg {
+    /// JVM, Wasm, JS and Native, the targets that build and run on this machine
+    Host,
+    /// Android, which runs on a device or an emulator
+    Device,
+}
+
+impl From<TargetSetArg> for kargo_ops::ops::build::TargetSet {
+    fn from(set: TargetSetArg) -> Self {
+        match set {
+            TargetSetArg::Host => Self::Host,
+            TargetSetArg::Device => Self::Device,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ScopeArg {
     Compile,
@@ -886,6 +904,9 @@ struct BuildArgs {
     /// Only this target (repeatable); defaults to all enabled targets
     #[arg(short, long = "target", value_enum)]
     targets: Vec<TargetArg>,
+    /// Only the targets that run here (`host`: JVM, Wasm, JS, Native on this machine) or on a device (`device`: Android)
+    #[arg(long, value_enum, value_name = "SET", conflicts_with = "targets")]
+    target_set: Option<TargetSetArg>,
     #[command(flatten)]
     packages: PackageArgs,
     #[command(flatten)]
@@ -904,6 +925,7 @@ impl BuildArgs {
             targets: self.targets.iter().map(|t| (*t).into()).collect(),
             profile: profile_kind(self.release, self.profile.as_deref()),
             size_report: self.size_report,
+            target_set: self.target_set.map(Into::into).unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -1103,6 +1125,12 @@ enum Command {
         /// Also combine the Apple frameworks of `kind = "framework"` into an XCFramework (macOS with Xcode)
         #[arg(long)]
         xcframework: bool,
+        /// With `--xcframework`: also write a Swift package (`Package.swift`) for the XCFramework
+        #[arg(long, requires = "xcframework")]
+        swift_package: bool,
+        /// With `--xcframework`: also write a CocoaPods spec (`<name>.podspec`) for the XCFramework
+        #[arg(long, requires = "xcframework")]
+        cocoapods: bool,
     },
     /// Type-check the project without packaging or linking
     #[command(visible_alias = "c")]
@@ -2654,10 +2682,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             Ok(0)
         }
         Command::Import { path, dry_run, no_build, from } => import_project(config, global, path, dry_run, no_build, from),
-        Command::Build { build, keep_going, xcframework } => {
+        Command::Build { build, keep_going, xcframework, swift_package, cocoapods } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
-            let opts = BuildOptions { keep_going, xcframework, ..build.options() };
+            let apple_files = kargo_ops::apple_package::AppleFiles { swift_package, cocoapods };
+            let opts = BuildOptions { keep_going, xcframework, apple_files, ..build.options() };
             let results = build_packages(
                 config,
                 &project,
@@ -4331,10 +4360,10 @@ mod tests {
     fn parses_common_invocations() {
         let cli = Cli::try_parse_from(["kargo", "build", "--release", "-t", "jvm", "-t", "native"]).unwrap();
         match cli.command {
-            Command::Build { build, keep_going, xcframework } => {
+            Command::Build { build, keep_going, xcframework, swift_package, cocoapods } => {
                 let o = build.options();
                 assert_eq!(o.profile, ProfileKind::Release);
-                assert!(!keep_going && !xcframework);
+                assert!(!keep_going && !xcframework && !swift_package && !cocoapods);
                 assert_eq!(o.targets, [TargetKind::Jvm, TargetKind::Native]);
             }
             other => panic!("{other:?}"),
@@ -4413,6 +4442,11 @@ mod tests {
             Cli::try_parse_from(["kargo", "build", "--xcframework"]).unwrap().command,
             Command::Build { xcframework: true, .. }
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["kargo", "build", "--xcframework", "--swift-package", "--cocoapods"]).unwrap().command,
+            Command::Build { xcframework: true, swift_package: true, cocoapods: true, .. }
+        ));
+        assert!(Cli::try_parse_from(["kargo", "build", "--swift-package"]).is_err(), "it needs the XCFramework");
         assert!(matches!(
             Cli::try_parse_from(["kargo", "check", "--keep-going"]).unwrap().command,
             Command::Check { keep_going: true, .. }

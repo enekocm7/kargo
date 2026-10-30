@@ -47,7 +47,7 @@ struct SourceSet {
     platform: &'static str,
     roots: Vec<PathBuf>,
     classpath: Vec<PathBuf>,
-    depends_on: Option<String>,
+    depends_on: Vec<String>,
     /// Documentation sites linked from this source set only, on top of `[doc] external-links`.
     links: Vec<String>,
 }
@@ -78,6 +78,7 @@ pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
     super::build::generate_sources(ctx, targets)?;
     let mut dirs = vec![ws.common_sources()];
     dirs.extend(targets.iter().map(|t| ws.target_sources(*t)));
+    dirs.extend(targets.iter().flat_map(|t| ws.manifest().all_groups_for(*t)).map(|g| ws.group_sources(&g.name)));
     dirs.extend(targets.iter().flat_map(|t| crate::generate::dirs(ws, &ctx.profile, *t, GeneratedKind::Sources)));
     if dirs.iter().all(|d| collect_files(d, &["kt", "java"]).is_empty()) {
         bail!("no Kotlin or Java sources to document; add them under `src/` or `src-<target>/`");
@@ -130,6 +131,11 @@ pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// The names a source set depends on: the ones it refines, else `common`.
+fn refined(parents: &[&str]) -> Vec<String> {
+    if parents.is_empty() { vec!["common".to_owned()] } else { parents.iter().map(|p| (*p).to_owned()).collect() }
+}
+
 /// Builds the Dokka source sets for `targets` from the project layout.
 fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceSet>> {
     let ws = ctx.ws;
@@ -143,16 +149,45 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
             platform: "common",
             roots: existing(vec![common.clone()]),
             classpath: Vec::new(),
-            depends_on: None,
+            depends_on: Vec::new(),
             links: Vec::new(),
         });
+        // The intermediate source sets (`[source-sets.<name>]`) sit between common code and the targets.
+        let mut seen: Vec<&str> = Vec::new();
+        for (group, parents) in targets.iter().flat_map(|t| ctx.ws.manifest().source_groups_for(*t)) {
+            if !seen.contains(&group.name.as_str()) {
+                seen.push(&group.name);
+                sets.push(SourceSet {
+                    name: group.name.clone(),
+                    platform: "common",
+                    roots: existing(vec![ws.group_sources(&group.name)]),
+                    classpath: Vec::new(),
+                    depends_on: refined(&parents),
+                    links: Vec::new(),
+                });
+            }
+        }
     }
     for &target in targets {
         let mut roots = vec![ws.target_sources(target)];
+        let groups = ws.manifest().source_groups_for(target);
+        if single {
+            roots.extend(groups.iter().map(|(g, _)| ws.group_sources(&g.name)));
+        }
+        // The sets of some Native platforms are documented with the Native target's own code.
+        if target == TargetKind::Native {
+            roots.extend(ws.manifest().native_platform_groups(None).iter().map(|(g, _)| ws.group_sources(&g.name)));
+        }
         roots.extend(crate::generate::dirs(ws, &ctx.profile, target, GeneratedKind::Sources));
         if single {
             roots.insert(0, common.clone());
         }
+        // The target refines the narrowest source sets, those that no other one of its list refines.
+        let leaves: Vec<&str> = groups
+            .iter()
+            .filter(|(g, _)| !groups.iter().any(|(_, p)| p.contains(&g.name.as_str())))
+            .map(|(g, _)| g.name.as_str())
+            .collect();
         let (platform, classpath) = classpath(ctx, target)?;
         let links = if target == TargetKind::Android { vec![ANDROID_REFERENCE.to_owned()] } else { Vec::new() };
         sets.push(SourceSet {
@@ -160,7 +195,7 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
             platform,
             roots: existing(roots),
             classpath,
-            depends_on: (!single).then(|| "common".to_owned()),
+            depends_on: if single { Vec::new() } else { refined(&leaves) },
             links,
         });
     }
@@ -168,8 +203,11 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
         // Common code is analysed against klibs (Wasm or Native), which carry the
         // full Kotlin metadata of multiplatform libraries; JVM and Android jars
         // do not. Without a klib target, common code only sees the standard library.
-        if let Some(klib_set) = sets.iter().skip(1).find(|s| s.platform != "jvm") {
-            sets[0].classpath = klib_set.classpath.clone();
+        if let Some(klib_set) = sets.iter().find(|s| s.platform != "jvm" && s.platform != "common") {
+            let classpath = klib_set.classpath.clone();
+            for set in sets.iter_mut().filter(|s| s.platform == "common") {
+                set.classpath = classpath.clone();
+            }
         }
     }
     Ok(sets)
@@ -303,13 +341,13 @@ fn path_str(path: &Path) -> String {
 mod tests {
     use super::*;
 
-    fn set(name: &str, platform: &'static str, depends_on: Option<&str>) -> SourceSet {
+    fn set(name: &str, platform: &'static str, depends_on: &[&str]) -> SourceSet {
         SourceSet {
             name: name.to_owned(),
             platform,
             roots: vec![PathBuf::from("/p/src")],
             classpath: vec![PathBuf::from("/m2/lib.jar")],
-            depends_on: depends_on.map(str::to_owned),
+            depends_on: depends_on.iter().map(|d| (*d).to_owned()).collect(),
             links: Vec::new(),
         }
     }
@@ -322,9 +360,9 @@ mod tests {
             source_link: Some("https://github.com/me/lib/blob/main".to_owned()),
             external_links: vec!["https://kotlinlang.org/api/kotlinx.coroutines".to_owned()],
         };
-        let mut android = set("android", "jvm", Some("common"));
+        let mut android = set("android", "jvm", &["common"]);
         android.links.push(ANDROID_REFERENCE.to_owned());
-        let sets = [set("common", "common", None), set("jvm", "jvm", Some("common")), android];
+        let sets = [set("common", "common", &[]), set("jvm", "jvm", &["common"]), android];
         let plugins = [PathBuf::from("/m2/dokka-base.jar")];
         let config = DokkaConfig {
             module_name: "lib",

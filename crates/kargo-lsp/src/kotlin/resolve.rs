@@ -203,7 +203,7 @@ impl<'a> Analyzer<'a> {
             (Origin::Loose, Origin::Source(t)) => t.kind == SetKind::Main,
             (Origin::Source(f), Origin::Source(t)) => {
                 let kind_ok = t.kind == SetKind::Main || (t.kind == SetKind::Test && f.kind == SetKind::Test);
-                let target_ok = t.target.is_none() || t.target == f.target;
+                let target_ok = t.visible_from(f);
                 if f.package == t.package {
                     kind_ok && target_ok
                 } else {
@@ -234,7 +234,10 @@ impl<'a> Analyzer<'a> {
 
     /// The platforms the code of `set` compiles for: its target's, or every target's for common
     /// code, which compiles for each of them.
-    fn platforms_of(&self, set: &SourceSet) -> Platforms {
+    pub(super) fn platforms_of(&self, set: &SourceSet) -> Platforms {
+        if let Some((_, targets)) = set.group() {
+            return targets.into_iter().fold(Platforms::NONE, |all, t| all.union(Platforms::of_target(t)));
+        }
         match &set.target {
             Some(target) => Platforms::of_target(target),
             None => match self.packages.platforms.get(set.package) {

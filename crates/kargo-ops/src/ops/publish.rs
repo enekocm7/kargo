@@ -309,6 +309,14 @@ fn stage_library(ctx: &BuildContext, group: &str, work: &Path, repo_dir: &Path) 
             } else {
                 vec![("", ws.common_sources()), ("", ws.target_sources(target))]
             };
+            // The intermediate source sets this platform compiles, each under its name like Gradle's `<name>Main`.
+            let groups: Vec<(String, PathBuf)> = ws
+                .manifest()
+                .all_groups_for(target)
+                .iter()
+                .map(|g| (if multiplatform { format!("{}Main", g.name) } else { String::new() }, ws.group_sources(&g.name)))
+                .collect();
+            dirs.extend(groups.iter().map(|(prefix, dir)| (prefix.as_str(), dir.clone())));
             // What `[[generate]]` steps wrote is part of the library's code too.
             let generated = if multiplatform { platform_source_root(&platform.kind) } else { "" };
             dirs.extend(crate::generate::dirs(ws, &ctx.profile, target, GeneratedKind::Sources).into_iter().map(|dir| (generated, dir)));
@@ -905,6 +913,7 @@ pub fn package_library(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Resu
     write_library_jar(ctx, &jar, jvm, &manifest)?;
     let work = ws.profile_dir(&ctx.profile).join("package-work");
     let mut dirs = vec![("", ws.common_sources()), ("", ws.target_sources(TargetKind::Jvm))];
+    dirs.extend(ws.manifest().source_groups_for(TargetKind::Jvm).iter().map(|(g, _)| ("", ws.group_sources(&g.name))));
     dirs.extend(crate::generate::dirs(ws, &ctx.profile, TargetKind::Jvm, GeneratedKind::Sources).into_iter().map(|dir| ("", dir)));
     let sources = sources_jar(&work, "jvm", &dirs)?;
     let dest = dir.join(format!("{}-{}-sources.jar", pkg.name, pkg.version));
