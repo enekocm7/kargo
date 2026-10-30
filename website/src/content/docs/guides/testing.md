@@ -91,6 +91,8 @@ error: test failed
 fail-fast = false
 ```
 
+To run the tests of the targets that run on this machine, or only on a device, pass [`--target-set host` or `--target-set device`](../multiplatform/#target-sets).
+
 `kargo build --keep-going` and `kargo check --keep-going` do the same for builds: every target is built and each failure is reported.
 
 ## Test reports for CI

@@ -21,6 +21,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     target: Option<RawTargets>,
     #[serde(default)]
+    source_sets: BTreeMap<String, RawSourceSet>,
+    #[serde(default)]
     bin: Vec<RawBin>,
     #[serde(default)]
     generate: Vec<RawGenerate>,
@@ -58,6 +60,92 @@ pub(super) struct RawManifest {
     publish: RawPublish,
     #[serde(default)]
     build: RawBuild,
+}
+
+/// `[source-sets.<name>]`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawSourceSet {
+    #[serde(default)]
+    targets: Vec<String>,
+    /// Kotlin/Native platforms or families of them, for a set that is only some of the `native` target's platforms.
+    #[serde(default)]
+    platforms: Vec<String>,
+}
+
+/// The Konan targets a name in `platforms` of a source set stands for: a family such as `apple` or `linux`, or one
+/// platform (`ios_arm64`, `iosArm64`).
+fn native_platform_family(name: &str) -> Result<Vec<String>> {
+    let prefixes: &[&str] = match name.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
+        "apple" => &["ios_", "macos_", "tvos_", "watchos_"],
+        "ios" => &["ios_"],
+        "macos" => &["macos_"],
+        "tvos" => &["tvos_"],
+        "watchos" => &["watchos_"],
+        "linux" => &["linux_"],
+        "mingw" => &["mingw_"],
+        "androidnative" => &["android_"],
+        _ => {
+            if name == "host" {
+                bail!("`host` is the machine you build on; name its platform (such as `linux_x64`) or a family such as `linux`");
+            }
+            return Ok(vec![normalize_konan_target(name)?]);
+        }
+    };
+    Ok(KONAN_TARGETS.iter().filter(|t| prefixes.iter().any(|p| t.starts_with(p))).map(|t| (*t).to_owned()).collect())
+}
+
+/// Checks the `[source-sets.<name>]` tables: names that do not clash with a target or with each other,
+/// known targets, and no two sets over the same targets.
+fn validate_source_sets(raw: BTreeMap<String, RawSourceSet>) -> Result<Vec<SourceGroup>> {
+    let mut groups: Vec<SourceGroup> = Vec::new();
+    for (name, set) in raw {
+        let valid =
+            name.starts_with(|c: char| c.is_ascii_alphabetic()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !valid {
+            bail!("invalid [source-sets] name `{name}` (use letters, digits, `-` and `_`, starting with a letter)");
+        }
+        if name == "common" || name.parse::<TargetKind>().is_ok() {
+            bail!("[source-sets.{name}] clashes with the source directories of a target; pick another name, like `jvmAndAndroid`");
+        }
+        let mut targets: Vec<TargetKind> = Vec::new();
+        for t in &set.targets {
+            let target: TargetKind = t.parse().with_context(|| format!("invalid [source-sets.{name}] `targets`"))?;
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        let mut platforms: Vec<String> = Vec::new();
+        for p in &set.platforms {
+            let expanded = native_platform_family(p).with_context(|| format!("invalid [source-sets.{name}] `platforms`"))?;
+            for konan in expanded {
+                if !platforms.contains(&konan) {
+                    platforms.push(konan);
+                }
+            }
+        }
+        platforms.sort();
+        if platforms.is_empty() {
+            if targets.len() < 2 {
+                bail!(
+                    "[source-sets.{name}] `targets` needs at least two different targets; code for one target belongs in `src-<target>/`,                      and code for some Native platforms needs `platforms`"
+                );
+            }
+        } else {
+            if !targets.is_empty() && targets != [TargetKind::Native] {
+                bail!("[source-sets.{name}] `platforms` lists Kotlin/Native platforms, so `targets` can only be [\"native\"]");
+            }
+            targets = vec![TargetKind::Native];
+        }
+        let same = |g: &&SourceGroup| {
+            g.targets.len() == targets.len() && targets.iter().all(|t| g.targets.contains(t)) && g.platforms == platforms
+        };
+        if let Some(same) = groups.iter().find(same) {
+            bail!("[source-sets.{name}] has the same targets as [source-sets.{}]; keep one of them", same.name);
+        }
+        groups.push(SourceGroup { name, targets, platforms });
+    }
+    Ok(groups)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2725,6 +2813,7 @@ impl RawManifest {
         let fmt = self.fmt.validate()?;
         let lint = self.lint.validate()?;
         let build = self.build.validate("build")?;
+        let source_sets = validate_source_sets(self.source_sets)?;
         if let Some(missing) = build.default_targets.iter().flatten().find(|t| !targets.is_enabled(**t)) {
             bail!("[build] `default-targets` names `{missing}`, which is not enabled; add a [target.{missing}] section");
         }
@@ -2740,6 +2829,7 @@ impl RawManifest {
 
         Ok(Manifest {
             publish,
+            source_sets,
             toolchain: ToolchainSettings { jdk, graalvm, android_sdk, kargo, typescript },
             packaging,
             doc,

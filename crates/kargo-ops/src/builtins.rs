@@ -230,6 +230,67 @@ fn check_spring_starters(manifest: &Manifest, starters: &[String], spring: &str)
     Ok(())
 }
 
+/// The first three numbers of a version: `2.2.20-RC` is `[2, 2, 20]`, `1.8` is `[1, 8, 0]`. A qualifier is ignored, so a
+/// pre-release counts as the release it leads to.
+fn numeric_version(version: &str) -> [u64; 3] {
+    let mut out = [0; 3];
+    let digits = version.split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or_default();
+    for (slot, part) in out.iter_mut().zip(digits.split('.')) {
+        *slot = part.parse().unwrap_or(0);
+    }
+    out
+}
+
+/// The Compose Multiplatform release that `[frameworks.compose]` uses.
+pub fn compose_version(compose: &ComposeConfig) -> &str {
+    compose.version.as_deref().unwrap_or(COMPOSE_VERSION)
+}
+
+/// Fails on a Compose Multiplatform release that cannot work with the project's Kotlin version. The Compose
+/// compiler plugin is part of Kotlin since 2.0 and always has Kotlin's version, so only the runtime has to match:
+/// 1.6.10 is the first release built for Kotlin 2.0, and 1.8.0 the first that needs Kotlin 2.1.
+pub fn check_compose_versions(manifest: &Manifest, compose: &ComposeConfig) -> Result<()> {
+    let kotlin = manifest.kotlin.version.as_str();
+    let (k, c) = (numeric_version(kotlin), compose_version(compose));
+    let runtime = numeric_version(c);
+    if k < [2, 0, 0] {
+        bail!(
+            "Compose needs Kotlin 2.0 or newer, whose compiler includes the Compose plugin; [kotlin] version is {kotlin}.              Raise [kotlin] version, or remove [frameworks.compose]"
+        );
+    }
+    if runtime < [1, 6, 10] {
+        bail!(
+            "Compose Multiplatform {c} predates the Kotlin 2.0 compiler plugin, which the project needs with Kotlin {kotlin};              set [frameworks.compose] version to 1.6.10 or newer"
+        );
+    }
+    if runtime >= [1, 8, 0] && k < [2, 1, 0] {
+        let default = if compose.version.is_none() { " (the default for this version of Kargo)" } else { "" };
+        bail!(
+            "Compose Multiplatform {c}{default} needs Kotlin 2.1.0 or newer, but [kotlin] version is {kotlin};              raise [kotlin] version, or pin an older release with [frameworks.compose] version (before 1.8.0 for Kotlin 2.0)"
+        );
+    }
+    Ok(())
+}
+
+/// A warning for Compose for iOS or the web on a Kotlin older than JetBrains recommends for them: Kotlin 2.2.20
+/// for Compose Multiplatform 1.9 and newer, whose iOS and web support moves quickly.
+pub fn compose_platform_advice(manifest: &Manifest) -> Option<String> {
+    let compose = manifest.frameworks.compose.as_ref()?;
+    let on_moving_targets: Vec<&str> = [(manifest.targets.wasm.is_some(), "web"), (manifest.targets.native.is_some(), "iOS")]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+    let kotlin = manifest.kotlin.version.as_str();
+    if on_moving_targets.is_empty() || numeric_version(compose_version(compose)) < [1, 9, 0] || numeric_version(kotlin) >= [2, 2, 20] {
+        return None;
+    }
+    Some(format!(
+        "Compose Multiplatform {} for {} works best with Kotlin 2.2.20 or newer (JetBrains recommends it for platforms with rapidly          evolving support); [kotlin] version is {kotlin}",
+        compose_version(compose),
+        on_moving_targets.join(" and ")
+    ))
+}
+
 /// Computes contributions for `target`. Android is handled by the Gradle
 /// generator, which maps frameworks to Gradle plugins instead.
 pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path) -> Result<Contributions> {
@@ -294,8 +355,9 @@ pub fn contributions(manifest: &Manifest, target: TargetKind, project_dir: &Path
     }
 
     if let Some(compose) = &fw.compose {
+        check_compose_versions(manifest, compose)?;
         c.plugins.push(PluginSpec::kotlin("kotlin-compose-compiler-plugin-embeddable", COMPOSE_PLUGIN_ID));
-        let v = compose.version.as_deref().unwrap_or(COMPOSE_VERSION);
+        let v = compose_version(compose);
         match target {
             TargetKind::Jvm => {
                 c.dependencies.push(dep(&format!("org.jetbrains.compose.desktop:desktop-jvm-{}", compose_desktop_classifier()?), Some(v)));
@@ -787,6 +849,87 @@ mod tests {
         let missing = manifest("[frameworks]\ncompose = { stability-config = [\"stability.conf\", \"missing.conf\"] }\n");
         let err = check_compose_stability_config(&missing, dir.path()).unwrap_err();
         assert!(err.to_string().contains("missing.conf"), "{err}");
+    }
+
+    #[test]
+    fn compose_needs_a_kotlin_it_supports() {
+        let err = |extra: &str| contributions(&manifest(extra), TargetKind::Jvm, Path::new(".")).unwrap_err().to_string();
+        // The default runtime needs Kotlin 2.1, which is what the default Kotlin is.
+        assert!(
+            contributions(
+                &manifest(
+                    "[frameworks]
+compose = true
+"
+                ),
+                TargetKind::Jvm,
+                Path::new(".")
+            )
+            .is_ok()
+        );
+        let old_kotlin = err("[kotlin]
+version = \"1.9.25\"
+[frameworks]
+compose = true
+");
+        assert!(old_kotlin.contains("Compose needs Kotlin 2.0 or newer") && old_kotlin.contains("1.9.25"), "{old_kotlin}");
+        let default_runtime = err("[kotlin]
+version = \"2.0.21\"
+[frameworks]
+compose = true
+");
+        assert!(default_runtime.contains(&format!("Compose Multiplatform {COMPOSE_VERSION} (the default")), "{default_runtime}");
+        assert!(default_runtime.contains("needs Kotlin 2.1.0 or newer"), "{default_runtime}");
+        let pinned = err("[kotlin]
+version = \"2.0.21\"
+[frameworks.compose]
+version = \"1.8.0-beta01\"
+");
+        assert!(pinned.contains("Compose Multiplatform 1.8.0-beta01 needs Kotlin 2.1.0"), "{pinned}");
+        let ancient = err("[frameworks.compose]
+version = \"1.5.12\"
+");
+        assert!(ancient.contains("predates the Kotlin 2.0 compiler plugin"), "{ancient}");
+        // An older release that suits the older Kotlin is fine, on every target the check covers.
+        let fine = manifest(
+            "[kotlin]
+version = \"2.0.21\"
+[frameworks.compose]
+version = \"1.7.3\"
+",
+        );
+        assert!(contributions(&fine, TargetKind::Jvm, Path::new(".")).is_ok());
+        assert!(compose_platform_advice(&fine).is_none());
+    }
+
+    #[test]
+    fn compose_for_ios_and_web_advises_a_newer_kotlin() {
+        let web = |kotlin: &str, compose: &str| {
+            manifest(&format!(
+                "[kotlin]
+version = \"{kotlin}\"
+[target.wasm]
+environment = \"browser\"
+[frameworks.compose]
+version = \"{compose}\"
+"
+            ))
+        };
+        let advice = compose_platform_advice(&web("2.2.0", "1.9.0")).unwrap();
+        assert!(advice.contains("for web works best with Kotlin 2.2.20") && advice.contains("[kotlin] version is 2.2.0"), "{advice}");
+        assert!(compose_platform_advice(&web("2.2.20", "1.9.0")).is_none());
+        assert!(compose_platform_advice(&web("2.2.0", "1.8.2")).is_none(), "older releases were not tied to 2.2.20");
+        // A JVM-only Compose project has no such advice.
+        assert!(
+            compose_platform_advice(&manifest(
+                "[kotlin]
+version = \"2.2.0\"
+[frameworks]
+compose = true
+"
+            ))
+            .is_none()
+        );
     }
 
     #[test]

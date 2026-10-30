@@ -12,9 +12,9 @@ use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, hook_env, js_libraries, js_work_dir, jvm_classpaths,
+    BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, for_platform, hook_env, js_libraries, js_work_dir, jvm_classpaths,
     jvm_javac_args, jvm_processor_path, native_cinterop, native_libraries, native_platforms, prepare_js, prepare_wasm, run_jvm_ksp,
-    select_targets, sources, wasm_libraries,
+    sources, wasm_libraries,
 };
 use super::context::BuildContext;
 use crate::builtins::{JUNIT_MIN_JDK, JUNIT_VERSION};
@@ -93,7 +93,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         return Ok(true);
     }
     let start = Instant::now();
-    let targets = select_targets(ctx, &opts.build.targets)?;
+    let targets = opts.build.select(ctx)?;
     if opts.against_min && targets != [TargetKind::Jvm] {
         anyhow::bail!("`--against-min` runs JVM tests; select the JVM target with `-t jvm`");
     }
@@ -714,11 +714,18 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
 pub(crate) fn build_jvm_test_fixtures(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     let ws = ctx.ws;
     let manifest = ws.manifest();
-    let fixtures = SourceSet::new(
+    let mut fixtures = SourceSet::new(
         collect_files(&ws.common_test_fixtures(), &["kt", "java"]),
         collect_files(&ws.target_test_fixtures(TargetKind::Jvm), &["kt", "java"]),
         TargetKind::Jvm.as_str(),
     );
+    fixtures.groups = manifest
+        .source_groups_for(TargetKind::Jvm)
+        .into_iter()
+        .map(|(g, parents)| {
+            kargo_compiler::SourceGroup::new(&g.name, collect_files(&ws.group_test_fixtures(&g.name), &["kt", "java"]), &parents)
+        })
+        .collect();
     if fixtures.is_empty() {
         return Ok(None);
     }
@@ -1296,8 +1303,8 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(&ctx.profile)?;
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
-    let mut all = sources(ctx, TargetKind::Native, false, &["kt"])?;
-    all.extend(&tests);
+    let mut all = for_platform(ctx, sources(ctx, TargetKind::Native, false, &["kt"])?, host);
+    all.extend(&for_platform(ctx, tests, host));
     let name = format!("{}-test", manifest.package.name);
     let unit = NativeCompilation {
         name: &name,
@@ -1357,7 +1364,7 @@ impl ListedTest {
 
 /// `kargo test --list`: compiles the tests of each target and prints them without running them.
 fn list(ctx: &BuildContext, opts: &TestOptions, format: ListFormat) -> Result<()> {
-    let targets = select_targets(ctx, &opts.build.targets)?;
+    let targets = opts.build.select(ctx)?;
     let listed = super::parallel_targets(&targets, |target| match target {
         TargetKind::Jvm => list_jvm(ctx, opts),
         TargetKind::Native => list_native(ctx, opts),

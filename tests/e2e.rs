@@ -662,6 +662,200 @@ fun main() = runBlocking {
     t.kargo("deps").args(["build", "--locked"]).assert().success();
 }
 
+/// An `[source-sets.shared]` of the JVM and Wasm: its `actual` matches the `expect` of `src/`, and the
+/// set's tests run on both targets.
+#[test]
+fn source_set_shared_by_jvm_and_wasm() {
+    require_e2e!();
+    if which("node").is_none() {
+        eprintln!("skipping: Node.js not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["sets", "--target", "jvm,wasm"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("sets/kargo.toml")).unwrap();
+    t.write(
+        "sets/kargo.toml",
+        &format!(
+            "{manifest}
+[source-sets.shared]
+targets = [\"jvm\", \"wasm\"]
+"
+        ),
+    );
+    t.write(
+        "sets/src/Platform.kt",
+        "package com.example.sets
+
+expect fun platform(): String
+",
+    );
+    t.write(
+        "sets/src-shared/Platform.kt",
+        "package com.example.sets
+
+actual fun platform(): String = \"shared+\" + target()
+
+expect fun target(): String
+",
+    );
+    t.write(
+        "sets/src-jvm/Target.kt",
+        "package com.example.sets
+
+actual fun target(): String = \"jvm\"
+",
+    );
+    t.write(
+        "sets/src-wasm/Target.kt",
+        "package com.example.sets
+
+actual fun target(): String = \"wasm\"
+",
+    );
+    t.write(
+        "sets/src/Main.kt",
+        "package com.example.sets
+
+fun greeting(n: String) = \"Hello, $n!\"
+
+fun main() = println(greeting(platform()))
+",
+    );
+    t.write(
+        "sets/tests-shared/PlatformTest.kt",
+        "package com.example.sets
+
+import kotlin.test.Test
+import kotlin.test.assertTrue
+
+class PlatformTest {
+    @Test
+    fun startsWithTheSet() = assertTrue(platform().startsWith(\"shared+\"))
+}
+",
+    );
+    t.kargo("sets").arg("run").assert().success().stdout(predicate::str::contains("Hello, shared+jvm!"));
+    t.kargo("sets").args(["run", "--target", "wasm"]).assert().success().stdout(predicate::str::contains("Hello, shared+wasm!"));
+    t.kargo("sets")
+        .args(["test", "--no-fail-fast"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PlatformTest.startsWithTheSet ... ok"));
+    let out = t.kargo("sets").args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(metadata["packages"][0]["targets"][0]["source-sets"][0]["name"], "shared");
+}
+
+/// A shared module with an Android library and a JVM jar, consumed by an Android app and a JVM app: the
+/// code of `[source-sets.jvmAndAndroid]` is in both.
+#[test]
+fn shared_module_for_an_android_and_a_jvm_app() {
+    require_e2e!();
+    if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
+        eprintln!("skipping: set KARGO_E2E_ANDROID=1 (needs the Android SDK)");
+        return;
+    }
+    let t = E2e::new();
+    t.write(
+        "kargo.toml",
+        "[workspace]
+members = [\"shared\", \"androidApp\", \"desktopApp\"]
+",
+    );
+    t.write(
+        "shared/kargo.toml",
+        "[package]
+name = \"shared\"
+version = \"0.1.0\"
+group = \"com.example\"
+
+[target.jvm]
+
+         [target.android]
+kind = \"library\"
+
+[source-sets.jvmAndAndroid]
+targets = [\"jvm\", \"android\"]
+
+         [publish]
+javadoc = \"empty\"
+",
+    );
+    t.write(
+        "shared/src/Platform.kt",
+        "package com.example.shared
+
+expect fun platform(): String
+
+fun hello() = \"Hello from \" + platform() + \" via \" + via()
+
+expect fun via(): String
+",
+    );
+    t.write(
+        "shared/src-jvmAndAndroid/Via.kt",
+        "package com.example.shared
+
+actual fun via(): String = java.io.StringReader(\"java.io\").readText()
+",
+    );
+    t.write(
+        "shared/src-jvm/Platform.kt",
+        "package com.example.shared
+
+actual fun platform(): String = \"jvm\"
+",
+    );
+    t.write(
+        "shared/src-android/Platform.kt",
+        "package com.example.shared
+
+actual fun platform(): String = \"android\"
+",
+    );
+    t.create(&["androidApp", "--target", "android"]);
+    let app = std::fs::read_to_string(t.dir.path().join("androidApp/kargo.toml")).unwrap();
+    t.write(
+        "androidApp/kargo.toml",
+        &format!(
+            "{app}
+[dependencies]
+shared = {{ path = \"../shared\" }}
+"
+        ),
+    );
+    t.write(
+        "androidApp/src-android/Welcome.kt",
+        "package com.example.androidapp
+
+fun welcome(): String = com.example.shared.hello()
+",
+    );
+    t.create(&["desktopApp"]);
+    let desktop = std::fs::read_to_string(t.dir.path().join("desktopApp/kargo.toml")).unwrap();
+    t.write(
+        "desktopApp/kargo.toml",
+        &format!(
+            "{desktop}
+[dependencies]
+shared = {{ path = \"../shared\" }}
+"
+        ),
+    );
+    t.write(
+        "desktopApp/src/Main.kt",
+        "package com.example.desktopapp
+
+fun main() = println(com.example.shared.hello())
+",
+    );
+    t.kargo("").arg("build").assert().success();
+    t.kargo("").args(["run", "-p", "desktopApp"]).assert().success().stdout(predicate::str::contains("Hello from jvm via java.io"));
+    assert!(t.dir.path().join("target/android/androidApp/build/outputs/apk/debug/androidApp-debug.apk").is_file());
+    assert!(t.dir.path().join("target/android/shared/build/outputs/aar/shared-debug.aar").is_file());
+}
+
 #[test]
 fn multiplatform_expect_actual_on_wasm() {
     require_e2e!();
@@ -2192,6 +2386,39 @@ fn native_executable() {
     let t = E2e::new();
     t.create(&["nat", "--target", "native", "--with", "coroutines"]);
     t.kargo("nat").arg("run").assert().success().stdout(predicate::str::contains("Hello, Kotlin!"));
+}
+
+/// A source set of one family of Native platforms (the host's) below `src-native/`: it implements what `src-native/`
+/// declares, and a set of another family is not compiled.
+#[test]
+fn source_sets_of_some_native_platforms() {
+    require_e2e!();
+    require_native!();
+    let family = if cfg!(target_os = "macos") {
+        "apple"
+    } else if cfg!(windows) {
+        "mingw"
+    } else {
+        "linux"
+    };
+    let other = if family == "linux" { "mingw" } else { "linux" };
+    let t = E2e::new();
+    t.create(&["plat", "--target", "native"]);
+    let manifest = std::fs::read_to_string(t.dir.path().join("plat/kargo.toml")).unwrap();
+    let sets = format!("\n[source-sets.hostFamily]\nplatforms = [\"{family}\"]\n\n[source-sets.otherFamily]\nplatforms = [\"{other}\"]\n");
+    t.write("plat/kargo.toml", &format!("{manifest}{sets}"));
+    t.write("plat/src/Os.kt", "package com.example.plat\n\nexpect fun os(): String\n");
+    // `src-native/` holds the code of every platform and declares what the families implement below it.
+    t.write(
+        "plat/src-native/Os.kt",
+        "package com.example.plat\n\nactual fun os(): String = \"native \" + detail()\n\nexpect fun detail(): String\n",
+    );
+    t.write("plat/src-hostFamily/Detail.kt", "package com.example.plat\n\nactual fun detail(): String = \"family\"\n");
+    // Code for a platform this build does not target would not compile here.
+    t.write("plat/src-otherFamily/Other.kt", "package com.example.plat\n\nval broken: Int = \"not an int\"\n");
+    t.write("plat/src/Main.kt", "package com.example.plat\n\nfun main() = println(os())\n");
+    t.kargo("plat").arg("run").assert().success().stdout(predicate::str::contains("native family"));
+    t.kargo("plat").args(["test", "--no-run"]).assert().success();
 }
 
 #[test]

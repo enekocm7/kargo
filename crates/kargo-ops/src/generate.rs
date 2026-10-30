@@ -944,6 +944,99 @@ mod tests {
     }
 
     #[test]
+    fn source_sets_of_several_targets_join_the_sources_of_their_targets() {
+        use crate::ops::build::{existing_sources, sources};
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let project = project(
+            dir.path(),
+            &format!(
+                "[target.jvm]
+[target.wasm]
+[source-sets.shared]
+targets = [\"jvm\", \"wasm\"]
+{}",
+                write_step("everywhere", "Everywhere.kt", "")
+            ),
+        );
+        for file in ["src/Common.kt", "src-shared/Shared.kt", "tests-shared/SharedTest.kt", "src-wasm/Wasm.kt"] {
+            std::fs::create_dir_all(dir.path().join(file).parent().unwrap()).unwrap();
+            std::fs::write(dir.path().join(file), "").unwrap();
+        }
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let ctx = context(&config, &project);
+        let names =
+            |files: &[PathBuf]| -> Vec<String> { files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect() };
+
+        let jvm = existing_sources(&ctx, TargetKind::Jvm, false, &["kt"]).unwrap();
+        assert_eq!(names(&jvm.common), ["Common.kt"]);
+        assert_eq!(jvm.groups.len(), 1);
+        assert_eq!((jvm.groups[0].name.as_str(), names(&jvm.groups[0].files)), ("shared", vec!["Shared.kt".to_owned()]));
+        assert!(jvm.platform.is_empty() && jvm.has_platform_kotlin());
+        // The set's code and the target's own are fragments of one compilation.
+        let wasm = existing_sources(&ctx, TargetKind::Wasm, false, &["kt"]).unwrap();
+        assert!(wasm.fragment_args().contains(&"-Xfragments=common,shared,wasm".to_owned()));
+        // Its tests are compiled with the target's.
+        let tests = existing_sources(&ctx, TargetKind::Jvm, true, &["kt"]).unwrap();
+        assert_eq!(names(&tests.groups[0].files), ["SharedTest.kt"]);
+        // The generated files join the platform side, as the set already makes it multiplatform.
+        let generated = sources(&ctx, TargetKind::Jvm, false, &["kt"]).unwrap();
+        assert_eq!(names(&generated.platform), ["Everywhere.kt"]);
+        assert_eq!(names(&generated.common), ["Common.kt"]);
+    }
+
+    #[test]
+    fn source_sets_of_some_native_platforms_only_compile_for_those_platforms() {
+        use crate::ops::build::{existing_sources, for_platform};
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let project = project(
+            dir.path(),
+            "[target.native]
+platforms = [\"linux_x64\", \"macos_arm64\", \"ios_arm64\"]
+             [source-sets.apple]
+platforms = [\"apple\"]
+[source-sets.ios]
+platforms = [\"ios\"]
+             [source-sets.linux]
+platforms = [\"linux\"]
+",
+        );
+        for file in [
+            "src/Common.kt",
+            "src-native/Native.kt",
+            "src-apple/Apple.kt",
+            "src-ios/Ios.kt",
+            "src-linux/Linux.kt",
+            "tests-apple/AppleTest.kt",
+        ] {
+            std::fs::create_dir_all(dir.path().join(file).parent().unwrap()).unwrap();
+            std::fs::write(dir.path().join(file), "").unwrap();
+        }
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let ctx = context(&config, &project);
+        let names =
+            |files: &[PathBuf]| -> Vec<String> { files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect() };
+
+        let all = existing_sources(&ctx, TargetKind::Native, false, &["kt"]).unwrap();
+        assert_eq!(names(&all.platform), ["Native.kt"]);
+        assert_eq!(all.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["apple", "ios", "linux"]);
+        // The code of a platform's sets joins the compilation of the platforms they hold, and no others.
+        let groups = |konan: &str| -> Vec<(String, Vec<String>)> {
+            for_platform(&ctx, all.clone(), konan).groups.iter().map(|g| (g.name.clone(), g.refines.clone())).collect()
+        };
+        assert_eq!(groups("ios_arm64"), [("apple".into(), vec!["native".into()]), ("ios".into(), vec!["apple".into()])]);
+        assert_eq!(groups("macos_arm64"), [("apple".into(), vec!["native".into()])]);
+        assert_eq!(groups("linux_x64"), [("linux".into(), vec!["native".into()])]);
+        assert!(groups("mingw_x64").is_empty());
+        let linux = for_platform(&ctx, all.clone(), "linux_x64").fragment_args();
+        assert_eq!(linux[1], "-Xfragments=common,native,linux", "{linux:?}");
+        assert!(linux.contains(&"-Xfragment-refines=linux:native".to_owned()), "{linux:?}");
+        let tests = existing_sources(&ctx, TargetKind::Native, true, &["kt"]).unwrap();
+        assert_eq!(names(&tests.groups[0].files), ["AppleTest.kt"]);
+    }
+
+    #[test]
     fn steps_run_only_when_their_inputs_change() {
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();

@@ -184,10 +184,12 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 |---|---|
 | `--keep-going` | Build every target even if one fails, then report each failure and which targets failed and succeeded |
 | `--xcframework` | Also combine the Apple frameworks of `kind = "framework"` into `target/<profile>/native/<name>.xcframework` (macOS with Xcode). See [C interop](../../guides/c-interop/#calling-kotlin-from-swift-and-objective-c) |
+| `--swift-package`, `--cocoapods` | With `--xcframework`: also write `Package.swift` (a Swift package) or `<name>.podspec` (a CocoaPods spec) next to the XCFramework, for Xcode projects that use Swift Package Manager or CocoaPods. See [Swift Package Manager and CocoaPods](../../guides/c-interop/#swift-package-manager-and-cocoapods) |
 | `--message-format <fmt>` | `human` (default) or `json`: print each compiler diagnostic as a JSON object on stdout. See [Machine-readable output](../machine-readable-output/#compiler-diagnostics) |
 | `-r, --release` | Use the release profile |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable). Default: `[build] default-targets` (`[workspace.build]` in a workspace), else every enabled target |
+| `--target-set <set>` | Instead of `-t`: `host` for the targets that build and run on this machine (JVM, Wasm, JS, and Native when this host's platform is in `platforms`), or `device` for the targets that run on a phone or an emulator (Android). An error when no enabled target is in the set. Ignores `[build] default-targets`. See [Target sets](../../guides/multiplatform/#target-sets) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
 | `-j, --jobs <n>` | How many workspace members, and targets of each, build at the same time: a number, or `auto` (also `0`) for the CPUs within the free memory. Default: `KARGO_JOBS`, then `[build] jobs`, then `auto`. `-j 1` builds one thing at a time, in a fixed order. See [parallelism](../../guides/build-performance/#limiting-parallelism) |
 | `--size-report` | Print Binaryen per-function metrics for a Wasm release build |
@@ -236,6 +238,7 @@ Type-check all enabled targets, or the ones you name, and report compiler errors
 | `-r, --release` | Use the release profile |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable) |
+| `--target-set <set>` | Instead of `-t`: `host` for the targets that build and run on this machine (JVM, Wasm, JS, and Native when this host's platform is in `platforms`), or `device` for the targets that run on a phone or an emulator (Android). An error when no enabled target is in the set. Ignores `[build] default-targets`. See [Target sets](../../guides/multiplatform/#target-sets) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to check |
 | `-j, --jobs <n>` | How many workspace members, and targets of each, are checked at the same time, as for `kargo build` |
 
@@ -369,6 +372,7 @@ kargo test [filter] [options]
 | `-r, --release` | Use the release profile |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable) |
+| `--target-set <set>` | Instead of `-t`: `host` for the targets that build and run on this machine (JVM, Wasm, JS, and Native when this host's platform is in `platforms`), or `device` for the targets that run on a phone or an emulator (Android). An error when no enabled target is in the set. Ignores `[build] default-targets`. See [Target sets](../../guides/multiplatform/#target-sets) |
 | `--env-file <path>` | Read this `.env` file after the standard ones, so its values win. Repeatable. Conflicts with `--no-env-file`. See [Environment variables](../../guides/environment/#choose-the-files-for-one-command) |
 | `--no-env-file` | Read none of the `.env` files; the variables in kargo.toml and the shell still apply |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to test, in dependency order. The command fails if any test failed |
@@ -404,6 +408,7 @@ kargo bench [filter] [options]
 | `-r, --release` | Use the release profile (the default, unless `kargo.toml` defines `[profile.bench]` in every selected package) |
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `bench` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target. Benchmarks run on the JVM only, so any other target is an error |
+| `--target-set <set>` | Instead of `-t`: `host` for the targets that build and run on this machine (JVM, Wasm, JS, and Native when this host's platform is in `platforms`), or `device` for the targets that run on a phone or an emulator (Android). An error when no enabled target is in the set. Ignores `[build] default-targets`. See [Target sets](../../guides/multiplatform/#target-sets) |
 | `--env-file <path>`, `--no-env-file` | As for [`kargo test`](#kargo-test-t) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to benchmark, in dependency order |
 | `-j, --jobs <n>` | How many packages are built at the same time, as for `kargo build`. Without `-j`, `KARGO_JOBS` or `[build] jobs`, one at a time, so benchmarks don't compete for the machine |
@@ -1279,7 +1284,7 @@ kargo metadata --fingerprint
 | `--profile <name>` | Describe a custom profile's output directories and compiler arguments |
 | `--fingerprint` | Only print a hash of every `kargo.toml` and `kargo.lock`. It is the `fingerprint` of the document, and it changes when the metadata may have changed |
 
-A JVM target lists its `@Preview` composables in `previews`, and every target the `Res` class of `composeResources/` in `compose-resources`. The output has a `"version": 1` field and is described in [Machine-readable output](../machine-readable-output/#kargo-metadata). See [Editor integration](../../guides/editors/) for how editors use it.
+A JVM target lists its `@Preview` composables in `previews`, and every target the `Res` class of `composeResources/` in `compose-resources`. A target lists the [source sets of several targets](../../guides/multiplatform/#source-sets-for-several-targets) it compiles in `source-sets` (`name`, `targets`, `refines` and the three roots), and their directories follow the common and the target's own in `source-roots`, `test-roots` and `test-fixture-roots`. The output has a `"version": 1` field and is described in [Machine-readable output](../machine-readable-output/#kargo-metadata). See [Editor integration](../../guides/editors/) for how editors use it.
 
 ## `kargo lsp`
 

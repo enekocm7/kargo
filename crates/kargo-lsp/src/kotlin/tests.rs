@@ -4336,3 +4336,60 @@ fn marks_uses_of_deprecated_declarations() {
         ],
     );
 }
+
+#[test]
+fn intermediate_source_sets_see_the_code_of_their_targets() {
+    let set = |target: Option<String>| SourceSet { package: 0, kind: SetKind::Main, target };
+    let common = set(None);
+    let jvm = set(Some("jvm".into()));
+    let android = set(Some("android".into()));
+    let wasm = set(Some("wasm".into()));
+    let jvm_android = set(Some(SourceSet::group_target("jvmAndAndroid", &["jvm", "android"], &[])));
+    let non_web = set(Some(SourceSet::group_target("nonWeb", &["jvm", "android", "native"], &[])));
+
+    // Everything sees common code; only the targets of a set see it.
+    for from in [&common, &jvm, &android, &wasm, &jvm_android, &non_web] {
+        assert!(common.visible_from(from));
+    }
+    assert!(jvm_android.visible_from(&jvm) && jvm_android.visible_from(&android));
+    assert!(!jvm_android.visible_from(&wasm) && !jvm_android.visible_from(&common));
+    // A set sees the sets that hold at least its targets, but not the other way around.
+    assert!(non_web.visible_from(&jvm_android));
+    assert!(!jvm_android.visible_from(&non_web));
+    // A target's own code is for that target alone.
+    assert!(jvm.visible_from(&jvm) && !jvm.visible_from(&android) && !jvm.visible_from(&jvm_android) && !jvm.visible_from(&common));
+    assert_eq!((jvm.own_target(), jvm_android.own_target(), jvm_android.some_target()), (Some("jvm"), None, Some("jvm")));
+
+    // A set compiles for all its targets, so it sees only the libraries all of them have.
+    let lib = Index::new(true, Vec::new());
+    let proj = Index::new(false, Vec::new());
+    let packages = Packages { visible: vec![vec![0]], platforms: vec![Platforms::ALL] };
+    let an = Analyzer::new(&lib, &proj, &packages);
+    let platforms = |set: &SourceSet| an.platforms_of(set);
+    assert_eq!(platforms(&jvm_android), Platforms::JVM);
+    assert_eq!(platforms(&non_web), Platforms::JVM.union(Platforms::NATIVE));
+}
+
+#[test]
+fn sets_of_native_platforms_sit_below_the_native_directory() {
+    let set = |target: Option<String>| SourceSet { package: 0, kind: SetKind::Main, target };
+    let native = set(Some("native".into()));
+    let common = set(None);
+    let jvm = set(Some("jvm".into()));
+    let non_js = set(Some(SourceSet::group_target("nonJs", &["jvm", "native"], &[])));
+    let apple = set(Some(SourceSet::group_target("apple", &["native"], &["ios_arm64", "macos_arm64"])));
+    let ios = set(Some(SourceSet::group_target("ios", &["native"], &["ios_arm64"])));
+    assert_eq!(apple.group(), Some(("apple", vec!["native"])));
+    assert_eq!(apple.group_platforms(), ["ios_arm64", "macos_arm64"]);
+    assert!(non_js.group_platforms().is_empty());
+
+    // `src-native/` and the sets of whole targets are above a set of platforms, and common code cannot see it.
+    for above in [&common, &native, &non_js] {
+        assert!(above.visible_from(&apple) && above.visible_from(&ios));
+    }
+    assert!(!jvm.visible_from(&apple));
+    assert!(!apple.visible_from(&common) && !apple.visible_from(&native) && !apple.visible_from(&non_js));
+    // A set sees the sets of more platforms, not of fewer.
+    assert!(apple.visible_from(&ios) && !ios.visible_from(&apple));
+    assert!(apple.visible_from(&apple));
+}

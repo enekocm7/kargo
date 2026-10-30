@@ -45,6 +45,7 @@ pub fn manifest(manifest: &Manifest, is_builtin_command: impl Fn(&str) -> bool) 
         ));
     }
     messages.extend(npm_publishing(manifest));
+    messages.extend(crate::builtins::compose_platform_advice(manifest));
     messages
 }
 
@@ -109,7 +110,7 @@ pub fn missing_sources(ws: &Workspace, targets: &[TargetKind]) -> Vec<String> {
                 // Gradle reports an Android project without sources itself.
                 TargetKind::Android => return None,
             };
-            let has_sources = [ws.common_sources(), ws.target_sources(target)].iter().any(|dir| !collect_files(dir, extensions).is_empty());
+            let has_sources = ws.source_dirs(target).iter().any(|dir| !collect_files(dir, extensions).is_empty());
             // A JVM project can be nothing but resources.
             if has_sources || (target == TargetKind::Jvm && has_entries(&ws.resources())) {
                 return None;
@@ -279,6 +280,28 @@ mod tests {
         assert!(missing_sources(&ws, &[TargetKind::Jvm]).is_empty(), "Java alone is enough on the JVM");
         let (_dir, ws) = project(&["src/Util.java"]);
         assert_eq!(missing_sources(&ws, &[TargetKind::Wasm]).len(), 1, "Java is no source for Wasm");
+    }
+
+    #[test]
+    fn sources_of_an_intermediate_source_set_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = "[package]
+name = \"app\"
+version = \"1.0.0\"
+[target.jvm]
+[target.wasm]
+[target.native]
+                        [source-sets.web]
+targets = [\"jvm\", \"wasm\"]
+";
+        std::fs::write(dir.path().join("kargo.toml"), manifest).unwrap();
+        std::fs::create_dir_all(dir.path().join("src-web")).unwrap();
+        std::fs::write(dir.path().join("src-web/Shared.kt"), "").unwrap();
+        let ws = Workspace::load(&dir.path().join("kargo.toml")).unwrap();
+        assert_eq!(
+            missing_sources(&ws, &[TargetKind::Jvm, TargetKind::Wasm, TargetKind::Native]),
+            ["no Kotlin sources found in src/ or src-native/ for the native target"]
+        );
     }
 
     #[test]

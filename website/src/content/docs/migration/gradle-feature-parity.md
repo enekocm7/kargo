@@ -75,7 +75,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 |---|---|---|
 | JVM, Wasm, JS and Native targets | Supported | [Targets](../../guides/multiplatform/) |
 | Android | Different | Generated Gradle project under `target/android`; see [Android](../../guides/android/) |
-| Multiplatform source sets | Different | Flat `src/`, `src-jvm/`, `src-wasm/`, `src-js/`, `src-native/`. |
+| Multiplatform source sets | Different | `src/`, `src-jvm/`, `src-wasm/`, `src-js/`, `src-native/`, `src-android/`, and intermediate sets of several targets (`src-jvmAndAndroid/`) declared with `[source-sets.<name>]`. Sets of some Native platforms (`appleMain`, `linuxMain`) with `platforms`. See [Source sets for several targets](../../guides/multiplatform/#source-sets-for-several-targets) |
 | Compiler arguments, opt-in, language and API version | Supported | [`[kotlin]`](../../reference/manifest/#kotlin) |
 | Warnings as errors | Supported | `warnings-as-errors = true` |
 | Compiler plugins (serialization, allopen, noarg, compose, ...) | Supported | [`[frameworks]`](../../guides/frameworks/) and `[plugins.<name>]` |
@@ -85,7 +85,8 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Binary compatibility validator | Gap | |
 | C interop | Supported | [C interop](../../guides/c-interop/) |
 | Cross-compiling Native for Apple targets | Different | Needs macOS, as with Gradle; see [Native](../../guides/native/) |
-| Shared Android and multiplatform code, XCFramework | Planned | [#229](https://github.com/enekocm7/kargo/issues/229) |
+| Shared Android and multiplatform code, XCFramework | Supported | [A shared module for apps](../../guides/multiplatform/#a-shared-module-for-apps), [Android libraries](../../guides/android/#android-libraries), [XCFrameworks](../../guides/c-interop/#calling-kotlin-from-swift-and-objective-c) |
+| CocoaPods and Swift Package Manager output | Supported | `kargo build --xcframework --swift-package --cocoapods`; see [Swift Package Manager and CocoaPods](../../guides/c-interop/#swift-package-manager-and-cocoapods). A CocoaPods plugin that builds the framework from Xcode (`embedAndSignAppleFrameworkForXcode`) is not there |
 
 ## Testing
 

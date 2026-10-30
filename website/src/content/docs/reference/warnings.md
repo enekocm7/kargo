@@ -25,6 +25,7 @@ Warnings never change the exit code, and `-q` hides them. In a [workspace](../..
 | [Tasks hidden by built-in commands](#tasks-hidden-by-built-in-commands) | every command that works on a package: `build`, `check`, `run`, `test`, `package`, `doc`, `fmt`, `lint`, `fetch`, `tree` |
 | [Odd package versions](#odd-package-versions) | the same commands |
 | [npm packages without metadata](#npm-packages-without-metadata) | the same commands |
+| [Compose for iOS or the web on an older Kotlin](#compose-for-ios-or-the-web-on-an-older-kotlin) | the same commands |
 | [`.env` file tracked by git](#env-file-tracked-by-git) | `run`, `test`, `task`, `env` |
 | [Generator inputs that match nothing](#generator-inputs-that-match-nothing) | `build`, `check`, `run`, `test`, `package`, `generate` |
 
@@ -96,6 +97,14 @@ warning: [publish.npm] is ignored: no npm package is built; set `kind = "library
 A package with a [`[publish.npm]`](../manifest/#publishnpm) table publishes a Wasm or Kotlin/JS library to npm with [`kargo publish --npm`](../commands/#kargo-publish). npm accepts a package without a `description`, `license` or `repository`, but the registry's page for it then shows none, and tools that check licenses can't tell what it is. Set them under [`[package]`](../manifest/#package); they are written to `package.json` (the license as an SPDX expression, the repository as `git+https://...git`). Without `[publish.npm]` the first warning is not printed.
 
 The second warning means the table has nothing to publish: only a `kind = "library"` target of `[target.wasm]` (with `environment = "js"` or `"browser"`, not `"wasi"`) or `[target.js]` is an npm package. An application is not.
+
+## Compose for iOS or the web on an older Kotlin
+
+```text
+warning: Compose Multiplatform 1.12.1 for web and iOS works best with Kotlin 2.2.20 or newer (JetBrains recommends it for platforms with rapidly evolving support); [kotlin] version is 2.2.0
+```
+
+Compose Multiplatform 1.9.0 and newer, used with a `[target.wasm]` or `[target.native]` target, works best on Kotlin 2.2.20 or newer, as JetBrains recommends for the platforms whose support evolves fastest. The build still runs. Raise `[kotlin] version`, or pin an older release with `version` under [`[frameworks.compose]`](../manifest/#frameworks). Combinations that cannot work are an error, not a warning: see [Kotlin and Compose versions](../../guides/compose/#kotlin-and-compose-versions).
 
 ## `.env` file tracked by git
 

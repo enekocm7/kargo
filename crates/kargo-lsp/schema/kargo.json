@@ -616,6 +616,34 @@
       "additionalProperties": { "$ref": "#/definitions/profile" }
     },
     "build": { "$ref": "#/definitions/build" },
+    "source-sets": {
+      "description": "Intermediate source sets: groups of targets that share `src-<name>/` (and `tests-<name>/`), between `src/` and `src-<target>/`, such as `jvmAndAndroid`. See the multiplatform guide.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]*$", "not": { "enum": ["common", "jvm", "wasm", "wasm-js", "wasmjs", "js", "javascript", "native", "android"] } },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "targets": {
+            "description": "The targets that compile the set's directories. At least two, unless `platforms` is set (then only `native`), and no two sets may list the same targets. A set refines the sets whose targets include all of its own.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "enum": ["jvm", "wasm", "js", "native", "android"] },
+            "examples": [["jvm", "android"]]
+          },
+          "platforms": {
+            "description": "For a set of only some Kotlin/Native platforms, such as `appleMain`: the platforms (`ios_arm64`, `macos_arm64`, ...) or families of them (`apple`, `ios`, `macos`, `tvos`, `watchos`, `linux`, `mingw`, `androidNative`). The set's code is in `src-<name>/`, compiled by those platforms below `src-native/`.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string" },
+            "examples": [["apple"]]
+          }
+        }
+      },
+      "examples": [{ "jvmAndAndroid": { "targets": ["jvm", "android"] } }, { "apple": { "platforms": ["apple"] } }]
+    },
     "doc": {
       "description": "Options for `kargo doc` (Dokka).",
       "type": "object",

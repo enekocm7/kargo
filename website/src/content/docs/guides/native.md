@@ -57,7 +57,7 @@ Apple targets can only be built on macOS. On another host, `kargo build` and `ka
 | `library` | A `.klib` that other Kotlin/Native code can depend on |
 | `shared` | A shared C library (`.so`, `.dylib`, `.dll`) plus a C header in `include/` |
 | `static` | A static C library (`.a`) plus a C header in `include/` |
-| `framework` | An Apple framework for Swift and Objective-C (Apple platforms only); `kargo build --xcframework` combines them |
+| `framework` | An Apple framework for Swift and Objective-C (Apple platforms only); `kargo build --xcframework` combines them. A shared module for an Android, a desktop and an iOS app: [A shared module for apps](../multiplatform/#a-shared-module-for-apps) |
 
 See [Calling Kotlin from C](../c-interop/#calling-kotlin-from-c) and [from Swift](../c-interop/#calling-kotlin-from-swift-and-objective-c). With `[frameworks] compose`, an iOS framework is a Compose for iOS UI; see [Compose](../compose/#ios).
 

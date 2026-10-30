@@ -430,6 +430,22 @@ engines = { node = ">=20" }
 
 The rest of `package.json` comes from [`[package]`](#package): `description`, `license`, `authors`, `homepage` and `repository`. Credentials are never read from `kargo.toml`: use [`NPM_TOKEN`](../environment/) or your own `.npmrc`. See [Publishing to npm](../../guides/publishing/#publishing-to-npm).
 
+## `[source-sets.<name>]`
+
+An intermediate source set: a group of targets that share a source directory, between `src/` and `src-<target>/`. Optional; one table per set.
+
+```toml
+[source-sets.jvmAndAndroid]
+targets = ["jvm", "android"]
+```
+
+| Key | Meaning |
+|---|---|
+| `targets` | The targets that compile the set: at least two of `jvm`, `wasm`, `js`, `native` and `android`. No two sets may list the same targets. A listed target need not be enabled |
+| `platforms` | Instead of `targets`: the Kotlin/Native platforms (`ios_arm64`, `iosArm64`, ...) or families of them (`apple`, `ios`, `macos`, `tvos`, `watchos`, `linux`, `mingw`, `androidNative`) that compile the set. It sits below `src-native/`. `targets` can then be left out or be `["native"]` |
+
+The table name picks the directories: `src-<name>/`, `tests-<name>/` and `test-fixtures-<name>/`. It uses letters, digits, `-` and `_`, starts with a letter, and can't be `common` or a target's name. A set whose targets include all of another's is above it: the lower set sees its declarations, as `src-<target>/` sees `src/`. See [Source sets for several targets](../../guides/multiplatform/#source-sets-for-several-targets) and [Sets of some Native platforms](../../guides/multiplatform/#sets-of-some-native-platforms).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.

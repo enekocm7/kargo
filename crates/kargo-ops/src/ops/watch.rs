@@ -41,6 +41,13 @@ impl WatchSet {
             paths.push(package.manifest_path());
             paths.push(package.common_sources());
             paths.extend(TargetKind::ALL.iter().map(|t| package.target_sources(*t)));
+            for group in &package.manifest().source_sets {
+                paths.extend([
+                    package.group_sources(&group.name),
+                    package.group_tests(&group.name),
+                    package.group_test_fixtures(&group.name),
+                ]);
+            }
             paths.push(package.common_tests());
             paths.extend(TargetKind::ALL.iter().map(|t| package.target_tests(*t)));
             paths.push(package.common_test_fixtures());

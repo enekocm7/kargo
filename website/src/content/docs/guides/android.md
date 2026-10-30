@@ -540,7 +540,7 @@ An app or another library uses the library as a [path dependency](#sharing-code-
 
 ## Sharing code with other targets
 
-Android is just another target. Common code in `src/` is shared with JVM, Wasm, JS and Native, and `src-android/` holds `actual` implementations: Kargo compiles the two directories as fragments of one module, so an `expect` in `src/` matches its `actual` in `src-android/` (and `tests/` with `tests-android/`). See [Multiplatform projects](../multiplatform/).
+Android is just another target. Common code in `src/` is shared with JVM, Wasm, JS and Native, and `src-android/` holds `actual` implementations: Kargo compiles the two directories as fragments of one module, so an `expect` in `src/` matches its `actual` in `src-android/` (and `tests/` with `tests-android/`). Code that only the JVM and Android share goes in a [source set](../multiplatform/#source-sets-for-several-targets) (`[source-sets.jvmAndAndroid] targets = ["jvm", "android"]`, in `src-jvmAndAndroid/`), which Gradle compiles as one more fragment between the two. A shared module with an Android library, a desktop app and an iOS framework is laid out in [A shared module for apps](../multiplatform/#a-shared-module-for-apps). See [Multiplatform projects](../multiplatform/).
 
 Code can also live in other packages of a [workspace](../workspaces/#android-members): an Android app or library can depend on path members. An [Android library](#android-libraries) among them (`kind = "library"`, including a multiplatform package whose `src-android/` is its Android code) becomes a Gradle subproject of the app's generated build, and a package without `[target.android]` comes in as the JVM jar Kargo builds for it:
 

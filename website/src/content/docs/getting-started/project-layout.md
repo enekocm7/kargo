@@ -53,6 +53,8 @@ See [Multiplatform projects](../../guides/multiplatform/) for a complete example
 
 `kargo target add <target>` creates `src-<target>/` (with a `.gitkeep`) when it does not exist yet, and `kargo target remove` leaves it in place.
 
+Code that only some targets share, like the JVM and Android, goes in `src-<set>/` (and `tests-<set>/`) once you declare the set with [`[source-sets.<set>]`](../../reference/manifest/#source-setsname). See [Source sets for several targets](../../guides/multiplatform/#source-sets-for-several-targets).
+
 Subdirectories are fine. You don't need to mirror the package name in the folder structure, but it's a good habit.
 
 With `[frameworks] compose`, `composeResources/` holds the images, fonts, strings and files of a Compose application; see [Compose resources](../../guides/compose/#resources).

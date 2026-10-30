@@ -432,6 +432,9 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     }
     let compose_resources = has_compose_resources(ws).then(|| compose_resources_dir(ws));
     let mut src_dirs = vec![root.join("src"), root.join(TargetKind::Android.source_dir_name())];
+    // The intermediate source sets (`[source-sets.<name>]`) that include Android.
+    let groups = manifest.source_groups_for(TargetKind::Android);
+    src_dirs.extend(groups.iter().map(|(g, _)| ws.group_sources(&g.name)));
     src_dirs.extend(module.generated.sources.iter().cloned());
     // The generated `Res` class of `composeResources/`, and the files it reads as assets.
     let mut asset_dirs = vec![root.join("android/assets")];
@@ -440,6 +443,7 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
         asset_dirs.push(dir.join("resources"));
     }
     let mut test_dirs = vec![root.join("tests"), root.join("tests-android")];
+    test_dirs.extend(groups.iter().map(|(g, _)| ws.group_tests(&g.name)));
     test_dirs.extend(module.generated.test_sources.iter().cloned());
     let mut resource_dirs = vec![ws.resources()];
     resource_dirs.extend(module.generated.resources.iter().cloned());
@@ -508,8 +512,18 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     }
     let mut common_test_dirs = vec![root.join("tests")];
     common_test_dirs.extend(module.generated.test_sources.iter().cloned());
-    let main_fragments = fragment_args(&common_dirs, &root.join(TargetKind::Android.source_dir_name()));
-    let test_fragments = fragment_args(&common_test_dirs, &root.join("tests-android"));
+    let group_fragments = |dir: fn(&Workspace, &str) -> PathBuf| -> Vec<kargo_compiler::SourceGroup> {
+        groups
+            .iter()
+            .map(|(g, parents)| {
+                let files = kargo_util::fs::collect_files(&dir(ws, &g.name), &["kt"]);
+                kargo_compiler::SourceGroup::new(&g.name, files, parents)
+            })
+            .collect()
+    };
+    let main_fragments =
+        fragment_args(&common_dirs, group_fragments(Workspace::group_sources), &root.join(TargetKind::Android.source_dir_name()));
+    let test_fragments = fragment_args(&common_test_dirs, group_fragments(Workspace::group_tests), &root.join("tests-android"));
     if !main_fragments.is_empty() || !test_fragments.is_empty() {
         let list = |args: &[String]| format!("listOf({})", args.iter().map(|a| kts_string(a)).collect::<Vec<_>>().join(", "));
         let _ = writeln!(s, "tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{");
@@ -582,10 +596,13 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
 }
 
 /// The compiler arguments that make the Kotlin files of `common` and of `platform` two fragments of one
-/// multiplatform compilation, so `expect` and `actual` declarations match. Empty unless both have Kotlin files.
-fn fragment_args(common: &[PathBuf], platform: &Path) -> Vec<String> {
+/// multiplatform compilation (with the Kotlin files of `groups` between them), so `expect` and `actual`
+/// declarations match. Empty unless at least two of them have Kotlin files.
+fn fragment_args(common: &[PathBuf], groups: Vec<kargo_compiler::SourceGroup>, platform: &Path) -> Vec<String> {
     let files = |dirs: &[PathBuf]| dirs.iter().flat_map(|d| kargo_util::fs::collect_files(d, &["kt"])).collect::<Vec<_>>();
-    SourceSet::new(files(common), files(&[platform.to_path_buf()]), TargetKind::Android.as_str()).fragment_args()
+    let mut set = SourceSet::new(files(common), files(&[platform.to_path_buf()]), TargetKind::Android.as_str());
+    set.groups = groups;
+    set.fragment_args()
 }
 
 /// The Gradle line of a `[profile.<profile>.dependencies]` entry, in the configuration of its build
@@ -2294,6 +2311,40 @@ mod tests {
         };
         assert!(text.contains(&sources([("common", &common), ("android", &actual)])), "{text}");
         assert!(text.contains(&sources([("common", &common_test), ("android", &actual_test)])), "{text}");
+    }
+
+    #[test]
+    fn intermediate_source_sets_are_fragments_between_common_and_android() {
+        let (dir, ws) = workspace(
+            "
+[target.jvm]
+[source-sets.jvmAndAndroid]
+targets = [\"jvm\", \"android\"]
+",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let write = |path: &str| {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "").unwrap();
+            kargo_util::process::slash(&file)
+        };
+        let common = write("src/Platform.kt");
+        let shared = write("src-jvmAndAndroid/Shared.kt");
+        let actual = write("src-android/Platform.android.kt");
+        let text = build_gradle(&ws, &android).unwrap();
+        let main = text.split("getByName(\"main\")").nth(1).unwrap().split("getByName(\"test\")").next().unwrap();
+        let line = format!("kotlin.directories.add({})", kts_path(&ws.root().join("src-jvmAndAndroid")));
+        assert!(
+            main.contains(&line),
+            "missing {line} in
+{text}"
+        );
+        assert!(text.contains("\"-Xfragments=common,jvmAndAndroid,android\""), "{text}");
+        assert!(text.contains("\"-Xfragment-refines=jvmAndAndroid:common\""), "{text}");
+        assert!(text.contains("\"-Xfragment-refines=android:jvmAndAndroid\""), "{text}");
+        let sources = format!("\"-Xfragment-sources=common:{common},jvmAndAndroid:{shared},android:{actual}\"");
+        assert!(text.contains(&sources), "{text}");
     }
 
     #[test]

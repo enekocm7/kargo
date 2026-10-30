@@ -301,7 +301,12 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             // The output directories of `[[generate]]` steps are in the lists below too; they have no place in
             // their pairs of common and target roots, so they are added on their own.
             let generated: Vec<&Value> = target["generated-roots"].as_array().into_iter().flatten().collect();
-            let is_generated = |root: &str| generated.iter().any(|g| g["dir"].as_str() == Some(root));
+            // The directories of intermediate source sets follow the pair in the lists, and get their own sets.
+            let groups: Vec<&Value> = target["source-sets"].as_array().into_iter().flatten().collect();
+            let is_group_root = |root: &str| {
+                groups.iter().any(|g| ["source-root", "test-root", "test-fixture-root"].iter().any(|k| g[*k].as_str() == Some(root)))
+            };
+            let is_generated = |root: &str| generated.iter().any(|g| g["dir"].as_str() == Some(root)) || is_group_root(root);
             let mut add = |key: &str, set: SetKind| {
                 let roots = target[key].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|root| !is_generated(root));
                 for (i, root) in roots.enumerate() {
@@ -316,6 +321,19 @@ pub fn model_from_metadata(meta: &Value) -> Model {
             };
             add("source-roots", SetKind::Main);
             add("test-roots", SetKind::Test);
+            for group in &groups {
+                let Some(name) = group["name"].as_str() else { continue };
+                let targets: Vec<&str> = group["targets"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let platforms: Vec<&str> = group["platforms"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let group_target = SourceSet::group_target(name, &targets, &platforms);
+                for (key, set) in [("source-root", SetKind::Main), ("test-root", SetKind::Test), ("test-fixture-root", SetKind::Test)] {
+                    let Some(root) = group[key].as_str() else { continue };
+                    let set = SourceSet { package: pi, kind: set, target: Some(group_target.clone()) };
+                    if !model.roots.iter().any(|(r, s)| r == Path::new(root) && *s == set) {
+                        model.roots.push((PathBuf::from(root), set));
+                    }
+                }
+            }
             // The `BuildConfig` AGP generates for an Android module, once Gradle built it.
             for dir in target["android"]["generated-source-roots"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                 let set = SourceSet { package: pi, kind: SetKind::Main, target: Some(kind.clone()) };
@@ -2247,7 +2265,7 @@ impl State {
                     .filter_map(|u| match &u.origin {
                         Origin::Source(set) if set.kind == SetKind::Test => Some(testing::TestFile {
                             unit: u,
-                            target: set.target.as_deref(),
+                            target: set.some_target(),
                             cwd: self.model.manifests.get(set.package).and_then(|m| m.parent()),
                         }),
                         _ => None,
@@ -2527,6 +2545,54 @@ mod tests {
         assert_eq!(set("/p/target/generated/debug/mocks/M.kt"), (0, SetKind::Test, None));
         assert_eq!(model.origin(Path::new("/p/target/generated/debug/assets/a.txt")), Origin::Loose, "resources hold no Kotlin");
         assert_eq!(model.origin(Path::new("/elsewhere/X.kt")), Origin::Loose);
+    }
+
+    #[test]
+    fn reads_the_intermediate_source_sets_from_metadata() {
+        let group = json!({
+            "name": "jvmAndAndroid",
+            "targets": ["jvm", "android"],
+            "refines": [],
+            "source-root": "/p/src-jvmAndAndroid",
+            "test-root": "/p/tests-jvmAndAndroid",
+            "test-fixture-root": "/p/test-fixtures-jvmAndAndroid",
+        });
+        let meta = json!({
+            "packages": [{
+                "name": "app",
+                "targets": [
+                    {
+                        "kind": "jvm",
+                        "source-roots": ["/p/src", "/p/src-jvm", "/p/src-jvmAndAndroid"],
+                        "test-roots": ["/p/tests", "/p/tests-jvm", "/p/test-fixtures", "/p/test-fixtures-jvm", "/p/benches", "/p/benches-jvm",
+                            "/p/tests-jvmAndAndroid", "/p/test-fixtures-jvmAndAndroid"],
+                        "source-sets": [group],
+                    },
+                    {
+                        "kind": "android",
+                        "source-roots": ["/p/src", "/p/src-android", "/p/src-jvmAndAndroid"],
+                        "test-roots": ["/p/tests", "/p/tests-android"],
+                        "source-sets": [group],
+                    },
+                ],
+            }],
+        });
+        let model = model_from_metadata(&meta);
+        let set = |path: &str| match model.origin(Path::new(path)) {
+            Origin::Source(s) => s,
+            other => panic!("{path}: {other:?}"),
+        };
+        // The common and the target's directories keep their places in the pairs.
+        assert_eq!(set("/p/src/A.kt").target, None);
+        assert_eq!(set("/p/src-jvm/A.kt").target.as_deref(), Some("jvm"));
+        assert_eq!(set("/p/src-android/A.kt").target.as_deref(), Some("android"));
+        assert_eq!(set("/p/tests-jvm/A.kt").target.as_deref(), Some("jvm"));
+        let shared = set("/p/src-jvmAndAndroid/A.kt");
+        assert_eq!((shared.kind, shared.group()), (SetKind::Main, Some(("jvmAndAndroid", vec!["jvm", "android"]))));
+        assert_eq!(shared.some_target(), Some("jvm"));
+        assert_eq!(set("/p/tests-jvmAndAndroid/A.kt").kind, SetKind::Test);
+        assert_eq!(set("/p/test-fixtures-jvmAndAndroid/A.kt").kind, SetKind::Test);
+        assert_eq!(model.roots.iter().filter(|(r, _)| r == Path::new("/p/src-jvmAndAndroid")).count(), 1);
     }
 
     #[test]

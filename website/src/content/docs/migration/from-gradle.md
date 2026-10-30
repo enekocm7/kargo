@@ -126,6 +126,11 @@ For Kotlin Multiplatform:
 | `src/androidMain/kotlin` | `src-android/` |
 | `src/commonTest/kotlin` | `tests/` |
 | `src/jvmTest/kotlin` | `tests-jvm/` |
+| `src/jvmAndAndroidMain/kotlin` (a source set of the hierarchy template's `dependsOn` graph) | `src-jvmAndAndroid/` with `[source-sets.jvmAndAndroid] targets = ["jvm", "android"]` |
+| `src/webMain/kotlin`, `src/nonJsMain/kotlin`, ... | `src-web/`, `src-nonJs/`, each with its `[source-sets.<name>]` |
+| `src/appleMain/kotlin`, `src/iosMain/kotlin`, `src/linuxMain/kotlin` | `src-apple/`, `src-ios/`, `src-linux/`, each with `[source-sets.<name>] platforms = [...]` |
+
+`appleMain`, `linuxMain` and the other source sets of Native platforms become `[source-sets.<name>]` with `platforms` (`platforms = ["apple"]`); `src-native/` is `nativeMain`, which they sit below. See [Source sets for several targets](../../guides/multiplatform/#source-sets-for-several-targets) and [Sets of some Native platforms](../../guides/multiplatform/#sets-of-some-native-platforms).
 
 ## Step 3: Delete Gradle
 

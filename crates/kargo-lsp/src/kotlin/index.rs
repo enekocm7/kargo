@@ -81,12 +81,67 @@ impl Platforms {
 }
 
 /// A source set of a Kargo package: which package, main, test or example code, and which
-/// target (`None` for the common sources in `src/` and `tests/`).
+/// target (`None` for the common sources in `src/` and `tests/`). An intermediate source set
+/// (`[source-sets.<name>]`) has a [`SourceSet::group_target`] in place of a target.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceSet {
     pub package: usize,
     pub kind: SetKind,
     pub target: Option<String>,
+}
+
+impl SourceSet {
+    /// The `target` of an intermediate source set: `@<name>:<target>,<target>`, with `#<platform>,<platform>` after
+    /// it for a set of only some Native platforms (no target name starts with `@`).
+    pub fn group_target(name: &str, targets: &[&str], platforms: &[&str]) -> String {
+        let platforms = if platforms.is_empty() { String::new() } else { format!("#{}", platforms.join(",")) };
+        format!("@{name}:{}{platforms}", targets.join(","))
+    }
+
+    /// The name and targets of the intermediate source set this is, if it is one.
+    pub fn group(&self) -> Option<(&str, Vec<&str>)> {
+        let (name, rest) = self.target.as_deref()?.strip_prefix('@')?.split_once(':')?;
+        let targets = rest.split_once('#').map_or(rest, |(targets, _)| targets);
+        Some((name, targets.split(',').filter(|t| !t.is_empty()).collect()))
+    }
+
+    /// The Native platforms of an intermediate source set that is only some of them; empty for one of whole targets.
+    pub fn group_platforms(&self) -> Vec<&str> {
+        let rest = self.target.as_deref().and_then(|t| t.strip_prefix('@')).and_then(|t| t.split_once(':')).map(|(_, rest)| rest);
+        rest.and_then(|rest| rest.split_once('#'))
+            .map_or(Vec::new(), |(_, platforms)| platforms.split(',').filter(|p| !p.is_empty()).collect())
+    }
+
+    /// The target this set belongs to when it is one target's own sources; `None` for common code and for
+    /// an intermediate source set.
+    pub fn own_target(&self) -> Option<&str> {
+        self.target.as_deref().filter(|t| !t.starts_with('@'))
+    }
+
+    /// The target that stands for this set when a command has to name one: its own, else the first of its
+    /// intermediate source set's.
+    pub fn some_target(&self) -> Option<&str> {
+        self.own_target().or_else(|| self.group().and_then(|(_, targets)| targets.first().copied()))
+    }
+
+    /// Whether code of `from` sees the declarations of this set, as far as targets go: everything sees
+    /// common code; a target's own code is for that target alone; an intermediate source set is seen by
+    /// the targets it holds and by the sets that hold no more targets than it does. A set of only some Native
+    /// platforms is below `src-native/`: the sets that hold no more platforms than it does see it, `src-native/`
+    /// and the sets of whole targets do not, and it sees them.
+    pub fn visible_from(&self, from: &SourceSet) -> bool {
+        match (self.group(), from.group()) {
+            (Some((_, to)), Some((_, of))) => {
+                let (to_platforms, of_platforms) = (self.group_platforms(), from.group_platforms());
+                let platforms_ok =
+                    to_platforms.is_empty() || (!of_platforms.is_empty() && of_platforms.iter().all(|p| to_platforms.contains(p)));
+                of.iter().all(|t| to.contains(t)) && platforms_ok
+            }
+            (Some((_, to)), None) => self.group_platforms().is_empty() && from.own_target().is_some_and(|t| to.contains(&t)),
+            (None, Some(_)) => self.target.is_none() || (self.own_target() == Some("native") && !from.group_platforms().is_empty()),
+            (None, None) => self.target.is_none() || self.target == from.target,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

@@ -358,6 +358,28 @@ $ kargo build --release --xcframework
 
 Kargo merges the frameworks of the same slice (the arm64 and x64 iOS simulators) with `lipo`, then runs `xcodebuild -create-xcframework`. The result is `target/<profile>/native/shared.xcframework`; drag it into an Xcode project's Frameworks, Libraries, and Embedded Content. It needs Xcode's command-line tools.
 
+### Swift Package Manager and CocoaPods
+
+An Xcode project can also use the XCFramework as a package, so it stays in step with the Kotlin code instead of being dragged in by hand. Add `--swift-package`, `--cocoapods` or both:
+
+```console
+$ kargo build --release --xcframework --swift-package --cocoapods
+   Packaging shared.xcframework
+     Writing target/release/native/Package.swift
+     Writing target/release/native/shared.podspec
+```
+
+`Package.swift` is a Swift package named after the framework, with a library product over a binary target that points at `shared.xcframework` next to it, and the platforms (`iOS 14`, `macOS 12`, `tvOS 14`, `watchOS 7`) of the frameworks that were built. In Xcode, choose File > Add Package Dependencies > Add Local, pick `target/release/native`, and `import shared`. In a package of your own, depend on it with `.package(path: "../kotlin/target/release/native")`.
+
+`shared.podspec` is a pod that vendors the XCFramework (`vendored_frameworks`), with the package's version, description, homepage, license and authors from [`[package]`](../../reference/manifest/#package) and a deployment target per Apple family. Use it from a Podfile with a local path:
+
+```ruby title="Podfile"
+pod 'shared', :path => '../kotlin/target/release/native'
+```
+
+Both files describe a local XCFramework. To distribute the framework, host the XCFramework as a zip, and change the `binaryTarget` to `.binaryTarget(name:url:checksum:)` (the checksum is `swift package compute-checksum` of the zip) or the podspec's `source` to the zip's URL.
+
+
 ## When something is missing
 
 Errors from clang and the linker are shown as they are, with their file and line. Kargo adds a note on what to change for the two most common failures:

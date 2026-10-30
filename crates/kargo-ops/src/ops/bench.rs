@@ -15,9 +15,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
-use super::build::{
-    BuildOptions, JvmBuild, announce, build_jvm, finished, jvm_classpaths, jvm_javac_args, jvm_processor_path, select_targets,
-};
+use super::build::{BuildOptions, JvmBuild, announce, build_jvm, finished, jvm_classpaths, jvm_javac_args, jvm_processor_path};
 use super::context::{BuildContext, TargetSetup, to_request};
 use crate::bench::{self, BenchResult, Scale};
 use crate::builtins;
@@ -132,7 +130,7 @@ pub fn bench(ctx: &BuildContext, opts: &BenchOptions) -> Result<()> {
     if let Some(other) = opts.build.targets.iter().find(|target| **target != TargetKind::Jvm) {
         bail!("benchmarks of the {other} target are not supported yet; `kargo bench` runs the JVM target's benchmarks (`-t jvm`)");
     }
-    let targets = select_targets(ctx, &opts.build.targets)?;
+    let targets = opts.build.select(ctx)?;
     if !targets.contains(&TargetKind::Jvm) {
         bail!("`kargo bench` runs the benchmarks of the JVM target, which is not enabled; add it with `kargo target add jvm`");
     }
