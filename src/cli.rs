@@ -2980,7 +2980,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let ctx = context(config, &project, index, global, profile.clone())?;
             if list {
                 let root = ctx.ws.root();
-                for p in ops::preview::list(&ctx)? {
+                let previews = ops::preview::list(&ctx)?;
+                if previews.is_empty() {
+                    shell.note("no @Preview functions found");
+                }
+                for p in previews {
                     let file = p.file.strip_prefix(root).unwrap_or(&p.file);
                     println!("{}	{}:{}", p.qualified_name(), file.display(), p.line);
                 }
