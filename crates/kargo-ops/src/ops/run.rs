@@ -388,8 +388,16 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let wasm = results.wasm.context("there are no Wasm sources to run")?;
             if wasm.environment == WasmEnvironment::Browser {
-                let configured = ctx.ws.manifest().targets.wasm.as_ref().and_then(|w| w.port);
-                return served(ctx, &wasm.dir, wasm.node_modules.as_deref(), opts, configured);
+                let target = ctx.ws.manifest().targets.wasm.as_ref();
+                let modules = if wasm.bundle.is_some() { None } else { wasm.node_modules.as_deref() };
+                return served(
+                    ctx,
+                    wasm.site_dir(),
+                    modules,
+                    target.map(|w| w.proxy.clone()).unwrap_or_default(),
+                    opts,
+                    target.and_then(|w| w.port),
+                );
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             cmd.arg(&wasm.module);
@@ -400,8 +408,16 @@ pub fn start(ctx: &BuildContext, opts: &RunOptions) -> Result<Start> {
             crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreRun, &hook_env(ctx, &opts.env)?)?;
             let js = results.js.context("there are no Kotlin/JS sources to run")?;
             if js.environment == JsEnvironment::Browser {
-                let configured = ctx.ws.manifest().targets.js.as_ref().and_then(|j| j.port);
-                return served(ctx, &js.dir, js.node_modules.as_deref(), opts, configured);
+                let target = ctx.ws.manifest().targets.js.as_ref();
+                let modules = if js.bundle.is_some() { None } else { js.node_modules.as_deref() };
+                return served(
+                    ctx,
+                    js.site_dir(),
+                    modules,
+                    target.map(|j| j.proxy.clone()).unwrap_or_default(),
+                    opts,
+                    target.and_then(|j| j.port),
+                );
             }
             let mut cmd = Command::new(kargo_toolchain::node()?);
             // Stack traces point into the Kotlin sources when the build has source maps.
@@ -635,13 +651,24 @@ pub struct Served {
     /// The directory shown in the `Serving` line.
     shown: String,
     node_modules: Option<PathBuf>,
+    /// The requests forwarded to other servers (`[target.<wasm|js>.dev-server.proxy]`).
+    proxy: Vec<kargo_manifest::ProxyRoute>,
+    /// The certificate authorities the proxy trusts.
+    network: kargo_util::http::Network,
     port: u16,
     open: bool,
 }
 
-/// The browser app in `dir`, with the npm packages of `node_modules`. The port is `--port`, else the `port` of the target in
-/// `kargo.toml` (`configured`), else [`DEFAULT_PORT`].
-fn served(ctx: &BuildContext, dir: &Path, node_modules: Option<&Path>, opts: &RunOptions, configured: Option<u16>) -> Result<Start> {
+/// The browser app in `dir`, with the npm packages of `node_modules` and the `proxy` routes. The port is `--port`, else the
+/// `port` of the target in `kargo.toml` (`configured`), else [`DEFAULT_PORT`].
+fn served(
+    ctx: &BuildContext,
+    dir: &Path,
+    node_modules: Option<&Path>,
+    proxy: Vec<kargo_manifest::ProxyRoute>,
+    opts: &RunOptions,
+    configured: Option<u16>,
+) -> Result<Start> {
     // Other `kargo` commands may build while the page is being served.
     ctx.unlock()?;
     let shown = dir.strip_prefix(ctx.ws.root()).unwrap_or(dir).display().to_string();
@@ -649,6 +676,8 @@ fn served(ctx: &BuildContext, dir: &Path, node_modules: Option<&Path>, opts: &Ru
         dir: dir.to_path_buf(),
         shown,
         node_modules: node_modules.map(Path::to_path_buf),
+        proxy,
+        network: ctx.config.network().clone(),
         port: opts.port.or(configured).unwrap_or(DEFAULT_PORT),
         open: opts.open,
     })))
@@ -666,9 +695,15 @@ impl Served {
         if live_reload {
             site = site.live_reload();
         }
-        let server = web::Server::start(listener, site, None)?;
+        let server = web::Server::start(listener, site.proxy(&self.proxy, &self.network), None)?;
         let reloading = if live_reload { "reloading on change, " } else { "" };
         shell.status("Serving", format!("{} at {} ({reloading}press Ctrl+C to stop)", self.shown, server.url()));
+        for route in &self.proxy {
+            let base = route.base.as_deref().unwrap_or_default();
+            let scheme = if route.tls { "https" } else { "http" };
+            let note = if route.insecure { " (its certificate is not checked)" } else { "" };
+            shell.status("Proxying", format!("{} to {scheme}://{}:{}{base}{note}", route.prefix, route.host, route.port));
+        }
         if self.open {
             web::open_in_browser(std::ffi::OsStr::new(&server.url()))?;
         }

@@ -1,7 +1,7 @@
 //! What surrounds a compiled Kotlin/Wasm module: the HTML page of a browser
 //! app and the page that runs its tests, the import map that lets a page find
 //! npm packages, the `package.json` of a library, `wasm-opt` for release
-//! builds and the size report.
+//! builds, the bundler step ([`crate::bundler`]) and the size report.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -10,9 +10,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::bundler::{self, Bundle};
 use crate::ops::build::WasmBuild;
 use crate::ops::context::BuildContext;
-use kargo_manifest::{WasmCompression, WasmEnvironment, WasmKind, WasmOpt, WasmOptLevel};
+use kargo_manifest::{TargetKind, WasmCompression, WasmEnvironment, WasmKind, WasmOpt, WasmOptLevel};
 use kargo_util::process::{self, find_on_path};
 
 /// Records which files were copied from `resources/`, so a deleted one does not linger.
@@ -21,12 +22,17 @@ const RESOURCES_MARKER: &str = ".kargo-resources";
 const OPTIMIZED_MARKER: &str = ".kargo-wasm-opt";
 
 /// Everything a finished Wasm build adds around the compiled module: the page of a
-/// browser app, the `package.json` of a library, and for release builds `wasm-opt`
-/// and the size report.
+/// browser app (bundled when `bundler` is set), the `package.json` of a library, and for
+/// release builds `wasm-opt` and the size report.
 pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> Result<()> {
-    if ctx.ws.profile(&ctx.profile)?.optimize {
+    let optimized = ctx.ws.profile(&ctx.profile)?.optimize;
+    let browser_app = build.environment == WasmEnvironment::Browser && build.kind == WasmKind::Application;
+    let library = build.kind == WasmKind::Library;
+    let bundling = (browser_app || library) && bundler::active(ctx.ws.manifest(), TargetKind::Wasm, optimized).is_some();
+    if optimized {
         optimize(ctx, build, size_report)?;
-        if !ctx.ws.manifest().targets.wasm.as_ref().unwrap().debug_info {
+        // The bundler minifies, hashes and drops the source maps of what it bundles.
+        if !bundling && !ctx.ws.manifest().targets.wasm.as_ref().unwrap().debug_info {
             for file in minify_glue(build)? {
                 ctx.shell()
                     .verbose("Skipping", format!("the minification of {}: its syntax is not supported by the minifier", file.display()));
@@ -36,29 +42,53 @@ pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> R
             }
         }
     }
-    if ctx.ws.manifest().targets.wasm.as_ref().is_some_and(|w| w.content_hash) {
+    if !bundling && ctx.ws.manifest().targets.wasm.as_ref().is_some_and(|w| w.content_hash) {
         hash_assets(build)?;
     }
-    if build.kind == WasmKind::Library {
-        let manifest = ctx.ws.manifest();
-        let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    let manifest = ctx.ws.manifest();
+    let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    // The npm packages a library depends on stay imports of its bundle.
+    let dependencies = if library {
         let dependencies = crate::npm::dependencies(ctx, kargo_manifest::TargetKind::Wasm, &build.libraries)?;
-        let dependencies = crate::npm_package::published_dependencies(ctx.project, ctx.ws, dependencies);
-        let json = package_json(
-            &manifest.package,
-            wasm.npm_package_name(&manifest.package),
-            &build.name,
-            &dependencies,
-            manifest.publish.npm.as_ref(),
-        );
+        Some(crate::npm_package::published_dependencies(ctx.project, ctx.ws, dependencies))
+    } else {
+        None
+    };
+    let mut bundle = None;
+    if bundling {
+        let file = build.dir.join(format!("{}.wasm", build.name));
+        let npm_name = wasm.npm_package_name(&manifest.package);
+        let input = bundler::Input {
+            target: TargetKind::Wasm,
+            name: &build.name,
+            module: &build.module,
+            dir: &build.dir,
+            wasm: file.is_file().then_some(file.as_path()),
+            browser: build.environment == WasmEnvironment::Browser,
+            library: dependencies
+                .as_ref()
+                .map(|deps| bundler::LibraryInput { package: &npm_name, dependencies: deps.keys().cloned().collect() }),
+        };
+        bundle = Some(bundler::bundle(ctx, &input)?);
+    }
+    if let Some(dependencies) = &dependencies {
+        let name = wasm.npm_package_name(&manifest.package);
+        let json = package_json(&manifest.package, name.clone(), &build.name, dependencies, manifest.publish.npm.as_ref(), None);
         std::fs::write(build.dir.join("package.json"), json).context("failed to write package.json")?;
+        if let Some(bundle) = &bundle {
+            let formats =
+                (wasm.bundling.as_ref().map(|b| b.formats.as_slice()).unwrap_or_default(), crate::npm_package::bundled_files(&bundle.dir));
+            let json = package_json(&manifest.package, name, &build.name, dependencies, manifest.publish.npm.as_ref(), Some(formats));
+            std::fs::write(bundle.dir.join("package.json"), json).context("failed to write package.json")?;
+        }
     }
-    if build.environment == WasmEnvironment::Browser && build.kind == WasmKind::Application {
-        assemble_site(ctx, build)?;
+    if browser_app {
+        assemble_site(ctx, build, bundle.as_ref())?;
     }
-    if ctx.ws.profile(&ctx.profile)?.optimize {
-        compress_assets(ctx, build)?;
-        report_size(ctx, build, size_report)?;
+    build.bundle = bundle.as_ref().map(|b| b.dir.clone());
+    if optimized {
+        compress_assets(ctx, build.site_dir())?;
+        report_size(ctx, build, bundle.as_ref())?;
     }
     Ok(())
 }
@@ -128,9 +158,9 @@ fn hash_assets(build: &mut WasmBuild) -> Result<()> {
     Ok(())
 }
 
-fn compress_assets(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
+fn compress_assets(ctx: &BuildContext, dir: &Path) -> Result<()> {
     let wasm = ctx.ws.manifest().targets.wasm.as_ref().context("the Wasm target is not enabled")?;
-    let mut files = all_files(&build.dir)
+    let mut files = all_files(dir)
         .into_iter()
         .filter(|file| matches!(file.extension().and_then(|e| e.to_str()), Some("wasm" | "mjs" | "js")))
         .collect::<Vec<_>>();
@@ -171,9 +201,10 @@ pub(crate) fn brotli(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Copies `resources/` and the web resources of the app's libraries next to the module and writes
 /// `index.html` (unless `resources/index.html` is the page), with an import map for the npm packages
-/// that are installed and the libraries' init scripts.
-fn assemble_site(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
-    let dir = &build.dir;
+/// that are installed and the libraries' init scripts. A bundled app gets all of it in the directory of its
+/// `bundle`, with the page loading the bundle and needing no import map.
+fn assemble_site(ctx: &BuildContext, build: &WasmBuild, bundle: Option<&Bundle>) -> Result<()> {
+    let dir = bundle.map_or(&build.dir, |b| &b.dir);
     let mut shipments = crate::web_resources::dependencies(ctx, false)?;
     // The files the `Res` class of a Compose app fetches, under `composeResources/`.
     let compose_resources = crate::ops::build::compose_resources_dir(ctx, kargo_manifest::TargetKind::Wasm);
@@ -189,7 +220,16 @@ fn assemble_site(ctx: &BuildContext, build: &WasmBuild) -> Result<()> {
             Page { package: &ctx.ws.manifest().package.name, module: &build.name, compose: crate::compose::enabled(ctx.ws.manifest()) };
         default_page(&page, &crate::web_resources::init_scripts(&shipments))
     };
-    let imports = build.node_modules.as_deref().map(import_map).unwrap_or_default();
+    let (html, imports) = match bundle {
+        Some(bundle) => {
+            let (html, loaded) = bundle.rewrite_page(&html, &build.name);
+            if !loaded {
+                ctx.shell().warn(format!("index.html does not load {}.mjs, so it does not use the bundle", build.name));
+            }
+            (html, BTreeMap::new())
+        }
+        None => (html, build.node_modules.as_deref().map(import_map).unwrap_or_default()),
+    };
     std::fs::write(&index, inject_import_map(&html, &imports)).context("failed to write index.html")?;
     Ok(())
 }
@@ -447,7 +487,12 @@ fn package_json(
     module: &str,
     dependencies: &BTreeMap<String, String>,
     settings: Option<&kargo_manifest::NpmPublishSettings>,
+    bundled: Option<(&[kargo_manifest::LibraryFormat], Vec<String>)>,
 ) -> String {
+    let (formats, files) = match bundled {
+        Some((formats, files)) => (Some(formats), files),
+        None => (None, vec!["*.mjs".to_owned(), "*.wasm".to_owned(), "*.d.mts".to_owned()]),
+    };
     crate::npm_package::LibraryPackage {
         name: crate::npm_package::scoped_name(npm_name, settings),
         package,
@@ -456,7 +501,8 @@ fn package_json(
         extension: "mjs",
         types_extension: "d.mts",
         es: true,
-        files: vec!["*.mjs".to_owned(), "*.wasm".to_owned(), "*.d.mts".to_owned()],
+        formats,
+        files,
         dependencies,
     }
     .json()
@@ -550,22 +596,25 @@ fn optimize(ctx: &BuildContext, build: &WasmBuild, size_report: bool) -> Result<
 
 // --- Size report ------------------------------------------------------------------------------
 
-/// Prints how big the release module and the whole output are.
-fn report_size(ctx: &BuildContext, build: &WasmBuild, _size_report: bool) -> Result<()> {
-    let file = build.dir.join(format!("{}.wasm", build.name));
+/// Prints how big the release module and the whole output (the bundle, when there is one) are.
+fn report_size(ctx: &BuildContext, build: &WasmBuild, bundle: Option<&Bundle>) -> Result<()> {
+    let file = match bundle {
+        Some(bundle) => bundle.wasm.clone().unwrap_or_default(),
+        None => build.dir.join(format!("{}.wasm", build.name)),
+    };
     let Ok(wasm) = std::fs::read(&file) else { return Ok(()) };
     let gz = gzipped_size(&wasm);
     let br = brotli(&wasm)?.len() as u64;
     let options = ctx.ws.manifest().targets.wasm.as_ref().context("the Wasm target is not enabled")?;
     let raw = wasm.len() as u64;
-    let files = deliverables(&build.dir);
+    let files = deliverables(build.site_dir());
     let total: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
-    let shown = build.dir.strip_prefix(ctx.ws.root()).unwrap_or(&build.dir);
+    let shown = build.site_dir().strip_prefix(ctx.ws.root()).unwrap_or(build.site_dir());
+    let wasm_name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     ctx.shell().status(
         "Size",
         format!(
-            "{}.wasm {} ({} gzip, {} brotli), {} files {} in {}",
-            build.name,
+            "{wasm_name} {} ({} gzip, {} brotli), {} files {} in {}",
             human_size(raw),
             human_size(gz),
             human_size(br),
@@ -791,7 +840,7 @@ mod tests {
             publish: true,
         };
         let deps = map(&[("@js-joda/core", "3.2.0")]);
-        let text = package_json(&package, "@acme/hello".to_owned(), "hello", &deps, None);
+        let text = package_json(&package, "@acme/hello".to_owned(), "hello", &deps, None, None);
         assert!(text.find("\"types\": \"./hello.d.mts\",\n      \"import\"").is_some(), "`types` comes first in `exports`:\n{text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["name"], "@acme/hello");
@@ -809,12 +858,12 @@ mod tests {
 
         let settings = kargo_manifest::NpmPublishSettings { scope: Some("acme".into()), ..Default::default() };
         let scoped: serde_json::Value =
-            serde_json::from_str(&package_json(&package, "hello".to_owned(), "hello", &deps, Some(&settings))).unwrap();
+            serde_json::from_str(&package_json(&package, "hello".to_owned(), "hello", &deps, Some(&settings), None)).unwrap();
         assert_eq!(scoped["name"], "@acme/hello", "`scope` names a package that has none");
 
         let bare = kargo_manifest::Package { description: None, authors: vec![], license: None, ..package };
         let json: serde_json::Value =
-            serde_json::from_str(&package_json(&bare, "hello".to_owned(), "hello", &BTreeMap::new(), None)).unwrap();
+            serde_json::from_str(&package_json(&bare, "hello".to_owned(), "hello", &BTreeMap::new(), None, None)).unwrap();
         assert!(json.get("dependencies").is_none() && json.get("author").is_none() && json.get("license").is_none());
     }
 
@@ -840,6 +889,7 @@ mod tests {
             dir: dir.path().to_path_buf(),
             libraries: vec![],
             node_modules: None,
+            bundle: None,
         };
         hash_assets(&mut build).unwrap();
         let mut contents = b"wasm bytes".to_vec();
@@ -878,6 +928,7 @@ mod tests {
             dir: dir.path().to_path_buf(),
             libraries: vec![],
             node_modules: None,
+            bundle: None,
         };
         minify_glue(&build).unwrap();
         let code = std::fs::read_to_string(build.module).unwrap();
@@ -897,6 +948,7 @@ mod tests {
             dir: dir.path().to_path_buf(),
             libraries: vec![],
             node_modules: None,
+            bundle: None,
         };
         minify_glue(&build).unwrap();
     }

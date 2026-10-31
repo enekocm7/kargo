@@ -44,6 +44,8 @@ With `--offline` or `--locked`, Kargo never chooses and downloads a JDK by itsel
 | kotlin-debug-adapter | `dap` | Yes |
 | Kotlin compiler, compiler plugins | Every build | Yes, from Maven Central like a dependency |
 | ktlint, detekt, Dokka, JUnit launcher, JMH | `fmt`, `lint`, `doc`, `test`, `bench` | Yes, from Maven Central like a dependency |
+| Bun (`bundler = "bun"`) | Release builds of a Wasm or JS browser app that sets it | Yes, a pinned release into `~/.kargo/toolchains/bun/`, unless a `bun` is on `PATH`. Not with `--offline` |
+| Rollup and its plugins (`bundler = "rollup"`) | The same builds | Yes, installed with npm, pnpm or bun into `target/rollup/`; they need Node.js |
 | Node.js, a browser | Running Wasm programs and tests | No: install them yourself |
 
 Every install prints a status line, verifies the download's SHA-256 (SHA-1 for the Android SDK, the only checksum Google publishes) and takes the toolchain's [lock](#parallel-installs-and-retries). It never prompts, so CI behaves like your terminal, except for the Android SDK's license terms, which only you can accept. Downloads go through [`[toolchain-mirrors]`](../offline-and-mirrors/#toolchain-mirrors).
@@ -211,6 +213,10 @@ typescript = "5.9.3"   # or "^6", "~5.9", "next"; default "latest"
 ```
 
 An exact version needs no registry lookup, which helps offline and on a mirror that lacks the registry's metadata. Kargo compiles with the same `tsc` command line and `tsconfig.json` for every version. See [`kargo.lock`](../../reference/lockfile/#build-tools) for what is recorded.
+
+## The bundler
+
+A Wasm or JS browser app with a [`bundler`](../wasm/#bundling) is bundled by Bun or Rollup. `bundler = "bun"` runs the `bun` on `PATH`; without one, Kargo downloads the Bun release it pins (the SHA-256 comes from the `SHASUMS256.txt` of that release) into `~/.kargo/toolchains/bun/<version>/`. `bundler = "rollup"` installs Rollup, `@rollup/plugin-node-resolve`, `@rollup/plugin-commonjs` and `@rollup/plugin-terser` at the versions Kargo pins, with `--ignore-scripts`, into `target/rollup/`, and runs them on Node.js. The project needs no `package.json` for either. `kargo fetch` gets the bundler for an offline build.
 
 ## Parallel installs and retries
 

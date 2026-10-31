@@ -477,6 +477,7 @@ pub(crate) fn lock_tools(ctx: &BuildContext, target: TargetKind) -> Result<()> {
     ctx.plugin_jars(&setup.contributions.plugins)?;
     if matches!(target, TargetKind::Wasm | TargetKind::Js) {
         crate::js_sources::lock_typescript(ctx, target)?;
+        crate::bundler::fetch(ctx, target)?;
     }
     if target == TargetKind::Jvm {
         test::console_launcher(ctx)?;

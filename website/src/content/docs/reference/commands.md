@@ -220,7 +220,7 @@ After a JVM build, `kargo build` prints a `Resolved` line for each enabled [fram
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
-For Wasm, a release build removes dead code, downloads pinned Binaryen on demand, and reports raw, gzip and Brotli sizes. Optional size budgets can fail the build, and `--size-report` asks Binaryen for per-function metrics. See [WebAssembly](../../guides/wasm/). A `kind = "library"` project also gets a `package.json` and TypeScript declarations.
+For Wasm, a release build removes dead code, downloads pinned Binaryen on demand, and reports raw, gzip and Brotli sizes. Optional size budgets can fail the build, and `--size-report` asks Binaryen for per-function metrics. See [WebAssembly](../../guides/wasm/). A `kind = "library"` project also gets a `package.json` and TypeScript declarations. A browser app or a library with a [`bundler`](../../guides/wasm/#bundling) (Wasm or JS) is bundled by a release build into `target/<profile>/wasm-bundle/` or `js-bundle/`: one minified bundle with code splitting and content-hashed names, which the size report counts.
 
 ```sh
 kargo build
@@ -326,6 +326,8 @@ kargo run -e 'println(1 + 1)'
 The `Running` line quotes arguments that contain spaces or shell characters, so you can copy it: ``Running `java com.example.MainKt add "buy milk"` `` shows that `buy milk` is one argument.
 
 `--port` and `--open` only apply to a Wasm or JS browser app; `kargo run` rejects them for any other target. A Wasm or JS project with `kind = "library"` has no program, so `kargo run` rejects it too.
+
+A browser app is served from its [bundle](../../guides/wasm/#bundling) when it has one (`kargo run --release` with a `bundler`, or any run with `bundle = true`), and the requests below the paths of [`dev-server.proxy`](../../guides/wasm/#forwarding-api-requests) are forwarded to the servers they name.
 
 ### Running a single file
 
@@ -1042,6 +1044,8 @@ The count of javadoc jars is left out when there are none.
 
 When the JVM target is fetched, `kargo fetch` also prints a `Resolved` line for each enabled framework with its version, as [`kargo build`](#kargo-build-b) does, so you can see which Spring Boot, Spring Framework and Jackson versions the project uses before you build.
 
+A Wasm or JS target with a [`bundler`](../../guides/wasm/#bundling) gets it too: `kargo fetch` downloads Bun (when no `bun` is on `PATH`) or installs Rollup and its plugins, so an offline build finds them.
+
 ## `kargo generate`
 
 Run the [`[[generate]]` steps](../manifest/#generate) of kargo.toml without building: protobuf, OpenAPI, `BuildConfig` and other generated sources. `kargo build`, `check`, `test`, `run` and `package` run the steps they need first, so this command is for CI checks, for trying a step out, and for an editor that wants the generated files before the first build.
@@ -1277,7 +1281,7 @@ Each check is `ok`, a `warning` (something to know, or a build that will downloa
 | JDK | `JAVA_HOME` (one without `bin/java`, or another JDK than `java` on `PATH`), and the JDK the project builds with: found or [pinned and installed](../../guides/toolchains/), at least JDK 11, one the project's Kotlin compiler runs on, new enough for `jvm-target`, with `javac`. A pinned `[toolchain] graalvm` too |
 | Toolchains | The JDKs, GraalVMs, Kotlin/Native and Gradle distributions, language servers and debug adapter installed under the Kargo home, and installs that were interrupted (a directory without a complete toolchain). With the Native target, whether its Kotlin/Native is installed, and a warning for each platform in `platforms` this host cannot build (Apple platforms off macOS) |
 | Android | The Android SDK the machine has, and with the Android target: the SDK (`ANDROID_HOME`, or the [Kargo-managed one](../../guides/android/#android-sdk)), its platform and build-tools, accepted licenses, `adb` and its version, the connected devices and their states, the installed virtual devices, the emulator package and whether the machine accelerates the emulator (KVM, the Windows Hypervisor Platform, Hypervisor.framework), and the Gradle the build runs |
-| Wasm and JavaScript | Node.js and the package manager (`npm`, `pnpm` or `bun`, or the `package-manager` of the target) that installs npm dependencies; with the Wasm or JS target, they are errors when the project needs them, and it also checks a browser for a `browser` environment and Binaryen's `wasm-opt` |
+| Wasm and JavaScript | Node.js and the package manager (`npm`, `pnpm` or `bun`, or the `package-manager` of the target) that installs npm dependencies; with the Wasm or JS target, they are errors when the project needs them, and it also checks a browser for a `browser` environment, Bun when a target bundles with it, and Binaryen's `wasm-opt` |
 | Network | The proxy (`[http] proxy` or `HTTPS_PROXY` and friends, passwords hidden), `[http] cainfo`, repository credentials whose environment variables are unset, and whether each repository (Maven Central outside a project) answers. `--offline` skips contacting them |
 | Project | Each member's `kargo.toml` [warnings](../warnings/), the process that holds the build lock on the `target/` of the project or workspace (named once, with its command and process id), and `kargo.lock`: present, readable, and locking every declared dependency. A `kargo.toml` that does not load is reported here instead of stopping the command |
 

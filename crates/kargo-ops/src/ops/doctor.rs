@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use kargo_manifest::{
-    AndroidSdkRequest, GraalvmRequest, JdkRequest, JsEnvironment, Manifest, PackageManager, Scope, TargetKind, WasmEnvironment,
+    AndroidSdkRequest, Bundler, GraalvmRequest, JdkRequest, JsEnvironment, Manifest, PackageManager, Scope, TargetKind, WasmEnvironment,
 };
 use kargo_maven::repo::{Repository, effective_repositories};
 use kargo_toolchain::archive::human_size;
@@ -745,6 +745,21 @@ fn web(project: Option<&Project>, config: &Config, out: &mut Vec<Check>) {
         Ok(browser) => out.push(Check::ok(s, "browser", browser.exe.display().to_string())),
         Err(e) if needs_browser => out.push(Check::error(s, "browser", chain(&e), "install Chrome, Edge, Chromium, Brave or Firefox")),
         Err(_) => {}
+    }
+    if wasm
+        .iter()
+        .filter_map(|w| w.bundling.as_ref())
+        .chain(js.iter().filter_map(|j| j.bundling.as_ref()))
+        .any(|b| b.bundler == Bundler::Bun)
+    {
+        match kargo_util::process::find_on_path("bun").or_else(|| kargo_toolchain::bun::find(config)) {
+            Some(bun) => out.push(Check::ok(s, "bundler", format!("bun at {}", bun.display()))),
+            None => out.push(Check::ok(
+                s,
+                "bundler",
+                format!("Bun {} is not installed yet; the first bundled build downloads it", kargo_toolchain::bun::VERSION),
+            )),
+        }
     }
     if !wasm.is_empty() {
         match kargo_toolchain::binaryen::find(config) {

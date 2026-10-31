@@ -118,9 +118,10 @@ pub fn publish(ctx: &BuildContext, opts: &NpmOptions) -> Result<()> {
     let work = ctx.ws.profile_dir(&ctx.profile).join("npm");
     remove_dir_all_if_exists(&work)?;
     for (target, name, registry, token, manager, exe) in prepared {
+        // The bundle, when the library was bundled: its `package.json` names the files of its formats.
         let dir = match target {
-            TargetKind::Wasm => build_wasm(ctx, false)?.map(|b| b.dir),
-            _ => build_js(ctx)?.map(|b| b.dir),
+            TargetKind::Wasm => build_wasm(ctx, false)?.map(|b| b.site_dir().to_path_buf()),
+            _ => build_js(ctx)?.map(|b| b.site_dir().to_path_buf()),
         }
         .with_context(|| format!("there are no {target} sources to publish; add them under `src/` or `src-{target}/`"))?;
         check_package(&dir, &name, &pkg.version)?;

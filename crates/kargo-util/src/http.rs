@@ -2,9 +2,15 @@
 //! `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables) and the trusted
 //! certificate authorities (`[http] cainfo`, else the built-in Mozilla roots).
 
+use std::net::TcpStream;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::WebPkiSupportedAlgorithms;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme, StreamOwned};
 use ureq::tls::{Certificate, PemItem, RootCerts, TlsConfig};
 
 use crate::config::Config;
@@ -58,6 +64,84 @@ impl Network {
             }
         };
         Ok(Self { proxy, root_certs })
+    }
+}
+
+impl Network {
+    /// The DER of the certificate authorities of `[http] cainfo`, if there are any.
+    fn root_cert_ders(&self) -> Option<Vec<Vec<u8>>> {
+        self.root_certs.as_ref().map(|certs| certs.iter().map(|c| c.der().to_vec()).collect())
+    }
+}
+
+/// A TLS connection to a server, for code that speaks HTTP over a socket itself (the dev server's proxy).
+pub type TlsStream = StreamOwned<ClientConnection, TcpStream>;
+
+/// Starts TLS over `tcp` to the server called `host`, trusting `[http] cainfo`, else the built-in Mozilla roots. With
+/// `verify` off any certificate is accepted, which is for a development server with a self-signed one. The handshake
+/// happens on the first read or write.
+pub fn tls_connect(network: &Network, host: &str, tcp: TcpStream, verify: bool) -> Result<TlsStream> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder =
+        ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions().context("failed to set up TLS")?;
+    let client = if verify {
+        let mut roots = RootCertStore::empty();
+        match network.root_cert_ders() {
+            Some(ders) => {
+                for der in ders {
+                    roots.add(CertificateDer::from(der)).context("a certificate of the [http] `cainfo` bundle is not valid")?;
+                }
+            }
+            None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+        }
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate(provider.signature_verification_algorithms)))
+            .with_no_client_auth()
+    };
+    let name = ServerName::try_from(host.to_owned()).with_context(|| format!("`{host}` is not a valid host name"))?;
+    let connection = ClientConnection::new(Arc::new(client), name).context("failed to start TLS")?;
+    Ok(StreamOwned::new(connection, tcp))
+}
+
+/// Trusts every server certificate. Only for the target of a proxy route that says `insecure = true`.
+#[derive(Debug)]
+struct AcceptAnyCertificate(WebPkiSupportedAlgorithms);
+
+impl ServerCertVerifier for AcceptAnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.supported_schemes()
     }
 }
 

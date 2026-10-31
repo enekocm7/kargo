@@ -215,7 +215,7 @@ Add Node.js so Wasm and JS tests can run. It also provides npm, which Kargo uses
 
 Tests of a Wasm or JS project with `environment = "browser"` run in a headless browser instead. GitHub's `ubuntu-latest`, `macos-latest` and `windows-latest` runners come with Chrome, which Kargo finds. On a container image, install a browser and pass the flags it needs through `KARGO_BROWSER_ARGS`, for example `--no-sandbox` when running as root. See [Testing in a browser](../wasm/#testing-in-a-browser).
 
-For release builds, Kargo downloads its pinned Binaryen `wasm-opt` into the toolchain cache and verifies its SHA-256 automatically. CI needs no global npm install. See [Wasm release builds](../wasm/#release-builds) for optimization presets, compression and size budgets.
+For release builds, Kargo downloads its pinned Binaryen `wasm-opt` into the toolchain cache and verifies its SHA-256 automatically. CI needs no global npm install. See [Wasm release builds](../wasm/#release-builds) for optimization presets, compression and size budgets. A browser app with a [`bundler`](../wasm/#bundling) also downloads Bun (or installs Rollup with the package manager the job has), which `kargo fetch` can do ahead of the build.
 
 ### Android
 

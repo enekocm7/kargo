@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-use kargo_manifest::{Manifest, NpmPublishSettings, NpmSideEffects, Package, WasmKind};
+use kargo_manifest::{LibraryFormat, Manifest, NpmPublishSettings, NpmSideEffects, Package, WasmKind};
 
 use crate::workspace::{Project, Workspace};
 
@@ -24,6 +24,9 @@ pub struct LibraryPackage<'a> {
     pub types_extension: &'a str,
     /// Whether the module is an ES module, as opposed to CommonJS or UMD.
     pub es: bool,
+    /// The formats of a library bundle, when it has one: `<module>.mjs`, `<module>.cjs` and `<module>.umd.js` are written
+    /// as the formats say, and `extension` and `es` are not used.
+    pub formats: Option<&'a [LibraryFormat]>,
     /// The `files` patterns: what `npm publish` puts in the tarball.
     pub files: Vec<String>,
     /// The npm packages the module imports.
@@ -70,21 +73,26 @@ impl LibraryPackage<'_> {
         if let Some(repository) = &package.repository {
             fields.push(("repository", nested(serde_json::json!({ "type": "git", "url": git_url(repository) }))));
         }
-        let module_type = if self.es { "module" } else { "commonjs" };
-        fields.extend([("type", quoted(module_type)), ("main", entry.clone())]);
-        if self.es {
-            fields.push(("module", entry.clone()));
+        match self.formats.filter(|formats| *formats != [LibraryFormat::Esm]) {
+            Some(formats) => fields.extend(self.bundle_fields(formats)),
+            None => {
+                let module_type = if self.es { "module" } else { "commonjs" };
+                fields.extend([("type", quoted(module_type)), ("main", entry.clone())]);
+                if self.es {
+                    fields.push(("module", entry.clone()));
+                }
+                let condition = if self.es { "import" } else { "require" };
+                fields.extend([
+                    ("types", types.clone()),
+                    (
+                        "exports",
+                        format!(
+                            "{{\n    \".\": {{\n      \"types\": {types},\n      \"{condition}\": {entry},\n      \"default\": {entry}\n    }},\n    \"./package.json\": \"./package.json\"\n  }}"
+                        ),
+                    ),
+                ]);
+            }
         }
-        let condition = if self.es { "import" } else { "require" };
-        fields.extend([
-            ("types", types.clone()),
-            (
-                "exports",
-                format!(
-                    "{{\n    \".\": {{\n      \"types\": {types},\n      \"{condition}\": {entry},\n      \"default\": {entry}\n    }},\n    \"./package.json\": \"./package.json\"\n  }}"
-                ),
-            ),
-        ]);
         match settings.and_then(|s| s.side_effects.as_ref()) {
             Some(NpmSideEffects::Flag(flag)) => fields.push(("sideEffects", flag.to_string())),
             Some(NpmSideEffects::Files(files)) => fields.push(("sideEffects", nested(serde_json::json!(files)))),
@@ -100,6 +108,62 @@ impl LibraryPackage<'_> {
         let body: Vec<String> = fields.iter().map(|(key, value)| format!("  \"{key}\": {value}")).collect();
         format!("{{\n{}\n}}\n", body.join(",\n"))
     }
+}
+
+impl LibraryPackage<'_> {
+    /// `main`, `module`, `types`, `unpkg`, `jsdelivr` and `exports` of a library bundled in more than the ES module format:
+    /// `import` loads the ES module and `require` the CommonJS one, each with the declarations for its kind of module, and the
+    /// UMD file is for `<script>` tags (through unpkg and jsDelivr).
+    fn bundle_fields(&self, formats: &[LibraryFormat]) -> Vec<(&'static str, String)> {
+        let quoted = |s: &str| serde_json::to_string(s).expect("a string serializes");
+        let file = |format: LibraryFormat| formats.contains(&format).then(|| quoted(&format!("./{}.{}", self.module, format.extension())));
+        let (esm, cjs, umd) = (file(LibraryFormat::Esm), file(LibraryFormat::Cjs), file(LibraryFormat::Umd));
+        let types_esm = quoted(&format!("./{}.d.mts", self.module));
+        let types_cjs = quoted(&format!("./{}.d.cts", self.module));
+        let main = cjs.clone().or_else(|| esm.clone()).or_else(|| umd.clone()).expect("a library has a format");
+        let mut fields = vec![("main", main.clone())];
+        if let Some(esm) = &esm {
+            fields.push(("module", esm.clone()));
+        }
+        fields.push(("types", if esm.is_some() { types_esm.clone() } else { types_cjs.clone() }));
+        if let Some(umd) = &umd {
+            fields.push(("unpkg", umd.clone()));
+            fields.push(("jsdelivr", umd.clone()));
+        }
+        let mut conditions = Vec::new();
+        if let Some(esm) = &esm {
+            conditions.push(format!("      \"import\": {{\n        \"types\": {types_esm},\n        \"default\": {esm}\n      }}"));
+        }
+        if let Some(cjs) = &cjs {
+            conditions.push(format!("      \"require\": {{\n        \"types\": {types_cjs},\n        \"default\": {cjs}\n      }}"));
+        }
+        conditions.push(format!("      \"default\": {main}"));
+        fields.push((
+            "exports",
+            format!("{{\n    \".\": {{\n{}\n    }},\n    \"./package.json\": \"./package.json\"\n  }}", conditions.join(",\n")),
+        ));
+        fields
+    }
+}
+
+/// The `files` patterns for what a bundle wrote into `dir`: the modules of each format, the Wasm module, the declarations
+/// and the source maps, as far as there are any.
+pub fn bundled_files(dir: &Path) -> Vec<String> {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    ["*.mjs", "*.cjs", "*.umd.js", "*.wasm", "*.d.mts", "*.d.cts", "*.map"]
+        .into_iter()
+        .filter(|pattern| {
+            let suffix = &pattern[1..];
+            names.iter().any(|n| n.ends_with(suffix))
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The name a library is published under: `name`, or `@<scope>/<name>` when `[publish.npm]` has a
@@ -230,6 +294,7 @@ mod tests {
             extension: "mjs",
             types_extension: "d.mts",
             es: true,
+            formats: None,
             files: vec!["*.mjs".to_owned(), "*.wasm".to_owned(), "*.d.mts".to_owned()],
             dependencies: deps,
         }
@@ -284,6 +349,38 @@ mod tests {
         assert_eq!(json["type"], "commonjs");
         assert_eq!(json["exports"]["."]["require"], "./hello.js");
         assert!(json.get("module").is_none() && json["exports"]["."].get("import").is_none());
+    }
+
+    #[test]
+    fn bundled_libraries_name_the_file_of_each_format() {
+        let package = package();
+        let deps = BTreeMap::from([("lodash".to_owned(), "^4.17.0".to_owned())]);
+        let formats = [LibraryFormat::Esm, LibraryFormat::Cjs, LibraryFormat::Umd];
+        let mut bundled = library(&package, None, &deps);
+        (bundled.formats, bundled.files) =
+            (Some(&formats[..]), vec!["*.mjs".into(), "*.cjs".into(), "*.umd.js".into(), "*.d.mts".into(), "*.d.cts".into()]);
+        let json: serde_json::Value = serde_json::from_str(&bundled.json()).unwrap();
+        assert_eq!((json["main"].as_str(), json["module"].as_str()), (Some("./hello.cjs"), Some("./hello.mjs")));
+        assert_eq!(
+            (json["types"].as_str(), json["unpkg"].as_str(), json["jsdelivr"].as_str()),
+            (Some("./hello.d.mts"), Some("./hello.umd.js"), Some("./hello.umd.js"))
+        );
+        assert_eq!(json["exports"]["."]["import"]["default"], "./hello.mjs");
+        assert_eq!(json["exports"]["."]["import"]["types"], "./hello.d.mts");
+        assert_eq!(json["exports"]["."]["require"]["default"], "./hello.cjs");
+        assert_eq!(json["exports"]["."]["require"]["types"], "./hello.d.cts");
+        assert_eq!(json["exports"]["."]["default"], "./hello.cjs");
+        assert!(json.get("type").is_none(), "a package of more than one format is not only one of them:\n{json}");
+        assert_eq!(json["dependencies"]["lodash"], "^4.17.0");
+
+        // Without UMD there is no file for `<script>` tags; without an ES module the declarations are of a `require`.
+        let formats = [LibraryFormat::Cjs];
+        let mut only_cjs = library(&package, None, &deps);
+        (only_cjs.formats, only_cjs.files) = (Some(&formats[..]), vec!["*.cjs".into(), "*.d.cts".into()]);
+        let json: serde_json::Value = serde_json::from_str(&only_cjs.json()).unwrap();
+        assert_eq!((json["main"].as_str(), json["types"].as_str()), (Some("./hello.cjs"), Some("./hello.d.cts")));
+        assert!(json.get("module").is_none() && json.get("unpkg").is_none());
+        assert!(json["exports"]["."].get("import").is_none() && json["exports"]["."]["require"]["default"] == "./hello.cjs");
     }
 
     #[test]

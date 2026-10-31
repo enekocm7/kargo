@@ -315,7 +315,7 @@ A release on Maven Central is permanent: it can't be changed or deleted. Try `ka
 
 ## Publishing to npm
 
-A Wasm or Kotlin/JS library (`kind = "library"` in [`[target.wasm]`](../wasm/#libraries-and-npm-packages), with `environment = "js"` or `"browser"`, or in [`[target.js]`](../js/#libraries-and-npm-packages)) is an npm package, and `kargo publish --npm` uploads it with npm, pnpm or bun, whichever the project uses (the `package-manager` of the target, else the first of the three on `PATH`):
+A Wasm or Kotlin/JS library (`kind = "library"` in [`[target.wasm]`](../wasm/#libraries-and-npm-packages), with `environment = "js"` or `"browser"`, or in [`[target.js]`](../js/#libraries-and-npm-packages)) is an npm package, and `kargo publish --npm` uploads it with npm, pnpm or bun, whichever the project uses (the `package-manager` of the target, else the first of the three on `PATH`). A [bundled](../wasm/#libraries) library is packed from its bundle directory, `target/release/wasm-bundle/` or `js-bundle/`, where `package.json` names the file of each of its formats:
 
 ```toml title="kargo.toml"
 [package]
@@ -375,8 +375,8 @@ Kargo writes the `package.json` next to the compiled module on every build, so `
 | `repository` | `[package] repository`, as `{ "type": "git", "url": "git+https://....git" }` |
 | `bugs` | `bugs` of `[publish.npm]`, else the issues page of a GitHub or GitLab repository |
 | `keywords`, `sideEffects`, `engines` | `keywords`, `side-effects` and `engines` of `[publish.npm]` |
-| `main`, `module`, `types`, `exports` | the compiled module. `exports` lists the conditions `types`, `import` (`require` for CommonJS and UMD) and `default`, in the order TypeScript reads them |
-| `files` | the module, its `.wasm` and its declarations |
+| `main`, `module`, `types`, `exports` | the compiled module. `exports` lists the conditions `types`, `import` (`require` for CommonJS and UMD) and `default`, in the order TypeScript reads them. A [bundled library](../js/#bundling-a-library) names the file of each of its `formats` instead, with `unpkg` and `jsdelivr` for its UMD file |
+| `files` | the module, its `.wasm` and its declarations, or the files of the bundle's formats |
 
 ### Credentials
 

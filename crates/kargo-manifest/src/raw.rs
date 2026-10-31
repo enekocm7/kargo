@@ -489,8 +489,44 @@ struct RawWasm {
     web_init: Option<PathBuf>,
     js_sources: Option<Vec<PathBuf>>,
     port: Option<u16>,
+    bundler: Option<String>,
+    bundle: Option<bool>,
+    source_maps: Option<bool>,
+    #[serde(default)]
+    external: Vec<String>,
+    #[serde(default)]
+    formats: Vec<String>,
+    #[serde(default)]
+    globals: BTreeMap<String, String>,
+    global_name: Option<String>,
+    dev_server: Option<RawDevServer>,
     #[serde(default)]
     dependencies: toml::Table,
+}
+
+/// `[target.wasm.dev-server]` and `[target.js.dev-server]`: how `kargo run` serves a browser app.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawDevServer {
+    port: Option<u16>,
+    #[serde(default)]
+    proxy: BTreeMap<String, RawProxyTarget>,
+}
+
+/// A target of `[target.<wasm|js>.dev-server.proxy]`: a URL, or a table with the URL and options.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawProxyTarget {
+    Url(String),
+    Table(RawProxyOptions),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawProxyOptions {
+    target: String,
+    #[serde(default)]
+    insecure: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -508,6 +544,17 @@ struct RawJs {
     dev_npm_dependencies: BTreeMap<String, String>,
     js_sources: Option<Vec<PathBuf>>,
     port: Option<u16>,
+    bundler: Option<String>,
+    bundle: Option<bool>,
+    source_maps: Option<bool>,
+    #[serde(default)]
+    external: Vec<String>,
+    #[serde(default)]
+    formats: Vec<String>,
+    #[serde(default)]
+    globals: BTreeMap<String, String>,
+    global_name: Option<String>,
+    dev_server: Option<RawDevServer>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -790,6 +837,131 @@ fn validate_web_resources(kind: WasmKind, environment: WasmEnvironment, resource
         }
     }
     Ok(())
+}
+
+/// The keys of `[target.<target>]` that bundle a browser app or a library.
+struct BundleKeys<'a> {
+    bundler: Option<&'a str>,
+    bundle: Option<bool>,
+    source_maps: Option<bool>,
+    external: &'a [String],
+    formats: &'a [String],
+    globals: &'a BTreeMap<String, String>,
+    global_name: Option<&'a str>,
+}
+
+/// Validates the bundling keys of `[target.<target>]`. `browser_app` and `library` say what the target builds: a browser
+/// application or an npm library, the only things that get bundled; `modules` is whether the library is made of
+/// ES modules that can have more formats than that (not Kotlin/Wasm, whose module awaits at the top level).
+fn bundling(target: &str, browser_app: bool, library: bool, modules: bool, keys: BundleKeys) -> Result<Option<Bundling>> {
+    let BundleKeys { bundler, bundle, source_maps, external, formats, globals, global_name } = keys;
+    let Some(bundler) = bundler else {
+        if bundle.is_some()
+            || source_maps.is_some()
+            || !external.is_empty()
+            || !formats.is_empty()
+            || !globals.is_empty()
+            || global_name.is_some()
+        {
+            bail!(
+                "[target.{target}] `bundle`, `source-maps`, `external`, `formats`, `globals` and `global-name` configure the bundler; set `bundler = \"bun\"` or `\"rollup\"`"
+            );
+        }
+        return Ok(None);
+    };
+    let bundler = bundler.parse::<Bundler>().map_err(|e| anyhow::anyhow!("[target.{target}] {e}"))?;
+    if !browser_app && !library {
+        bail!(
+            "[target.{target}] `bundler` bundles a browser application or an npm library; it needs environment = \"browser\" and kind = \"application\", or kind = \"library\""
+        );
+    }
+    if let Some(bad) = external.iter().find(|e| e.trim().is_empty()) {
+        bail!("[target.{target}] `external` lists `{bad}`; name npm packages, such as \"react\"");
+    }
+    if !library && (!formats.is_empty() || !globals.is_empty() || global_name.is_some()) {
+        bail!(
+            "[target.{target}] `formats`, `globals` and `global-name` are about the files of a library; set kind = \"library\" or remove them"
+        );
+    }
+    let mut parsed = Vec::new();
+    for format in formats {
+        let format = format.parse::<LibraryFormat>().map_err(|e| anyhow::anyhow!("[target.{target}] `formats`: {e}"))?;
+        if parsed.contains(&format) {
+            bail!("[target.{target}] `formats` lists `{}` twice", format.as_str());
+        }
+        parsed.push(format);
+    }
+    if parsed.is_empty() {
+        parsed.push(LibraryFormat::Esm);
+    }
+    parsed.sort();
+    if library && !modules && parsed != [LibraryFormat::Esm] {
+        bail!(
+            "[target.{target}] `formats` can only be [\"esm\"] for Kotlin/Wasm: its module awaits the Wasm instance at the top level, which CommonJS and UMD cannot do"
+        );
+    }
+    if parsed.contains(&LibraryFormat::Umd) && bundler == Bundler::Bun {
+        bail!("[target.{target}] the `umd` format needs `bundler = \"rollup\"`: bun does not write UMD");
+    }
+    if !parsed.contains(&LibraryFormat::Umd) && (!globals.is_empty() || global_name.is_some()) {
+        bail!("[target.{target}] `globals` and `global-name` are for the `umd` format; add it to `formats` or remove them");
+    }
+    if let Some(name) = global_name.filter(|n| !valid_global_name(n)) {
+        bail!("[target.{target}] `global-name` is `{name}`; use a JavaScript name such as \"Greeter\" or \"acme.Greeter\"");
+    }
+    for (package, global) in globals {
+        if package.trim().is_empty() || !valid_global_name(global) {
+            bail!("[target.{target}.globals] `{package}` = \"{global}\"; name an npm package and a JavaScript global such as \"React\"");
+        }
+    }
+    Ok(Some(Bundling {
+        bundler,
+        bundle,
+        source_maps,
+        external: external.to_vec(),
+        formats: parsed,
+        globals: globals.clone(),
+        global_name: global_name.map(str::to_owned),
+    }))
+}
+
+/// Whether `name` is a JavaScript identifier, or a dotted path of them (`acme.Greeter`).
+fn valid_global_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|part| {
+            let mut chars = part.chars();
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        })
+}
+
+/// `port` and `[dev-server]` of `[target.<target>]`: the port and the proxy routes (the longest prefix first).
+fn dev_server(target: &str, browser: bool, port: Option<u16>, server: Option<RawDevServer>) -> Result<(Option<u16>, Vec<ProxyRoute>)> {
+    if !browser && port.is_some() {
+        bail!("[target.{target}] `port` is the port `kargo run` serves a browser app on; it needs environment = \"browser\"");
+    }
+    if !browser && server.is_some() {
+        bail!(
+            "[target.{target}.dev-server] configures the server `kargo run` starts for a browser app; it needs environment = \"browser\""
+        );
+    }
+    let Some(server) = server else { return Ok((port, Vec::new())) };
+    if port.is_some() && server.port.is_some() {
+        bail!("[target.{target}] `port` and [target.{target}.dev-server] `port` both set the port; keep one");
+    }
+    let mut routes = Vec::new();
+    for (prefix, target_url) in &server.proxy {
+        let route = match target_url {
+            RawProxyTarget::Url(url) => ProxyRoute::parse(prefix, url, false)?,
+            RawProxyTarget::Table(options) => ProxyRoute::parse(prefix, &options.target, options.insecure)?,
+        };
+        if routes.iter().any(|r: &ProxyRoute| r.prefix == route.prefix) {
+            bail!("[target.{target}.dev-server.proxy] lists `{}` twice", route.prefix);
+        }
+        routes.push(route);
+    }
+    routes.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()).then_with(|| a.prefix.cmp(&b.prefix)));
+    Ok((port.or(server.port), routes))
 }
 
 /// `js-sources` of `[target.<target>]`: directories inside the package, `js/` when not set. An empty
@@ -2417,9 +2589,18 @@ impl RawManifest {
                                 (WasmEnvironment::Wasi, _) => Vec::new(),
                                 (_, dirs) => js_sources("wasm", dirs)?,
                             };
-                            if w.port.is_some() && environment != WasmEnvironment::Browser {
-                                bail!("[target.wasm] `port` is the port `kargo run` serves a browser app on; it needs environment = \"browser\"");
-                            }
+                            let browser = environment == WasmEnvironment::Browser;
+                            let keys = BundleKeys {
+                                bundler: w.bundler.as_deref(),
+                                bundle: w.bundle,
+                                source_maps: w.source_maps,
+                                external: &w.external,
+                                formats: &w.formats,
+                                globals: &w.globals,
+                                global_name: w.global_name.as_deref(),
+                            };
+                            let bundling = bundling("wasm", browser && kind == WasmKind::Application, kind == WasmKind::Library, false, keys)?;
+                            let (port, proxy) = dev_server("wasm", browser, w.port, w.dev_server)?;
                             Ok(WasmTarget {
                                 environment,
                                 kind,
@@ -2442,7 +2623,9 @@ impl RawManifest {
                                 web_resources: w.web_resources,
                                 web_init: w.web_init,
                                 js_sources,
-                                port: w.port,
+                                port,
+                                bundling,
+                                proxy,
                                 dependencies: deps.parse(&w.dependencies, "target.wasm.dependencies", false, Some(TargetKind::Wasm))?,
                             })
                         })
@@ -2488,9 +2671,21 @@ impl RawManifest {
                                     }
                                 }
                             }
-                            if j.port.is_some() && environment != JsEnvironment::Browser {
-                                bail!("[target.js] `port` is the port `kargo run` serves a browser app on; it needs environment = \"browser\"");
+                            let browser = environment == JsEnvironment::Browser;
+                            if j.bundler.is_some() && module_kind != JsModuleKind::Es {
+                                bail!("[target.js] `bundler` bundles ES modules; set module-kind = \"es\"");
                             }
+                            let keys = BundleKeys {
+                                bundler: j.bundler.as_deref(),
+                                bundle: j.bundle,
+                                source_maps: j.source_maps,
+                                external: &j.external,
+                                formats: &j.formats,
+                                globals: &j.globals,
+                                global_name: j.global_name.as_deref(),
+                            };
+                            let bundling = bundling("js", browser && kind == JsKind::Application, kind == JsKind::Library, true, keys)?;
+                            let (port, proxy) = dev_server("js", browser, j.port, j.dev_server)?;
                             Ok(JsTarget {
                                 environment,
                                 kind,
@@ -2501,7 +2696,9 @@ impl RawManifest {
                                 npm_dependencies: j.npm_dependencies,
                                 dev_npm_dependencies: j.dev_npm_dependencies,
                                 js_sources: js_sources("js", j.js_sources)?,
-                                port: j.port,
+                                port,
+                                bundling,
+                                proxy,
                                 dependencies: deps.parse(&j.dependencies, "target.js.dependencies", false, Some(TargetKind::Js))?,
                             })
                         })

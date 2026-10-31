@@ -6,37 +6,74 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::bundler::{self, Bundle};
 use crate::ops::build::JsBuild;
 use crate::ops::context::BuildContext;
-use kargo_manifest::{JsEnvironment, JsKind, JsModuleKind, TargetKind};
+use kargo_manifest::{JsEnvironment, JsKind, JsModuleKind, LibraryFormat, TargetKind};
 
 /// The file the tests run with, next to the test module.
 pub const TEST_RUNNER: &str = "kargo-test-runner.mjs";
 
 /// Everything a finished Kotlin/JS build adds around the compiled module: the page of a browser app
-/// and the `package.json` of a library.
-pub fn finish(ctx: &BuildContext, build: &JsBuild) -> Result<()> {
-    if build.kind == JsKind::Library {
+/// (bundled when `bundler` is set) and the `package.json` of a library.
+pub fn finish(ctx: &BuildContext, build: &mut JsBuild) -> Result<()> {
+    let optimized = ctx.ws.profile(&ctx.profile)?.optimize;
+    let browser_app = build.environment == JsEnvironment::Browser && build.kind == JsKind::Application;
+    let library = build.kind == JsKind::Library;
+    let bundling = (browser_app || library) && bundler::active(ctx.ws.manifest(), TargetKind::Js, optimized).is_some();
+    let mut bundle = None;
+    if library {
         let manifest = ctx.ws.manifest();
         let js = manifest.targets.js.as_ref().context("the JS target is not enabled")?;
+        let npm_name = js.npm_package_name(&manifest.package);
         let dependencies = crate::npm::dependencies(ctx, TargetKind::Js, &build.libraries)?;
         let dependencies = crate::npm_package::published_dependencies(ctx.project, ctx.ws, dependencies);
-        let json =
-            package_json(&manifest.package, js.npm_package_name(&manifest.package), build, &dependencies, manifest.publish.npm.as_ref());
+        let json = package_json(&manifest.package, npm_name.clone(), build, &dependencies, manifest.publish.npm.as_ref(), None);
         std::fs::write(build.dir.join("package.json"), json).context("failed to write package.json")?;
+        if bundling {
+            let input = bundler::Input {
+                target: TargetKind::Js,
+                name: &build.name,
+                module: &build.module,
+                dir: &build.dir,
+                wasm: None,
+                browser: build.environment == JsEnvironment::Browser,
+                library: Some(bundler::LibraryInput { package: &npm_name, dependencies: dependencies.keys().cloned().collect() }),
+            };
+            bundle = Some(bundler::bundle(ctx, &input)?);
+        }
+        if let Some(bundle) = &bundle {
+            let formats =
+                (js.bundling.as_ref().map(|b| b.formats.as_slice()).unwrap_or_default(), crate::npm_package::bundled_files(&bundle.dir));
+            let json = package_json(&manifest.package, npm_name, build, &dependencies, manifest.publish.npm.as_ref(), Some(formats));
+            std::fs::write(bundle.dir.join("package.json"), json).context("failed to write package.json")?;
+        }
     } else {
         remove_library_package_json(&build.dir)?;
     }
-    if build.environment == JsEnvironment::Browser && build.kind == JsKind::Application {
-        assemble_site(ctx, build)?;
-        if ctx.ws.profile(&ctx.profile)?.optimize {
-            report_size(ctx, build);
+    if browser_app {
+        if bundling {
+            let input = bundler::Input {
+                target: TargetKind::Js,
+                name: &build.name,
+                module: &build.module,
+                dir: &build.dir,
+                wasm: None,
+                browser: true,
+                library: None,
+            };
+            bundle = Some(bundler::bundle(ctx, &input)?);
+        }
+        assemble_site(ctx, build, bundle.as_ref())?;
+        if optimized {
+            report_size(ctx, build, bundle.as_ref());
         }
     } else {
         // The page of an earlier build, which linking leaves alone (unlike on Wasm, the directory holds the npm packages).
         let _ = crate::wasm_output::copy_site_files(&build.dir, None, &[]);
         let _ = std::fs::remove_file(build.dir.join("index.html"));
     }
+    build.bundle = bundle.as_ref().map(|b| b.dir.clone());
     Ok(())
 }
 
@@ -53,10 +90,12 @@ fn remove_library_package_json(dir: &Path) -> Result<()> {
 }
 
 /// Copies `resources/` next to the module and writes `index.html` (unless `resources/index.html` is
-/// the page), with an import map for the npm packages that are installed.
-fn assemble_site(ctx: &BuildContext, build: &JsBuild) -> Result<()> {
-    let own_page = crate::wasm_output::copy_site_files(&build.dir, Some(&ctx.ws.resources()), &[])?;
-    let index = build.dir.join("index.html");
+/// the page), with an import map for the npm packages that are installed. A bundled app gets them in
+/// the directory of its `bundle`, with the page loading the bundle and needing no import map.
+fn assemble_site(ctx: &BuildContext, build: &JsBuild, bundle: Option<&Bundle>) -> Result<()> {
+    let dir = bundle.map_or(&build.dir, |b| &b.dir);
+    let own_page = crate::wasm_output::copy_site_files(dir, Some(&ctx.ws.resources()), &[])?;
+    let index = dir.join("index.html");
     let html = if own_page {
         std::fs::read_to_string(&index)?
     } else {
@@ -65,9 +104,16 @@ fn assemble_site(ctx: &BuildContext, build: &JsBuild) -> Result<()> {
         default_page(&manifest.package.name, &build.name, build.module_kind, compose_html)
     };
     // A UMD module loads with a plain `<script>`, which cannot use an import map.
-    let imports = match (&build.node_modules, build.module_kind) {
-        (Some(node_modules), JsModuleKind::Es) => crate::wasm_output::import_map(node_modules),
-        _ => BTreeMap::new(),
+    let (html, imports) = match (bundle, &build.node_modules, build.module_kind) {
+        (Some(bundle), _, _) => {
+            let (html, loaded) = bundle.rewrite_page(&html, &build.name);
+            if !loaded {
+                ctx.shell().warn(format!("index.html does not load {}.mjs, so it does not use the bundle", build.name));
+            }
+            (html, BTreeMap::new())
+        }
+        (None, Some(node_modules), JsModuleKind::Es) => (html, crate::wasm_output::import_map(node_modules)),
+        (None, _, _) => (html, BTreeMap::new()),
     };
     std::fs::write(&index, crate::wasm_output::inject_import_map(&html, &imports)).context("failed to write index.html")?;
     Ok(())
@@ -105,16 +151,21 @@ fn default_page(package: &str, module: &str, kind: JsModuleKind, compose_html: b
     )
 }
 
-/// Prints how big the release module and the whole output are, like the Wasm build does.
-fn report_size(ctx: &BuildContext, build: &JsBuild) {
+/// Prints how big the release module (the bundle's entry module, when there is one) and the whole output are, like
+/// the Wasm build does.
+fn report_size(ctx: &BuildContext, build: &JsBuild, bundle: Option<&Bundle>) {
     use crate::wasm_output::{brotli, deliverables, gzipped_size, human_size};
-    let Ok(module) = std::fs::read(&build.module) else { return };
+    let module_path = match bundle {
+        Some(bundle) => bundle.dir.join(&bundle.entry),
+        None => build.module.clone(),
+    };
+    let Ok(module) = std::fs::read(&module_path) else { return };
     let (raw, gzip) = (module.len() as u64, gzipped_size(&module));
     let brotli = brotli(&module).map(|b| b.len() as u64).unwrap_or(0);
-    let files = deliverables(&build.dir);
+    let files = deliverables(build.site_dir());
     let total: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
-    let shown = build.dir.strip_prefix(ctx.ws.root()).unwrap_or(&build.dir);
-    let file = build.module.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let shown = build.site_dir().strip_prefix(ctx.ws.root()).unwrap_or(build.site_dir());
+    let file = module_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     ctx.shell().status(
         "Size",
         format!(
@@ -129,7 +180,7 @@ fn report_size(ctx: &BuildContext, build: &JsBuild) {
     );
     if kargo_compiler::diagnostics::is_json() {
         kargo_compiler::diagnostics::emit(&serde_json::json!({
-            "reason": "js-size", "target": "js", "path": build.module, "bytes": raw, "gzip_bytes": gzip, "brotli_bytes": brotli
+            "reason": "js-size", "target": "js", "path": module_path, "bytes": raw, "gzip_bytes": gzip, "brotli_bytes": brotli
         }));
     }
 }
@@ -161,10 +212,15 @@ fn package_json(
     build: &JsBuild,
     dependencies: &BTreeMap<String, String>,
     settings: Option<&kargo_manifest::NpmPublishSettings>,
+    bundled: Option<(&[LibraryFormat], Vec<String>)>,
 ) -> String {
     let (extension, types_extension) = match build.module_kind {
         JsModuleKind::Es => ("mjs", "d.mts"),
         JsModuleKind::CommonJs | JsModuleKind::Umd => ("js", "d.ts"),
+    };
+    let (formats, files) = match bundled {
+        Some((formats, files)) => (Some(formats), files),
+        None => (None, vec![format!("*.{extension}"), format!("*.{extension}.map"), format!("*.{types_extension}")]),
     };
     crate::npm_package::LibraryPackage {
         name: crate::npm_package::scoped_name(npm_name, settings),
@@ -174,7 +230,8 @@ fn package_json(
         extension,
         types_extension,
         es: build.module_kind == JsModuleKind::Es,
-        files: vec![format!("*.{extension}"), format!("*.{extension}.map"), format!("*.{types_extension}")],
+        formats,
+        files,
         dependencies,
     }
     .json()
@@ -195,6 +252,7 @@ mod tests {
             dir: "out".into(),
             libraries: vec![],
             node_modules: None,
+            bundle: None,
         }
     }
 
@@ -205,7 +263,7 @@ mod tests {
         )
         .unwrap();
         let deps = BTreeMap::from([("left-pad".to_owned(), "^1.3.0".to_owned())]);
-        let json = package_json(&manifest.package, "@acme/greeter".into(), &build(JsModuleKind::Es), &deps, None);
+        let json = package_json(&manifest.package, "@acme/greeter".into(), &build(JsModuleKind::Es), &deps, None, None);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["name"], "@acme/greeter");
         assert_eq!(value["type"], "module");
@@ -219,6 +277,7 @@ mod tests {
             "greeter".into(),
             &build(JsModuleKind::CommonJs),
             &BTreeMap::new(),
+            None,
             None,
         ))
         .unwrap();

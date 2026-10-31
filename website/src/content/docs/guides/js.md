@@ -94,6 +94,18 @@ module-kind = "commonjs"   # "es" (default), "commonjs" or "umd"
 
 A browser can't load a CommonJS module, so a `browser` application needs `es` or `umd`. Tests always run as an ES module, whatever the program is. `module-name` changes `<name>` (default: the package name).
 
+## Bundling
+
+Set `bundler` to bundle a browser application into one tree-shaken, minified bundle with code splitting and content-hashed names, instead of serving the compiler's module and an import map:
+
+```toml title="kargo.toml"
+[target.js]
+environment = "browser"
+bundler = "bun"          # or "rollup"
+```
+
+`kargo build --release` and `kargo run --release` bundle; development builds do not, unless you set `bundle = true`. The bundle goes to `target/<profile>/js-bundle/` with a page that loads its entry module (`<name>-<hash>.js`), and `kargo run` serves that directory. It works as it does for [Wasm](../wasm/#bundling), with the same keys (`bundler`, `bundle`, `source-maps`, `external`) and the same two bundlers, and the [dev server's proxy](../wasm/#forwarding-api-requests) is `[target.js.dev-server.proxy]`. A browser application needs `module-kind = "es"` (the default); a [library can be bundled too](#bundling-a-library).
+
 ## Release builds
 
 `kargo build --release` links with the compiler's dead code elimination (`-Xir-dce`): only what `main` and `@JsExport` reach stays, and no source map is written. For a library with one exported function that takes the module from about 560 KiB to under 1 KiB. Dev builds keep everything and write `<name>.mjs.map` with the Kotlin sources embedded. A release build of a browser app also prints the size of the module (raw, gzip and brotli) and of the whole output, like a [Wasm build](../wasm/); with `--message-format json` it is a `js-size` message.
@@ -133,6 +145,33 @@ greeter.d.mts  greeter.mjs  package.json
 - **Declarations.** `<name>.d.mts` (`<name>.d.ts` for CommonJS and UMD) holds the TypeScript declarations of the `@JsExport` declarations (`export declare function greet(name: string): string;`). Unlike Wasm, Kotlin/JS exports classes and objects too. An ES module exports them by name (`import { greet } from "@acme/greeter"`); CommonJS and UMD modules put them in objects named after their Kotlin package (`require("@acme/greeter").com.example.greeter.greet`).
 - **`package.json`** comes from `[package]` (`name`, `version`, `description`, `license`, `homepage`, `repository`, `author`) and [`[publish.npm]`](../../reference/manifest/#publishnpm) (`keywords`, `bugs`, `sideEffects`, `engines`), with `type` (`module`, or `commonjs` for the other kinds), `main`, `types`, `exports`, `files`, and the [npm packages](#npm-packages) the library needs as `dependencies`.
 - A library has no `main`, so `kargo run` refuses to run it; `kargo test` runs its tests.
+
+### Bundling a library
+
+A `kind = "library"` can be bundled into the module formats its consumers want:
+
+```toml title="kargo.toml"
+[target.js]
+kind = "library"
+module-kind = "es"
+bundler = "rollup"          # bun writes no UMD
+formats = ["esm", "cjs", "umd"]
+global-name = "acme.Greeter"
+external = ["lodash"]
+
+[target.js.globals]
+lodash = "_"
+```
+
+`kargo build --release` writes `target/release/js-bundle/` with the file of each format (`<name>.mjs`, `<name>.cjs`, `<name>.umd.js`), the declarations and a `package.json` whose `main`, `module`, `types`, `unpkg`, `jsdelivr` and `exports` name them: `import` loads the ES module and `require` the CommonJS one, each with the declarations for its kind of module. The npm packages the library depends on stay imports, for the app that installs it to bundle them, and are its `dependencies` in `package.json`. [`kargo publish --npm`](../publishing/#publishing-to-npm) publishes that directory.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `formats` | `["esm"]` | Any of `esm`, `cjs` and `umd`, in any order |
+| `globals` | none | For `umd`: the global variable of each npm package the bundle leaves external or the library depends on (`lodash = "_"`). A UMD build errors naming the ones it still needs |
+| `global-name` | the package name in PascalCase | For `umd`: the global variable the library puts itself in, such as `acme.Greeter` |
+
+Only `rollup` writes `umd`; `bun` writes `esm` and `cjs`. The bundler needs `module-kind = "es"`, and without one the library is published as the compiler wrote it. Like an app, a library bundles in release builds unless `bundle = true`.
 
 To publish a Kotlin library for other Kotlin projects, use [`kargo publish`](../publishing/): it publishes the klib as the `<name>-js` module, with the Gradle module metadata (`org.jetbrains.kotlin.platform.type = js`, `org.jetbrains.kotlin.js.compiler = ir`) that Gradle and Kargo builds select it by.
 
@@ -303,6 +342,8 @@ Dependencies only the JS target uses go in `[target.js.dependencies]`. Kargo res
 | `index.html` and your `resources/` | The page of a `browser` app |
 | `node_modules/` | The npm packages the module imports |
 | `test/` | The tests and their runner, after `kargo test` |
+
+A [bundled](#bundling) app is in `target/<profile>/js-bundle/`, next to `js/`.
 
 ## Limitations
 
