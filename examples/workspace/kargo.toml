@@ -1,0 +1,6 @@
+[workspace]
+# Member directories; globs such as "libs/*" work too. `kargo new <dir>` adds new members.
+members = ["libs/greeter", "apps/cli"]
+
+[workspace.kotlin]
+version = "2.4.21"

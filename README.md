@@ -95,6 +95,7 @@ There are many more: `check`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `ben
 ## Learn more
 
 - [Documentation](https://enekocm7.github.io/kargo/): start with the [quick start](https://enekocm7.github.io/kargo/getting-started/quick-start/).
+- [Examples](examples/): complete projects for the JVM, Ktor, Spring Boot, Compose Multiplatform, Android, Wasm, JS and Native that you can copy and run.
 - [Guides](https://enekocm7.github.io/kargo/guides/dependencies/): dependencies, workspaces, testing, toolchains, CI, offline builds and more.
 - [Editor support](https://enekocm7.github.io/kargo/guides/editors/): plugins for IntelliJ IDEA and Android Studio, VS Code, Zed, Neovim and Emacs, and `kargo lsp` for every other editor.
 - Coming from Gradle, Maven or the [Kotlin Toolchain](https://kotlin-toolchain.org/)? `kargo import` converts your project. See [migrating from Gradle](https://enekocm7.github.io/kargo/migration/from-gradle/), [from the Kotlin Toolchain](https://enekocm7.github.io/kargo/migration/from-kotlin-toolchain/) and the [feature parity table](https://enekocm7.github.io/kargo/migration/gradle-feature-parity/).

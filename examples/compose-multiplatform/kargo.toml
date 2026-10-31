@@ -1,0 +1,12 @@
+[package]
+name = "compose-multiplatform"
+version = "0.1.0"
+group = "com.example"
+
+[target.jvm]
+
+[target.wasm]
+environment = "browser"
+
+[frameworks]
+compose = true

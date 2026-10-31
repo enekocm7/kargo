@@ -1,0 +1,138 @@
+name: Examples
+
+# Builds and tests every project in examples/ with the real compilers, so the examples keep working
+# when Kargo, its templates or its default versions change. The cheap offline checks (the examples
+# equal `kargo new`, no pinned versions) are `cargo test --test examples`.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "examples/**"
+      - "tests/examples.rs"
+      - "crates/kargo-ops/src/ops/new.rs"
+      - "crates/kargo-ops/src/builtins.rs"
+      - "crates/kargo-manifest/src/lib.rs"
+      - ".github/workflows/examples.yml"
+  pull_request:
+    paths:
+      - "examples/**"
+      - "tests/examples.rs"
+      - "crates/kargo-ops/src/ops/new.rs"
+      - "crates/kargo-ops/src/builtins.rs"
+      - "crates/kargo-manifest/src/lib.rs"
+      - ".github/workflows/examples.yml"
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  KARGO_AUTO_INSTALL: "1"
+
+jobs:
+  offline:
+    name: Match kargo new
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --test examples
+
+  kargo:
+    name: Build kargo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kargo
+          path: target/release/kargo
+          if-no-files-found: error
+
+  examples:
+    name: ${{ matrix.example }}
+    needs: kargo
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { example: hello-jvm, dir: hello-jvm, test: kargo test }
+          - { example: ktor-server, dir: ktor-server, test: kargo test }
+          - { example: spring-boot, dir: spring-boot, test: kargo test }
+          - { example: compose-desktop, dir: compose-desktop, test: kargo test }
+          - { example: compose-multiplatform, dir: compose-multiplatform, test: kargo test -t jvm }
+          - { example: compose-html, dir: compose-html, test: "true" }
+          - { example: kotlin-wasm, dir: kotlin-wasm, test: "true" }
+          - { example: kotlin-js, dir: kotlin-js, test: kargo test }
+          - { example: multiplatform-library, dir: multiplatform-library, test: kargo test -t jvm }
+          - { example: workspace, dir: workspace, test: kargo test }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kargo
+          path: ${{ runner.temp }}/kargo-bin
+      - name: Put kargo on the PATH
+        run: |
+          chmod +x "$RUNNER_TEMP/kargo-bin/kargo"
+          echo "$RUNNER_TEMP/kargo-bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.kargo
+          key: kargo-examples-${{ runner.os }}-${{ matrix.example }}-${{ hashFiles('examples/**/kargo.toml') }}
+          restore-keys: kargo-examples-${{ runner.os }}-
+      - name: Build
+        working-directory: examples/${{ matrix.dir }}
+        run: kargo build
+      - name: Test
+        working-directory: examples/${{ matrix.dir }}
+        run: ${{ matrix.test }}
+
+  # Native and Android download large toolchains, so they run weekly and on demand, not on every pull request.
+  slow:
+    name: ${{ matrix.example }}
+    needs: kargo
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { example: kotlin-native, test: kargo test }
+          - { example: android, test: "true" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kargo
+          path: ${{ runner.temp }}/kargo-bin
+      - name: Put kargo on the PATH
+        run: |
+          chmod +x "$RUNNER_TEMP/kargo-bin/kargo"
+          echo "$RUNNER_TEMP/kargo-bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.kargo
+          key: kargo-examples-${{ runner.os }}-${{ matrix.example }}-${{ hashFiles('examples/**/kargo.toml') }}
+          restore-keys: kargo-examples-${{ runner.os }}-
+      - name: Install the Android SDK
+        if: matrix.example == 'android'
+        working-directory: examples/android
+        run: kargo toolchain install android-sdk --accept-licenses
+      - name: Build
+        working-directory: examples/${{ matrix.example }}
+        run: kargo build
+      - name: Test
+        working-directory: examples/${{ matrix.example }}
+        run: ${{ matrix.test }}
