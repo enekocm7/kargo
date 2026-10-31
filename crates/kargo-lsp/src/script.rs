@@ -23,6 +23,8 @@ const PREFIX: &str = "@file:";
 const JDKS: [&str; 6] = ["system", "8", "11", "17", "21", "25"];
 /// The repositories offered for `@file:Repository`.
 const REPOSITORIES: [&str; 3] = ["mavenCentral", "https://jitpack.io", "https://maven.google.com"];
+/// The targets offered for `@file:Target`.
+const TARGETS: [&str; 2] = ["jvm", "native"];
 
 /// Whether `uri` names a Kotlin script file.
 pub fn is_script_uri(uri: &str) -> bool {
@@ -129,7 +131,7 @@ pub fn request(text: &str, offset: usize) -> Option<Request> {
 }
 
 /// The completion items of a request the server answers without the network: the annotation names,
-/// and the values of `@file:Jdk`, `@file:Framework` and `@file:Repository`.
+/// and the values of `@file:Jdk`, `@file:Framework`, `@file:Repository` and `@file:Target`.
 pub fn completion(text: &str, request: &Request) -> Vec<Value> {
     match request {
         Request::Name { range, .. } => ANNOTATIONS.iter().map(|(name, doc)| item(text, range.clone(), name, KIND_CLASS, doc)).collect(),
@@ -137,6 +139,7 @@ pub fn completion(text: &str, request: &Request) -> Vec<Value> {
             "Jdk" => JDKS.iter().map(|jdk| item(text, range.clone(), jdk, KIND_VALUE, "JDK")).collect(),
             "Framework" => FRAMEWORK_NAMES.iter().map(|f| item(text, range.clone(), f, KIND_VALUE, "built-in framework")).collect(),
             "Repository" => REPOSITORIES.iter().map(|r| item(text, range.clone(), r, KIND_VALUE, "Maven repository")).collect(),
+            "Target" => TARGETS.iter().map(|t| item(text, range.clone(), t, KIND_VALUE, "script target")).collect(),
             _ => Vec::new(),
         },
     }
@@ -196,7 +199,7 @@ mod tests {
         let (text, offset) = at("@file:|\n");
         let request = request(&text, offset).unwrap();
         let labels: Vec<String> = completion(&text, &request).iter().map(|i| i["label"].as_str().unwrap().to_owned()).collect();
-        for name in ["DependsOn", "Repository", "Kotlin", "Jdk", "Framework"] {
+        for name in ["DependsOn", "Repository", "Kotlin", "Jdk", "Framework", "Target"] {
             assert!(labels.iter().any(|l| l == name), "{labels:?}");
         }
     }
@@ -217,6 +220,9 @@ mod tests {
         assert!(labels.contains(&"serialization".to_owned()), "{labels:?}");
         let request = Request::Value { name: "Jdk".into(), partial: String::new(), range: 0..0 };
         assert!(completion("", &request).iter().any(|i| i["label"] == "21"));
+        let request = Request::Value { name: "Target".into(), partial: String::new(), range: 0..0 };
+        let labels: Vec<String> = completion("", &request).iter().map(|i| i["label"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(labels, ["jvm", "native"]);
     }
 
     #[test]

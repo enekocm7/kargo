@@ -334,7 +334,7 @@ A browser app is served from its [bundle](../../guides/wasm/#bundling) when it h
 `kargo run <file>` runs one Kotlin file, wherever it is:
 
 - **A `.kt` file in a project** (a `kargo.toml` in its directory or above it, wherever you run `kargo run`) is compiled like an `--example`: against the project's classes, dependencies and dev-dependencies, with its toolchain, frameworks and profile. It needs a `main`. It is not part of the project's build: its classes go to `target/<profile>/jvm/files/<name>/`, and an unchanged file is not compiled again. `--release`, `--target` (`jvm` or `native`), `--debug`, `--env-file` and `-p` apply; `--watch` does not.
-- **A `.kts` script**, **a `.kt` file with a `/* kargo ... */` front matter**, and **a `.kt` file outside any project** run as [`kargo script`](#kargo-script) runs them: with their own dependencies, Kotlin version and JDK, cached in `~/.kargo/cache/scripts`. The project's options, such as `--release` or `--debug`, are errors there.
+- **A `.kts` script**, **a `.kt` file with a `/* kargo ... */` front matter**, and **a `.kt` file outside any project** run as [`kargo script`](#kargo-script) runs them: with their own dependencies, Kotlin version and JDK, cached in `~/.kargo/cache/scripts`. `--target jvm` or `--target native` picks the script's target there (a `.kts` script with `native` is an error); the project's other options, such as `--release` or `--debug`, are errors.
 
 The first word after `run` is the file only when it ends in `.kt` or `.kts` and the file exists. Any other word, and every word after `--`, is an argument for the program, so `kargo run deploy` passes `deploy` to the project's program. Use `--` before arguments that start with `-`: `kargo run tools/migrate.kt -- --dry-run`.
 
@@ -352,22 +352,24 @@ How each target runs:
 
 ## `kargo script`
 
-Run a single Kotlin file without a project. A `.kts` script takes its dependencies, repositories, Kotlin version, JDK and frameworks from `@file:` annotations at its top; a `.kt` file takes them from a `/* kargo ... */` front matter. See [Kotlin scripts](../../guides/scripts/).
+Run a single Kotlin file without a project. A `.kts` script takes its dependencies, repositories, Kotlin version, JDK, frameworks and target from `@file:` annotations at its top; a `.kt` file takes them from a `/* kargo ... */` front matter. See [Kotlin scripts](../../guides/scripts/).
 
 ```sh
 kargo script fetch.kts https://example.com
 kargo script -e 'println(1 + 1)'
+kargo script --target native tool.kt a b
 ```
 
 | Option | Meaning |
 |---|---|
 | `<file>` | The `.kts` script or `.kt` file to run. Required unless `-e` is given |
 | `-e, --expr <code>` | Run this Kotlin code instead of a file. Every positional argument is then one of the script's arguments |
+| `-t, --target <jvm\|native>` | Build for this target: `jvm` (default) or `native` for a native executable of a `.kt` file with a `fun main`. A `.kts` script or `-e` code with `native` is an error; the front matter `target` and `@file:Target` pick the target without the flag. See [Native scripts](../../guides/scripts/#native-scripts) |
 | `[args]...` | Arguments for the script. Use `--` before an argument that starts with `-` |
 
 The global flags apply: `--offline` runs from the cache alone, `-v` shows the compiler commands, `-q` hides Kargo's status lines.
 
-Exit codes: the script's own exit code when it runs; `1` when the script throws an exception; `101` when the header is invalid or the file does not compile; `2` for a usage error, such as no file. Compiled scripts are cached in `~/.kargo/cache/scripts`.
+Exit codes: the script's own exit code when it runs; `1` when the script throws an exception; `101` when the header is invalid or the file does not compile; `2` for a usage error, such as no file. Compiled scripts are cached in `~/.kargo/cache/scripts`: JVM classes for `jvm`, the linked binary for `native`.
 
 ## `kargo test` (`t`)
 

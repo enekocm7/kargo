@@ -2199,6 +2199,34 @@ rel = { script = \"rel.kts\" }
         let err = format!("{:#}", parse_kt_front_matter("/* kargo\nflavour = \"x\"\n*/\n").unwrap_err());
         assert!(err.contains("unknown key `flavour`"), "{err}");
     }
+
+    #[test]
+    fn reads_script_targets() {
+        use crate::script::ScriptTarget;
+        assert_eq!(settings("@file:Target(\"native\")\n").target, Some(ScriptTarget::Native));
+        assert_eq!(settings("@file:Target(\"jvm\")\n").target, Some(ScriptTarget::Jvm));
+        let err = format!(
+            "{:#}",
+            parse_kts("@file:Target(\"wasm\")\n")
+                .and_then(|s| settings_from_annotations("@file:Target(\"wasm\")\n", &s.annotations))
+                .unwrap_err()
+        );
+        assert!(err.contains("invalid target"), "{err}");
+        let err = format!(
+            "{:#}",
+            parse_kts("@file:Target(\"jvm\", \"native\")\n")
+                .and_then(|s| settings_from_annotations("@file:Target(\"jvm\", \"native\")\n", &s.annotations))
+                .unwrap_err()
+        );
+        assert!(err.contains("takes exactly one"), "{err}");
+
+        let s = parse_kt_front_matter("/* kargo\ntarget = \"native\"\n*/\nfun main() {}\n").unwrap().unwrap();
+        assert_eq!(s.target, Some(ScriptTarget::Native));
+        let s = parse_kt_front_matter("/* kargo\ntarget = \"jvm\"\n*/\nfun main() {}\n").unwrap().unwrap();
+        assert_eq!(s.target, Some(ScriptTarget::Jvm));
+        let err = format!("{:#}", parse_kt_front_matter("/* kargo\ntarget = \"wasm\"\n*/\n").unwrap_err());
+        assert!(err.contains("invalid target"), "{err}");
+    }
 }
 
 #[test]

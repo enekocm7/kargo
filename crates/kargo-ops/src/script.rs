@@ -8,6 +8,10 @@
 //! compiling again. A `.kt` file is compiled once and started the same way. Each entry is keyed by
 //! the script's code and everything that changes what it compiles to, and lives in
 //! `~/.kargo/cache/scripts`.
+//!
+//! A `.kt` file also runs as a native executable with `--target native`: it is compiled with the
+//! cached Kotlin/Native toolchain into a binary, and a second run starts the cached binary without
+//! rebuilding. `.kts` scripts and `-e` code stay on the JVM: the scripting compiler is JVM-only.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -17,12 +21,14 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use kargo_compiler::mainclass::find_entry_point_in;
-use kargo_compiler::{ResolvedPlugin, compiler_jvm_options, plugin_args};
-use kargo_manifest::script::{self, Settings};
-use kargo_manifest::{DEFAULT_KOTLIN_VERSION, JdkRequest, Manifest, TargetKind};
+use kargo_compiler::native::{NativeCompilation, NativeLink};
+use kargo_compiler::{ResolvedPlugin, SourceSet, compiler_jvm_options, plugin_args};
+use kargo_manifest::script::{self, ScriptTarget, Settings};
+use kargo_manifest::{DEFAULT_KOTLIN_VERSION, JdkRequest, Manifest, NativeKind, TargetKind};
 use kargo_maven::{DependencyRequest, MavenClient, ModuleId, Platform, Repository, Resolver};
 use kargo_toolchain::kotlin::{JVM_COMPILER_MAIN, KOTLIN_GROUP, KotlinCompiler, check_compiler_jdk, fetch_jar};
-use kargo_toolchain::{Jdk, jdks};
+use kargo_toolchain::native::Host;
+use kargo_toolchain::{Jdk, NativeToolchain, jdks};
 use kargo_util::config::Config;
 use kargo_util::fs::{join_paths, remove_dir_all_if_exists, write_string_atomic};
 use kargo_util::hash::Fingerprint;
@@ -33,7 +39,7 @@ use crate::builtins::{self, FRAMEWORK_NAMES};
 use crate::ops::context::{MIN_JDK, to_request};
 
 /// Written into every cache key; bump it when what an entry holds changes.
-const FORMAT: &str = "3";
+const FORMAT: &str = "4";
 /// The script template that gives a script its `args`.
 const SCRIPT_TEMPLATE: &str = "kotlin.script.templates.standard.ScriptTemplateWithArgs";
 /// The Kotlin scripting runtime a compiled script needs at run time.
@@ -90,12 +96,30 @@ pub fn run(config: &Config, source: &Source, args: &[String]) -> Result<i32> {
     run_in(config, source, args, &Surroundings::default())
 }
 
+/// Runs the script for `target`, overriding what its header declares, and returns its exit code.
+pub fn run_with(config: &Config, source: &Source, args: &[String], target: Option<ScriptTarget>) -> Result<i32> {
+    run_in_with(config, source, args, &Surroundings::default(), target)
+}
+
 /// Like [`run`], in the working directory and with the environment of `around`. The first run of a
 /// `.kts` script happens inside the Kotlin compiler, which gets them too. Pass `source` as an absolute
 /// path when `around` changes the directory.
 pub fn run_in(config: &Config, source: &Source, args: &[String], around: &Surroundings) -> Result<i32> {
-    let shell = config.shell();
+    run_in_with(config, source, args, around, None)
+}
+
+/// Like [`run_in`], but `target` overrides what the script's header declares.
+pub fn run_in_with(config: &Config, source: &Source, args: &[String], around: &Surroundings, target: Option<ScriptTarget>) -> Result<i32> {
     let script = load(source)?;
+    let requested = target.or(script.settings.target).unwrap_or_default();
+    match requested {
+        ScriptTarget::Jvm => run_jvm(config, &script, args, around),
+        ScriptTarget::Native => run_native(config, &script, args, around),
+    }
+}
+
+fn run_jvm(config: &Config, script: &Script, args: &[String], around: &Surroundings) -> Result<i32> {
+    let shell = config.shell();
     let kotlin = kotlin_version(&script.settings)?;
     let frameworks = frameworks(&script.settings)?;
     if script.is_script {
@@ -103,7 +127,7 @@ pub fn run_in(config: &Config, source: &Source, args: &[String], around: &Surrou
     }
     let jdk_request = script.settings.jdk.clone().unwrap_or_default();
     let repositories = repositories(&script.settings);
-    let entry = config.scripts_cache().join(cache_key(&script, &kotlin, &jdk_request, &repositories, &frameworks));
+    let entry = config.scripts_cache().join(cache_key(script, &kotlin, &jdk_request, &repositories, &frameworks, ScriptTarget::Jvm, None));
 
     let needs = jdks::JdkNeeds { max: kargo_toolchain::kotlin::max_compiler_jdk(&kotlin), ..Default::default() };
     let jdk = jdks::resolve_for(config, &jdk_request, needs)?;
@@ -115,11 +139,146 @@ pub fn run_in(config: &Config, source: &Source, args: &[String], around: &Surrou
     check_compiler_jdk(&kotlin, &jdk)?;
 
     shell.status("Compiling", format!("`{}`", script.name));
-    let built = build(config, &script, &kotlin, &jdk, &repositories, &frameworks, &entry, args, around)?;
+    let built = build(config, script, &kotlin, &jdk, &repositories, &frameworks, &entry, args, around)?;
     match built.ran {
         Some(code) => Ok(code),
         None => launch(config, &jdk, &entry.join("classes"), &built.classpath, &built.main_class, args, around),
     }
+}
+
+/// Runs the script as a native executable for this machine, building it first unless the cache
+/// already holds the binary. Only `.kt` files run natively: the Kotlin scripting compiler is
+/// JVM-only, and a `.kts` file's top-level statements have no `fun main` to link.
+fn run_native(config: &Config, script: &Script, args: &[String], around: &Surroundings) -> Result<i32> {
+    let shell = config.shell();
+    if script.is_script {
+        let what = if script.name == EXPRESSION { "`-e` code".to_owned() } else { format!("`{}`", script.name) };
+        bail!(
+            "{what} is a .kts script, but `--target native` needs a .kt file with a `fun main`; \
+             move the code to a .kt file with a `/* kargo ... */` front matter"
+        );
+    }
+    let file = script.file.as_ref().with_context(|| format!("`{}` has no file to compile", script.name))?;
+    let kotlin = kotlin_version(&script.settings)?;
+    let frameworks = frameworks(&script.settings)?;
+    let jdk_request = script.settings.jdk.clone().unwrap_or_default();
+    let repositories = repositories(&script.settings);
+    let konan_target = Host::current()?.konan_target.to_owned();
+    let entry = config.scripts_cache().join(cache_key(
+        script,
+        &kotlin,
+        &jdk_request,
+        &repositories,
+        &frameworks,
+        ScriptTarget::Native,
+        Some(&konan_target),
+    ));
+
+    if let Some(cached) = NativeCached::read(&entry, &konan_target) {
+        shell.verbose("Cached", format!("`{}`", script.name));
+        return launch_native(config, &cached.binary, args, around);
+    }
+
+    shell.status("Compiling", format!("`{}`", script.name));
+    let binary = build_native(config, script, file, &kotlin, &repositories, &frameworks, &konan_target, &entry)?;
+    launch_native(config, &binary, args, around)
+}
+
+/// Compiles the `.kt` script `file` into a native binary in `entry`, and marks the entry complete.
+/// Returns the binary.
+#[allow(clippy::too_many_arguments)]
+fn build_native(
+    config: &Config,
+    script: &Script,
+    file: &Path,
+    kotlin: &str,
+    repositories: &[Repository],
+    frameworks: &[&str],
+    konan_target: &str,
+    entry: &Path,
+) -> Result<PathBuf> {
+    let client = MavenClient::new(config, repositories.to_vec());
+    let manifest = framework_manifest(kotlin, frameworks)?;
+    let contributions = builtins::contributions(&manifest, TargetKind::Native, entry)?;
+
+    let mut roots: Vec<DependencyRequest> = script
+        .settings
+        .dependencies
+        .iter()
+        .map(|d| DependencyRequest::new(ModuleId::new(&d.group, &d.artifact), Some(d.version.clone())))
+        .collect();
+    roots.extend(contributions.dependencies.iter().map(to_request));
+    let libraries = Resolver::new(&client, Platform::Native(konan_target.to_owned()))
+        .resolve(&roots)
+        .with_context(|| format!("failed to resolve the dependencies of `{}` for {konan_target}", script.name))?
+        .files();
+
+    let toolchain = NativeToolchain::ensure(config, &client, kotlin).with_context(|| format!("failed to obtain Kotlin/Native {kotlin}"))?;
+    toolchain.ensure_dependencies(config, konan_target)?;
+
+    let mut plugins = Vec::new();
+    for p in &contributions.plugins {
+        let version = p.version.as_deref().unwrap_or(kotlin);
+        let jar = fetch_jar(&client, &p.group, &p.artifact, version)
+            .with_context(|| format!("failed to fetch compiler plugin {}:{}:{version}", p.group, p.artifact))?;
+        plugins.push(ResolvedPlugin { jar, options: builtins::plugin_option_args(p) });
+    }
+
+    let entry_point = find_entry_point_in(file, true)?.native_entry();
+    let sources = SourceSet::new(vec![file.to_path_buf()], Vec::new(), "native");
+    let unit = NativeCompilation {
+        name: "script",
+        konan_target: konan_target.to_owned(),
+        kind: NativeKind::Executable,
+        sources,
+        libraries,
+        plugins: &plugins,
+        kotlin_args: &contributions.compiler_args,
+        entry_point: Some(entry_point),
+        link: NativeLink::default(),
+        output_dir: entry.to_path_buf(),
+        debug: true,
+        optimize: false,
+        test_runner: false,
+        exported: Vec::new(),
+        bundle_id: None,
+    };
+    // Remove a binary a failed build left behind, so a cache hit never runs it.
+    let artifact = unit.artifact();
+    let _ = std::fs::remove_file(&artifact);
+    std::fs::create_dir_all(entry).with_context(|| format!("failed to create {}", entry.display()))?;
+    unit.compile(config.shell(), &toolchain, entry, &|| {})?;
+    if !artifact.is_file() {
+        bail!("could not compile `{}` for {konan_target} due to previous errors", script.name);
+    }
+    write_string_atomic(&entry.join("complete"), FORMAT)?;
+    Ok(artifact)
+}
+
+/// A finished native cache entry: the binary a previous run linked.
+struct NativeCached {
+    binary: PathBuf,
+}
+
+impl NativeCached {
+    /// The entry at `dir` for `konan_target`, if a build finished there and the binary is still present.
+    fn read(dir: &Path, konan_target: &str) -> Option<Self> {
+        if !dir.join("complete").is_file() {
+            return None;
+        }
+        let binary = dir.join(format!("script.{}", kargo_toolchain::native::executable_extension(konan_target)));
+        binary.is_file().then_some(Self { binary })
+    }
+}
+
+/// Runs a native script binary with `args`.
+fn launch_native(config: &Config, binary: &Path, args: &[String], around: &Surroundings) -> Result<i32> {
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    around.apply(&mut cmd);
+    config.shell().verbose("Running", format!("`{}`", binary.display()));
+    let status = cmd.status().with_context(|| format!("failed to start {}", binary.display()))?;
+    Ok(kargo_util::process::exit_code_of(status))
 }
 
 /// Reads the script and the settings it declares.
@@ -200,7 +359,8 @@ pub struct Problem {
 }
 
 /// The problems `kargo script` would report for the header of a `.kts` script, found without
-/// compiling it: a malformed annotation, an unknown framework or one that needs a compiler plugin.
+/// compiling it: a malformed annotation, an unknown framework or one that needs a compiler plugin,
+/// or a native target (only `.kt` files run natively).
 /// The language server shows them as diagnostics.
 pub fn problems(text: &str) -> Vec<Problem> {
     let parsed = match script::parse_kts(text) {
@@ -214,6 +374,12 @@ pub fn problems(text: &str) -> Vec<Problem> {
     let mut out = Vec::new();
     for annotation in &parsed.annotations {
         let checked = script::settings_from_annotations(text, std::slice::from_ref(annotation)).and_then(|settings| {
+            if settings.target == Some(ScriptTarget::Native) {
+                bail!(
+                    "`@file:Target(\"native\")` needs a .kt file with a `fun main`; \
+                     move the code to a .kt file with a `/* kargo ... */` front matter"
+                );
+            }
             let kotlin = kotlin_version(&settings)?;
             let frameworks = frameworks(&settings)?;
             check_script_frameworks("this script", &kotlin, &frameworks)
@@ -316,7 +482,15 @@ fn repositories(settings: &Settings) -> Vec<Repository> {
 }
 
 /// The directory of the cache entry for a script: a hash of everything that changes its output.
-fn cache_key(script: &Script, kotlin: &str, jdk: &JdkRequest, repositories: &[Repository], frameworks: &[&str]) -> String {
+fn cache_key(
+    script: &Script,
+    kotlin: &str,
+    jdk: &JdkRequest,
+    repositories: &[Repository],
+    frameworks: &[&str],
+    target: ScriptTarget,
+    konan_target: Option<&str>,
+) -> String {
     let mut fp = Fingerprint::new();
     fp.str(FORMAT).str(&script.name).str(if script.is_script { "kts" } else { "kt" }).str(&script.code);
     fp.str(kotlin).str(&jdk.to_string());
@@ -328,6 +502,10 @@ fn cache_key(script: &Script, kotlin: &str, jdk: &JdkRequest, repositories: &[Re
     }
     for framework in frameworks {
         fp.str(framework);
+    }
+    fp.str(&target.to_string());
+    if let Some(konan) = konan_target {
+        fp.str(konan);
     }
     fp.finish()
 }
@@ -602,10 +780,48 @@ mod tests {
         let script =
             |code: &str| Script { name: "a.kts".into(), is_script: true, code: code.into(), file: None, settings: Settings::default() };
         let repos = [Repository::maven_central()];
-        let key = |s: &Script, kotlin: &str| cache_key(s, kotlin, &JdkRequest::System, &repos, &[]);
+        let key = |s: &Script, kotlin: &str| cache_key(s, kotlin, &JdkRequest::System, &repos, &[], ScriptTarget::Jvm, None);
         assert_eq!(key(&script("1"), "2.4.21"), key(&script("1"), "2.4.21"));
         assert_ne!(key(&script("1"), "2.4.21"), key(&script("2"), "2.4.21"));
         assert_ne!(key(&script("1"), "2.4.21"), key(&script("1"), "2.3.0"));
+    }
+
+    #[test]
+    fn keys_separate_jvm_and_native_and_hosts() {
+        let script =
+            |code: &str| Script { name: "a.kt".into(), is_script: false, code: code.into(), file: None, settings: Settings::default() };
+        let repos = [Repository::maven_central()];
+        let jvm = cache_key(&script("1"), "2.4.21", &JdkRequest::System, &repos, &[], ScriptTarget::Jvm, None);
+        let native = cache_key(&script("1"), "2.4.21", &JdkRequest::System, &repos, &[], ScriptTarget::Native, Some("linux_x64"));
+        let other_host = cache_key(&script("1"), "2.4.21", &JdkRequest::System, &repos, &[], ScriptTarget::Native, Some("macos_arm64"));
+        assert_ne!(jvm, native);
+        assert_ne!(native, other_host);
+    }
+
+    #[test]
+    fn native_cache_reads_only_finished_binaries() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(NativeCached::read(dir.path(), "linux_x64").is_none());
+        std::fs::write(dir.path().join("complete"), FORMAT).unwrap();
+        assert!(NativeCached::read(dir.path(), "linux_x64").is_none(), "no binary yet");
+        let binary = dir.path().join("script.kexe");
+        std::fs::write(&binary, "fake").unwrap();
+        assert_eq!(NativeCached::read(dir.path(), "linux_x64").unwrap().binary, binary);
+        // Windows binaries have another extension.
+        assert!(NativeCached::read(dir.path(), "mingw_x64").is_none());
+        let win = tempfile::tempdir().unwrap();
+        std::fs::write(win.path().join("complete"), FORMAT).unwrap();
+        std::fs::write(win.path().join("script.exe"), "fake").unwrap();
+        assert!(NativeCached::read(win.path(), "mingw_x64").is_some());
+        assert!(NativeCached::read(win.path(), "linux_x64").is_none());
+    }
+
+    #[test]
+    fn native_needs_a_kt_file() {
+        let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let script = Script { name: "a.kts".into(), is_script: true, code: "println(1)".into(), file: None, settings: Settings::default() };
+        let err = format!("{:#}", run_native(&config, &script, &[], &Surroundings::default()).unwrap_err());
+        assert!(err.contains("--target native") && err.contains(".kt file"), "{err}");
     }
 
     #[test]
@@ -622,6 +838,13 @@ mod tests {
         assert_eq!(bad.len(), 1);
         assert!(bad[0].message.starts_with("line 2:"), "{}", bad[0].message);
         assert_eq!(bad[0].range, 1..13);
+        let native = problems("@file:Target(\"native\")\nprintln(1)\n");
+        assert_eq!(native.len(), 1, "{native:?}");
+        assert!(native[0].message.contains("needs a .kt file"), "{}", native[0].message);
+        assert!(problems("@file:Target(\"jvm\")\nprintln(1)\n").is_empty());
+        let bad_target = problems("@file:Target(\"wasm\")\nprintln(1)\n");
+        assert_eq!(bad_target.len(), 1, "{bad_target:?}");
+        assert!(bad_target[0].message.contains("invalid target"), "{}", bad_target[0].message);
     }
 
     #[test]

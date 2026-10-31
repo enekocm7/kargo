@@ -5842,6 +5842,36 @@ fn script_reports_its_header_before_compiling() {
 }
 
 #[test]
+fn script_native_needs_a_kt_file() {
+    let p = Project::new();
+    p.file("tool.kts", "println(1)\n");
+    p.kargo()
+        .args(["script", "--target", "native", "tool.kts"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("--target native").and(predicate::str::contains(".kt file")));
+    p.kargo()
+        .args(["script", "--target", "native", "-e", "println(1)"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("--target native").and(predicate::str::contains(".kt file")));
+    // The front matter selects the target when `--target` is not given.
+    p.file("native.kts", "@file:Target(\"native\")\nprintln(1)\n");
+    p.kargo().args(["script", "native.kts"]).assert().failure().code(101).stderr(predicate::str::contains("needs a .kt file"));
+}
+
+#[test]
+fn script_rejects_an_invalid_target_before_compiling() {
+    let p = Project::new();
+    p.file("bad.kts", "@file:Target(\"wasm\")\nprintln(1)\n");
+    p.kargo().args(["script", "bad.kts"]).assert().failure().code(101).stderr(predicate::str::contains("invalid target"));
+    p.file("bad.kt", "/* kargo\ntarget = \"wasm\"\n*/\nfun main() {}\n");
+    p.kargo().args(["script", "bad.kt"]).assert().failure().code(101).stderr(predicate::str::contains("invalid target"));
+}
+
+#[test]
 fn custom_profiles_are_chosen_by_name() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("app", "\n[profile.staging]\ninherits = \"release\"\n[profile.staging.env]\nMODE = \"staging\"\n"));

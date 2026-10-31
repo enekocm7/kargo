@@ -3640,6 +3640,45 @@ fn kotlin_files_with_front_matter_and_expressions() {
 }
 
 #[test]
+fn native_scripts_build_a_cached_binary() {
+    require_e2e!();
+    require_native!();
+    let e = E2e::new();
+    e.write(
+        "tool.kt",
+        "/* kargo\ntarget = \"native\"\n*/\nfun main(args: Array<String>) {\n    println(\"native \" + args.joinToString())\n}\n",
+    );
+    e.kargo("")
+        .args(["script", "--target", "native", "tool.kt", "a", "b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("native a, b\n").normalize());
+    // The second run starts the cached binary without rebuilding, even offline.
+    e.kargo("")
+        .args(["script", "--target", "native", "tool.kt", "a", "b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("native a, b\n").normalize())
+        .stderr(predicate::str::contains("Compiling").not());
+    e.kargo("")
+        .args(["--offline", "script", "--target", "native", "tool.kt", "c"])
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("native c\n").normalize());
+    // The front matter selects the native target without the flag.
+    e.kargo("").args(["script", "tool.kt", "d"]).assert().success().stdout(predicate::str::diff("native d\n").normalize());
+    // Exit codes match the JVM path.
+    e.write("fail.kt", "/* kargo\ntarget = \"native\"\n*/\nfun main() {\n    kotlin.system.exitProcess(3)\n}\n");
+    e.kargo("").args(["script", "--target", "native", "fail.kt"]).assert().code(3);
+    e.write("bad.kt", "/* kargo\ntarget = \"native\"\n*/\nfun main() {\n    println(undefinedThing)\n}\n");
+    e.kargo("")
+        .args(["script", "--target", "native", "bad.kt"])
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("unresolved reference"));
+}
+
+#[test]
 fn script_annotations_set_kotlin_jdk_and_frameworks() {
     require_e2e!();
     let e = E2e::new();

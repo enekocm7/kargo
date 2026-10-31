@@ -194,6 +194,22 @@ impl From<TargetArg> for TargetKind {
     }
 }
 
+/// `--target` of `kargo script`: the JVM, or a native executable for this machine.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ScriptTargetArg {
+    Jvm,
+    Native,
+}
+
+impl From<ScriptTargetArg> for kargo_manifest::script::ScriptTarget {
+    fn from(t: ScriptTargetArg) -> Self {
+        match t {
+            ScriptTargetArg::Jvm => Self::Jvm,
+            ScriptTargetArg::Native => Self::Native,
+        }
+    }
+}
+
 /// `--target-set`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum TargetSetArg {
@@ -1301,6 +1317,9 @@ enum Command {
         /// Run this Kotlin code instead of a file
         #[arg(short, long, value_name = "CODE")]
         expr: Option<String>,
+        /// Build for this target: `jvm` (default) or `native` for a native executable of a .kt file
+        #[arg(short, long, value_enum)]
+        target: Option<ScriptTargetArg>,
         /// Arguments for the script
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -3060,10 +3079,15 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 _ => None,
             };
             if let Some(source) = script {
+                let script_target = match target {
+                    Some(TargetArg::Jvm) => Some(kargo_manifest::script::ScriptTarget::Jvm),
+                    Some(TargetArg::Native) => Some(kargo_manifest::script::ScriptTarget::Native),
+                    _ => None,
+                };
                 let given = [
                     (release, "--release"),
                     (profile.is_some(), "--profile"),
-                    (target.is_some_and(|t| !matches!(t, TargetArg::Jvm)), "--target"),
+                    (target.is_some_and(|t| !matches!(t, TargetArg::Jvm | TargetArg::Native)), "--target"),
                     (port.is_some(), "--port"),
                     (open, "--open"),
                     (debug.is_some(), "--debug"),
@@ -3082,7 +3106,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     };
                     bail!("`{flag}` applies to a project's program, but {what} runs on its own like `kargo script`");
                 }
-                return kargo_ops::script::run(config, &source, &args);
+                return kargo_ops::script::run_with(config, &source, &args, script_target);
             }
             if file.is_some() && watch.is_some() {
                 bail!("`--watch` reruns the project's program when the project changes; it does not run a single file");
@@ -3137,7 +3161,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             })?;
             Ok(0)
         }
-        Command::Script { file, expr, mut args } => {
+        Command::Script { file, expr, target, mut args } => {
             let source = match (expr, file) {
                 // With --expr every positional is an argument, since the file slot is the first one.
                 (Some(code), file) => {
@@ -3147,7 +3171,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 (None, Some(file)) => kargo_ops::script::Source::File(file.into()),
                 (None, None) => bail!("give a .kts or .kt file to run, or code with --expr"),
             };
-            kargo_ops::script::run(config, &source, &args)
+            kargo_ops::script::run_with(config, &source, &args, target.map(Into::into))
         }
         Command::Test {
             build,
