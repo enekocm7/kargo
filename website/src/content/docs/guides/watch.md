@@ -104,6 +104,8 @@ The server starts once, so the address stays the same, and `--port` and `--open`
 
 A build that fails prints its errors and leaves the page as it is; the next successful build reloads it. The pages listen to a server-sent events stream on `/__kargo/reload`, which the served HTML pages get a small script for. Kargo adds the script to the pages it serves and not to the files in `target/`, and only with `--watch`.
 
+With a [`bundler`](../wasm/#bundling) and `bundle = true`, each build bundles the app again (an unchanged build does not) and the open pages reload onto the new bundle, so you develop against what a release serves. The [dev server's proxy](../wasm/#forwarding-api-requests) works with `--watch` too.
+
 The page reloads completely, so its state is lost. [Hot reload](#hot-reload-a-jvm-program) swaps code without a restart, but it is for the JVM.
 
 ## Rerun tests on change

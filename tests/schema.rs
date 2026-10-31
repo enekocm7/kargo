@@ -7,8 +7,8 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use kargo_manifest::{
-    BENCH_TIME_UNITS, BUILTIN_GENERATORS, BenchMode, COMPOSE_FEATURE_FLAGS, DenyLevel, GeneratedKind, Hook, InstallerType, Manifest,
-    PackageManager, TargetKind, TaskShell, WorkspaceManifest,
+    BENCH_TIME_UNITS, BUILTIN_GENERATORS, BenchMode, Bundler, COMPOSE_FEATURE_FLAGS, DenyLevel, GeneratedKind, Hook, InstallerType,
+    Manifest, PackageManager, TargetKind, TaskShell, WorkspaceManifest,
 };
 
 fn schema() -> Value {
@@ -224,6 +224,12 @@ fn schema_enums_match_kargo() {
         enum_values(&props["target"]["properties"]["js"]["properties"]["package-manager"]),
         names(PackageManager::ALL.iter().map(|p| p.as_str()).collect())
     );
+    for target in ["wasm", "js"] {
+        assert_eq!(
+            enum_values(&props["target"]["properties"][target]["properties"]["bundler"]),
+            names(Bundler::ALL.iter().map(|b| b.as_str()).collect())
+        );
+    }
     assert_eq!(enum_values(&root["definitions"]["installer-type"]), names(InstallerType::ALL.iter().map(|t| t.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["mode"]), names(BenchMode::ALL.iter().map(|m| m.as_str()).collect()));
     assert_eq!(enum_values(&props["bench"]["properties"]["time-unit"]), names(BENCH_TIME_UNITS.to_vec()));

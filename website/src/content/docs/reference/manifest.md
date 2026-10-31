@@ -514,6 +514,16 @@ web-resources = ["web/raylib.mjs", "web/raylib.wasm"]  # a library's files for t
 web-init = "web/init.mjs" # a library's script that runs before a dependent app's module
 js-sources = ["js"]       # your own JavaScript and TypeScript modules; default: js/
 port = 5173               # the port `kargo run` serves a browser app on; default 8080
+bundler = "bun"           # bundle a browser app with "bun" or "rollup"; default: none
+bundle = true             # bundle development builds too; default: release builds only
+source-maps = true        # source maps for the bundle; default: development builds only
+external = ["react"]      # npm packages the bundle leaves as imports for the page to provide
+
+[target.wasm.dev-server]
+port = 5173               # as `port` above; set one of the two
+
+[target.wasm.dev-server.proxy]
+"/api" = "http://localhost:8081"  # forward the requests below /api to a backend
 
 [target.wasm.npm-dependencies]
 "left-pad" = "1.3.0"      # npm packages besides those your Wasm libraries ask for
@@ -546,8 +556,13 @@ mocha = "^10.0.0"         # npm packages only `kargo test` installs
 | `web-init` | none | A script of a library, relative to the package, that the page Kargo generates for a dependent browser app imports before the app module, after the init scripts of the libraries it depends on. It is shipped like `web-resources`. Same requirements as `web-resources` |
 | `js-sources` | `["js"]` | Directories, relative to the package, of your own JavaScript and TypeScript modules. They land in `js/` next to the module (TypeScript compiled with tsc) and get Kotlin declarations in the package `js.<path>`. A directory that doesn't exist is skipped; `[]` turns the convention off. Not for `environment = "wasi"`. See [Your own JavaScript and TypeScript](../../guides/wasm/#your-own-javascript-and-typescript) |
 | `port` | `8080` | The port `kargo run` serves a browser app on, `0` for a free one. `kargo run --port` overrides it. Needs `environment = "browser"`. See [Choosing the port](../../guides/wasm/#choosing-the-port) |
+| `bundler` | none | `"bun"` (`bun build`: the `bun` on `PATH`, else a pinned download) or `"rollup"` (pinned Rollup and plugins, installed with npm, pnpm or bun) bundles a browser application into `target/<profile>/wasm-bundle/`: tree-shaken, minified, split where it loads code on demand and named by content hashes. Needs `environment = "browser"` and `kind = "application"`. See [Bundling](../../guides/wasm/#bundling) |
+| `bundle` | `true` for optimized builds | Which builds bundle: `true` every build, `false` none. Without it, builds that `optimize` (the release profile) bundle and the others serve the compiler's modules. Needs `bundler` |
+| `source-maps` | `true` for builds that do not optimize | Write a source map for the bundle. Needs `bundler` |
+| `external` | none | npm packages the bundle leaves as `import`s, which the page has to provide. Needs `bundler` |
+| `dev-server` | none | How `kargo run` serves a browser app: `port` (as above) and `proxy`, a table of path prefixes and `http://` URLs. The requests below a prefix are forwarded to the URL (a path in the URL replaces the prefix). Needs `environment = "browser"`. See [Forwarding API requests](../../guides/wasm/#forwarding-api-requests) |
 
-With `optimize = true`, as in the [release profile](#profilename), a Wasm build removes code nothing reaches, runs pinned Binaryen `wasm-opt` and reports module, gzip and Brotli sizes. Size budgets are checked after optimization.
+With `optimize = true`, as in the [release profile](#profilename), a Wasm build removes code nothing reaches, runs pinned Binaryen `wasm-opt` and reports module, gzip and Brotli sizes. Size budgets are checked after optimization. With a `bundler`, the same step then bundles the app and the budgets and the size report count the bundle.
 
 ### `[target.js]`
 
@@ -561,6 +576,13 @@ npm-name = "@acme/hello"  # npm package name of a library; default: the lowercas
 package-manager = "pnpm"  # "npm", "pnpm" or "bun"; default: the first one found on PATH
 js-sources = ["js"]       # your own JavaScript and TypeScript modules; default: js/
 port = 5173               # the port `kargo run` serves a browser app on; default 8080
+bundler = "bun"           # bundle a browser app with "bun" or "rollup"; default: none
+bundle = true             # bundle development builds too; default: release builds only
+source-maps = true        # source maps for the bundle; default: development builds only
+external = ["react"]      # npm packages the bundle leaves as imports for the page to provide
+
+[target.js.dev-server.proxy]
+"/api" = "http://localhost:8081"  # forward the requests below /api to a backend
 
 [target.js.npm-dependencies]
 "left-pad" = "1.3.0"      # npm packages besides those your Kotlin/JS libraries ask for
@@ -581,6 +603,8 @@ mocha = "^10.0.0"         # npm packages only `kargo test` installs
 | `dev-npm-dependencies` | none | npm packages only the tests need, installed by `kargo test` next to the test module. No Kotlin declarations are generated for them. `kargo add --npm --dev` edits it |
 | `js-sources` | `["js"]` | Directories of your own JavaScript and TypeScript modules, as for Wasm. See [Your own JavaScript and TypeScript](../../guides/js/#your-own-javascript-and-typescript) |
 | `port` | `8080` | The port `kargo run` serves a browser app on, as for Wasm. Needs `environment = "browser"` |
+| `bundler`, `bundle`, `source-maps`, `external` | none | Bundle a browser application with `"bun"` or `"rollup"` into `target/<profile>/js-bundle/`, as for Wasm. Needs `environment = "browser"`, `kind = "application"` and `module-kind = "es"`. See [Bundling](../../guides/js/#bundling) |
+| `dev-server` | none | `port` and a `proxy` table of path prefixes and `http://` URLs for `kargo run`, as for Wasm. Needs `environment = "browser"` |
 
 With `optimize = true`, as in the [release profile](#profilename), the JS module is linked with dead code elimination and without a source map.
 

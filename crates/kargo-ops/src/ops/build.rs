@@ -122,6 +122,15 @@ pub struct WasmBuild {
     pub libraries: Vec<PathBuf>,
     /// The `node_modules` holding the npm packages the module imports, once installed.
     pub node_modules: Option<PathBuf>,
+    /// The directory of the bundled site, when the app was bundled (`bundler` in `kargo.toml`).
+    pub bundle: Option<PathBuf>,
+}
+
+impl WasmBuild {
+    /// The directory `kargo run` serves a browser app from: the bundle, else the compiler's output.
+    pub fn site_dir(&self) -> &Path {
+        self.bundle.as_deref().unwrap_or(&self.dir)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +149,15 @@ pub struct JsBuild {
     pub libraries: Vec<PathBuf>,
     /// The `node_modules` holding the npm packages the module imports, once installed.
     pub node_modules: Option<PathBuf>,
+    /// The directory of the bundled site, when the app was bundled (`bundler` in `kargo.toml`).
+    pub bundle: Option<PathBuf>,
+}
+
+impl JsBuild {
+    /// The directory `kargo run` serves a browser app from: the bundle, else the compiler's output.
+    pub fn site_dir(&self) -> &Path {
+        self.bundle.as_deref().unwrap_or(&self.dir)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -828,6 +846,7 @@ pub fn compile_wasm(ctx: &BuildContext, main_args: bool) -> Result<Option<WasmBu
         dir: unit.output.clone(),
         libraries: unit.libraries,
         node_modules: None,
+        bundle: None,
     }))
 }
 
@@ -892,8 +911,8 @@ pub fn js_work_dir(ctx: &BuildContext, name: &str) -> PathBuf {
 /// Compiles the Kotlin/JS target and adds what surrounds the module: the page of a browser app and
 /// the `package.json` of a library.
 pub fn build_js(ctx: &BuildContext) -> Result<Option<JsBuild>> {
-    let Some(build) = prepare_js(ctx)? else { return Ok(None) };
-    crate::js_output::finish(ctx, &build)?;
+    let Some(mut build) = prepare_js(ctx)? else { return Ok(None) };
+    crate::js_output::finish(ctx, &mut build)?;
     Ok(Some(build))
 }
 
@@ -955,6 +974,7 @@ pub fn compile_js(ctx: &BuildContext, main_args: bool) -> Result<Option<JsBuild>
         dir: unit.output.clone(),
         libraries: unit.libraries,
         node_modules: None,
+        bundle: None,
     }))
 }
 

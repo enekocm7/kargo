@@ -4,11 +4,12 @@
 //! output that page reports back.
 //!
 //! It listens on the loopback interface only and serves files from a few
-//! directories, so it needs no dependencies and no configuration.
+//! directories, so it needs no dependencies and no configuration. A site can forward the
+//! requests below some paths to other HTTP servers ([`Site::proxy`]), such as the API of the app.
 
 use std::ffi::OsStr;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
+use kargo_manifest::ProxyRoute;
 use kargo_util::process;
 
 /// URL prefix of the endpoints the test page reports to: `stdout`, `stderr`, `returned` and `failed`.
@@ -63,12 +65,25 @@ pub enum PageEvent {
 pub struct Site {
     mounts: Vec<(String, PathBuf)>,
     live_reload: bool,
+    proxies: Vec<ProxyRoute>,
 }
 
 impl Site {
     /// A site that serves `root` at `/`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { mounts: vec![("/".to_owned(), root.into())], live_reload: false }
+        Self { mounts: vec![("/".to_owned(), root.into())], live_reload: false, proxies: Vec::new() }
+    }
+
+    /// Forwards the requests below the prefix of each of `routes` to the server it names, in the order given, so the
+    /// longest prefix goes first.
+    pub fn proxy(mut self, routes: &[ProxyRoute]) -> Self {
+        self.proxies = routes.to_vec();
+        self
+    }
+
+    /// The route that takes a request for `path`.
+    fn route(&self, path: &str) -> Option<&ProxyRoute> {
+        self.proxies.iter().find(|r| path.strip_prefix(r.prefix.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/')))
     }
 
     /// Adds a script to the HTML pages that reloads them when [`Server::reload`] is called.
@@ -274,6 +289,8 @@ struct Request {
     target: String,
     host: Option<String>,
     accept_encoding: Option<String>,
+    /// Every header as sent, for the requests that are forwarded.
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -286,13 +303,14 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
     let mut parts = line.split_whitespace();
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else { return Ok(None) };
     let (method, target) = (method.to_owned(), target.to_owned());
-    let (mut length, mut host, mut accept_encoding) = (0usize, None, None);
+    let (mut length, mut host, mut accept_encoding, mut headers) = (0usize, None, None, Vec::new());
     for _ in 0..MAX_HEADERS {
         line.clear();
         if reader.read_line(&mut line)? == 0 || line.trim_end().is_empty() {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_owned(), value.trim().to_owned()));
             match name.trim().to_ascii_lowercase().as_str() {
                 "content-length" => length = value.trim().parse().unwrap_or(0),
                 "host" => host = Some(value.trim().to_owned()),
@@ -303,7 +321,7 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
     }
     let mut body = vec![0; length.min(MAX_BODY)];
     reader.read_exact(&mut body)?;
-    Ok(Some(Request { method, target, host, accept_encoding, body }))
+    Ok(Some(Request { method, target, host, accept_encoding, headers, body }))
 }
 
 fn handle(mut stream: TcpStream, site: &Site, events: Option<&Sender<PageEvent>>, shared: &Shared, port: u16) -> io::Result<()> {
@@ -335,6 +353,9 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
     }
     if request.method == "GET" && site.live_reload && path == RELOAD_PATH {
         return stream_reloads(stream, shared);
+    }
+    if let Some(route) = site.route(path) {
+        return forward(stream, &request, route);
     }
     match request.method.as_str() {
         "GET" | "HEAD" => {
@@ -373,6 +394,74 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
         }
         _ => respond(stream, "405 Method Not Allowed", "text/plain", b"method not allowed", false),
     }
+}
+
+/// How long Kargo waits to reach a server it forwards to, and for it to say something.
+const UPSTREAM_CONNECT: Duration = Duration::from_secs(5);
+const UPSTREAM_IDLE: Duration = Duration::from_secs(600);
+
+/// The headers of a request that are for the connection to Kargo, not for the server it is forwarded to.
+fn is_hop_header(name: &str) -> bool {
+    ["host", "connection", "keep-alive", "upgrade", "te", "trailer", "transfer-encoding", "content-length", "expect"]
+        .iter()
+        .any(|h| name.eq_ignore_ascii_case(h))
+        || name.to_ascii_lowercase().starts_with("proxy-")
+}
+
+/// The request line target the server of `route` gets for `target`: the path as it is, or with the prefix replaced by the
+/// path of the route's URL.
+fn upstream_target(route: &ProxyRoute, target: &str) -> String {
+    match &route.base {
+        Some(base) => format!("{base}{}", &target[route.prefix.len()..]),
+        None => target.to_owned(),
+    }
+}
+
+/// Sends `request` to the server of `route` and relays what it answers, as it comes. The connection is closed after one
+/// exchange (`Connection: close`), so the response ends when the server closes it and needs no parsing; a server that is
+/// not there is a 502.
+fn forward(stream: &mut TcpStream, request: &Request, route: &ProxyRoute) -> io::Result<()> {
+    let bad_gateway = |stream: &mut TcpStream, why: String| {
+        respond(stream, "502 Bad Gateway", "text/plain", format!("could not reach {}:{}: {why}", route.host, route.port).as_bytes(), false)
+    };
+    let host = route.host.trim_start_matches('[').trim_end_matches(']');
+    let Ok(addrs) = (host, route.port).to_socket_addrs() else { return bad_gateway(stream, "the host is unknown".to_owned()) };
+    // `localhost` may name an IPv6 address first, where a server listening on IPv4 only is not.
+    let mut last = None;
+    let mut upstream = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT) {
+            Ok(connected) => {
+                upstream = Some(connected);
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    let Some(mut upstream) = upstream else {
+        return bad_gateway(stream, last.map_or_else(|| "the host has no address".to_owned(), |e| e.to_string()));
+    };
+    upstream.set_read_timeout(Some(UPSTREAM_IDLE))?;
+    upstream.set_write_timeout(Some(UPSTREAM_CONNECT))?;
+    let mut head = format!(
+        "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n",
+        request.method,
+        upstream_target(route, &request.target),
+        route.host,
+        route.port
+    );
+    for (name, value) in request.headers.iter().filter(|(name, _)| !is_hop_header(name)) {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if !request.body.is_empty() {
+        head.push_str(&format!("Content-Length: {}\r\n", request.body.len()));
+    }
+    head.push_str("\r\n");
+    if let Err(e) = upstream.write_all(head.as_bytes()).and_then(|()| upstream.write_all(&request.body)) {
+        return bad_gateway(stream, e.to_string());
+    }
+    io::copy(&mut upstream, stream)?;
+    stream.flush()
 }
 
 /// Answers a page's request to [`RELOAD_PATH`] with an event stream: the generation now, then the new one after each
@@ -715,6 +804,95 @@ mod tests {
         assert_ne!(first, second);
         server.reload();
         assert_ne!(next_event(), second);
+    }
+
+    /// A server that answers one request with `answer(request)`, and the port it listens on.
+    fn upstream(answer: impl FnOnce(String) -> String + Send + 'static) -> u16 {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            // The head and, for the request below, the 4-byte body.
+            while !String::from_utf8_lossy(&request).contains("\r\n\r\n") || (request.starts_with(b"POST") && !request.ends_with(b"data")) {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            stream.write_all(answer(String::from_utf8_lossy(&request).into_owned()).as_bytes()).unwrap();
+        });
+        port
+    }
+
+    fn route(prefix: &str, target: &str) -> ProxyRoute {
+        ProxyRoute::parse(prefix, target).unwrap()
+    }
+
+    #[test]
+    fn forwards_the_requests_below_a_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = upstream(|request| {
+            assert!(request.starts_with("GET /api/users?id=7 HTTP/1.1\r\n"), "{request}");
+            assert!(request.contains("Host: localhost:"), "the server sees its own host:\n{request}");
+            assert!(request.contains("Connection: close") && request.contains("Accept: application/json"), "{request}");
+            assert!(!request.contains("127.0.0.1"), "{request}");
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"users\":[]}".to_owned()
+        });
+        let site = site(dir.path()).proxy(&[route("/api", &format!("http://localhost:{api}"))]);
+        let server = Server::start(bind(0).unwrap(), site, None).unwrap();
+        let response = exchange(
+            server.port(),
+            &format!(
+                "GET /api/users?id=7 HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n",
+                server.port()
+            ),
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK") && response.ends_with("{\"users\":[]}"), "{response}");
+        // What is not below the prefix is still the site's.
+        assert!(get(&server, "/app.mjs").ends_with("export {}"));
+        assert!(get(&server, "/apiary.txt").starts_with("HTTP/1.1 404"), "`/apiary` is not below `/api`");
+    }
+
+    #[test]
+    fn the_prefix_is_replaced_by_the_path_of_the_target_and_bodies_go_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = upstream(|request| {
+            assert!(request.starts_with("POST /backend/save HTTP/1.1\r\n"), "{request}");
+            assert!(request.contains("Content-Length: 4") && request.ends_with("data"), "{request}");
+            "HTTP/1.1 201 Created\r\nConnection: close\r\n\r\n".to_owned()
+        });
+        let site = site(dir.path()).proxy(&[route("/api", &format!("http://localhost:{api}/backend/"))]);
+        let server = Server::start(bind(0).unwrap(), site, None).unwrap();
+        let response = exchange(
+            server.port(),
+            &format!("POST /api/save HTTP/1.1\r\nHost: localhost:{}\r\nContent-Length: 4\r\n\r\ndata", server.port()),
+        );
+        assert!(response.starts_with("HTTP/1.1 201 Created"), "{response}");
+    }
+
+    #[test]
+    fn a_server_that_is_not_there_is_a_bad_gateway() {
+        let dir = tempfile::tempdir().unwrap();
+        // A port that was just free.
+        let closed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+        let site = site(dir.path()).proxy(&[route("/api", &format!("http://127.0.0.1:{closed}"))]);
+        let server = Server::start(bind(0).unwrap(), site, None).unwrap();
+        let response = get(&server, "/api/users");
+        assert!(response.starts_with("HTTP/1.1 502 Bad Gateway") && response.contains("could not reach 127.0.0.1"), "{response}");
+        // Another site cannot use the proxy through its own host name either.
+        let foreign = exchange(server.port(), "GET /api/users HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+        assert!(foreign.starts_with("HTTP/1.1 403"), "{foreign}");
+    }
+
+    #[test]
+    fn upstream_targets() {
+        assert_eq!(upstream_target(&route("/api", "http://h:1"), "/api/x?y=1"), "/api/x?y=1");
+        assert_eq!(upstream_target(&route("/api", "http://h:1/backend/"), "/api/x?y=1"), "/backend/x?y=1");
+        assert_eq!(upstream_target(&route("/api", "http://h:1/backend"), "/api?y=1"), "/backend?y=1");
+        assert!(is_hop_header("Connection") && is_hop_header("proxy-authorization") && !is_hop_header("Accept"));
     }
 
     #[test]

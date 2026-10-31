@@ -7,6 +7,7 @@ pub mod android_device;
 pub mod apple_package;
 pub mod bench;
 pub mod builtins;
+pub mod bundler;
 pub mod compose;
 pub mod dts;
 pub mod env;

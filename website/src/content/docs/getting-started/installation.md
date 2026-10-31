@@ -140,6 +140,7 @@ You only need these for some targets:
 |---|---|
 | Run or test **WebAssembly** programs | [Node.js](https://nodejs.org) (`node` on `PATH`). Compiling Wasm doesn't need it, unless a dependency needs [npm packages](../../guides/wasm/#npm-packages); then npm, pnpm or bun must be on `PATH` too. |
 | Test a Wasm **browser** app | Chrome, Chromium, Edge, Brave or Firefox (Kargo runs it without a window; see [Testing in a browser](../../guides/wasm/#testing-in-a-browser)). `kargo run` only needs a browser to look at the page. |
+| Bundle a **Wasm** or **JS** browser app (`bundler`) | Nothing for `bundler = "bun"` beyond a `bun` on `PATH` or a download Kargo does itself; `bundler = "rollup"` needs Node.js and npm, pnpm or bun (see [Bundling](../../guides/wasm/#bundling)). |
 | Make release **Wasm** modules smaller | Kargo downloads and SHA-256 checks its pinned Binaryen toolchain on the first release build. Set `[target.wasm] wasm-opt = false` to disable it or provide a path to a custom executable. |
 | Build for **Android** | Nothing with `[toolchain] android-sdk = "36"`, which makes Kargo install the Android SDK (see [Android SDK](../../guides/android/#android-sdk)); otherwise the [Android SDK](https://developer.android.com/studio) (set `ANDROID_HOME`). Kargo downloads Gradle itself. |
 | Run on an **Android** device | `adb` from the SDK platform-tools, plus a device or emulator |

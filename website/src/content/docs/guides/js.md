@@ -94,6 +94,18 @@ module-kind = "commonjs"   # "es" (default), "commonjs" or "umd"
 
 A browser can't load a CommonJS module, so a `browser` application needs `es` or `umd`. Tests always run as an ES module, whatever the program is. `module-name` changes `<name>` (default: the package name).
 
+## Bundling
+
+Set `bundler` to bundle a browser application into one tree-shaken, minified bundle with code splitting and content-hashed names, instead of serving the compiler's module and an import map:
+
+```toml title="kargo.toml"
+[target.js]
+environment = "browser"
+bundler = "bun"          # or "rollup"
+```
+
+`kargo build --release` and `kargo run --release` bundle; development builds do not, unless you set `bundle = true`. The bundle goes to `target/<profile>/js-bundle/` with a page that loads its entry module (`<name>-<hash>.js`), and `kargo run` serves that directory. It works as it does for [Wasm](../wasm/#bundling), with the same keys (`bundler`, `bundle`, `source-maps`, `external`) and the same two bundlers, and the [dev server's proxy](../wasm/#forwarding-api-requests) is `[target.js.dev-server.proxy]`. The bundler needs `module-kind = "es"` (the default), and only applications are bundled.
+
 ## Release builds
 
 `kargo build --release` links with the compiler's dead code elimination (`-Xir-dce`): only what `main` and `@JsExport` reach stays, and no source map is written. For a library with one exported function that takes the module from about 560 KiB to under 1 KiB. Dev builds keep everything and write `<name>.mjs.map` with the Kotlin sources embedded. A release build of a browser app also prints the size of the module (raw, gzip and brotli) and of the whole output, like a [Wasm build](../wasm/); with `--message-format json` it is a `js-size` message.
@@ -303,6 +315,8 @@ Dependencies only the JS target uses go in `[target.js.dependencies]`. Kargo res
 | `index.html` and your `resources/` | The page of a `browser` app |
 | `node_modules/` | The npm packages the module imports |
 | `test/` | The tests and their runner, after `kargo test` |
+
+A [bundled](#bundling) app is in `target/<profile>/js-bundle/`, next to `js/`.
 
 ## Limitations
 

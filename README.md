@@ -70,7 +70,7 @@ Every key is in the [manifest reference](https://enekocm7.github.io/kargo/refere
 | Target | What you get |
 |---|---|
 | [JVM](https://enekocm7.github.io/kargo/getting-started/quick-start/) | Kotlin and Java sources, fat jars, zip/tar distributions, R8, jlink images, GraalVM native images and installers |
-| [WebAssembly](https://enekocm7.github.io/kargo/guides/wasm/) | Node.js, WASI and browser apps, or npm libraries |
+| [WebAssembly](https://enekocm7.github.io/kargo/guides/wasm/) | Node.js, WASI and browser apps (bundled with bun or Rollup), or npm libraries |
 | [JavaScript](https://enekocm7.github.io/kargo/guides/js/) | Kotlin/JS for Node.js and browsers, ES, CommonJS or UMD modules with TypeScript declarations |
 | [Kotlin/Native](https://enekocm7.github.io/kargo/guides/native/) | Executables and libraries for Linux, macOS, Windows and iOS, with C interop and XCFrameworks |
 | [Android](https://enekocm7.github.io/kargo/guides/android/) | Apps and libraries through the Android Gradle Plugin, with flavors, signing, devices and emulators |

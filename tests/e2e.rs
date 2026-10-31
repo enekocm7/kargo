@@ -1071,6 +1071,148 @@ fn wasm_browser_app_serves_its_own_page() {
     assert!(!home.contains("importmap"), "a page that needs no npm package gets no import map:\n{home}");
 }
 
+/// The files of `dir` (not its subdirectories), by name.
+fn file_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn wasm_browser_app_is_bundled_with_bun_and_rollup() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    for bundler in ["bun", "rollup"] {
+        let name = format!("bundle{bundler}");
+        wasm_project(&t, &name, &format!("environment = \"browser\"\nbundler = \"{bundler}\"\nwasm-opt = false\n"));
+        // kotlinx-datetime imports the npm package @js-joda/core on Wasm.
+        t.kargo(&name).args(["add", "org.jetbrains.kotlinx:kotlinx-datetime:0.7.1"]).assert().success();
+        t.write(
+            &format!("{name}/src/Main.kt"),
+            "package com.example.bundled\n\nimport kotlinx.datetime.*\n\nfun main() = println(LocalDate(2024, 1, 31).plus(1, DateTimeUnit.MONTH))\n",
+        );
+
+        // Development builds serve the modules as the compiler wrote them.
+        t.kargo(&name).arg("build").assert().success().stderr(predicate::str::contains("Bundling").not());
+        assert!(!t.dir.path().join(&name).join("target/debug/wasm-bundle").exists());
+
+        t.kargo(&name)
+            .args(["build", "--release"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(format!("Bundling {name}.mjs with {bundler}")))
+            .stderr(predicate::str::contains("Bundled "))
+            .stderr(predicate::str::contains("Size "));
+        let bundle = t.dir.path().join(&name).join("target/release/wasm-bundle");
+        let files = file_names(&bundle);
+        let entry = files.iter().find(|f| f.starts_with(&format!("{name}-")) && f.ends_with(".js")).unwrap_or_else(|| panic!("{files:?}"));
+        let wasm = files.iter().find(|f| f.ends_with(".wasm")).unwrap_or_else(|| panic!("{files:?}"));
+        assert!(
+            wasm.starts_with(&format!("{name}.")) && wasm.len() > name.len() + ".wasm".len() + 1,
+            "the wasm file is named by its contents: {wasm}"
+        );
+        assert!(!files.iter().any(|f| f.ends_with(".map")), "release bundles have no source maps: {files:?}");
+
+        // The page loads the bundle, which has the npm package inside and no import map in front.
+        let page = std::fs::read_to_string(bundle.join("index.html")).unwrap();
+        assert!(
+            page.contains(&format!("src=\"./{entry}\"")) && !page.contains(&format!("{name}.mjs")) && !page.contains("importmap"),
+            "{page}"
+        );
+        let code = std::fs::read_to_string(bundle.join(entry)).unwrap();
+        assert!(code.contains(wasm.as_str()), "the bundle loads the hashed wasm file");
+        assert!(!code.contains("from\"@js-joda/core\"") && !code.contains("from '@js-joda/core'"), "the package is bundled");
+
+        // Nothing changed: the bundler does not run again, and the files stay.
+        t.kargo(&name).args(["build", "--release"]).assert().success().stderr(predicate::str::contains("Bundling").not());
+        assert_eq!(file_names(&bundle), files);
+
+        // A page of the project's own loads the bundle too, and `bundle = true` bundles development builds with source maps.
+        t.write(
+            &format!("{name}/resources/index.html"),
+            &format!("<!doctype html><html><head><title>mine</title></head><body><script type=\"module\" src=\"./{name}.mjs\"></script></body></html>\n"),
+        );
+        let manifest = t.dir.path().join(&name).join("kargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            text.replace(
+                "wasm-opt = false
+",
+                "wasm-opt = false
+bundle = true
+",
+            ),
+        )
+        .unwrap();
+        t.kargo(&name).arg("build").assert().success().stderr(predicate::str::contains("Bundling"));
+        let dev = t.dir.path().join(&name).join("target/debug/wasm-bundle");
+        let dev_files = file_names(&dev);
+        assert!(dev_files.iter().any(|f| f.ends_with(".js.map")), "development bundles have source maps: {dev_files:?}");
+        let page = std::fs::read_to_string(dev.join("index.html")).unwrap();
+        assert!(page.contains("<title>mine</title>") && !page.contains(&format!("{name}.mjs")), "{page}");
+    }
+}
+
+#[test]
+fn js_browser_app_is_bundled() {
+    require_e2e!();
+    let t = E2e::new();
+    js_project(&t, "jsbundle", "environment = \"browser\"\nbundler = \"bun\"\n");
+    t.kargo("jsbundle")
+        .args(["build", "--release"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Bundling jsbundle.mjs with bun"))
+        .stderr(predicate::str::contains("Size "));
+    let bundle = t.dir.path().join("jsbundle/target/release/js-bundle");
+    let files = file_names(&bundle);
+    let entry = files.iter().find(|f| f.starts_with("jsbundle-") && f.ends_with(".js")).unwrap_or_else(|| panic!("{files:?}"));
+    let page = std::fs::read_to_string(bundle.join("index.html")).unwrap();
+    assert!(page.contains(&format!("src=\"./{entry}\"")), "{page}");
+}
+
+#[test]
+fn browser_app_forwards_api_requests_to_other_servers() {
+    require_e2e!();
+    use std::io::{Read, Write};
+    let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = upstream.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let n = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..n]).into_owned();
+        let body = if request.starts_with("GET /users HTTP/1.1") { "[\"ada\"]" } else { "wrong path" };
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let t = E2e::new();
+    wasm_project(
+        &t,
+        "proxied",
+        &format!("environment = \"browser\"\n\n[target.wasm.dev-server.proxy]\n\"/api\" = \"http://127.0.0.1:{api}/\"\n"),
+    );
+    let server = Served::start(&t, "proxied");
+    let response = http_get(&server.host, "/api/users");
+    assert!(response.starts_with("HTTP/1.1 200 OK") && response.ends_with("[\"ada\"]"), "{response}");
+    // The app's own files are still served.
+    assert!(http_get(&server.host, "/").contains("<script type=\"module\" src=\"./proxied.mjs\"></script>"));
+}
+
 #[test]
 fn wasm_browser_app_gets_the_web_resources_of_its_libraries() {
     require_e2e!();

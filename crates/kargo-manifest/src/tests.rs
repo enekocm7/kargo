@@ -459,6 +459,171 @@ wasm-debugger-custom-formatters = true
 }
 
 #[test]
+fn browser_apps_are_bundled_and_proxied() {
+    let wasm = |t: &str| {
+        parse(&format!(
+            "{MINIMAL}
+{t}
+"
+        ))
+        .targets
+        .wasm
+        .unwrap()
+    };
+    assert!(
+        wasm(
+            "[target.wasm]
+environment = \"browser\""
+        )
+        .bundling
+        .is_none()
+    );
+    let bundled = wasm(
+        "[target.wasm]
+environment = \"browser\"
+bundler = \"rollup\"
+external = [\"react\"]",
+    )
+    .bundling
+    .unwrap();
+    assert_eq!((bundled.bundler, bundled.bundler.as_str()), (Bundler::Rollup, "rollup"));
+    assert_eq!(bundled.external, ["react"]);
+    // Release builds bundle and write no source maps; the other builds are served unbundled with maps.
+    assert!(bundled.applies(true) && !bundled.applies(false));
+    assert!(!bundled.wants_source_maps(true) && bundled.wants_source_maps(false));
+    let always = wasm(
+        "[target.wasm]
+environment = \"browser\"
+bundler = \"bun\"
+bundle = true
+source-maps = true",
+    )
+    .bundling
+    .unwrap();
+    assert!(always.applies(false) && always.wants_source_maps(true));
+    let never = wasm(
+        "[target.wasm]
+environment = \"browser\"
+bundler = \"bun\"
+bundle = false",
+    )
+    .bundling
+    .unwrap();
+    assert!(!never.applies(true));
+
+    let served = wasm(
+        "[target.wasm]
+environment = \"browser\"
+[target.wasm.dev-server]
+port = 3000
+[target.wasm.dev-server.proxy]
+\"/api\" = \"http://localhost:8080\"
+\"/api/v2\" = \"http://[::1]:9000/backend/\"
+",
+    );
+    assert_eq!(served.port, Some(3000));
+    // The longest prefix comes first, so it wins.
+    assert_eq!(served.proxy.iter().map(|r| r.prefix.as_str()).collect::<Vec<_>>(), ["/api/v2", "/api"]);
+    assert_eq!((served.proxy[1].host.as_str(), served.proxy[1].port, served.proxy[1].base.as_deref()), ("localhost", 8080, None));
+    assert_eq!((served.proxy[0].host.as_str(), served.proxy[0].port, served.proxy[0].base.as_deref()), ("[::1]", 9000, Some("/backend")));
+
+    let js = parse(&format!(
+        "{MINIMAL}
+[target.js]
+environment = \"browser\"
+bundler = \"bun\"
+[target.js.dev-server]
+port = 4000
+"
+    ))
+    .targets
+    .js
+    .unwrap();
+    assert_eq!((js.bundling.unwrap().bundler, js.port), (Bundler::Bun, Some(4000)));
+}
+
+#[test]
+fn bundling_and_dev_server_errors() {
+    let wasm = |t: &str| {
+        parse_err(&format!(
+            "{MINIMAL}
+[target.wasm]
+{t}
+"
+        ))
+    };
+    let browser = "environment = \"browser\"
+";
+    assert!(wasm(&format!("{browser}bundler = \"webpack\"")).contains("unknown bundler `webpack` (expected `bun` or `rollup`)"));
+    assert!(wasm("bundler = \"bun\"").contains("`bundler` bundles a browser app"));
+    assert!(
+        wasm(&format!(
+            "{browser}kind = \"library\"
+bundler = \"bun\""
+        ))
+        .contains("kind = \"application\"")
+    );
+    assert!(wasm(&format!("{browser}bundle = true")).contains("set `bundler = \"bun\"` or `\"rollup\"`"));
+    assert!(wasm(&format!("{browser}source-maps = true")).contains("configure the bundler"));
+    assert!(
+        wasm(&format!(
+            "{browser}bundler = \"bun\"
+external = [\" \"]"
+        ))
+        .contains("`external` lists")
+    );
+    assert!(
+        wasm(
+            "[target.wasm.dev-server]
+port = 80"
+        )
+        .contains("configures the server `kargo run` starts")
+    );
+    assert!(
+        wasm(&format!(
+            "{browser}port = 80
+[target.wasm.dev-server]
+port = 81"
+        ))
+        .contains("both set the port")
+    );
+    let proxy = |route: &str| {
+        wasm(&format!(
+            "{browser}[target.wasm.dev-server.proxy]
+{route}"
+        ))
+    };
+    assert!(proxy("\"api\" = \"http://localhost\"").contains("is not a path prefix"));
+    assert!(proxy("\"/api\" = \"https://localhost\"").contains("`http://` URL"));
+    assert!(proxy("\"/api\" = \"http://localhost:http\"").contains("the port is not a number"));
+    assert!(proxy("\"/api\" = \"http://\"").contains("no host"));
+    assert!(proxy("\"/api\" = \"http://localhost/x?y\"").contains("no query"));
+    assert!(
+        proxy(
+            "\"/api\" = \"http://a\"
+\"/api/\" = \"http://b\""
+        )
+        .contains("lists `/api` twice")
+    );
+    let js = parse_err(&format!(
+        "{MINIMAL}
+[target.js]
+environment = \"browser\"
+module-kind = \"umd\"
+bundler = \"bun\"
+"
+    ));
+    assert!(js.contains("`bundler` bundles ES modules"), "{js}");
+    let node = parse_err(&format!(
+        "{MINIMAL}
+[target.js]
+bundler = \"bun\"
+"
+    ));
+    assert!(node.contains("[target.js] `bundler` bundles a browser app"), "{node}");
+}
+
+#[test]
 fn wasm_target_option_errors() {
     let with = |t: &str| format!("{MINIMAL}\n[target.wasm]\n{t}\n");
     assert!(parse_err(&with("kind = \"plugin\"")).contains("unknown wasm kind `plugin` (expected `application` or `library`)"));

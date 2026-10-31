@@ -135,6 +135,7 @@ Every toolchain download goes through it, the longest matching prefix wins, and 
 | GraalVM reachability metadata | `https://github.com/oracle/graalvm-reachability-metadata/releases/...` |
 | Gradle (Android builds) | `https://services.gradle.org/distributions` |
 | Kotlin language servers and debug adapter | `https://download.jetbrains.com/language-server/...`, `https://github.com/fwcd/...` |
+| Bun (`bundler = "bun"` without a `bun` on `PATH`) | `https://github.com/oven-sh/bun/releases/download/...` |
 
 The Kotlin compiler and Kotlin/Native come from Maven repositories, so `[mirrors]` covers them.
 
