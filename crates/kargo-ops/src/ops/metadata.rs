@@ -322,9 +322,20 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         "output-dir": path(&ws.output_dir(&ctx.profile, kind)),
     });
     if kind == TargetKind::Android {
-        // Gradle compiles Android code and resolves its dependencies.
-        out["dependencies"] = Value::Null;
+        // Gradle compiles Android code and resolves its dependencies. Editors get the libraries Kargo's resolver
+        // finds for the same declarations (not pinned in `kargo.lock`), or `null` when it can't resolve them.
         out["android"] = android(ctx)?;
+        out["dependencies"] = if opts.no_deps {
+            Value::Null
+        } else {
+            match ctx.setup(kind).and_then(|setup| android_dependencies(ctx, &setup)) {
+                Ok(entries) => Value::Array(entries),
+                Err(e) => {
+                    ctx.shell().warn(format!("no libraries for the Android code of `{}` in the metadata: {e:#}", m.package.name));
+                    Value::Null
+                }
+            }
+        };
         return Ok(out);
     }
     let setup = ctx.setup(kind)?;
@@ -520,6 +531,8 @@ fn android(ctx: &BuildContext) -> Result<Value> {
         },
         "library-dependencies": libraries,
         "build-dir": path(&ws.work_dir("android").join("build")),
+        // The platform's `android.jar` (`null` until the SDK has it), whose classes editors resolve `android.*` against.
+        "platform-jar": crate::gradle::platform_jar(ws, ctx.config).map(|p| path(&p)),
         "variant": generated.as_ref().map(|g| g.variant.clone()),
         "generated-source-roots": generated.iter().filter_map(|g| g.build_config.as_deref()).map(path).collect::<Vec<_>>(),
         "r-class-jar": generated.as_ref().map(|g| path(&g.r_class_jar)),
@@ -607,6 +620,25 @@ fn dependencies(ctx: &BuildContext, kind: TargetKind, setup: &TargetSetup) -> Re
             .collect::<Result<_>>()?,
         TargetKind::Android => Vec::new(),
     })
+}
+
+/// The libraries of the Android code of a package, as the JVM's classpaths: the Maven artifacts (`.jar` and `.aar`
+/// files) that resolving the declared dependencies for the JVM gives. Gradle builds the app with its own resolution
+/// (Android variants of libraries, `debug` and `release` classpaths); this one is for editors, so it is not locked.
+fn android_dependencies(ctx: &BuildContext, setup: &TargetSetup) -> Result<Vec<Value>> {
+    let resolve = |scopes: &[Scope], dev: bool| -> Result<Vec<Value>> {
+        let roots = setup.requests(scopes, dev);
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(maven_entries(ctx, &ctx.resolve_unlocked(Platform::Jvm, &roots, &setup.boms)?))
+    };
+    Ok(vec![json!({
+        "platform": "android",
+        "compile": resolve(&[Scope::Compile, Scope::Provided], false)?,
+        "runtime": resolve(&[Scope::Compile, Scope::Runtime], false)?,
+        "test": resolve(&ALL_SCOPES, true)?,
+    })])
 }
 
 /// A klib platform: the same libraries compile and link the program.
@@ -737,14 +769,28 @@ pub fn fetch_docs(client: &kargo_maven::MavenClient, module: &kargo_maven::Modul
 /// documentation. Modules with neither are skipped. Returns how many of each are now in the cache.
 pub fn fetch_sources(ctx: &BuildContext, targets: &[TargetKind]) -> Result<FetchedDocs> {
     let mut modules: Vec<(kargo_maven::ModuleId, String)> = Vec::new();
-    for &target in targets.iter().filter(|t| **t != TargetKind::Android) {
+    let mut add = |res: &Resolution| {
+        for node in res.nodes.iter().filter(|n| !n.files.is_empty()) {
+            if !modules.iter().any(|(m, v)| *m == node.module && *v == node.version) {
+                modules.push((node.module.clone(), node.version.clone()));
+            }
+        }
+    };
+    for &target in targets {
+        if target == TargetKind::Android {
+            // Gradle builds the app, but editors read the libraries Kargo resolves for it (see `android_dependencies`).
+            let setup = ctx.setup(target)?;
+            for (scopes, dev) in [(&[Scope::Compile, Scope::Provided][..], false), (&ALL_SCOPES[..], true)] {
+                let roots = setup.requests(scopes, dev);
+                if !roots.is_empty() {
+                    add(&ctx.resolve_unlocked(Platform::Jvm, &roots, &setup.boms)?);
+                }
+            }
+            continue;
+        }
         for configuration in [super::Configuration::Compile, super::Configuration::Runtime, super::Configuration::Test] {
             for (_, res) in super::resolution_for(ctx, target, configuration)? {
-                for node in res.nodes.iter().filter(|n| !n.files.is_empty()) {
-                    if !modules.iter().any(|(m, v)| *m == node.module && *v == node.version) {
-                        modules.push((node.module.clone(), node.version.clone()));
-                    }
-                }
+                add(&res);
             }
         }
     }

@@ -66,7 +66,11 @@ impl CompiledLibrary {
 }
 
 /// Bumped when the generated stubs change, so that cached ones are generated again.
-const STUBS_FORMAT: &str = "1";
+const STUBS_FORMAT: &str = "2";
+
+/// The packages of the JDK that `android.jar` has its own copy of, left out of its stubs so that
+/// each class is declared once, by the JDK.
+const JDK_PACKAGES: [&str; 6] = ["java", "javax", "jdk", "sun", "org/w3c", "org/xml"];
 
 /// The parsed library files, by the path of their first copy and what they apply to. Kept across
 /// reloads of the project.
@@ -278,7 +282,12 @@ fn library_units(config: &Config, cache: &UnitCache, library: &CompiledLibrary) 
             None if klib => compiled::klib_stubs(&library.path, docs.as_ref())?,
             None => compiled::jar_stubs(&library.path, docs.as_ref())?,
         };
+        let android = library.path.file_name().is_some_and(|n| n == "android.jar");
         for (rel, text) in stubs {
+            // `android.jar` carries the Java classes Android has as well; the JDK's are the ones to read.
+            if android && JDK_PACKAGES.iter().any(|p| rel.starts_with(p)) {
+                continue;
+            }
             let path = staging.join(rel);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
@@ -557,6 +566,65 @@ mod tests {
         );
         assert_eq!(again.len(), 2);
         assert!(again.iter().all(|u| !u.file.decls.is_empty()));
+    }
+
+    /// The class file of the empty public class `name` (such as `p/Foo`).
+    fn empty_class(name: &str) -> Vec<u8> {
+        let mut out = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52];
+        // The constant pool: #1 Utf8 name, #2 Class #1, #3 Utf8 "java/lang/Object", #4 Class #3.
+        out.extend(5u16.to_be_bytes());
+        for (index, text) in [(1u16, name), (3, "java/lang/Object")] {
+            out.push(1);
+            out.extend((text.len() as u16).to_be_bytes());
+            out.extend(text.as_bytes());
+            out.push(7);
+            out.extend(index.to_be_bytes());
+        }
+        // access (public super), this, super, then no interfaces, fields, methods or attributes.
+        out.extend([0x00, 0x21, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out
+    }
+
+    fn zip_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn reads_the_classes_of_android_libraries_and_the_platform_without_the_jdk_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::new(dir.path().join("home"), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
+        let classes = |names: &[&str]| -> Vec<(String, Vec<u8>)> { names.iter().map(|n| (format!("{n}.class"), empty_class(n))).collect() };
+        let as_entries = |v: &[(String, Vec<u8>)]| zip_of(&v.iter().map(|(n, b)| (n.as_str(), b.clone())).collect::<Vec<_>>());
+
+        // `android.jar`: Android's own classes, and the Java ones the JDK declares.
+        let platform = dir.path().join("platforms").join("android-36");
+        std::fs::create_dir_all(&platform).unwrap();
+        std::fs::write(platform.join("android.jar"), as_entries(&classes(&["android/app/Application", "java/lang/Thing"]))).unwrap();
+        // An AAR holds its classes in `classes.jar`.
+        let aar = dir.path().join("core-1.0.aar");
+        let inner = as_entries(&classes(&["androidx/core/Core"]));
+        std::fs::write(&aar, zip_of(&[("AndroidManifest.xml", b"<manifest/>".to_vec()), ("classes.jar", inner)])).unwrap();
+
+        let library = |name: &str, path: PathBuf| CompiledLibrary {
+            name: name.into(),
+            path,
+            main: Platforms::JVM,
+            test: Platforms::JVM,
+            known: None,
+            javadoc: None,
+        };
+        let libraries = [library("Android SDK", platform.join("android.jar")), library("core 1.0", aar)];
+        let mut packages: Vec<String> =
+            compiled_units(&config, &UnitCache::default(), &libraries).iter().map(|u| u.file.package.clone()).collect();
+        packages.sort();
+        assert_eq!(packages, ["android.app", "androidx.core"]);
     }
 
     /// A sources jar of `count` Kotlin files, and a Kargo home to extract it into.
