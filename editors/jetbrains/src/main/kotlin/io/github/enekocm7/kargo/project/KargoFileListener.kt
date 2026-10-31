@@ -23,7 +23,9 @@ class KargoFileListener(private val project: Project) : BulkFileListener {
             val name = path.substringAfterLast('/')
             if (name == Kargo.MANIFEST || name == LOCKFILE) {
                 manifests = true
-            } else if (isLayoutChange(event) && LAYOUT_DIR.matches(name) && path.substringBeforeLast('/', "") in roots) {
+            } else if (isLayoutChange(event) && isUnderRoots(path, roots)) {
+                // Any directory appearing or disappearing under a package (such as a `[layout]`
+                // directory) may be a new source root, so the project is imported again.
                 layout = true
             }
         }
@@ -32,13 +34,16 @@ class KargoFileListener(private val project: Project) : BulkFileListener {
         if (manifests || layout) KargoProjectSync.getInstance(project).requestSync(force = layout)
     }
 
+    private fun isUnderRoots(path: String, roots: List<String>): Boolean {
+        // The event itself is a directory, or a directory's contents changed (the path is a file).
+        val dir = path.substringBeforeLast('/', "")
+        return roots.any { root -> dir == root || dir.startsWith("$root/") || path == root }
+    }
+
     private fun isLayoutChange(event: VFileEvent) =
         event is VFileCreateEvent || event is VFileDeleteEvent || event is VFileMoveEvent || (event is VFilePropertyChangeEvent && event.isRename)
 
     companion object {
         const val LOCKFILE = "kargo.lock"
-
-        /** The directories Kargo takes roots from: `src`, `src-jvm`, `tests`, `tests-native`, `resources`, `test-resources`. */
-        val LAYOUT_DIR = Regex("(src|tests)(-[a-z]+)?|resources|test-resources")
     }
 }

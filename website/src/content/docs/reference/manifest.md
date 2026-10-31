@@ -487,6 +487,47 @@ targets = ["jvm", "android"]
 
 The table name picks the directories: `src-<name>/`, `tests-<name>/` and `test-fixtures-<name>/`. It uses letters, digits, `-` and `_`, starts with a letter, and can't be `common` or a target's name. A set whose targets include all of another's is above it: the lower set sees its declarations, as `src-<target>/` sees `src/`. See [Source sets for several targets](../../guides/multiplatform/#source-sets-for-several-targets) and [Sets of some Native platforms](../../guides/multiplatform/#sets-of-some-native-platforms).
 
+## `[layout]`
+
+Where the sources, tests, resources, benchmarks and Android files live. Optional; without it the project uses the [fixed layout](../../getting-started/project-layout/). Each directory is inside the package, never absolute or with `..`, and never `target/` (build output). A key is one directory or a list of them; a target that lists several compiles them all.
+
+```toml
+[layout]
+src = ["src/main/kotlin", "src/main/java"]
+tests = "src/test/kotlin"
+resources = "src/main/resources"
+test-resources = "src/test/resources"
+android-dir = "src/main"
+
+[layout.jvm]
+src = "src/jvmMain/kotlin"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `src` | `src/` | Common sources, compiled for every target |
+| `tests` | `tests/` | Common tests |
+| `resources` | `resources/` | JVM resources, also the files of a Wasm or JS browser app |
+| `test-resources` | `test-resources/` | Resources for JVM tests |
+| `benches` | `benches/` | Common benchmarks (`kargo bench`) |
+| `examples` | `examples/` | Example programs (`kargo run --example <name>`) |
+| `test-fixtures` | `test-fixtures/` | Test helpers shared with dependents (`test-fixtures = true`) |
+| `android-tests` | `android-tests/` | Android instrumented tests (`kargo test --instrumented`) |
+| `android-dir` | `android/` | The directory holding `AndroidManifest.xml`, `res/`, `assets/` and `jniLibs/` |
+
+`[layout.<target>]` (`jvm`, `wasm`, `js`, `native`, `android`) overrides the target-specific directories:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `src` | `src-<target>/` | Sources only this target compiles |
+| `tests` | `tests-<target>/` | Tests only this target runs |
+| `benches` | `benches-<target>/` | Benchmarks only this target runs (only the JVM runs them yet) |
+| `test-fixtures` | `test-fixtures-<target>/` | Test fixtures only this target uses |
+
+`[layout.source-sets.<name>]` overrides the directories of one [`[source-sets.<name>]`](#source-setsname) set (`name` must be declared there): `src` (default `src-<name>/`), `tests` (default `tests-<name>/`) and `test-fixtures` (default `test-fixtures-<name>/`).
+
+`kargo import --keep-layout` writes this table from the old build files instead of moving the sources. See [Keeping the old layout](../../guides/importing/#keeping-the-old-layout) and [Custom source directories](../../getting-started/project-layout/#custom-source-directories).
+
 ## Targets
 
 With no `[target.*]` section, the project targets the JVM with default settings. Otherwise exactly the listed targets are built.

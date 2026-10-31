@@ -49,6 +49,8 @@ impl Build {
 pub struct ImportOptions {
     /// The build tool to import from, when the directory has the files of both.
     pub from: Option<Build>,
+    /// Keep the sources where they are and point `[layout]` at them, instead of moving them.
+    pub keep_layout: bool,
 }
 
 /// One line of the report.
@@ -137,6 +139,14 @@ pub fn plan(config: &Config, root: &Path, opts: &ImportOptions) -> Result<Plan> 
         unify_toolchains(&mut imported);
     }
 
+    if opts.keep_layout {
+        for package in &mut imported.packages {
+            package.layout = keep_layout(root, package);
+            package.moves.clear();
+        }
+        imported.translated("sources stay where they are (`--keep-layout`); `[layout]` points at the old directories");
+    }
+
     let mut manifests = Vec::new();
     let mut workspace_manifest = None;
     let workspace_kotlin = shared_kotlin_version(&imported.packages).filter(|_| imported.workspace);
@@ -166,6 +176,124 @@ pub fn plan(config: &Config, root: &Path, opts: &ImportOptions) -> Result<Plan> 
     let dir_moves: Vec<_> = imported.packages.iter().flat_map(|p| p.moves.iter().cloned()).collect();
     let moves = layout::plan(root, &dir_moves)?;
     Ok(Plan { build, manifests, packages: imported.packages.iter().map(|p| p.name.clone()).collect(), moves, notes: imported.notes })
+}
+
+/// The `[layout]` for `--keep-layout`: the old directories of `package`, which stay
+/// where they are. Only directories that exist are listed; ones already in Kargo's
+/// layout need no entry.
+fn keep_layout(root: &Path, package: &Package) -> crate::ops::import::model::KeepLayout {
+    use crate::ops::import::model::{KeepLayout, KeepTarget};
+    use std::collections::BTreeMap;
+    let mut layout = KeepLayout::default();
+    let mut android_candidates: Vec<PathBuf> = Vec::new();
+    let strip = |path: &Path| -> Option<PathBuf> {
+        if package.dir.as_os_str().is_empty() {
+            return Some(path.to_path_buf());
+        }
+        path.strip_prefix(&package.dir).ok().map(|p| p.to_path_buf()).filter(|p| !p.as_os_str().is_empty())
+    };
+    let exists = |from: &Path| root.join(from).is_file() || root.join(from).is_dir();
+    let push_unique = |list: &mut Vec<String>, value: String| {
+        if !list.contains(&value) {
+            list.push(value);
+        }
+    };
+    for m in &package.moves {
+        if !exists(&m.from) {
+            continue;
+        }
+        let (Some(from_rel), Some(to_rel)) = (strip(&m.from), strip(&m.to)) else { continue };
+        if from_rel == to_rel {
+            continue;
+        }
+        let from_str = self::model::relative_path(&from_rel);
+        let to_str = self::model::relative_path(&to_rel);
+        // The default directory needs no entry.
+        let is_default = |to: &str, from: &str| to == from;
+        match to_str.as_str() {
+            "src" if !is_default(&to_str, &from_str) => push_unique(&mut layout.src, from_str),
+            "tests" if !is_default(&to_str, &from_str) => push_unique(&mut layout.tests, from_str),
+            "resources" if !is_default(&to_str, &from_str) => push_unique(&mut layout.resources, from_str),
+            "test-resources" if !is_default(&to_str, &from_str) => push_unique(&mut layout.test_resources, from_str),
+            to if to.starts_with("android/") => {
+                let parent = from_rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+                if !parent.as_os_str().is_empty() {
+                    android_candidates.push(parent);
+                }
+            }
+            to => {
+                // Parse `src-<target>` and `tests-<target>`.
+                let (kind, is_src) = if let Some(suffix) = to.strip_prefix("src-") {
+                    (suffix, true)
+                } else if let Some(suffix) = to.strip_prefix("tests-") {
+                    (suffix, false)
+                } else {
+                    continue;
+                };
+                let Ok(kind) = kind.parse::<kargo_manifest::TargetKind>() else { continue };
+                let entry: &mut KeepTarget = layout.targets.entry(kind).or_default();
+                if is_src {
+                    // Already in Kargo's layout needs no entry.
+                    if from_str != to_str {
+                        push_unique(&mut entry.src, from_str);
+                    }
+                } else if from_str != to_str {
+                    push_unique(&mut entry.tests, from_str);
+                }
+            }
+        }
+    }
+    // Deduplicate against the defaults: a directory already in Kargo's layout needs no entry.
+    // (The checks above already skip identical ones; this keeps the common case of a single
+    // existing `src/` from writing `[layout]`.)
+    if layout.src.iter().any(|d| d == "src") {
+        layout.src.retain(|d| d != "src");
+    }
+    if layout.tests.iter().any(|d| d == "tests") {
+        layout.tests.retain(|d| d != "tests");
+    }
+    // The Android directory: the common parent of the old manifest, resources and assets.
+    if !android_candidates.is_empty() {
+        let mut candidates: Vec<String> = android_candidates
+            .iter()
+            .map(|p| p.strip_prefix(&package.dir).unwrap_or(p).to_string_lossy().replace('\\', "/").trim_matches('/').to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        // The longest common prefix of the candidates (usually they are all the same).
+        let parts: Vec<Vec<&str>> = candidates.iter().map(|c| c.split('/').collect()).collect();
+        let mut common: Vec<&str> = Vec::new();
+        if let Some(first) = parts.first() {
+            for (i, segment) in first.iter().enumerate() {
+                if parts.iter().all(|p| p.get(i) == Some(segment)) {
+                    common.push(segment);
+                } else {
+                    break;
+                }
+            }
+        }
+        let dir = if common.is_empty() { candidates.first().cloned() } else { Some(common.join("/")) };
+        // `android/` itself needs no entry.
+        if let Some(dir) = dir.filter(|d| d != "android") {
+            layout.android_dir = Some(dir);
+        }
+    }
+    // Drop targets that ended up empty (their directories were already the defaults).
+    layout.targets.retain(|_, t| !t.src.is_empty() || !t.tests.is_empty());
+    // Sort for stable manifests.
+    layout.src.sort();
+    layout.tests.sort();
+    layout.resources.sort();
+    layout.test_resources.sort();
+    let mut targets = BTreeMap::new();
+    for (kind, mut target) in layout.targets {
+        target.src.sort();
+        target.tests.sort();
+        targets.insert(kind, target);
+    }
+    layout.targets = targets;
+    layout
 }
 
 /// Which build tool to import from: the one with build files in `root`.

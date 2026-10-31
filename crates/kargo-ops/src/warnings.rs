@@ -112,10 +112,14 @@ pub fn missing_sources(ws: &Workspace, targets: &[TargetKind]) -> Vec<String> {
             };
             let has_sources = ws.source_dirs(target).iter().any(|dir| !collect_files(dir, extensions).is_empty());
             // A JVM project can be nothing but resources.
-            if has_sources || (target == TargetKind::Jvm && has_entries(&ws.resources())) {
+            if has_sources || (target == TargetKind::Jvm && ws.resource_dirs().iter().any(|d| has_entries(d))) {
                 return None;
             }
-            Some(format!("no {kinds} sources found in src/ or {}/ for the {target} target", target.source_dir_name()))
+            let layout = &ws.manifest().layout;
+            let common = layout.src.first().map(|d| d.display().to_string()).unwrap_or_else(|| "src".to_owned());
+            let specific =
+                layout.target_sources(target).first().cloned().unwrap_or_else(|| std::path::PathBuf::from(target.source_dir_name()));
+            Some(format!("no {kinds} sources found in {common}/ or {}/ for the {target} target", specific.display()))
         })
         .collect()
 }

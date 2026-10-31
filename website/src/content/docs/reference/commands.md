@@ -153,7 +153,7 @@ kargo template list
 
 ## `kargo import`
 
-Convert a Maven, Gradle or Kotlin Toolchain project into a Kargo project: write the `kargo.toml` (a [workspace](../../guides/workspaces/) for a multi-module build), move the sources into [Kargo's layout](../../getting-started/project-layout/) with `git mv` inside a git repository, print a report and build the result. The old build files stay.
+Convert a Maven, Gradle or Kotlin Toolchain project into a Kargo project: write the `kargo.toml` (a [workspace](../../guides/workspaces/) for a multi-module build), move the sources into [Kargo's layout](../../getting-started/project-layout/) with `git mv` inside a git repository, print a report and build the result. With `--keep-layout` the sources stay where they are and [`[layout]`](../manifest/#layout) points at them instead. The old build files stay.
 
 ```sh
 kargo import [path] [options]
@@ -164,11 +164,13 @@ kargo import [path] [options]
 | `--dry-run` | | Print every `kargo.toml` and file move on stdout, and change nothing |
 | `--no-build` | | Don't run `kargo build` when the import is done |
 | `--from <maven\|gradle\|kotlin>` | the build tool whose files are there | Which build tool to read when the directory has the files of several; `amper` is an alias of `kotlin` |
+| `--keep-layout` | | Keep the sources where they are and write `[layout]` instead of moving them; `--dry-run` prints the manifest and no moves |
 
 ```sh
 kargo import --dry-run
 kargo import
 kargo import ../legacy-service --no-build
+kargo import --keep-layout --dry-run
 ```
 
 The command refuses a directory that already has a `kargo.toml`, plans every move before making one, and fails without changing anything when two files would land on the same path. A Maven project is translated exactly. A Gradle project and a Kotlin Toolchain project are read without running their build, so what the scripts or templates compute in code is listed in the report instead. If the final build fails, the project is imported anyway and the command exits with code 101. See [Importing a project](../../guides/importing/).

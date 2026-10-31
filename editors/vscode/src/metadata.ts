@@ -28,9 +28,9 @@ export interface Package {
 export interface Target {
     /** `jvm`, `wasm`, `native` or `android`. */
     readonly kind: string;
-    /** Absolute `src/` and `src-<target>/` directories. */
+    /** Absolute source directories (`[layout] src` and `[layout.<target>] src`). */
     readonly sourceRoots: readonly string[];
-    /** Absolute `tests/` and `tests-<target>/` directories. */
+    /** Absolute test directories (`[layout] tests` and `[layout.<target>] tests`). */
     readonly testRoots: readonly string[];
     readonly mainClass?: string;
 }
@@ -113,12 +113,19 @@ export function packageOf(metadata: Metadata, file: string): Package | undefined
 }
 
 /**
- * The target a source file belongs to by its directory: `src-wasm/` and `tests-wasm/` are Wasm,
- * and so on. `undefined` for `src/` and `tests/`, which every target compiles.
+ * The target a source file belongs to: the only target whose `sourceRoots` or `testRoots`
+ * hold it, or `undefined` for `src/` and `tests/` (and other common directories), which
+ * every target compiles. Reads the directories from `kargo metadata`, so `[layout]`
+ * directories work too; the `src-<target>` name is only a fallback.
  */
 export function targetOf(pkg: Package, file: string): string | undefined {
+    const holders = pkg.targets.filter(target =>
+        [...target.sourceRoots, ...target.testRoots].some(root => isInside(file, root)),
+    );
+    if (holders.length === 1) return holders[0].kind;
+    if (holders.length > 1) return undefined;
     const top = path.relative(pkg.root, file).split(/[\\/]/)[0] ?? '';
-    const match = /^(?:src|tests|test-fixtures)-(jvm|wasm|native|android)$/.exec(top);
+    const match = /^(?:src|tests|test-fixtures)-(jvm|wasm|js|native|android)$/.exec(top);
     return match?.[1];
 }
 

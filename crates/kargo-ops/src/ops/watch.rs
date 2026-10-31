@@ -39,26 +39,32 @@ impl WatchSet {
         let mut paths = vec![root.join(MANIFEST_NAME), lockfile.clone()];
         for package in project.packages() {
             paths.push(package.manifest_path());
-            paths.push(package.common_sources());
-            paths.extend(TargetKind::ALL.iter().map(|t| package.target_sources(*t)));
-            for group in &package.manifest().source_sets {
-                paths.extend([
-                    package.group_sources(&group.name),
-                    package.group_tests(&group.name),
-                    package.group_test_fixtures(&group.name),
-                ]);
+            paths.extend(package.common_source_dirs());
+            for t in TargetKind::ALL {
+                paths.extend(package.target_source_dirs(t));
             }
-            paths.push(package.common_tests());
-            paths.extend(TargetKind::ALL.iter().map(|t| package.target_tests(*t)));
-            paths.push(package.common_test_fixtures());
-            paths.extend(TargetKind::ALL.iter().map(|t| package.target_test_fixtures(*t)));
-            paths.push(package.common_benches());
-            paths.extend(TargetKind::ALL.iter().map(|t| package.target_benches(*t)));
+            for group in &package.manifest().source_sets {
+                paths.extend(package.group_source_dirs(&group.name));
+                paths.extend(package.group_test_dirs(&group.name));
+                paths.extend(package.group_test_fixture_dirs(&group.name));
+            }
+            paths.extend(package.common_test_dirs());
+            for t in TargetKind::ALL {
+                paths.extend(package.target_test_dirs(t));
+            }
+            paths.extend(package.common_test_fixture_dirs());
+            for t in TargetKind::ALL {
+                paths.extend(package.target_test_fixture_dirs(t));
+            }
+            paths.extend(package.common_bench_dirs());
+            for t in TargetKind::ALL {
+                paths.extend(package.target_bench_dirs(t));
+            }
             paths.push(package.examples_dir());
-            paths.push(package.resources());
+            paths.extend(package.resource_dirs());
             paths.push(package.root().join(crate::compose::resources::DIR));
-            paths.push(package.test_resources());
-            paths.push(package.root().join("android"));
+            paths.extend(package.test_resource_dirs());
+            paths.push(package.android_dir());
             paths.push(package.root().join("interop"));
             // The JavaScript and TypeScript modules of the web targets.
             let manifest = package.manifest();

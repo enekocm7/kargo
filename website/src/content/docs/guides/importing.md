@@ -29,6 +29,7 @@ $ kargo import
 | `--dry-run` | Print every `kargo.toml` and every file move, and change nothing. The report of what was translated and what was not is printed too |
 | `--no-build` | Don't run `kargo build` at the end |
 | `--from <maven\|gradle\|kotlin>` | Which build tool to read, when the directory has the files of several (`amper` works for `kotlin`) |
+| `--keep-layout` | Keep the sources where they are and point [`[layout]`](../../reference/manifest/#layout) at them, instead of moving them into [Kargo's layout](../../getting-started/project-layout/) |
 
 `kargo import` stops without changing anything when the directory already has a `kargo.toml`, when it has no build files, or when two files would land on the same path in the new layout. It plans every move before it makes the first one. In a git repository the moves use `git mv`, so they show up as renames, and `/target` is added to `.gitignore` when the file doesn't ignore it yet.
 
@@ -136,6 +137,21 @@ The [Kotlin Toolchain](https://kotlin-toolchain.org/) (formerly Amper) is config
 
 Files from `src/main/kotlin` and `src/main/java` merge into one tree. The directories the moves leave empty are removed. The Kotlin/Native source sets of several platforms all go to `src-native/`; the report says so, because files with the same name collide there and code for one platform needs `expect`/`actual`.
 
+## Keeping the old layout
+
+`kargo import --keep-layout` leaves every file where it is and points [`[layout]`](../../reference/manifest/#layout) at the old source directories instead of moving them. `--dry-run` prints the manifest with the `[layout]` table and no moves; without it the import writes the manifest, moves nothing and builds.
+
+```toml title="kargo.toml"
+[layout]
+src = ["src/main/kotlin", "src/main/java"]
+tests = "src/test/kotlin"
+resources = "src/main/resources"
+test-resources = "src/test/resources"
+android-dir = "src/main"
+```
+
+A package imported this way builds, tests and runs in an editor like a conventional one, because every command reads `[layout]`. Move the sources into [Kargo's layout](../../getting-started/project-layout/) later by deleting the table and moving the files (or run `kargo import` again without `--keep-layout`).
+
 ## The report
 
 After the import, `kargo import` lists what it translated and, with a link to the page that helps, what needs your attention:
@@ -154,7 +170,6 @@ Credentials of private repositories are not copied. Name the environment variabl
 ## Limits
 
 - Gradle is read, not run. A build that computes its dependencies or settings in code, or hides them in convention plugins (`buildSrc`, `build-logic`), imports only the part that is declared in the scripts, and the report lists the rest.
-- The sources always move into Kargo's layout; there is no way to leave them where they are, because Kargo's layout is fixed.
 - A Gradle project whose root also includes other projects imports those projects as the members of a workspace; the code of the root project itself is not imported.
 - Android modules import their target, the manifest and the resources, but flavors, build types besides `release` minification and signing configurations are listed for you to translate.
 

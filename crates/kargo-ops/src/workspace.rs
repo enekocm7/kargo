@@ -246,81 +246,168 @@ impl Workspace {
         }
     }
 
-    /// Common source directory.
-    pub fn common_sources(&self) -> PathBuf {
-        self.root.join("src")
+    /// Common source directories (`[layout] src`).
+    pub fn common_source_dirs(&self) -> Vec<PathBuf> {
+        self.manifest.layout.src.iter().map(|d| self.root.join(d)).collect()
     }
 
-    /// Target-specific source directory.
+    /// Target-specific source directories (`[layout.<target>] src`, else `src-<target>/`).
+    pub fn target_source_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.manifest.layout.target_sources(target).iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// The directories of the intermediate source set `name`.
+    pub fn group_source_dirs(&self, name: &str) -> Vec<PathBuf> {
+        self.manifest.layout.group_sources(name).iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Common source directory (the first of [`Workspace::common_source_dirs`]).
+    pub fn common_sources(&self) -> PathBuf {
+        self.common_source_dirs().into_iter().next().unwrap_or_else(|| self.root.join("src"))
+    }
+
+    /// Target-specific source directory (the first of [`Workspace::target_source_dirs`]).
     pub fn target_sources(&self, target: TargetKind) -> PathBuf {
-        self.root.join(target.source_dir_name())
+        self.target_source_dirs(target).into_iter().next().unwrap_or_else(|| self.root.join(target.source_dir_name()))
     }
 
     /// The directory of the intermediate source set `name` (`[source-sets.<name>]`).
     pub fn group_sources(&self, name: &str) -> PathBuf {
-        self.root.join(format!("src-{name}"))
+        self.group_source_dirs(name).into_iter().next().unwrap_or_else(|| self.root.join(format!("src-{name}")))
+    }
+
+    pub fn group_test_dirs(&self, name: &str) -> Vec<PathBuf> {
+        self.manifest.layout.group_tests(name).iter().map(|d| self.root.join(d)).collect()
+    }
+
+    pub fn group_test_fixture_dirs(&self, name: &str) -> Vec<PathBuf> {
+        self.manifest.layout.group_test_fixtures(name).iter().map(|d| self.root.join(d)).collect()
     }
 
     pub fn group_tests(&self, name: &str) -> PathBuf {
-        self.root.join(format!("tests-{name}"))
+        self.group_test_dirs(name).into_iter().next().unwrap_or_else(|| self.root.join(format!("tests-{name}")))
     }
 
     pub fn group_test_fixtures(&self, name: &str) -> PathBuf {
-        self.root.join(format!("test-fixtures-{name}"))
+        self.group_test_fixture_dirs(name).into_iter().next().unwrap_or_else(|| self.root.join(format!("test-fixtures-{name}")))
+    }
+
+    /// Common test directories (`[layout] tests`).
+    pub fn common_test_dirs(&self) -> Vec<PathBuf> {
+        self.manifest.layout.tests.iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Target-specific test directories.
+    pub fn target_test_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.manifest.layout.target_tests(target).iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Common benchmark directories.
+    pub fn common_bench_dirs(&self) -> Vec<PathBuf> {
+        self.manifest.layout.benches.iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Target-specific benchmark directories.
+    pub fn target_bench_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.manifest.layout.target_benches(target).iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Common test-fixture directories.
+    pub fn common_test_fixture_dirs(&self) -> Vec<PathBuf> {
+        self.manifest.layout.test_fixtures.iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Target-specific test-fixture directories.
+    pub fn target_test_fixture_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.manifest.layout.target_test_fixtures(target).iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Resource directories (`[layout] resources`).
+    pub fn resource_dirs(&self) -> Vec<PathBuf> {
+        self.manifest.layout.resources.iter().map(|d| self.root.join(d)).collect()
+    }
+
+    /// Test resource directories (`[layout] test-resources`).
+    pub fn test_resource_dirs(&self) -> Vec<PathBuf> {
+        self.manifest.layout.test_resources.iter().map(|d| self.root.join(d)).collect()
     }
 
     /// The source directories `target` compiles, widest first: `src/`, the directories of the source
-    /// sets that include it and `src-<target>/`.
+    /// sets that include it and `src-<target>/`. Each of those may be several directories.
     pub fn source_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
-        let mut dirs = vec![self.common_sources()];
-        dirs.extend(self.manifest().all_groups_for(target).iter().map(|g| self.group_sources(&g.name)));
-        dirs.push(self.target_sources(target));
+        let mut dirs = self.common_source_dirs();
+        for g in self.manifest().all_groups_for(target) {
+            dirs.extend(self.group_source_dirs(&g.name));
+        }
+        dirs.extend(self.target_source_dirs(target));
         dirs
     }
 
     /// Like [`Workspace::source_dirs`], for `tests/`.
     pub fn test_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
-        let mut dirs = vec![self.common_tests()];
-        dirs.extend(self.manifest().all_groups_for(target).iter().map(|g| self.group_tests(&g.name)));
-        dirs.push(self.target_tests(target));
+        let mut dirs = self.common_test_dirs();
+        for g in self.manifest().all_groups_for(target) {
+            dirs.extend(self.group_test_dirs(&g.name));
+        }
+        dirs.extend(self.target_test_dirs(target));
+        dirs
+    }
+
+    /// Benchmark directories of `target`: the common ones and its own.
+    pub fn bench_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        let mut dirs = self.common_bench_dirs();
+        dirs.extend(self.target_bench_dirs(target));
+        dirs
+    }
+
+    /// Test-fixture directories of `target`: the common ones, the source sets' and its own.
+    pub fn test_fixture_dirs(&self, target: TargetKind) -> Vec<PathBuf> {
+        let mut dirs = self.common_test_fixture_dirs();
+        for g in self.manifest().all_groups_for(target) {
+            dirs.extend(self.group_test_fixture_dirs(&g.name));
+        }
+        dirs.extend(self.target_test_fixture_dirs(target));
         dirs
     }
 
     /// The instrumented tests of the Android target, which run on a device (`kargo test --instrumented`).
     pub fn instrumented_tests(&self) -> PathBuf {
-        self.root.join("android-tests")
+        self.root.join(&self.manifest.layout.android_tests)
     }
 
     pub fn common_tests(&self) -> PathBuf {
-        self.root.join("tests")
+        self.common_test_dirs().into_iter().next().unwrap_or_else(|| self.root.join("tests"))
     }
 
     pub fn target_tests(&self, target: TargetKind) -> PathBuf {
-        self.root.join(format!("tests-{}", target.as_str()))
+        self.target_test_dirs(target).into_iter().next().unwrap_or_else(|| self.root.join(format!("tests-{}", target.as_str())))
     }
 
     /// Common benchmarks, run with `kargo bench`.
     pub fn common_benches(&self) -> PathBuf {
-        self.root.join("benches")
+        self.common_bench_dirs().into_iter().next().unwrap_or_else(|| self.root.join("benches"))
     }
 
     pub fn target_benches(&self, target: TargetKind) -> PathBuf {
-        self.root.join(format!("benches-{}", target.as_str()))
+        self.target_bench_dirs(target).into_iter().next().unwrap_or_else(|| self.root.join(format!("benches-{}", target.as_str())))
     }
 
     /// Common test fixtures: code the tests of this package and of the packages that depend on it
     /// with `test-fixtures = true` share.
     pub fn common_test_fixtures(&self) -> PathBuf {
-        self.root.join("test-fixtures")
+        self.common_test_fixture_dirs().into_iter().next().unwrap_or_else(|| self.root.join("test-fixtures"))
     }
 
     pub fn target_test_fixtures(&self, target: TargetKind) -> PathBuf {
-        self.root.join(format!("test-fixtures-{}", target.as_str()))
+        self.target_test_fixture_dirs(target)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| self.root.join(format!("test-fixtures-{}", target.as_str())))
     }
 
     /// Example programs: `examples/<name>.kt`, run with `kargo run --example <name>`.
     pub fn examples_dir(&self) -> PathBuf {
-        self.root.join("examples")
+        self.root.join(&self.manifest.layout.examples)
     }
 
     /// The names of the example programs, sorted.
@@ -337,33 +424,79 @@ impl Workspace {
         names
     }
 
-    /// Every existing source, test, test fixture, benchmark and example directory (`src/`, `src-<target>/`,
-    /// `tests/`, `tests-<target>/`, `test-fixtures/`, `test-fixtures-<target>/`, `benches/`, `benches-<target>/`, `examples/`) for any
+    /// The directory holding `AndroidManifest.xml`, `res/`, `assets/` and `jniLibs/`.
+    pub fn android_dir(&self) -> PathBuf {
+        self.root.join(&self.manifest.layout.android_dir)
+    }
+
+    /// Every existing source, test, test fixture, benchmark and example directory for any
     /// target, enabled or not, relative to the root.
     /// Used by `kargo fmt` and `kargo lint`, which never look inside `target/`.
     pub fn source_roots(&self) -> Vec<PathBuf> {
-        let mut dirs = vec![PathBuf::from("src")];
-        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(t.source_dir_name())));
-        let groups = &self.manifest().source_sets;
-        dirs.extend(groups.iter().map(|g| PathBuf::from(g.source_dir_name())));
-        dirs.push(PathBuf::from("tests"));
-        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("tests-{}", t.as_str()))));
-        dirs.extend(groups.iter().map(|g| PathBuf::from(format!("tests-{}", g.name))));
-        dirs.push(PathBuf::from("test-fixtures"));
-        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("test-fixtures-{}", t.as_str()))));
-        dirs.extend(groups.iter().map(|g| PathBuf::from(format!("test-fixtures-{}", g.name))));
-        dirs.push(PathBuf::from("benches"));
-        dirs.extend(TargetKind::ALL.iter().map(|t| PathBuf::from(format!("benches-{}", t.as_str()))));
-        dirs.push(PathBuf::from("examples"));
+        let layout = &self.manifest.layout;
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut push = |dir: PathBuf| {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        };
+        for d in layout.src.iter().cloned() {
+            push(d);
+        }
+        for target in TargetKind::ALL {
+            for d in layout.target_sources(target) {
+                push(d);
+            }
+        }
+        for g in &self.manifest().source_sets {
+            for d in layout.group_sources(&g.name) {
+                push(d);
+            }
+        }
+        for d in layout.tests.iter().cloned() {
+            push(d);
+        }
+        for target in TargetKind::ALL {
+            for d in layout.target_tests(target) {
+                push(d);
+            }
+        }
+        for g in &self.manifest().source_sets {
+            for d in layout.group_tests(&g.name) {
+                push(d);
+            }
+        }
+        for d in layout.test_fixtures.iter().cloned() {
+            push(d);
+        }
+        for target in TargetKind::ALL {
+            for d in layout.target_test_fixtures(target) {
+                push(d);
+            }
+        }
+        for g in &self.manifest().source_sets {
+            for d in layout.group_test_fixtures(&g.name) {
+                push(d);
+            }
+        }
+        for d in layout.benches.iter().cloned() {
+            push(d);
+        }
+        for target in TargetKind::ALL {
+            for d in layout.target_benches(target) {
+                push(d);
+            }
+        }
+        push(layout.examples.clone());
         dirs.into_iter().filter(|d| self.root.join(d).is_dir()).collect()
     }
 
     pub fn resources(&self) -> PathBuf {
-        self.root.join("resources")
+        self.resource_dirs().into_iter().next().unwrap_or_else(|| self.root.join("resources"))
     }
 
     pub fn test_resources(&self) -> PathBuf {
-        self.root.join("test-resources")
+        self.test_resource_dirs().into_iter().next().unwrap_or_else(|| self.root.join("test-resources"))
     }
 }
 

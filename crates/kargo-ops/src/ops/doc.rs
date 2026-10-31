@@ -89,9 +89,13 @@ pub fn generate(ctx: &BuildContext, targets: &[TargetKind]) -> Result<PathBuf> {
 
     // What `[[generate]]` steps write is documented with the rest of the code.
     super::build::generate_sources(ctx, targets)?;
-    let mut dirs = vec![ws.common_sources()];
-    dirs.extend(targets.iter().map(|t| ws.target_sources(*t)));
-    dirs.extend(targets.iter().flat_map(|t| ws.manifest().all_groups_for(*t)).map(|g| ws.group_sources(&g.name)));
+    let mut dirs = ws.common_source_dirs();
+    for t in targets {
+        dirs.extend(ws.target_source_dirs(*t));
+    }
+    for g in targets.iter().flat_map(|t| ws.manifest().all_groups_for(*t)) {
+        dirs.extend(ws.group_source_dirs(&g.name));
+    }
     dirs.extend(targets.iter().flat_map(|t| crate::generate::dirs(ws, &ctx.profile, *t, GeneratedKind::Sources)));
     if dirs.iter().all(|d| collect_files(d, &["kt", "java"]).is_empty()) {
         bail!("no Kotlin or Java sources to document; add them under `src/` or `src-<target>/`");
@@ -152,7 +156,7 @@ fn refined(parents: &[&str]) -> Vec<String> {
 /// Builds the Dokka source sets for `targets` from the project layout.
 fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceSet>> {
     let ws = ctx.ws;
-    let common = ws.common_sources();
+    let common = ws.common_source_dirs();
     let mut sets: Vec<SourceSet> = Vec::new();
     let single = targets.len() == 1;
     if !single {
@@ -160,7 +164,7 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
         sets.push(SourceSet {
             name: "common".to_owned(),
             platform: "common",
-            roots: existing(vec![common.clone()]),
+            roots: existing(common.clone()),
             classpath: Vec::new(),
             depends_on: Vec::new(),
             links: Vec::new(),
@@ -173,7 +177,7 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
                 sets.push(SourceSet {
                     name: group.name.clone(),
                     platform: "common",
-                    roots: existing(vec![ws.group_sources(&group.name)]),
+                    roots: existing(ws.group_source_dirs(&group.name)),
                     classpath: Vec::new(),
                     depends_on: refined(&parents),
                     links: Vec::new(),
@@ -182,18 +186,24 @@ fn source_sets(ctx: &BuildContext, targets: &[TargetKind]) -> Result<Vec<SourceS
         }
     }
     for &target in targets {
-        let mut roots = vec![ws.target_sources(target)];
+        let mut roots = ws.target_source_dirs(target);
         let groups = ws.manifest().source_groups_for(target);
         if single {
-            roots.extend(groups.iter().map(|(g, _)| ws.group_sources(&g.name)));
+            for (g, _) in &groups {
+                roots.extend(ws.group_source_dirs(&g.name));
+            }
         }
         // The sets of some Native platforms are documented with the Native target's own code.
         if target == TargetKind::Native {
-            roots.extend(ws.manifest().native_platform_groups(None).iter().map(|(g, _)| ws.group_sources(&g.name)));
+            for (g, _) in ws.manifest().native_platform_groups(None).iter() {
+                roots.extend(ws.group_source_dirs(&g.name));
+            }
         }
         roots.extend(crate::generate::dirs(ws, &ctx.profile, target, GeneratedKind::Sources));
         if single {
-            roots.insert(0, common.clone());
+            let mut with_common = common.clone();
+            with_common.extend(roots);
+            roots = with_common;
         }
         // The target refines the narrowest source sets, those that no other one of its list refines.
         let leaves: Vec<&str> = groups

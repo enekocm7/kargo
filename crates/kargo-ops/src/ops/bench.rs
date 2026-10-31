@@ -210,11 +210,8 @@ pub fn bench(ctx: &BuildContext, opts: &BenchOptions) -> Result<()> {
 /// The benchmark sources of the JVM target.
 fn bench_sources(ctx: &BuildContext) -> SourceSet {
     let extensions = ["kt", "java"];
-    SourceSet::new(
-        collect_files(&ctx.ws.common_benches(), &extensions),
-        collect_files(&ctx.ws.target_benches(TargetKind::Jvm), &extensions),
-        TargetKind::Jvm.as_str(),
-    )
+    let collect = |dirs: &[PathBuf]| dirs.iter().flat_map(|d| collect_files(d, &extensions)).collect::<Vec<_>>();
+    SourceSet::new(collect(&ctx.ws.common_bench_dirs()), collect(&ctx.ws.target_bench_dirs(TargetKind::Jvm)), TargetKind::Jvm.as_str())
 }
 
 /// The libraries the benchmarks compile and run against: those of the tests, kotlinx-benchmark and JMH.
@@ -310,7 +307,7 @@ fn compile_benches(ctx: &BuildContext, main: &JvmBuild, sources: SourceSet) -> R
         kotlin_args: &kotlin_args,
         javac_args: &javac_args,
         processor_path: &processor_path,
-        resources: vec![ctx.ws.test_resources()],
+        resources: ctx.ws.test_resource_dirs(),
     };
     let outcome = unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Jvm), &|| {
         announce(ctx, "Compiling", TargetKind::Jvm, ", benches")

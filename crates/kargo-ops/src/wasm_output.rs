@@ -211,7 +211,7 @@ fn assemble_site(ctx: &BuildContext, build: &WasmBuild, bundle: Option<&Bundle>)
     if crate::compose::enabled(ctx.ws.manifest()) && compose_resources.is_dir() {
         shipments.push(crate::web_resources::from_dir("the app's composeResources/", &compose_resources));
     }
-    let own_page = copy_site_files(dir, Some(&ctx.ws.resources()), &shipments)?;
+    let own_page = copy_site_files(dir, &ctx.ws.resource_dirs(), &shipments)?;
     let index = dir.join("index.html");
     let html = if own_page {
         std::fs::read_to_string(&index)?
@@ -237,7 +237,8 @@ fn assemble_site(ctx: &BuildContext, build: &WasmBuild, bundle: Option<&Bundle>)
 /// Copies the files of `resources` and what `shipments` ship into `dir`, after removing what an earlier
 /// build copied there, and returns whether `resources` has its own `index.html`. A file of `resources`
 /// wins over a library's; a library's file may not replace one the build wrote (the module, the page).
-pub(crate) fn copy_site_files(dir: &Path, resources: Option<&Path>, shipments: &[crate::web_resources::Shipment]) -> Result<bool> {
+/// With several resource directories, the first one wins.
+pub(crate) fn copy_site_files(dir: &Path, resources: &[PathBuf], shipments: &[crate::web_resources::Shipment]) -> Result<bool> {
     let marker = dir.join(RESOURCES_MARKER);
     for old in std::fs::read_to_string(&marker).unwrap_or_default().lines() {
         let _ = std::fs::remove_file(dir.join(old));
@@ -246,9 +247,12 @@ pub(crate) fn copy_site_files(dir: &Path, resources: Option<&Path>, shipments: &
     let mut reserved: Vec<String> = all_files(dir).iter().filter_map(|f| f.strip_prefix(dir).ok()).map(process::slash).collect();
     reserved.push("index.html".to_owned());
     let mut copied = Vec::new();
-    if let Some(resources) = resources {
+    for resources in resources {
         for file in all_files(resources) {
             let relative = file.strip_prefix(resources).unwrap_or(&file);
+            if copied.iter().any(|c| c == &process::slash(relative)) {
+                continue;
+            }
             let dest = dir.join(relative);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;

@@ -95,7 +95,9 @@ sealed class RunSpec(val file: VirtualFile, val packageDir: VirtualFile) {
         is Test -> filter.substringAfterLast('.').let { last -> if (last.firstOrNull()?.isUpperCase() == true) last else filter.split('.').takeLast(2).joinToString(".") }
     }
 
-    /** The target a source directory belongs to: `src-wasm/` and `tests-wasm/` are Wasm, and so on. */
+    /** The target a source directory belongs to by its `src-<target>` name, or null for common code.
+     * Custom `[layout]` directories have no suffix, so they read as common; `kargo metadata`
+     * already lists them in the right `source-roots`. */
     fun target(): String? {
         val top = VfsUtilCore.getRelativePath(file, packageDir)?.substringBefore('/') ?: return null
         return top.substringAfter('-', "").takeIf { it in setOf("jvm", "wasm", "native", "android") }

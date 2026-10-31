@@ -295,7 +295,8 @@ fn stage_library(ctx: &BuildContext, group: &str, work: &Path, repo_dir: &Path) 
         package: pkg,
         platforms: Vec::new(),
         common_sources: if sources && multiplatform {
-            Some(sources_jar(&jars, "common", &[("commonMain", ws.common_sources())])?)
+            let dirs: Vec<(&str, PathBuf)> = ws.common_source_dirs().into_iter().map(|d| ("commonMain", d)).collect();
+            Some(sources_jar(&jars, "common", &dirs)?)
         } else {
             None
         },
@@ -304,23 +305,25 @@ fn stage_library(ctx: &BuildContext, group: &str, work: &Path, repo_dir: &Path) 
     for (platform, target) in platforms.into_iter().zip(targets_per_platform(&targets, &kinds)) {
         let mut platform = platform;
         if sources {
-            let mut dirs = if multiplatform {
-                vec![("commonMain", ws.common_sources()), (platform_source_root(&platform.kind), ws.target_sources(target))]
-            } else {
-                vec![("", ws.common_sources()), ("", ws.target_sources(target))]
-            };
-            // The intermediate source sets this platform compiles, each under its name like Gradle's `<name>Main`.
-            let groups: Vec<(String, PathBuf)> = ws
-                .manifest()
-                .all_groups_for(target)
-                .iter()
-                .map(|g| (if multiplatform { format!("{}Main", g.name) } else { String::new() }, ws.group_sources(&g.name)))
-                .collect();
-            dirs.extend(groups.iter().map(|(prefix, dir)| (prefix.as_str(), dir.clone())));
+            let mut all: Vec<(String, PathBuf)> = Vec::new();
+            for d in ws.common_source_dirs() {
+                all.push((if multiplatform { "commonMain".to_owned() } else { String::new() }, d));
+            }
+            for d in ws.target_source_dirs(target) {
+                all.push((if multiplatform { platform_source_root(&platform.kind).to_owned() } else { String::new() }, d));
+            }
+            for g in ws.manifest().all_groups_for(target) {
+                for d in ws.group_source_dirs(&g.name) {
+                    all.push((if multiplatform { format!("{}Main", g.name) } else { String::new() }, d));
+                }
+            }
+            let refs: Vec<(&str, PathBuf)> = all.iter().map(|(p, d)| (p.as_str(), d.clone())).collect();
             // What `[[generate]]` steps wrote is part of the library's code too.
             let generated = if multiplatform { platform_source_root(&platform.kind) } else { "" };
-            dirs.extend(crate::generate::dirs(ws, &ctx.profile, target, GeneratedKind::Sources).into_iter().map(|dir| (generated, dir)));
-            platform.sources = Some(sources_jar(&jars, &platform.kind.module_suffix(), &dirs)?);
+            let mut with_gen = refs;
+            with_gen
+                .extend(crate::generate::dirs(ws, &ctx.profile, target, GeneratedKind::Sources).into_iter().map(|dir| (generated, dir)));
+            platform.sources = Some(sources_jar(&jars, &platform.kind.module_suffix(), &with_gen)?);
         }
         platform.javadoc = javadoc.clone();
         publication.platforms.push(platform);
@@ -912,8 +915,20 @@ pub fn package_library(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Resu
     };
     write_library_jar(ctx, &jar, jvm, &manifest)?;
     let work = ws.profile_dir(&ctx.profile).join("package-work");
-    let mut dirs = vec![("", ws.common_sources()), ("", ws.target_sources(TargetKind::Jvm))];
-    dirs.extend(ws.manifest().source_groups_for(TargetKind::Jvm).iter().map(|(g, _)| ("", ws.group_sources(&g.name))));
+    let mut all: Vec<(String, PathBuf)> = Vec::new();
+    for d in ws.common_source_dirs() {
+        all.push((String::new(), d));
+    }
+    for d in ws.target_source_dirs(TargetKind::Jvm) {
+        all.push((String::new(), d));
+    }
+    for (g, _) in ws.manifest().source_groups_for(TargetKind::Jvm) {
+        for d in ws.group_source_dirs(&g.name) {
+            all.push((String::new(), d));
+        }
+    }
+    let refs: Vec<(&str, PathBuf)> = all.iter().map(|(p, d)| (p.as_str(), d.clone())).collect();
+    let mut dirs = refs;
     dirs.extend(crate::generate::dirs(ws, &ctx.profile, TargetKind::Jvm, GeneratedKind::Sources).into_iter().map(|dir| ("", dir)));
     let sources = sources_jar(&work, "jvm", &dirs)?;
     let dest = dir.join(format!("{}-{}-sources.jar", pkg.name, pkg.version));
