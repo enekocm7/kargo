@@ -1,0 +1,10 @@
+[package]
+name = "compose-html"
+version = "0.1.0"
+group = "com.example"
+
+[target.js]
+environment = "browser"
+
+[frameworks]
+compose = { html = true }

@@ -1,0 +1,10 @@
+[package]
+name = "kotlin-wasm"
+version = "0.1.0"
+group = "com.example"
+
+[target.wasm]
+environment = "js"
+
+[frameworks]
+coroutines = true

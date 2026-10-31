@@ -39,6 +39,10 @@ KARGO_E2E=1 KARGO_E2E_GUI=1 cargo test --test e2e compose_hot_reload   # Compose
 
 Format with `cargo fmt` before committing.
 
+## Examples
+
+The projects in `examples/` (see [Examples](../../guides/examples/)) are what `kargo new` writes, so `cargo test --test examples` fails when a template changes. Refresh them with `KARGO_UPDATE_EXAMPLES=1 cargo test --test examples`. A new example is a line in `GENERATED` (or `HAND_WRITTEN`) in `tests/examples.rs`, a row in `examples/README.md` and in the table of `guides/examples.md`, and an entry in the matrix of `.github/workflows/examples.yml`, which builds every example with the real compilers.
+
 ## Releases
 
 Pushing a tag `v<version>` runs `.github/workflows/release.yml`. The version in the tag must equal `version` in the `[workspace.package]` table of `Cargo.toml`, or the workflow stops. It builds Kargo with `cargo build --release --locked` for eight targets (`x86_64` and `aarch64` for Linux with glibc and with musl, macOS and Windows), runs each binary's `--version`, and publishes a GitHub release with:

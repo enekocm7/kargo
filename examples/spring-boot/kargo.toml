@@ -1,0 +1,7 @@
+[package]
+name = "spring-boot"
+version = "0.1.0"
+group = "com.example"
+
+[frameworks]
+spring-boot = { starters = ["web"] }
