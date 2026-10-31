@@ -32,6 +32,7 @@ import com.intellij.openapi.roots.impl.libraries.LibraryEx
 import com.intellij.openapi.util.Disposer
 import org.jetbrains.jps.model.java.JavaResourceRootType
 import org.jetbrains.jps.model.java.JavaSourceRootType
+import org.jetbrains.jps.model.java.JpsJavaExtensionService
 import java.io.File
 
 object KargoProjectImporter {
@@ -143,8 +144,11 @@ object KargoProjectImporter {
             val entry = model.addContentEntry(VfsUtilCore.pathToUrl(content.root))
             for (root in content.roots) {
                 val url = VfsUtilCore.pathToUrl(root.path)
+                // A generated root (the npm declarations under `target/`) warns before it is edited.
+                val properties = if (root.generated) JpsJavaExtensionService.getInstance().createSourceRootProperties("", true) else null
                 when (root.kind) {
-                    RootKind.SOURCE -> entry.addSourceFolder(url, JavaSourceRootType.SOURCE)
+                    RootKind.SOURCE -> if (properties != null) entry.addSourceFolder(url, JavaSourceRootType.SOURCE, properties)
+                        else entry.addSourceFolder(url, JavaSourceRootType.SOURCE)
                     RootKind.TEST -> entry.addSourceFolder(url, JavaSourceRootType.TEST_SOURCE)
                     RootKind.RESOURCE -> entry.addSourceFolder(url, JavaResourceRootType.RESOURCE)
                     RootKind.TEST_RESOURCE -> entry.addSourceFolder(url, JavaResourceRootType.TEST_RESOURCE)

@@ -79,6 +79,7 @@ An IDE can only complete and resolve what it knows about. When a folder with a `
 | `target/generated/<profile>/<name>/` of a [`[[generate]]` step](../code-generation/) | A source root, so generated code, such as classes from `.proto` files, resolves. The directory is filled by `kargo build`, `kargo check` or `kargo generate`; run one before the IDE needs the code |
 | A Maven dependency | A project library named `Kargo: <group>:<artifact>:<version>`, with its sources jar if `kargo fetch --sources` downloaded it |
 | An npm package of a Wasm target (from `[target.wasm.npm-dependencies]`, or one a Wasm library needs) | A project library named `Kargo: npm <name>@<version>`, with the package's directory in `target/<profile>/node_modules`. It is a runtime dependency of the Wasm module, or a test one for a package only the tests need. A package that isn't installed yet is left out until a build or `kargo fetch` installs it |
+| The [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) generated for `npm-dependencies` | A generated source root of the Wasm module, so calls into npm packages resolve. The directory is filled by `kargo build`, `kargo check` or `kargo fetch`; the import keeps it even before the first build creates it |
 | `[dev-dependencies]` and runtime-only dependencies | The same libraries with *Test* and *Runtime* scope |
 | A path dependency or workspace member | A module dependency on that package's module |
 | `[package] kotlin`, `language-version`, `api-version`, `opt-in`, `compiler-args` and compiler plugins | The module's Kotlin facet |
@@ -179,7 +180,7 @@ Android Studio runs the plugin like IntelliJ IDEA does: `kargo.toml` support, th
 - *Rerun Failed Tests* is not available; rerun a single test from its gutter icon.
 - The IDE analyzes each module for one platform. In a package with several targets, common code (`src/`) is analyzed like the first target, so completion there also offers that platform's APIs. *Tools → Kargo → Check* shows what fails on the other targets.
 - The npm packages of a [path dependency](../workspaces/#path-dependencies) are not described to the IDE: the import doesn't build a path dependency to read the npm packages in its klibs.
-- The [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) generated for `npm-dependencies` and for your own [TypeScript modules](../wasm/#your-own-javascript-and-typescript) are not yet a source root of the Wasm and JS modules, so calls into them show as unresolved in the IDE; they compile and run. `kargo lsp` with Kargo's own Kotlin server, in other editors, reads them.
+- The [Kotlin declarations](../wasm/#kotlin-declarations-for-npm-packages) generated for your own [TypeScript modules](../wasm/#your-own-javascript-and-typescript) are not yet a source root of the Wasm and JS modules, so calls into them show as unresolved in the IDE; they compile and run. `kargo lsp` with Kargo's own Kotlin server, in other editors, reads them.
 - Compiler plugins from [`[frameworks]`](../frameworks/), such as serialization, are handed to the IDE but it may not apply them, so it can report errors that `kargo build` doesn't. *Tools → Kargo → Check* shows the compiler's own.
 - The IDE reads libraries compiled by its own Kotlin version or one newer at most, see the note under [Project import](#project-import).
 

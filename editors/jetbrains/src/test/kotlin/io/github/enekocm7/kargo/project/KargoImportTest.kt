@@ -13,7 +13,6 @@ import com.intellij.openapi.roots.DependencyScope
 import com.intellij.openapi.roots.LibraryOrderEntry
 import com.intellij.openapi.roots.ModuleOrderEntry
 import com.intellij.openapi.roots.ModuleRootManager
-import com.intellij.openapi.roots.libraries.LibraryTablesRegistrar
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
@@ -97,6 +96,18 @@ class KargoImportTest : UsefulTestCase() {
         "compiler-args" to emptyList<String>(),
         "compiler-plugins" to emptyList<Any>(),
         "dependencies" to listOf(linkedMapOf("platform" to "native-$platform", "compile" to dependencies, "runtime" to dependencies, "test" to dependencies)),
+    )
+
+    private fun wasmTarget(pkg: String, npmDeclarations: String?) = linkedMapOf<String, Any?>(
+        "kind" to "wasm",
+        "source-roots" to listOf("$root/$pkg/src"),
+        "test-roots" to listOf("$root/$pkg/tests"),
+        "resource-roots" to emptyList<String>(),
+        "test-resource-roots" to emptyList<String>(),
+        "compiler-args" to emptyList<String>(),
+        "compiler-plugins" to emptyList<Any>(),
+        "npm-declarations" to npmDeclarations,
+        "dependencies" to listOf(linkedMapOf("platform" to "wasm-js", "compile" to emptyList<Any>(), "runtime" to emptyList<Any>(), "test" to emptyList<Any>())),
     )
 
     private fun pkg(name: String, vararg targets: Map<String, Any?>) = linkedMapOf<String, Any?>(
@@ -328,4 +339,26 @@ class KargoImportTest : UsefulTestCase() {
         assertEquals(emptyList<String>(), errors(jvm))
         assertEquals(emptyList<String>(), errors(native))
     }
+
+    // --- Wasm ---------------------------------------------------------------------------------------------------
+
+    fun `test the npm declarations are a generated source root of the Wasm module`() {
+        // The directory doesn't exist yet: the import keeps it anyway, and the IDE picks the files up later.
+        val declarations = File(root, "app/target/debug/generated/npm")
+        write("app/src/Main.kt", "fun main() {}\n")
+        write("app/kargo.toml", "")
+        importMetadata(json { put("packages", listOf(pkg("app", wasmTarget("app", declarations.path)))) })
+        val module = ModuleManager.getInstance(project).findModuleByName("app")!!
+        val roots = ModuleRootManager.getInstance(module)
+        val folder = runReadAction { roots.contentEntries.flatMap { it.sourceFolders.toList() }.single { it.url == VfsUtilCore.pathToUrl(declarations.invariantSeparatorsPath) } }
+        val properties = runReadAction { folder.jpsElement.getProperties(org.jetbrains.jps.model.java.JavaSourceRootType.SOURCE) }
+        assertTrue(properties.isForGeneratedSources)
+        // `target/` is excluded, but the declarations have a content root of their own, so they stay in source content.
+        val index = runReadAction { com.intellij.openapi.roots.ProjectFileIndex.getInstance(project) }
+        val file = write("app/target/debug/generated/npm/express.kt", "package express\n")
+        val virtual = runReadAction { com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)!! }
+        assertTrue(runReadAction { index.isInSourceContent(virtual) })
+        assertTrue(runReadAction { roots.contentEntries.flatMap { it.excludeFolderUrls.toList() }.any { it.endsWith("/target") } })
+    }
 }
+

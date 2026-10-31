@@ -18,12 +18,12 @@ enum class LibraryKind { JVM, NATIVE, WASM_JS, WASM_WASI, NPM }
 
 enum class DependencyScope { COMPILE, RUNTIME, TEST }
 
-class RootSpec(val path: String, val kind: RootKind) {
-    override fun equals(other: Any?) = other is RootSpec && path == other.path && kind == other.kind
+class RootSpec(val path: String, val kind: RootKind, val generated: Boolean = false) {
+    override fun equals(other: Any?) = other is RootSpec && path == other.path && kind == other.kind && generated == other.generated
 
-    override fun hashCode() = 31 * path.hashCode() + kind.hashCode()
+    override fun hashCode() = 31 * (31 * path.hashCode() + kind.hashCode()) + generated.hashCode()
 
-    override fun toString() = "$kind $path"
+    override fun toString() = (if (generated) "generated " else "") + "$kind $path"
 }
 
 /** One content root of a module with the source roots below it. */
@@ -143,6 +143,7 @@ object KargoImportPlanner {
                 target.testRoots.map { RootSpec(norm(it), RootKind.TEST) } +
                 target.resourceRoots.map { RootSpec(norm(it), RootKind.RESOURCE) } +
                 target.testResourceRoots.map { RootSpec(norm(it), RootKind.TEST_RESOURCE) } +
+                npmDeclarations(target) +
                 examples()
             return module(pkg.name, contents(roots), target, dependsOn = emptyList(), target = target.kind)
         }
@@ -168,7 +169,26 @@ object KargoImportPlanner {
             add(target.testRoots, RootKind.TEST, shared.tests)
             add(target.resourceRoots, RootKind.RESOURCE, emptyList())
             add(target.testResourceRoots, RootKind.TEST_RESOURCE, emptyList())
+            // The Kotlin declarations generated for `npm-dependencies` are main code of the Wasm module.
+            // They sit under `target/`, so they are kept even before the first build creates them.
+            for (declarations in npmDeclarations(target)) {
+                if (declarations.path !in contents.flatMap { it.roots }.map { it.path }) {
+                    contents += ContentSpec(declarations.path, listOf(declarations), emptyList())
+                }
+            }
             return module(moduleName(pkg.name, target.kind, targetsOf.getValue(pkg.name)), contents, target, dependsOn = listOf("${pkg.name}.common"), target = target.kind)
+        }
+
+        /**
+         * The Kotlin declarations generated for a Wasm target's `npm-dependencies`, as a generated source
+         * root: kept even before the first build creates the directory, so the IDE picks the files up when
+         * they appear. Never on the common module or the test roots.
+         */
+        private fun npmDeclarations(target: KargoTarget): List<RootSpec> {
+            if (target.kind != "wasm") return emptyList()
+            val dir = target.npmDeclarations?.let(::norm) ?: return emptyList()
+            // Unit tests don't parse `kargo.toml` and can hand any directory; the shape is what matters.
+            return listOf(RootSpec(dir, RootKind.SOURCE, generated = true))
         }
 
         /** `examples/` is compiled against the package's sources, so the IDE sees it as test code. */
