@@ -72,13 +72,13 @@ impl App<'_> {
     /// Writes the program's own jar (without the `Class-Path` of `kargo build`'s) and copies the
     /// dependencies next to it in `lib`, except those that `skip` matches. Returns the file names in
     /// classpath order, the program's first.
-    fn stage_jars(&self, ctx: &BuildContext, lib: &Path, skip: impl Fn(&Path) -> bool) -> Result<Vec<String>> {
+    pub(super) fn stage_jars(&self, ctx: &BuildContext, lib: &Path, skip: impl Fn(&Path) -> bool) -> Result<Vec<String>> {
         std::fs::create_dir_all(lib).with_context(|| format!("failed to create {}", lib.display()))?;
         let pkg = &ctx.ws.manifest().package;
         let deps: Vec<PathBuf> = self.dependency_jars().into_iter().filter(|j| !skip(j)).collect();
         let names = jar_names(&format!("{}-{}.jar", pkg.name, pkg.version), &deps);
         let manifest = JarManifest {
-            main_class: Some(self.main_class.clone()),
+            main_class: Some(self.main_class.clone()).filter(|m| !m.is_empty()),
             class_path: Vec::new(),
             implementation_title: Some(pkg.name.clone()),
             implementation_version: Some(pkg.version.clone()),

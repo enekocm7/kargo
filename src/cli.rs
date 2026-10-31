@@ -259,6 +259,45 @@ impl From<PackageFormatArg> for PackageFormat {
     }
 }
 
+/// `kargo package --archive`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ArchiveArg {
+    Zip,
+    Tar,
+    #[value(name = "tar.gz")]
+    TarGz,
+}
+
+impl From<ArchiveArg> for ops::dist::Archive {
+    fn from(a: ArchiveArg) -> Self {
+        match a {
+            ArchiveArg::Zip => Self::Zip,
+            ArchiveArg::Tar => Self::Tar,
+            ArchiveArg::TarGz => Self::TarGz,
+        }
+    }
+}
+
+/// The `--dist` flags of `kargo package`.
+#[derive(Debug, Clone, clap::Args)]
+struct DistArgs {
+    /// Build an application distribution: an archive with bin/ start scripts and lib/ jars
+    #[arg(long)]
+    dist: bool,
+    /// With --dist: the archive format (default: zip and tar.gz)
+    #[arg(long, value_enum, value_name = "FORMAT", value_delimiter = ',', requires = "dist")]
+    archive: Vec<ArchiveArg>,
+    /// With --dist: leave out the bin/ start scripts
+    #[arg(long, requires = "dist")]
+    no_scripts: bool,
+}
+
+impl DistArgs {
+    fn options(self) -> Option<ops::DistOptions> {
+        self.dist.then(|| ops::DistOptions { archives: self.archive.into_iter().map(Into::into).collect(), scripts: !self.no_scripts })
+    }
+}
+
 /// `kargo install --format`.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum InstallFormatArg {
@@ -1533,6 +1572,9 @@ compile run the steps they need first, so this command is for editors, CI checks
   native-image  package/<name>: a native executable built by GraalVM ([toolchain] graalvm)
   installer     an .msi, .dmg or .deb (see [package.installer] type) built by jpackage
 
+`--dist` writes an application distribution: target/dist/<name>-<version>.zip and .tar.gz with
+bin/ start scripts and lib/ jars, for machines that have Java.
+
 jlink, native-image and installer build for the OS and CPU they run on. Their output goes to
 target/<profile>/jvm/package/.
 
@@ -1567,6 +1609,8 @@ OS by default, with Skiko's native library next to the app so macOS signs and no
         /// With --desktop --format jar: the platforms whose Skiko natives the jar carries (all, or e.g. windows-x64,macos-arm64)
         #[arg(long, value_name = "PLATFORMS", value_delimiter = ',', requires = "desktop")]
         platforms: Vec<String>,
+        #[command(flatten)]
+        dist: DistArgs,
         /// How to print compiler and package reports
         #[arg(long, value_enum, default_value_t, value_name = "FMT")]
         message_format: MessageFormatArg,
@@ -3542,7 +3586,21 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             shell.status("Removed", removed.display());
             Ok(0)
         }
-        Command::Package { release, profile, target, bin, fat, optimize, format, desktop, platforms, message_format, package, jobs } => {
+        Command::Package {
+            release,
+            profile,
+            target,
+            bin,
+            fat,
+            optimize,
+            format,
+            desktop,
+            platforms,
+            dist,
+            message_format,
+            package,
+            jobs,
+        } => {
             set_message_format(message_format);
             let project = load_project(global)?;
             let index = project.select_one(&package.selection(), "`kargo package`")?;
@@ -3557,6 +3615,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 format: format.map(Into::into),
                 desktop,
                 platforms,
+                dist: dist.options(),
             };
             let files = match ops::package(&ctx, &opts) {
                 Ok(files) => files,
@@ -4426,6 +4485,12 @@ mod tests {
         assert!(matches!(cli.command, Command::Test { against_min: true, .. }));
         let cli = Cli::try_parse_from(["kargo", "package", "--fat"]).unwrap();
         assert!(matches!(cli.command, Command::Package { fat: true, bin: None, format: None, desktop: false, .. }));
+        let cli = Cli::try_parse_from(["kargo", "package", "--dist", "--archive", "zip,tar.gz", "--no-scripts"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Package { dist: DistArgs { dist: true, no_scripts: true, ref archive }, .. } if archive.len() == 2
+        ));
+        assert!(Cli::try_parse_from(["kargo", "package", "--no-scripts"]).is_err(), "--no-scripts needs --dist");
         let cli = Cli::try_parse_from(["kargo", "package", "--desktop", "--format", "jar", "--platforms", "all,linux-x64"]).unwrap();
         assert!(matches!(
             cli.command,

@@ -899,6 +899,8 @@ See [JVM shrinking and obfuscation](../../guides/publishing/#jvm-shrinking-and-o
 | `native-image` | `target/<profile>/jvm/package/<name>` (`<name>.exe` on Windows): a native executable built by GraalVM's `native-image` |
 | `installer` | An installer built by `jpackage` into `target/<profile>/jvm/package/`: `.msi` on Windows, `.dmg` on macOS, `.deb` on Linux, or the [`[package.installer]`](../manifest/#packageinstaller) `type` |
 
+`--dist` builds an application distribution instead: an archive with `bin/` start scripts and the jars in `lib/`, for machines that already have Java. It writes `target/dist/<name>-<version>.zip` and `.tar.gz` (`--archive zip`, `tar` or `tar.gz`, comma separated, picks some), prints their paths and leaves the unpacked tree in `target/dist/<name>-<version>/`. See [Distribution archives](../../guides/distributing/#distribution-archives).
+
 `jlink`, `native-image` and `installer` need a main class and build for the OS and CPU Kargo runs on. An installer can also register file associations, and on macOS be signed and notarized. See [Distributing applications](../../guides/distributing/).
 
 A library (a project without a `main` function or `main-class`) gets what you would publish instead: `target/<profile>/package/<name>-<version>.jar` with only its own classes (no Kotlin standard library, no `Class-Path`) and `<name>-<version>-sources.jar` next to it. Pass `--fat` for the fat jar anyway. `kargo publish --dry-run` shows everything a [publication](../../guides/publishing/) holds, POM included.
@@ -914,6 +916,9 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `--bin <name>` | Launch this [`[[bin]]`](../manifest/#bin) instead of the main class; the jar is `<bin>-<version>-all.jar` (JVM) |
 | `--fat` | Build the self-contained `<name>-<version>-all.jar` even for a library (JVM) |
 | `--format <format>` | `jar` (default), `jlink`, `native-image` or `installer` (JVM) |
+| `--dist` | Build an [application distribution](../../guides/distributing/#distribution-archives): `bin/` start scripts and `lib/` jars in a zip and a tar.gz (JVM). Does not combine with `--format`, `--fat`, `--optimize` or `--desktop`; `--bin` limits it to one start script |
+| `--archive <formats>` | With `--dist`: `zip`, `tar` or `tar.gz`, comma separated (default `zip,tar.gz`) |
+| `--no-scripts` | With `--dist`: leave out the start scripts (a distribution of jars, for a library or your own scripts) |
 | `--optimize` | Shrink and obfuscate the JVM jar with R8 into `-min.jar`, next to the `-all.jar`; also enabled automatically with `--release` |
 | `--message-format json` | Print compiler diagnostics, optimization reports and package paths as JSON lines |
 | `--desktop` | Package the [Compose Desktop](../../guides/compose/#distributing) application: an installer for this OS unless `--format` says otherwise, with the JDK modules, options and Skiko native library Compose needs. Needs `[frameworks] compose` |

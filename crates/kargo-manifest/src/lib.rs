@@ -1435,11 +1435,12 @@ impl fmt::Display for AndroidSdkRequest {
     }
 }
 
-/// `[package.jlink]`, `[package.optimize]`, `[package.native-image]` and `[package.installer]`: how `kargo package
-/// --format` builds runtime images, native executables and installers.
+/// `[package.jlink]`, `[package.dist]`, `[package.optimize]`, `[package.native-image]` and `[package.installer]`: how
+/// `kargo package` builds runtime images, distributions, native executables and installers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackagingSettings {
     pub jlink: JlinkSettings,
+    pub dist: DistSettings,
     pub optimize: OptimizeSettings,
     pub native_image: NativeImageSettings,
     pub installer: InstallerSettings,
@@ -1462,6 +1463,13 @@ pub struct ShadeSettings {
     pub merge_services: bool,
     /// Also rewrite string constants that name a relocated class (`"com.google.common.Foo"`).
     pub relocate_strings: bool,
+}
+
+/// `[package.dist]`: what `kargo package --dist` adds to the archive besides `bin/` and `lib/`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DistSettings {
+    /// Files and directories of the project, relative to its root, copied into the archive at the same path.
+    pub include: Vec<PathBuf>,
 }
 
 /// `[package.optimize]`: R8's JVM class-file shrinking and obfuscation settings.

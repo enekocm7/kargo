@@ -57,6 +57,19 @@ jdeps = true
 | `modules` | `[]` | JDK modules to add to the ones `jdeps` finds, such as modules the program only loads through reflection or a service loader |
 | `jdeps` | `true` | Ask `jdeps` which modules the program and its dependencies use. `false` puts only `modules` in the runtime, so it then needs at least one |
 
+### `[package.dist]`
+
+What `kargo package --dist` adds to the distribution archive. See [Distribution archives](../../guides/distributing/#distribution-archives).
+
+```toml
+[package.dist]
+include = ["conf", "docs/CHANGELOG.md"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `include` | `[]` | Files and directories of the project, copied into the archive at the same relative path. They must be inside the project and exist. The README, LICENSE and NOTICE files of the project root are always included |
+
 ### `[package.shade]`
 
 Relocation, resource merging and minimizing of the jars `kargo package` bundles: the fat jar and, for a library, the library jar. See [Shading](../../guides/distributing/#shading).

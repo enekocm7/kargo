@@ -3653,6 +3653,55 @@ fn jvm_packages_runtime_images_and_app_images() {
 }
 
 #[test]
+fn jvm_packages_an_application_distribution() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write(
+        "app/src/Main.kt",
+        r#"fun main(args: Array<String>) { println(System.getProperty("greeting") + " " + args.joinToString("|")) }"#,
+    );
+    t.write("app/conf/app.conf", "key = value\n");
+    t.write("app/LICENSE", "MIT\n");
+    let manifest = std::fs::read_to_string(t.dir.path().join("app/kargo.toml")).unwrap();
+    let extra = "[target.jvm]\njvm-args = [\"-Dgreeting=Hi there\"]\n\n[package.dist]\ninclude = [\"conf\"]\n";
+    t.write("app/kargo.toml", &format!("{manifest}\n{extra}"));
+
+    let out = t.kargo("app").args(["package", "-q", "--dist"]).assert().success().get_output().stdout.clone();
+    let files: Vec<PathBuf> = String::from_utf8(out).unwrap().lines().map(PathBuf::from).collect();
+    let names: Vec<_> = files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["app-0.1.0.zip", "app-0.1.0.tar.gz"]);
+
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&files[0]).unwrap()).unwrap();
+    let entries: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).collect();
+    for expected in
+        ["app-0.1.0/bin/app", "app-0.1.0/bin/app.bat", "app-0.1.0/lib/app-0.1.0.jar", "app-0.1.0/conf/app.conf", "app-0.1.0/LICENSE"]
+    {
+        assert!(entries.iter().any(|e| e == expected), "{expected} in {entries:?}");
+    }
+    let mut script = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("app-0.1.0/bin/app").unwrap(), &mut script).unwrap();
+    assert!(script.contains("JAVA_HOME") && script.contains("APP_OPTS"), "{script}");
+
+    // The staged directory is the same tree; its start script runs the program with the JVM args and APP_OPTS.
+    let home = t.dir.path().join("app/target/dist/app-0.1.0");
+    let launcher = home.join("bin").join(if cfg!(windows) { "app.bat" } else { "app" });
+    let out = StdCommand::new(&launcher).args(["a b", "c"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hi there a b|c");
+    let out = StdCommand::new(&launcher).env("APP_OPTS", "-Dgreeting=Hello").arg("x").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello x");
+    let out = run_without_java(&launcher, &[]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("JAVA_HOME"));
+
+    // One archive format, and no start scripts.
+    let out =
+        t.kargo("app").args(["package", "-q", "--dist", "--archive", "tar", "--no-scripts"]).assert().success().get_output().stdout.clone();
+    assert!(String::from_utf8(out).unwrap().trim().ends_with("app-0.1.0.tar"));
+    assert!(!home.join("bin").exists());
+}
+
+#[test]
 fn compose_desktop_resources_and_packages() {
     require_e2e!();
     let t = E2e::new();

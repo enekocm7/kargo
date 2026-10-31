@@ -5577,6 +5577,13 @@ fn custom_profiles_are_chosen_by_name() {
 }
 
 #[test]
+fn package_dist_include_must_stay_inside_the_project() {
+    let p = Project::new();
+    p.file("kargo.toml", &format!("{}\n[package.dist]\ninclude = [\"../secrets\"]\n", manifest("app", "[target.jvm]\n")));
+    p.kargo().args(["package", "--dist"]).assert().failure().stderr(predicate::str::contains("must be paths inside the project"));
+}
+
+#[test]
 fn package_formats_check_their_flags_first() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.wasm]\n"));
@@ -5592,6 +5599,20 @@ fn package_formats_check_their_flags_first() {
         .failure()
         .stderr(predicate::str::contains("`--format native-image` packages a JVM application and needs the jvm target, not wasm"));
     p.kargo().args(["package", "--format", "zip"]).assert().failure().stderr(predicate::str::contains("invalid value 'zip'"));
+    p.kargo()
+        .args(["package", "--dist", "--format", "jlink"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--dist` writes an application distribution and does not combine with `--format jlink`"));
+    p.kargo().args(["package", "--dist", "--fat"]).assert().failure().stderr(predicate::str::contains("does not combine with `--fat`"));
+    p.kargo()
+        .args(["package", "--dist", "--target", "wasm"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--dist` packages a JVM application and needs the jvm target, not wasm"));
+    p.kargo().args(["package", "--archive", "zip"]).assert().failure().stderr(predicate::str::contains("--dist"));
+    p.kargo().args(["package", "--dist", "--archive", "rar"]).assert().failure().stderr(predicate::str::contains("invalid value 'rar'"));
     p.kargo()
         .args(["run", "--native-agent", "--target", "wasm"])
         .assert()
