@@ -1427,6 +1427,52 @@ pub struct AndroidConfig {
     /// Product flavors by name.
     #[serde(default)]
     pub flavors: BTreeMap<String, AndroidFlavor>,
+    /// More Gradle plugins for the generated Android project, in the order of `kargo.toml`.
+    #[serde(default, deserialize_with = "ordered_plugins")]
+    pub plugins: Vec<(String, AndroidGradlePlugin)>,
+}
+
+/// `[target.android.plugins.<name>]`: a Gradle plugin Kargo applies to the generated Android project.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AndroidGradlePlugin {
+    /// The plugin id, such as `com.google.gms.google-services`.
+    pub id: String,
+    /// The plugin's version, resolved from the plugin repositories (default: none, for a plugin already on the
+    /// build classpath; the Kotlin version for `org.jetbrains.kotlin.*` plugins).
+    pub version: Option<String>,
+    /// Apply the plugin (default: true). `false` only puts it on the classpath of the build.
+    #[serde(default = "default_true")]
+    pub apply: bool,
+    /// Files the plugin reads, relative to `android/`, copied into the Gradle module (`google-services.json` is
+    /// copied for any plugin whose id starts with `com.google.gms`).
+    #[serde(default)]
+    pub files: Vec<PathBuf>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Reads the `[target.android.plugins]` table as a list that keeps the order of the file.
+fn ordered_plugins<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<(String, AndroidGradlePlugin)>, D::Error> {
+    struct Plugins;
+    impl<'de> serde::de::Visitor<'de> for Plugins {
+        type Value = Vec<(String, AndroidGradlePlugin)>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a table of Gradle plugins")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(entry) = map.next_entry()? {
+                out.push(entry);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_map(Plugins)
 }
 
 impl AndroidConfig {
@@ -1763,6 +1809,7 @@ fn validate_android(config: &AndroidConfig) -> Result<()> {
     validate_android_resources(config)?;
     validate_android_ndk(config)?;
     validate_android_lint(&config.lint)?;
+    validate_android_plugins(&config.plugins)?;
     if config.build_tools.as_deref().is_some_and(|v| !is_dotted_version(v)) {
         bail!("[target.android] `build-tools` must be a version such as \"36.0.0\"");
     }
@@ -1860,6 +1907,34 @@ fn validate_android_ndk(config: &AndroidConfig) -> Result<()> {
     for (key, version) in [("version", &ndk.version), ("cmake-version", &ndk.cmake_version)] {
         if version.as_deref().is_some_and(|v| !is_dotted_version(v)) {
             bail!("[target.android.ndk] `{key}` must be a version such as \"27.2.12479018\"");
+        }
+    }
+    Ok(())
+}
+
+/// Gradle plugins Kargo applies itself, which `[target.android.plugins]` must not repeat.
+const KARGO_ANDROID_PLUGINS: [&str; 3] = ["com.android.application", "com.android.library", "org.jetbrains.kotlin.android"];
+
+fn validate_android_plugins(plugins: &[(String, AndroidGradlePlugin)]) -> Result<()> {
+    for (i, (name, plugin)) in plugins.iter().enumerate() {
+        let section = format!("[target.android.plugins.{name}]");
+        let id = plugin.id.as_str();
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            bail!("{section} `id` must be a Gradle plugin id such as \"com.google.gms.google-services\"");
+        }
+        if KARGO_ANDROID_PLUGINS.contains(&id) {
+            bail!("{section} `{id}` is applied by Kargo itself; set `agp-version` or `[kotlin] version` to change its version");
+        }
+        if plugin.version.as_deref().is_some_and(|v| v.trim().is_empty() || v.contains(['"', '\\', '\n'])) {
+            bail!("{section} `version` must be a plugin version such as \"4.4.2\"");
+        }
+        if plugins[..i].iter().any(|(_, other)| other.id == plugin.id) {
+            bail!("{section} the plugin `{id}` is listed twice");
+        }
+        for file in &plugin.files {
+            if file.is_absolute() || file.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                bail!("{section} `files` are relative to `android/`, such as \"google-services.json\"; `{}` is not", file.display());
+            }
         }
     }
     Ok(())

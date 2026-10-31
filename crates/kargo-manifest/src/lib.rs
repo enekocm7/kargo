@@ -36,8 +36,8 @@ use kargo_maven::repo::Credentials;
 use kargo_maven::{CoordSpec, ModuleId, Repository, VersionReq};
 
 pub use raw::{
-    AndroidConfig, AndroidFlavor, AndroidLint, AndroidNdk, AndroidSigning, BenchmarkConfig, BuildConfigValue, COMPOSE_FEATURE_FLAGS,
-    ComposeConfig, KtorConfig, LombokConfig, SerializationConfig, SpringBootConfig,
+    AndroidConfig, AndroidFlavor, AndroidGradlePlugin, AndroidLint, AndroidNdk, AndroidSigning, BenchmarkConfig, BuildConfigValue,
+    COMPOSE_FEATURE_FLAGS, ComposeConfig, KtorConfig, LombokConfig, SerializationConfig, SpringBootConfig,
 };
 
 pub const MANIFEST_NAME: &str = "kargo.toml";

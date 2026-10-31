@@ -465,6 +465,22 @@
                 "ndk-build": { "description": "The Android.mk that builds the native code with ndk-build, relative to the project root. Not with `cmake`.", "type": "string" }
               }
             },
+            "plugins": {
+              "description": "More Gradle plugins for the generated Android project, applied in this order after Kargo's own.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id"],
+                "properties": {
+                  "id": { "description": "The plugin id.", "type": "string", "examples": ["com.google.gms.google-services"] },
+                  "version": { "description": "The plugin version, resolved from the plugin repositories (or their mirrors). Without one, the plugin must already be on the build classpath; org.jetbrains.kotlin.* plugins default to the Kotlin version.", "type": "string", "examples": ["4.4.2"] },
+                  "apply": { "description": "Apply the plugin. false only puts it on the classpath of the build.", "type": "boolean", "default": true },
+                  "files": { "description": "Files the plugin reads, relative to android/, copied into the Gradle module. google-services.json is copied for com.google.gms.* plugins without listing it.", "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "examples": [{ "google-services": { "id": "com.google.gms.google-services", "version": "4.4.2" } }]
+            },
             "lint": {
               "description": "Android lint, run by `kargo lint --android` and `kargo android lint`.",
               "type": "object",
