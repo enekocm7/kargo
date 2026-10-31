@@ -43,9 +43,27 @@ impl LocalTarget<'_> {
 /// `scopes` (plus, with `dev`, the ones its dev-dependencies reach) and returns their artifacts,
 /// nearest first. Each package is built once per invocation.
 pub fn artifacts(ctx: &BuildContext, target: LocalTarget, scopes: &[Scope], dev: bool) -> Result<Vec<PathBuf>> {
+    artifacts_for_suite(ctx, target, scopes, dev, None)
+}
+
+/// Like [`artifacts`], for the test suite `suite`: its own `path` dependencies are built too.
+pub fn artifacts_for_suite(
+    ctx: &BuildContext,
+    target: LocalTarget,
+    scopes: &[Scope],
+    dev: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Vec<PathBuf>> {
     let mut deps = ctx.local_dependencies(target.kind(), false)?;
     if dev {
         deps.extend(ctx.local_dependencies(target.kind(), true)?);
+    }
+    if let Some(suite) = suite {
+        for local in ctx.local_dependencies_for_suite(target.kind(), Some(suite))? {
+            if !deps.iter().any(|d| d.package == local.package) {
+                deps.push(local);
+            }
+        }
     }
     let mut out = Vec::new();
     for dep in deps.iter().filter(|d| scopes.contains(&d.scope)) {

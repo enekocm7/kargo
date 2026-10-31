@@ -734,6 +734,27 @@
         "timeout": { "description": "How long the whole test run may take, such as \"30s\", \"5m\" or \"1h\". The run is stopped when it passes.", "type": "string" },
         "test-timeout": { "description": "How long one JVM test may take, such as \"30s\" or \"2m\" (JUnit Jupiter's default timeout).", "type": "string" },
         "jvm-args": { "description": "JVM arguments for the test process, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } },
+        "suites": {
+          "description": "Extra test suites, each with its own sources and settings, such as integration tests in `integration-tests/`. Run with `kargo test --suite <name>` (`--suite all` runs every suite).",
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "sources": { "description": "Test sources, relative to the package. Default: `<name>-tests/` (such as `integration-tests/`).", "type": "string", "examples": ["integration-tests"] },
+              "resources": { "description": "Test resources on the JVM classpath, relative to the package. Default: `<name>-resources/`.", "type": "string", "examples": ["integration-resources"] },
+              "jvm-args": { "description": "JVM arguments for the suite's test process, after [test] jvm-args.", "type": "array", "items": { "type": "string" } },
+              "cwd": { "description": "Working directory of the suite's tests, relative to the package. Default: the package root.", "type": "string" },
+              "timeout": { "description": "How long the suite's run may take, such as \"30s\" or \"5m\". Default: [test] timeout.", "type": "string" },
+              "test-timeout": { "description": "How long one JVM test of the suite may take. Default: [test] test-timeout.", "type": "string" },
+              "include-tags": { "description": "Only run JVM tests with one of these JUnit tags.", "type": "array", "items": { "type": "string" } },
+              "exclude-tags": { "description": "Skip JVM tests with one of these JUnit tags.", "type": "array", "items": { "type": "string" } },
+              "env": { "description": "Extra environment variables of the suite's tests, on top of [env].", "type": "object", "additionalProperties": { "type": "string" } },
+              "dependencies": { "$ref": "#/definitions/dependencies", "description": "Maven dependencies only the suite's tests compile and run against." }
+            }
+          }
+        },
         "coverage": {
           "description": "Code coverage of `kargo test --coverage` (JVM, JaCoCo).",
           "type": "object",

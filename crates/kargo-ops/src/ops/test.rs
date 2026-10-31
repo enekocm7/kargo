@@ -12,9 +12,8 @@ use anstyle::AnsiColor;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, for_platform, hook_env, js_libraries, js_work_dir, jvm_classpaths,
-    jvm_javac_args, jvm_processor_path, native_cinterop, native_libraries, native_platforms, prepare_js, prepare_wasm, run_jvm_ksp,
-    sources, wasm_libraries,
+    BuildOptions, JvmKspUnit, announce, build_jvm, compiling, finished, for_platform, hook_env, js_work_dir, jvm_classpaths,
+    jvm_javac_args, jvm_processor_path, native_cinterop, native_platforms, prepare_js, prepare_wasm, run_jvm_ksp, sources,
 };
 use super::context::BuildContext;
 use crate::builtins::{JUNIT_MIN_JDK, JUNIT_VERSION};
@@ -74,6 +73,237 @@ pub struct TestOptions {
     pub fail_under: Option<f64>,
     /// The device, emulator and `--stop-emulator` of the instrumented tests.
     pub android: crate::android_device::AndroidRun,
+    /// Test suites to run (`--suite`): `unit` (the default), a `[test.suites.<name>]`
+    /// suite, or `all`. Empty runs the default suite.
+    pub suites: Vec<String>,
+}
+
+/// One test suite to run: the default `unit` suite (`None`) or a declared suite.
+#[derive(Debug, Clone)]
+struct SuiteSelection {
+    /// `unit` for the default suite, else the suite name.
+    name: String,
+    /// The declared suite, if any.
+    suite: Option<kargo_manifest::TestSuite>,
+}
+
+impl SuiteSelection {
+    fn is_unit(&self) -> bool {
+        self.suite.is_none()
+    }
+}
+
+/// The suites `opts` runs for this package, in order: the default `unit` suite and each
+/// declared suite `--suite` names, with `--suite all` expanding to all of them.
+/// Suites the package does not declare are left out for the caller to skip.
+fn resolve_suites_for_package(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<SuiteSelection>> {
+    let manifest = ctx.ws.manifest();
+    if opts.suites.is_empty() {
+        return Ok(vec![SuiteSelection { name: kargo_manifest::TestSettings::UNIT.to_owned(), suite: None }]);
+    }
+    let mut out: Vec<SuiteSelection> = Vec::new();
+    for requested in &opts.suites {
+        if requested == kargo_manifest::TestSettings::ALL {
+            let unit = SuiteSelection { name: kargo_manifest::TestSettings::UNIT.to_owned(), suite: None };
+            if !out.iter().any(|s| s.is_unit()) {
+                out.push(unit);
+            }
+            for name in manifest.test.suites.keys() {
+                if !out.iter().any(|s| &s.name == name) {
+                    out.push(SuiteSelection { name: name.clone(), suite: manifest.test.suite(name).cloned() });
+                }
+            }
+            continue;
+        }
+        if requested == kargo_manifest::TestSettings::UNIT {
+            if !out.iter().any(|s| s.is_unit()) {
+                out.push(SuiteSelection { name: requested.clone(), suite: None });
+            }
+            continue;
+        }
+        match manifest.test.suite(requested) {
+            Some(suite) => {
+                if !out.iter().any(|s| &s.name == requested) {
+                    out.push(SuiteSelection { name: requested.clone(), suite: Some(suite.clone()) });
+                }
+            }
+            None => {
+                // Left out: the caller notes the package has no such suite and skips it.
+                // Unknown names are reported by `validate_suites` before any package runs.
+                continue;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Fails when `--suite` names no suite of the selected packages: a typo that would otherwise
+/// run nothing and pass. Workspaces may still have members without the suite; those are skipped.
+pub fn validate_suites(project: &crate::workspace::Project, selected: &[usize], suites: &[String]) -> Result<()> {
+    use kargo_manifest::TestSettings as TS;
+    for requested in suites {
+        if requested == TS::UNIT || requested == TS::ALL {
+            continue;
+        }
+        let declared = selected.iter().any(|&i| project.package(i).manifest().test.suite(requested).is_some());
+        if !declared {
+            let mut all: Vec<String> = selected.iter().flat_map(|&i| project.package(i).manifest().test.suites.keys().cloned()).collect();
+            all.sort();
+            all.dedup();
+            let known = if all.is_empty() { "none (only the default `unit` suite)".to_owned() } else { all.join(", ") };
+            let mut known_list = vec![TS::UNIT.to_owned(), TS::ALL.to_owned()];
+            known_list.extend(all);
+            return Err(kargo_util::help::unknown(
+                format!(
+                    "no test suite `{requested}` in the selected packages (declared suites: {known}); suites are declared as `[test.suites.<name>]`"
+                ),
+                requested,
+                &known_list,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `kargo.lock` key of a test resolution for `suite`: `jvm/test` for the default
+/// suite, `jvm/test-<name>` for a declared one. `base` is the unit key (`jvm/test`,
+/// `wasm/test`, `js/test` or `native-<konan>/test`).
+fn suite_test_key(base: &str, suite: Option<&kargo_manifest::TestSuite>) -> String {
+    match suite {
+        None => base.to_owned(),
+        Some(suite) => format!("{base}-{}", suite.name),
+    }
+}
+
+/// Clears and returns the test-reports directory of `target` and `suite`:
+/// `test-reports` for the default suite, `test-reports-<name>` for a declared one.
+fn reports_dir_for_suite(ctx: &BuildContext, target: TargetKind, suite: Option<&kargo_manifest::TestSuite>) -> Result<PathBuf> {
+    let name = match suite {
+        None => "test-reports".to_owned(),
+        Some(suite) => format!("test-reports-{}", suite.name),
+    };
+    let dir = ctx.ws.output_dir(&ctx.profile, target).join(name);
+    kargo_util::fs::remove_dir_all_if_exists(&dir)?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The directory of the compiled JVM test classes of `suite`:
+/// `test-classes` for the default suite, `test-classes-<name>` for a declared one.
+fn test_classes_dir(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+    let name = match suite {
+        None => "test-classes".to_owned(),
+        Some(suite) => format!("test-classes-{}", suite.name),
+    };
+    ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(name)
+}
+
+/// The file that records the JVM test classes that failed in the last run of `suite`:
+/// `test-failures` for the default suite, `test-failures-<name>` for a declared one.
+fn failures_file_for_suite(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+    let name = match suite {
+        None => "test-failures".to_owned(),
+        Some(suite) => format!("test-failures-{}", suite.name),
+    };
+    ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(name)
+}
+
+/// The output directory of the Wasm test module of `suite`:
+/// `test` for the default suite, `test-<name>` for a declared one.
+fn wasm_test_dir(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+    let name = match suite {
+        None => "test".to_owned(),
+        Some(suite) => format!("test-{}", suite.name),
+    };
+    ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join(name)
+}
+
+/// The output directory of the Kotlin/JS test module of `suite`.
+fn js_test_dir(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+    let name = match suite {
+        None => "test".to_owned(),
+        Some(suite) => format!("test-{}", suite.name),
+    };
+    ctx.ws.output_dir(&ctx.profile, TargetKind::Js).join(name)
+}
+
+/// The output directory of the Native test executable of `suite` for `konan_target`.
+fn native_test_dir(ctx: &BuildContext, konan_target: &str, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+    let name = match suite {
+        None => "test".to_owned(),
+        Some(suite) => format!("test-{}", suite.name),
+    };
+    ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target).join(name)
+}
+
+/// The JVM arguments of `suite`: `[test] jvm-args`, then the suite's own.
+fn suite_jvm_args(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> Vec<String> {
+    let mut args = ctx.ws.manifest().test.jvm_args.clone();
+    if let Some(suite) = suite {
+        args.extend(suite.jvm_args.iter().cloned());
+    }
+    args
+}
+
+/// The JUnit tags of `suite`: the command line's, then the suite's own.
+fn suite_include_tags(opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Vec<String> {
+    let mut tags = opts.include_tags.clone();
+    if let Some(suite) = suite {
+        tags.extend(suite.include_tags.iter().cloned());
+    }
+    tags
+}
+
+/// The excluded JUnit tags of `suite`: the command line's, then the suite's own.
+fn suite_exclude_tags(opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Vec<String> {
+    let mut tags = opts.exclude_tags.clone();
+    if let Some(suite) = suite {
+        tags.extend(suite.exclude_tags.iter().cloned());
+    }
+    tags
+}
+
+/// The whole-run timeout of `suite`: the suite's own, else `[test] timeout`.
+fn suite_timeout(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> Option<Duration> {
+    suite.and_then(|s| s.timeout).or(ctx.ws.manifest().test.timeout)
+}
+
+/// The per-test timeout of `suite`: the suite's own, else `[test] test-timeout`.
+fn suite_test_timeout(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> Option<Duration> {
+    suite.and_then(|s| s.test_timeout).or(ctx.ws.manifest().test.test_timeout)
+}
+
+/// The working directory the tests of `suite` run in: the suite's `cwd`, else the package root.
+fn suite_cwd(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+    match suite.and_then(|s| s.cwd.as_ref()) {
+        Some(cwd) => ctx.ws.root().join(cwd),
+        None => ctx.ws.root().to_path_buf(),
+    }
+}
+
+/// The environment the tests of `suite` run in: the project environment, with the suite's
+/// own variables on top.
+fn suite_project_env(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Result<crate::env::ProjectEnv> {
+    let mut env = ctx.project_env(&opts.env)?;
+    if let Some(suite) = suite {
+        for (name, value) in &suite.env {
+            env.vars.insert(
+                name.clone(),
+                crate::env::Var { value: value.clone(), source: crate::env::Source::Manifest(format!("[test.suites.{}.env]", suite.name)) },
+            );
+            env.missing.retain(|(missing, _)| missing != name);
+        }
+    }
+    Ok(env)
+}
+
+/// The label of a test run for `target` and `suite`: `JVM tests` for the default suite,
+/// `JVM tests (integration)` for a declared one.
+fn suite_label(target: TargetKind, suite: Option<&kargo_manifest::TestSuite>) -> String {
+    match suite {
+        None => format!("{target} tests"),
+        Some(suite) => format!("{target} tests ({})", suite.name),
+    }
 }
 
 /// How `kargo test --list` prints the tests.
@@ -125,73 +355,145 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
             anyhow::bail!("`--coverage` measures the JVM tests with JaCoCo; select the JVM target with `-t jvm`");
         }
     }
+    let suites = resolve_suites_for_package(ctx, opts)?;
+    if suites.is_empty() {
+        let requested = opts.suites.join(", ");
+        ctx.shell().note(format!("package `{}` has no test suite `{requested}`; skipping it (declared suites: {})", ctx.ws.name(), {
+            let names: Vec<&str> = ctx.ws.manifest().test.suites.keys().map(String::as_str).collect();
+            if names.is_empty() { "none (only the default `unit` suite)".to_owned() } else { names.join(", ") }
+        }));
+        return Ok(true);
+    }
+    // Warn about suite directories that exist but are not declared.
+    warnings::emit(ctx.shell(), ctx.project, ctx.ws, warnings::undeclared_suites(ctx.ws));
     note_jvm_only_options(ctx, &targets, opts);
     // Fails before anything compiles when a required variable is not set, unless only Android or
     // browser tests run, which get no environment.
     if targets.iter().any(|&target| ctx.program_env_applies(target)) {
         let env = ctx.project_env(&opts.env)?;
         warnings::emit(ctx.shell(), ctx.project, ctx.ws, env.tracked_secret_warnings(ctx.ws.root()));
+        // A suite's own variables may add the missing ones; each suite checks again when it runs.
+        for selection in &suites {
+            if let Some(suite) = selection.suite.as_ref()
+                && !suite.env.is_empty()
+            {
+                let _ = suite_project_env(ctx, opts, Some(suite))?;
+            }
+        }
     }
     let env = hook_env(ctx, &opts.env)?;
     crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreTest, &env)?;
     // A project may test code that lives elsewhere, so missing main sources are not worth a warning here.
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, warnings::ignored_files(ctx.ws));
 
-    // Compile every target's tests at the same time, then run them one target at a
-    // time so their output doesn't interleave.
-    let prepared = super::parallel_targets(&targets, |target| match target {
-        TargetKind::Jvm => test_jvm(ctx, opts),
-        TargetKind::Wasm => test_wasm(ctx, opts),
-        TargetKind::Js => test_js(ctx, opts),
-        TargetKind::Native => test_native(ctx, opts),
-        TargetKind::Android => Ok(TestRun::Android),
-    });
     let fail_fast = !opts.no_fail_fast && ctx.ws.manifest().test.fail_fast;
-    // The whole run's time limit counts from when the tests start running, not from compiling them.
-    let deadline = ctx.ws.manifest().test.timeout.map(|limit| Instant::now() + limit);
-    let mut outcomes = Vec::new();
-    // In fail-fast mode an error ends the run once the skipped targets are listed.
+    // (suite, target, outcome), in the order they ran.
+    let mut outcomes: Vec<(String, TargetKind, TargetOutcome)> = Vec::new();
     let mut fatal = None;
-    for (&target, run) in targets.iter().zip(prepared) {
-        if outcomes.iter().any(|(_, o)| *o != TargetOutcome::Passed) && fail_fast {
-            outcomes.push((target, TargetOutcome::Skipped));
-            continue;
-        }
-        let passed = run.and_then(|run| match run {
-            TestRun::Done(passed) => Ok(passed),
-            TestRun::Junit(run) => run_junit(ctx, run, opts, deadline),
-            TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts, deadline),
-            TestRun::Browser(run) => run_in_browser(ctx, run, target, opts, deadline),
-            TestRun::Android => test_android(ctx, opts, deadline),
+    for selection in &suites {
+        let suite = selection.suite.as_ref();
+        let label = if selection.is_unit() { "unit".to_owned() } else { selection.name.clone() };
+        // Compile every target's tests at the same time, then run them one target at a
+        // time so their output doesn't interleave.
+        let prepared = super::parallel_targets(&targets, |target| match target {
+            TargetKind::Jvm => test_jvm_for_suite(ctx, opts, suite),
+            TargetKind::Wasm => test_wasm_for_suite(ctx, opts, suite),
+            TargetKind::Js => test_js_for_suite(ctx, opts, suite),
+            TargetKind::Native => test_native_for_suite(ctx, opts, suite),
+            TargetKind::Android => {
+                if suite.is_some() {
+                    ctx.shell().note(format!(
+                        "skipping the android target for the `{}` suite: test suites are not supported for Android yet; its tests run in the `unit` suite",
+                        selection.name
+                    ));
+                    Ok(TestRun::Done(true))
+                } else {
+                    Ok(TestRun::Android)
+                }
+            }
         });
-        let outcome = match passed {
-            Ok(true) => TargetOutcome::Passed,
-            Ok(false) => TargetOutcome::Failed,
-            Err(e) if fail_fast || targets.len() == 1 => {
-                fatal = Some(e);
-                TargetOutcome::Error
+        // The whole suite's time limit counts from when its tests start running, not from compiling them.
+        let deadline = suite_timeout(ctx, suite).map(|limit| Instant::now() + limit);
+        for (&target, run) in targets.iter().zip(prepared) {
+            if outcomes.iter().any(|(_, _, o)| *o != TargetOutcome::Passed) && fail_fast {
+                outcomes.push((label.clone(), target, TargetOutcome::Skipped));
+                continue;
             }
-            Err(e) => {
-                ctx.shell().error(format!("could not test the {target} target: {e:#}"));
-                TargetOutcome::Error
+            let passed = run.and_then(|run| match run {
+                TestRun::Done(passed) => Ok(passed),
+                TestRun::Junit(run) => run_junit_for_suite(ctx, run, opts, suite, deadline),
+                TestRun::Reported(cmd, run_label) => run_reported_for_suite(ctx, cmd, run_label, target, opts, suite, deadline),
+                TestRun::Browser(run) => run_in_browser_for_suite(ctx, run, target, opts, suite, deadline),
+                TestRun::Android => test_android(ctx, opts, deadline),
+            });
+            let outcome = match passed {
+                Ok(true) => TargetOutcome::Passed,
+                Ok(false) => TargetOutcome::Failed,
+                Err(e) if fail_fast || (targets.len() == 1 && suites.len() == 1) => {
+                    fatal = Some(e);
+                    TargetOutcome::Error
+                }
+                Err(e) => {
+                    let where_ = if selection.is_unit() {
+                        format!("the {target} target")
+                    } else {
+                        format!("the {target} target of the `{}` suite", selection.name)
+                    };
+                    ctx.shell().error(format!("could not test {where_}: {e:#}"));
+                    TargetOutcome::Error
+                }
+            };
+            outcomes.push((label.clone(), target, outcome));
+        }
+        if fatal.is_some() {
+            // Still list the skipped suites/targets below.
+            let remaining: Vec<String> = suites
+                .iter()
+                .skip_while(|s| s.name != selection.name)
+                .skip(1)
+                .flat_map(|s| targets.iter().map(move |t| (s.name.clone(), *t)))
+                .chain(targets.iter().skip_while(|_| false).filter(|_| false).map(|t| (label.clone(), *t)))
+                .map(|(s, _)| s)
+                .collect();
+            let _ = remaining;
+            // Mark the rest as skipped.
+            for later in suites.iter().skip_while(|s| s.name != selection.name).skip(1) {
+                for &target in &targets {
+                    outcomes.push((later.name.clone(), target, TargetOutcome::Skipped));
+                }
             }
-        };
-        outcomes.push((target, outcome));
+            break;
+        }
     }
-    let skipped: Vec<&str> = outcomes.iter().filter(|(_, o)| *o == TargetOutcome::Skipped).map(|(t, _)| t.as_str()).collect();
+    let unit_only = suites.len() == 1 && suites[0].is_unit();
+    let skipped: Vec<String> = outcomes
+        .iter()
+        .filter(|(_, _, o)| *o == TargetOutcome::Skipped)
+        .map(|(suite, target, _)| if suite == "unit" { target.as_str().to_owned() } else { format!("{target} ({suite})") })
+        .collect();
     if !skipped.is_empty() {
-        ctx.shell().note(format!(
-            "skipped the {} target{} after a failure; pass `--no-fail-fast` to test every target",
-            skipped.join(", "),
-            if skipped.len() == 1 { "" } else { "s" }
-        ));
+        if unit_only {
+            ctx.shell().note(format!(
+                "skipped the {} target{} after a failure; pass `--no-fail-fast` to test every target",
+                skipped.join(", "),
+                if skipped.len() == 1 { "" } else { "s" }
+            ));
+        } else {
+            ctx.shell()
+                .note(format!("skipped {} after a failure; pass `--no-fail-fast` to test every target and suite", skipped.join(", ")));
+        }
     } else if outcomes.len() > 1 && !fail_fast {
-        print_target_table(&outcomes, human_out())?;
+        if unit_only {
+            let target_outcomes: Vec<(TargetKind, TargetOutcome)> = outcomes.iter().map(|(_, t, o)| (*t, *o)).collect();
+            print_target_table(&target_outcomes, human_out())?;
+        } else {
+            print_suite_table(&outcomes, human_out())?;
+        }
     }
     if let Some(e) = fatal {
         return Err(e);
     }
-    let ok = outcomes.iter().all(|(_, o)| *o == TargetOutcome::Passed);
+    let ok = outcomes.iter().all(|(_, _, o)| *o == TargetOutcome::Passed);
     let mut env = env;
     env.push(("KARGO_TEST_RESULT".to_owned(), if ok { "success" } else { "failure" }.to_owned()));
     crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostTest, &env)?;
@@ -223,10 +525,28 @@ pub(crate) fn emit_report_event(package: &str, target: TargetKind, event: TestEv
 
 /// With `--message-format json`, prints the `test-summary` message that ends a target's results.
 pub(crate) fn emit_summary(ctx: &BuildContext, target: TargetKind, passed: usize, failed: usize, ignored: usize, success: bool) {
+    emit_summary_for_suite(ctx, target, None, passed, failed, ignored, success)
+}
+
+pub(crate) fn emit_summary_for_suite(
+    ctx: &BuildContext,
+    target: TargetKind,
+    suite: Option<&kargo_manifest::TestSuite>,
+    passed: usize,
+    failed: usize,
+    ignored: usize,
+    success: bool,
+) {
     if !diagnostics::is_json() {
         return;
     }
-    let json = serde_json::json!({ "reason": "test-summary", "passed": passed, "failed": failed, "ignored": ignored, "success": success });
+    let mut json =
+        serde_json::json!({ "reason": "test-summary", "passed": passed, "failed": failed, "ignored": ignored, "success": success });
+    if let Some(suite) = suite
+        && let serde_json::Value::Object(map) = &mut json
+    {
+        map.insert("test-suite".to_owned(), suite.name.clone().into());
+    }
     if let serde_json::Value::Object(message) = json {
         emit_event(&ctx.ws.manifest().package.name, target, message);
     }
@@ -247,6 +567,26 @@ test results by target:"
             TargetOutcome::Skipped => (AnsiColor::Yellow.on_default(), "skipped"),
         };
         writeln!(out, "    {:<8} {style}{text}{style:#}", target.as_str())?;
+    }
+    Ok(())
+}
+
+/// Prints one line per suite and target with how its tests went, after a `--no-fail-fast` run.
+fn print_suite_table(outcomes: &[(String, TargetKind, TargetOutcome)], mut out: impl std::io::Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "
+test results by suite and target:"
+    )?;
+    for (suite, target, outcome) in outcomes {
+        let (style, text) = match outcome {
+            TargetOutcome::Passed => (AnsiColor::Green.on_default(), "ok"),
+            TargetOutcome::Failed => (AnsiColor::Red.on_default(), "FAILED"),
+            TargetOutcome::Error => (AnsiColor::Red.on_default(), "error (could not compile or run the tests)"),
+            TargetOutcome::Skipped => (AnsiColor::Yellow.on_default(), "skipped"),
+        };
+        let what = if suite == "unit" { target.as_str().to_owned() } else { format!("{target} ({suite})") };
+        writeln!(out, "    {what:<24} {style}{text}{style:#}")?;
     }
     Ok(())
 }
@@ -285,6 +625,21 @@ struct BrowserRun {
 fn no_tests(ctx: &BuildContext, target: TargetKind) -> TestRun {
     ctx.shell().note(format!("no tests found for the {target} target (put them in tests/ or tests-{target}/)"));
     TestRun::Done(true)
+}
+
+fn no_tests_for_suite(ctx: &BuildContext, target: TargetKind, suite: Option<&kargo_manifest::TestSuite>) -> TestRun {
+    match suite {
+        None => no_tests(ctx, target),
+        Some(suite) => {
+            ctx.shell().note(format!(
+                "no `{}` tests found for the {target} target (put them in `{}/` or `{}-{target}/`)",
+                suite.name,
+                suite.sources.display(),
+                suite.sources.display()
+            ));
+            TestRun::Done(true)
+        }
+    }
 }
 
 fn test_android(ctx: &BuildContext, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
@@ -362,10 +717,12 @@ fn wrote_reports(ctx: &BuildContext, dir: &Path) {
     ctx.shell().status("Reported", format!("JUnit XML in {}", shown.display()));
 }
 
-fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
+fn test_jvm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Result<TestRun> {
     let main = build_jvm(ctx)?;
-    let Some(JvmTestClasses { classes: test_classes, mut classpath }) = compile_jvm_tests(ctx, &main.classes, "Compiling")? else {
-        return Ok(no_tests(ctx, TargetKind::Jvm));
+    let Some(JvmTestClasses { classes: test_classes, mut classpath }) =
+        compile_jvm_tests_for_suite(ctx, &main.classes, "Compiling", suite)?
+    else {
+        return Ok(no_tests_for_suite(ctx, TargetKind::Jvm, suite));
     };
     if opts.against_min {
         let files = super::package(ctx, &super::PackageOptions { optimize: true, ..Default::default() })?;
@@ -377,23 +734,31 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
-    let rerun = if opts.failed { failed_jvm_classes(ctx)? } else { None };
+    let rerun = if opts.failed { failed_jvm_classes_for_suite(ctx, suite)? } else { None };
     if opts.failed && rerun.is_none() {
-        ctx.shell().note("no failed JVM tests are recorded; running all of them");
+        let where_ = match suite {
+            None => "no failed JVM tests are recorded; running all of them".to_owned(),
+            Some(suite) => format!("no failed JVM tests of the `{}` suite are recorded; running all of them", suite.name),
+        };
+        ctx.shell().note(where_);
     }
     if rerun.as_ref().is_some_and(Vec::is_empty) {
-        ctx.shell().note("no JVM test failed in the last run");
+        let where_ = match suite {
+            None => "no JVM test failed in the last run".to_owned(),
+            Some(suite) => format!("no JVM test of the `{}` suite failed in the last run", suite.name),
+        };
+        ctx.shell().note(where_);
         return Ok(TestRun::Done(true));
     }
     let mode = if diagnostics::is_json() { JunitMode::Events } else { JunitMode::Run };
     let tests = JvmTestClasses { classes: test_classes, classpath };
-    let cmd = junit_command(ctx, opts, &tests, mode, rerun.as_deref())?;
+    let cmd = junit_command_for_suite(ctx, opts, &tests, mode, rerun.as_deref(), suite)?;
     Ok(TestRun::Junit(JunitRun { cmd, main_classes: main.classes.clone() }))
 }
 
 /// The test classes that failed in the last JVM run (`--failed`); `None` when no run has recorded any.
-fn failed_jvm_classes(ctx: &BuildContext) -> Result<Option<Vec<String>>> {
-    let path = failures_file(ctx);
+fn failed_jvm_classes_for_suite(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> Result<Option<Vec<String>>> {
+    let path = failures_file_for_suite(ctx, suite);
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(Some(text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -403,8 +768,8 @@ fn failed_jvm_classes(ctx: &BuildContext) -> Result<Option<Vec<String>>> {
 
 /// Records the JVM test classes that failed in the last run, for `--failed`. `None` forgets them,
 /// which is what an unfinished run leaves: its failures are unknown.
-fn record_jvm_failures(ctx: &BuildContext, failed: Option<&[String]>) -> Result<()> {
-    let path = failures_file(ctx);
+fn record_jvm_failures_for_suite(ctx: &BuildContext, failed: Option<&[String]>, suite: Option<&kargo_manifest::TestSuite>) -> Result<()> {
+    let path = failures_file_for_suite(ctx, suite);
     match failed {
         Some(classes) => {
             let text: String = classes.iter().map(|class| format!("{class}\n")).collect();
@@ -416,10 +781,6 @@ fn record_jvm_failures(ctx: &BuildContext, failed: Option<&[String]>) -> Result<
             Err(e) => Err(e).with_context(|| format!("failed to remove {}", path.display())),
         },
     }
-}
-
-fn failures_file(ctx: &BuildContext) -> PathBuf {
-    ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("test-failures")
 }
 
 /// The test classes with a failed test in the JUnit XML reports of a run, in name order.
@@ -478,9 +839,13 @@ fn describe_limit(limit: Duration) -> String {
 }
 
 /// Why a run stopped at the `[test] timeout`, for the error that says so.
-fn timed_out_message(ctx: &BuildContext) -> String {
-    let limit = ctx.ws.manifest().test.timeout.map(describe_limit).unwrap_or_default();
-    format!("timed out after {limit}; the whole test run is limited by `[test] timeout`")
+fn timed_out_message_for_suite(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> String {
+    let limit = suite_timeout(ctx, suite).map(describe_limit).unwrap_or_default();
+    let where_ = match suite {
+        None => "[test] timeout".to_owned(),
+        Some(suite) => format!("[test.suites.{}] timeout", suite.name),
+    };
+    format!("timed out after {limit}; the whole test run is limited by `{where_}`")
 }
 
 /// Waits for a test process to exit. When `deadline` passes first, the process is killed.
@@ -519,12 +884,13 @@ pub fn console_launcher(ctx: &BuildContext) -> Result<PathBuf> {
 
 /// The JUnit console launcher command that runs (or lists) the compiled tests.
 /// `rerun` names the test classes to run in place of scanning every test (`--failed`).
-fn junit_command(
+fn junit_command_for_suite(
     ctx: &BuildContext,
     opts: &TestOptions,
     tests: &JvmTestClasses,
     mode: JunitMode,
     rerun: Option<&[String]>,
+    suite: Option<&kargo_manifest::TestSuite>,
 ) -> Result<Command> {
     let jdk = ctx.compiler_jdk()?;
     jdk.require_version(JUNIT_MIN_JDK).context("JVM tests run on JUnit 6; set `[toolchain] jdk` to a newer JDK")?;
@@ -546,9 +912,9 @@ fn junit_command(
     if opts.debug.is_none() && !opts.coverage {
         cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)));
     }
-    // Same order as `kargo run`: `[target.jvm]`, the profile, then `[test]`, which is the most specific.
+    // Same order as `kargo run`: `[target.jvm]`, the profile, then `[test]` and the suite, which is the most specific.
     let profile = ctx.ws.profile(&ctx.profile)?;
-    cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).args(&profile.jvm_args).args(&ctx.ws.manifest().test.jvm_args);
+    cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).args(&profile.jvm_args).args(suite_jvm_args(ctx, suite));
     if opts.coverage {
         let exec = super::coverage::exec_file(ctx);
         if let Some(parent) = exec.parent() {
@@ -565,20 +931,26 @@ fn junit_command(
     }
     let colors = mode == JunitMode::Run && std::io::IsTerminal::is_terminal(&std::io::stdout());
     // JUnit's own limit for each test, which a test that sleeps too long fails with.
-    let test_timeout = ctx.ws.manifest().test.test_timeout;
+    let test_timeout = suite_test_timeout(ctx, suite);
+    let include_tags = suite_include_tags(opts, suite);
+    let exclude_tags = suite_exclude_tags(opts, suite);
     cmd.arg("-jar")
         .arg(&launcher)
         .arg("execute")
         .arg("--disable-banner")
         .arg(if mode == JunitMode::List { "--details=none" } else { "--details=tree" })
         .args((!colors).then_some("--disable-ansi-colors"))
-        .args(opts.include_tags.iter().map(|tag| format!("--include-tag={tag}")))
-        .args(opts.exclude_tags.iter().map(|tag| format!("--exclude-tag={tag}")))
+        .args(include_tags.iter().map(|tag| format!("--include-tag={tag}")))
+        .args(exclude_tags.iter().map(|tag| format!("--exclude-tag={tag}")))
         .args(test_timeout.map(|limit| format!("--config=junit.jupiter.execution.timeout.default={} ms", limit.as_millis())));
     let joined = join_paths(&run_cp);
     if joined.len() >= process::LONG_CLASSPATH {
         // A long classpath would pass the limit of a command line on Windows (32,767 characters); the launcher reads `@argfiles`.
-        let argfile = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join("test.args");
+        let argfile_name = match suite {
+            None => "test.args".to_owned(),
+            Some(suite) => format!("test-{}.args", suite.name),
+        };
+        let argfile = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(argfile_name);
         process::write_argfile(&argfile, &["--class-path".to_owned(), process::classpath_for_argfile(&run_cp)])?;
         cmd.arg(format!("@{}", process::slash(&argfile)));
     } else {
@@ -594,8 +966,8 @@ fn junit_command(
         }
     }
     cmd.args(junit_filter_args(opts.filter.as_deref(), &test_class_names(&tests.classes)))
-        .current_dir(ctx.ws.root())
-        .envs(ctx.project_env(&opts.env)?.for_child());
+        .current_dir(suite_cwd(ctx, suite))
+        .envs(suite_project_env(ctx, opts, suite)?.for_child());
     match mode {
         JunitMode::Run => {
             cmd.arg("--fail-if-no-tests");
@@ -613,12 +985,19 @@ fn junit_command(
     Ok(cmd)
 }
 
-fn run_junit(ctx: &BuildContext, run: JunitRun, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
+fn run_junit_for_suite(
+    ctx: &BuildContext,
+    run: JunitRun,
+    opts: &TestOptions,
+    suite: Option<&kargo_manifest::TestSuite>,
+    deadline: Option<Instant>,
+) -> Result<bool> {
     let JunitRun { mut cmd, main_classes } = run;
     // The launcher writes `TEST-junit-jupiter.xml` (one file per test engine); `--failed` reads the failures from it.
-    let reports = reports_dir(ctx, TargetKind::Jvm)?;
+    let reports = reports_dir_for_suite(ctx, TargetKind::Jvm, suite)?;
     cmd.arg("--reports-dir").arg(&reports);
-    ctx.shell().status("Running", "JVM tests (JUnit Platform)");
+    let label = suite_label(TargetKind::Jvm, suite);
+    ctx.shell().status("Running", format!("{label} (JUnit Platform)"));
     if let Some(port) = opts.debug {
         super::run::note_debugger(ctx.shell(), port, "the test JVM");
     }
@@ -627,21 +1006,21 @@ fn run_junit(ctx: &BuildContext, run: JunitRun, opts: &TestOptions, deadline: Op
         wrote_reports(ctx, &reports);
     }
     if let Some(tally) = &end.events {
-        emit_summary(ctx, TargetKind::Jvm, tally.passed, tally.failed, tally.ignored, end.status.success());
+        emit_summary_for_suite(ctx, TargetKind::Jvm, suite, tally.passed, tally.failed, tally.ignored, end.status.success());
     }
     if end.timed_out {
-        ctx.shell().error(format!("JVM tests {}", timed_out_message(ctx)));
-        record_jvm_failures(ctx, None)?;
+        ctx.shell().error(format!("{} {}", label, timed_out_message_for_suite(ctx, suite)));
+        record_jvm_failures_for_suite(ctx, None, suite)?;
         return Ok(false);
     }
     if let Some(reason) = end.abnormal() {
         ctx.shell().error(format!("test JVM {reason} before finishing"));
-        record_jvm_failures(ctx, None)?;
+        record_jvm_failures_for_suite(ctx, None, suite)?;
         return Ok(false);
     }
-    record_jvm_failures(ctx, Some(&failed_classes(&reports)?))?;
+    record_jvm_failures_for_suite(ctx, Some(&failed_classes(&reports)?), suite)?;
     let filter = opts.filter.as_deref();
-    let tagged = !opts.include_tags.is_empty() || !opts.exclude_tags.is_empty();
+    let tagged = !suite_include_tags(opts, suite).is_empty() || !suite_exclude_tags(opts, suite).is_empty();
     if end.status.code() == Some(JUNIT_NO_TESTS) {
         match filter {
             Some(filter) => ctx.shell().error(format!("no JVM tests match `{filter}`; the filter matches `package.Class.method` names")),
@@ -813,6 +1192,97 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
 }
 
 /// Compiles the JVM test fixtures against the main jar,
+/// Like [`compile_jvm_tests`], for the test suite `suite` (`None` is the default `unit` suite).
+/// Compiles the suite's sources against `main_classes` into `test-classes` (`unit`)
+/// or `test-classes-<name>` (a declared suite).
+pub(crate) fn compile_jvm_tests_for_suite(
+    ctx: &BuildContext,
+    main_classes: &Path,
+    verb: &str,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Option<JvmTestClasses>> {
+    use super::build::{jvm_processor_path_for_suite, run_jvm_ksp_for_suite, suite_sources};
+    let manifest = ctx.ws.manifest();
+    let test_sources = if suite.is_none() {
+        sources(ctx, TargetKind::Jvm, true, &["kt", "java"])?
+    } else {
+        suite_sources(ctx, TargetKind::Jvm, suite, &["kt", "java"])?
+    };
+    if test_sources.is_empty() {
+        return Ok(None);
+    }
+    let setup = ctx.setup_for_suite(TargetKind::Jvm, suite)?;
+    // Make sure the main classpaths are locked too.
+    let _ = jvm_classpaths(ctx, &ctx.setup(TargetKind::Jvm)?)?;
+    let all_scopes = [Scope::Compile, Scope::Runtime, Scope::Provided];
+    // The test fixtures of this package and of the `test-fixtures = true` dev-dependencies come first.
+    let mut test_cp = super::local::test_fixtures(ctx)?;
+    test_cp.extend(super::local::artifacts_for_suite(ctx, super::local::LocalTarget::Jvm, &all_scopes, true, suite)?);
+    let test_key = suite_test_key("jvm/test", suite);
+    test_cp.extend(ctx.resolve(&test_key, Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?.files());
+    let jdk = ctx.jvm_jdk()?;
+    let compiler = ctx.kotlin_compiler()?;
+    let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
+    let kotlin_args = common_kotlin_args(manifest, ctx.ws.profile(&ctx.profile)?, &setup.contributions.compiler_args);
+    let jvm = manifest.targets.jvm.as_ref().context("the JVM target is not enabled")?;
+    let test_classes = test_classes_dir(ctx, suite);
+    let processor_path = jvm_processor_path_for_suite(ctx, &setup, true, suite)?;
+    let javac_args = jvm_javac_args(&setup, jvm);
+    let jvm_target = jvm.target_for(jdk.version)?;
+
+    let mut classpath = vec![main_classes.to_path_buf()];
+    classpath.extend(test_cp);
+    let name = match suite {
+        None => format!("{}-test", manifest.package.name),
+        Some(suite) => format!("{}-test-{}", manifest.package.name, suite.name),
+    };
+    let mut test_sources = test_sources;
+    let mut resources = match suite {
+        None => ctx.ws.test_resource_dirs(),
+        Some(suite) => {
+            // The default test resources plus the suite's own; missing suite directories are left out
+            // (the defaults may be generated later, and an empty classpath entry is harmless).
+            let defaults = ctx.ws.test_resource_dirs();
+            let mut resources = defaults.clone();
+            resources.push(ctx.ws.root().join(&suite.resources));
+            resources.dedup();
+            resources.into_iter().filter(|p| defaults.contains(p) || p.is_dir()).collect()
+        }
+    };
+    if resources.is_empty() {
+        resources = ctx.ws.test_resource_dirs();
+    }
+    let ksp = JvmKspUnit {
+        name: &name,
+        test: true,
+        libraries: classpath.clone(),
+        friends: vec![main_classes.to_path_buf()],
+        jdk,
+        jvm_target: &jvm_target,
+    };
+    run_jvm_ksp_for_suite(ctx, &setup, ksp, &mut test_sources, &mut resources, suite)?;
+    let what = match suite {
+        None => ", tests".to_owned(),
+        Some(suite) => format!(", {} tests", suite.name),
+    };
+    let unit = JvmCompilation {
+        name: &name,
+        sources: test_sources,
+        classpath: classpath.clone(),
+        friend_paths: vec![main_classes.to_path_buf()],
+        output: test_classes.clone(),
+        jvm_target: &jvm_target,
+        plugins: &plugins,
+        kotlin_args: &kotlin_args,
+        javac_args: &javac_args,
+        processor_path: &processor_path,
+        resources,
+    };
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
+    unit.compile(ctx.shell(), jdk, compiler, &fp_dir, &|| announce(ctx, verb, TargetKind::Jvm, &what))?;
+    Ok(Some(JvmTestClasses { classes: test_classes, classpath }))
+}
+
 /// its dependencies and dev-dependencies, into `<name>-<version>-test-fixtures.jar`. Returns `None`
 /// without fixture sources.
 pub(crate) fn build_jvm_test_fixtures(ctx: &BuildContext) -> Result<Option<PathBuf>> {
@@ -917,12 +1387,13 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// Runs a test executable whose stdout carries TeamCity messages.
-fn run_reported(
+fn run_reported_for_suite(
     ctx: &BuildContext,
     mut cmd: Command,
     label: &str,
     target: TargetKind,
     opts: &TestOptions,
+    suite: Option<&kargo_manifest::TestSuite>,
     deadline: Option<Instant>,
 ) -> Result<bool> {
     ctx.shell().status("Running", label);
@@ -944,7 +1415,7 @@ fn run_reported(
     let summary = reader.join().map_err(|_| anyhow::anyhow!("the test reporter panicked"))??;
     // Runners exit non-zero when a test failed; without a failed test that means a crash.
     let abnormal = if timed_out {
-        Some(timed_out_message(ctx))
+        Some(timed_out_message_for_suite(ctx, suite))
     } else {
         (!status.success()).then(|| {
             let how = format!("exited with {}", process::describe_status(status));
@@ -952,7 +1423,7 @@ fn run_reported(
         })
     };
     let ending = Ending { abnormal, timed_out, elapsed: started.elapsed() };
-    finish_reported(ctx, summary, label, target, opts, ending)
+    finish_reported_for_suite(ctx, summary, label, target, opts, suite, ending)
 }
 
 /// How a test process that reports TeamCity messages ended.
@@ -968,25 +1439,29 @@ struct Ending {
 /// Writes the reports and prints the summary of a test run. `ending.abnormal` says how the runner
 /// ended when it did not finish normally (`exited with exit code 1`); that only counts as a crash
 /// when no test failed, since runners also end that way when a test failed. A timeout always does.
-fn finish_reported(
+fn finish_reported_for_suite(
     ctx: &BuildContext,
     mut summary: testreport::TestSummary,
     label: &str,
     target: TargetKind,
     opts: &TestOptions,
+    suite: Option<&kargo_manifest::TestSuite>,
     ending: Ending,
 ) -> Result<bool> {
     let Ending { abnormal, timed_out, elapsed } = ending;
     if opts.junit_report {
-        let dir = reports_dir(ctx, target)?;
+        let dir = reports_dir_for_suite(ctx, target, suite)?;
         let file = dir.join(format!("TEST-{target}.xml"));
         let package = &ctx.ws.manifest().package.name;
-        testreport::write_junit_xml(&file, &format!("{package} ({target})"), &summary.cases)
-            .with_context(|| format!("failed to write {}", file.display()))?;
+        let title = match suite {
+            None => format!("{package} ({target})"),
+            Some(suite) => format!("{package} ({target}, {})", suite.name),
+        };
+        testreport::write_junit_xml(&file, &title, &summary.cases).with_context(|| format!("failed to write {}", file.display()))?;
         wrote_reports(ctx, &dir);
     }
     summary.crashed = abnormal.is_some() && (timed_out || summary.failed == 0);
-    emit_summary(ctx, target, summary.passed, summary.failed, summary.ignored, summary.success());
+    emit_summary_for_suite(ctx, target, suite, summary.passed, summary.failed, summary.ignored, summary.success());
     if summary.crashed && !summary.ran_tests() {
         ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
         return Ok(false);
@@ -1010,7 +1485,14 @@ const SETTLE: Duration = Duration::from_millis(400);
 
 /// Runs the tests in a headless browser: serves the test page, starts the browser on it and
 /// turns the console output the page reports into the usual test report.
-fn run_in_browser(ctx: &BuildContext, run: BrowserRun, target: TargetKind, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
+fn run_in_browser_for_suite(
+    ctx: &BuildContext,
+    run: BrowserRun,
+    target: TargetKind,
+    opts: &TestOptions,
+    suite: Option<&kargo_manifest::TestSuite>,
+    deadline: Option<Instant>,
+) -> Result<bool> {
     let started = Instant::now();
     let (events_tx, events) = mpsc::channel();
     let server = web::Server::start(web::bind(0)?, run.site, Some(events_tx))?;
@@ -1057,8 +1539,8 @@ fn run_in_browser(ctx: &BuildContext, run: BrowserRun, target: TargetKind, opts:
         std::thread::sleep(Duration::from_millis(100));
     }
     let timed_out = outcome.is_err() && deadline.is_some_and(|deadline| Instant::now() >= deadline);
-    let abnormal = if timed_out { Some(timed_out_message(ctx)) } else { outcome.err() };
-    finish_reported(ctx, summary, label, target, opts, Ending { abnormal, timed_out, elapsed: started.elapsed() })
+    let abnormal = if timed_out { Some(timed_out_message_for_suite(ctx, suite)) } else { outcome.err() };
+    finish_reported_for_suite(ctx, summary, label, target, opts, suite, Ending { abnormal, timed_out, elapsed: started.elapsed() })
 }
 
 /// What a test page has reported so far.
@@ -1186,27 +1668,32 @@ impl Read for ChannelReader {
     }
 }
 
-fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
+fn test_wasm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Result<TestRun> {
+    use super::build::{suite_sources, wasm_libraries_for_suite};
     let manifest = ctx.ws.manifest();
     let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
-    let tests = sources(ctx, TargetKind::Wasm, true, &["kt"])?;
+    let tests = suite_sources(ctx, TargetKind::Wasm, suite, &["kt"])?;
     if tests.kotlin_files().is_empty() {
-        return Ok(no_tests(ctx, TargetKind::Wasm));
+        return Ok(no_tests_for_suite(ctx, TargetKind::Wasm, suite));
     }
     super::local::test_fixtures_unsupported(ctx, TargetKind::Wasm)?;
     // Tests link against the main klib as a friend module, so the program's
     // `main` is not part of the test binary.
     let main = prepare_wasm(ctx)?;
-    let setup = ctx.setup(TargetKind::Wasm)?;
-    let libraries = wasm_libraries(ctx, &setup, true)?;
+    let setup = ctx.setup_for_suite(TargetKind::Wasm, suite)?;
+    let libraries = wasm_libraries_for_suite(ctx, &setup, true, suite)?;
     let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(&ctx.profile)?;
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     super::build::npm_opt_in(ctx, TargetKind::Wasm, &mut kotlin_args);
-    let name = format!("{}-test", wasm.module_name(&manifest.package));
+    let name = match suite {
+        None => format!("{}-test", wasm.module_name(&manifest.package)),
+        Some(suite) => format!("{}-test-{}", wasm.module_name(&manifest.package), suite.name),
+    };
     let main_node_modules = main.as_ref().and_then(|m| m.node_modules.clone());
+    let output = wasm_test_dir(ctx, suite);
     let unit = WasmCompilation {
         name: &name,
         environment: wasm.environment,
@@ -1215,7 +1702,7 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         friends: main.map(|m| vec![m.klib]).unwrap_or_default(),
         plugins: &plugins,
         kotlin_args: &kotlin_args,
-        output: ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm).join("test"),
+        output: output.clone(),
         debug: true,
         debug_info: false,
         optimize: false,
@@ -1224,23 +1711,29 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         declarations: false,
         main_args: false,
     };
-    unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Wasm), &|| compiling(ctx, TargetKind::Wasm, ", tests"))?;
+    let what = match suite {
+        None => ", tests".to_owned(),
+        Some(suite) => format!(", {} tests", suite.name),
+    };
+    unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Wasm), &|| compiling(ctx, TargetKind::Wasm, &what))?;
     // The main module's JavaScript and TypeScript modules, which the test module imports from its own directory.
     let main_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Wasm);
     crate::js_sources::install(ctx, TargetKind::Wasm, &unit.output, &main_dir, main_node_modules.as_deref())?;
     crate::js_sources::alias_module(ctx.ws, TargetKind::Wasm, &unit.output, wasm.module_name(&manifest.package), &name)?;
     // `prepare_wasm` installed the main npm packages one level up; dev-dependencies
     // that need more get their own `node_modules` next to the test module.
+    let main_libs = wasm_libraries_for_suite(ctx, &ctx.setup_for_suite(TargetKind::Wasm, None)?, false, None)?;
     let node_modules = if main_node_modules.is_none()
-        || npm_dependencies(&unit.libraries)? != npm_dependencies(&wasm_libraries(ctx, &setup, false)?)?
+        || npm_dependencies(&unit.libraries)? != npm_dependencies(&main_libs)?
         || !crate::npm::dev_dependencies(manifest, TargetKind::Wasm).is_empty()
+        || suite.is_some()
     {
         crate::npm::install_for_tests(ctx, TargetKind::Wasm, &unit.libraries, &unit.output)?
     } else {
         main_node_modules
     };
     if wasm.environment == WasmEnvironment::Browser {
-        return browser_tests(ctx, opts, &unit, node_modules);
+        return browser_tests_for_suite(ctx, opts, &unit, node_modules, suite);
     }
     if opts.no_run {
         return Ok(TestRun::Done(true));
@@ -1251,13 +1744,20 @@ fn test_wasm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     let mut cmd = Command::new(kargo_toolchain::node()?);
     cmd.arg("-e")
         .arg(format!("import({:?}).then(m => m.startUnitTests())", process::file_url(&unit.module_path())))
-        .current_dir(ctx.ws.root())
-        .envs(ctx.project_env(&opts.env)?.for_child());
-    Ok(TestRun::Reported(cmd, "Wasm tests (Node.js)"))
+        .current_dir(suite_cwd(ctx, suite))
+        .envs(suite_project_env(ctx, opts, suite)?.for_child());
+    let label: &'static str = "Wasm tests (Node.js)";
+    Ok(TestRun::Reported(cmd, label))
 }
 
 /// Writes the page that runs the compiled Wasm tests and finds the browser to run it in.
-fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation, node_modules: Option<PathBuf>) -> Result<TestRun> {
+fn browser_tests_for_suite(
+    ctx: &BuildContext,
+    opts: &TestOptions,
+    unit: &WasmCompilation,
+    node_modules: Option<PathBuf>,
+    _suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<TestRun> {
     let imports = node_modules.as_deref().map(crate::wasm_output::import_map).unwrap_or_default();
     // The tests get the web resources of the package's libraries and of the package itself, after theirs.
     let mut shipments = crate::web_resources::dependencies(ctx, true)?;
@@ -1278,33 +1778,38 @@ fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation,
         site = site.mount("node_modules", node_modules);
     }
     let profile = unit.output.join(format!(".browser-profile-{}", std::process::id()));
-    Ok(TestRun::Browser(BrowserRun { label: "Wasm tests (headless browser)", browser, site, profile }))
+    let label: &'static str = "Wasm tests (headless browser)";
+    Ok(TestRun::Browser(BrowserRun { label, browser, site, profile }))
 }
 
 /// Compiles the Kotlin/JS tests into an ES module below the main module and prepares to run them on
 /// Node.js or in a headless browser, with the runner of [`crate::js_output`].
-fn test_js(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
+fn test_js_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Result<TestRun> {
+    use super::build::{js_libraries_for_suite, suite_sources};
     let manifest = ctx.ws.manifest();
     let js = manifest.targets.js.as_ref().context("the JS target is not enabled")?;
-    let tests = sources(ctx, TargetKind::Js, true, &["kt"])?;
+    let tests = suite_sources(ctx, TargetKind::Js, suite, &["kt"])?;
     if tests.kotlin_files().is_empty() {
-        return Ok(no_tests(ctx, TargetKind::Js));
+        return Ok(no_tests_for_suite(ctx, TargetKind::Js, suite));
     }
     super::local::test_fixtures_unsupported(ctx, TargetKind::Js)?;
     // Tests link against the main klib as a friend module, so the program's `main` does not run.
     let main = prepare_js(ctx)?;
-    let setup = ctx.setup(TargetKind::Js)?;
-    let libraries = js_libraries(ctx, &setup, true)?;
+    let setup = ctx.setup_for_suite(TargetKind::Js, suite)?;
+    let libraries = js_libraries_for_suite(ctx, &setup, true, suite)?;
     let jdk = ctx.compiler_jdk()?;
     let compiler = ctx.kotlin_compiler()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
     let profile = ctx.ws.profile(&ctx.profile)?;
     let mut kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     super::build::npm_opt_in(ctx, TargetKind::Js, &mut kotlin_args);
-    let name = format!("{}-test", js.module_name(&manifest.package));
+    let name = match suite {
+        None => format!("{}-test", js.module_name(&manifest.package)),
+        Some(suite) => format!("{}-test-{}", js.module_name(&manifest.package), suite.name),
+    };
     let main_node_modules = main.as_ref().and_then(|m| m.node_modules.clone());
     // Below the main module, so Node.js finds its npm packages from here too.
-    let output = ctx.ws.output_dir(&ctx.profile, TargetKind::Js).join("test");
+    let output = js_test_dir(ctx, suite);
     let unit = JsCompilation {
         name: &name,
         environment: js.environment,
@@ -1323,15 +1828,21 @@ fn test_js(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         declarations: false,
         main_args: false,
     };
-    unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Js), &|| compiling(ctx, TargetKind::Js, ", tests"))?;
+    let what = match suite {
+        None => ", tests".to_owned(),
+        Some(suite) => format!(", {} tests", suite.name),
+    };
+    unit.compile(ctx.shell(), jdk, compiler, &ctx.fingerprint_dir(TargetKind::Js), &|| compiling(ctx, TargetKind::Js, &what))?;
     // The main module's JavaScript and TypeScript modules, which the test module imports from its own directory.
     let main_dir = ctx.ws.output_dir(&ctx.profile, TargetKind::Js);
     crate::js_sources::install(ctx, TargetKind::Js, &output, &main_dir, main_node_modules.as_deref())?;
     crate::js_sources::alias_module(ctx.ws, TargetKind::Js, &output, js.module_name(&manifest.package), &name)?;
     // The main npm packages are one level up; dev-dependencies that need more get their own.
+    let main_libs = js_libraries_for_suite(ctx, &ctx.setup_for_suite(TargetKind::Js, None)?, false, None)?;
     let node_modules = if main_node_modules.is_none()
-        || npm_dependencies(&unit.libraries)? != npm_dependencies(&js_libraries(ctx, &setup, false)?)?
+        || npm_dependencies(&unit.libraries)? != npm_dependencies(&main_libs)?
         || !crate::npm::dev_dependencies(manifest, TargetKind::Js).is_empty()
+        || suite.is_some()
     {
         crate::npm::install_for_tests(ctx, TargetKind::Js, &unit.libraries, &output)?
     } else {
@@ -1363,20 +1874,24 @@ fn test_js(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
         quoted(opts.filter.as_deref().unwrap_or_default()),
     );
     let mut cmd = Command::new(kargo_toolchain::node()?);
-    cmd.arg("--enable-source-maps").arg("-e").arg(script).current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child());
+    cmd.arg("--enable-source-maps")
+        .arg("-e")
+        .arg(script)
+        .current_dir(suite_cwd(ctx, suite))
+        .envs(suite_project_env(ctx, opts, suite)?.for_child());
     Ok(TestRun::Reported(cmd, "Kotlin/JS tests (Node.js)"))
 }
 
-fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
+fn test_native_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Result<TestRun> {
     super::local::test_fixtures_unsupported(ctx, TargetKind::Native)?;
-    let Some(executable) = compile_native_tests(ctx)? else {
+    let Some(executable) = compile_native_tests_for_suite(ctx, suite)? else {
         return Ok(TestRun::Done(true));
     };
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
     let mut cmd = Command::new(executable);
-    cmd.arg("--ktest_logger=TEAMCITY").current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child());
+    cmd.arg("--ktest_logger=TEAMCITY").current_dir(suite_cwd(ctx, suite)).envs(suite_project_env(ctx, opts, suite)?.for_child());
     if let Some(filter) = &opts.filter {
         cmd.arg(format!("--ktest_filter=*{filter}*"));
     }
@@ -1385,11 +1900,12 @@ fn test_native(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
 
 /// Compiles the Kotlin/Native tests for this host into a test executable. Returns `None`
 /// (after saying why) when there is nothing to run.
-fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
+fn compile_native_tests_for_suite(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> Result<Option<PathBuf>> {
+    use super::build::{native_libraries_for_suite, suite_sources};
     let manifest = ctx.ws.manifest();
-    let tests = sources(ctx, TargetKind::Native, true, &["kt"])?;
+    let tests = suite_sources(ctx, TargetKind::Native, suite, &["kt"])?;
     if tests.kotlin_files().is_empty() {
-        no_tests(ctx, TargetKind::Native);
+        no_tests_for_suite(ctx, TargetKind::Native, suite);
         return Ok(None);
     }
     let host = Host::current()?.konan_target;
@@ -1398,9 +1914,9 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
         ctx.shell().warn(format!("skipping native tests: this host ({host}) is not in `platforms`"));
         return Ok(None);
     }
-    let setup = ctx.setup(TargetKind::Native)?;
-    let _ = native_libraries(ctx, &setup, host, false)?;
-    let mut libraries = native_libraries(ctx, &setup, host, true)?;
+    let setup = ctx.setup_for_suite(TargetKind::Native, suite)?;
+    let _ = native_libraries_for_suite(ctx, &ctx.setup_for_suite(TargetKind::Native, None)?, host, false, None)?;
+    let mut libraries = native_libraries_for_suite(ctx, &setup, host, true, suite)?;
     libraries.extend(native_cinterop(ctx, host)?);
     let toolchain = ctx.native_toolchain()?;
     let plugins = ctx.plugin_jars(&setup.contributions.plugins)?;
@@ -1408,7 +1924,15 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut all = for_platform(ctx, sources(ctx, TargetKind::Native, false, &["kt"])?, host);
     all.extend(&for_platform(ctx, tests, host));
-    let name = format!("{}-test", manifest.package.name);
+    let name = match suite {
+        None => format!("{}-test", manifest.package.name),
+        Some(suite) => format!("{}-test-{}", manifest.package.name, suite.name),
+    };
+    let output_dir = native_test_dir(ctx, host, suite);
+    let what = match suite {
+        None => ", tests".to_owned(),
+        Some(suite) => format!(", {} tests", suite.name),
+    };
     let unit = NativeCompilation {
         name: &name,
         konan_target: host.to_owned(),
@@ -1419,7 +1943,7 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
         kotlin_args: &kotlin_args,
         entry_point: None,
         link: crate::native_interop::native_link(ctx, host)?,
-        output_dir: ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(host).join("test"),
+        output_dir,
         debug: true,
         optimize: false,
         test_runner: true,
@@ -1427,7 +1951,7 @@ fn compile_native_tests(ctx: &BuildContext) -> Result<Option<PathBuf>> {
         bundle_id: None,
     };
     let outcome =
-        unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| compiling(ctx, TargetKind::Native, ", tests"))?;
+        unit.compile(ctx.shell(), toolchain, &ctx.fingerprint_dir(TargetKind::Native), &|| compiling(ctx, TargetKind::Native, &what))?;
     Ok((outcome != Outcome::Empty).then(|| unit.artifact()))
 }
 
@@ -1468,52 +1992,81 @@ impl ListedTest {
 /// `kargo test --list`: compiles the tests of each target and prints them without running them.
 fn list(ctx: &BuildContext, opts: &TestOptions, format: ListFormat) -> Result<()> {
     let targets = opts.build.select(ctx)?;
-    let listed = super::parallel_targets(&targets, |target| match target {
-        TargetKind::Jvm => list_jvm(ctx, opts),
-        TargetKind::Native => list_native(ctx, opts),
-        TargetKind::Wasm | TargetKind::Js | TargetKind::Android => {
-            ctx.shell().note(format!("`--list` does not list {target} tests yet"));
-            Ok(Vec::new())
-        }
-    });
+    let suites = resolve_suites_for_package(ctx, opts)?;
+    if suites.is_empty() {
+        ctx.shell().note(format!("package `{}` has no test suite `{}`; skipping it", ctx.ws.name(), opts.suites.join(", ")));
+        return Ok(());
+    }
     let package = &ctx.ws.manifest().package.name;
     let mut out = anstream::stdout();
-    for (&target, tests) in targets.iter().zip(listed) {
-        let mut tests = tests?;
-        let test_sources = sources(ctx, target, true, &["kt", "java"])?;
-        locate_tests(&mut tests, &test_sources.all().cloned().collect::<Vec<_>>());
-        for test in &tests {
-            match format {
-                ListFormat::Text => writeln!(out, "{target}: {}", test.full_name())?,
-                ListFormat::Json => {
-                    let json = serde_json::json!({
-                        "reason": "test-discovered",
-                        "id": test.id,
-                        "parent-id": test.parent_id,
-                        "suite": test.suite,
-                        "name": test.name,
-                        "display-name": test.display_name,
-                        "file": test.file.as_ref().map(|f| f.display().to_string()),
-                        "line": test.line,
-                    });
-                    if let serde_json::Value::Object(message) = json {
-                        emit_event(package, target, message);
+    for selection in &suites {
+        let suite = selection.suite.as_ref();
+        let listed = super::parallel_targets(&targets, |target| match target {
+            TargetKind::Jvm => list_jvm_for_suite(ctx, opts, suite),
+            TargetKind::Native => list_native_for_suite(ctx, opts, suite),
+            TargetKind::Wasm | TargetKind::Js | TargetKind::Android => {
+                if suite.is_none() {
+                    ctx.shell().note(format!("`--list` does not list {target} tests yet"));
+                } else {
+                    ctx.shell().note(format!("`--list` does not list {target} tests of the `{}` suite yet", selection.name));
+                }
+                Ok(Vec::new())
+            }
+        });
+        for (&target, tests) in targets.iter().zip(listed) {
+            let mut tests = tests?;
+            let test_sources = if suite.is_none() {
+                sources(ctx, target, true, &["kt", "java"])?
+            } else {
+                use super::build::suite_sources;
+                suite_sources(ctx, target, suite, &["kt", "java"])?
+            };
+            locate_tests(&mut tests, &test_sources.all().cloned().collect::<Vec<_>>());
+            for test in &tests {
+                match format {
+                    ListFormat::Text => {
+                        if selection.is_unit() {
+                            writeln!(out, "{target}: {}", test.full_name())?;
+                        } else {
+                            writeln!(out, "{target} ({}): {}", selection.name, test.full_name())?;
+                        }
+                    }
+                    ListFormat::Json => {
+                        let mut json = serde_json::json!({
+                            "reason": "test-discovered",
+                            "id": test.id,
+                            "parent-id": test.parent_id,
+                            "suite": test.suite,
+                            "name": test.name,
+                            "display-name": test.display_name,
+                            "file": test.file.as_ref().map(|f| f.display().to_string()),
+                            "line": test.line,
+                        });
+                        if let Some(suite) = suite
+                            && let serde_json::Value::Object(map) = &mut json
+                        {
+                            map.insert("test-suite".to_owned(), suite.name.clone().into());
+                        }
+                        if let serde_json::Value::Object(message) = json {
+                            emit_event(package, target, message);
+                        }
                     }
                 }
             }
+            let where_ = if selection.is_unit() { format!("{target}") } else { format!("{target} ({})", selection.name) };
+            ctx.shell().status("Listed", format!("{} {where_} test{}", tests.len(), if tests.len() == 1 { "" } else { "s" }));
         }
-        ctx.shell().status("Listed", format!("{} {target} test{}", tests.len(), if tests.len() == 1 { "" } else { "s" }));
     }
     Ok(())
 }
 
-fn list_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<ListedTest>> {
+fn list_jvm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Result<Vec<ListedTest>> {
     let main = build_jvm(ctx)?;
-    let Some(tests) = compile_jvm_tests(ctx, &main.classes, "Compiling")? else {
-        no_tests(ctx, TargetKind::Jvm);
+    let Some(tests) = compile_jvm_tests_for_suite(ctx, &main.classes, "Compiling", suite)? else {
+        no_tests_for_suite(ctx, TargetKind::Jvm, suite);
         return Ok(Vec::new());
     };
-    let mut cmd = junit_command(ctx, opts, &tests, JunitMode::List, None)?;
+    let mut cmd = junit_command_for_suite(ctx, opts, &tests, JunitMode::List, None, suite)?;
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let output = cmd.stdin(Stdio::null()).output().context("failed to start the JUnit console launcher")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1544,12 +2097,15 @@ fn listed_from_event(event: &serde_json::Map<String, serde_json::Value>) -> Opti
     })
 }
 
-fn list_native(ctx: &BuildContext, opts: &TestOptions) -> Result<Vec<ListedTest>> {
-    let Some(executable) = compile_native_tests(ctx)? else {
+fn list_native_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kargo_manifest::TestSuite>) -> Result<Vec<ListedTest>> {
+    let Some(executable) = compile_native_tests_for_suite(ctx, suite)? else {
         return Ok(Vec::new());
     };
     let mut cmd = Command::new(&executable);
-    cmd.arg("--ktest_list_tests").current_dir(ctx.ws.root()).envs(ctx.project_env(&opts.env)?.for_child()).stdin(Stdio::null());
+    cmd.arg("--ktest_list_tests")
+        .current_dir(suite_cwd(ctx, suite))
+        .envs(suite_project_env(ctx, opts, suite)?.for_child())
+        .stdin(Stdio::null());
     ctx.shell().verbose("Running", format!("`{}`", process::describe(&cmd)));
     let output = cmd.output().with_context(|| format!("failed to start {}", executable.display()))?;
     if !output.status.success() {

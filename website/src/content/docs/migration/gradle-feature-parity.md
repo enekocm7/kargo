@@ -96,7 +96,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | JUnit XML and JSON reports | Supported | [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
 | Re-running failed tests | Supported | `kargo test --failed`; see [Rerunning failures](../../guides/testing/#rerunning-failures) |
 | Retry plugin (`org.gradle.test-retry`) | Gap | Rerun failures with `--failed` |
-| Test suites (`jvm-test-suite`, separate integration tests) | Planned | [#219](https://github.com/enekocm7/kargo/issues/219) |
+| Test suites (`jvm-test-suite`, separate integration tests) | Supported | [`[test.suites.<name>]`](../../guides/testing/#test-suites), `kargo test --suite <name>` |
 | Code coverage (JaCoCo) | Supported | [`kargo test --coverage`](../../guides/testing/#coverage) |
 | Test fixtures | Supported | [Test fixtures](../../guides/testing/#test-fixtures) |
 | Benchmarks (kotlinx-benchmark, JMH) | Supported | [`kargo bench`](../../guides/benchmarking/) |

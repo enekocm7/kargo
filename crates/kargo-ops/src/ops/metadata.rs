@@ -254,6 +254,11 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
     test_dirs.extend(ws.target_bench_dirs(kind));
     test_dirs.extend(group_dirs(Workspace::group_test_dirs));
     test_dirs.extend(group_dirs(Workspace::group_test_fixture_dirs));
+    // Test suites (`[test.suites.<name>]`): their sources are test roots too, so editors resolve them.
+    for suite in m.test.suites.values() {
+        test_dirs.push(ws.root().join(&suite.sources));
+        test_dirs.push(ws.suite_target_tests(suite, kind));
+    }
     if kind == TargetKind::Android {
         test_dirs.push(ws.instrumented_tests());
     }
@@ -299,6 +304,21 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             b.extend(ws.target_bench_dirs(kind));
             b
         }),
+        // Test suites (`[test.suites.<name>]`): their directories and settings, so editors resolve
+        // imports in `integration-tests/` and run their tests with the right classpath.
+        "test-suites": m.test.suites.values().map(|suite| json!({
+            "name": suite.name,
+            "sources": path(&ws.root().join(&suite.sources)),
+            "resources": path(&ws.root().join(&suite.resources)),
+            "test-roots": roots(&[ws.root().join(&suite.sources), ws.suite_target_tests(suite, kind)]),
+            "jvm-args": suite.jvm_args,
+            "cwd": suite.cwd.as_ref().map(|p| path(&ws.root().join(p))),
+            "timeout": suite.timeout.map(|d| d.as_millis() as u64),
+            "test-timeout": suite.test_timeout.map(|d| d.as_millis() as u64),
+            "include-tags": suite.include_tags,
+            "exclude-tags": suite.exclude_tags,
+            "env": suite.env,
+        })).collect::<Vec<_>>(),
         "output-dir": path(&ws.output_dir(&ctx.profile, kind)),
     });
     if kind == TargetKind::Android {
@@ -382,7 +402,100 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         TargetKind::Android => unreachable!("handled above"),
     }
     out["dependencies"] = if opts.no_deps { Value::Null } else { Value::Array(dependencies(ctx, kind, &setup)?) };
+    // The test classpath of each suite, so editors resolve the suite's own dependencies
+    // (such as `testcontainers`) in `integration-tests/`. New fields only; `version` stays 1.
+    if !opts.no_deps
+        && !m.test.suites.is_empty()
+        && kind != TargetKind::Android
+        && let Some(suites) = out.get_mut("test-suites").and_then(|v| v.as_array_mut())
+    {
+        for entry in suites.iter_mut() {
+            let Some(name) = entry.get("name").and_then(|n| n.as_str()).map(str::to_owned) else { continue };
+            let Some(suite) = m.test.suite(&name) else { continue };
+            let suite_setup = ctx.setup_for_suite(kind, Some(suite))?;
+            let test_deps = suite_test_dependencies(ctx, kind, &suite_setup, suite)?;
+            entry["test-dependencies"] = Value::Array(test_deps);
+        }
+    }
     Ok(out)
+}
+
+/// The resolved test classpath of one suite for `kind`, as Maven entries and path dependencies,
+/// like the `test` entries of [`dependencies`].
+fn suite_test_dependencies(
+    ctx: &BuildContext,
+    kind: TargetKind,
+    setup: &TargetSetup,
+    suite: &kargo_manifest::TestSuite,
+) -> Result<Vec<Value>> {
+    use super::build::{js_resolution_for_suite, native_resolution_for_suite, wasm_resolution_for_suite};
+    let locals = |scopes: &[Scope]| -> Result<Vec<Value>> {
+        let deps = ctx.local_dependencies_for_suite(kind, Some(suite))?;
+        Ok(deps
+            .iter()
+            .filter(|d| scopes.contains(&d.scope))
+            .map(|d| json!({ "package": ctx.project.package(d.package).name(), "scope": d.scope.as_str() }))
+            .collect())
+    };
+    let entries = |locals: Vec<Value>, res: &Resolution| -> Vec<Value> {
+        let mut out = locals;
+        out.extend(maven_entries(ctx, res));
+        out
+    };
+    let compile_scopes = [Scope::Compile, Scope::Provided];
+    let all_scopes = super::build::ALL_SCOPES;
+    Ok(match kind {
+        TargetKind::Jvm => {
+            let classpaths = super::build::jvm_classpaths(ctx, setup)?;
+            let test_key = format!("jvm/test-{}", suite.name);
+            let test = ctx.resolve(&ctx.ws.lock_key(&test_key), Platform::Jvm, &setup.requests(&all_scopes, true), &setup.boms)?;
+            vec![json!({
+                "platform": "jvm",
+                "compile": entries(locals(&compile_scopes)?, &classpaths.compile),
+                "runtime": entries(locals(&[Scope::Compile, Scope::Runtime])?, &classpaths.runtime),
+                "test": entries(locals(&all_scopes)?, &test),
+            })]
+        }
+        TargetKind::Wasm => {
+            let env = ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
+            let main = wasm_resolution_for_suite(ctx, setup, false, None)?;
+            let test = wasm_resolution_for_suite(ctx, setup, true, Some(suite))?;
+            vec![klib_entry_for_suite(&format!("wasm-{}", env.platform()), locals(&all_scopes)?, &main, &test, ctx)]
+        }
+        TargetKind::Js => {
+            let main = js_resolution_for_suite(ctx, setup, false, None)?;
+            let test = js_resolution_for_suite(ctx, setup, true, Some(suite))?;
+            vec![klib_entry_for_suite("js", locals(&all_scopes)?, &main, &test, ctx)]
+        }
+        TargetKind::Native => super::build::native_platforms(ctx)?
+            .iter()
+            .map(|p| -> Result<Value> {
+                let main = native_resolution_for_suite(ctx, setup, p, false, None)?;
+                let test = native_resolution_for_suite(ctx, setup, p, true, Some(suite))?;
+                Ok(klib_entry_for_suite(&format!("native-{p}"), locals(&all_scopes)?, &main, &test, ctx))
+            })
+            .collect::<Result<_>>()?,
+        TargetKind::Android => Vec::new(),
+    })
+}
+
+/// A klib platform entry for [`suite_test_dependencies`]: the main libraries and the suite's test ones.
+fn klib_entry_for_suite(platform: &str, main_locals: Vec<Value>, main: &Resolution, test: &Resolution, ctx: &BuildContext) -> Value {
+    let mut main_entries = main_locals;
+    main_entries.extend(maven_entries(ctx, main));
+    let mut test_entries = main_entries.clone();
+    // Only the test resolution's own nodes are extra; path deps are already in `main_locals` via `local_dependencies_for_suite`.
+    // To avoid duplicates, keep the test entries that are not already in the main ones (by path).
+    let main_paths: std::collections::HashSet<String> =
+        main_entries.iter().filter_map(|e| e.get("path").and_then(|p| p.as_str()).map(str::to_owned)).collect();
+    for entry in maven_entries(ctx, test) {
+        let path = entry.get("path").and_then(|p| p.as_str()).unwrap_or_default().to_owned();
+        if !main_paths.contains(&path) && !test_entries.contains(&entry) {
+            test_entries.push(entry);
+        }
+    }
+    // Include the main libraries in the test list too when they are missing (different lockfile keys may resolve the same files).
+    json!({ "platform": platform, "compile": main_entries, "runtime": main_entries, "test": test_entries })
 }
 
 /// The Android module of a package: its namespace and `R` class, its Android manifest, resources and

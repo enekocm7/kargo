@@ -28,6 +28,7 @@ Warnings never change the exit code, and `-q` hides them. In a [workspace](../..
 | [Compose for iOS or the web on an older Kotlin](#compose-for-ios-or-the-web-on-an-older-kotlin) | the same commands |
 | [`.env` file tracked by git](#env-file-tracked-by-git) | `run`, `test`, `task`, `env` |
 | [Generator inputs that match nothing](#generator-inputs-that-match-nothing) | `build`, `check`, `run`, `test`, `package`, `generate` |
+| [Undeclared test suite directory](#undeclared-test-suite-directory) | `build`, `check`, `test` |
 
 ## No sources
 
@@ -121,6 +122,14 @@ warning: no file matches the `inputs` of [[generate]] `protos`: proto/**/*.proto
 ```
 
 A [`[[generate]]` step](../../guides/code-generation/) with `inputs` runs when those files change, and none of the globs matches a file. Usually the glob has a typo or the files are somewhere else. Globs are relative to the project root, use gitignore syntax, and never match inside `target/` or a directory whose name starts with a dot. A `protobuf` step with no `.proto` file generates nothing; any other step still runs.
+
+## Undeclared test suite directory
+
+```text
+warning: `integration-tests/` has test sources but no `[test.suites.<name>]` names it with `sources`; declare it to run it with `kargo test --suite <name>`
+```
+
+A directory like `integration-tests/` (or `integration-tests-jvm/`) with Kotlin or Java sources is a [test suite](../../guides/testing/#test-suites) that no `[test.suites.<name>]` table names with `sources`, so `kargo test` never runs it. Declare it (`[test.suites.integration]` with the default `sources = "integration-tests"`, or name its directory with `sources`), or rename the directory if it is not a suite.
 
 ## Odd package versions
 

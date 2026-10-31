@@ -338,6 +338,50 @@ Files in `test-resources/` are on the classpath of JVM tests:
 val text = javaClass.getResource("/fixtures/sample.json")!!.readText()
 ```
 
+## Test suites
+
+Slow or external tests (integration tests, end-to-end tests) live apart from the unit tests in their own source set, with their own dependencies and settings, so `kargo test` stays fast by default. Declare a suite in `kargo.toml`:
+
+```toml title="kargo.toml"
+[test.suites.integration]
+sources = "integration-tests"          # integration-tests/ and integration-tests-jvm/
+resources = "integration-resources"  # on the JVM classpath
+jvm-args = ["-Xmx2g"]
+env = { DATABASE_URL = "jdbc:h2:mem:test" }
+
+[test.suites.integration.dependencies]
+"org.testcontainers:testcontainers" = "1.20.0"
+```
+
+```kotlin title="integration-tests/DatabaseTest.kt"
+package com.example.calc
+
+import kotlin.test.*
+
+class DatabaseTest {
+    @Test
+    fun stores() { /* ... uses testcontainers ... */ }
+}
+```
+
+Run it with `--suite` (`unit` is the default suite, `tests/`; `all` is every suite):
+
+```sh
+kargo test                 # unit tests only (tests/, tests-jvm/)
+kargo test --suite integration
+kargo test --suite unit --suite integration   # in order, reported separately
+kargo test --suite all
+kargo test --suite integration DatabaseTest  # with a filter, like unit tests
+kargo test --suite integration --list        # list the suite's tests
+kargo build                # never compiles suites unless asked
+```
+
+A suite has its own `sources` (default `<name>-tests/`), `resources` (default `<name>-resources/`), `jvm-args`, working directory (`cwd`, relative to the package root), `timeout`, `test-timeout`, JUnit tag filters (`include-tags`, `exclude-tags`) and `env`, on top of `[test]`, `[target.jvm]` and `[env]`. Its `dependencies` are locked separately in `kargo.lock` (`jvm/test-integration`, `wasm/test-integration`, ...), and it can use the package's `test-fixtures` through `[dev-dependencies]`. With `--report junit` each suite writes its own `test-reports-<name>/TEST-<target>.xml`, so CI publishes one report per suite. With `--message-format json` each test still reports `test-started` and `test-finished`, and each suite ends with its own `test-summary`.
+
+In a workspace, suites apply per member: `kargo test --workspace --suite integration` runs the members that declare it and skips the others. A directory like `integration-tests/` with sources but no suite that names it warns; declare it with `[test.suites.<name>] sources` or rename the directory.
+
+See [`[test.suites.<name>]`](../../reference/manifest/#testsuitesname).
+
 ## Test fixtures
 
 Test helpers that the tests of several packages share (fakes, builders, sample data) go in `test-fixtures/` (and JVM-only ones in `test-fixtures-jvm/`). They compile against the package and its dev-dependencies, and are on the classpath of the package's own JVM tests and of every package that depends on it with `test-fixtures = true`:

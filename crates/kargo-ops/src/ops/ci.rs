@@ -107,7 +107,7 @@ impl CiPlan {
         if self.junit {
             y.push_str("      - run: kargo test --locked --report junit\n");
             y.push_str("      - uses: mikepenz/action-junit-report@v5\n        if: always()\n");
-            y.push_str("        with:\n          report_paths: target/*/*/test-reports/*.xml\n");
+            y.push_str("        with:\n          report_paths: target/*/*/test-reports*/*.xml\n");
         } else {
             y.push_str("      - run: kargo test --locked\n");
         }

@@ -340,6 +340,40 @@ exclude = ["**/generated/**"]
 
 See [Testing every target](../../guides/testing/#testing-every-target) and [Timeouts](../../guides/testing/#timeouts).
 
+### `[test.suites.<name>]`
+
+An extra test suite with its own sources and settings, such as integration tests in `integration-tests/`. Optional; one table per suite. Run with `kargo test --suite <name>` (`--suite all` runs every suite); plain `kargo test` runs the default `unit` suite (`tests/`, `tests-<target>/`). `kargo build` never compiles suites unless asked.
+
+```toml
+[test.suites.integration]
+sources = "integration-tests"          # default: "<name>-tests"
+resources = "integration-resources"  # default: "<name>-resources"
+jvm-args = ["-Xmx2g"]                # after [test] jvm-args
+cwd = "integration"                  # working directory, relative to the package root
+timeout = "5m"                       # default: [test] timeout
+test-timeout = "30s"                 # default: [test] test-timeout
+include-tags = ["integration"]       # only run JVM tests with one of these tags
+exclude-tags = ["slow"]              # skip JVM tests with one of these tags
+env = { DATABASE_URL = "jdbc:h2:mem:test" }
+
+[test.suites.integration.dependencies]
+"org.testcontainers:testcontainers" = "1.20.0"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `sources` | `"<name>-tests"` | Test sources, relative to the package. The per-target directory `<sources>-<target>/` (such as `integration-tests-jvm/`) is also compiled |
+| `resources` | `"<name>-resources"` | Test resources on the JVM classpath, relative to the package |
+| `jvm-args` | `[]` | JVM arguments for the suite's test process, after `[test] jvm-args` |
+| `cwd` | the package root | Working directory the suite's tests run in, relative to the package root |
+| `timeout` | `[test] timeout` | How long the suite's run may take. The clock starts when its tests start running |
+| `test-timeout` | `[test] test-timeout` | How long one JVM test of the suite may take |
+| `include-tags`, `exclude-tags` | `[]` | JUnit tag filters of the suite, added to `kargo test --include-tag` and `--exclude-tag` |
+| `env` | `{}` | Extra environment variables of the suite's tests, on top of `[env]`. Names must be valid (`DATABASE_URL`) |
+| `dependencies` | none | Maven dependencies only the suite's tests compile and run against (locked as `jvm/test-<name>`, `wasm/test-<name>`, ... in `kargo.lock`). A suite can use the package's `test-fixtures` through `[dev-dependencies]` |
+
+The name uses letters, digits, `-` and `_`, starting with a letter, and cannot be `unit`, `all` or a target's name. `sources` cannot be `tests`, `tests-<target>` or `test-resources`. A directory like `integration-tests/` with sources but no suite that names it warns; declare it or rename the directory. In a workspace, `kargo test --workspace --suite <name>` runs the members that declare it and skips the others. See [Test suites](../../guides/testing/#test-suites).
+
 ## `[test.coverage]`
 
 Code coverage of `kargo test --coverage` (JVM, JaCoCo). Every key is optional.

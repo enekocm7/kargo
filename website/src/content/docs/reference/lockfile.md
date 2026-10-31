@@ -18,6 +18,8 @@ For every resolution (one per target and classpath, such as `jvm/runtime`):
 
 The JS target's resolutions are `js/main` and `js/test`, like the Wasm target's `wasm/main` and `wasm/test`.
 
+A [test suite](../../guides/testing/#test-suites) pins its own test classpath separately, with the suite's name after `test`: `jvm/test-integration`, `wasm/test-integration`, `js/test-integration` and `native-linux_x64/test-integration` (and `jvm/test-integration-annotation-processors`, `jvm/test-integration-ksp` for its processors). The default `unit` suite keeps the plain `jvm/test` keys.
+
 The [web resources](../../guides/wasm/#web-resources-from-libraries) of Wasm libraries from a repository are pinned under `wasm/web-resources` (and `wasm/web-resources-test` for the tests): one entry per library that ships them, with its `-web-resources.zip`. A project whose libraries ship none has no such entry.
 
 A [`[[generate]]` step](../../guides/code-generation/) that runs a `tool`, or the `protobuf` built-in, pins what it downloads under `generate/<name>`: the tool and its dependencies, or `protoc` and the gRPC plugins.

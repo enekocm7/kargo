@@ -288,6 +288,24 @@ fn test_classpath(metadata: &Value) -> Vec<PathBuf> {
                 out.push(path);
             }
         }
+        // Test suites have their own test classpath (such as `testcontainers`), which the
+        // server needs to resolve imports in `integration-tests/`.
+        for suite in jvm["test-suites"].as_array().into_iter().flatten() {
+            for classpaths in suite["test-dependencies"].as_array().into_iter().flatten() {
+                for entry in classpaths["test"].as_array().into_iter().flatten() {
+                    let path = match entry["path"].as_str() {
+                        Some(p) => PathBuf::from(p),
+                        None => match package_named(metadata, str_of(entry, "package")).and_then(jvm_target) {
+                            Some(dep) => PathBuf::from(str_of(dep, "classes-dir")),
+                            None => continue,
+                        },
+                    };
+                    if !out.contains(&path) {
+                        out.push(path);
+                    }
+                }
+            }
+        }
     }
     out
 }
@@ -615,6 +633,33 @@ impl<'a> Workspace<'a> {
                     for dependency in found {
                         if !dependencies.iter().any(|d| d["name"] == dependency["name"]) {
                             dependencies.push(dependency);
+                        }
+                    }
+                }
+            }
+            // Test suites have their own test classpath; test modules get every suite's too,
+            // so imports in `integration-tests/` resolve.
+            if set.test {
+                for suite in set.target["test-suites"].as_array().into_iter().flatten() {
+                    for classpaths in suite["test-dependencies"].as_array().into_iter().flatten() {
+                        for entry in classpaths["test"].as_array().into_iter().flatten() {
+                            let found: Vec<Value> = match entry["path"].as_str() {
+                                Some(file) => {
+                                    let library = self.library(entry, file, set.platform.library_type);
+                                    vec![json!({ "type": "library", "name": library, "scope": "compile" })]
+                                }
+                                None => package_named(self.metadata, str_of(entry, "package"))
+                                    .map(|dep| code_modules(dep, kind, self.targets))
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|m| json!({ "type": "module", "name": m, "scope": "compile" }))
+                                    .collect(),
+                            };
+                            for dependency in found {
+                                if !dependencies.iter().any(|d| d["name"] == dependency["name"]) {
+                                    dependencies.push(dependency);
+                                }
+                            }
                         }
                     }
                 }

@@ -1725,6 +1725,66 @@ fn test_coverage_section() {
 }
 
 #[test]
+fn test_suites() {
+    assert!(parse(MINIMAL).test.suites.is_empty(), "no suites by default");
+    let manifest = format!(
+        "{MINIMAL}
+[test.suites.integration]
+sources = \"integration-tests\"
+resources = \"integration-resources\"
+jvm-args = [\"-Xmx2g\"]
+cwd = \"integration\"
+timeout = \"5m\"
+test-timeout = \"30s\"
+include-tags = [\"integration\"]
+exclude-tags = [\"slow\"]
+env = {{ DATABASE_URL = \"jdbc:h2:mem:test\" }}
+
+[test.suites.integration.dependencies]
+\"org.testcontainers:testcontainers\" = \"1.20.0\"
+"
+    );
+    let suite = &parse(&manifest).test.suites["integration"];
+    assert_eq!(suite.sources, PathBuf::from("integration-tests"));
+    assert_eq!(suite.resources, PathBuf::from("integration-resources"));
+    assert_eq!(suite.jvm_args, ["-Xmx2g"]);
+    assert_eq!(suite.cwd.as_deref(), Some(Path::new("integration")));
+    assert_eq!(suite.timeout, Some(Duration::from_secs(300)));
+    assert_eq!(suite.test_timeout, Some(Duration::from_secs(30)));
+    assert_eq!(suite.include_tags, ["integration"]);
+    assert_eq!(suite.exclude_tags, ["slow"]);
+    assert_eq!(suite.env["DATABASE_URL"], "jdbc:h2:mem:test");
+    assert_eq!(suite.dependencies.len(), 1);
+    assert_eq!(suite.dependencies[0].module.to_string(), "org.testcontainers:testcontainers");
+
+    // Defaults: `<name>-tests` and `<name>-resources`.
+    let suite = &parse(&format!("{MINIMAL}\n[test.suites.integration]\n")).test.suites["integration"];
+    assert_eq!(suite.sources, PathBuf::from("integration-tests"));
+    assert_eq!(suite.resources, PathBuf::from("integration-resources"));
+    assert!(suite.jvm_args.is_empty() && suite.cwd.is_none() && suite.timeout.is_none());
+
+    // Reserved names, clashes and bad directories are rejected.
+    for (body, what) in [
+        ("[test.suites.unit]\n", "`unit`"),
+        ("[test.suites.all]\n", "`all`"),
+        ("[test.suites.jvm]\n", "clashes with the source directories"),
+        ("[test.suites.integration]\nsources = \"tests\"\n", "`tests`"),
+        ("[test.suites.integration]\nsources = \"tests-jvm\"\n", "`tests-jvm`"),
+        ("[test.suites.integration]\nsources = \"/abs\"\n", "inside the package"),
+        ("[test.suites.integration]\nresources = \"test-resources\"\n", "`test-resources`"),
+        ("[test.suites.integration]\ncwd = \"/abs\"\n", "`cwd`"),
+        ("[test.suites.integration]\ninclude-tags = [\"\"]\n", "empty tag"),
+        ("[test.suites.integration]\nenv = { \"1BAD\" = \"x\" }\n", "not a valid environment variable"),
+        ("[test.suites.a]\nsources = \"same\"\n[test.suites.b]\nsources = \"same\"\n", "also used by"),
+    ] {
+        let err = parse_err(&format!("{MINIMAL}\n{body}"));
+        assert!(err.contains(what), "{body}: {err}");
+    }
+    // Unknown keys are still errors.
+    assert!(parse_err(&format!("{MINIMAL}\n[test.suites.integration]\nthreads = 2\n")).contains("threads"));
+}
+
+#[test]
 fn audit_section() {
     assert_eq!(parse(MINIMAL).audit, AuditSettings::default(), "nothing is set by default");
     let audit = parse(&format!(

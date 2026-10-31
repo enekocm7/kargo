@@ -5,7 +5,7 @@
 //!
 //! Each check returns plain messages; [`emit`] prints them with `Shell::warn`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kargo_manifest::{Manifest, TargetKind};
 use kargo_util::fs::collect_files;
@@ -181,6 +181,53 @@ pub fn untyped_modules(ws: &Workspace, targets: &[TargetKind]) -> Vec<String> {
     messages
 }
 
+/// Warnings about suite directories that have sources but are not declared in `kargo.toml`:
+/// a directory like `integration-tests/` (or `integration-tests-<target>/`) with Kotlin or Java
+/// sources that no `[test.suites.<name>]` names with `sources`.
+pub fn undeclared_suites(ws: &Workspace) -> Vec<String> {
+    let mut known: Vec<PathBuf> = vec![ws.common_tests()];
+    for target in TargetKind::ALL {
+        known.push(ws.target_tests(target));
+    }
+    for suite in ws.manifest().test.suites.values() {
+        known.push(ws.root().join(&suite.sources));
+        for target in TargetKind::ALL {
+            known.push(ws.suite_target_tests(suite, target));
+        }
+    }
+    let mut messages = Vec::new();
+    let Ok(entries) = std::fs::read_dir(ws.root()) else { return messages };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if known.iter().any(|d| d == &path) {
+            continue;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // A test suite directory ends with `-tests` (such as `integration-tests`) or is a
+        // per-target `*-tests-<target>` directory (such as `integration-tests-jvm/`).
+        let looks_like_suite =
+            name.ends_with("-tests") || TargetKind::ALL.iter().any(|t| name.ends_with(&format!("-tests-{}", t.as_str())));
+        if !looks_like_suite {
+            continue;
+        }
+        if collect_files(&path, &["kt", "java"]).is_empty() {
+            continue;
+        }
+        candidates.push(path);
+    }
+    candidates.sort();
+    for path in candidates.into_iter().take(LISTED_FILES) {
+        let rel = slash(path.strip_prefix(ws.root()).unwrap_or(&path));
+        messages.push(format!(
+            "`{rel}/` has test sources but no `[test.suites.<name>]` names it with `sources`; declare it to run it with `kargo test --suite <name>`"
+        ));
+    }
+    messages
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +360,28 @@ targets = [\"jvm\", \"wasm\"]
         let (_dir, ws) = project(&["resources/config.properties"]);
         assert!(missing_sources(&ws, &[TargetKind::Jvm]).is_empty());
         assert_eq!(missing_sources(&ws, &[TargetKind::Wasm]).len(), 1);
+    }
+
+    #[test]
+    fn undeclared_suite_directories_warn() {
+        let (dir, _) = project(&["src/Main.kt", "integration-tests/DatabaseTest.kt", "integration-tests-jvm/JvmTest.kt"]);
+        let ws = Workspace::load(&dir.path().join("kargo.toml")).unwrap();
+        let messages = undeclared_suites(&ws);
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages[0].contains("integration-tests/"), "{messages:?}");
+        assert!(messages[0].contains("[test.suites.<name>]"), "{messages:?}");
+
+        // Declared suites do not warn.
+        std::fs::write(dir.path().join("kargo.toml"), "[package]\nname = \"app\"\nversion = \"1.0.0\"\n[test.suites.integration]\n")
+            .unwrap();
+        let ws = Workspace::load(&dir.path().join("kargo.toml")).unwrap();
+        assert!(undeclared_suites(&ws).is_empty(), "declared suites are fine");
+
+        // Directories without sources do not warn.
+        let (dir, _) = project(&["src/Main.kt"]);
+        std::fs::create_dir_all(dir.path().join("empty-tests")).unwrap();
+        let ws = Workspace::load(&dir.path().join("kargo.toml")).unwrap();
+        assert!(undeclared_suites(&ws).is_empty());
     }
 
     #[test]

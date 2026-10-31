@@ -84,7 +84,7 @@ Built-in [frameworks](https://enekocm7.github.io/kargo/guides/frameworks/) add t
 | `kargo new <dir>` | Create a project (`--lib`, `-t jvm,wasm,js,native,android`, `--with compose,ktor,...`, or `--template <git URL or path>` for your own) |
 | `kargo build` | Compile every target (`--release` for an optimized build) |
 | `kargo run` | Build and run the program, or serve a browser app (`--watch` restarts it on changes) |
-| `kargo test` | Compile and run the tests of every target (`--coverage` measures JVM code coverage) |
+| `kargo test` | Compile and run the tests of every target (`--suite integration` for integration tests, `--coverage` for JVM code coverage) |
 | `kargo add <group:artifact>` | Add a dependency, at its latest version unless you give one |
 | `kargo package` | Build a fat jar, a runtime image, a native image, an installer or Android bundles |
 | `kargo publish` | Publish a library to Maven Central, a Maven repository or npm |

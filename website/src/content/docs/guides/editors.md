@@ -72,8 +72,8 @@ An IDE can only complete and resolve what it knows about. When a folder with a `
 |---|---|
 | A package | A module named after it |
 | The [`[layout]`](../../reference/manifest/#layout) source directories (`src/`, `src-<target>/` by default) | Source roots |
-| The `[layout]` test directories (`tests/`, `tests-<target>/` by default) | Test source roots |
-| The `[layout]` resource directories (`resources/`, `test-resources/` by default) | Resource roots |
+| The `[layout]` test directories (`tests/`, `tests-<target>/` by default), and a [test suite](../../testing/#test-suites)'s `integration-tests/`, `integration-tests-<target>/` | Test source roots |
+| The `[layout]` resource directories (`resources/`, `test-resources/` by default), and a suite's `integration-resources/` | Resource roots |
 | The `[layout]` examples directory (`examples/` by default) | A test source root, since examples are compiled against the package's sources |
 | `target/` | Excluded from the project, except the output directories of [`[[generate]]` steps](../code-generation/) in `target/generated/`, which are source (or test source, or resource) roots of their own |
 | `target/generated/<profile>/<name>/` of a [`[[generate]]` step](../code-generation/) | A source root, so generated code, such as classes from `.proto` files, resolves. The directory is filled by `kargo build`, `kargo check` or `kargo generate`; run one before the IDE needs the code |

@@ -85,10 +85,11 @@ $ kargo test --list --format json 2>/dev/null
 | `display-name` | The name the test framework shows, such as `adds()` |
 | `file` | Absolute path of the source file that declares the test, or `null` if Kargo can't tell |
 | `line` | 1-based line of the test function (or of its class when the function isn't found), or `null` |
+| `test-suite` | The Kargo [test suite](../../guides/testing/#test-suites) the test belongs to (`unit` is left out): `integration` for `kargo test --suite integration --list --format json` |
 
 A parameterized test or test factory is listed once; its invocations only exist when it runs, and their `parent-id` is its `id`. Kargo finds `file` and `line` by looking for the class and function in the test sources, so tests generated at run time (Kotest specs, dynamic tests) point at their class at best.
 
-Wasm, JS and Android tests are not listed yet: `kargo test --list` notes that and prints nothing for them. A filter (`kargo test --list MathTest`) lists only the tests it would run.
+Wasm, JS and Android tests are not listed yet: `kargo test --list` notes that and prints nothing for them. A filter (`kargo test --list MathTest`) lists only the tests it would run. With `--suite`, each suite's tests are listed in turn, with `test-suite` naming the suite.
 
 ## Test results
 
@@ -113,7 +114,7 @@ $ kargo test --message-format json 2>/dev/null
 
 An ignored test gets a `test-finished` message without a `test-started` one. On the JVM, a class whose setup failed (such as a failing `@BeforeAll`) is reported as a failed `test-finished` whose `suite` is the class and whose `name` is its display name.
 
-Each target ends with a `test-summary` message: the `passed`, `failed` and `ignored` counts and `success`. The exit code is the same as without the flag.
+Each target ends with a `test-summary` message: the `passed`, `failed` and `ignored` counts and `success`. With `--suite`, each suite ends with its own `test-summary`, with `test-suite` naming the suite (`unit` is left out). The exit code is the same as without the flag.
 
 With `--coverage`, each JVM package ends with a `coverage-summary` message after its `test-summary`:
 

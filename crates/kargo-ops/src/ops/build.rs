@@ -215,6 +215,37 @@ pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: 
     existing_sources(ctx, target, tests, extensions)
 }
 
+/// Like [`sources`], for one test suite: the default `unit` suite with `None`, or a
+/// declared suite (`[test.suites.<name>]`) with `Some`.
+pub fn suite_sources(
+    ctx: &BuildContext,
+    target: TargetKind,
+    suite: Option<&kargo_manifest::TestSuite>,
+    extensions: &[&str],
+) -> Result<SourceSet> {
+    crate::generate::ensure(ctx, target)?;
+    suite_existing_sources(ctx, target, suite, extensions)
+}
+
+/// Like [`existing_sources`], for one test suite, without running `[[generate]]` steps.
+pub fn suite_existing_sources(
+    ctx: &BuildContext,
+    target: TargetKind,
+    suite: Option<&kargo_manifest::TestSuite>,
+    extensions: &[&str],
+) -> Result<SourceSet> {
+    let Some(suite) = suite else {
+        return existing_sources(ctx, target, true, extensions);
+    };
+    let ws = ctx.ws;
+    let common = ws.root().join(&suite.sources);
+    let platform = ws.suite_target_tests(suite, target);
+    let mut set = SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str());
+    // Suites have no intermediate source sets of their own; the generated test sources apply to all.
+    add_generated_sources(&mut set, crate::generate::sources(ws, &ctx.profile, target, true, extensions));
+    Ok(set)
+}
+
 /// Like [`sources`], but runs no `[[generate]]` step: the generated files are whatever the last build wrote.
 /// `kargo metadata` reads the sources this way.
 pub fn existing_sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: &[&str]) -> Result<SourceSet> {
@@ -371,6 +402,7 @@ pub fn warn_about_sources(ctx: &BuildContext, targets: &[TargetKind]) {
     let mut messages = warnings::missing_sources(ctx.ws, &bare);
     messages.extend(warnings::ignored_files(ctx.ws));
     messages.extend(warnings::untyped_modules(ctx.ws, targets));
+    messages.extend(warnings::undeclared_suites(ctx.ws));
     warnings::emit(ctx.shell(), ctx.project, ctx.ws, messages);
 }
 
@@ -522,6 +554,16 @@ pub fn jvm_classpaths(ctx: &BuildContext, setup: &TargetSetup) -> Result<JvmClas
 /// The javac `-processorpath`: framework processors (e.g. Lombok) followed by
 /// `scope = "processor"` dependencies; `test` adds processor dev-dependencies.
 pub fn jvm_processor_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -> Result<Vec<PathBuf>> {
+    jvm_processor_path_for_suite(ctx, setup, test, None)
+}
+
+/// Like [`jvm_processor_path`], for the test suite `suite` (`None` is the default `unit` suite).
+pub fn jvm_processor_path_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    test: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Vec<PathBuf>> {
     let mut requests: Vec<_> = setup.contributions.annotation_processors.iter().map(super::context::to_request).collect();
     let declared = setup.requests(&[Scope::Processor], test);
     // BOMs only apply to declared processors, so framework-only setups keep their lockfile entry.
@@ -535,19 +577,37 @@ pub fn jvm_processor_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -
         return Ok(Vec::new());
     }
     let dev_processors = test && setup.dev.iter().any(|d| d.scope == Scope::Processor);
-    let key = if dev_processors { "jvm/test-annotation-processors" } else { "jvm/annotation-processors" };
-    Ok(ctx.resolve(key, Platform::Jvm, &requests, boms)?.files())
+    let key = match (dev_processors, suite) {
+        (true, None) => "jvm/test-annotation-processors".to_owned(),
+        (true, Some(suite)) => format!("jvm/test-{}-annotation-processors", suite.name),
+        (false, _) => "jvm/annotation-processors".to_owned(),
+    };
+    Ok(ctx.resolve(&key, Platform::Jvm, &requests, boms)?.files())
 }
 
 /// The KSP processor path: `scope = "ksp"` dependencies; `test` adds KSP dev-dependencies.
 pub fn jvm_ksp_path(ctx: &BuildContext, setup: &TargetSetup, test: bool) -> Result<Vec<PathBuf>> {
+    jvm_ksp_path_for_suite(ctx, setup, test, None)
+}
+
+/// Like [`jvm_ksp_path`], for the test suite `suite`.
+pub fn jvm_ksp_path_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    test: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Vec<PathBuf>> {
     let requests = setup.requests(&[Scope::Ksp], test);
     if requests.is_empty() {
         return Ok(Vec::new());
     }
     let dev_processors = test && setup.dev.iter().any(|d| d.scope == Scope::Ksp);
-    let key = if dev_processors { "jvm/test-ksp" } else { "jvm/ksp" };
-    Ok(ctx.resolve(key, Platform::Jvm, &requests, &setup.boms)?.files())
+    let key = match (dev_processors, suite) {
+        (true, None) => "jvm/test-ksp".to_owned(),
+        (true, Some(suite)) => format!("jvm/test-{}-ksp", suite.name),
+        (false, _) => "jvm/ksp".to_owned(),
+    };
+    Ok(ctx.resolve(&key, Platform::Jvm, &requests, &setup.boms)?.files())
 }
 
 /// The compilation a KSP pass precedes.
@@ -569,7 +629,19 @@ pub(crate) fn run_jvm_ksp(
     sources: &mut SourceSet,
     resources: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let processor_path = jvm_ksp_path(ctx, setup, unit.test)?;
+    run_jvm_ksp_for_suite(ctx, setup, unit, sources, resources, None)
+}
+
+/// Like [`run_jvm_ksp`], for the test suite `suite` (`None` is the default `unit` suite).
+pub(crate) fn run_jvm_ksp_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    unit: JvmKspUnit,
+    sources: &mut SourceSet,
+    resources: &mut Vec<PathBuf>,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<()> {
+    let processor_path = jvm_ksp_path_for_suite(ctx, setup, unit.test, suite)?;
     if processor_path.is_empty() {
         return Ok(());
     }
@@ -577,11 +649,15 @@ pub(crate) fn run_jvm_ksp(
     let kotlin = &ws.manifest().kotlin;
     let language_version = kotlin.language_version.clone().unwrap_or_else(|| kargo_compiler::ksp::language_version(&kotlin.version));
     let api_version = kotlin.api_version.clone().unwrap_or_else(|| language_version.clone());
-    let (mut source_roots, dir, what) = if unit.test {
-        (ws.test_dirs(TargetKind::Jvm), "test", ", tests, ksp")
+    let (mut source_roots, dir, what): (Vec<std::path::PathBuf>, &str, String) = if unit.test {
+        match suite {
+            None => (ws.test_dirs(TargetKind::Jvm), "test", ", tests, ksp".to_owned()),
+            Some(suite) => (ws.suite_test_dirs(TargetKind::Jvm, Some(suite)), "test", format!(", {} tests, ksp", suite.name)),
+        }
     } else {
-        (ws.source_dirs(TargetKind::Jvm), "main", ", ksp")
+        (ws.source_dirs(TargetKind::Jvm), "main", ", ksp".to_owned())
     };
+    let what: &str = &what;
     // The processors see what `[[generate]]` steps wrote too, as classes in `src/` may use it.
     let generated = if unit.test { GeneratedKind::TestSources } else { GeneratedKind::Sources };
     source_roots.extend(crate::generate::dirs(ws, &ctx.profile, TargetKind::Jvm, generated));
@@ -786,18 +862,42 @@ fn sync_lib_dir(lib_dir: &Path, jars: &[PathBuf]) -> Result<Vec<String>> {
 
 /// The resolved Maven klibs of the Wasm target.
 pub fn wasm_resolution(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Resolution> {
+    wasm_resolution_for_suite(ctx, setup, include_dev, None)
+}
+
+/// Like [`wasm_resolution`], for the test suite `suite`.
+pub fn wasm_resolution_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    include_dev: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Resolution> {
     let env = ctx.ws.manifest().targets.wasm.as_ref().map(|w| w.environment).unwrap_or_default();
-    let key = if include_dev { "wasm/test" } else { "wasm/main" };
+    let key = match (include_dev, suite) {
+        (true, None) => "wasm/test".to_owned(),
+        (true, Some(suite)) => format!("wasm/test-{}", suite.name),
+        (false, _) => "wasm/main".to_owned(),
+    };
     let requests = setup.requests(&ALL_SCOPES, include_dev);
-    ctx.resolve(key, Platform::Wasm(env.platform().to_owned()), &requests, &setup.boms)
+    ctx.resolve(&key, Platform::Wasm(env.platform().to_owned()), &requests, &setup.boms)
 }
 
 /// Every klib the Wasm sources compile against: path dependencies first, then Maven libraries.
 /// A jar in the resolution is not a klib but files for the page, such as Skiko's runtime (see
 /// [`crate::web_resources`]), so it is left out.
 pub fn wasm_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Vec<PathBuf>> {
-    let mut libraries = local::artifacts(ctx, LocalTarget::Wasm, &ALL_SCOPES, include_dev)?;
-    libraries.extend(wasm_resolution(ctx, setup, include_dev)?.files().into_iter().filter(|f| !is_jar(f)));
+    wasm_libraries_for_suite(ctx, setup, include_dev, None)
+}
+
+/// Like [`wasm_libraries`], for the test suite `suite`.
+pub fn wasm_libraries_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    include_dev: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Vec<PathBuf>> {
+    let mut libraries = local::artifacts_for_suite(ctx, LocalTarget::Wasm, &ALL_SCOPES, include_dev, suite)?;
+    libraries.extend(wasm_resolution_for_suite(ctx, setup, include_dev, suite)?.files().into_iter().filter(|f| !is_jar(f)));
     Ok(libraries)
 }
 
@@ -918,14 +1018,38 @@ pub(crate) fn npm_opt_in(ctx: &BuildContext, target: TargetKind, kotlin_args: &m
 
 /// The resolved Maven klibs of the Kotlin/JS target.
 pub fn js_resolution(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Resolution> {
-    let key = if include_dev { "js/test" } else { "js/main" };
-    ctx.resolve(key, Platform::Js, &setup.requests(&ALL_SCOPES, include_dev), &setup.boms)
+    js_resolution_for_suite(ctx, setup, include_dev, None)
+}
+
+/// Like [`js_resolution`], for the test suite `suite`.
+pub fn js_resolution_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    include_dev: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Resolution> {
+    let key = match (include_dev, suite) {
+        (true, None) => "js/test".to_owned(),
+        (true, Some(suite)) => format!("js/test-{}", suite.name),
+        (false, _) => "js/main".to_owned(),
+    };
+    ctx.resolve(&key, Platform::Js, &setup.requests(&ALL_SCOPES, include_dev), &setup.boms)
 }
 
 /// Every klib the Kotlin/JS sources compile against: path dependencies first, then Maven libraries.
 pub fn js_libraries(ctx: &BuildContext, setup: &TargetSetup, include_dev: bool) -> Result<Vec<PathBuf>> {
-    let mut libraries = local::artifacts(ctx, LocalTarget::Js, &ALL_SCOPES, include_dev)?;
-    libraries.extend(js_resolution(ctx, setup, include_dev)?.files());
+    js_libraries_for_suite(ctx, setup, include_dev, None)
+}
+
+/// Like [`js_libraries`], for the test suite `suite`.
+pub fn js_libraries_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    include_dev: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Vec<PathBuf>> {
+    let mut libraries = local::artifacts_for_suite(ctx, LocalTarget::Js, &ALL_SCOPES, include_dev, suite)?;
+    libraries.extend(js_resolution_for_suite(ctx, setup, include_dev, suite)?.files());
     Ok(libraries)
 }
 
@@ -1041,15 +1165,41 @@ pub fn buildable_native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {
 
 /// The resolved Maven klibs of one Kotlin/Native platform.
 pub fn native_resolution(ctx: &BuildContext, setup: &TargetSetup, konan_target: &str, include_dev: bool) -> Result<Resolution> {
-    let key = format!("native-{konan_target}/{}", if include_dev { "test" } else { "main" });
+    native_resolution_for_suite(ctx, setup, konan_target, include_dev, None)
+}
+
+/// Like [`native_resolution`], for the test suite `suite`.
+pub fn native_resolution_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    konan_target: &str,
+    include_dev: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Resolution> {
+    let key = match (include_dev, suite) {
+        (true, None) => format!("native-{konan_target}/test"),
+        (true, Some(suite)) => format!("native-{konan_target}/test-{}", suite.name),
+        (false, _) => format!("native-{konan_target}/main"),
+    };
     let requests = setup.requests(&ALL_SCOPES, include_dev);
     ctx.resolve(&key, Platform::Native(konan_target.to_owned()), &requests, &setup.boms)
 }
 
 /// Every klib the Native sources compile against: path dependencies first, then Maven libraries.
 pub fn native_libraries(ctx: &BuildContext, setup: &TargetSetup, konan_target: &str, include_dev: bool) -> Result<Vec<PathBuf>> {
-    let mut libraries = local::artifacts(ctx, LocalTarget::Native(konan_target), &ALL_SCOPES, include_dev)?;
-    libraries.extend(native_resolution(ctx, setup, konan_target, include_dev)?.files());
+    native_libraries_for_suite(ctx, setup, konan_target, include_dev, None)
+}
+
+/// Like [`native_libraries`], for the test suite `suite`.
+pub fn native_libraries_for_suite(
+    ctx: &BuildContext,
+    setup: &TargetSetup,
+    konan_target: &str,
+    include_dev: bool,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Vec<PathBuf>> {
+    let mut libraries = local::artifacts_for_suite(ctx, LocalTarget::Native(konan_target), &ALL_SCOPES, include_dev, suite)?;
+    libraries.extend(native_resolution_for_suite(ctx, setup, konan_target, include_dev, suite)?.files());
     Ok(libraries)
 }
 
