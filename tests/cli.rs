@@ -156,6 +156,21 @@ fn new_rejects_invalid_input() {
 }
 
 #[test]
+fn new_suggests_name_for_a_folder_name_that_is_not_a_package_name() {
+    let p = Project::new();
+    p.kargo()
+        .args(["new", "01-cli-app", "--no-vcs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must start with a letter"))
+        .stderr(predicate::str::contains("pass `--name <valid-name>`"));
+    assert!(!p.path().join("01-cli-app").exists(), "a rejected name left a directory behind");
+    p.kargo().args(["new", "01-cli-app", "--name", "cli-app", "--no-vcs"]).assert().success();
+    let manifest = std::fs::read_to_string(p.path().join("01-cli-app/kargo.toml")).unwrap();
+    assert!(manifest.contains("name = \"cli-app\""), "{manifest}");
+}
+
+#[test]
 fn new_escapes_keyword_names_in_the_package() {
     let p = Project::new();
     p.kargo().args(["new", "class", "--no-vcs"]).assert().success();
