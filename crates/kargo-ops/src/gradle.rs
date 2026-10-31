@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -58,6 +59,12 @@ pub const CREATE_BASELINE_PROPERTY: &str = "kargo.lint.createBaseline";
 pub const COMPOSE_BOM_VERSION: &str = "2026.09.00";
 pub const ACTIVITY_COMPOSE_VERSION: &str = "1.13.0";
 pub const JUNIT4_VERSION: &str = "4.13.2";
+/// The directory of instrumented tests, which run on a device (`kargo test -t android --instrumented`).
+pub const INSTRUMENTED_TESTS_DIR: &str = "android-tests";
+/// AndroidX Test's runner and JUnit extensions, which the instrumented tests of a project get.
+pub const ANDROIDX_TEST_RUNNER_VERSION: &str = "1.6.2";
+pub const ANDROIDX_TEST_EXT_JUNIT_VERSION: &str = "1.2.1";
+pub const ANDROIDX_TEST_ORCHESTRATOR_VERSION: &str = "1.5.1";
 
 fn kts_string(s: &str) -> String {
     let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$");
@@ -414,6 +421,10 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     build_config_fields(&mut s, "        ", &cfg.build_config);
     manifest_placeholders(&mut s, "        ", &cfg.manifest_placeholders);
     ndk_default_config(&mut s, cfg.ndk.as_ref());
+    let instrumented = root.join(INSTRUMENTED_TESTS_DIR).is_dir();
+    if instrumented {
+        let _ = writeln!(s, "        testInstrumentationRunner = \"androidx.test.runner.AndroidJUnitRunner\"");
+    }
     let _ = writeln!(s, "    }}");
     external_native_build(&mut s, cfg.ndk.as_ref(), root);
     android_resources(&mut s, cfg);
@@ -471,9 +482,22 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     kotlin_dirs(&mut s, &test_dirs);
     let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", kts_path(&ws.test_resources()));
     let _ = writeln!(s, "        }}");
+    if instrumented {
+        let instrumented_dirs = [root.join(INSTRUMENTED_TESTS_DIR)];
+        let _ = writeln!(s, "        getByName(\"androidTest\") {{");
+        let _ = writeln!(s, "            java.setSrcDirs(listOf({}))", dirs(&instrumented_dirs));
+        kotlin_dirs(&mut s, &instrumented_dirs);
+        let _ = writeln!(s, "        }}");
+    }
     let _ = writeln!(s, "    }}");
     // Like the other targets, a test filter that matches nothing is not an error.
-    let _ = writeln!(s, "\n    testOptions {{\n        unitTests.all {{ it.filter.isFailOnNoMatchingTests = false }}\n    }}");
+    let orchestrator = if instrumented {
+        "\n        if (providers.gradleProperty(\"kargo.orchestrator\").isPresent) execution = \"ANDROIDX_TEST_ORCHESTRATOR\""
+    } else {
+        ""
+    };
+    let _ =
+        writeln!(s, "\n    testOptions {{\n        unitTests.all {{ it.filter.isFailOnNoMatchingTests = false }}{orchestrator}\n    }}");
     let _ = writeln!(s, "}}\n");
 
     // Compiler options.
@@ -590,6 +614,25 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     }
     push(&mut s, &Dependency::new("org.jetbrains.kotlin:kotlin-test-junit".parse()?, Some(kotlin.clone())), true);
     push(&mut s, &Dependency::new("junit:junit".parse()?, Some(JUNIT4_VERSION.to_owned())), true);
+    if instrumented {
+        // The test dependencies are the instrumented tests' too, next to AndroidX Test.
+        for d in &manifest.dev_dependencies {
+            let _ = writeln!(s, "{}", dependency_line_in(d, "androidTestImplementation"));
+        }
+        for (module, version) in
+            [("androidx.test:runner", ANDROIDX_TEST_RUNNER_VERSION), ("androidx.test.ext:junit", ANDROIDX_TEST_EXT_JUNIT_VERSION)]
+        {
+            let d = Dependency::new(module.parse()?, Some(version.to_owned()));
+            let _ = writeln!(s, "{}", dependency_line_in(&d, "androidTestImplementation"));
+        }
+        let kotlin_test = Dependency::new("org.jetbrains.kotlin:kotlin-test-junit".parse()?, Some(kotlin.clone()));
+        let _ = writeln!(s, "{}", dependency_line_in(&kotlin_test, "androidTestImplementation"));
+        // The orchestrator runs each test in its own instrumentation (`kargo test --orchestrator`).
+        let _ = writeln!(
+            s,
+            "    if (providers.gradleProperty(\"kargo.orchestrator\").isPresent) androidTestUtil(\"androidx.test:orchestrator:{ANDROIDX_TEST_ORCHESTRATOR_VERSION}\")"
+        );
+    }
     let _ = writeln!(s, "}}");
     s.push_str(&doc_classpath_task_kts(&variant_name(&default_flavors(cfg, &[])?, "debug")));
     Ok(s)
@@ -1485,6 +1528,11 @@ pub fn run_tasks(ctx: &BuildContext, args: &[String], device: Option<&str>) -> R
 }
 
 fn run_gradle(ctx: &BuildContext, tasks: &[String], env: &[(&str, &str)]) -> Result<bool> {
+    Ok(run_gradle_until(ctx, tasks, env, None)?.0)
+}
+
+/// Runs Gradle, killing it when `deadline` passes. Returns whether it succeeded and whether it was killed.
+fn run_gradle_until(ctx: &BuildContext, tasks: &[String], env: &[(&str, &str)], deadline: Option<Instant>) -> Result<(bool, bool)> {
     // Chosen first, so an incompatible `agp-version` and `gradle-version` fail before anything else.
     let choice = choose_gradle(ctx.ws, ctx.config)?;
     let dir = generate(ctx)?;
@@ -1513,8 +1561,13 @@ fn run_gradle(ctx: &BuildContext, tasks: &[String], env: &[(&str, &str)]) -> Res
         // Stdout carries only JSON messages.
         cmd.stdout(std::io::stderr());
     }
-    let status = process::status(ctx.shell(), &mut cmd, "Gradle")?;
-    Ok(status.success())
+    let Some(deadline) = deadline else {
+        let status = process::status(ctx.shell(), &mut cmd, "Gradle")?;
+        return Ok((status.success(), false));
+    };
+    let mut child = cmd.spawn().context("failed to start Gradle")?;
+    let (status, timed_out) = crate::ops::test::wait_until(&mut child, Some(deadline))?;
+    Ok((status.success() && !timed_out, timed_out))
 }
 
 /// The classpath of the Android main sources (`android.jar` first, then the
@@ -1848,6 +1901,177 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
         ctx.shell().error(format!("Gradle `{task}` failed"));
     }
     Ok(gradle_ok && summary.success())
+}
+
+/// Where AGP writes the JUnit XML of the instrumented tests, one directory per device.
+fn instrumented_results(ctx: &BuildContext) -> PathBuf {
+    ctx.ws.work_dir("android").join("build/outputs/androidTest-results/connected")
+}
+
+/// What `kargo test --target android --instrumented` asks of the device.
+#[derive(Default)]
+pub struct InstrumentedRun<'a> {
+    /// A class or `package.Class#method` for the runner.
+    pub filter: Option<&'a str>,
+    pub no_run: bool,
+    /// Where the JUnit XML is copied (`--report junit`).
+    pub report_dir: Option<&'a Path>,
+    /// Annotation classes the tests must have (`--include-tag`) or must not have (`--exclude-tag`).
+    pub include: &'a [String],
+    pub exclude: &'a [String],
+    /// Rerun the failed classes of the last run (`--failed`).
+    pub failed: bool,
+    /// `--shard index/count`, the index counted from 1.
+    pub shard: Option<(u32, u32)>,
+    pub orchestrator: bool,
+    /// `[test] test-timeout`: the limit of one test.
+    pub test_timeout: Option<Duration>,
+    /// The end of the whole test run (`[test] timeout`).
+    pub deadline: Option<Instant>,
+}
+
+/// The file with the classes that had a failed instrumented test in the last run, for `--failed`.
+fn instrumented_failures(ctx: &BuildContext) -> PathBuf {
+    ctx.ws.work_dir("android").join("test-results/failed-classes")
+}
+
+/// `kargo test --target android --instrumented`: runs the tests of `android-tests/` on the device `selection` chose
+/// (`connected<Variant>AndroidTest`) and reports the JUnit XML AGP writes. The log of the device and, when a test
+/// failed, a screenshot of its screen go to `target/android/test-results`.
+pub fn test_instrumented(ctx: &BuildContext, run: &InstrumentedRun, selection: Option<&Selection>) -> Result<bool> {
+    compiling(ctx, TargetKind::Android, ", instrumented tests");
+    let variant = default_variant(ctx)?;
+    if run.no_run {
+        return gradle(ctx, &[format!("compile{variant}AndroidTestSources")]);
+    }
+    let selection = selection.context("instrumented tests need a device")?;
+    let task = format!("connected{variant}AndroidTest");
+    let results = instrumented_results(ctx);
+    kargo_util::fs::remove_dir_all_if_exists(&results)?;
+    let collected = ctx.ws.work_dir("android").join("test-results");
+    std::fs::create_dir_all(&collected).with_context(|| format!("failed to create {}", collected.display()))?;
+
+    let mut classes: Option<Vec<String>> = None;
+    if run.failed {
+        match std::fs::read_to_string(instrumented_failures(ctx)) {
+            Ok(text) => {
+                let all: Vec<String> = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
+                if all.is_empty() {
+                    ctx.shell().note("no instrumented test failed in the last run");
+                    return Ok(true);
+                }
+                classes = Some(all);
+            }
+            Err(_) => ctx.shell().note("no failed instrumented tests are recorded; running all of them"),
+        }
+    }
+    let mut args = vec![task.clone()];
+    let mut runner = |key: &str, value: String| args.push(format!("-Pandroid.testInstrumentationRunnerArguments.{key}={value}"));
+    // The runner matches a class or `package.Class#method`, not a part of the name like the JVM filter.
+    match (run.filter, &classes) {
+        (Some(filter), _) => runner("class", filter.to_owned()),
+        (None, Some(classes)) => runner("class", classes.join(",")),
+        (None, None) => {}
+    }
+    if !run.include.is_empty() {
+        runner("annotation", run.include.join(","));
+    }
+    if !run.exclude.is_empty() {
+        runner("notAnnotation", run.exclude.join(","));
+    }
+    if let Some((index, count)) = run.shard {
+        runner("numShards", count.to_string());
+        runner("shardIndex", (index - 1).to_string());
+    }
+    if let Some(limit) = run.test_timeout {
+        runner("timeout_msec", limit.as_millis().to_string());
+    }
+    if run.orchestrator {
+        args.push("-Pkargo.orchestrator=true".to_owned());
+    }
+
+    let toolbox = Toolbox::locate(ctx.config, Some(ctx.ws.manifest()));
+    let adb = toolbox.adb().ok();
+    if let Some(adb) = &adb {
+        android_device::clear_logcat(adb, &selection.serial);
+    }
+    ctx.shell().status("Running", format!("instrumented tests on {} (Gradle)", selection.serial));
+    let (gradle_ok, timed_out) = run_gradle_until(ctx, &args, &[("ANDROID_SERIAL", &selection.serial)], run.deadline)?;
+
+    let mut reports = Vec::new();
+    collect_files(&results, "xml", &mut reports)?;
+    reports.retain(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("TEST-")));
+    reports.sort();
+    let mut summary = TestSummary::default();
+    let json = kargo_compiler::diagnostics::is_json();
+    let package = &ctx.ws.manifest().package.name;
+    for report in &reports {
+        let xml = std::fs::read_to_string(report).with_context(|| format!("failed to read {}", report.display()))?;
+        if let (Some(dir), Some(name)) = (run.report_dir, report.file_name()) {
+            std::fs::write(dir.join(name), &xml).with_context(|| format!("failed to copy {} to {}", report.display(), dir.display()))?;
+        }
+        let part = testreport::report_junit_xml_with(&xml, human_out(), |event| {
+            if json {
+                emit_report_event(package, TargetKind::Android, event);
+            }
+        })
+        .with_context(|| format!("failed to parse {}", report.display()))?;
+        summary.merge(part);
+    }
+
+    // What the device logged, and its screen when a test failed.
+    if let Some(adb) = &adb {
+        let log = collected.join("logcat.txt");
+        match android_device::save_logcat(adb, &selection.serial, &log) {
+            Ok(()) => ctx.shell().status("Collected", format!("the device log in {}", display_in(ctx, &log))),
+            Err(e) => ctx.shell().warn(format!("could not collect the device log: {e:#}")),
+        }
+        if summary.failed > 0 || !gradle_ok {
+            let shot = collected.join("failure.png");
+            match android_device::save_screenshot(adb, &selection.serial, &shot) {
+                Ok(()) => ctx.shell().status("Collected", format!("a screenshot in {}", display_in(ctx, &shot))),
+                Err(e) => ctx.shell().warn(format!("could not take a screenshot: {e:#}")),
+            }
+        }
+    }
+    // A filtered or sharded run knows only some of the failures, so it leaves what `--failed` reads alone.
+    if timed_out {
+        let _ = std::fs::remove_file(instrumented_failures(ctx));
+    } else if run.filter.is_none() && run.shard.is_none() {
+        let mut failed: Vec<&str> = summary
+            .cases
+            .iter()
+            .filter(|c| matches!(c.outcome, testreport::CaseOutcome::Failed { .. }) && !c.class.is_empty())
+            .map(|c| c.class.as_str())
+            .collect();
+        failed.sort_unstable();
+        failed.dedup();
+        let text: String = failed.iter().map(|c| format!("{c}\n")).collect();
+        std::fs::write(instrumented_failures(ctx), text).context("failed to record the failed instrumented tests")?;
+    }
+
+    if timed_out {
+        ctx.shell().error("instrumented tests timed out; the whole test run is limited by `[test] timeout`");
+        return Ok(false);
+    }
+    if summary == TestSummary::default() && (run.filter.is_none() || !gradle_ok) {
+        if gradle_ok {
+            ctx.shell().error(format!("Gradle `{task}` ran no tests although the project has instrumented tests"));
+        } else {
+            ctx.shell().error(format!("Gradle `{task}` failed"));
+        }
+        return Ok(false);
+    }
+    emit_summary(ctx, TargetKind::Android, summary.passed, summary.failed, summary.ignored, gradle_ok && summary.success());
+    testreport::print_summary(&summary, None, human_out())?;
+    if !gradle_ok && summary.success() {
+        ctx.shell().error(format!("Gradle `{task}` failed"));
+    }
+    Ok(gradle_ok && summary.success())
+}
+
+fn display_in(ctx: &BuildContext, path: &Path) -> String {
+    path.strip_prefix(ctx.ws.root()).unwrap_or(path).display().to_string()
 }
 
 /// An app installed and started on a device.
@@ -2268,6 +2492,31 @@ mod tests {
         assert_eq!((issues[2].severity.as_str(), issues[2].file.as_deref()), ("info", None));
         assert_eq!(issues[2].rendered, "info: Target is old [OldTargetApi]");
         assert!(parse_sarif("not json").is_empty());
+    }
+
+    #[test]
+    fn android_tests_directory_registers_instrumented_tests() {
+        let (dir, ws) = workspace(
+            "[dev-dependencies]
+\"io.mockk:mockk\" = \"1.13.0\"
+",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let plain = build_gradle(&ws, &android).unwrap();
+        assert!(!plain.contains("androidTest") && !plain.contains("testInstrumentationRunner"), "{plain}");
+
+        std::fs::create_dir_all(dir.path().join("android-tests")).unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains("testInstrumentationRunner = \"androidx.test.runner.AndroidJUnitRunner\""), "{text}");
+        let block = text.split("getByName(\"androidTest\")").nth(1).expect("an androidTest source set");
+        assert!(block.contains(&format!("kotlin.directories.add({})", kts_path(&ws.root().join("android-tests")))), "{text}");
+        assert!(text.contains("androidTestImplementation(\"io.mockk:mockk:1.13.0\")"), "{text}");
+        assert!(text.contains(&format!("androidTestImplementation(\"androidx.test:runner:{ANDROIDX_TEST_RUNNER_VERSION}\")")), "{text}");
+        assert!(
+            text.contains("execution = \"ANDROIDX_TEST_ORCHESTRATOR\"") && text.contains("androidTestUtil(\"androidx.test:orchestrator:"),
+            "{text}"
+        );
+        assert!(!plain.contains("kargo.orchestrator"), "{plain}");
     }
 
     #[test]

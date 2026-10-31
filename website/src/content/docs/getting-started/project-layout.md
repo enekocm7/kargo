@@ -16,6 +16,7 @@ my-app/
 ├── src-native/          Kotlin/Native-only sources
 ├── src-android/         Android-only sources
 ├── tests/               common tests (kotlin.test)
+├── android-tests/       Android instrumented tests (run on a device with `kargo test --instrumented`)
 ├── tests-jvm/           JVM-only tests (likewise tests-wasm/, tests-js/, tests-native/, tests-android/)
 ├── test-fixtures/       test helpers shared with the tests of packages that depend on this one (JVM)
 ├── benches/             common benchmarks, run with kargo bench (JVM)

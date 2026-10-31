@@ -387,6 +387,40 @@ impl AndroidRunArgs {
     }
 }
 
+/// Reads `--shard INDEX/COUNT`.
+fn parse_shard(text: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("`{text}` is not a shard: write INDEX/COUNT, such as 2/4");
+    let (index, count) = text.split_once('/').ok_or_else(bad)?;
+    let (index, count): (u32, u32) = (index.trim().parse().map_err(|_| bad())?, count.trim().parse().map_err(|_| bad())?);
+    if count == 0 || index == 0 || index > count {
+        return Err(format!("shard {text} is out of range: INDEX counts from 1 up to COUNT"));
+    }
+    Ok((index, count))
+}
+
+/// The options of `kargo test -t android --instrumented`.
+#[derive(Debug, Args)]
+struct AndroidTestArgs {
+    /// Android: run the tests of android-tests/ on a device or emulator instead of the local unit tests
+    #[arg(long, conflicts_with_all = ["list", "watch"])]
+    instrumented: bool,
+    /// Android: with --instrumented, run on this device, a serial or the name of a virtual device, which is started if it is not running
+    #[arg(short = 's', long, value_name = "SERIAL|AVD", env = "KARGO_ANDROID_DEVICE", requires = "instrumented")]
+    device: Option<String>,
+    /// Android: with --instrumented, start an emulator without a window or sound
+    #[arg(long, requires = "instrumented")]
+    headless: bool,
+    /// Android: with --instrumented, shut down an emulator that this run started once the tests are done
+    #[arg(long, requires = "instrumented")]
+    stop_emulator: bool,
+    /// Android: with --instrumented, run only shard INDEX of COUNT (INDEX counts from 1), such as 2/4
+    #[arg(long, value_name = "INDEX/COUNT", value_parser = parse_shard, requires = "instrumented")]
+    shard: Option<(u32, u32)>,
+    /// Android: with --instrumented, run each test in its own instrumentation with Android Test Orchestrator
+    #[arg(long, requires = "instrumented")]
+    orchestrator: bool,
+}
+
 /// How an emulator that Kargo starts boots.
 #[derive(Debug, Args)]
 struct EmulatorArgs {
@@ -1215,6 +1249,8 @@ enum Command {
         /// Start the JVM tests suspended, waiting for a debugger on this port (default 5005)
         #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
         debug: Option<u16>,
+        #[command(flatten)]
+        android: Box<AndroidTestArgs>,
         /// Compile the tests and list them instead of running them (JVM and Native)
         #[arg(long, conflicts_with_all = ["no_run", "report", "debug"])]
         list: bool,
@@ -2868,6 +2904,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             against_min,
             report,
             debug,
+            android,
             list,
             format,
             watch,
@@ -2891,6 +2928,15 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 exclude_tags: exclude_tag,
                 failed,
                 against_min,
+                instrumented: android.instrumented,
+                shard: android.shard,
+                orchestrator: android.orchestrator,
+                android: kargo_ops::android_device::AndroidRun {
+                    device: android.device,
+                    emulator: kargo_ops::android_device::EmulatorOptions { headless: android.headless, ..Default::default() },
+                    stop_emulator: android.stop_emulator,
+                    ..Default::default()
+                },
                 env: env.options(),
             };
             let Some(watch) = watch else {

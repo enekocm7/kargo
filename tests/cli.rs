@@ -1359,6 +1359,18 @@ fn bench_settings_are_validated_in_the_manifest() {
 }
 
 #[test]
+fn metadata_lists_the_instrumented_test_root_of_android() {
+    let p = Project::new();
+    android_app(&p);
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let android =
+        metadata["packages"][0]["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "android").expect("an android target").clone();
+    let roots: Vec<&str> = android["test-roots"].as_array().unwrap().iter().filter_map(|r| r.as_str()).collect();
+    assert!(roots.iter().any(|r| r.ends_with("android-tests")), "{roots:?}");
+}
+
+#[test]
 fn metadata_lists_the_benchmark_roots() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("tool", ""));
@@ -2254,6 +2266,79 @@ fn android_flags_need_the_android_target() {
             .stderr(predicate::str::contains(format!("`{flag}` applies to an Android run and needs `-t android`")));
     }
     p.kargo().args(["run", "--watch", "--no-logcat"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn android_instrumented_tests_need_their_directory_and_flag() {
+    let p = Project::new();
+    android_app(&p);
+    p.kargo()
+        .args(["test", "-t", "android", "--instrumented"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("there are no instrumented tests: put them in `android-tests/`"));
+    p.kargo()
+        .args(["test", "-t", "android", "--device", "R58M123ABC"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--instrumented"));
+}
+
+#[test]
+fn android_instrumented_tests_pass_their_options_to_the_runner_and_collect_the_device_log() {
+    let p = Project::new();
+    android_app(&p);
+    p.file(
+        "android-tests/ExampleTest.kt",
+        "class ExampleTest
+",
+    );
+    let fake = common::FakeAndroid::new(EMULATOR_AND_PHONE);
+    let mut cmd = p.kargo();
+    fake.apply(&mut cmd);
+    // The fake Gradle writes no results, so the run fails; what it was asked and what was collected still show.
+    cmd.args([
+        "--system-gradle",
+        "test",
+        "-t",
+        "android",
+        "--instrumented",
+        "-s",
+        "R58M123ABC",
+        "--include-tag",
+        "com.example.Slow",
+        "--exclude-tag",
+        "com.example.Flaky",
+        "--shard",
+        "2/4",
+        "--orchestrator",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("the device log in"));
+    let log = fake.log();
+    for arg in [
+        "connectedDebugAndroidTest",
+        "testInstrumentationRunnerArguments.annotation=com.example.Slow",
+        "testInstrumentationRunnerArguments.notAnnotation=com.example.Flaky",
+        "testInstrumentationRunnerArguments.numShards=4",
+        "testInstrumentationRunnerArguments.shardIndex=1",
+        "-Pkargo.orchestrator=true",
+    ] {
+        assert!(
+            log.contains(arg),
+            "{arg} missing from
+{log}"
+        );
+    }
+    assert!(log.contains("gradle-env ANDROID_SERIAL=R58M123ABC") && log.contains("logcat -c"), "{log}");
+    assert!(p.path().join("target/android/test-results/logcat.txt").is_file());
+
+    p.kargo()
+        .args(["test", "-t", "android", "--instrumented", "--shard", "5/4"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("out of range"));
 }
 
 #[test]

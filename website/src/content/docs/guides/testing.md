@@ -112,7 +112,7 @@ $ kargo test --report junit
 | Wasm | `TEST-wasm.xml`, built from the test runner's results |
 | JS | `TEST-js.xml`, built from the test runner's results |
 | Native | `TEST-native.xml`, built from the test runner's results |
-| Android | Gradle's `TEST-<class>.xml` files, copied from `target/android/build/test-results` |
+| Android | Gradle's `TEST-<class>.xml` files, copied from `target/android/build/test-results` (local) or `build/outputs/androidTest-results/connected` (instrumented) |
 
 Each report has one `<testsuite>` per test class, with each test's time, failure message and stack trace, and what it printed. The directory is cleared at the start of every run, so it never holds results from an earlier one. See [CI](../ci/#test-results) for publishing the reports.
 
@@ -154,7 +154,7 @@ class CalculatorTest {
 }
 ```
 
-Tags apply to JVM tests. Kargo says so when another target runs with them, and that target's tests run unfiltered. When no test matches, the run fails and says the filters matched nothing.
+Tags apply to JVM tests, and to instrumented Android tests, where they name annotation classes (see [Instrumented tests](../android/#instrumented-tests)). Kargo says so when another target runs with them, and that target's tests run unfiltered. When no test matches, the run fails and says the filters matched nothing.
 
 ## Timeouts
 
@@ -166,7 +166,7 @@ timeout = "5m"         # the whole test run
 test-timeout = "30s"   # each JVM test
 ```
 
-`timeout` limits the whole run. When it passes, Kargo kills the test process and fails with `JVM tests timed out after 5m; the whole test run is limited by [test] timeout`. The clock starts when the tests start running, so compiling them doesn't count. It applies to the JVM, Native, Wasm and JS targets; Android tests run under Gradle, which Kargo doesn't limit.
+`timeout` limits the whole run. When it passes, Kargo kills the test process and fails with `JVM tests timed out after 5m; the whole test run is limited by [test] timeout`. The clock starts when the tests start running, so compiling them doesn't count. It applies to the JVM, Native, Wasm and JS targets; Local Android tests run under Gradle, which Kargo doesn't limit; instrumented tests (`--instrumented`) are limited, and Kargo stops Gradle when the time is up.
 
 `test-timeout` limits each JVM test with JUnit Jupiter's `junit.jupiter.execution.timeout.default`. A test that runs longer fails, and the rest of the run goes on. It applies to tests run by JUnit Jupiter, which includes `kotlin.test` on the JVM. Other targets have no per-test limit, and Kargo says so when they run.
 
@@ -246,7 +246,7 @@ Editors that use the [`kargo dap`](../editors/#debug-adapter) debug adapter do t
 | Wasm | Node.js, or a headless browser with `environment = "browser"` | `kotlin-test-wasm-js` / `kotlin-test-wasm-wasi` |
 | JS | Node.js, or a headless browser with `environment = "browser"`, through Kargo's own runner | `kotlin-test-js` |
 | Native | the native test binary | built into Kotlin/Native |
-| Android | Gradle local unit tests (`testDebugUnitTest`) | `kotlin-test-junit`, `junit` |
+| Android | Gradle local unit tests (`testDebugUnitTest`); with `--instrumented`, the tests of `android-tests/` on a device (`connectedDebugAndroidTest`) | `kotlin-test-junit`, `junit` (instrumented: also AndroidX Test) |
 
 Test filters are not supported on Wasm; all tests run. They work on JS. See [JavaScript](../js/#run-and-test-with-nodejs).
 

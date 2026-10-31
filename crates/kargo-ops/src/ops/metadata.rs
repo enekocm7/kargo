@@ -241,6 +241,9 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
     ];
     test_dirs.extend(group_dirs(Workspace::group_tests));
     test_dirs.extend(group_dirs(Workspace::group_test_fixtures));
+    if kind == TargetKind::Android {
+        test_dirs.push(ws.instrumented_tests());
+    }
     let mut fixture_dirs = vec![ws.common_test_fixtures(), ws.target_test_fixtures(kind)];
     fixture_dirs.extend(group_dirs(Workspace::group_test_fixtures));
     let mut out = json!({
