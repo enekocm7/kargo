@@ -187,10 +187,10 @@ expose = ["APP_NAME", "BUILD_ID"]
 APP_NAME = "demo"
 ```
 
-The object is `BuildConfig` in a package made from the group and name of the package (`my-app` becomes `my_app`; with `group = "com.example"`, it is `com.example.my_app`):
+The object is `BuildConfig` in a package made from the group and name of the package, the same way `kargo new` derives the package of a project (`my-app` becomes `myapp`; with `group = "com.example"`, it is `com.example.myapp`):
 
 ```kotlin title="src/Main.kt"
-import my_app.BuildConfig
+import com.example.myapp.BuildConfig
 
 fun main() {
     println("${BuildConfig.APP_NAME}")

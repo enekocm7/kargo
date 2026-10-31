@@ -164,6 +164,23 @@ fn new_escapes_keyword_names_in_the_package() {
 }
 
 #[test]
+fn new_package_name_is_lint_clean() {
+    let p = Project::new();
+    // `_` is not a lint-clean package segment (ktlint's `standard:package-name` and detekt's
+    // `PackageNaming` reject it), so separators are dropped instead of replaced.
+    p.kargo().args(["new", "cli-app", "--no-vcs", "-t", "android"]).assert().success();
+    let main = p.read("cli-app/src/Main.kt");
+    assert!(main.starts_with("package com.example.cliapp\n"), "{main}");
+    let manifest = p.read("cli-app/kargo.toml");
+    assert!(manifest.contains("namespace = \"com.example.cliapp\""), "{manifest}");
+    let activity = p.read("cli-app/src-android/MainActivity.kt");
+    assert!(activity.starts_with("package com.example.cliapp\n"), "{activity}");
+
+    p.kargo().args(["new", "my_app", "--no-vcs"]).assert().success();
+    assert!(p.read("my_app/src/Main.kt").starts_with("package com.example.myapp\n"));
+}
+
+#[test]
 fn new_with_invalid_input_leaves_nothing_behind() {
     let p = Project::new();
     for name in ["9lives", "Bad Name", "ünï"] {
