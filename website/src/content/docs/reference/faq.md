@@ -45,6 +45,12 @@ Yes. A package can depend on another package on disk with `{ path = "../lib" }`,
 
 When a build fails for a reason outside your code (the JDK, a missing SDK, the network), start with [`kargo doctor`](../commands/#kargo-doctor). It checks the JDK, the toolchains, the Android SDK, Node.js and browsers, the repositories and the project in one go, and prints a fix for each problem it finds. `kargo doctor --bug-report` gives a block to paste into an issue.
 
+### How do I report a bug?
+
+Run [`kargo report`](../commands/#kargo-report) in the project directory and paste the Markdown it writes (`target/.kargo/kargo-report.md`) into the issue. It collects the versions, the `kargo.toml`, the output of the last failed `build`, `check`, `test` or `run`, the checks of `kargo doctor` and the hash of `kargo.lock`, redacted: your home directory becomes `~`, your user and machine names are replaced, URLs lose their credentials and query string, and only the environment variables Kargo reads are listed, never tokens or passwords. Read it before posting: a secret written somewhere Kargo does not know about, such as a task script, is not redacted for you. `kargo report --open` writes the same report and opens a prefilled GitHub issue in your browser; `--format zip` writes an archive with the logs instead.
+
+When Kargo panics, it prints its version and asks for the same report. The command you ran and the output of `kargo -vV` help too.
+
 ### Errors with a `help:` line
 
 Kargo's errors end with a `help:` line when it knows what to do next:

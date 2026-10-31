@@ -182,8 +182,8 @@ $ kargo metadata
                 {
                   "module": "org.jetbrains.kotlin:kotlin-stdlib",
                   "version": "2.4.21",
-                  "path": "/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar",
-                  "sources": "/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21-sources.jar"
+                  "path": "/home/me/.kargo/cache/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar",
+                  "sources": "/home/me/.kargo/cache/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21-sources.jar"
                 },
                 ...
               ],
@@ -286,6 +286,8 @@ $ kargo info --format json
   "bins": [
     { "entry-point": null, "main": null, "name": "migrate", "path": "src/tools/Migrate.kt" }
   ],
+  "cache": { "path": "/home/me/.kargo/cache", "bytes": 356793344 },
+  "daemons": 0,
   "dependencies": [
     {
       "module": "org.jetbrains.kotlinx:kotlinx-datetime",
@@ -295,10 +297,14 @@ $ kargo info --format json
     }
   ],
   "dev-dependencies": [],
+  "environment": { "JAVA_HOME": "/usr/lib/jvm/jdk-21", "KARGO_HOME": "/home/me/.kargo" },
   "examples": ["greet"],
   "framework-versions": [{ "managed": [], "name": "serialization", "version": "1.11.0" }],
   "frameworks": ["serialization"],
+  "home": { "path": "/home/me/.kargo", "bytes": 1288490188 },
   "jdk": "system",
+  "jdk-toolchain": "JDK 21 at /usr/lib/jvm/jdk-21 (JAVA_HOME)",
+  "kargo": { "version": "0.1.4", "commit": "abc1234", "built": "2026-10-31", "target": "x86_64-unknown-linux-gnu" },
   "kotlin": "2.4.21",
   "manifest": "/home/me/app/kargo.toml",
   "package": {
@@ -312,11 +318,15 @@ $ kargo info --format json
   ],
   "root": "/home/me/app",
   "target-dir": "/home/me/app/target",
-  "targets": ["jvm"]
+  "targets": ["jvm"],
+  "toolchains": "JDK jdk-21.0.5+11, Gradle 9.6.0",
+  "version": 1
 }
 ```
 
-At the root of a [workspace](../../guides/workspaces/), it describes the workspace instead: `workspace` (its root), `members` (each with its `name`, `version`, `root` and the `dependencies` it builds on through path dependencies), `default-members`, `lockfile` and `target-dir`.
+`version` is the format version: fields are added freely, and removing or redefining one makes it 2. `kargo` is the build of the binary (`version`, `commit`, `built`, and the `target` triple), `jdk-toolchain` is the JDK the project builds with and where it came from, `toolchains` is what is installed under the Kargo home, and `home` and `cache` are their paths and sizes in bytes (`bytes` is `null` when the directory does not exist). `environment` holds the [environment variables Kargo reads](../environment/) that are set, with the home directory shortened to `~` and credentials removed; the variables that hold credentials (`NPM_TOKEN`, `KARGO_SIGNING_KEY`, `GITHUB_TOKEN`, repository passwords) are never included.
+
+At the root of a [workspace](../../guides/workspaces/), it describes the workspace instead: `workspace` (its root), `members` (each with its `name`, `version`, `root` and the `dependencies` it builds on through path dependencies), `default-members`, `lockfile` and `target-dir`, plus `version`, `kargo`, `environment`, `home`, `cache` and `daemons`.
 
 `framework-versions` has an entry for each enabled framework, in the order of `frameworks`: its `name`, the `version` it uses, and the `managed` modules of its BOM that `kargo.lock` resolved for the JVM runtime, each with its `name`, `module` and `version`. `managed` is empty for a framework without a BOM, and before the project has been built or fetched. For Spring Boot these are Spring Framework, Spring Security and Jackson.
 
@@ -333,7 +343,7 @@ At the root of a [workspace](../../guides/workspaces/), it describes the workspa
   "platform": "jvm",
   "scope": "compile",
   "classpath": [
-    "/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar"
+    "/home/me/.kargo/cache/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar"
   ]
 }
 ```
@@ -363,7 +373,7 @@ $ kargo tree --format json
           "group": "org.jetbrains.kotlin",
           "artifact": "kotlin-stdlib",
           "version": "2.4.21",
-          "files": ["/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar"],
+          "files": ["/home/me/.kargo/cache/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar"],
           "dependencies": [
             { "id": "org.jetbrains:annotations", "requested": "13.0", "version": "13.0" }
           ]

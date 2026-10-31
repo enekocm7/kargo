@@ -99,6 +99,7 @@ impl Shell {
         if self.verbosity >= Verbosity::Normal {
             let mut err = anstream::stderr().lock();
             let _ = writeln!(err, "{text}");
+            crate::capture::line(text.to_string());
         }
     }
 
@@ -178,10 +179,12 @@ impl Shell {
     fn print(&self, style: Style, verb: impl Display, message: impl Display) {
         let mut err = anstream::stderr().lock();
         let _ = writeln!(err, "{style}{verb:>12}{style:#} {message}");
+        crate::capture::line(format!("{verb:>12} {message}"));
     }
 
     fn print_left(&self, style: Style, label: &str, message: impl Display) {
         let mut err = anstream::stderr().lock();
         let _ = writeln!(err, "{style}{label}{style:#}: {message}");
+        crate::capture::line(format!("{label}: {message}"));
     }
 }

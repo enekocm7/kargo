@@ -324,6 +324,143 @@ fn info_shows_framework_versions_before_the_first_resolution() {
 }
 
 #[test]
+fn info_shows_the_machine_facts() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("infoapp", "[target.jvm]\n"));
+    p.kargo()
+        .arg("info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("jdk:          "))
+        .stdout(predicate::str::contains("toolchains:   "))
+        .stdout(predicate::str::contains("kargo:        ").and(predicate::str::contains(env!("CARGO_PKG_VERSION"))))
+        .stdout(predicate::str::contains("home:         "))
+        .stdout(predicate::str::contains("cache:        "))
+        .stdout(predicate::str::contains("daemons:      "))
+        .stdout(predicate::str::contains("env:          KARGO_HOME="));
+}
+
+#[test]
+fn info_json_is_versioned_and_lists_the_build_and_the_environment() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("infoapp", "[target.jvm]\n"));
+    let out = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let info: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(info["version"], 1);
+    assert_eq!(info["kargo"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(info["kargo"]["commit"].is_string());
+    assert!(info["kargo"]["built"].is_string());
+    assert!(info["kargo"]["target"].is_string());
+    assert!(info["toolchains"].is_string());
+    assert_eq!(info["home"]["path"], p.home.path().display().to_string());
+    assert!(info["home"]["bytes"].is_u64());
+    let home_name = p.home.path().file_name().unwrap().to_string_lossy().into_owned();
+    let env_home = info["environment"]["KARGO_HOME"].as_str().unwrap();
+    assert!(env_home.contains(&home_name), "{env_home}");
+    assert!(env_home.starts_with('~'), "{env_home}");
+    assert_eq!(info["daemons"], 0);
+    // The workspace document is versioned too.
+    p.file("app/kargo.toml", &manifest("app", "[workspace]\nmembers = [\"app\"]\n[target.jvm]\n"));
+    let out = p.kargo().args(["info", "--format", "json"]).assert().success().get_output().stdout.clone();
+    let info: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(info["version"], 1);
+}
+
+#[test]
+fn report_redacts_the_manifest_the_environment_and_urls() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        "[package]\nname = \"reportapp\"\nversion = \"0.1.0\"\ndescription = \"built for REPORTUSER on REPORTBOX\"\n\
+         [target.jvm]\n[repositories]\ninternal = { url = \"https://reportuser:sup3rsecret@nexus.example/maven?token=querytoken\" }\n",
+    );
+    let out = p
+        .kargo()
+        .env("USER", "REPORTUSER")
+        .env("USERNAME", "REPORTUSER")
+        .env("COMPUTERNAME", "REPORTBOX")
+        .env("KARGO_JOBS", "4")
+        .env("NPM_TOKEN", "npm-secret")
+        .env("KARGO_SIGNING_KEY", "signing-secret")
+        .args(["report", "--offline"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("kargo-report.md"), "{stderr}");
+    let report = p.read("target/.kargo/kargo-report.md");
+    assert!(report.contains("https://***@nexus.example/maven"), "{report}");
+    for secret in ["sup3rsecret", "querytoken", "npm-secret", "signing-secret", "REPORTUSER", "REPORTBOX"] {
+        assert!(!report.contains(secret), "`{secret}` is in the report:\n{report}");
+    }
+    assert!(report.contains("built for <user> on <host>"), "{report}");
+    assert!(report.contains("`KARGO_JOBS` = 4"), "{report}");
+    assert!(!report.contains("NPM_TOKEN"), "{report}");
+}
+
+#[test]
+fn report_redacts_a_manifest_that_does_not_load() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("bad", "[target.jvm]\npassword = \"hunter2\"\ntoken = \"abc\"\n"));
+    p.kargo().args(["report", "--offline"]).assert().success();
+    // A manifest that does not load still names no target directory, so the report goes to the Kargo home.
+    let report = std::fs::read_to_string(p.home.path().join("reports/kargo-report.md")).unwrap();
+    assert!(!report.contains("hunter2"), "{report}");
+    assert!(!report.contains("\"abc\""), "{report}");
+    assert!(report.contains("password = \"***\""), "{report}");
+    assert!(report.contains("does not load"), "{report}");
+}
+
+#[test]
+fn report_attaches_the_output_of_the_last_failed_command_and_the_lockfile() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("reportapp", "[target.jvm]\n"));
+    p.file(
+        "kargo.lock",
+        "version = 1\n\n[resolution.\"jvm/runtime\"]\ninputs = \"x\"\nroots = []\n\n\
+         [[resolution.\"jvm/runtime\".package]]\nmodule = \"org.example:widget\"\nversion = \"1.2.0\"\n",
+    );
+    p.kargo().args(["build", "--offline", "--package", "nope"]).assert().code(101);
+    let last_error = p.read("target/.kargo/last-error.log");
+    assert!(last_error.contains("`kargo build` failed"), "{last_error}");
+    assert!(last_error.contains("package `nope` is not part of this project"), "{last_error}");
+
+    p.kargo().args(["report", "--offline", "--include-lock"]).assert().success();
+    let report = p.read("target/.kargo/kargo-report.md");
+    assert!(report.contains("## Last error"), "{report}");
+    assert!(report.contains("package `nope` is not part of this project"), "{report}");
+    assert!(report.contains("sha256: "), "{report}");
+    assert!(report.contains("| org.example:widget | 1.2.0 |"), "{report}");
+}
+
+#[test]
+fn report_zip_holds_the_markdown_the_manifest_and_the_last_error() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("reportapp", "[target.jvm]\n"));
+    p.kargo().args(["build", "--offline", "--package", "nope"]).assert().code(101);
+    p.kargo().args(["report", "--offline", "--format", "zip"]).assert().success();
+    let file = std::fs::File::open(p.path().join("target/.kargo/kargo-report.zip")).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let names: Vec<String> = (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned()).collect();
+    assert!(names.contains(&"kargo-report.md".to_owned()), "{names:?}");
+    assert!(names.contains(&"kargo.toml".to_owned()), "{names:?}");
+    assert!(names.contains(&"last-error.log".to_owned()), "{names:?}");
+}
+
+#[test]
+fn report_outside_a_project_writes_to_the_kargo_home() {
+    let p = Project::new();
+    let out = p.kargo().args(["report", "--offline"]).assert().success().get_output().clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Nothing was uploaded"), "{stderr}");
+    let report = std::fs::read_to_string(p.home.path().join("reports/kargo-report.md")).unwrap();
+    assert!(report.contains(&format!("- kargo: {} (", env!("CARGO_PKG_VERSION"))), "{report}");
+    assert!(report.contains("There is no kargo.lock"), "{report}");
+    assert!(report.contains("No failed `build`, `check`, `test` or `run` is recorded"), "{report}");
+}
+
+#[test]
 fn add_and_remove_dependencies() {
     let repo = LocalRepo::new();
     repo.publish("com.acme:widget", "1.0.0", &[]).publish("com.acme:widget", "1.2.0", &[]).publish("com.acme:widget", "2.0.0-beta1", &[]);
@@ -1249,6 +1386,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "task",
         "toolchain",
         "doctor",
+        "report",
     ];
     const UNCOMMON: &[&str] = &[
         "script",

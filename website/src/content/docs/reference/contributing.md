@@ -7,7 +7,7 @@ Kargo is written in Rust and lives at [github.com/enekocm7/kargo](https://github
 
 ## Issues and pull requests
 
-New issues use a form: a bug report, a feature request, or a question (which also covers documentation problems). A bug report asks for the output of `kargo -vV`, the smallest project that shows the problem and the report of [`kargo doctor --bug-report`](../commands/#kargo-doctor), which saves a round trip.
+New issues use a form: a bug report, a feature request, or a question (which also covers documentation problems). A bug report asks for the output of `kargo -vV`, the smallest project that shows the problem and the report of [`kargo report`](../commands/#kargo-report) (or [`kargo doctor --bug-report`](../commands/#kargo-doctor) for a machine problem), which saves a round trip. `kargo report` is redacted and uploads nothing; `kargo report --open` opens the prefilled issue in a browser.
 
 A pull request starts with a checklist that mirrors what is asked below: formatted code, passing tests, a test for new behavior, and the documentation of the change in the same pull request. The forms and the template are in `.github/ISSUE_TEMPLATE/` and `.github/pull_request_template.md`.
 

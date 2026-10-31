@@ -2,6 +2,7 @@
 //! filesystem, locking, hashing and process helpers, and the network settings of
 //! `config.toml` with the HTTP client built from them.
 
+pub mod capture;
 pub mod config;
 pub mod flock;
 pub mod fs;
