@@ -200,7 +200,7 @@ The emulator and a system image are not among the SDK packages every build needs
 kargo toolchain install android-sdk 36 --emulator --accept-licenses
 ```
 
-This installs `emulator`, `cmdline-tools;latest` (which has `avdmanager`) and a system image, `system-images;android-<api>;google_apis;<abi>`. `<abi>` is the one of the host (`x86_64`, or `arm64-v8a` on ARM machines) and `<api>` the platform you name, or `compile-sdk`. The packages are under the same license as the others. The system image is 1 GB or more.
+This installs `emulator`, `cmdline-tools;latest` (which has `avdmanager`) and a system image, `system-images;android-<api>;google_apis;<abi>`. `<abi>` is the one of the host (`x86_64`, or `arm64-v8a` on ARM machines) and `<api>` the platform you name, or `compile-sdk`. Google lists system images in manifests of their own (`sys-img/<tag>/sys-img2-1.xml`), apart from the other packages; Kargo reads them in this order and takes the first image for the API level: `google_apis`, `google_apis_playstore`, then the plain `default` image. The packages are under the same license as the others. The system image is 1 GB or more.
 
 `kargo android avd` and `kargo android emulator` manage the virtual devices:
 
