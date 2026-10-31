@@ -763,6 +763,22 @@ fn tree_resolves_from_local_repository_and_writes_lockfile() {
 }
 
 #[test]
+fn tree_duplicates_says_when_nothing_is_requested_twice() {
+    let repo = LocalRepo::new();
+    repo.publish("g:lib", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "nodupes",
+            &format!("[kotlin]\nversion = \"2.4.21\"\n[dependencies]\n\"g:lib\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n", repo.url()),
+        ),
+    );
+
+    p.kargo().args(["tree", "--duplicates", "--offline"]).assert().success().stdout(predicate::str::contains("no duplicate modules"));
+}
+
+#[test]
 fn why_and_tree_invert_explain_versions() {
     // A diamond (`left` and `right` both bring `util`, in different versions), a module whose
     // version a BOM manages, and one `force`d below what a dependency asks for.
