@@ -266,6 +266,19 @@ pub fn status(shell: &Shell, cmd: &mut Command, what: &str) -> Result<ExitStatus
 /// Like [`status`], and also hands every line the tool reports to `observe`, so the caller can
 /// explain a failure (a missing header, an undefined symbol) after it.
 pub fn status_observed(shell: &Shell, cmd: &mut Command, what: &str, observe: &mut dyn FnMut(&str)) -> Result<ExitStatus> {
+    status_filtered(shell, cmd, what, observe, &mut |_| true)
+}
+
+/// Like [`status_observed`], but only relays the lines `keep` accepts; the others still reach
+/// `observe`, so a caller can explain a failure from them. Used to drop a tool's internal stack
+/// trace from what the user sees.
+pub fn status_filtered(
+    shell: &Shell,
+    cmd: &mut Command,
+    what: &str,
+    observe: &mut dyn FnMut(&str),
+    keep: &mut dyn FnMut(&str) -> bool,
+) -> Result<ExitStatus> {
     shell.verbose("Running", format!("`{}`", process::describe(cmd)));
     let start_error = |cmd: &Command| format!("failed to start {what} (`{}`)", cmd.get_program().to_string_lossy());
     if is_json() {
@@ -273,8 +286,12 @@ pub fn status_observed(shell: &Shell, cmd: &mut Command, what: &str, observe: &m
         let mut relay = Relay::new();
         for text in [&output.stderr, &output.stdout] {
             let text = String::from_utf8_lossy(text);
-            text.lines().for_each(&mut *observe);
-            relay.text(&text);
+            for line in text.lines() {
+                observe(line);
+                if keep(line) {
+                    relay.line(line);
+                }
+            }
         }
         relay.flush();
         return Ok(output.status);
@@ -287,7 +304,9 @@ pub fn status_observed(shell: &Shell, cmd: &mut Command, what: &str, observe: &m
             let Ok(line) = line else { break };
             let line = String::from_utf8_lossy(&line);
             observe(&line);
-            relay.line(&line);
+            if keep(&line) {
+                relay.line(&line);
+            }
         }
     }
     relay.flush();

@@ -2591,6 +2591,20 @@ fn native_cinterop_tests() {
     t.kargo("cin").arg("test").assert().success().stdout(predicate::str::contains("1 passed"));
 }
 
+#[test]
+fn native_cinterop_missing_header_is_explained_without_a_stack_trace() {
+    require_e2e!();
+    require_native!();
+    let t = cinterop_project();
+    t.write("cin/interop/mathx.def", "headers = missing.h\n");
+    t.kargo("cin")
+        .arg("build")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("note: the C header `missing.h` was not found"))
+        .stderr(predicate::str::contains("org.jetbrains.kotlin.native.interop.gen").not());
+}
+
 /// The Kotlin/Native target of this machine.
 fn host_konan_target() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {

@@ -539,7 +539,7 @@ kargo add --cinterop <name> [--header <file>]... [--pkg-config <package>]
 | `--no-verify` | Don't check that the artifact exists (with `--npm`: that the version exists in the registry) |
 | `-F, --framework <list>` | Enable built-in frameworks instead |
 | `--cinterop <name>` | Add the C library `<name>` instead: a `[target.native.cinterop.<name>]` entry (with `package = "<name>"`) and, unless it exists, `interop/<name>.def`. Needs `[target.native]`. See [C interop](../../guides/c-interop/) |
-| `--header <file>` | With `--cinterop`: a header the `.def` file binds (repeatable; default `<name>.h`) |
+| `--header <file>` | With `--cinterop`: a header the `.def` file binds (repeatable; default `<name>.h`). Warns when the header is in none of the project's include directories |
 | `--pkg-config <package>` | With `--cinterop`: the pkg-config package that gives the library's flags |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 

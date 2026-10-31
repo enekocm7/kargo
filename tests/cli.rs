@@ -2570,6 +2570,22 @@ fn add_cinterop_scaffolds_the_entry_and_def_file() {
     p.kargo().args(["add", "--cinterop", "curl"]).assert().success().stderr(predicate::str::contains("keeping the existing"));
     assert_eq!(std::fs::read_to_string(p.path().join("interop/curl.def")).unwrap(), "headers = curl/curl.h\n");
     p.kargo().args(["add", "--header", "x.h", "g:a"]).assert().failure().stderr(predicate::str::contains("--cinterop"));
+
+    // A header that is in none of the project's include directories is reported when the def is written.
+    p.kargo()
+        .args(["add", "--cinterop", "missing", "--header", "nope.h"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("warning: the C header `nope.h` was not found"))
+        .stderr(predicate::str::contains("[target.native.cinterop.missing]"));
+    // A header in an include directory of its C sources is not.
+    p.file("native/mathx.h", "");
+    p.file("kargo.toml", &manifest("cdemo", "\n[target.native]\n\n[target.native.c-sources]\ninclude-dirs = [\"native\"]\n"));
+    p.kargo()
+        .args(["add", "--cinterop", "mathx", "--header", "mathx.h"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("was not found").not());
 }
 
 #[test]
@@ -2882,6 +2898,47 @@ fn native_binaries_link_the_precompiled_stdlib() {
     assert!(!cache_flag(&argfile("debug")));
     build(&["--release"], &[]);
     assert!(!cache_flag(&argfile("release")), "{}", argfile("release"));
+}
+
+/// A fake `cinterop` that fails the way the real one does for a missing header: clang's message in
+/// an uncaught JVM exception, then the stack trace of Kotlin/Native's internals.
+#[cfg(windows)]
+const FAKE_CINTEROP: &str = "@echo off\r\n\
+    echo Exception in thread \"main\" java.lang.Error: x.c:1:10: fatal error: 'nope.h' file not found 1>&2\r\n\
+    echo \tat org.jetbrains.kotlin.native.interop.gen.JvmGeneratorKt.main(JvmGenerator.kt:10) 1>&2\r\n\
+    echo \t... 3 more 1>&2\r\n\
+    exit /b 1\r\n";
+#[cfg(not(windows))]
+const FAKE_CINTEROP: &str = "#!/bin/sh\n\
+    printf '%s\\n' \"Exception in thread \\\"main\\\" java.lang.Error: x.c:1:10: fatal error: 'nope.h' file not found\" \
+    \"\tat org.jetbrains.kotlin.native.interop.gen.JvmGeneratorKt.main(JvmGenerator.kt:10)\" \"\t... 3 more\" 1>&2\n\
+    exit 1\n";
+
+#[test]
+fn cinterop_failure_hides_the_jvm_stack_trace() {
+    let p = Project::new();
+    let dist = fake_native(p.home.path());
+    let cinterop = dist.join("bin").join(if cfg!(windows) { "cinterop.bat" } else { "cinterop" });
+    std::fs::write(&cinterop, FAKE_CINTEROP).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cinterop, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p.file(
+        "kargo.toml",
+        &manifest("nat", "\n[target.native]\nplatforms = [\"linux_x64\"]\n\n[target.native.cinterop.sqlite]\nheaders = [\"nope.h\"]\n"),
+    );
+    p.file("src/Main.kt", "fun main() {}\n");
+    let stderr =
+        String::from_utf8(p.kargo().args(["build", "--target", "native"]).assert().failure().code(101).get_output().stderr.clone())
+            .unwrap();
+    // clang's message and Kargo's note stay; the frames of Kotlin/Native's own stack trace do not.
+    assert!(stderr.contains("fatal error: 'nope.h' file not found"), "{stderr}");
+    assert!(stderr.contains("note: the C header `nope.h` was not found"), "{stderr}");
+    assert!(stderr.contains("error: could not generate the `sqlite` C bindings for linux_x64"), "{stderr}");
+    assert!(!stderr.contains("org.jetbrains.kotlin.native.interop.gen"), "the stack trace is shown:\n{stderr}");
+    assert!(!stderr.contains("... 3 more"), "the elided frames are shown:\n{stderr}");
 }
 
 #[test]
