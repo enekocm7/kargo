@@ -89,6 +89,10 @@ class KargoTarget(
     val dependencies: List<KargoPlatformDependencies>?,
     /** The npm packages a Wasm target runs with, where they are installed; empty for other targets. */
     val npm: List<KargoNpmPackage>,
+    /** The Kotlin declarations generated from the npm packages' TypeScript declarations, or null without them. */
+    val npmDeclarations: String?,
+    /** The Kotlin declarations generated from the package's own TypeScript modules (`js/`), or null without them. */
+    val jsDeclarations: String?,
 ) {
     companion object {
         fun parse(json: JsonObject) = KargoTarget(
@@ -106,6 +110,8 @@ class KargoTarget(
             platforms = json.strings("platforms"),
             dependencies = json.get("dependencies")?.takeIf { it.isJsonArray }?.asJsonArray?.map { KargoPlatformDependencies.parse(it.asJsonObject) },
             npm = json.objs("npm").map(KargoNpmPackage::parse),
+            npmDeclarations = json.string("npm-declarations"),
+            jsDeclarations = json.string("js-declarations"),
         )
     }
 }
