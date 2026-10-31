@@ -158,6 +158,8 @@ impl From<CiSystemArg> for ops::ci::CiSystem {
 enum ImportSource {
     Maven,
     Gradle,
+    #[value(alias = "amper")]
+    Kotlin,
 }
 
 impl From<ImportSource> for ops::import::Build {
@@ -165,6 +167,7 @@ impl From<ImportSource> for ops::import::Build {
         match source {
             ImportSource::Maven => ops::import::Build::Maven,
             ImportSource::Gradle => ops::import::Build::Gradle,
+            ImportSource::Kotlin => ops::import::Build::KotlinToolchain,
         }
     }
 }
@@ -1110,7 +1113,7 @@ enum Command {
         #[command(flatten)]
         args: NewArgs,
     },
-    /// Convert a Maven or Gradle project to a Kargo project
+    /// Convert a Maven, Gradle or Kotlin Toolchain project to a Kargo project
     Import {
         /// The project directory (defaults to the current one)
         path: Option<PathBuf>,
@@ -1120,7 +1123,7 @@ enum Command {
         /// Do not build the project when it is imported
         #[arg(long)]
         no_build: bool,
-        /// The build tool to read, when the directory has the files of both
+        /// The build tool to read, when the directory has the files of several
         #[arg(long, value_enum)]
         from: Option<ImportSource>,
     },
@@ -2539,7 +2542,7 @@ fn create_package(shell: &Shell, dir: &Path, args: NewArgs) -> Result<i32> {
     Ok(0)
 }
 
-/// `kargo import`: converts the Maven or Gradle project in `path` and, unless `no_build`, builds it.
+/// `kargo import`: converts the Maven, Gradle or Kotlin Toolchain project in `path` and, unless `no_build`, builds it.
 fn import_project(
     config: &Config,
     global: &GlobalArgs,

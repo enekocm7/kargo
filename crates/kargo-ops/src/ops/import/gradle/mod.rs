@@ -5,9 +5,9 @@
 //! `plugins {}`, `dependencies {}`, `kotlin {}`, `android {}` blocks and the usual settings) and lists
 //! what it could not translate.
 
-mod catalog;
+pub(super) mod catalog;
 mod dependencies;
-mod dsl;
+pub(super) mod dsl;
 mod sources;
 
 use std::collections::{BTreeMap, HashMap};
@@ -1385,7 +1385,7 @@ fn uri_value(vars: &Vars, tokens: &[Tok]) -> Option<String> {
     vars.eval(inner)
 }
 
-fn is_standard_repository(url: &str) -> bool {
+pub(super) fn is_standard_repository(url: &str) -> bool {
     let url = url.trim_end_matches('/');
     [
         "repo.maven.apache.org/maven2",
@@ -1399,7 +1399,7 @@ fn is_standard_repository(url: &str) -> bool {
     .any(|known| url.contains(known))
 }
 
-fn repository_name(url: &str, count: usize) -> String {
+pub(super) fn repository_name(url: &str, count: usize) -> String {
     let host = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("repo");
     let name: String = host.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let name = name.trim_matches('-').to_owned();
@@ -1407,7 +1407,7 @@ fn repository_name(url: &str, count: usize) -> String {
 }
 
 /// A Kargo package name for a Gradle project name.
-fn package_name(project: &str) -> (String, bool) {
+pub(super) fn package_name(project: &str) -> (String, bool) {
     if validate_package_name(project).is_ok() {
         return (project.to_owned(), false);
     }

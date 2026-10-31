@@ -6,7 +6,7 @@ description: Create, run, test and package a Kotlin project in five minutes.
 This page walks through the everyday commands. It assumes you have [installed Kargo](../installation/).
 
 :::tip
-Starting from a Maven or Gradle project? Run `kargo import` in its directory instead of creating a new project: it writes the `kargo.toml` and moves the sources. See [Importing a Maven or Gradle project](../../guides/importing/).
+Starting from a Maven, Gradle or Kotlin Toolchain project? Run `kargo import` in its directory instead of creating a new project: it writes the `kargo.toml` and moves the sources. See [Importing a project](../../guides/importing/).
 :::
 
 ## Create a project

@@ -6,7 +6,7 @@ description: Translate a pom.xml into kargo.toml.
 Kargo reads the same Maven repositories and understands the same POMs and BOMs, so moving from Maven is mostly copying coordinates.
 
 :::tip
-`kargo import` does this translation for you: it writes the `kargo.toml` from your `pom.xml` (parents, BOMs and modules included), moves the sources and builds the result. See [Importing a Maven or Gradle project](../../guides/importing/). The rest of this page explains what it does and where Maven and Kargo differ.
+`kargo import` does this translation for you: it writes the `kargo.toml` from your `pom.xml` (parents, BOMs and modules included), moves the sources and builds the result. See [Importing a project](../../guides/importing/). The rest of this page explains what it does and where Maven and Kargo differ.
 :::
 
 ## Example
