@@ -30,7 +30,16 @@ const rewrite = {
   },
 };
 
-const isExternal = (id) =>
+// The compiler's entry module has branches for Node.js and Deno whose imports no page ever takes, and Rollup cannot
+// resolve a `node:` module or a URL; only those are left alone, so a package that imports them elsewhere still fails.
+const entry = resolve(options.input);
+const isUnreachableHostImport = (id, importer) =>
+  importer !== undefined &&
+  resolve(importer) === entry &&
+  (id.startsWith('node:') || id.startsWith('http://') || id.startsWith('https://'));
+
+const isExternal = (id, importer) =>
+  isUnreachableHostImport(id, importer) ||
   options.external.some((name) => id === name || id.startsWith(`${name}/`)) ||
   (!browser && (id.startsWith('node:') || builtinModules.includes(id)));
 

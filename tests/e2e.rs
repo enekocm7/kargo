@@ -1094,8 +1094,10 @@ fn wasm_browser_app_is_bundled_with_bun_and_rollup() {
     for bundler in ["bun", "rollup"] {
         let name = format!("bundle{bundler}");
         wasm_project(&t, &name, &format!("environment = \"browser\"\nbundler = \"{bundler}\"\nwasm-opt = false\n"));
-        // kotlinx-datetime imports the npm package @js-joda/core on Wasm.
+        // kotlinx-datetime imports the npm package @js-joda/core on Wasm; its older serialization range is upgraded
+        // to one whose Wasm variant does not depend on the common-only stdlib artifact.
         t.kargo(&name).args(["add", "org.jetbrains.kotlinx:kotlinx-datetime:0.7.1"]).assert().success();
+        t.kargo(&name).args(["add", "org.jetbrains.kotlinx:kotlinx-serialization-core:1.9.0"]).assert().success();
         t.write(
             &format!("{name}/src/Main.kt"),
             "package com.example.bundled\n\nimport kotlinx.datetime.*\n\nfun main() = println(LocalDate(2024, 1, 31).plus(1, DateTimeUnit.MONTH))\n",
@@ -1263,17 +1265,24 @@ fn browser_app_forwards_api_requests_to_other_servers() {
     let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let api = upstream.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        let (mut stream, _) = upstream.accept().unwrap();
-        let mut request = [0u8; 4096];
-        let n = stream.read(&mut request).unwrap();
-        let request = String::from_utf8_lossy(&request[..n]).into_owned();
-        let body = if request.starts_with("GET /users HTTP/1.1") { "[\"ada\"]" } else { "wrong path" };
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .unwrap();
+        // A client that goes away before its request arrives is not the request the test makes (Windows reports
+        // that as an error from `accept`), so keep listening until one arrives.
+        loop {
+            let Ok((mut stream, _)) = upstream.accept() else { continue };
+            let mut request = [0u8; 4096];
+            let Ok(n) = stream.read(&mut request) else { continue };
+            if n == 0 {
+                continue;
+            }
+            let request = String::from_utf8_lossy(&request[..n]).into_owned();
+            let body = if request.starts_with("GET /users HTTP/1.1") { "[\"ada\"]" } else { "wrong path" };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            break;
+        }
     });
     let t = E2e::new();
     wasm_project(
