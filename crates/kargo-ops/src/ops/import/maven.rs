@@ -16,6 +16,7 @@ use kargo_maven::pom::{
 };
 use kargo_maven::{Artifact, MavenClient, ModuleId, Repository as MavenRepository};
 use kargo_util::config::Config;
+use kargo_util::fs::dunce_canonicalize;
 
 use super::frameworks::{self, Hints};
 use super::model::{CompilerPlugin, Dependency, DirMove, KotlinSettings, LocalPackage, Package, Repository, Scope};
@@ -295,6 +296,82 @@ fn normalize(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
+/// Resolves `.` and `..` in a path relative to the import root, keeping leading
+/// `..` that escape it (e.g. `../core` for a sibling of a child-module import).
+fn clean_relative(path: &Path) -> PathBuf {
+    let mut parts: Vec<String> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(parts.last(), Some(last) if last != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..".to_owned());
+                }
+            }
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) => return path.to_path_buf(),
+        }
+    }
+    parts.iter().collect()
+}
+
+/// Sibling modules listed in a parent POM on disk that is not part of the
+/// imported project: when `kargo import` runs in a child module, a dependency
+/// on a sibling looks like a Maven coordinate, but it is really a path
+/// dependency on a directory outside the import root (e.g. `../core`).
+fn external_siblings(root: &Path, modules: &[Module]) -> HashMap<String, LocalPackage> {
+    let mut out: HashMap<String, LocalPackage> = HashMap::new();
+    let known_poms: Vec<PathBuf> = modules.iter().map(|m| dunce_canonicalize(&root.join(&m.dir).join("pom.xml"))).collect();
+    let known_dirs: Vec<PathBuf> = modules.iter().map(|m| dunce_canonicalize(&root.join(&m.dir))).collect();
+    for module in modules {
+        let relative = module.extras.relative_path.as_deref().unwrap_or("../pom.xml");
+        let mut parent_file = root.join(&module.dir).join(relative);
+        if parent_file.is_dir() {
+            parent_file.push("pom.xml");
+        }
+        if !parent_file.is_file() {
+            continue;
+        }
+        // The parent is already imported (a workspace import); its modules are known.
+        if known_poms.iter().any(|p| *p == dunce_canonicalize(&parent_file)) {
+            continue;
+        }
+        let Ok(parent_xml) = std::fs::read_to_string(&parent_file) else { continue };
+        let Ok(parent_extras) = Extras::parse(&parent_xml) else { continue };
+        if parent_extras.modules.is_empty() {
+            continue;
+        }
+        let parent_file_rel = clean_relative(&module.dir.join(relative));
+        let Some(parent_dir_rel) = parent_file_rel.parent().map(Path::to_path_buf) else { continue };
+        let Some(parent_dir_abs) = parent_file.parent().map(Path::to_path_buf) else { continue };
+        for child in &parent_extras.modules {
+            let child_path = Path::new(child);
+            let child_path =
+                if child_path.extension().is_some_and(|e| e == "xml") { child_path.parent().unwrap_or(Path::new("")) } else { child_path };
+            let sibling_pom_abs = parent_dir_abs.join(child_path).join("pom.xml");
+            if !sibling_pom_abs.is_file() {
+                continue;
+            }
+            // The sibling is already imported; it is not external.
+            if known_dirs.iter().any(|d| *d == dunce_canonicalize(&parent_dir_abs.join(child_path))) {
+                continue;
+            }
+            let Ok(sibling_xml) = std::fs::read_to_string(&sibling_pom_abs) else { continue };
+            let Ok(sibling_pom) = Pom::parse(&sibling_xml) else { continue };
+            let Some(group) = sibling_pom.effective_group() else { continue };
+            if group.contains("${") {
+                continue;
+            }
+            let sibling_dir_rel = clean_relative(&parent_dir_rel.join(child_path));
+            let (name, _) = package_name(&sibling_pom.artifact);
+            out.entry(format!("{group}:{}", sibling_pom.artifact)).or_insert(LocalPackage { name, dir: sibling_dir_rel });
+        }
+    }
+    out
+}
+
 /// Reads `<dir>/pom.xml` and, from its `<modules>`, every module below it.
 fn load_modules(root: &Path, dir: &Path, modules: &mut Vec<Module>, seen: &mut HashSet<PathBuf>, imported: &mut Imported) -> Result<()> {
     if !seen.insert(dir.to_path_buf()) {
@@ -384,10 +461,19 @@ pub(super) fn read(config: &Config, root: &Path) -> Result<Imported> {
         let (name, _) = package_name(&module.pom.artifact);
         siblings.insert(format!("{group}:{}", module.pom.artifact), LocalPackage { name, dir: module.dir.clone() });
     }
+    // A child-module import: dependencies on siblings listed in a parent POM
+    // outside the project are path dependencies, not Maven coordinates.
+    let mut outside: HashSet<String> = HashSet::new();
+    for (coords, local) in external_siblings(root, &modules) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = siblings.entry(coords.clone()) {
+            outside.insert(coords);
+            entry.insert(local);
+        }
+    }
 
     imported.workspace = workspace;
     for module in buildable {
-        let package = package(&poms, module, &siblings, &mut imported)?;
+        let package = package(&poms, module, &siblings, &outside, &mut imported)?;
         imported.packages.push(package);
     }
     let names: Vec<_> = imported.packages.iter().map(|p| p.name.clone()).collect();
@@ -477,7 +563,13 @@ fn resolve(poms: &Poms, module: &Module, imported: &mut Imported, name: &str) ->
     Ok(Resolved { chain, local, extras, props, effective })
 }
 
-fn package(poms: &Poms, module: &Module, siblings: &HashMap<String, LocalPackage>, imported: &mut Imported) -> Result<Package> {
+fn package(
+    poms: &Poms,
+    module: &Module,
+    siblings: &HashMap<String, LocalPackage>,
+    outside: &HashSet<String>,
+    imported: &mut Imported,
+) -> Result<Package> {
     let (name, renamed) = package_name(&module.pom.artifact);
     if renamed {
         imported.manual(
@@ -586,7 +678,7 @@ fn package(poms: &Poms, module: &Module, siblings: &HashMap<String, LocalPackage
     }
 
     // Dependencies.
-    let (mut dependencies, mut dev_dependencies, bom_imports) = dependencies(&resolved, &interp, siblings, &package.dir, imported);
+    let (mut dependencies, mut dev_dependencies, bom_imports) = dependencies(&resolved, &interp, siblings, outside, &package.dir, imported);
     dependencies.extend(bom_imports);
     if let Some(compiler) = &compiler {
         for path in compiler.configs().flat_map(|c| c.at(&["annotationProcessorPaths"]).into_iter().flat_map(|p| p.named("path"))) {
@@ -729,6 +821,7 @@ fn dependencies(
     resolved: &Resolved,
     interp: &dyn Fn(&str) -> String,
     siblings: &HashMap<String, LocalPackage>,
+    outside: &HashSet<String>,
     dir: &Path,
     imported: &mut Imported,
 ) -> (Vec<Dependency>, Vec<Dependency>, Vec<Dependency>) {
@@ -775,6 +868,7 @@ fn dependencies(
 
     let mut main = Vec::new();
     let mut dev = Vec::new();
+    let mut warned: HashSet<String> = HashSet::new();
     for dep in effective {
         let scope = dep.scope.as_deref().unwrap_or("compile");
         let coords = format!("{}:{}", dep.group, dep.artifact);
@@ -820,6 +914,15 @@ fn dependencies(
             out.classifier = None;
             out.extension = None;
             out.exclude.clear();
+            if outside.contains(&coords) && warned.insert(coords.clone()) {
+                let path = out.path.as_ref().map(|l| l.dir.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                imported.manual(
+                    format!(
+                        "{coords} looks like the sibling module `{path}` listed in the parent POM; it became a path dependency, so import the parent as a workspace or make sure `{path}` has a kargo.toml"
+                    ),
+                    MIGRATION,
+                );
+            }
         }
         if scope == "test" {
             out.scope = Scope::Compile;
@@ -1084,6 +1187,44 @@ mod tests {
         assert_eq!(core.dependencies[0].coords(), "org.slf4j:slf4j-api");
         assert_eq!(core.dependencies[0].version.as_deref(), Some("2.0.13"));
         assert_eq!(core.kotlin.version.as_deref(), Some("2.4.21"), "the plugin comes from the parent");
+    }
+
+    #[test]
+    fn a_child_module_import_links_siblings_listed_in_the_parent() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = r#"<project>
+  <groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version><packaging>pom</packaging>
+  <modules><module>core</module><module>api</module></modules>
+  <properties><kotlin.version>2.4.21</kotlin.version></properties>
+  <build><plugins><plugin><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version></plugin></plugins></build>
+</project>"#;
+        let core = r#"<project>
+  <parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version></parent>
+  <artifactId>core</artifactId>
+</project>"#;
+        let api = r#"<project>
+  <parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version></parent>
+  <artifactId>api</artifactId>
+  <dependencies><dependency><groupId>com.example</groupId><artifactId>core</artifactId><version>1.0.0</version></dependency></dependencies>
+</project>"#;
+        let dir = project(&[("pom.xml", parent), ("core/pom.xml", core), ("api/pom.xml", api)]);
+        let imported = read(&config(home.path()), &dir.path().join("api")).unwrap();
+        assert!(!imported.workspace);
+        let package = &imported.packages[0];
+        assert_eq!(package.name, "api");
+        let dep = package.dependencies.iter().find(|d| d.coords() == "com.example:core").expect("sibling dependency");
+        assert_eq!(
+            dep.path.as_ref().map(|p| (p.name.as_str(), p.dir.to_string_lossy().replace('\\', "/"))),
+            Some(("core", "../core".to_owned())),
+            "a sibling outside the import becomes a path dependency"
+        );
+        let text = package.manifest(None);
+        assert!(text.contains("core = { path = \"../core\" }"), "{text}");
+        assert!(
+            imported.notes.iter().any(|n| !n.translated && n.message.contains("com.example:core looks like the sibling module")),
+            "a warning names the sibling: {:?}",
+            imported.notes
+        );
     }
 
     #[test]
