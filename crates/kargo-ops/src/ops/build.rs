@@ -15,7 +15,7 @@ use kargo_compiler::jar::{JarManifest, manifest_matches, write_jar};
 use kargo_compiler::js::JsCompilation;
 use kargo_compiler::jvm::JvmCompilation;
 use kargo_compiler::ksp::KspRun;
-use kargo_compiler::mainclass::{find_entry_point_in, find_jvm_main_class, find_single_entry_point};
+use kargo_compiler::mainclass::{EntryPoint, find_entry_point_in, find_entry_points, find_jvm_main_class, find_single_entry_point};
 use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
 use kargo_compiler::{Outcome, SourceSet, common_kotlin_args};
@@ -685,6 +685,16 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
 pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
     let manifest = ctx.ws.manifest();
     let jvm = jvm_settings(ctx)?;
+    // Fail before any toolchain downloads when an explicit main class cannot exist in
+    // pure Kotlin sources; Java, generated and KSP sources defer to the compiled output below.
+    if let Some(main) = &jvm.main_class {
+        validate_jvm_main_early(ctx, main, "`[target.jvm] main-class`")?;
+    }
+    for bin in &manifest.bins {
+        if let Some(main) = &bin.main {
+            validate_jvm_main_early(ctx, main, &format!("bin '{}'", bin.name))?;
+        }
+    }
     let JvmClasses { classes, sources: srcs, classpaths, outcome } = compile_jvm(ctx, "Compiling")?;
     let changed = outcome == Outcome::Compiled;
     let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm);
@@ -697,6 +707,17 @@ pub fn build_jvm(ctx: &BuildContext) -> Result<JvmBuild> {
             Err(e) => (None, Some(e.to_string())),
         },
     };
+
+    // An explicit main class must name a class in the compiled output (a Java main counts);
+    // the Kotlin mains are listed as the "multiple `main` functions" error does.
+    if let Some(main) = &jvm.main_class {
+        validate_jvm_main_class(ctx, &classes, main, "`[target.jvm] main-class`")?;
+    }
+    for bin in &manifest.bins {
+        if let Some(main) = &bin.main {
+            validate_jvm_main_class(ctx, &classes, main, &format!("bin '{}'", bin.name))?;
+        }
+    }
 
     // Thin jar plus dependencies in lib/.
     let runtime_classpath = jvm_runtime_classpath(ctx, &classpaths)?;
@@ -1171,6 +1192,99 @@ pub fn bin_entry_point(root: &Path, bin: &Bin) -> Result<Option<String>> {
     }
 }
 
+/// Formats entry points for `validate_jvm_main_class` and `validate_native_entry`:
+/// `  <name> (<file>)` per line, as the "multiple `main` functions" error does.
+fn format_mains(entries: &[EntryPoint], name: impl Fn(&EntryPoint) -> String) -> String {
+    entries.iter().map(|e| format!("  {} ({})", name(e), e.file.display())).collect::<Vec<_>>().join("\n")
+}
+
+/// Whether the JVM target could have a main class that `find_entry_points` does not see:
+/// a Java `main`, a `[[generate]]` step or KSP output. Callers that only have the Kotlin
+/// sources defer to the compiled output then instead of failing early.
+fn jvm_may_have_unseen_main(ctx: &BuildContext, srcs: &SourceSet) -> bool {
+    if !srcs.java_files().is_empty() {
+        return true;
+    }
+    if ctx.ws.manifest().generators.iter().any(|g| g.applies_to(TargetKind::Jvm)) {
+        return true;
+    }
+    // KSP (`scope = "ksp"`) generates sources during compilation.
+    if let Ok(setup) = ctx.setup(TargetKind::Jvm)
+        && !setup.requests(&[Scope::Ksp], false).is_empty()
+    {
+        return true;
+    }
+    false
+}
+
+/// Checks an explicit JVM main class (`--main`, `[[bin]] main` or `[target.jvm] main-class`)
+/// against the Kotlin mains in `srcs`, failing early when the project is pure Kotlin with
+/// no generated sources. Returns whether the caller may continue: `true` when the class
+/// matches or when only the compiled output can decide (Java, generated or KSP sources).
+fn check_jvm_main_early(ctx: &BuildContext, srcs: &SourceSet, requested: &str, what: &str) -> Result<()> {
+    let found = find_entry_points(&srcs.kotlin_files());
+    if found.iter().any(|e| e.jvm_class == requested) {
+        return Ok(());
+    }
+    if jvm_may_have_unseen_main(ctx, srcs) {
+        return Ok(());
+    }
+    if found.is_empty() {
+        bail!("{what} points to {requested}, which is not in the compiled output");
+    }
+    let list = format_mains(&found, |e| e.jvm_class.clone());
+    bail!("{what} points to {requested}, which is not in the compiled output; available main classes:\n{list}")
+}
+
+/// Validates an explicit JVM main class before anything compiles, when the sources already
+/// prove it wrong. Defers to [`validate_jvm_main_class`] after compilation otherwise (Java,
+/// generated or KSP sources). `what` is `` `--main` ``, `bin 'name'` or `` `[target.jvm] main-class` ``.
+pub fn validate_jvm_main_early(ctx: &BuildContext, requested: &str, what: &str) -> Result<()> {
+    let srcs = match sources(ctx, TargetKind::Jvm, false, &["kt", "java"]) {
+        Ok(srcs) => srcs,
+        Err(_) => return Ok(()),
+    };
+    check_jvm_main_early(ctx, &srcs, requested, what)
+}
+
+/// Validates an explicit JVM main class against the compiled output: the class file must exist
+/// or a Kotlin `main` must declare it. Lists the Kotlin mains when it does not, as the
+/// "multiple `main` functions" error does. `what` is `` `--main` ``, `bin 'name'` or
+/// `` `[target.jvm] main-class` ``.
+pub fn validate_jvm_main_class(ctx: &BuildContext, classes_dir: &Path, requested: &str, what: &str) -> Result<()> {
+    let rel = format!("{}.class", requested.replace('.', "/"));
+    if classes_dir.join(&rel).is_file() {
+        return Ok(());
+    }
+    let srcs = sources(ctx, TargetKind::Jvm, false, &["kt"])?;
+    let found = find_entry_points(&srcs.kotlin_files());
+    if found.iter().any(|e| e.jvm_class == requested) {
+        return Ok(());
+    }
+    if found.is_empty() {
+        bail!("{what} points to {requested}, which is not in the compiled output");
+    }
+    let list = format_mains(&found, |e| e.jvm_class.clone());
+    bail!("{what} points to {requested}, which is not in the compiled output; available main classes:\n{list}")
+}
+
+/// Validates an explicit Kotlin/Native entry function (`--main`/`--entry-point`, `[[bin]]`
+/// `entry-point` or `[target.native] entry-point`) against the top-level `main` functions in
+/// `srcs`, listing them as the "multiple `main` functions" error does. `what` is `` `--main` ``,
+/// `bin 'name'` or `` `[target.native] entry-point` ``.
+pub fn validate_native_entry(srcs: &SourceSet, requested: &str, what: &str) -> Result<()> {
+    let found: Vec<EntryPoint> =
+        find_entry_points(&srcs.kotlin_files()).into_iter().filter(|e| e.kind == kargo_compiler::mainclass::EntryKind::TopLevel).collect();
+    if found.iter().any(|e| e.native_entry() == requested) {
+        return Ok(());
+    }
+    if found.is_empty() {
+        bail!("{what} points to {requested}, which is not in the compiled output: no top-level `fun main` found in the sources");
+    }
+    let list = format_mains(&found, |e| e.native_entry());
+    bail!("{what} points to {requested}, which is not in the compiled output; available entry functions:\n{list}")
+}
+
 /// One Kotlin/Native artifact a build links.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeProgram {
@@ -1184,13 +1298,23 @@ pub struct NativeProgram {
 /// functions without an `entry-point`, the project's own executable is left out: each bin picks one.
 pub fn native_programs(ctx: &BuildContext, native: &kargo_manifest::NativeTarget, srcs: &SourceSet) -> Result<Vec<NativeProgram>> {
     if native.kind != NativeKind::Executable {
-        return Ok(vec![NativeProgram { bin: None, entry_point: native_entry_point(native, srcs)? }]);
+        let entry = native_entry_point(native, srcs)?;
+        if let (Some(explicit), Some(_)) = (&native.entry_point, &entry) {
+            validate_native_entry(srcs, explicit, "`[target.native] entry-point`")?;
+        }
+        return Ok(vec![NativeProgram { bin: None, entry_point: entry }]);
     }
     let mut bins = Vec::new();
     for bin in &ctx.ws.manifest().bins {
         if let Some(entry) = bin_entry_point(ctx.ws.root(), bin)? {
+            if let Some(explicit) = &bin.entry_point {
+                validate_native_entry(srcs, explicit, &format!("bin '{}'", bin.name))?;
+            }
             bins.push(NativeProgram { bin: Some(bin.name.clone()), entry_point: Some(entry) });
         }
+    }
+    if let Some(explicit) = &native.entry_point {
+        validate_native_entry(srcs, explicit, "`[target.native] entry-point`")?;
     }
     let mut programs = Vec::new();
     match native_entry_point(native, srcs) {

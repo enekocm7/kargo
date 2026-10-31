@@ -488,7 +488,7 @@ $ kargo build
 error: [target.jvm] jvm-target 26 is newer than JDK 25, which builds the project; set `[toolchain] jdk = "26"` in kargo.toml to build with a newer JDK, or lower `jvm-target`
 ```
 
-Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one, run another with `kargo run --main <class>`, or declare each program as a [`[[bin]]`](#bin).
+Without `main-class`, Kargo scans the Kotlin sources for exactly one `main`: a top-level `fun main` (class `<package>.<File>Kt`) or a `@JvmStatic fun main` in an `object` (class `<package>.<Object>`) or a `companion object` (the enclosing class). If it finds none or several, `kargo run` says so and lists the candidates; set `main-class` to pick one, run another with `kargo run --main <class>`, or declare each program as a [`[[bin]]`](#bin). An explicit `main-class` that names no compiled class (a Java `main` counts) fails the build and `kargo run` with the available main classes listed.
 
 ### `[target.wasm]`
 
@@ -675,6 +675,8 @@ Valid platforms: `host`, `linux_x64`, `linux_arm64`, `mingw_x64`, `macos_x64`, `
 
 `[target.native.platform.<platform>]` takes `linker-options`, `library-paths`, `static-libraries` and `frameworks`, added to the common ones for that platform. The platform must be named (`host` is not allowed).
 
+Without `entry-point`, Kargo uses the single top-level `fun main` in the sources. An explicit `entry-point` that names no `main` fails the build and `kargo run` with the available entry functions listed.
+
 | `[target.native.c-sources]` key | Default | Meaning |
 |---|---|---|
 | `sources` | `["c"]` | Files, directories (their `.c`, `.cc`, `.cpp`, `.cxx`, `.m` and `.mm` files) and globs, relative to the project root |
@@ -845,7 +847,7 @@ entry-point = "com.example.report.main"  # Kotlin/Native entry function
 | `main` | The JVM main class |
 | `entry-point` | The Kotlin/Native entry function |
 
-Set `path`, or `main` and/or `entry-point`, but not both. The sources stay in `src/`. An executable Native target links one extra executable per bin with a native entry point, into `target/<profile>/native/<platform>/bin/`. See [Several programs in one project](../../guides/multiple-programs/).
+Set `path`, or `main` and/or `entry-point`, but not both. The sources stay in `src/`. An executable Native target links one extra executable per bin with a native entry point, into `target/<profile>/native/<platform>/bin/`. A `main` or `entry-point` that names nothing in the compiled output fails the build and `kargo run` with the available mains listed. See [Several programs in one project](../../guides/multiple-programs/).
 
 ## `[[generate]]`
 

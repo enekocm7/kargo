@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use super::build::{
     BuildOptions, BuildResults, JvmBuild, announce, bin_main_class, build, compiling, find_bin, finished, hook_env, jvm_classpaths,
     jvm_javac_args, jvm_processor_path, native_cinterop, native_cinterop_defs, native_entry_point, native_libraries, sources,
+    validate_jvm_main_class, validate_jvm_main_early, validate_native_entry,
 };
 use super::context::BuildContext;
 use crate::android_device::{self, AndroidRun};
@@ -242,11 +243,39 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
             if target == TargetKind::Jvm && bin.main.is_none() && bin.path.is_none() {
                 bail!("[[bin]] `{name}` has no JVM main class; set `main` or `path` in kargo.toml");
             }
+            if target == TargetKind::Jvm
+                && let Some(main) = &bin.main
+            {
+                validate_jvm_main_early(ctx, main, &format!("bin '{name}'"))?;
+            }
+            if target == TargetKind::Native
+                && let Some(entry) = &bin.entry_point
+            {
+                validate_native_bin_early(ctx, entry, name)?;
+            }
         }
         Program::Example(_) | Program::File(_) => {
             single_file(ctx, program)?;
         }
-        Program::Main(_) | Program::Default => {}
+        Program::Main(main) => {
+            if target == TargetKind::Jvm {
+                validate_jvm_main_early(ctx, main, "`--main`")?;
+            } else if target == TargetKind::Native {
+                validate_native_main_early(ctx, main)?;
+            }
+        }
+        Program::Default => {
+            if target == TargetKind::Jvm
+                && let Some(main) = ctx.ws.manifest().targets.jvm.as_ref().and_then(|j| j.main_class.as_ref())
+            {
+                validate_jvm_main_early(ctx, main, "`[target.jvm] main-class`")?;
+            }
+            if target == TargetKind::Native
+                && let Some(entry) = ctx.ws.manifest().targets.native.as_ref().and_then(|n| n.entry_point.as_ref())
+            {
+                validate_native_default_early(ctx, entry)?;
+            }
+        }
     }
     // An example links its own executable even when the project is a library.
     if target == TargetKind::Native
@@ -256,6 +285,31 @@ fn validate(ctx: &BuildContext, target: TargetKind, opts: &RunOptions) -> Result
         bail!("the native target builds a library, not an executable");
     }
     Ok(())
+}
+
+/// The Native sources for this host, or `None` when they cannot be listed yet (let the build decide).
+fn native_host_sources(ctx: &BuildContext) -> Option<SourceSet> {
+    let host = Host::current().ok()?.konan_target.to_owned();
+    let srcs = sources(ctx, TargetKind::Native, false, &["kt"]).ok()?;
+    Some(super::build::for_platform(ctx, srcs, &host))
+}
+
+/// Fails early when an explicit Native entry function cannot exist on this host.
+fn validate_native_bin_early(ctx: &BuildContext, entry: &str, bin: &str) -> Result<()> {
+    let Some(srcs) = native_host_sources(ctx) else { return Ok(()) };
+    validate_native_entry(&srcs, entry, &format!("bin '{bin}'"))
+}
+
+/// Fails early when `--main`/`--entry-point` cannot exist on this host.
+fn validate_native_main_early(ctx: &BuildContext, entry: &str) -> Result<()> {
+    let Some(srcs) = native_host_sources(ctx) else { return Ok(()) };
+    validate_native_entry(&srcs, entry, "`--main`")
+}
+
+/// Fails early when an explicit `[target.native] entry-point` cannot exist on this host.
+fn validate_native_default_early(ctx: &BuildContext, entry: &str) -> Result<()> {
+    let Some(srcs) = native_host_sources(ctx) else { return Ok(()) };
+    validate_native_entry(&srcs, entry, "`[target.native] entry-point`")
 }
 
 /// The hint appended when the program to run is ambiguous and bins exist.
@@ -717,14 +771,34 @@ fn jvm_program(ctx: &BuildContext, jvm: &JvmBuild, program: &Program) -> Result<
     classpath.extend(jvm.runtime_classpath.iter().cloned());
     let main = match program {
         Program::Default => match &jvm.main_class {
-            Some(main) => main.clone(),
+            Some(main) => {
+                // An explicit `[target.jvm] main-class` must name a compiled class; a detected
+                // one already comes from the sources. `build_jvm` checked both, but a stale
+                // fingerprint could have skipped the build, so check again before launching.
+                if ctx.ws.manifest().targets.jvm.as_ref().and_then(|j| j.main_class.as_ref()).is_some() {
+                    validate_jvm_main_class(ctx, &jvm.classes, main, "`[target.jvm] main-class`")?;
+                }
+                main.clone()
+            }
             None => {
                 let reason = jvm.main_class_error.as_deref().unwrap_or("set `[target.jvm] main-class` in kargo.toml");
                 bail!("could not determine the main class: {reason}{}", bin_hint(ctx));
             }
         },
-        Program::Main(main) => main.clone(),
-        Program::Bin(name) => bin_main_class(ctx.ws.root(), find_bin(ctx.ws.manifest(), name)?)?,
+        Program::Main(main) => {
+            validate_jvm_main_class(ctx, &jvm.classes, main, "`--main`")?;
+            main.clone()
+        }
+        Program::Bin(name) => {
+            let bin = find_bin(ctx.ws.manifest(), name)?;
+            let main = bin_main_class(ctx.ws.root(), bin)?;
+            // A `path` bin already proved its file holds exactly one `main`; an explicit
+            // `main` must name a compiled class instead.
+            if bin.main.is_some() {
+                validate_jvm_main_class(ctx, &jvm.classes, &main, &format!("bin '{name}'"))?;
+            }
+            main
+        }
         Program::Example(_) | Program::File(_) => {
             let single = single_file(ctx, program)?.expect("an example or a file");
             let main = find_entry_point_in(&single.file, false)?.jvm_class;
@@ -816,6 +890,9 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     let host = Host::current()?.konan_target.to_owned();
     let setup = ctx.setup(TargetKind::Native)?;
     let main_sources = super::build::for_platform(ctx, sources(ctx, TargetKind::Native, false, &["kt"])?, &host);
+    if let Program::Main(entry) = program {
+        super::build::validate_native_entry(&main_sources, entry, "`--main`")?;
+    }
     let example = match single_file(ctx, program)? {
         Some(single) => {
             let entry = find_entry_point_in(&single.file, true)?.native_entry();

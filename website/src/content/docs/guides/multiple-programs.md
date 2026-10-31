@@ -49,6 +49,15 @@ migrating up
 
 The class of a top-level `fun main` in `Migrate.kt` is `MigrateKt`; for `object Cli { @JvmStatic fun main(...) }` it is `Cli`.
 
+A `--main` class (or Native entry function) that names nothing in the compiled output fails before launching, with the available mains listed:
+
+```console
+$ kargo run --main com.example.nope.NopeKt
+error: `--main` points to com.example.nope.NopeKt, which is not in the compiled output; available main classes:
+  com.example.app.MainKt (/home/me/app/src/Main.kt)
+  com.example.tools.MigrateKt (/home/me/app/src/tools/Migrate.kt)
+```
+
 On [Kotlin/Native](../native/), `--main` takes the entry function instead, and `--entry-point` is an alias that reads better there:
 
 ```sh
@@ -96,6 +105,8 @@ Each `[[bin]]` needs a `name` and one way to find its entry point:
 | `entry-point` | The Kotlin/Native entry function, e.g. `com.example.tools.main` |
 
 Use `path`, or `main` and/or `entry-point`, not both. A bin with only `main` is JVM-only; one with only `entry-point` is Native-only.
+
+A `main` or `entry-point` that names nothing in the compiled output fails the build and `kargo run` before launching, with the available mains listed as above. A Java `main` counts: set `main` to its class and Kargo checks the compiled classes.
 
 The bin's sources stay in `src/`, so they are compiled with the rest of the project. On the JVM that costs nothing extra: every bin runs from the same classes. With an executable [Native target](../native/), `kargo build` also links one executable per bin with a native entry point, into `target/<profile>/native/<platform>/bin/<name>`. If the sources hold several `main` functions and `entry-point` is not set, the project's own executable is skipped and only the bins are linked.
 
