@@ -726,14 +726,14 @@ note: run `kargo build --target wasm` to build it
 | Option | Meaning |
 |---|---|
 | `<target>...` | `jvm`, `wasm`, `js`, `native` or `android`; space- or comma-separated |
-| `--lib` | `add`: a Native or Android library (`kind = "library"`) |
-| `--app` | `add`: a Native executable or an Android application |
+| `--lib` | `add`: a Wasm, JS, Native or Android library (`kind = "library"`) |
+| `--app` | `add`: a Wasm or JS application, a Native executable or an Android application |
 | `--format json` | `list`: print JSON (`enabled` with each target's settings, and `available`) |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit or list |
 
 `kargo target add`:
 
-- Writes the defaults of `kargo new`: `environment = "js"` for Wasm, `environment = "node"` for JS, `platforms = ["host"]` and a `kind` for Native, and `namespace`, `kind` and `min-sdk = 24` for Android (the namespace is the package's `group` plus its name). With `[frameworks] compose`, Wasm gets `environment = "browser"` and Native the iOS platforms with `kind = "framework"`, as [Compose](../../guides/compose/) needs.
+- Writes the defaults of `kargo new`: `environment = "js"` for Wasm, `environment = "node"` for JS, `platforms = ["host"]` and a `kind` for Native, and `namespace`, `kind` and `min-sdk = 24` for Android (the namespace is the package's `group` plus its name). Wasm and JS get `kind = "library"` for a library, as `--lib` does. With `[frameworks] compose`, Wasm gets `environment = "browser"` and Native the iOS platforms with `kind = "framework"`, as [Compose](../../guides/compose/) needs.
 - Adds `[target.jvm]` first when `kargo.toml` has no `[target]` section, because such a project is implicitly JVM and would stop building for the JVM once any other `[target.*]` table exists.
 - Without `--lib` or `--app`, picks an application when the sources declare a `main` function (or the manifest sets `main-class` or a `[[bin]]`), and a library otherwise.
 - Creates only missing files and never overwrites one: `src-<target>/.gitkeep` when `src-<target>/` does not exist, and for Android `android/AndroidManifest.xml` plus, for an application, a launcher activity in `src-android/MainActivity.kt`.

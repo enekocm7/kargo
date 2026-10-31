@@ -230,12 +230,14 @@ fn file(path: &str, contents: impl Into<String>) -> TemplateFile {
 }
 
 /// The `[target.<name>]` table `kargo new` writes for a target, with its defaults. `lib` picks a
-/// library over an application (Native and Android); `namespace` is the Android namespace.
+/// library over an application (Wasm, JS, Native and Android); `namespace` is the Android namespace.
 /// `kargo target add` appends the same table to an existing manifest.
 pub fn target_section(target: TargetKind, lib: bool, namespace: &str) -> String {
     match target {
         TargetKind::Jvm => "[target.jvm]\n".to_owned(),
+        TargetKind::Wasm if lib => "[target.wasm]\nenvironment = \"js\"\nkind = \"library\"\n".to_owned(),
         TargetKind::Wasm => "[target.wasm]\nenvironment = \"js\"\n".to_owned(),
+        TargetKind::Js if lib => "[target.js]\nenvironment = \"node\"\nkind = \"library\"\n".to_owned(),
         TargetKind::Js => "[target.js]\nenvironment = \"node\"\n".to_owned(),
         TargetKind::Native => {
             let kind = if lib { "library" } else { "executable" };
@@ -927,6 +929,17 @@ mod tests {
         let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
         assert!(main.contains("package com.example.hello_world"));
         assert!(main.contains("fun main()"));
+    }
+
+    #[test]
+    fn target_section_writes_the_library_kind_of_every_target() {
+        for target in [TargetKind::Wasm, TargetKind::Js, TargetKind::Native, TargetKind::Android] {
+            let lib = target_section(target, true, "com.example.demo");
+            assert!(lib.contains("kind = \"library\""), "{}: {lib}", target.as_str());
+            let app = target_section(target, false, "com.example.demo");
+            assert!(!app.contains("kind = \"library\""), "{}: {app}", target.as_str());
+        }
+        assert_eq!(target_section(TargetKind::Jvm, true, "com.example.demo"), "[target.jvm]\n");
     }
 
     #[test]

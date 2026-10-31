@@ -100,7 +100,7 @@ A browser can't load a CommonJS module, so a `browser` application needs `es` or
 
 ## Libraries and npm packages
 
-Set `kind = "library"` and mark what JavaScript and TypeScript may use with `@JsExport`:
+`kargo new greeter --lib -t js` creates a library with `kind = "library"`; in an existing project, set `kind = "library"` and mark what JavaScript and TypeScript may use with `@JsExport`:
 
 ```toml title="kargo.toml"
 [package]

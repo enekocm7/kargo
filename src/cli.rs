@@ -566,10 +566,10 @@ enum TargetCommand {
         /// Targets to enable (space- or comma-separated)
         #[arg(value_enum, required = true, value_delimiter = ',')]
         targets: Vec<TargetArg>,
-        /// Native and Android: build a library (default: inferred, a `main` function makes an application)
+        /// Wasm, JS, Native and Android: build a library (default: inferred, a `main` function makes an application)
         #[arg(long, conflicts_with = "app")]
         lib: bool,
-        /// Native and Android: build an application (default: inferred)
+        /// Wasm, JS, Native and Android: build an application (default: inferred)
         #[arg(long)]
         app: bool,
         #[command(flatten)]
