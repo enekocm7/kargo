@@ -359,7 +359,7 @@ The modules belong to the package that has them: a [path dependency](../workspac
 
 ## Libraries and npm packages
 
-A Wasm project can be a library for JavaScript and TypeScript code. Set `kind = "library"` and mark what you want to expose with `@JsExport`:
+A Wasm project can be a library for JavaScript and TypeScript code. `kargo new greeter --lib -t wasm` creates one with `kind = "library"`; in an existing project, set `kind = "library"` and mark what you want to expose with `@JsExport`:
 
 ```toml title="kargo.toml"
 [package]

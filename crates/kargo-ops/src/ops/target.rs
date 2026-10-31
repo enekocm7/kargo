@@ -23,7 +23,7 @@ pub struct AddedTargets {
 
 /// `kargo target add`: appends `[target.<name>]` with the defaults `kargo new` writes and scaffolds
 /// the files a target needs, never overwriting one. `lib` picks a library over an application for
-/// Native and Android; `None` infers it from the sources (a `main` function makes an application).
+/// Wasm, JS, Native and Android; `None` infers it from the sources (a `main` function makes an application).
 pub fn add(shell: &Shell, ws: &Workspace, targets: &[TargetKind], lib: Option<bool>) -> Result<AddedTargets> {
     let mut editor = ManifestEditor::load(&ws.manifest_path())?;
     for &target in targets {
@@ -43,11 +43,10 @@ pub fn add(shell: &Shell, ws: &Workspace, targets: &[TargetKind], lib: Option<bo
     }
     for &target in &new_targets {
         let kind = match target {
-            TargetKind::Native if lib => " (library)",
+            TargetKind::Wasm | TargetKind::Js | TargetKind::Native | TargetKind::Android if lib => " (library)",
+            TargetKind::Wasm | TargetKind::Js | TargetKind::Android => " (application)",
             TargetKind::Native => " (executable)",
-            TargetKind::Android if lib => " (library)",
-            TargetKind::Android => " (application)",
-            _ => "",
+            TargetKind::Jvm => "",
         };
         shell.status("Adding", format!("{target} target{kind}"));
     }

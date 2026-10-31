@@ -44,6 +44,23 @@ fn new_creates_a_project() {
 }
 
 #[test]
+fn new_lib_writes_the_library_kind_of_the_wasm_and_js_targets() {
+    let p = Project::new();
+    p.kargo().args(["new", "js-lib", "--lib", "--target", "js", "--no-vcs"]).assert().success();
+    let js = p.read("js-lib/kargo.toml");
+    assert!(js.contains("[target.js]\nenvironment = \"node\"\nkind = \"library\"\n"), "{js}");
+
+    p.kargo().args(["new", "wasm-lib", "--lib", "--target", "wasm", "--no-vcs"]).assert().success();
+    let wasm = p.read("wasm-lib/kargo.toml");
+    assert!(wasm.contains("[target.wasm]\nenvironment = \"js\"\nkind = \"library\"\n"), "{wasm}");
+
+    // An application keeps the default kind, which the manifest leaves out.
+    p.kargo().args(["new", "wasm-app", "--target", "wasm", "--no-vcs"]).assert().success();
+    let app = p.read("wasm-app/kargo.toml");
+    assert!(!app.contains("kind"), "{app}");
+}
+
+#[test]
 fn new_bench_adds_the_framework_and_a_sample_benchmark() {
     let p = Project::new();
     p.kargo().args(["new", "fast", "--bench", "--no-vcs"]).assert().success();
@@ -3831,6 +3848,15 @@ fn target_add_is_idempotent_and_infers_libraries() {
         .stderr(predicate::str::contains("the native target is already enabled"))
         .stderr(predicate::str::contains("the jvm target is already enabled"));
     assert_eq!(p.read("kargo.toml"), before);
+    p.kargo()
+        .args(["target", "add", "wasm", "js"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding wasm target (library)"))
+        .stderr(predicate::str::contains("Adding js target (library)"));
+    let after = p.read("kargo.toml");
+    assert!(after.contains("[target.wasm]\nenvironment = \"js\"\nkind = \"library\""), "{after}");
+    assert!(after.contains("[target.js]\nenvironment = \"node\"\nkind = \"library\""), "{after}");
     p.kargo().args(["target", "add", "android", "--app"]).assert().success();
     assert!(p.read("kargo.toml").contains("namespace = \"com.example.lib\"\nkind = \"application\""));
 }
@@ -3924,9 +3950,9 @@ fn target_list_shows_enabled_and_available_targets() {
 fn target_add_js_writes_a_node_target() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("app", "[target.jvm]\n"));
-    p.kargo().args(["target", "add", "js"]).assert().success();
+    p.kargo().args(["target", "add", "js", "--app"]).assert().success();
     let text = p.read("kargo.toml");
-    assert!(text.contains("[target.js]\nenvironment = \"js\"\n"), "{text}");
+    assert!(text.contains("[target.js]\nenvironment = \"node\"\n"), "{text}");
     p.kargo()
         .args(["target", "list"])
         .assert()
