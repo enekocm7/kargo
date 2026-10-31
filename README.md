@@ -88,15 +88,16 @@ Built-in [frameworks](https://enekocm7.github.io/kargo/guides/frameworks/) add t
 | `kargo add <group:artifact>` | Add a dependency, at its latest version unless you give one |
 | `kargo package` | Build a fat jar, a runtime image, a native image, an installer or Android bundles |
 | `kargo publish` | Publish a library to Maven Central, a Maven repository or npm |
+| `kargo import` | Convert a Maven, Gradle or Kotlin Toolchain project, sources included |
 
-There are many more: `check`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `bench`, `import` for Maven and Gradle projects, `script` for single files, and others. See the [commands reference](https://enekocm7.github.io/kargo/reference/commands/), or run `kargo --list`.
+There are many more: `check`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `bench`, `script` for single files, and others. See the [commands reference](https://enekocm7.github.io/kargo/reference/commands/), or run `kargo --list`.
 
 ## Learn more
 
 - [Documentation](https://enekocm7.github.io/kargo/): start with the [quick start](https://enekocm7.github.io/kargo/getting-started/quick-start/).
 - [Guides](https://enekocm7.github.io/kargo/guides/dependencies/): dependencies, workspaces, testing, toolchains, CI, offline builds and more.
 - [Editor support](https://enekocm7.github.io/kargo/guides/editors/): plugins for IntelliJ IDEA and Android Studio, VS Code, Zed, Neovim and Emacs, and `kargo lsp` for every other editor.
-- Coming from Gradle or Maven? `kargo import` converts your project. See [migrating from Gradle](https://enekocm7.github.io/kargo/migration/from-gradle/) and the [feature parity table](https://enekocm7.github.io/kargo/migration/gradle-feature-parity/).
+- Coming from Gradle, Maven or the [Kotlin Toolchain](https://kotlin-toolchain.org/)? `kargo import` converts your project. See [migrating from Gradle](https://enekocm7.github.io/kargo/migration/from-gradle/), [from the Kotlin Toolchain](https://enekocm7.github.io/kargo/migration/from-kotlin-toolchain/) and the [feature parity table](https://enekocm7.github.io/kargo/migration/gradle-feature-parity/).
 
 ## Contributing
 

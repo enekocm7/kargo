@@ -9,6 +9,10 @@ description: Answers to common questions and fixes for common errors.
 
 For JVM, Wasm, JS and Native projects, yes: Kargo calls the Kotlin compilers directly and Gradle is not involved. Android builds still use the Android Gradle Plugin, but Kargo generates and runs that Gradle project for you. [Gradle feature parity](../../migration/gradle-feature-parity/) lists what Gradle can do and the status of each feature in Kargo.
 
+### Does Kargo replace the Kotlin Toolchain (formerly Amper)?
+
+Both replace Gradle scripts with one declarative file and one command. Kargo is a Rust binary with full Maven resolution (POM inheritance, BOMs, exclusions, version ranges, Gradle module metadata) and `kargo.lock`; the Kotlin Toolchain is a Kotlin/JVM tool. Kargo builds the JVM, Wasm, JS and Native targets without Gradle, and drives the Android Gradle Plugin from a generated Gradle project for Android. `kargo import` reads `project.yaml` and `module.yaml` and moves the sources; [Migrating from the Kotlin Toolchain](../../migration/from-kotlin-toolchain/) lists the differences.
+
 ### Can I use any Maven library?
 
 Yes. Anything on Maven Central or in a repository you add in `[repositories]`, including Kotlin Multiplatform libraries.

@@ -1,4 +1,4 @@
-//! `kargo import`: turns a Maven or Gradle project into a Kargo project.
+//! `kargo import`: turns a Maven, Gradle or Kotlin Toolchain project into a Kargo project.
 //!
 //! Importing is planned first and applied second. [`plan`] reads the build files, builds the
 //! `kargo.toml` files, checks that each of them is valid and works out every file move, without
@@ -7,6 +7,7 @@
 
 mod frameworks;
 mod gradle;
+mod kotlin_toolchain;
 mod layout;
 mod maven;
 mod model;
@@ -31,6 +32,7 @@ const DOCS: &str = "https://enekocm7.github.io/kargo";
 pub enum Build {
     Maven,
     Gradle,
+    KotlinToolchain,
 }
 
 impl Build {
@@ -38,6 +40,7 @@ impl Build {
         match self {
             Build::Maven => "Maven",
             Build::Gradle => "Gradle",
+            Build::KotlinToolchain => "Kotlin Toolchain",
         }
     }
 }
@@ -127,6 +130,7 @@ pub fn plan(config: &Config, root: &Path, opts: &ImportOptions) -> Result<Plan> 
     let mut imported = match build {
         Build::Maven => maven::read(config, root)?,
         Build::Gradle => gradle::read(root)?,
+        Build::KotlinToolchain => kotlin_toolchain::read(root)?,
     };
     export_for_dependents(&mut imported.packages);
     if imported.workspace {
@@ -168,19 +172,48 @@ pub fn plan(config: &Config, root: &Path, opts: &ImportOptions) -> Result<Plan> 
 fn detect(root: &Path, from: Option<Build>) -> Result<Build> {
     let maven = root.join("pom.xml").is_file();
     let gradle = ["build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle"].iter().any(|f| root.join(f).is_file());
-    match (from, maven, gradle) {
-        (Some(Build::Maven), false, _) => bail!("there is no pom.xml in {}", root.display()),
-        (Some(Build::Gradle), _, false) => bail!("there is no build.gradle.kts or build.gradle in {}", root.display()),
-        (Some(build), _, _) => Ok(build),
-        (None, true, true) => {
-            bail!("{} has a pom.xml and Gradle build files; choose with `--from maven` or `--from gradle`", root.display())
+    // The wrapper alone is enough to recognize a Kotlin Toolchain project; `read` then asks for the configuration.
+    let kotlin = root.join("project.yaml").is_file()
+        || root.join("module.yaml").is_file()
+        || ["kotlin", "kotlin.bat", "amper", "amper.bat"].iter().any(|f| root.join(f).is_file());
+    if let Some(build) = from {
+        let present = match build {
+            Build::Maven => maven,
+            Build::Gradle => gradle,
+            Build::KotlinToolchain => kotlin,
+        };
+        if present {
+            return Ok(build);
         }
-        (None, true, false) => Ok(Build::Maven),
-        (None, false, true) => Ok(Build::Gradle),
-        (None, false, false) => bail!(
-            "there is no pom.xml, build.gradle.kts or build.gradle in {}; `kargo import` needs a Maven or Gradle project",
+        match build {
+            Build::Maven => bail!("there is no pom.xml in {}", root.display()),
+            Build::Gradle => bail!("there is no build.gradle.kts or build.gradle in {}", root.display()),
+            Build::KotlinToolchain => bail!("there is no project.yaml, module.yaml or kotlin wrapper in {}", root.display()),
+        }
+    }
+    match (maven, gradle, kotlin) {
+        (false, false, false) => bail!(
+            "there is no pom.xml, build.gradle.kts, build.gradle, project.yaml or module.yaml in {}; \
+             `kargo import` needs a Maven, Gradle or Kotlin Toolchain project",
             root.display()
         ),
+        (true, false, false) => Ok(Build::Maven),
+        (false, true, false) => Ok(Build::Gradle),
+        (false, false, true) => Ok(Build::KotlinToolchain),
+        _ => {
+            let mut names = Vec::new();
+            if maven {
+                names.push("Maven");
+            }
+            if gradle {
+                names.push("Gradle");
+            }
+            if kotlin {
+                names.push("Kotlin Toolchain");
+            }
+            let options = names.iter().map(|n| format!("`--from {}`", n.to_lowercase().replace(' ', "-"))).collect::<Vec<_>>().join(", ");
+            bail!("{} has the files of several build tools ({}); choose with {options}", root.display(), names.join(", "))
+        }
     }
 }
 
@@ -333,5 +366,23 @@ mod tests {
         std::fs::write(dir.path().join("build.gradle.kts"), "").unwrap();
         assert!(detect(dir.path(), None).unwrap_err().to_string().contains("--from"));
         assert_eq!(detect(dir.path(), Some(Build::Gradle)).unwrap(), Build::Gradle);
+    }
+
+    #[test]
+    fn detects_the_kotlin_toolchain_from_its_configuration_or_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("module.yaml"), "product: jvm/app\n").unwrap();
+        assert_eq!(detect(dir.path(), None).unwrap(), Build::KotlinToolchain);
+        // A wrapper alone is enough, like `gradlew` next to a missing script.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kotlin"), "#!/bin/sh\n").unwrap();
+        assert_eq!(detect(dir.path(), None).unwrap(), Build::KotlinToolchain);
+        assert!(detect(dir.path(), Some(Build::Maven)).unwrap_err().to_string().contains("no pom.xml"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pom.xml"), "<project/>").unwrap();
+        std::fs::write(dir.path().join("kotlin"), "#!/bin/sh\n").unwrap();
+        let error = detect(dir.path(), None).unwrap_err().to_string();
+        assert!(error.contains("--from maven") && error.contains("--from kotlin"), "{error}");
+        assert_eq!(detect(dir.path(), Some(Build::KotlinToolchain)).unwrap(), Build::KotlinToolchain);
     }
 }

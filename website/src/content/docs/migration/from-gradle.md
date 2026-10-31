@@ -6,7 +6,7 @@ description: Translate build.gradle.kts into kargo.toml, step by step.
 This guide moves a Gradle project, JVM or Kotlin Multiplatform, to Kargo. Most single-module projects take about fifteen minutes. To see first what Gradle features Kargo does not have, read [Gradle feature parity](../gradle-feature-parity/).
 
 :::tip
-`kargo import` writes most of this `kargo.toml` for you and moves the sources: it reads the plugins, dependencies, version catalogs, targets and source sets of your build scripts and lists what it could not translate. See [Importing a Maven or Gradle project](../../guides/importing/), then use this guide for the parts the report points at.
+`kargo import` writes most of this `kargo.toml` for you and moves the sources: it reads the plugins, dependencies, version catalogs, targets and source sets of your build scripts and lists what it could not translate. See [Importing a project](../../guides/importing/), then use this guide for the parts the report points at.
 :::
 
 :::caution[Before you start]

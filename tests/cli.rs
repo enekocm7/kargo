@@ -6417,7 +6417,11 @@ fn import_turns_maven_modules_into_a_workspace() {
 #[test]
 fn import_explains_what_it_cannot_do() {
     let p = Project::new();
-    p.kargo().arg("import").assert().failure().stderr(predicate::str::contains("no pom.xml, build.gradle.kts or build.gradle"));
+    p.kargo()
+        .arg("import")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no pom.xml, build.gradle.kts, build.gradle, project.yaml or module.yaml"));
     p.file("pom.xml", "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version></project>").file("build.gradle.kts", "");
     p.kargo().arg("import").assert().failure().stderr(predicate::str::contains("--from maven"));
     p.kargo().args(["import", "--from", "maven", "--dry-run"]).assert().success();
@@ -6484,6 +6488,96 @@ dependencies {
     assert!(p.path().join("build.gradle.kts").is_file(), "the Gradle files stay");
     assert_eq!(p.read(".gitignore"), "build/\n/target\n");
     p.kargo().arg("info").assert().success();
+}
+
+#[test]
+fn import_converts_a_kotlin_toolchain_project() {
+    let p = Project::new();
+    p.file("kotlin", "#!/bin/sh\n")
+        .file("kotlin.bat", "@echo off\n")
+        .file(
+            "project.yaml",
+            r#"modules:
+  - shared
+  - app
+"#,
+        )
+        .file(
+            "libs.versions.toml",
+            r#"[versions]
+ktor = "3.6.0"
+
+[libraries]
+ktor-client = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+"#,
+        )
+        .file(
+            "shared/module.yaml",
+            r#"product:
+  type: kmp/lib
+  platforms: [ jvm, android ]
+dependencies:
+  - $libs.ktor.client
+settings:
+  kotlin:
+    version: 2.4.10
+"#,
+        )
+        .file(
+            "app/module.yaml",
+            r#"product: android/app
+dependencies:
+  - //shared
+settings:
+  android:
+    namespace: com.example.app
+    applicationId: com.example.app
+    minSdk: 26
+  compose: enabled
+"#,
+        )
+        .file("shared/src/Common.kt", "package shared\n")
+        .file("shared/src@jvm/Jvm.kt", "package shared\n")
+        .file("shared/test/CommonTest.kt", "package shared\n")
+        .file("app/src/MainActivity.kt", "package app\n")
+        .file("app/src/AndroidManifest.xml", "<manifest/>\n")
+        .file("app/res/values/strings.xml", "<resources/>\n");
+    p.kargo()
+        .args(["import", "--no-build"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Imported Kotlin Toolchain project as 2 packages (app, shared)"))
+        .stderr(predicate::str::contains("project.yaml modules -> workspace members (app, shared)"));
+    let root = p.read("kargo.toml");
+    assert!(root.contains("[workspace]\nmembers = [\"app\", \"shared\"]"), "{root}");
+    let shared = p.read("shared/kargo.toml");
+    assert!(shared.contains("[kotlin]\nversion = \"2.4.10\""), "{shared}");
+    assert!(shared.contains("\"io.ktor:ktor-client-core\" = { version = \"3.6.0\", exported = true }"), "{shared}");
+    assert!(shared.contains("[target.jvm]\n"), "{shared}");
+    assert!(shared.contains("[target.android]\nkind = \"library\""), "{shared}");
+    let app = p.read("app/kargo.toml");
+    assert!(app.contains("shared = { path = \"../shared\" }"), "{app}");
+    assert!(app.contains("[target.android]\nkind = \"application\"\nnamespace = \"com.example.app\""), "{app}");
+    assert!(app.contains("application-id = \"com.example.app\"") && app.contains("min-sdk = 26"), "{app}");
+    assert!(app.contains("[frameworks]\ncompose = true"), "{app}");
+    assert!(p.path().join("shared/src/Common.kt").is_file());
+    assert!(p.path().join("shared/src-jvm/Jvm.kt").is_file());
+    assert!(p.path().join("shared/tests/CommonTest.kt").is_file());
+    assert!(p.path().join("app/src/MainActivity.kt").is_file());
+    assert!(p.path().join("app/android/AndroidManifest.xml").is_file());
+    assert!(p.path().join("app/android/res/values/strings.xml").is_file());
+    assert!(p.path().join("app/module.yaml").is_file(), "the Kotlin Toolchain files stay");
+    p.kargo().arg("info").assert().success();
+
+    // A directory with the files of several build tools asks which one to read.
+    let both = Project::new();
+    both.file("pom.xml", "<project/>").file("module.yaml", "product: jvm/app\n");
+    both.kargo()
+        .arg("import")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--from kotlin").and(predicate::str::contains("--from maven")));
+    both.kargo().args(["import", "--from", "amper", "--dry-run"]).assert().success();
 }
 
 #[test]

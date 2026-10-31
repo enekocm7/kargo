@@ -118,6 +118,7 @@ export default defineConfig({
 						{ label: 'From Gradle', slug: 'migration/from-gradle' },
 						{ label: 'Gradle feature parity', slug: 'migration/gradle-feature-parity' },
 						{ label: 'From Maven', slug: 'migration/from-maven' },
+						{ label: 'From the Kotlin Toolchain', slug: 'migration/from-kotlin-toolchain' },
 						{ label: 'For Rust developers', slug: 'migration/from-cargo' },
 					],
 				},
