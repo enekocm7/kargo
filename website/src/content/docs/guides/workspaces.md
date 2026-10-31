@@ -383,7 +383,7 @@ graph:
     core
     cli -> core
     server -> core
-kargo:        0.1.4 (abc1234, built 2026-10-31, x86_64-unknown-linux-gnu)
+kargo:        0.1.5 (abc1234, built 2026-10-31, x86_64-unknown-linux-gnu)
 home:         /home/me/.kargo (1.2 GiB)
 cache:        /home/me/.kargo/cache (340.2 MiB)
 daemons:      none running
