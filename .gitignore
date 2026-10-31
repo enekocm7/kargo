@@ -1,1 +1,3 @@
 /target
+# Examples must stay exactly as `kargo new` writes them; their lockfiles are local build artifacts.
+examples/**/*.lock
