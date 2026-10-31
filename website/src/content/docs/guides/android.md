@@ -537,6 +537,29 @@ kargo lint --android --create-baseline
 
 `lint-baseline.xml` is used when it exists; name another file with `baseline`. A `lint.xml` in the project root (or `config`) is passed to lint, for severity per path. `kargo android lint` runs Gradle's `lint` task with the same settings, and `kargo android lintRelease` or `lintFreeDebug` lint other variants. For the settings of detekt on your Kotlin code, see [Formatting and linting](../formatting-and-linting/).
 
+## Gradle plugins
+
+Kargo writes the Gradle project, so you can't edit its `build.gradle.kts` (it is rewritten on every build). Plugins that generate code or resources from your project, such as Firebase's Google services or Hilt, go under `[target.android.plugins]`:
+
+```toml title="kargo.toml"
+[target.android.plugins]
+google-services = { id = "com.google.gms.google-services", version = "4.4.2" }
+hilt = { id = "com.google.dagger.hilt.android", version = "2.57.2" }
+```
+
+Each entry becomes a line of the generated `plugins` block, after the plugins Kargo applies itself and in the order of the file. The plugin comes from the same repositories as the Android Gradle Plugin (Google, Maven Central, the Gradle Plugin Portal), or from their [mirrors](../offline-and-mirrors/#repository-mirrors). `apply = false` only declares it on the build classpath.
+
+A plugin often needs libraries and a processor too, which you add as ordinary dependencies, for example `"com.google.dagger:hilt-android"` under `[target.android.dependencies]` and `"com.google.dagger:hilt-compiler"` with the `ksp` scope.
+
+Files a plugin reads go in `android/`, next to `AndroidManifest.xml`. `android/google-services.json` is copied into the Gradle module when a `com.google.gms.*` plugin is listed; name other files with `files`:
+
+```toml title="kargo.toml"
+[target.android.plugins]
+crashlytics = { id = "com.google.firebase.crashlytics", version = "3.0.2", files = ["crashlytics.properties"] }
+```
+
+In a [workspace](#android-libraries), the plugins of each package apply to that package's Gradle module, and the root build file declares their versions.
+
 ## Running any Gradle task
 
 `kargo android` passes its arguments to Gradle in the generated project:

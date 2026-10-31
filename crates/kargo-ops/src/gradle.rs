@@ -296,13 +296,28 @@ rootProject.name = {name}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GradlePlugin {
     pub id: String,
-    pub version: String,
+    /// `None` for a plugin already on the build classpath, which Gradle takes without a version.
+    pub version: Option<String>,
     pub applied: bool,
+}
+
+impl GradlePlugin {
+    /// The line of a `plugins` block: `id("..") version ".."`, with `apply false` when `apply_false`.
+    fn line(&self, apply_false: bool) -> String {
+        let mut line = format!("    id({})", kts_string(&self.id));
+        if let Some(version) = &self.version {
+            let _ = write!(line, " version {}", kts_string(version));
+        }
+        if apply_false {
+            line.push_str(" apply false");
+        }
+        line
+    }
 }
 
 /// The Gradle plugins of an Android package.
 pub fn plugins(manifest: &Manifest, android: &AndroidTarget) -> Vec<GradlePlugin> {
-    let plugin = |id: &str, version: &str, applied: bool| GradlePlugin { id: id.to_owned(), version: version.to_owned(), applied };
+    let plugin = |id: &str, version: &str, applied: bool| GradlePlugin { id: id.to_owned(), version: Some(version.to_owned()), applied };
     let cfg = &android.config;
     let kotlin = &manifest.kotlin.version;
     let fw = &manifest.frameworks;
@@ -322,6 +337,14 @@ pub fn plugins(manifest: &Manifest, android: &AndroidTarget) -> Vec<GradlePlugin
     let uses_ksp = manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp);
     if uses_ksp {
         out.push(plugin("com.google.devtools.ksp", builtins::ksp_version(manifest), true));
+    }
+    // `[target.android.plugins]`, in order after Kargo's own. Kotlin's plugins default to the Kotlin version.
+    for (_, user) in &cfg.plugins {
+        if out.iter().any(|p| p.id == user.id) {
+            continue;
+        }
+        let version = user.version.clone().or_else(|| user.id.starts_with("org.jetbrains.kotlin.").then(|| kotlin.clone()));
+        out.push(GradlePlugin { id: user.id.clone(), version, applied: user.apply });
     }
     out
 }
@@ -381,12 +404,11 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
         match (module.subproject, p.applied) {
             (true, false) => {}
             (true, true) => plugins.push(format!("    id({})", kts_string(&p.id))),
-            (false, true) => plugins.push(format!("    id({}) version {}", kts_string(&p.id), kts_string(&p.version))),
-            (false, false) => plugins.push(format!("    id({}) version {} apply false", kts_string(&p.id), kts_string(&p.version))),
+            (false, applied) => plugins.push(p.line(!applied)),
         }
     }
     for p in &module.subproject_plugins {
-        let line = format!("    id({}) version {} apply false", kts_string(&p.id), kts_string(&p.version));
+        let line = p.line(true);
         if !own.iter().any(|o| o.id == p.id) && !plugins.contains(&line) {
             plugins.push(line);
         }
@@ -1191,6 +1213,7 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
             build_dir: Some(pkg.work_dir("android").join("build")),
         };
         write(&format!("modules/{}/build.gradle.kts", pkg.name()), &build_gradle_with(pkg, pkg_android, &module)?)?;
+        copy_plugin_files(pkg, pkg_android, &dir.join("modules").join(pkg.name()))?;
     }
     let names: Vec<(&str, &Manifest)> =
         modules.iter().map(|(i, _)| (ctx.project.package(*i).name(), ctx.project.package(*i).manifest())).collect();
@@ -1205,11 +1228,45 @@ pub fn generate(ctx: &BuildContext) -> Result<PathBuf> {
         build_dir: None,
     };
     write("build.gradle.kts", &build_gradle_with(ws, android, &root)?)?;
+    copy_plugin_files(ws, android, &dir)?;
     write("gradle.properties", GRADLE_PROPERTIES)?;
     let sdk = sdk(ctx.ws, ctx.config, Licenses::Ask)?;
     let escaped = sdk.to_string_lossy().replace('\\', "\\\\").replace(':', "\\:");
     write("local.properties", &format!("sdk.dir={escaped}\n"))?;
     Ok(dir)
+}
+
+/// Copies the files the package's `[target.android.plugins]` read from `android/` into the Gradle module `dest`:
+/// their `files`, and `google-services.json` for the Google services plugin, when it exists.
+fn copy_plugin_files(ws: &Workspace, android: &AndroidTarget, dest: &Path) -> Result<()> {
+    let from = ws.android_dir();
+    let mut files: Vec<PathBuf> = Vec::new();
+    for (name, plugin) in &android.config.plugins {
+        if plugin.id.starts_with("com.google.gms.") {
+            files.push(PathBuf::from("google-services.json"));
+        }
+        for file in &plugin.files {
+            if !from.join(file).is_file() {
+                bail!("[target.android.plugins.{name}] lists `{}`, but {} does not exist", file.display(), from.join(file).display());
+            }
+            files.push(file.clone());
+        }
+    }
+    for file in files {
+        let source = from.join(&file);
+        if !source.is_file() {
+            continue;
+        }
+        let target = dest.join(&file);
+        let contents = std::fs::read(&source).with_context(|| format!("failed to read {}", source.display()))?;
+        if std::fs::read(&target).ok().as_deref() != Some(contents.as_slice()) {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, contents).with_context(|| format!("failed to write {}", target.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// The SDK packages an Android package builds with: its platform, the build-tools (`build-tools`, else those of
@@ -2205,6 +2262,60 @@ mod tests {
         .unwrap();
         let ws = Workspace::load(&dir.path().join("kargo.toml")).unwrap();
         (dir, ws)
+    }
+
+    #[test]
+    fn user_plugins_follow_kargos_own() {
+        let (dir, ws) = workspace(
+            "[target.android.plugins]
+google-services = { id = \"com.google.gms.google-services\", version = \"4.4.2\" }
+             hilt = { id = \"com.google.dagger.hilt.android\", version = \"2.57.2\", apply = false }
+             parcelize = { id = \"org.jetbrains.kotlin.plugin.parcelize\" }
+             bare = { id = \"some.builtin\" }
+",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        let kotlin = &ws.manifest().kotlin.version;
+        let expected = [
+            "    id(\"org.jetbrains.kotlin.android\")".to_owned(),
+            "    id(\"com.google.gms.google-services\") version \"4.4.2\"
+"
+            .to_owned(),
+            "    id(\"com.google.dagger.hilt.android\") version \"2.57.2\" apply false
+"
+            .to_owned(),
+            format!(
+                "    id(\"org.jetbrains.kotlin.plugin.parcelize\") version \"{kotlin}\"
+"
+            ),
+            "    id(\"some.builtin\")
+}"
+            .to_owned(),
+        ];
+        let mut at = 0;
+        for part in &expected {
+            at += text[at..].find(part.as_str()).unwrap_or_else(|| panic!("`{part}` not in order in {text}"));
+        }
+
+        // `google-services.json` of `android/` goes next to the generated build file.
+        let module = dir.path().join("module");
+        std::fs::create_dir_all(dir.path().join("android")).unwrap();
+        std::fs::write(dir.path().join("android/google-services.json"), "{}").unwrap();
+        copy_plugin_files(&ws, &android, &module).unwrap();
+        assert_eq!(std::fs::read_to_string(module.join("google-services.json")).unwrap(), "{}");
+    }
+
+    #[test]
+    fn missing_plugin_file_is_an_error() {
+        let (_dir, ws) = workspace(
+            "[target.android.plugins]
+x = { id = \"p.q\", files = [\"missing.json\"] }
+",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let err = copy_plugin_files(&ws, &android, Path::new("unused")).unwrap_err().to_string();
+        assert!(err.contains("missing.json"), "{err}");
     }
 
     #[test]

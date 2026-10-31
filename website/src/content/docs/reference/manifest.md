@@ -917,7 +917,22 @@ application-id-suffix = ".free"
 | `fatal`, `error`, `warning`, `informational`, `ignore` | `[]`. Issue ids reported at that severity |
 | `reports` | `["html", "xml", "sarif"]`. Also `text`. SARIF is always written, since `--message-format json` reads it |
 
-See [Release builds](../../guides/android/#release-builds) and [Product flavors](../../guides/android/#product-flavors).
+`[target.android.plugins]` applies more Gradle plugins to the generated Android project, in the order of the file and after Kargo's own:
+
+```toml
+[target.android.plugins]
+google-services = { id = "com.google.gms.google-services", version = "4.4.2" }
+hilt = { id = "com.google.dagger.hilt.android", version = "2.57.2" }
+```
+
+| Key | Meaning |
+|---|---|
+| `id` | The plugin id. Required. The plugins Kargo applies itself (`com.android.application`, `com.android.library`, `org.jetbrains.kotlin.android`) are an error |
+| `version` | The plugin's version, resolved from Google, Maven Central and the Gradle Plugin Portal (or their `[mirrors]`). Without one the plugin must already be on the build classpath; `org.jetbrains.kotlin.*` plugins default to the Kotlin version |
+| `apply` | `true`. `false` only puts the plugin on the build classpath (`apply false`) |
+| `files` | `[]`. Files the plugin reads, relative to `android/`, copied to the same path in the Gradle module. `android/google-services.json` is copied for `com.google.gms.*` plugins without listing it |
+
+See [Gradle plugins](../../guides/android/#gradle-plugins), [Release builds](../../guides/android/#release-builds) and [Product flavors](../../guides/android/#product-flavors).
 
 ### Per-target dependencies
 

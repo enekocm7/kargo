@@ -2833,3 +2833,20 @@ fn invalid_source_sets_of_native_platforms_are_rejected() {
     );
     assert!(with("[source-sets.x]\ntargets = [\"native\"]\n").contains("code for some Native platforms needs `platforms`"));
 }
+
+#[test]
+fn android_plugins_keep_their_order() {
+    let manifest = parse(&format!(
+        "{MINIMAL}
+[target.android]
+namespace = \"a\"
+[target.android.plugins]
+zeta = {{ id = \"z.plugin\", version = \"1\" }}
+alpha = {{ id = \"a.plugin\", apply = false }}
+"
+    ));
+    let plugins = &manifest.targets.android.unwrap().config.plugins;
+    assert_eq!(plugins.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["zeta", "alpha"]);
+    assert_eq!(plugins[0].1.version.as_deref(), Some("1"));
+    assert!(plugins[0].1.apply && !plugins[1].1.apply);
+}
