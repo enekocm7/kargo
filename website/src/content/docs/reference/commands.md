@@ -321,7 +321,7 @@ kargo run -e 'println(1 + 1)'
 
 `--clear` and `--ignore` need `--watch`.
 
-`--main`, `--bin`, `--example` and a file exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. See [Several programs in one project](../../guides/multiple-programs/).
+`--main`, `--bin`, `--example` and a file exclude each other and work for the JVM and Native targets. Without them, `kargo run` starts `main-class` / `entry-point` or the single `main` in the sources; with several, it lists them and any bins. A `--main` class, `--bin` program or `main-class` / `entry-point` that names nothing in the compiled output fails before launching, with the available mains listed. See [Several programs in one project](../../guides/multiple-programs/).
 
 The `Running` line quotes arguments that contain spaces or shell characters, so you can copy it: ``Running `java com.example.MainKt add "buy milk"` `` shows that `buy milk` is one argument.
 

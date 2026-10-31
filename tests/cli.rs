@@ -3678,6 +3678,80 @@ fn run_selects_bins_and_examples_before_compiling() {
 }
 
 #[test]
+fn run_rejects_unknown_main_classes_before_compiling() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tools",
+            "[[bin]]\nname = \"gamma\"\nmain = \"com.example.nope.NopeKt\"\n\n[[bin]]\nname = \"migrate\"\nmain = \"com.example.tools.MigrateKt\"\n",
+        ),
+    );
+    p.file("src/Main.kt", "package com.example\n\nfun main() {}\n");
+    p.file("src/tools/Migrate.kt", "package com.example.tools\n\nfun main(args: Array<String>) {}\n");
+    // Each mistake is reported before any toolchain is downloaded, so this stays offline.
+    p.kargo()
+        .args(["run", "--bin", "gamma"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("bin 'gamma' points to com.example.nope.NopeKt, which is not in the compiled output"))
+        .stderr(predicate::str::contains("available main classes:"))
+        .stderr(predicate::str::contains("com.example.MainKt"))
+        .stderr(predicate::str::contains("com.example.tools.MigrateKt"));
+    p.kargo()
+        .args(["run", "--main", "com.example.nope.NopeKt"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--main` points to com.example.nope.NopeKt, which is not in the compiled output"))
+        .stderr(predicate::str::contains("available main classes:"));
+    p.kargo()
+        .args(["build"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("bin 'gamma' points to com.example.nope.NopeKt"));
+    p.kargo()
+        .args(["package", "--bin", "gamma"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("bin 'gamma' points to com.example.nope.NopeKt"));
+    // An explicit `[target.jvm] main-class` is checked the same way.
+    let q = Project::new();
+    q.file("kargo.toml", &manifest("app", "[target.jvm]\nmain-class = \"com.example.nope.NopeKt\"\n"));
+    q.file("src/Main.kt", "package com.example\n\nfun main() {}\n");
+    q.kargo()
+        .args(["run"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`[target.jvm] main-class` points to com.example.nope.NopeKt"));
+}
+
+#[test]
+fn run_rejects_unknown_native_entries_before_compiling() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tools", "[target.native]\n[[bin]]\nname = \"gamma\"\nentry-point = \"com.example.nope.main\"\n"));
+    p.file("src/Main.kt", "package com.example\n\nfun main() {}\n");
+    p.kargo()
+        .args(["run", "-t", "native", "--bin", "gamma"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("bin 'gamma' points to com.example.nope.main, which is not in the compiled output"))
+        .stderr(predicate::str::contains("available entry functions:"))
+        .stderr(predicate::str::contains("com.example.main"));
+    p.kargo()
+        .args(["run", "-t", "native", "--main", "com.example.nope.main"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--main` points to com.example.nope.main, which is not in the compiled output"));
+}
+
+#[test]
 fn run_file_in_a_project_is_checked_before_compiling() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("tools", "[target.jvm]\n[target.wasm]\n"));
