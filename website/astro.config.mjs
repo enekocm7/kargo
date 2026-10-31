@@ -41,6 +41,7 @@ export default defineConfig({
 						{ label: 'Quick start', slug: 'getting-started/quick-start' },
 						{ label: 'Project layout', slug: 'getting-started/project-layout' },
 						{ label: 'Your first Kotlin app', slug: 'guides/first-app' },
+						{ label: 'Project templates', slug: 'guides/templates' },
 					],
 				},
 				{

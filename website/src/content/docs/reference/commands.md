@@ -102,6 +102,11 @@ kargo new <path> [options]
 | `-t, --target <list>` | `jvm` | Comma-separated targets to enable |
 | `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot`, `benchmark`; or the presets `compose-multiplatform`: Compose on the jvm and wasm (browser) targets, besides the `--target`s you give, with a shared `App()` in `src/App.kt` (see [Compose](../../guides/compose/#one-ui-for-every-target)), and `compose-html`: a Compose HTML app on the js (browser) target instead of the default jvm one (see [Compose HTML](../../guides/compose/#compose-html-dom-elements)) |
 | `--bench` | | Add the `benchmark` framework and a sample benchmark in `benches/SampleBench.kt`, as `--with benchmark` does. See [Benchmarking](../../guides/benchmarking/) |
+| `--template <source>` | | Create the project from a [template](../../guides/templates/): a git URL (`URL#branch`), a directory, or a short name from `~/.kargo/templates.toml`. Replaces `--lib`, `-t`, `--with` and `--bench`; `--name`, `--group`, `--kotlin` and `--no-vcs` still apply |
+| `--rev <rev>` | | Branch, tag or commit of a template from a git repository (replaces the `#branch` of the URL). Needs `--template` |
+| `-D, --define <key=value>` | | Give a variable of the template a value instead of asking; repeatable. Needs `--template` |
+| `--defaults`, `--yes` | | Use the default of every variable of the template and ask nothing. Needs `--template` |
+| `--allow-scripts` | | Run the commands that the template lists after creating the project. Needs `--template` |
 | `--group <group>` | `com.example` | Maven group, also the base Kotlin package |
 | `--name <name>` | directory name | Package name: starts with a letter, then letters, digits, `-` and `_`. A folder name such as `01-cli-app` that breaks this needs `--name` (for example `--name cli-app`) |
 | `--kotlin <version>` | `2.4.21` | Kotlin version |
@@ -113,6 +118,7 @@ kargo new hello
 kargo new mylib --lib -t jvm,wasm,native
 kargo new api -w ktor,serialization --group io.acme
 kargo new shop --workspace
+kargo new svc --template company/service -D docker=true
 ```
 
 Inside a workspace, `kargo new` (and `kargo init`) adds the new package to the workspace's `members`, unless a `members` glob already covers it, and the package shares the workspace's git repository. `--workspace` writes a `kargo.toml` with an empty `[workspace]` and a `[workspace.kotlin]` that pins the Kotlin version, and a `.gitignore`.
@@ -129,11 +135,21 @@ In a folder that is not a git repository, every `kargo new` creates its own repo
 
 ## `kargo init`
 
-Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten. A directory that already has a `kargo.toml` is refused; use [`kargo target add`](#kargo-target) to enable more targets in it.
+Same as `kargo new`, but in an existing directory (the current one by default). Existing files are not overwritten. A directory that already has a `kargo.toml` is refused; use [`kargo target add`](#kargo-target) to enable more targets in it. It takes the same options as `kargo new`, `--template` included.
 
 ```sh
 kargo init [path] [options]
 ```
+
+## `kargo template`
+
+Work with the [project templates](../../guides/templates/) of `kargo new --template`.
+
+```sh
+kargo template list
+```
+
+`kargo template list` prints the short names in `templates.toml` of the Kargo home (`~/.kargo`, or `$KARGO_HOME`) with where each one points, one per line on stdout: the name, the source, and the description when the entry has one. With no `templates.toml` it says where to create it.
 
 ## `kargo import`
 

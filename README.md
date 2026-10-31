@@ -81,7 +81,7 @@ Built-in [frameworks](https://enekocm7.github.io/kargo/guides/frameworks/) add t
 
 | Command | What it does |
 |---|---|
-| `kargo new <dir>` | Create a project (`--lib`, `-t jvm,wasm,js,native,android`, `--with compose,ktor,...`) |
+| `kargo new <dir>` | Create a project (`--lib`, `-t jvm,wasm,js,native,android`, `--with compose,ktor,...`, or `--template <git URL or path>` for your own) |
 | `kargo build` | Compile every target (`--release` for an optimized build) |
 | `kargo run` | Build and run the program, or serve a browser app (`--watch` restarts it on changes) |
 | `kargo test` | Compile and run the tests of every target |

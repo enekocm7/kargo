@@ -90,9 +90,7 @@ impl NewOptions {
         if let Err(e) = validate_package_name(&self.name) {
             bail!("{e}; pass `--name <valid-name>` to name the package differently from the folder");
         }
-        if self.group.split('.').any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
-            bail!("invalid group `{}` (expected something like `com.example`)", self.group);
-        }
+        validate_group(&self.group)?;
         if self.targets.is_empty() {
             bail!("at least one target is required");
         }
@@ -138,6 +136,14 @@ impl NewOptions {
         }
         Ok(())
     }
+}
+
+/// Checks that `group` is dotted segments of letters, digits and `_`, like `com.example`.
+pub(crate) fn validate_group(group: &str) -> Result<()> {
+    if group.split('.').any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+        bail!("invalid group `{group}` (expected something like `com.example`)");
+    }
+    Ok(())
 }
 
 /// The `--with` value that sets up Compose Multiplatform: see [`NewOptions::with_presets`].
@@ -893,7 +899,7 @@ pub fn add_to_workspace(root: &Path, dir: &Path) -> Result<Option<String>> {
     Ok(Some(member))
 }
 
-fn git_init(dir: &Path) {
+pub(crate) fn git_init(dir: &Path) {
     if !inside_git_repo(dir)
         && let Some(git) = kargo_util::process::find_on_path("git")
     {
