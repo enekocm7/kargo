@@ -86,7 +86,10 @@ impl NewOptions {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_package_name(&self.name)?;
+        // The name defaults to the folder's, so say how to pick another one rather than only what is wrong.
+        if let Err(e) = validate_package_name(&self.name) {
+            bail!("{e}; pass `--name <valid-name>` to name the package differently from the folder");
+        }
         if self.group.split('.').any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
             bail!("invalid group `{}` (expected something like `com.example`)", self.group);
         }

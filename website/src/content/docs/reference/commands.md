@@ -103,7 +103,7 @@ kargo new <path> [options]
 | `-w, --with <list>` | | Frameworks: `compose`, `serialization`, `coroutines`, `ktor`, `lombok`, `spring-boot`, `benchmark`; or the presets `compose-multiplatform`: Compose on the jvm and wasm (browser) targets, besides the `--target`s you give, with a shared `App()` in `src/App.kt` (see [Compose](../../guides/compose/#one-ui-for-every-target)), and `compose-html`: a Compose HTML app on the js (browser) target instead of the default jvm one (see [Compose HTML](../../guides/compose/#compose-html-dom-elements)) |
 | `--bench` | | Add the `benchmark` framework and a sample benchmark in `benches/SampleBench.kt`, as `--with benchmark` does. See [Benchmarking](../../guides/benchmarking/) |
 | `--group <group>` | `com.example` | Maven group, also the base Kotlin package |
-| `--name <name>` | directory name | Package name |
+| `--name <name>` | directory name | Package name: starts with a letter, then letters, digits, `-` and `_`. A folder name such as `01-cli-app` that breaks this needs `--name` (for example `--name cli-app`) |
 | `--kotlin <version>` | `2.4.21` | Kotlin version |
 | `--no-vcs` | | Don't create a git repository |
 | `--workspace` | | Create an empty [workspace](../../guides/workspaces/#creating-a-workspace) instead of a package |
