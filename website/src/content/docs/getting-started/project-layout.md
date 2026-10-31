@@ -3,7 +3,7 @@ title: Project layout
 description: Where Kargo looks for sources, tests and resources, and where it writes output.
 ---
 
-Kargo uses fixed directory names, so there is nothing to configure.
+Kargo uses fixed directory names by default, so there is nothing to configure. A package whose sources live elsewhere points [`[layout]`](../../reference/manifest/#layout) at them instead; see [Custom source directories](#custom-source-directories).
 
 ```text
 my-app/
@@ -71,6 +71,24 @@ Code that a tool writes from other files, such as classes from `.proto` files or
 ## Benchmarks
 
 `benches/` and `benches-jvm/` hold benchmarks, which `kargo bench` compiles against `src/` the way tests are, and runs with JMH. They are not part of `kargo build`, `kargo test`, `kargo package` or `kargo publish`. See [Benchmarking](../../guides/benchmarking/).
+
+## Custom source directories
+
+A package whose sources live outside the directories above points [`[layout]`](../../reference/manifest/#layout) at them instead. Every command (`build`, `check`, `test`, `lint`, `fmt`, `run --watch`, `lsp`, `metadata`) reads the same directories, so the project builds, tests and runs in an editor like a conventional one.
+
+```toml title="kargo.toml"
+[layout]
+src = ["src/main/kotlin", "src/main/java"]
+tests = "src/test/kotlin"
+resources = "src/main/resources"
+test-resources = "src/test/resources"
+android-dir = "src/main"
+
+[layout.jvm]
+src = "src/jvmMain/kotlin"
+```
+
+A key is one directory or a list of them, always inside the package. `[layout]` holds the common directories (`src`, `tests`, `resources`, `test-resources`, `benches`, `examples`, `test-fixtures`, `android-tests`, `android-dir`); `[layout.<target>]` (`jvm`, `wasm`, `js`, `native`, `android`) the target-specific ones (`src`, `tests`, `benches`, `test-fixtures`); `[layout.source-sets.<name>]` the directories of one [source set](../../reference/manifest/#source-setsname). Anything left out keeps its default (`src/`, `src-jvm/`, ...). `kargo import --keep-layout` writes this table from Maven, Gradle or Kotlin Toolchain source sets instead of moving the files; see [Keeping the old layout](../../guides/importing/#keeping-the-old-layout).
 
 ## Several programs
 

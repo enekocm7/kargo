@@ -285,15 +285,14 @@ fn test_android(ctx: &BuildContext, opts: &TestOptions, deadline: Option<Instant
 /// `--instrumented`: the tests of `android-tests/` on a device, which is chosen like `kargo run -t android` does and
 /// started if it is a virtual device that is not running.
 fn test_android_instrumented(ctx: &BuildContext, opts: &TestOptions, reports: Option<&Path>, deadline: Option<Instant>) -> Result<bool> {
-    let dir = ctx.ws.root().join(crate::gradle::INSTRUMENTED_TESTS_DIR);
+    let dir = ctx.ws.instrumented_tests();
     if !dir.is_dir() {
-        anyhow::bail!(
-            "there are no instrumented tests: put them in `{}/` (for example `{0}/ExampleTest.kt`)",
-            crate::gradle::INSTRUMENTED_TESTS_DIR
-        );
+        let rel = dir.strip_prefix(ctx.ws.root()).unwrap_or(&dir).display().to_string();
+        anyhow::bail!("there are no instrumented tests: put them in `{rel}/` (for example `{rel}/ExampleTest.kt`)");
     }
     if sources_in(&dir).is_empty() {
-        ctx.shell().note(format!("no instrumented tests found (put them in {}/)", crate::gradle::INSTRUMENTED_TESTS_DIR));
+        let rel = dir.strip_prefix(ctx.ws.root()).unwrap_or(&dir).display().to_string();
+        ctx.shell().note(format!("no instrumented tests found (put them in {rel}/)"));
         return Ok(true);
     }
     let selection = if opts.no_run { None } else { Some(crate::gradle::choose_device(ctx, &opts.android)?) };
@@ -742,7 +741,7 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     classpath.extend(test_cp);
     let name = format!("{}-test", manifest.package.name);
     let mut test_sources = test_sources;
-    let mut resources = vec![ctx.ws.test_resources()];
+    let mut resources = ctx.ws.test_resource_dirs();
     let ksp = JvmKspUnit {
         name: &name,
         test: true,
@@ -770,23 +769,22 @@ pub(crate) fn compile_jvm_tests(ctx: &BuildContext, main_classes: &Path, verb: &
     Ok(Some(JvmTestClasses { classes: test_classes, classpath }))
 }
 
-/// Compiles the JVM test fixtures (`test-fixtures/`, `test-fixtures-jvm/`) against the main jar,
+/// Compiles the JVM test fixtures against the main jar,
 /// its dependencies and dev-dependencies, into `<name>-<version>-test-fixtures.jar`. Returns `None`
 /// without fixture sources.
 pub(crate) fn build_jvm_test_fixtures(ctx: &BuildContext) -> Result<Option<PathBuf>> {
     let ws = ctx.ws;
     let manifest = ws.manifest();
+    let collect = |dirs: &[PathBuf]| dirs.iter().flat_map(|d| collect_files(d, &["kt", "java"])).collect::<Vec<_>>();
     let mut fixtures = SourceSet::new(
-        collect_files(&ws.common_test_fixtures(), &["kt", "java"]),
-        collect_files(&ws.target_test_fixtures(TargetKind::Jvm), &["kt", "java"]),
+        collect(&ws.common_test_fixture_dirs()),
+        collect(&ws.target_test_fixture_dirs(TargetKind::Jvm)),
         TargetKind::Jvm.as_str(),
     );
     fixtures.groups = manifest
         .source_groups_for(TargetKind::Jvm)
         .into_iter()
-        .map(|(g, parents)| {
-            kargo_compiler::SourceGroup::new(&g.name, collect_files(&ws.group_test_fixtures(&g.name), &["kt", "java"]), &parents)
-        })
+        .map(|(g, parents)| kargo_compiler::SourceGroup::new(&g.name, collect(&ws.group_test_fixture_dirs(&g.name)), &parents))
         .collect();
     if fixtures.is_empty() {
         return Ok(None);
@@ -1221,7 +1219,7 @@ fn browser_tests(ctx: &BuildContext, opts: &TestOptions, unit: &WasmCompilation,
     // The tests get the web resources of the package's libraries and of the package itself, after theirs.
     let mut shipments = crate::web_resources::dependencies(ctx, true)?;
     shipments.extend(crate::web_resources::own(ctx.ws, false)?);
-    crate::wasm_output::copy_site_files(&unit.output, None, &shipments)?;
+    crate::wasm_output::copy_site_files(&unit.output, &[], &shipments)?;
     let inits = crate::web_resources::init_scripts(&shipments);
     std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports, &inits))
         .context("failed to write the test page")?;

@@ -262,6 +262,36 @@ pub struct DirMove {
     pub to: PathBuf,
 }
 
+/// The `[layout]` of a package imported with `--keep-layout`: the old source
+/// directories, which stay where they are instead of moving into Kargo's layout.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeepLayout {
+    pub src: Vec<String>,
+    pub tests: Vec<String>,
+    pub resources: Vec<String>,
+    pub test_resources: Vec<String>,
+    pub android_dir: Option<String>,
+    pub targets: BTreeMap<TargetKind, KeepTarget>,
+}
+
+/// The `[layout.<target>]` of `--keep-layout`: the old directories of one target.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeepTarget {
+    pub src: Vec<String>,
+    pub tests: Vec<String>,
+}
+
+impl KeepLayout {
+    pub fn is_empty(&self) -> bool {
+        self.src.is_empty()
+            && self.tests.is_empty()
+            && self.resources.is_empty()
+            && self.test_resources.is_empty()
+            && self.android_dir.is_none()
+            && self.targets.is_empty()
+    }
+}
+
 /// One Kargo package.
 #[derive(Debug, Clone, Default)]
 pub struct Package {
@@ -293,6 +323,8 @@ pub struct Package {
     /// Empty for a plain JVM project.
     pub targets: Vec<TargetSettings>,
     pub moves: Vec<DirMove>,
+    /// With `--keep-layout`: the old directories, which stay where they are.
+    pub layout: KeepLayout,
 }
 
 impl Package {
@@ -387,7 +419,47 @@ impl Package {
             }
             sections.push(section);
         }
+        sections.extend(self.layout.sections());
         render(&sections)
+    }
+}
+
+impl KeepLayout {
+    fn sections(&self) -> Vec<Section> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let mut layout = Section::new("layout");
+        let list = |dirs: &[String]| {
+            if dirs.len() == 1 { Value::str(&dirs[0]) } else { Value::strings(dirs) }
+        };
+        if !self.src.is_empty() {
+            layout.row("src", list(&self.src));
+        }
+        if !self.tests.is_empty() {
+            layout.row("tests", list(&self.tests));
+        }
+        if !self.resources.is_empty() {
+            layout.row("resources", list(&self.resources));
+        }
+        if !self.test_resources.is_empty() {
+            layout.row("test-resources", list(&self.test_resources));
+        }
+        if let Some(dir) = &self.android_dir {
+            layout.row("android-dir", Value::str(dir));
+        }
+        let mut sections = vec![layout];
+        for (target, kept) in &self.targets {
+            let mut section = Section::new(format!("layout.{}", target.as_str()));
+            if !kept.src.is_empty() {
+                section.row("src", list(&kept.src));
+            }
+            if !kept.tests.is_empty() {
+                section.row("tests", list(&kept.tests));
+            }
+            sections.push(section);
+        }
+        sections
     }
 }
 

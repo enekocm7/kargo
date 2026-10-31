@@ -1878,6 +1878,120 @@ impl SourceGroup {
     }
 }
 
+/// `[layout.<target>]` and `[layout.source-sets.<name>]`: the directories of one
+/// target or source set. `None` means the default (`src-<target>/`, ...).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LayoutTarget {
+    pub src: Option<Vec<PathBuf>>,
+    pub tests: Option<Vec<PathBuf>>,
+    pub benches: Option<Vec<PathBuf>>,
+    pub test_fixtures: Option<Vec<PathBuf>>,
+}
+
+/// `[layout]`: where a package's sources, tests, resources, benchmarks and
+/// Android files live. The common directories default to `src/`, `tests/`,
+/// `resources/`, `test-resources/`, `benches/`, `examples/`, `test-fixtures/`,
+/// `android-tests/` and `android/`; per-target and per-source-set tables
+/// override the defaults for those directories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    pub src: Vec<PathBuf>,
+    pub tests: Vec<PathBuf>,
+    pub resources: Vec<PathBuf>,
+    pub test_resources: Vec<PathBuf>,
+    pub benches: Vec<PathBuf>,
+    pub examples: PathBuf,
+    pub test_fixtures: Vec<PathBuf>,
+    pub android_tests: PathBuf,
+    pub android_dir: PathBuf,
+    pub targets: BTreeMap<TargetKind, LayoutTarget>,
+    pub source_sets: BTreeMap<String, LayoutTarget>,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            src: vec![PathBuf::from("src")],
+            tests: vec![PathBuf::from("tests")],
+            resources: vec![PathBuf::from("resources")],
+            test_resources: vec![PathBuf::from("test-resources")],
+            benches: vec![PathBuf::from("benches")],
+            examples: PathBuf::from("examples"),
+            test_fixtures: vec![PathBuf::from("test-fixtures")],
+            android_tests: PathBuf::from("android-tests"),
+            android_dir: PathBuf::from("android"),
+            targets: BTreeMap::new(),
+            source_sets: BTreeMap::new(),
+        }
+    }
+}
+
+impl Layout {
+    /// The common source directories: `[layout] src`.
+    pub fn common_sources(&self) -> &[PathBuf] {
+        &self.src
+    }
+
+    /// The source directories of `target`: `[layout.<target>] src`, else `src-<target>/`.
+    pub fn target_sources(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.targets.get(&target).and_then(|t| t.src.clone()).unwrap_or_else(|| vec![PathBuf::from(target.source_dir_name())])
+    }
+
+    /// The source directories of the source set `name`.
+    pub fn group_sources(&self, name: &str) -> Vec<PathBuf> {
+        self.source_sets.get(name).and_then(|t| t.src.clone()).unwrap_or_else(|| vec![PathBuf::from(format!("src-{name}"))])
+    }
+
+    /// The common test directories: `[layout] tests`.
+    pub fn common_tests(&self) -> &[PathBuf] {
+        &self.tests
+    }
+
+    /// The test directories of `target`.
+    pub fn target_tests(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.targets.get(&target).and_then(|t| t.tests.clone()).unwrap_or_else(|| vec![PathBuf::from(format!("tests-{}", target.as_str()))])
+    }
+
+    /// The test directories of the source set `name`.
+    pub fn group_tests(&self, name: &str) -> Vec<PathBuf> {
+        self.source_sets.get(name).and_then(|t| t.tests.clone()).unwrap_or_else(|| vec![PathBuf::from(format!("tests-{name}"))])
+    }
+
+    /// The common benchmark directories.
+    pub fn common_benches(&self) -> &[PathBuf] {
+        &self.benches
+    }
+
+    /// The benchmark directories of `target`.
+    pub fn target_benches(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.targets
+            .get(&target)
+            .and_then(|t| t.benches.clone())
+            .unwrap_or_else(|| vec![PathBuf::from(format!("benches-{}", target.as_str()))])
+    }
+
+    /// The common test-fixture directories.
+    pub fn common_test_fixtures(&self) -> &[PathBuf] {
+        &self.test_fixtures
+    }
+
+    /// The test-fixture directories of `target`.
+    pub fn target_test_fixtures(&self, target: TargetKind) -> Vec<PathBuf> {
+        self.targets
+            .get(&target)
+            .and_then(|t| t.test_fixtures.clone())
+            .unwrap_or_else(|| vec![PathBuf::from(format!("test-fixtures-{}", target.as_str()))])
+    }
+
+    /// The test-fixture directories of the source set `name`.
+    pub fn group_test_fixtures(&self, name: &str) -> Vec<PathBuf> {
+        self.source_sets
+            .get(name)
+            .and_then(|t| t.test_fixtures.clone())
+            .unwrap_or_else(|| vec![PathBuf::from(format!("test-fixtures-{name}"))])
+    }
+}
+
 impl Manifest {
     /// The source sets of whole targets that `target` compiles, widest first (a set comes after every set that
     /// holds more targets than it does), each with the names of the sets it refines directly. `src/` refines
@@ -2383,6 +2497,8 @@ pub struct Manifest {
     pub targets: Targets,
     /// `[source-sets.<name>]`: groups of targets that share `src-<name>/`, sorted by name.
     pub source_sets: Vec<SourceGroup>,
+    /// `[layout]`: where the sources, tests, resources, benchmarks and Android files live.
+    pub layout: Layout,
     /// Extra programs from `[[bin]]`, in declaration order.
     pub bins: Vec<Bin>,
     /// The `[[generate]]` steps, in declaration order.

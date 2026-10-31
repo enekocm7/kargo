@@ -421,7 +421,7 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     build_config_fields(&mut s, "        ", &cfg.build_config);
     manifest_placeholders(&mut s, "        ", &cfg.manifest_placeholders);
     ndk_default_config(&mut s, cfg.ndk.as_ref());
-    let instrumented = root.join(INSTRUMENTED_TESTS_DIR).is_dir();
+    let instrumented = ws.instrumented_tests().is_dir();
     if instrumented {
         let _ = writeln!(s, "        testInstrumentationRunner = \"androidx.test.runner.AndroidJUnitRunner\"");
     }
@@ -442,21 +442,27 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
         let _ = writeln!(s, "\n    buildFeatures {{\n{}\n    }}", features.join("\n"));
     }
     let compose_resources = has_compose_resources(ws).then(|| compose_resources_dir(ws));
-    let mut src_dirs = vec![root.join("src"), root.join(TargetKind::Android.source_dir_name())];
+    let mut src_dirs = ws.common_source_dirs();
+    src_dirs.extend(ws.target_source_dirs(TargetKind::Android));
     // The intermediate source sets (`[source-sets.<name>]`) that include Android.
     let groups = manifest.source_groups_for(TargetKind::Android);
-    src_dirs.extend(groups.iter().map(|(g, _)| ws.group_sources(&g.name)));
+    for (g, _) in &groups {
+        src_dirs.extend(ws.group_source_dirs(&g.name));
+    }
     src_dirs.extend(module.generated.sources.iter().cloned());
     // The generated `Res` class of `composeResources/`, and the files it reads as assets.
-    let mut asset_dirs = vec![root.join("android/assets")];
+    let mut asset_dirs = vec![ws.android_dir().join("assets")];
     if let Some(dir) = &compose_resources {
         src_dirs.push(dir.join("kotlin"));
         asset_dirs.push(dir.join("resources"));
     }
-    let mut test_dirs = vec![root.join("tests"), root.join("tests-android")];
-    test_dirs.extend(groups.iter().map(|(g, _)| ws.group_tests(&g.name)));
+    let mut test_dirs = ws.common_test_dirs();
+    test_dirs.extend(ws.target_test_dirs(TargetKind::Android));
+    for (g, _) in &groups {
+        test_dirs.extend(ws.group_test_dirs(&g.name));
+    }
     test_dirs.extend(module.generated.test_sources.iter().cloned());
-    let mut resource_dirs = vec![ws.resources()];
+    let mut resource_dirs = ws.resource_dirs();
     resource_dirs.extend(module.generated.resources.iter().cloned());
     let dirs = |ds: &[PathBuf]| ds.iter().map(|d| kts_path(d)).collect::<Vec<_>>().join(", ");
     // AGP's built-in Kotlin does not compile Kotlin files found through the
@@ -470,20 +476,21 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let _ = writeln!(s, "        getByName(\"main\") {{");
     let _ = writeln!(s, "            java.setSrcDirs(listOf({}))", dirs(&src_dirs));
     kotlin_dirs(&mut s, &src_dirs);
-    let _ = writeln!(s, "            manifest.srcFile({})", kts_path(&root.join("android/AndroidManifest.xml")));
-    let _ = writeln!(s, "            res.setSrcDirs(listOf({}))", kts_path(&root.join("android/res")));
+    let _ = writeln!(s, "            manifest.srcFile({})", kts_path(&ws.android_dir().join("AndroidManifest.xml")));
+    let _ = writeln!(s, "            res.setSrcDirs(listOf({}))", kts_path(&ws.android_dir().join("res")));
     let _ = writeln!(s, "            assets.setSrcDirs(listOf({}))", dirs(&asset_dirs));
     // Prebuilt native libraries, one directory per ABI (`arm64-v8a/libfoo.so`).
-    let _ = writeln!(s, "            jniLibs.setSrcDirs(listOf({}))", kts_path(&root.join("android/jniLibs")));
+    let _ = writeln!(s, "            jniLibs.setSrcDirs(listOf({}))", kts_path(&ws.android_dir().join("jniLibs")));
     let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", dirs(&resource_dirs));
     let _ = writeln!(s, "        }}");
     let _ = writeln!(s, "        getByName(\"test\") {{");
     let _ = writeln!(s, "            java.setSrcDirs(listOf({}))", dirs(&test_dirs));
     kotlin_dirs(&mut s, &test_dirs);
-    let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", kts_path(&ws.test_resources()));
+    let test_resources = ws.test_resource_dirs();
+    let _ = writeln!(s, "            resources.setSrcDirs(listOf({}))", dirs(&test_resources));
     let _ = writeln!(s, "        }}");
     if instrumented {
-        let instrumented_dirs = [root.join(INSTRUMENTED_TESTS_DIR)];
+        let instrumented_dirs = [ws.instrumented_tests()];
         let _ = writeln!(s, "        getByName(\"androidTest\") {{");
         let _ = writeln!(s, "            java.setSrcDirs(listOf({}))", dirs(&instrumented_dirs));
         kotlin_dirs(&mut s, &instrumented_dirs);
@@ -529,25 +536,27 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
 
     // `expect` declarations of `src/` and their `actual`s in `src-android/`: AGP compiles the module as
     // plain Android Kotlin, so the compiler is told about the two fragments like the other targets'.
-    let mut common_dirs = vec![root.join("src")];
+    let mut common_dirs = ws.common_source_dirs();
     common_dirs.extend(module.generated.sources.iter().cloned());
     if let Some(dir) = &compose_resources {
         common_dirs.push(dir.join("kotlin"));
     }
-    let mut common_test_dirs = vec![root.join("tests")];
+    let mut common_test_dirs = ws.common_test_dirs();
     common_test_dirs.extend(module.generated.test_sources.iter().cloned());
-    let group_fragments = |dir: fn(&Workspace, &str) -> PathBuf| -> Vec<kargo_compiler::SourceGroup> {
+    let group_fragments = |dirs: fn(&Workspace, &str) -> Vec<PathBuf>| -> Vec<kargo_compiler::SourceGroup> {
         groups
             .iter()
             .map(|(g, parents)| {
-                let files = kargo_util::fs::collect_files(&dir(ws, &g.name), &["kt"]);
+                let files = dirs(ws, &g.name).iter().flat_map(|d| kargo_util::fs::collect_files(d, &["kt"])).collect::<Vec<_>>();
                 kargo_compiler::SourceGroup::new(&g.name, files, parents)
             })
             .collect()
     };
-    let main_fragments =
-        fragment_args(&common_dirs, group_fragments(Workspace::group_sources), &root.join(TargetKind::Android.source_dir_name()));
-    let test_fragments = fragment_args(&common_test_dirs, group_fragments(Workspace::group_tests), &root.join("tests-android"));
+    let android_src = ws.target_source_dirs(TargetKind::Android);
+    let android_src_first = android_src.first().cloned().unwrap_or_else(|| root.join(TargetKind::Android.source_dir_name()));
+    let android_test_first = ws.target_test_dirs(TargetKind::Android).first().cloned().unwrap_or_else(|| root.join("tests-android"));
+    let main_fragments = fragment_args(&common_dirs, group_fragments(Workspace::group_source_dirs), &android_src_first);
+    let test_fragments = fragment_args(&common_test_dirs, group_fragments(Workspace::group_test_dirs), &android_test_first);
     if !main_fragments.is_empty() || !test_fragments.is_empty() {
         let list = |args: &[String]| format!("listOf({})", args.iter().map(|a| kts_string(a)).collect::<Vec<_>>().join(", "));
         let _ = writeln!(s, "tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{");
@@ -978,7 +987,7 @@ pub fn android_sdk() -> Option<PathBuf> {
 
 /// Fails unless the Android package `ws` has its `android/AndroidManifest.xml`.
 fn require_android_manifest(ws: &Workspace) -> Result<()> {
-    let manifest_file = ws.root().join("android/AndroidManifest.xml");
+    let manifest_file = ws.android_dir().join("AndroidManifest.xml");
     if !manifest_file.is_file() {
         bail!("Android builds need {}; `kargo new --target android` creates one", manifest_file.display());
     }

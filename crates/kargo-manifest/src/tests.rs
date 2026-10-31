@@ -2585,6 +2585,18 @@ fn build_default_targets() {
 #[test]
 fn source_sets() {
     assert!(parse(MINIMAL).source_sets.is_empty());
+    assert_eq!(parse(MINIMAL).layout.src, [PathBuf::from("src")]);
+    assert_eq!(parse(MINIMAL).layout.target_sources(TargetKind::Jvm), [PathBuf::from("src-jvm")]);
+    let m = parse(&format!(
+        "{MINIMAL}[layout]\nsrc = [\"src/main/kotlin\", \"src/main/java\"]\ntests = \"src/test/kotlin\"\n\
+         android-dir = \"src/main\"\n[layout.jvm]\nsrc = \"src/jvmMain/kotlin\"\n"
+    ));
+    assert_eq!(m.layout.src, [PathBuf::from("src/main/kotlin"), PathBuf::from("src/main/java")]);
+    assert_eq!(m.layout.tests, [PathBuf::from("src/test/kotlin")]);
+    assert_eq!(m.layout.android_dir, PathBuf::from("src/main"));
+    assert_eq!(m.layout.target_sources(TargetKind::Jvm), [PathBuf::from("src/jvmMain/kotlin")]);
+    assert_eq!(m.layout.target_sources(TargetKind::Wasm), [PathBuf::from("src-wasm")]);
+    assert!(parse(MINIMAL).layout.source_sets.is_empty());
     let m = parse(&format!(
         "{MINIMAL}[target.jvm]\n[target.android]\nnamespace = \"com.example\"\n[target.native]\n\
          [source-sets.jvmAndAndroid]\ntargets = [\"jvm\", \"android\", \"jvm\"]\n\
@@ -2628,6 +2640,27 @@ fn invalid_source_sets_are_rejected() {
             .contains("[source-sets.y] has the same targets as [source-sets.x]")
     );
     assert!(with("[source-sets.x]\ntargets = [\"jvm\", \"js\"]\nfoo = 1\n").contains("unknown field"));
+}
+
+#[test]
+fn layout_is_validated() {
+    let with = |extra: &str| parse_err(&format!("{MINIMAL}{extra}"));
+    assert!(with("[layout]\nsrc = []\n").contains("`src` is empty"));
+    assert!(with("[layout]\nsrc = \"/abs\"\n").contains("use a directory inside the package"));
+    assert!(with("[layout]\nsrc = \"../out\"\n").contains("use a directory inside the package"));
+    assert!(with("[layout]\nsrc = \"target/gen\"\n").contains("`target/` holds build output"));
+    assert!(with("[layout.jvm]\nbenches = []\n").contains("`benches` is empty"));
+    let m = parse(&format!(
+        "{MINIMAL}[target.jvm]\n[target.wasm]\n[source-sets.web]\ntargets = [\"jvm\", \"wasm\"]\n[layout.source-sets.web]\nsrc = \"src/web\"\n"
+    ));
+    assert_eq!(m.layout.group_sources("web"), [PathBuf::from("src/web")]);
+    assert!(with("[layout.source-sets.web]\nsrc = \"src/web\"\n").contains("names no [source-sets.web]"));
+    assert!(with("[layout.source-sets.jvm]\nsrc = \"x\"\n").contains("clashes with a target"));
+    assert!(
+        with("[target.jvm]\n[target.wasm]\n[source-sets.web]\ntargets = [\"jvm\", \"wasm\"]\n[layout.source-sets.web]\nbenches = \"b\"\n")
+            .contains("`benches` only exists")
+    );
+    assert!(with("[layout]\nfoo = \"x\"\n").contains("unknown field"));
 }
 
 #[test]

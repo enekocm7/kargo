@@ -89,8 +89,11 @@ pub fn test_fixtures(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
 /// its own or those of a `test-fixtures = true` dev-dependency, when they have sources for `target`.
 pub fn test_fixtures_unsupported(ctx: &BuildContext, target: TargetKind) -> Result<()> {
     let has_fixtures = |ws: &Workspace| {
-        let mut dirs = vec![ws.common_test_fixtures(), ws.target_test_fixtures(target)];
-        dirs.extend(ws.manifest().all_groups_for(target).iter().map(|g| ws.group_test_fixtures(&g.name)));
+        let mut dirs = ws.common_test_fixture_dirs();
+        dirs.extend(ws.target_test_fixture_dirs(target));
+        for g in ws.manifest().all_groups_for(target) {
+            dirs.extend(ws.group_test_fixture_dirs(&g.name));
+        }
         dirs.iter().any(|d| !collect_files(d, &["kt"]).is_empty())
     };
     let mut packages = vec![ctx.ws];

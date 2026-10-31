@@ -88,7 +88,7 @@ Built-in [frameworks](https://enekocm7.github.io/kargo/guides/frameworks/) add t
 | `kargo add <group:artifact>` | Add a dependency, at its latest version unless you give one |
 | `kargo package` | Build a fat jar, a runtime image, a native image, an installer or Android bundles |
 | `kargo publish` | Publish a library to Maven Central, a Maven repository or npm |
-| `kargo import` | Convert a Maven, Gradle or Kotlin Toolchain project, sources included |
+| `kargo import` | Convert a Maven, Gradle or Kotlin Toolchain project (`--keep-layout` keeps the sources where they are) |
 
 There are many more: `check`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `bench`, `script` for single files, and others. See the [commands reference](https://enekocm7.github.io/kargo/reference/commands/), or run `kargo --list`.
 

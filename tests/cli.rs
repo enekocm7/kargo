@@ -6693,6 +6693,56 @@ fn import_dry_run_prints_the_plan_and_changes_nothing() {
 }
 
 #[test]
+fn import_keep_layout_dry_run_prints_the_manifest_and_no_moves() {
+    let (p, _repo) = spring_project();
+    let before = snapshot(p.path());
+    let out = p.kargo().args(["import", "--keep-layout", "--dry-run"]).assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[layout]"), "{stdout}");
+    assert!(stdout.contains("src = [\"src/main/kotlin\"]") || stdout.contains("src/main/kotlin"), "{stdout}");
+    assert!(stdout.contains("# no files move"), "{stdout}");
+    assert!(!stdout.contains("-> src/"), "no moves with --keep-layout: {stdout}");
+    assert_eq!(snapshot(p.path()), before, "--dry-run must not change a thing");
+}
+
+#[test]
+fn import_keep_layout_leaves_files_and_builds_with_layout() {
+    let (p, _repo) = spring_project();
+    p.kargo().args(["import", "--keep-layout", "--no-build"]).assert().success().stderr(predicate::str::contains("Created kargo.toml"));
+    let manifest = p.read("kargo.toml");
+    assert!(manifest.contains("[layout]"), "{manifest}");
+    assert!(manifest.contains("src/main/kotlin"), "{manifest}");
+    // Nothing moved.
+    assert!(p.path().join("src/main/kotlin/com/example/demo/DemoApplication.kt").is_file());
+    assert!(p.path().join("src/test/kotlin/com/example/demo/DemoApplicationTests.kt").is_file());
+    assert!(p.path().join("src/main/resources/application.properties").is_file());
+    assert!(!p.path().join("src/com/example").exists());
+    // The project loads and describes the custom roots for editors.
+    p.kargo().arg("info").assert().success();
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("src/main/kotlin"), "{stdout}");
+    assert!(stdout.contains("src/test/kotlin"), "{stdout}");
+}
+
+#[test]
+fn layout_points_at_custom_directories() {
+    let p = Project::new();
+    p.file("kargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[layout]\nsrc = [\"src/main/kotlin\", \"src/main/java\"]\ntests = \"src/test/kotlin\"\nresources = \"src/main/resources\"\n")
+        .file("src/main/kotlin/Main.kt", "fun main() {}\n")
+        .file("src/main/java/Helper.java", "class Helper {}\n")
+        .file("src/test/kotlin/MainTest.kt", "class MainTest\n")
+        .file("src/main/resources/app.properties", "a=b\n");
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("src/main/kotlin"), "{stdout}");
+    assert!(stdout.contains("src/main/java"), "{stdout}");
+    assert!(stdout.contains("src/test/kotlin"), "{stdout}");
+    assert!(stdout.contains("src/main/resources"), "{stdout}");
+    p.kargo().arg("info").assert().success();
+}
+
+#[test]
 fn import_turns_maven_modules_into_a_workspace() {
     let p = Project::new();
     p.file(

@@ -212,13 +212,15 @@ fn scaffold_bench(config: &Config, ws: &Workspace, manifest: &Manifest) -> Resul
         config.shell().note("benchmarks run on the JVM target; add it with `kargo target add jvm`");
         return Ok(());
     }
-    let benches = [ws.common_benches(), ws.target_benches(TargetKind::Jvm)];
+    let mut benches = ws.common_bench_dirs();
+    benches.extend(ws.target_bench_dirs(TargetKind::Jvm));
     if benches.iter().any(|dir| !kargo_util::fs::collect_files(dir, &["kt", "java"]).is_empty()) {
         return Ok(());
     }
     let package = super::target::new_options(manifest, false).package();
-    let path = ws.common_benches().join("SampleBench.kt");
-    std::fs::create_dir_all(ws.common_benches()).with_context(|| format!("failed to create {}", ws.common_benches().display()))?;
+    let dir = ws.common_benches();
+    let path = dir.join("SampleBench.kt");
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     std::fs::write(&path, super::new::bench_source(&package)).with_context(|| format!("failed to write {}", path.display()))?;
     config.shell().status("Created", "benches/SampleBench.kt");
     Ok(())

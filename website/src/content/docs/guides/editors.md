@@ -71,10 +71,10 @@ An IDE can only complete and resolve what it knows about. When a folder with a `
 | From Kargo | In the IDE |
 |---|---|
 | A package | A module named after it |
-| `src/`, `src-<target>/` | Source roots |
-| `tests/`, `tests-<target>/` | Test source roots |
-| `resources/`, `test-resources/` | Resource roots |
-| `examples/` | A test source root, since examples are compiled against the package's sources |
+| The [`[layout]`](../../reference/manifest/#layout) source directories (`src/`, `src-<target>/` by default) | Source roots |
+| The `[layout]` test directories (`tests/`, `tests-<target>/` by default) | Test source roots |
+| The `[layout]` resource directories (`resources/`, `test-resources/` by default) | Resource roots |
+| The `[layout]` examples directory (`examples/` by default) | A test source root, since examples are compiled against the package's sources |
 | `target/` | Excluded from the project, except the output directories of [`[[generate]]` steps](../code-generation/) in `target/generated/`, which are source (or test source, or resource) roots of their own |
 | `target/generated/<profile>/<name>/` of a [`[[generate]]` step](../code-generation/) | A source root, so generated code, such as classes from `.proto` files, resolves. The directory is filled by `kargo build`, `kargo check` or `kargo generate`; run one before the IDE needs the code |
 | A Maven dependency | A project library named `Kargo: <group>:<artifact>:<version>`, with its sources jar if `kargo fetch --sources` downloaded it |
@@ -92,7 +92,7 @@ Reopen a JVM project and its Maven libraries resolve: completion, go to definiti
 
 **Several targets.** A package with more than one target gets a module for `src/` and `tests/` (`<name>.common`) and one per target (`<name>.jvm`, `<name>.native`, `<name>.wasm`) for `src-<target>/`, which refines the common one, so `expect` and `actual` declarations find each other. Common code is analyzed like the package's first target (JVM, then Native, then Wasm), with that target's libraries; `kargo check` still compiles it for every target. Android code isn't imported: Gradle owns it, see [Android](#android). Kotlin/JS code (`src-js/`) isn't imported yet either; open it with `kargo lsp` in another editor for now.
 
-The import runs again, without any action, when a `kargo.toml` or `kargo.lock` changes (including when `kargo add` or `kargo update` rewrites them), when a `src*`, `tests*` or `resources` directory appears or goes away, and after *Build*, *Run*, *Test* or a fetch, which can install npm packages without changing either file. *Tools → Kargo → Fetch Dependencies and Sources* imports once more to pick up the sources jars. To import by hand, use *Tools → Kargo → Reload Kargo Project*. If `kargo.toml` and `kargo.lock` are as they were at the last import, the check takes a moment and the IDE doesn't index anything.
+The import runs again, without any action, when a `kargo.toml` or `kargo.lock` changes (including when `kargo add` or `kargo update` rewrites them), when a source, test or resource directory appears or goes away (including the custom directories of [`[layout]`](../../reference/manifest/#layout)), and after *Build*, *Run*, *Test* or a fetch, which can install npm packages without changing either file. *Tools → Kargo → Fetch Dependencies and Sources* imports once more to pick up the sources jars. To import by hand, use *Tools → Kargo → Reload Kargo Project*. If `kargo.toml` and `kargo.lock` are as they were at the last import, the check takes a moment and the IDE doesn't index anything.
 
 The modules are saved in the IDE's `.idea/` directory (which `kargo new` git-ignores), so a project opens with its last known model, even offline. The import only manages what it created: the modules it recorded in `.idea/kargo.xml` and the libraries whose name starts with `Kargo: `. A module of your own with the same name as a package is taken over when it only covers that package, and left alone otherwise.
 

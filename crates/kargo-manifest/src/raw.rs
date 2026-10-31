@@ -60,6 +60,8 @@ pub(super) struct RawManifest {
     publish: RawPublish,
     #[serde(default)]
     build: RawBuild,
+    #[serde(default)]
+    layout: RawLayout,
 }
 
 /// `[source-sets.<name>]`.
@@ -196,6 +198,205 @@ impl RawBuild {
         };
         Ok(BuildSettings { jobs, default_targets })
     }
+}
+
+/// A directory list in `[layout]`: one directory or a list of them.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawDirs {
+    One(PathBuf),
+    Many(Vec<PathBuf>),
+}
+
+impl RawDirs {
+    fn into_vec(self) -> Vec<PathBuf> {
+        match self {
+            RawDirs::One(p) => vec![p],
+            RawDirs::Many(v) => v,
+        }
+    }
+}
+
+/// `[layout.<target>]` and `[layout.source-sets.<name>]`: the directories of one
+/// target or source set. Every key is one directory or a list of them.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawLayoutTarget {
+    src: Option<RawDirs>,
+    tests: Option<RawDirs>,
+    benches: Option<RawDirs>,
+    #[serde(rename = "test-fixtures")]
+    test_fixtures: Option<RawDirs>,
+}
+
+/// `[layout]`: where a package's sources, tests, resources, benchmarks and
+/// Android files live. Every common directory is one directory or a list of
+/// them; per-target and per-source-set tables override the defaults.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawLayout {
+    src: Option<RawDirs>,
+    tests: Option<RawDirs>,
+    resources: Option<RawDirs>,
+    #[serde(rename = "test-resources")]
+    test_resources: Option<RawDirs>,
+    benches: Option<RawDirs>,
+    examples: Option<PathBuf>,
+    #[serde(rename = "test-fixtures")]
+    test_fixtures: Option<RawDirs>,
+    #[serde(rename = "android-tests")]
+    android_tests: Option<PathBuf>,
+    #[serde(rename = "android-dir")]
+    android_dir: Option<PathBuf>,
+    jvm: Option<RawLayoutTarget>,
+    wasm: Option<RawLayoutTarget>,
+    js: Option<RawLayoutTarget>,
+    native: Option<RawLayoutTarget>,
+    android: Option<RawLayoutTarget>,
+    #[serde(default, rename = "source-sets")]
+    source_sets: BTreeMap<String, RawLayoutTarget>,
+}
+
+impl RawLayout {
+    fn validate(self, source_sets: &[SourceGroup]) -> Result<Layout> {
+        let section = "layout";
+        let dirs = |raw: Option<RawDirs>, what: &str, default: &str| -> Result<Vec<PathBuf>> {
+            match raw {
+                None => Ok(vec![PathBuf::from(default)]),
+                Some(raw) => {
+                    let mut out = raw.into_vec();
+                    if out.is_empty() {
+                        bail!("[{section}] `{what}` is empty; list at least one directory or leave it out");
+                    }
+                    for dir in &out {
+                        check_layout_dir(section, what, dir)?;
+                    }
+                    out.dedup();
+                    Ok(out)
+                }
+            }
+        };
+        let single = |raw: Option<PathBuf>, what: &str, default: &str| -> Result<PathBuf> {
+            match raw {
+                None => Ok(PathBuf::from(default)),
+                Some(dir) => {
+                    check_layout_dir(section, what, &dir)?;
+                    Ok(dir)
+                }
+            }
+        };
+        let target = |raw: Option<RawLayoutTarget>, name: &str| -> Result<Option<LayoutTarget>> {
+            let Some(raw) = raw else { return Ok(None) };
+            let convert = |raw: Option<RawDirs>, what: &str| -> Result<Option<Vec<PathBuf>>> {
+                match raw {
+                    None => Ok(None),
+                    Some(raw) => {
+                        let mut out = raw.into_vec();
+                        if out.is_empty() {
+                            bail!("[{section}.{name}] `{what}` is empty; list at least one directory or leave it out");
+                        }
+                        for dir in &out {
+                            check_layout_dir(&format!("{section}.{name}"), what, dir)?;
+                        }
+                        out.dedup();
+                        Ok(Some(out))
+                    }
+                }
+            };
+            Ok(Some(LayoutTarget {
+                src: convert(raw.src, "src")?,
+                tests: convert(raw.tests, "tests")?,
+                benches: convert(raw.benches, "benches")?,
+                test_fixtures: convert(raw.test_fixtures, "test-fixtures")?,
+            }))
+        };
+        let mut targets = BTreeMap::new();
+        for (name, raw) in [("jvm", self.jvm), ("wasm", self.wasm), ("js", self.js), ("native", self.native), ("android", self.android)] {
+            if let Some(layout) = target(raw, name)? {
+                // An empty table (`[layout.jvm]`) means the defaults; only tables that
+                // override something are kept.
+                if layout.src.is_some() || layout.tests.is_some() || layout.benches.is_some() || layout.test_fixtures.is_some() {
+                    targets.insert(name.parse::<TargetKind>().expect("known target"), layout);
+                }
+            }
+        }
+        let mut sets = BTreeMap::new();
+        for (name, raw) in self.source_sets {
+            if name.is_empty()
+                || !name.starts_with(|c: char| c.is_ascii_alphabetic())
+                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                bail!("[{section}.source-sets.{name}] is not a source-set name (use letters, digits, `-` and `_`, starting with a letter)");
+            }
+            if name.parse::<TargetKind>().is_ok() {
+                bail!("[{section}.source-sets.{name}] clashes with a target; put target directories in [{section}.{name}]");
+            }
+            if !source_sets.iter().any(|g| g.name == name) {
+                bail!("[{section}.source-sets.{name}] names no [source-sets.{name}]; declare the source set or remove the layout");
+            }
+            let convert = |raw: Option<RawDirs>, what: &str| -> Result<Option<Vec<PathBuf>>> {
+                match raw {
+                    None => Ok(None),
+                    Some(raw) => {
+                        let mut out = raw.into_vec();
+                        if out.is_empty() {
+                            bail!("[{section}.source-sets.{name}] `{what}` is empty; list at least one directory or leave it out");
+                        }
+                        for dir in &out {
+                            check_layout_dir(&format!("{section}.source-sets.{name}"), what, dir)?;
+                        }
+                        out.dedup();
+                        Ok(Some(out))
+                    }
+                }
+            };
+            if raw.benches.is_some() {
+                bail!(
+                    "[{section}.source-sets.{name}] `benches` only exists for the whole package and per target; a source set has sources, tests and test fixtures"
+                );
+            }
+            let layout = LayoutTarget {
+                src: convert(raw.src, "src")?,
+                tests: convert(raw.tests, "tests")?,
+                benches: None,
+                test_fixtures: convert(raw.test_fixtures, "test-fixtures")?,
+            };
+            if layout.src.is_none() && layout.tests.is_none() && layout.test_fixtures.is_none() {
+                bail!("[{section}.source-sets.{name}] sets nothing; list `src`, `tests` or `test-fixtures`");
+            }
+            sets.insert(name, layout);
+        }
+        Ok(Layout {
+            src: dirs(self.src, "src", "src")?,
+            tests: dirs(self.tests, "tests", "tests")?,
+            resources: dirs(self.resources, "resources", "resources")?,
+            test_resources: dirs(self.test_resources, "test-resources", "test-resources")?,
+            benches: dirs(self.benches, "benches", "benches")?,
+            examples: single(self.examples, "examples", "examples")?,
+            test_fixtures: dirs(self.test_fixtures, "test-fixtures", "test-fixtures")?,
+            android_tests: single(self.android_tests, "android-tests", "android-tests")?,
+            android_dir: single(self.android_dir, "android-dir", "android")?,
+            targets,
+            source_sets: sets,
+        })
+    }
+}
+
+/// A directory of `[layout]`: inside the package, not empty or absolute, without `..`.
+fn check_layout_dir(section: &str, what: &str, dir: &Path) -> Result<()> {
+    let text = dir.to_string_lossy().replace('\\', "/");
+    if dir.as_os_str().is_empty()
+        || dir.is_absolute()
+        || text.starts_with('/')
+        || text.split('/').any(|part| part == "..")
+        || dir.components().any(|c| c.as_os_str() == "..")
+    {
+        bail!("[{section}] `{what}` lists `{}`; use a directory inside the package", dir.display());
+    }
+    if dir.components().any(|c| c.as_os_str() == "target") || text.split('/').any(|part| part == "target") {
+        bail!("[{section}] `{what}` lists `{}`; `target/` holds build output, not sources", dir.display());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3068,6 +3269,7 @@ impl RawManifest {
         let lint = self.lint.validate()?;
         let build = self.build.validate("build")?;
         let source_sets = validate_source_sets(self.source_sets)?;
+        let layout = self.layout.validate(&source_sets)?;
         if let Some(missing) = build.default_targets.iter().flatten().find(|t| !targets.is_enabled(**t)) {
             bail!("[build] `default-targets` names `{missing}`, which is not enabled; add a [target.{missing}] section");
         }
@@ -3084,6 +3286,7 @@ impl RawManifest {
         Ok(Manifest {
             publish,
             source_sets,
+            layout,
             toolchain: ToolchainSettings { jdk, graalvm, android_sdk, kargo, typescript },
             packaging,
             doc,

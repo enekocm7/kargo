@@ -1247,6 +1247,9 @@ enum Command {
         /// The build tool to read, when the directory has the files of several
         #[arg(long, value_enum)]
         from: Option<ImportSource>,
+        /// Keep the sources where they are and point `[layout]` at them, instead of moving them
+        #[arg(long)]
+        keep_layout: bool,
     },
     /// Write a CI workflow for the project, from its kargo.toml
     InitCi {
@@ -2839,6 +2842,7 @@ fn import_project(
     dry_run: bool,
     no_build: bool,
     from: Option<ImportSource>,
+    keep_layout: bool,
 ) -> Result<i32> {
     let shell = config.shell();
     let cwd = std::env::current_dir().context("failed to read the current directory")?;
@@ -2846,7 +2850,7 @@ fn import_project(
         Some(path) => std::path::absolute(cwd.join(path))?,
         None => cwd,
     };
-    let plan = ops::import::plan(config, &root, &ops::import::ImportOptions { from: from.map(Into::into) })?;
+    let plan = ops::import::plan(config, &root, &ops::import::ImportOptions { from: from.map(Into::into), keep_layout })?;
     if dry_run {
         print!("{}", plan.describe());
         shell.status("Dry run", format!("{} project not changed; run `kargo import` to apply the plan above", plan.build.name()));
@@ -2983,7 +2987,9 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Import { path, dry_run, no_build, from } => import_project(config, global, path, dry_run, no_build, from),
+        Command::Import { path, dry_run, no_build, from, keep_layout } => {
+            import_project(config, global, path, dry_run, no_build, from, keep_layout)
+        }
         Command::Build { build, keep_going, xcframework, swift_package, cocoapods } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;

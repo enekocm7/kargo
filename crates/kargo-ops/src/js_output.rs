@@ -70,7 +70,7 @@ pub fn finish(ctx: &BuildContext, build: &mut JsBuild) -> Result<()> {
         }
     } else {
         // The page of an earlier build, which linking leaves alone (unlike on Wasm, the directory holds the npm packages).
-        let _ = crate::wasm_output::copy_site_files(&build.dir, None, &[]);
+        let _ = crate::wasm_output::copy_site_files(&build.dir, &[], &[]);
         let _ = std::fs::remove_file(build.dir.join("index.html"));
     }
     build.bundle = bundle.as_ref().map(|b| b.dir.clone());
@@ -94,7 +94,7 @@ fn remove_library_package_json(dir: &Path) -> Result<()> {
 /// the directory of its `bundle`, with the page loading the bundle and needing no import map.
 fn assemble_site(ctx: &BuildContext, build: &JsBuild, bundle: Option<&Bundle>) -> Result<()> {
     let dir = bundle.map_or(&build.dir, |b| &b.dir);
-    let own_page = crate::wasm_output::copy_site_files(dir, Some(&ctx.ws.resources()), &[])?;
+    let own_page = crate::wasm_output::copy_site_files(dir, &ctx.ws.resource_dirs(), &[])?;
     let index = dir.join("index.html");
     let html = if own_page {
         std::fs::read_to_string(&index)?

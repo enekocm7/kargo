@@ -219,9 +219,13 @@ pub fn sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: 
 /// `kargo metadata` reads the sources this way.
 pub fn existing_sources(ctx: &BuildContext, target: TargetKind, tests: bool, extensions: &[&str]) -> Result<SourceSet> {
     let ws = ctx.ws;
-    let (common, platform) =
-        if tests { (ws.common_tests(), ws.target_tests(target)) } else { (ws.common_sources(), ws.target_sources(target)) };
-    let mut set = SourceSet::new(collect_files(&common, extensions), collect_files(&platform, extensions), target.as_str());
+    let collect = |dirs: &[PathBuf]| dirs.iter().flat_map(|d| collect_files(d, extensions)).collect::<Vec<_>>();
+    let (common, platform) = if tests {
+        (collect(&ws.common_test_dirs()), collect(&ws.target_test_dirs(target)))
+    } else {
+        (collect(&ws.common_source_dirs()), collect(&ws.target_source_dirs(target)))
+    };
+    let mut set = SourceSet::new(common, platform, target.as_str());
     set.groups = source_groups(ws, target, tests, extensions);
     if target == TargetKind::Native {
         set.groups.extend(platform_groups(ws, tests, extensions));
@@ -240,8 +244,9 @@ pub fn source_groups(ws: &Workspace, target: TargetKind, tests: bool, extensions
         .source_groups_for(target)
         .into_iter()
         .map(|(group, parents)| {
-            let dir = if tests { ws.group_tests(&group.name) } else { ws.group_sources(&group.name) };
-            kargo_compiler::SourceGroup::new(&group.name, collect_files(&dir, extensions), &parents)
+            let dirs = if tests { ws.group_test_dirs(&group.name) } else { ws.group_source_dirs(&group.name) };
+            let files = dirs.iter().flat_map(|d| collect_files(d, extensions)).collect::<Vec<_>>();
+            kargo_compiler::SourceGroup::new(&group.name, files, &parents)
         })
         .collect()
 }
@@ -253,10 +258,11 @@ fn platform_groups(ws: &Workspace, tests: bool, extensions: &[&str]) -> Vec<karg
         .native_platform_groups(None)
         .into_iter()
         .map(|(group, parents)| {
-            let dir = if tests { ws.group_tests(&group.name) } else { ws.group_sources(&group.name) };
+            let dirs = if tests { ws.group_test_dirs(&group.name) } else { ws.group_source_dirs(&group.name) };
+            let files = dirs.iter().flat_map(|d| collect_files(d, extensions)).collect::<Vec<_>>();
             // A set that refines no other one is below the target's own fragment.
             let refines = if parents.is_empty() { vec![TargetKind::Native.as_str()] } else { parents };
-            kargo_compiler::SourceGroup::new(&group.name, collect_files(&dir, extensions), &refines)
+            kargo_compiler::SourceGroup::new(&group.name, files, &refines)
         })
         .collect()
 }
@@ -649,7 +655,7 @@ pub fn compile_jvm(ctx: &BuildContext, verb: &str) -> Result<JvmClasses> {
     let classes = out.join("classes");
     let jvm_target = jvm.target_for(jdk.version)?;
     let mut srcs = sources(ctx, TargetKind::Jvm, false, &["kt", "java"])?;
-    let mut resources = vec![ctx.ws.resources()];
+    let mut resources = ctx.ws.resource_dirs();
     resources.extend(crate::generate::resource_dirs(ctx.ws, &ctx.profile, TargetKind::Jvm));
     let compose_resources = compose_resources_dir(ctx, TargetKind::Jvm);
     if compose_resources.is_dir() {

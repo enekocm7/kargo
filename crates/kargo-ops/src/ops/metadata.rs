@@ -158,6 +158,7 @@ fn package(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
         .map(|name| json!({ "name": name, "path": path(&ws.examples_dir().join(format!("{name}.kt"))) }))
         .collect();
     let targets = m.targets.enabled().into_iter().map(|t| target(ctx, t, opts)).collect::<Result<Vec<_>>>()?;
+    let layout = &m.layout;
     Ok(json!({
         "name": m.package.name,
         "version": m.package.version,
@@ -173,6 +174,17 @@ fn package(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
             "api-version": m.kotlin.api_version,
             "opt-in": m.kotlin.opt_in,
             "warnings-as-errors": m.kotlin.warnings_as_errors,
+        },
+        "layout": {
+            "src": layout.src.iter().map(|d| path(&ws.root().join(d))).collect::<Vec<_>>(),
+            "tests": layout.tests.iter().map(|d| path(&ws.root().join(d))).collect::<Vec<_>>(),
+            "resources": layout.resources.iter().map(|d| path(&ws.root().join(d))).collect::<Vec<_>>(),
+            "test-resources": layout.test_resources.iter().map(|d| path(&ws.root().join(d))).collect::<Vec<_>>(),
+            "benches": layout.benches.iter().map(|d| path(&ws.root().join(d))).collect::<Vec<_>>(),
+            "examples": path(&ws.examples_dir()),
+            "test-fixtures": layout.test_fixtures.iter().map(|d| path(&ws.root().join(d))).collect::<Vec<_>>(),
+            "android-tests": path(&ws.instrumented_tests()),
+            "android-dir": path(&ws.android_dir()),
         },
         "frameworks": builtins::enabled_frameworks(m),
         "path-dependencies": path_dependencies,
@@ -226,26 +238,28 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
         let platform_sets = m.native_platform_groups(None).into_iter();
         groups.extend(platform_sets.map(|(g, parents)| (g, if parents.is_empty() { vec![TargetKind::Native.as_str()] } else { parents })));
     }
-    let group_dirs =
-        |dir: fn(&crate::workspace::Workspace, &str) -> PathBuf| -> Vec<PathBuf> { groups.iter().map(|(g, _)| dir(ws, &g.name)).collect() };
-    let mut source_dirs = vec![ws.common_sources(), ws.target_sources(kind)];
-    source_dirs.extend(group_dirs(Workspace::group_sources));
+    let group_dirs = |dirs: fn(&crate::workspace::Workspace, &str) -> Vec<PathBuf>| -> Vec<PathBuf> {
+        groups.iter().flat_map(|(g, _)| dirs(ws, &g.name)).collect()
+    };
+    let mut source_dirs = ws.common_source_dirs();
+    source_dirs.extend(ws.target_source_dirs(kind));
+    source_dirs.extend(group_dirs(Workspace::group_source_dirs));
     // Test fixtures and benchmarks compile like tests, so editors treat them as test sources too.
-    let mut test_dirs = vec![
-        ws.common_tests(),
-        ws.target_tests(kind),
-        ws.common_test_fixtures(),
-        ws.target_test_fixtures(kind),
-        ws.common_benches(),
-        ws.target_benches(kind),
-    ];
-    test_dirs.extend(group_dirs(Workspace::group_tests));
-    test_dirs.extend(group_dirs(Workspace::group_test_fixtures));
+    let mut test_dirs = Vec::new();
+    test_dirs.extend(ws.common_test_dirs());
+    test_dirs.extend(ws.target_test_dirs(kind));
+    test_dirs.extend(ws.common_test_fixture_dirs());
+    test_dirs.extend(ws.target_test_fixture_dirs(kind));
+    test_dirs.extend(ws.common_bench_dirs());
+    test_dirs.extend(ws.target_bench_dirs(kind));
+    test_dirs.extend(group_dirs(Workspace::group_test_dirs));
+    test_dirs.extend(group_dirs(Workspace::group_test_fixture_dirs));
     if kind == TargetKind::Android {
         test_dirs.push(ws.instrumented_tests());
     }
-    let mut fixture_dirs = vec![ws.common_test_fixtures(), ws.target_test_fixtures(kind)];
-    fixture_dirs.extend(group_dirs(Workspace::group_test_fixtures));
+    let mut fixture_dirs = ws.common_test_fixture_dirs();
+    fixture_dirs.extend(ws.target_test_fixture_dirs(kind));
+    fixture_dirs.extend(group_dirs(Workspace::group_test_fixture_dirs));
     let mut out = json!({
         "kind": kind.as_str(),
         "source-roots": roots(&with_generated(source_dirs, GeneratedKind::Sources)),
@@ -259,9 +273,12 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
                 "targets": g.targets.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
                 "platforms": g.platforms,
                 "refines": refines,
-                "source-root": path(&ws.group_sources(&g.name)),
-                "test-root": path(&ws.group_tests(&g.name)),
-                "test-fixture-root": path(&ws.group_test_fixtures(&g.name)),
+                "source-root": path(&ws.group_source_dirs(&g.name).first().cloned().unwrap_or_else(|| ws.root().join(format!("src-{}", g.name)))),
+                "test-root": path(&ws.group_test_dirs(&g.name).first().cloned().unwrap_or_else(|| ws.root().join(format!("tests-{}", g.name)))),
+                "test-fixture-root": path(&ws.group_test_fixture_dirs(&g.name).first().cloned().unwrap_or_else(|| ws.root().join(format!("test-fixtures-{}", g.name)))),
+                "source-roots": roots(&ws.group_source_dirs(&g.name)),
+                "test-roots": roots(&ws.group_test_dirs(&g.name)),
+                "test-fixture-roots": roots(&ws.group_test_fixture_dirs(&g.name)),
             }))
             .collect::<Vec<_>>(),
         // The output directories of the `[[generate]]` steps this target uses, by what they hold.
@@ -277,7 +294,11 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
             })
             .collect::<Vec<_>>(),
         "test-fixture-roots": roots(&fixture_dirs),
-        "bench-roots": roots(&[ws.common_benches(), ws.target_benches(kind)]),
+        "bench-roots": roots(&{
+            let mut b = ws.common_bench_dirs();
+            b.extend(ws.target_bench_dirs(kind));
+            b
+        }),
         "output-dir": path(&ws.output_dir(&ctx.profile, kind)),
     });
     if kind == TargetKind::Android {
@@ -320,8 +341,8 @@ fn target(ctx: &BuildContext, kind: TargetKind, opts: &MetadataOptions) -> Resul
                 json!([])
             };
             let output = ws.output_dir(&ctx.profile, kind);
-            out["resource-roots"] = json!(roots(&with_generated(vec![ws.resources()], GeneratedKind::Resources)));
-            out["test-resource-roots"] = json!(roots(&[ws.test_resources()]));
+            out["resource-roots"] = json!(roots(&with_generated(ws.resource_dirs(), GeneratedKind::Resources)));
+            out["test-resource-roots"] = json!(roots(&ws.test_resource_dirs()));
             out["classes-dir"] = json!(path(&output.join("classes")));
             out["test-classes-dir"] = json!(path(&output.join("test-classes")));
             out["jvm-target"] = json!(jvm_target);
@@ -377,9 +398,13 @@ fn android(ctx: &BuildContext) -> Result<Value> {
         "kind": cfg.kind,
         "namespace": cfg.namespace,
         "r-class": format!("{}.R", cfg.namespace),
-        "manifest": path(&ws.root().join("android/AndroidManifest.xml")),
-        "res-roots": [path(&ws.root().join("android/res"))],
-        "asset-roots": [path(&ws.root().join("android/assets"))],
+        "manifest": path(&ws.android_dir().join("AndroidManifest.xml")),
+        "res-roots": [path(&ws.android_dir().join("res"))],
+        "asset-roots": [path(&ws.android_dir().join("assets"))],
+        "layout": {
+            "android-dir": path(&ws.android_dir()),
+            "android-tests": path(&ws.instrumented_tests()),
+        },
         "library-dependencies": libraries,
         "build-dir": path(&ws.work_dir("android").join("build")),
         "variant": generated.as_ref().map(|g| g.variant.clone()),

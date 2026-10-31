@@ -154,9 +154,12 @@ fn has_main(ws: &Workspace, m: &Manifest) -> bool {
     if m.targets.jvm.as_ref().is_some_and(|j| j.main_class.is_some()) || !m.bins.is_empty() {
         return true;
     }
-    let mut files = kargo_util::fs::collect_files(&ws.common_sources(), &["kt"]);
+    let mut files = Vec::new();
+    for d in ws.common_source_dirs() {
+        files.extend(kargo_util::fs::collect_files(&d, &["kt"]));
+    }
     for target in m.targets.enabled() {
-        for dir in ws.source_dirs(target).iter().skip(1) {
+        for dir in ws.source_dirs(target).iter().skip(ws.common_source_dirs().len()) {
             files.extend(kargo_util::fs::collect_files(dir, &["kt"]));
         }
     }
@@ -168,12 +171,13 @@ fn has_main(ws: &Workspace, m: &Manifest) -> bool {
 fn scaffold(ws: &Workspace, opts: &NewOptions, target: TargetKind) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if target == TargetKind::Android {
-        let greeting = declares_greeting(&ws.common_sources(), &opts.package());
+        let greeting = ws.common_source_dirs().iter().any(|dir| declares_greeting(dir, &opts.package()));
         files.extend(android_files(opts, greeting).into_iter().map(|f| (f.path, f.contents)));
     }
-    let dir = PathBuf::from(target.source_dir_name());
-    if !files.iter().any(|(path, _)| path.starts_with(&dir)) {
-        files.push((dir.join(".gitkeep"), String::new()));
+    let relative_dir =
+        ws.manifest().layout.target_sources(target).first().cloned().unwrap_or_else(|| PathBuf::from(target.source_dir_name()));
+    if !files.iter().any(|(path, _)| path.starts_with(&relative_dir)) {
+        files.push((relative_dir.join(".gitkeep"), String::new()));
     }
     let mut created = Vec::new();
     for (relative, contents) in files {
@@ -229,9 +233,11 @@ pub fn remove(shell: &Shell, ws: &Workspace, targets: &[TargetKind]) -> Result<V
     for &target in &removed {
         shell.status("Removing", format!("{target} target"));
         let mut kept: Vec<String> = Vec::new();
-        let mut dirs = vec![ws.target_sources(target), ws.target_tests(target), ws.target_benches(target)];
+        let mut dirs: Vec<PathBuf> = ws.target_source_dirs(target);
+        dirs.extend(ws.target_test_dirs(target));
+        dirs.extend(ws.target_bench_dirs(target));
         if target == TargetKind::Android {
-            dirs.push(ws.root().join("android"));
+            dirs.push(ws.android_dir());
         }
         for dir in dirs.iter().filter(|d| d.exists()) {
             kept.push(format!("{}/", dir.file_name().unwrap_or_default().to_string_lossy()));

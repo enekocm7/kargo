@@ -668,6 +668,32 @@
       },
       "examples": [{ "jvmAndAndroid": { "targets": ["jvm", "android"] } }, { "apple": { "platforms": ["apple"] } }]
     },
+    "layout": {
+      "description": "Where the sources, tests, resources, benchmarks and Android files live. Each directory is inside the package; `kargo import --keep-layout` writes it from the old build files. Without it the project uses `src/`, `src-<target>/`, `tests/`, `tests-<target>/`, `resources/`, `test-resources/`, `benches/`, `examples/`, `test-fixtures/`, `android-tests/` and `android/`.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "src": { "$ref": "#/definitions/layout-dirs", "description": "Common sources, compiled for every target. Default: `src/`." },
+        "tests": { "$ref": "#/definitions/layout-dirs", "description": "Common tests. Default: `tests/`." },
+        "resources": { "$ref": "#/definitions/layout-dirs", "description": "JVM resources, put on the classpath and in the jar; also the files of a Wasm or JS browser app. Default: `resources/`." },
+        "test-resources": { "$ref": "#/definitions/layout-dirs", "description": "Resources for JVM tests. Default: `test-resources/`." },
+        "benches": { "$ref": "#/definitions/layout-dirs", "description": "Common benchmarks, run with `kargo bench`. Default: `benches/`." },
+        "examples": { "description": "Example programs, run with `kargo run --example <name>`. Default: `examples/`.", "type": "string" },
+        "test-fixtures": { "$ref": "#/definitions/layout-dirs", "description": "Test helpers shared with the tests of packages that depend on this one. Default: `test-fixtures/`." },
+        "android-tests": { "description": "Android instrumented tests, run on a device with `kargo test --instrumented`. Default: `android-tests/`.", "type": "string" },
+        "android-dir": { "description": "The directory holding `AndroidManifest.xml`, `res/`, `assets/` and `jniLibs/`. Default: `android/`.", "type": "string", "examples": ["src/main"] },
+        "jvm": { "$ref": "#/definitions/layout-target", "description": "JVM-only sources, tests, benchmarks and fixtures (`src-jvm/`, ...)." },
+        "wasm": { "$ref": "#/definitions/layout-target", "description": "Wasm-only sources, tests, benchmarks and fixtures." },
+        "js": { "$ref": "#/definitions/layout-target", "description": "Kotlin/JS-only sources, tests, benchmarks and fixtures." },
+        "native": { "$ref": "#/definitions/layout-target", "description": "Kotlin/Native-only sources, tests, benchmarks and fixtures." },
+        "android": { "$ref": "#/definitions/layout-target", "description": "Android-only sources, tests, benchmarks and fixtures." },
+        "source-sets": {
+          "description": "The directories of intermediate source sets (`[source-sets.<name>]`), by name.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/layout-source-set" }
+        }
+      }
+    },
     "doc": {
       "description": "Options for `kargo doc` (Dokka).",
       "type": "object",
@@ -1238,6 +1264,32 @@
         "jvm-args": { "description": "JVM options for `kargo run` and `kargo test`, after `[target.jvm] jvm-args`.", "type": "array", "items": { "type": "string" } },
         "env": { "$ref": "#/definitions/profile-env" },
         "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies only this profile's builds have." }
+      }
+    },
+    "layout-dirs": {
+      "description": "One directory or a list of directories inside the package.",
+      "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }],
+      "examples": ["src/main/kotlin", ["src/main/kotlin", "src/main/java"]]
+    },
+    "layout-target": {
+      "description": "The directories of one target (`[layout.<target>]`).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "src": { "$ref": "#/definitions/layout-dirs", "description": "Sources of this target. Default: `src-<target>/`." },
+        "tests": { "$ref": "#/definitions/layout-dirs", "description": "Tests of this target. Default: `tests-<target>/`." },
+        "benches": { "$ref": "#/definitions/layout-dirs", "description": "Benchmarks of this target. Default: `benches-<target>/`." },
+        "test-fixtures": { "$ref": "#/definitions/layout-dirs", "description": "Test fixtures of this target. Default: `test-fixtures-<target>/`." }
+      }
+    },
+    "layout-source-set": {
+      "description": "The directories of one intermediate source set (`[layout.source-sets.<name>]`).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "src": { "$ref": "#/definitions/layout-dirs", "description": "Sources of this set. Default: `src-<name>/`." },
+        "tests": { "$ref": "#/definitions/layout-dirs", "description": "Tests of this set. Default: `tests-<name>/`." },
+        "test-fixtures": { "$ref": "#/definitions/layout-dirs", "description": "Test fixtures of this set. Default: `test-fixtures-<name>/`." }
       }
     }
   }
