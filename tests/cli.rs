@@ -6660,6 +6660,34 @@ fn import_turns_maven_modules_into_a_workspace() {
 }
 
 #[test]
+fn import_from_a_child_module_links_siblings_listed_in_the_parent() {
+    let p = Project::new();
+    p.file(
+        "pom.xml",
+        r#"<project>
+  <groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version><packaging>pom</packaging>
+  <modules><module>core</module><module>api</module></modules>
+  <properties><kotlin.version>2.4.21</kotlin.version></properties>
+  <build><plugins><plugin><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version></plugin></plugins></build>
+</project>"#,
+    )
+    .file(
+        "core/pom.xml",
+        r#"<project><parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version></parent><artifactId>core</artifactId></project>"#,
+    )
+    .file(
+        "api/pom.xml",
+        r#"<project><parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version></parent><artifactId>api</artifactId>
+  <dependencies><dependency><groupId>com.example</groupId><artifactId>core</artifactId><version>1.0.0</version></dependency></dependencies></project>"#,
+    )
+    .file("api/src/main/kotlin/Api.kt", "package api\n");
+    p.kargo().args(["import", "api", "--no-build"]).assert().success().stderr(predicate::str::contains("looks like the sibling module"));
+    let api = p.read("api/kargo.toml");
+    assert!(api.contains("core = { path = \"../core\" }"), "{api}");
+    assert!(!api.contains("\"com.example:core\" = \"1.0.0\""), "the sibling is a path, not a coordinate: {api}");
+}
+
+#[test]
 fn import_explains_what_it_cannot_do() {
     let p = Project::new();
     p.kargo()

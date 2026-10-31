@@ -53,7 +53,7 @@ A `pom.xml` is static, so it is translated exactly, with the parent POMs and BOM
 | `<repositories>` | `[repositories]` |
 | `<modules>` | A [workspace](../workspaces/); a dependency on another module becomes a `path` dependency |
 
-In a multi-module build, the compile-scope dependencies of a module that other modules use get `exported = true`, which is what Maven's transitive compile scope means.
+In a multi-module build, the compile-scope dependencies of a module that other modules use get `exported = true`, which is what Maven's transitive compile scope means. Running the import from a child module (for example `cd api` instead of the parent) still turns a dependency on a sibling listed in the parent's `<modules>` into a `path` dependency (for example `core = { path = "../core" }`), with a warning that importing the parent instead gives a workspace.
 
 ### Gradle
 
