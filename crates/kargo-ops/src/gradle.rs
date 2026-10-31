@@ -1258,6 +1258,20 @@ pub fn sdk(ws: &Workspace, config: &Config, licenses: Licenses) -> Result<PathBu
     }
 }
 
+/// The `android.jar` of the platform `ws` compiles against (`compile-sdk`), for editors: the Kargo-managed SDK's
+/// with `[toolchain] android-sdk`, else the system SDK's. Nothing is installed or downloaded, so it is `None` until
+/// the SDK has the platform.
+pub fn platform_jar(ws: &Workspace, config: &Config) -> Option<PathBuf> {
+    let cfg = &ws.manifest().targets.android.as_ref()?.config;
+    let platform = android_sdk::platform_package(cfg.compile_sdk).replace(';', "/");
+    let managed = config.android_sdk_dir();
+    let sdks = match ws.manifest().toolchain.android_sdk {
+        AndroidSdkRequest::Platform(_) => [Some(managed), android_sdk()],
+        AndroidSdkRequest::System => [android_sdk(), Some(managed)],
+    };
+    sdks.into_iter().flatten().map(|sdk| sdk.join(&platform).join("android.jar")).find(|jar| jar.is_file())
+}
+
 /// Describes the Android SDK of `ws` for `kargo toolchain which`, without installing anything.
 pub fn describe_sdk(ws: &Workspace, config: &Config) -> Result<String> {
     let cfg = &ws.manifest().targets.android.as_ref().context("the Android target is not enabled")?.config;

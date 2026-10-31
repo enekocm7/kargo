@@ -555,7 +555,7 @@ fn dependency_compiled(meta: &Value) -> Vec<CompiledLibrary> {
                             continue;
                         }
                         let path = PathBuf::from(path);
-                        if !path.extension().is_some_and(|e| e == "jar" || e == "klib") {
+                        if !is_library_file(&path) {
                             continue;
                         }
                         // The cinterop klib of a module comes with the module's sources jar, which
@@ -591,7 +591,7 @@ fn dependency_compiled(meta: &Value) -> Vec<CompiledLibrary> {
                             continue;
                         }
                         let path = PathBuf::from(path);
-                        if !path.extension().is_some_and(|e| e == "jar" || e == "klib") {
+                        if !is_library_file(&path) {
                             continue;
                         }
                         let has_sources = !entry["sources"].is_null();
@@ -617,7 +617,40 @@ fn dependency_compiled(meta: &Value) -> Vec<CompiledLibrary> {
     }
     let mut out: Vec<CompiledLibrary> = libraries.into_values().collect();
     out.extend(platform_libraries(meta));
+    out.extend(android_platforms(meta));
     out
+}
+
+/// Whether `path` is a compiled library the server reads: a jar, a klib, or an Android library (`.aar`),
+/// whose `classes.jar` is read.
+fn is_library_file(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "jar" || e == "klib" || e == "aar")
+}
+
+/// The `android.jar` of the platform each Android target compiles against (`platform-jar` of its
+/// `android` object), the way the JDK is for JVM code: Android code gets `android.*` from it.
+fn android_platforms(meta: &Value) -> Vec<CompiledLibrary> {
+    let mut jars: BTreeMap<PathBuf, CompiledLibrary> = BTreeMap::new();
+    for target in meta["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["targets"].as_array().into_iter().flatten())
+        .filter(|t| t["kind"] == "android")
+    {
+        let Some(jar) = target["android"]["platform-jar"].as_str().map(PathBuf::from) else { continue };
+        // `<sdk>/platforms/android-36/android.jar`
+        let platform = jar.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        jars.entry(jar.clone()).or_insert_with(|| CompiledLibrary {
+            name: format!("Android SDK ({platform})"),
+            path: jar,
+            main: Platforms::JVM,
+            test: Platforms::JVM,
+            known: None,
+            javadoc: None,
+        });
+    }
+    jars.into_values().collect()
 }
 
 /// The Kotlin/Native platform libraries (`posix`, `zlib`, ...) of the first Native platform in
@@ -705,7 +738,7 @@ fn missing_sources(meta: &Value) -> Vec<(String, String)> {
                     if entry["sources"].is_null()
                         && entry["javadoc"].is_null()
                         && !is_stdlib_module(module)
-                        && Path::new(path).extension().is_some_and(|e| e == "jar" || e == "klib")
+                        && is_library_file(Path::new(path))
                     {
                         out.insert((module.to_owned(), version.to_owned()));
                     }
@@ -2676,6 +2709,35 @@ mod tests {
             Origin::Source(s) => assert_eq!((s.package, s.kind, s.target), (0, SetKind::Main, Some("android".into()))),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn reads_the_android_platform_and_libraries_of_android_targets() {
+        let entry = |module: &str, path: &str| json!({ "module": module, "version": "1.0", "path": path, "sources": null });
+        let meta = json!({
+            "packages": [{
+                "name": "droid",
+                "targets": [{
+                    "kind": "android",
+                    "android": { "platform-jar": "/sdk/platforms/android-36/android.jar" },
+                    "dependencies": [{ "platform": "android", "compile": [
+                        entry("androidx.core:core", "/m/core-1.0.aar"),
+                        entry("com.squareup.moshi:moshi", "/m/moshi-1.0.jar"),
+                    ], "test": [] }],
+                }],
+            }],
+        });
+        let libraries = dependency_compiled(&meta);
+        let names: Vec<(&str, Platforms)> = libraries.iter().map(|l| (l.name.as_str(), l.main)).collect();
+        assert_eq!(
+            names,
+            [("core 1.0", Platforms::JVM), ("moshi 1.0", Platforms::JVM), ("Android SDK (android-36)", Platforms::JVM)],
+            "{names:?}"
+        );
+        assert!(libraries[0].path.ends_with("core-1.0.aar") && libraries[2].path.ends_with("android.jar"));
+        // A project without the platform's jar (the SDK doesn't have it yet) just has no Android SDK.
+        let meta = json!({ "packages": [{ "targets": [{ "kind": "android", "android": { "platform-jar": null } }] }] });
+        assert!(dependency_compiled(&meta).is_empty());
     }
 
     #[test]

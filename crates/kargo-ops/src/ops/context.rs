@@ -685,6 +685,18 @@ impl<'a> BuildContext<'a> {
         self.resolve_at(&self.ws.lock_key(&self.profile_resolution(key)?), platform, roots, boms)
     }
 
+    /// Resolves `roots` for `platform` and downloads the artifacts, without reading or writing `kargo.lock`. For what
+    /// Kargo does not build itself and so does not pin: the libraries of an Android package, which Gradle resolves,
+    /// but whose jars editors need (`kargo metadata`).
+    pub fn resolve_unlocked(&self, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
+        let mut resolver = Resolver::new(&self.client, platform);
+        for bom in boms {
+            let version = bom.version.as_deref().context("BOM without version")?;
+            resolver.import_bom(&bom.module, version)?;
+        }
+        resolver.resolve(roots).context("failed to resolve dependencies")
+    }
+
     /// Resolves `roots` again, without `kargo.lock` and without downloading artifacts, to say why each module
     /// of the resolution `key` has its version (`kargo why`).
     pub fn explain(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Explanation> {

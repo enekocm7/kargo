@@ -463,7 +463,7 @@ With that setting, Zed runs `kargo lsp` in the folder, and it completes, documen
 
 - Zed has no test explorer: run tests from their buttons or tasks, and read the results in the terminal. A failed test is re-run from its button.
 - The extension starts `kargo lsp` only when `kargo.toml` is at the root of the folder you open. Open the project root, not a directory above it.
-- Code in `src-wasm/`, `src-native/` and `android/` gets no Kotlin code intelligence from the Kotlin LSP yet. Check on save still reports its errors.
+- Code in `src-wasm/`, `src-native/` and `android/` gets no Kotlin code intelligence from the Kotlin LSP yet. Check on save still reports its errors. Android code is covered by Kargo's own server (the default), which reads `android.jar` and the package's Maven libraries.
 - Debugging works for the JVM target only. kotlin-debug-adapter doesn't support conditional breakpoints or logpoints, and evaluates variable names only.
 - Slash commands work in text threads; the agent panel's threads don't run them.
 
@@ -864,7 +864,7 @@ The Kotlin LSP analyzes JVM code only. Kargo therefore analyzes `src/` as JVM co
 `kargo lsp --klib-targets` also writes `<name>.wasm.main`, `<name>.native.main` and their test modules, with their klibs and, for Native, the Kotlin/Native distribution's standard and platform libraries. The Kotlin LSP Kargo pins doesn't support them yet: it can't read klibs, so library calls in `src-wasm/` show as unresolved, and it rejects Native modules. Use the option with a newer server (`--server-path`) that supports them. Without a JVM target, `src/` is then analyzed for all of the package's platforms, with no libraries.
 
 :::caution
-Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence from the Kotlin LSP yet; Kargo's own server, the default, reads it. Use Android Studio for Android code. `kargo.toml` support, runnables and check on save work for every target.
+Code that only exists for Wasm, Native or Android (in `src-wasm/`, `src-native/` or `android/`) gets no Kotlin code intelligence from the Kotlin LSP yet; Kargo's own server, the default, reads it, including Android code: `android.*` from the `android.jar` of the package's `compile-sdk` (once the SDK has that platform) and the Maven libraries it declares. Layout and Compose previews still need Android Studio. `kargo.toml` support, runnables and check on save work for every target.
 :::
 
 ### Without `kargo lsp`

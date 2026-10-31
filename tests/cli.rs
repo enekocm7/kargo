@@ -4891,6 +4891,58 @@ fn metadata_describes_android_modules() {
 }
 
 #[test]
+fn metadata_gives_editors_the_android_platform_and_libraries() {
+    let repo = LocalRepo::new();
+    repo.publish("g:util", "1.0", &[]).publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let sdk = tempfile::tempdir().unwrap();
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "droid",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[target.android]\nnamespace = \"com.example.droid\"\ncompile-sdk = 36\n\
+                 [dependencies]\n\"g:util\" = \"1.0\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    let metadata = |args: &[&str]| -> serde_json::Value {
+        let out = p
+            .kargo()
+            .env("ANDROID_HOME", sdk.path())
+            .env_remove("ANDROID_SDK_ROOT")
+            .args(["--offline", "metadata"])
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let target = |doc: &serde_json::Value| doc["packages"][0]["targets"][0].clone();
+
+    // The SDK has no platform yet.
+    let doc = target(&metadata(&["--no-deps"]));
+    assert_eq!(doc["kind"], "android");
+    assert_eq!(doc["android"]["platform-jar"], serde_json::Value::Null);
+    assert_eq!(doc["dependencies"], serde_json::Value::Null);
+
+    // Once it has, `android.jar` and the libraries Kargo resolves for the declared dependencies are listed.
+    std::fs::create_dir_all(sdk.path().join("platforms/android-36")).unwrap();
+    std::fs::write(sdk.path().join("platforms/android-36/android.jar"), b"jar").unwrap();
+    let doc = target(&metadata(&[]));
+    let jar = doc["android"]["platform-jar"].as_str().unwrap().replace('\\', "/");
+    assert!(jar.ends_with("platforms/android-36/android.jar"), "{jar}");
+    let compile = doc["dependencies"][0]["compile"].as_array().unwrap();
+    let util = compile.iter().find(|e| e["module"] == "g:util").unwrap_or_else(|| panic!("{compile:?}"));
+    assert!(util["path"].as_str().unwrap().ends_with("util-1.0.jar"), "{util}");
+    assert!(doc["dependencies"][0]["test"].as_array().unwrap().iter().any(|e| e["module"] == "g:util"), "{doc}");
+    assert!(!p.path().join("kargo.lock").exists(), "Gradle resolves Android libraries; nothing is pinned for them");
+}
+
+#[test]
 fn metadata_describes_a_workspace_for_editors() {
     let repo = LocalRepo::new();
     repo.publish("g:util", "1.0", &[])
