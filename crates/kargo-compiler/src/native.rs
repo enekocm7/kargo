@@ -255,15 +255,30 @@ pub fn header_hint(lines: &[String], interop: &str) -> Option<String> {
         let Some(at) = line.find("fatal error: '") else { continue };
         let rest = &line[at + "fatal error: '".len()..];
         if let Some(end) = rest.find("' file not found") {
-            let header = &rest[..end];
-            return Some(format!(
-                "the C header `{header}` was not found: add the directory that holds it to `compiler-options` (`-I<dir>`) of \
-                 [target.native.cinterop.{interop}] or of its `platform.<platform>` table, name the library's package in \
-                 `pkg-config`, or install the library's development files"
-            ));
+            return Some(missing_header_hint(&rest[..end], interop));
         }
     }
     None
+}
+
+/// What to change when a header of a `cinterop` entry cannot be found, from clang during a build or
+/// ahead of one when `kargo add --cinterop` writes the `.def` file.
+pub fn missing_header_hint(header: &str, interop: &str) -> String {
+    format!(
+        "the C header `{header}` was not found: add the directory that holds it to `compiler-options` (`-I<dir>`) of \
+         [target.native.cinterop.{interop}] or of its `platform.<platform>` table, name the library's package in \
+         `pkg-config`, or install the library's development files"
+    )
+}
+
+/// Whether `line` belongs to the JVM stack trace `cinterop` prints when it fails. Kargo drops its
+/// frames: they name Kotlin/Native's internals, and the line that starts the trace carries clang's
+/// message, which [`header_hint`] turns into a note. The caller still sees them in the lines it
+/// collects for that note.
+fn is_jvm_stack_frame(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('\t') else { return false };
+    let rest = rest.trim_end();
+    rest.starts_with("at ") || (rest.starts_with("... ") && rest.ends_with(" more"))
 }
 
 /// The linker options a `cinterop` klib records for every program that links it: `-L` for the
@@ -432,8 +447,14 @@ impl CinteropUnit<'_> {
         let mut cmd = toolchain.cinterop_command();
         cmd.args(&args).current_dir(self.root);
         let mut lines = Vec::new();
-        let status =
-            crate::diagnostics::status_observed(shell, &mut cmd, "the Kotlin/Native cinterop tool", &mut |l| lines.push(l.to_owned()))?;
+        let mut keep = |line: &str| !is_jvm_stack_frame(line);
+        let status = crate::diagnostics::status_filtered(
+            shell,
+            &mut cmd,
+            "the Kotlin/Native cinterop tool",
+            &mut |l| lines.push(l.to_owned()),
+            &mut keep,
+        )?;
         if !status.success() {
             if let Some(hint) = header_hint(&lines, &self.interop.name) {
                 shell.note(hint);
@@ -717,6 +738,17 @@ mod tests {
         let hint = link_hint(&lines(&["ld.lld: error: unable to find library -lSDL2"])).unwrap();
         assert!(hint.contains("C library `SDL2`"), "{hint}");
         assert!(link_hint(&lines(&["error: unresolved reference 'x'"])).is_none());
+    }
+
+    #[test]
+    fn drops_the_jvm_stack_trace_of_a_failed_cinterop() {
+        // What a failed cinterop prints: the message, then frames of its own JVM stack trace.
+        assert!(!is_jvm_stack_frame("Exception in thread \"main\" java.lang.Error: x.c:1:10: fatal error: 'nope.h' file not found"));
+        assert!(!is_jvm_stack_frame("fatal error: 'nope.h' file not found"));
+        assert!(is_jvm_stack_frame("\tat org.jetbrains.kotlin.native.interop.gen.JvmGeneratorKt.main(JvmGenerator.kt:10)"));
+        assert!(is_jvm_stack_frame("\t... 12 more"));
+        // clang indents its source excerpts with spaces, which a stack trace's frames never use.
+        assert!(!is_jvm_stack_frame("    int x = y;"));
     }
 
     #[test]

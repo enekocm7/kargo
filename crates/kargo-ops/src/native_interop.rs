@@ -16,6 +16,7 @@ use kargo_util::process::slash;
 use crate::ops::build::{compiling, native_resolution};
 use crate::ops::context::{BuildContext, TargetSetup};
 use crate::pkg_config;
+use crate::workspace::Workspace;
 
 /// Extensions of the files a directory in `[target.native.c-sources] sources` contributes.
 pub const C_EXTENSIONS: &[&str] = &["c", "cc", "cpp", "cxx", "c++", "m", "mm"];
@@ -91,6 +92,57 @@ fn add_pkg_config_flags(options: &mut NativeOptions, flags: pkg_config::Flags) {
             options.linker_options.push(flag);
         }
     }
+}
+
+/// Whether a header of a `cinterop` entry is somewhere the build looks for it without the
+/// Kotlin/Native toolchain's own sysroot: an absolute path, or a file under the project root, the
+/// include directories of `[target.native.c-sources]`, the `-I` options of the `cinterop` entries
+/// and the compiler flags of `pkg_config`'s packages. `kargo add --cinterop` warns from it when it
+/// writes a `.def` file; a header the toolchain's sysroot holds counts as missing here.
+pub fn header_found(ws: &Workspace, header: &str, packages: &[String]) -> bool {
+    let path = Path::new(header);
+    if path.is_absolute() {
+        return path.is_file();
+    }
+    let root = ws.root();
+    let from_root = |dir: PathBuf| if dir.is_absolute() { dir } else { root.join(dir) };
+    let mut dirs = vec![root.to_path_buf()];
+    if let Some(native) = ws.manifest().targets.native.as_ref() {
+        if let Some(c) = &native.c_sources {
+            dirs.extend(c.include_dirs.iter().map(|d| root.join(d)));
+        }
+        for interop in &native.cinterop {
+            let options = std::iter::once(&interop.options).chain(interop.platform.values());
+            dirs.extend(include_dirs(options).map(from_root));
+        }
+    }
+    let found = |dirs: &[PathBuf]| dirs.iter().any(|dir| dir.join(path).is_file());
+    if found(&dirs) {
+        return true;
+    }
+    if packages.is_empty() {
+        return false;
+    }
+    // Their `-I` flags are only needed when the project does not have the header itself.
+    let search = pkg_config::search_path();
+    packages.iter().any(|package| {
+        pkg_config::probe(package, &search, false).is_ok_and(|flags| {
+            let dirs: Vec<PathBuf> = flags
+                .cflags
+                .iter()
+                .filter_map(|f| f.strip_prefix("-I"))
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+                .map(from_root)
+                .collect();
+            found(&dirs)
+        })
+    })
+}
+
+/// The `-I` directories of the compiler options.
+fn include_dirs<'a>(options: impl Iterator<Item = &'a NativeOptions> + 'a) -> impl Iterator<Item = PathBuf> + 'a {
+    options.flat_map(|o| o.compiler_options.iter()).filter_map(|o| o.strip_prefix("-I")).filter(|d| !d.is_empty()).map(PathBuf::from)
 }
 
 /// The directories a linker searches: `library-paths`, then the `-L` linker options.

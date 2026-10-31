@@ -10,6 +10,8 @@ use kargo_manifest::{MANIFEST_NAME, Manifest, Scope, TargetKind};
 use kargo_maven::{Artifact, CoordSpec, MavenClient, Repository, VersionReq, select_latest};
 use kargo_util::config::Config;
 
+use crate::native_interop;
+
 #[derive(Debug, Clone)]
 pub struct AddOptions {
     pub specs: Vec<String>,
@@ -237,6 +239,7 @@ pub fn add_cinterop(config: &Config, ws: &Workspace, name: &str, headers: &[Stri
     ws.check_manifest(&editor.contents()).context("the edited manifest is invalid; nothing was written")?;
     let def = ws.root().join("interop").join(format!("{name}.def"));
     let headers = if headers.is_empty() { vec![format!("{name}.h")] } else { headers.to_vec() };
+    let mut wrote_def = false;
     if def.exists() {
         config.shell().note(format!("keeping the existing {}", def.display()));
     } else {
@@ -248,9 +251,17 @@ pub fn add_cinterop(config: &Config, ws: &Workspace, name: &str, headers: &[Stri
             headers.join(" ")
         );
         std::fs::write(&def, text).with_context(|| format!("failed to write {}", def.display()))?;
+        wrote_def = true;
     }
     editor.save()?;
     config.shell().status("Adding", format!("C library `{name}` (package `{package}`, interop/{name}.def)"));
+    // A header the project cannot find would only fail later, in `cinterop`, with its own stack trace.
+    if wrote_def {
+        let packages: Vec<String> = pkg_config.map(str::to_owned).into_iter().collect();
+        for header in headers.iter().filter(|h| !native_interop::header_found(ws, h, &packages)) {
+            config.shell().warn(kargo_compiler::native::missing_header_hint(header, name));
+        }
+    }
     Ok(())
 }
 

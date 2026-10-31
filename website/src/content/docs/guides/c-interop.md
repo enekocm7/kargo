@@ -53,7 +53,7 @@ On Windows the platform is `mingw_x64`, so Kargo prints `target\debug\native\min
 
 The bindings use `kotlinx.cinterop` APIs, which need `@OptIn(ExperimentalForeignApi::class)`, or `opt-in = ["kotlinx.cinterop.ExperimentalForeignApi"]` in `[kotlin]`.
 
-`kargo add --cinterop sqlite --header sqlite3.h --pkg-config sqlite3` writes the `[target.native.cinterop.sqlite]` entry and an `interop/sqlite.def` to start from.
+`kargo add --cinterop sqlite --header sqlite3.h --pkg-config sqlite3` writes the `[target.native.cinterop.sqlite]` entry and an `interop/sqlite.def` to start from. It warns when a header it writes into the `.def` file is in none of the project's include directories: the project root, the `include-dirs` of [`[target.native.c-sources]`](#bundled-c-sources), the `-I` options of the `cinterop` entries and the compiler flags of the `pkg-config` packages. A header that only the Kotlin/Native sysroot has is reported too.
 
 ## Declaring a C library
 
@@ -395,6 +395,8 @@ Exception in thread "main" java.lang.Error: /tmp/4645017247209148547.c:1:10: fat
 note: the C header `mathx.h` was not found: add the directory that holds it to `compiler-options` (`-I<dir>`) of [target.native.cinterop.mathx] or of its `platform.<platform>` table, name the library's package in `pkg-config`, or install the library's development files
 error: could not generate the `mathx` C bindings for linux_x64 due to previous errors
 ```
+
+`cinterop` reports the failure as an uncaught JVM exception. Kargo keeps its message, which carries clang's error, and hides the stack trace of Kotlin/Native's internals that follows it.
 
 ```console
 $ kargo build
