@@ -1057,6 +1057,35 @@ pub fn wait_for_pid(adb: &Adb, serial: &str, app_id: &str) -> Option<u32> {
     }
 }
 
+/// Empties the log buffer of the device, so the log of a test run starts at the run.
+pub fn clear_logcat(adb: &Adb, serial: &str) {
+    let _ = adb.capture(Some(serial), &["logcat", "-c"], QUERY_TIMEOUT);
+}
+
+/// Writes what the device logged since [`clear_logcat`] to `path`.
+pub fn save_logcat(adb: &Adb, serial: &str, path: &Path) -> Result<()> {
+    let out = adb.capture(Some(serial), &["logcat", "-d", "-v", "threadtime"], Duration::from_secs(60))?;
+    if !out.success {
+        bail!("`adb logcat` failed: {}", out.message());
+    }
+    std::fs::write(path, out.stdout).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Saves a screenshot of the device's screen to `path`.
+pub fn save_screenshot(adb: &Adb, serial: &str, path: &Path) -> Result<()> {
+    const ON_DEVICE: &str = "/sdcard/kargo-screenshot.png";
+    let shot = adb.capture(Some(serial), &["shell", "screencap", "-p", ON_DEVICE], QUERY_TIMEOUT)?;
+    if !shot.success {
+        bail!("`screencap` failed: {}", shot.message());
+    }
+    let pulled = adb.capture(Some(serial), &["pull", ON_DEVICE, &path.to_string_lossy()], Duration::from_secs(60))?;
+    let _ = adb.capture(Some(serial), &["shell", "rm", ON_DEVICE], QUERY_TIMEOUT);
+    if !pulled.success {
+        bail!("`adb pull` failed: {}", pulled.message());
+    }
+    Ok(())
+}
+
 /// The `adb logcat` command of the process `pid`, or of the whole device when the process is not known.
 pub fn logcat_command(adb: &Adb, serial: &str, pid: Option<u32>) -> Command {
     let mut cmd = adb.command(Some(serial));

@@ -286,6 +286,11 @@ impl Workspace {
         dirs
     }
 
+    /// The instrumented tests of the Android target, which run on a device (`kargo test --instrumented`).
+    pub fn instrumented_tests(&self) -> PathBuf {
+        self.root.join("android-tests")
+    }
+
     pub fn common_tests(&self) -> PathBuf {
         self.root.join("tests")
     }

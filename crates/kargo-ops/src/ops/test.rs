@@ -62,6 +62,14 @@ pub struct TestOptions {
     pub failed: bool,
     /// Run JVM tests with the optimized jar on the runtime classpath.
     pub against_min: bool,
+    /// Run the Android tests of `android-tests/` on a device instead of the local ones (`--instrumented`).
+    pub instrumented: bool,
+    /// `--shard index/count` of the instrumented tests, the index counted from 1.
+    pub shard: Option<(u32, u32)>,
+    /// Run the instrumented tests with Android Test Orchestrator (`--orchestrator`).
+    pub orchestrator: bool,
+    /// The device, emulator and `--stop-emulator` of the instrumented tests.
+    pub android: crate::android_device::AndroidRun,
 }
 
 /// How `kargo test --list` prints the tests.
@@ -137,7 +145,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
             TestRun::Junit(cmd) => run_junit(ctx, cmd, opts, deadline),
             TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts, deadline),
             TestRun::Browser(run) => run_in_browser(ctx, run, target, opts, deadline),
-            TestRun::Android => test_android(ctx, opts),
+            TestRun::Android => test_android(ctx, opts, deadline),
         });
         let outcome = match passed {
             Ok(true) => TargetOutcome::Passed,
@@ -256,8 +264,12 @@ fn no_tests(ctx: &BuildContext, target: TargetKind) -> TestRun {
     TestRun::Done(true)
 }
 
-fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
+fn test_android(ctx: &BuildContext, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
     super::local::test_fixtures_unsupported(ctx, TargetKind::Android)?;
+    if opts.instrumented {
+        let reports = (opts.junit_report && !opts.no_run).then(|| reports_dir(ctx, TargetKind::Android)).transpose()?;
+        return test_android_instrumented(ctx, opts, reports.as_deref(), deadline);
+    }
     if sources(ctx, TargetKind::Android, true, &["kt", "java"])?.is_empty() {
         no_tests(ctx, TargetKind::Android);
         return Ok(true);
@@ -268,6 +280,51 @@ fn test_android(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         wrote_reports(ctx, dir);
     }
     Ok(passed)
+}
+
+/// `--instrumented`: the tests of `android-tests/` on a device, which is chosen like `kargo run -t android` does and
+/// started if it is a virtual device that is not running.
+fn test_android_instrumented(ctx: &BuildContext, opts: &TestOptions, reports: Option<&Path>, deadline: Option<Instant>) -> Result<bool> {
+    let dir = ctx.ws.root().join(crate::gradle::INSTRUMENTED_TESTS_DIR);
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "there are no instrumented tests: put them in `{}/` (for example `{0}/ExampleTest.kt`)",
+            crate::gradle::INSTRUMENTED_TESTS_DIR
+        );
+    }
+    if sources_in(&dir).is_empty() {
+        ctx.shell().note(format!("no instrumented tests found (put them in {}/)", crate::gradle::INSTRUMENTED_TESTS_DIR));
+        return Ok(true);
+    }
+    let selection = if opts.no_run { None } else { Some(crate::gradle::choose_device(ctx, &opts.android)?) };
+    let run = crate::gradle::InstrumentedRun {
+        filter: opts.filter.as_deref(),
+        no_run: opts.no_run,
+        report_dir: reports,
+        include: &opts.include_tags,
+        exclude: &opts.exclude_tags,
+        failed: opts.failed,
+        shard: opts.shard,
+        orchestrator: opts.orchestrator,
+        test_timeout: ctx.ws.manifest().test.test_timeout,
+        deadline,
+    };
+    let result = crate::gradle::test_instrumented(ctx, &run, selection.as_ref());
+    if let Some(dir) = reports {
+        wrote_reports(ctx, dir);
+    }
+    if let (Some(selection), true) = (&selection, opts.android.stop_emulator)
+        && selection.started
+    {
+        let toolbox = crate::android_device::Toolbox::locate(ctx.config, Some(ctx.ws.manifest()));
+        crate::android_device::stop_emulator(&toolbox.adb()?, ctx.shell(), &selection.serial)?;
+    }
+    result
+}
+
+/// The Kotlin and Java files under `dir`.
+fn sources_in(dir: &Path) -> Vec<PathBuf> {
+    kargo_util::fs::collect_files(dir, &["kt", "java"])
 }
 
 /// Clears and returns `target/<profile>/<target>/test-reports`, where `--report junit` writes.
@@ -359,7 +416,12 @@ fn failed_classes(reports: &Path) -> Result<Vec<String>> {
 
 /// Notes the options that only apply to JVM tests, for the targets that will not use them.
 fn note_jvm_only_options(ctx: &BuildContext, targets: &[TargetKind], opts: &TestOptions) {
-    let others: Vec<&str> = targets.iter().filter(|target| **target != TargetKind::Jvm).map(|target| target.as_str()).collect();
+    // Instrumented Android tests take tag filters (as annotations), `--failed` and the timeouts.
+    let others: Vec<&str> = targets
+        .iter()
+        .filter(|target| **target != TargetKind::Jvm && !(opts.instrumented && **target == TargetKind::Android))
+        .map(|target| target.as_str())
+        .collect();
     if others.is_empty() {
         return;
     }
@@ -397,7 +459,7 @@ fn timed_out_message(ctx: &BuildContext) -> String {
 
 /// Waits for a test process to exit. When `deadline` passes first, the process is killed.
 /// Returns its status and whether it was killed for that reason.
-fn wait_until(child: &mut Child, deadline: Option<Instant>) -> std::io::Result<(ExitStatus, bool)> {
+pub(crate) fn wait_until(child: &mut Child, deadline: Option<Instant>) -> std::io::Result<(ExitStatus, bool)> {
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok((status, false));

@@ -83,6 +83,60 @@ kargo doc -t android                # API documentation in target/debug/doc/
 
 `kargo test -t android` compiles `tests/` and `tests-android/`, runs them with Gradle and prints one `test ... ok` line per test and a `test result:` summary, like the other targets. A failing test makes it exit with status `101`. If the project has test sources but Gradle runs no tests, Kargo reports an error instead of passing silently.
 
+### Instrumented tests
+
+Tests that need a device or an emulator go in `android-tests/`. Kargo registers the directory as the `androidTest` source set of the generated project, sets AndroidX Test's `AndroidJUnitRunner`, and gives the tests your `[dev-dependencies]` plus `androidx.test:runner`, `androidx.test.ext:junit` and `kotlin-test-junit`.
+
+```kotlin title="android-tests/ExampleInstrumentedTest.kt"
+import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Test
+import kotlin.test.assertEquals
+
+class ExampleInstrumentedTest {
+    @Test
+    fun usesTheAppContext() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assertEquals("com.example.droid", context.packageName)
+    }
+}
+```
+
+```sh
+kargo test -t android --instrumented                      # on the only device, or pick from a list
+kargo test -t android --instrumented -s Pixel_8_API_35    # start this virtual device if it is not running
+kargo test -t android --instrumented --headless --stop-emulator   # CI: no window, shut it down afterwards
+kargo test -t android --instrumented --report junit       # JUnit XML in target/<profile>/android/test-reports/
+```
+
+The device is chosen like [`kargo run -t android`](#devices-and-emulators) chooses it (`-s, --device`, `KARGO_ANDROID_DEVICE`, the only device, or a list). Kargo runs `connected<Variant>AndroidTest` on it, reads the JUnit XML that AGP writes, and prints the same `test ... ok` lines, `test result:` summary and `--message-format json` messages as the local tests. The `filter` argument is passed to the runner, so it names a class (`com.example.ExampleInstrumentedTest`) or a method (`com.example.ExampleInstrumentedTest#usesTheAppContext`). `--no-run` only compiles the tests.
+
+| Option | What it does |
+|---|---|
+| `--include-tag <annotation>`, `--exclude-tag <annotation>` | Only run the tests with, or skip the tests with, this annotation class (`com.example.Slow`). AndroidJUnitRunner filters by annotation, so JUnit 5 `@Tag` names do not apply |
+| `--failed` | Rerun the classes that failed in the last unfiltered, unsharded run |
+| `--shard <i>/<n>` | Run shard `i` of `n` (`i` counts from 1), to split the tests over several devices in CI |
+| `--orchestrator` | Run each test in its own instrumentation with Android Test Orchestrator, so one crash cannot take the others down |
+| `--report junit` | Copy the JUnit XML to `target/<profile>/android/test-reports/` |
+
+[`[test] timeout`](../../reference/manifest/#test) limits the whole run: Kargo stops Gradle when it passes. [`[test] test-timeout`](../../reference/manifest/#test) is passed to the runner as the limit of one test.
+
+Kargo clears the device's log before the run and saves it to `target/android/test-results/logcat.txt` afterwards. When a test failed, it also saves a screenshot of the device's screen to `target/android/test-results/failure.png`, which shows the screen as the run ended and not at the failing test.
+
+`kargo metadata` and `kargo lsp` list `android-tests/` among the Android target's test roots, so editors treat the files as tests.
+
+The device to test on is always named on the command line (`-s`, or `KARGO_ANDROID_DEVICE`); there is no `kargo.toml` key for a test virtual device, and Gradle Managed Devices are not planned for now. In CI, start an emulator with `kargo android emulator start --headless` or use `--headless --stop-emulator` as above.
+
+Without `--instrumented`, `kargo test -t android` runs the local tests and leaves `android-tests/` alone.
+
+### Robolectric
+
+Local tests run on the JVM without an Android framework. For code that needs one, add [Robolectric](https://robolectric.org) to the dev dependencies and annotate the tests with `@RunWith(RobolectricTestRunner::class)`:
+
+```toml title="kargo.toml"
+[dev-dependencies]
+"org.robolectric:robolectric" = "4.14.1"
+```
+
 `kargo doc -t android` documents `src/` and `src-android/` with Dokka, using the classpath Gradle resolves for the debug variant. See [API documentation](../documentation/#android).
 
 The generated project compiles Kotlin with the Kotlin Gradle plugin at your `[kotlin] version`, so Android code is compiled with the same Kotlin version as your other targets rather than the version bundled with AGP.
@@ -490,7 +544,7 @@ kargo lint --android --create-baseline
 ```sh
 kargo android tasks
 kargo android lint
-kargo android connectedAndroidTest
+kargo android connectedAndroidTest      # prefer `kargo test -t android --instrumented`
 kargo android bundleRelease
 ```
 

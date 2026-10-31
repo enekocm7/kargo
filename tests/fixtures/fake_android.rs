@@ -173,6 +173,10 @@ fn adb(state: &std::path::Path, mut args: Vec<String>) {
                 std::process::exit(1);
             }
         }
+        ["logcat", "-c"] => {}
+        ["logcat", "-d", ..] => println!("05-01 12:00:00.000  4242  4242 I Tests: the device log"),
+        ["shell", "screencap", ..] | ["shell", "rm", ..] => {}
+        ["pull", _, local] => std::fs::write(local, b"png").unwrap(),
         ["logcat", rest @ ..] => {
             println!("--- logcat {}", rest.join(" "));
             println!("05-01 12:00:00.000  4242  4242 I Hello: the app says hi");
