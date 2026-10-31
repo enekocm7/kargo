@@ -1,0 +1,17 @@
+[package]
+name = "multiplatform-library"
+version = "0.1.0"
+group = "com.example"
+
+[target.jvm]
+
+[target.js]
+environment = "node"
+kind = "library"
+
+[target.wasm]
+environment = "js"
+kind = "library"
+
+[frameworks]
+serialization = true

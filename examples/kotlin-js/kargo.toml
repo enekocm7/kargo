@@ -1,0 +1,7 @@
+[package]
+name = "kotlin-js"
+version = "0.1.0"
+group = "com.example"
+
+[target.js]
+environment = "node"

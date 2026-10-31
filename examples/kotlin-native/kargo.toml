@@ -1,0 +1,8 @@
+[package]
+name = "kotlin-native"
+version = "0.1.0"
+group = "com.example"
+
+[target.native]
+platforms = ["host"]
+kind = "executable"

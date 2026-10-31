@@ -1,0 +1,9 @@
+[package]
+name = "android"
+version = "0.1.0"
+group = "com.example"
+
+[target.android]
+namespace = "com.example.android"
+kind = "application"
+min-sdk = 24

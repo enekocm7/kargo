@@ -1,0 +1,8 @@
+[package]
+name = "ktor-server"
+version = "0.1.0"
+group = "com.example"
+
+[frameworks]
+ktor = { server = "netty" }
+serialization = true

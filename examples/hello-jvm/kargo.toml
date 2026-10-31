@@ -1,0 +1,4 @@
+[package]
+name = "hello-jvm"
+version = "0.1.0"
+group = "com.example"
