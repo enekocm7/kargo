@@ -1,12 +1,13 @@
 ---
 title: Distributing applications
-description: Ship a JVM application as a runtime image that needs no Java, a GraalVM native executable, or an installer.
+description: Ship a JVM application as a zip or tar distribution, a runtime image that needs no Java, a GraalVM native executable, or an installer.
 ---
 
 `kargo package` builds a fat jar, which runs anywhere with `java -jar`, but only where the right Java is installed. To ship a program to people who don't have Java, `--format` builds something else:
 
 ```console
 $ kargo package --release                         # target/release/jvm/hello-0.1.0-min.jar (R8-shrunk), next to hello-0.1.0-all.jar
+$ kargo package --release --dist                  # a zip and a tar.gz with bin/ start scripts and lib/ jars
 $ kargo package --release --format jlink          # the jars, a trimmed Java runtime and launchers
 $ kargo package --release --format native-image   # a GraalVM native executable
 $ kargo package --release --format installer      # .msi on Windows, .dmg on macOS, .deb on Linux
@@ -24,6 +25,54 @@ To install a tool on your own machine instead, use [`kargo install`](../installi
 :::caution[Build on each OS]
 A runtime image, a native executable and an installer contain native code for the OS and CPU they were built on: build the Windows one on Windows, the macOS one on macOS (an Apple silicon Mac builds for Apple silicon) and the Linux one on Linux. A CI matrix does it in one go; see [Native executables and installers](../ci/#native-executables-and-installers).
 :::
+
+## Distribution archives
+
+`--dist` is Gradle's `distZip`: the program's jars and start scripts in an archive that people unpack and run where Java is installed. It is the smallest thing to ship and the one that needs no OS-specific build, so the archive built on any machine runs on every OS.
+
+```console
+$ kargo package --release --dist
+target/dist/hello-0.1.0.zip
+target/dist/hello-0.1.0.tar.gz
+```
+
+Both archives hold the same tree under a `hello-0.1.0/` directory, which Kargo also leaves unpacked in `target/dist/hello-0.1.0/` so you can try it:
+
+```text
+hello-0.1.0/
+├── bin/
+│   ├── hello          # POSIX shell
+│   └── hello.bat
+├── lib/
+│   ├── hello-0.1.0.jar
+│   └── kotlin-stdlib-2.2.20.jar
+├── conf/              # from [package.dist] include
+└── LICENSE            # README, LICENSE and NOTICE files of the project root
+```
+
+The start scripts find Java in `JAVA_HOME` (`$JAVA_HOME/bin/java`), then on the `PATH`, and say so when neither works. They run the main class with the jars of `lib/` on the class path, the `jvm-args` of [`[target.jvm]`](../../reference/manifest/#targetjvm) and the profile, then the `JAVA_OPTS` environment variable and `<NAME>_OPTS` (`HELLO_OPTS`; the program's name in capitals, with every other character an underscore), then your arguments. The `bin/` scripts can be symlinked onto a `PATH`.
+
+```console
+$ HELLO_OPTS="-Xmx1g" hello-0.1.0/bin/hello --name Ada
+```
+
+A start script is written for the project's main class and for each [`[[bin]]`](../multiple-programs/) with a JVM main class; `--bin <name>` writes only that one. The jars are the thin ones `kargo run` uses, with no `Class-Path` entry, so nothing in `lib/` refers to your machine.
+
+| Option | Meaning |
+|---|---|
+| `--archive <formats>` | `zip`, `tar` or `tar.gz`, comma separated. The default is `zip,tar.gz` |
+| `--no-scripts` | Write no `bin/` scripts: a distribution of `lib/` for a library, or one with your own scripts. Needs no main class |
+
+Add files with [`[package.dist]`](../../reference/manifest/#packagedist):
+
+```toml title="kargo.toml"
+[package.dist]
+include = ["conf", "docs/CHANGELOG.md"]
+```
+
+Each path is copied to the same place in the archive, and must exist. Archives are reproducible: entries are sorted, timestamps are fixed, there are no owners, and the start scripts are executable (mode 0755) no matter which OS built them, so the same sources give the same bytes.
+
+The distribution contains no Java runtime; for one that does, use [`--format jlink`](#runtime-images).
 
 ## Runtime images
 

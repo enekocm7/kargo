@@ -281,6 +281,8 @@ struct RawPackage {
     #[serde(default)]
     jlink: RawJlink,
     #[serde(default)]
+    dist: RawDist,
+    #[serde(default)]
     optimize: RawOptimize,
     #[serde(default)]
     native_image: RawNativeImage,
@@ -309,6 +311,13 @@ struct RawJlink {
     #[serde(default)]
     modules: Vec<String>,
     jdeps: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawDist {
+    #[serde(default)]
+    include: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2834,6 +2843,7 @@ impl RawManifest {
         };
         let packaging = PackagingSettings {
             jlink: self.package.jlink.validate()?,
+            dist: self.package.dist.validate()?,
             optimize: self.package.optimize.validate()?,
             native_image: self.package.native_image.validate(),
             installer: self.package.installer.validate()?,
@@ -3639,6 +3649,23 @@ impl RawJlink {
             bail!("[package.jlink] `jdeps = false` needs `modules`: the JDK modules to put in the runtime image, e.g. [\"java.base\"]");
         }
         Ok(JlinkSettings { modules: self.modules, jdeps })
+    }
+}
+
+impl RawDist {
+    fn validate(self) -> Result<DistSettings> {
+        for path in &self.include {
+            let escapes = path.is_absolute()
+                || path.has_root()
+                || path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)));
+            if path.as_os_str().is_empty() || escapes {
+                bail!(
+                    "[package.dist] `include` entries must be paths inside the project, such as \"conf\" or \"docs/NOTICE\", got `{}`",
+                    path.display()
+                );
+            }
+        }
+        Ok(DistSettings { include: self.include })
     }
 }
 

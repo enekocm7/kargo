@@ -2176,6 +2176,8 @@ category = "Development"
     assert!(parse_err(&with("[package.installer]\nbogus = 1")).contains("bogus"));
     assert!(parse_err(&with("[package.jlink]\nmodules = [\"java naming\"]")).contains("module names"));
     assert!(parse_err(&with("[package.jlink]\njdeps = false")).contains("needs `modules`"));
+    assert_eq!(parse(&with("[package.dist]\ninclude = [\"conf\", \"docs/NOTICE\"]")).packaging.dist.include.len(), 2);
+    assert!(parse_err(&with("[package.dist]\ninclude = [\"../secret\"]")).contains("inside the project"));
     assert!(parse_err(&with("[package.native-image]\nstatic = \"yes\"")).contains("static"));
 }
 

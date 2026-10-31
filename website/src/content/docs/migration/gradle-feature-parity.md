@@ -107,7 +107,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Gradle feature | Status | In Kargo |
 |---|---|---|
 | Executable and fat jars | Supported | `kargo package`; see [Distributing](../../guides/distributing/) |
-| Application distribution (`installDist`, `distZip`) | Planned | [#222](https://github.com/enekocm7/kargo/issues/222) |
+| Application distribution (`installDist`, `distZip`, `distTar`) | Supported | `kargo package --dist`; see [Distribution archives](../../guides/distributing/#distribution-archives). A bundled JDK and `kargo publish` attaching the archive are not done yet ([#222](https://github.com/enekocm7/kargo/issues/222)) |
 | jlink and jpackage | Supported | `--format jlink`, `--format installer` |
 | GraalVM native image | Supported | `--format native-image` |
 | Shadow relocation, resource merging, `minimize()` | Supported | [`[package.shade]`](../../guides/distributing/#shading) |
@@ -163,7 +163,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | SQLDelight | A [`[[generate]]` step](../../guides/code-generation/) with `run` that calls SQLDelight's command-line generator (there is no built-in step) |
 | BuildConfig (gmazoure, buildconfig) | `[env] expose` generates a `BuildConfig`; see [Code generation](../../guides/code-generation/) |
 | Dependency-Check | [`kargo audit`](../../reference/commands/#kargo-audit) |
-| Application, Distribution | `kargo package`; distributions are [#222](https://github.com/enekocm7/kargo/issues/222) |
+| Application, Distribution | `kargo package`; distributions are `kargo package --dist` |
 | Maven Publish, Signing, Vanniktech | [`kargo publish`](../../guides/publishing/) |
 | Compose Multiplatform | `[frameworks] compose`; see [Compose](../../guides/compose/) |
 

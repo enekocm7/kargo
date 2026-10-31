@@ -9,6 +9,7 @@ pub mod check;
 pub mod ci;
 pub mod classpath;
 pub mod context;
+pub mod dist;
 pub mod doc;
 pub mod doctor;
 pub mod env;
@@ -535,6 +536,17 @@ pub struct PackageOptions {
     pub desktop: bool,
     /// `--platforms`: the Compose Desktop platforms whose Skiko natives the jar carries.
     pub platforms: Vec<String>,
+    /// `--dist`: build an application distribution archive instead of a jar.
+    pub dist: Option<DistOptions>,
+}
+
+/// `kargo package --dist`.
+#[derive(Debug, Clone)]
+pub struct DistOptions {
+    /// The archives to write: all of [`dist::Archive::DEFAULT`] when empty.
+    pub archives: Vec<dist::Archive>,
+    /// Write `bin/` start scripts (`false` for `--no-scripts`).
+    pub scripts: bool,
 }
 
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target, launching
@@ -552,6 +564,17 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
         None if !targets.is_enabled(TargetKind::Jvm) && targets.is_enabled(TargetKind::Android) && !opts.desktop => TargetKind::Android,
         None => TargetKind::Jvm,
     };
+    if opts.dist.is_some() {
+        if let Some(format) = opts.format {
+            bail!("`--dist` writes an application distribution and does not combine with `--format {}`", format.as_str());
+        }
+        if opts.fat || opts.optimize || opts.desktop {
+            bail!("`--dist` does not combine with `--fat`, `--optimize` or `--desktop`");
+        }
+        if target != TargetKind::Jvm {
+            bail!("`--dist` packages a JVM application and needs the jvm target, not {target}");
+        }
+    }
     let format = opts.format.unwrap_or(if opts.desktop { PackageFormat::Installer } else { PackageFormat::Jar });
     let platforms = crate::compose::parse_platforms(&opts.platforms)?;
     if opts.desktop {
@@ -592,6 +615,7 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
             opts.optimize || (ctx.profile == ProfileKind::Release && format == PackageFormat::Jar),
             format,
             &platforms,
+            opts.dist.as_ref(),
         ),
         TargetKind::Android => {
             if opts.bin.is_some() || opts.fat {
@@ -623,6 +647,7 @@ fn package_jvm(
     optimize: bool,
     format: PackageFormat,
     platforms: &[&str],
+    dist: Option<&DistOptions>,
 ) -> Result<Vec<PathBuf>> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
         bail!("`kargo package` creates an executable jar and needs the JVM target; use `kargo build` for other targets");
@@ -652,6 +677,7 @@ fn package_jvm(
     };
     let package_main_class = bin_main.clone().or_else(|| jvm.main_class.clone());
     let mut files = match format {
+        _ if dist.is_some() => distribution(ctx, &jvm, bin, dist.expect("checked by the guard"))?,
         PackageFormat::Jar if bin.is_none() && !fat && platforms.is_empty() && jvm.main_class.is_none() => {
             vec![publish::package_library(ctx, &jvm)?]
         }
@@ -671,6 +697,37 @@ fn package_jvm(
     crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PostPackage, &env)?;
     build::finished(ctx, start);
     Ok(files)
+}
+
+/// `--dist`: the start scripts are the `--bin` one, or every `[[bin]]` with a JVM main class plus the
+/// package's own main class (unless a bin has its package's name).
+fn distribution(ctx: &BuildContext, jvm: &build::JvmBuild, bin: Option<&str>, opts: &DistOptions) -> Result<Vec<PathBuf>> {
+    let manifest = ctx.ws.manifest();
+    let own = manifest.package.name.as_str();
+    let mut programs: Vec<dist::Program> = Vec::new();
+    if let Some(name) = bin {
+        let main_class = build::bin_main_class(ctx.ws.root(), build::find_bin(manifest, name)?)?;
+        programs.push(dist::Program { name: name.to_owned(), main_class });
+    } else {
+        for bin in &manifest.bins {
+            if let Ok(main_class) = build::bin_main_class(ctx.ws.root(), bin) {
+                programs.push(dist::Program { name: bin.name.clone(), main_class });
+            }
+        }
+        if let Some(main_class) = &jvm.main_class
+            && !programs.iter().any(|p| p.name == own)
+        {
+            programs.insert(0, dist::Program { name: own.to_owned(), main_class: main_class.clone() });
+        }
+    }
+    if opts.scripts && programs.is_empty() {
+        bail!(
+            "`--dist` writes a start script for each program, but the package has none: {}; declare a [[bin]] or a `main` function, or pass `--no-scripts` for a distribution of jars only",
+            jvm.main_class_error.as_deref().unwrap_or("it declares no [[bin]] with a main class")
+        );
+    }
+    let archives = if opts.archives.is_empty() { dist::Archive::DEFAULT.to_vec() } else { opts.archives.clone() };
+    dist::dist(ctx, jvm, &programs, &archives, opts.scripts)
 }
 
 /// The self-contained `<name>-<version>-all.jar`. With `platforms` (`--desktop --platforms`), it

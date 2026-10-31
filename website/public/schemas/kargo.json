@@ -30,6 +30,14 @@
             "jdeps": { "description": "Ask jdeps which JDK modules the program uses. `false` uses only `modules`.", "type": "boolean", "default": true }
           }
         },
+        "dist": {
+          "description": "What `kargo package --dist` adds to the distribution archive besides `bin/` and `lib/`.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "include": { "description": "Files and directories of the project, copied into the archive at the same relative path. README, LICENSE and NOTICE files in the project root are always included.", "type": "array", "items": { "type": "string", "minLength": 1 }, "examples": [["conf", "docs/CHANGELOG.md"]] }
+          }
+        },
         "optimize": {
           "description": "R8 shrinking, optimization and obfuscation for JVM jars. Enabled by --release or kargo package --optimize.",
           "type": "object",
