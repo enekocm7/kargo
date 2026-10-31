@@ -12,7 +12,7 @@ use crate::env::{EnvOptions, ProjectEnv};
 use crate::lockfile::Lockfile;
 use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
-use kargo_manifest::{Dependency, JsEnvironment, Manifest, Scope, TargetKind, WasmEnvironment};
+use kargo_manifest::{Dependency, JsEnvironment, Manifest, Scope, TargetKind, TestSuite, WasmEnvironment};
 use kargo_maven::resolver::ResolvedNode;
 use kargo_maven::{Artifact, DependencyRequest, Exclusion, Explanation, MavenClient, ModuleId, Platform, Repository, Resolution, Resolver};
 use kargo_toolchain::jdks::JdkNeeds;
@@ -512,6 +512,14 @@ impl<'a> BuildContext<'a> {
     }
 
     pub fn setup(&self, target: TargetKind) -> Result<TargetSetup> {
+        self.setup_for_suite(target, None)
+    }
+
+    /// The dependency configuration of `target`, with the Maven dependencies of the test
+    /// suite `suite` added to the test classpath (`None` is the default `unit` suite).
+    /// A suite's dependencies replace the ones with the same artifact, as the suite is
+    /// the most specific declaration.
+    pub fn setup_for_suite(&self, target: TargetKind, suite: Option<&TestSuite>) -> Result<TargetSetup> {
         let manifest = self.ws.manifest();
         let mut contributions = builtins::contributions(manifest, target, self.ws.root())?;
         if let Some(compose) = &manifest.frameworks.compose
@@ -522,6 +530,18 @@ impl<'a> BuildContext<'a> {
         let user = with_profile_dependencies(manifest.dependencies_for(target), &self.ws.profile(&self.profile)?.dependencies);
         let mut all = merge_deps(&user, &contributions.dependencies);
         let mut dev_all = merge_deps(&manifest.dev_dependencies, &contributions.dev_dependencies);
+        if let Some(suite) = suite {
+            dev_all = merge_deps(&suite.dependencies, &dev_all);
+            // The suite's own declaration wins over a dev-dependency of the same artifact.
+            // `merge_deps` keeps the first occurrence, so put the suite's first.
+            let mut reordered = suite.dependencies.clone();
+            for d in dev_all {
+                if !reordered.iter().any(|u| u.same_artifact(&d)) {
+                    reordered.push(d);
+                }
+            }
+            dev_all = reordered;
+        }
         let (own, dev_own) = (all.len(), dev_all.len());
         // Path dependencies bring their Maven dependencies (declared and framework ones) along:
         // the `exported` ones (and the frameworks' libraries) with Maven's scope rules, the others
@@ -546,17 +566,88 @@ impl<'a> BuildContext<'a> {
                 }
             }
         }
+        // The suite's own path dependencies bring their Maven dependencies too.
+        if let Some(suite) = suite {
+            for path in &suite.path_dependencies {
+                let index = self
+                    .ws
+                    .path_dependencies()
+                    .iter()
+                    .find(|(d, _)| d.name == path.name)
+                    .map(|(_, i)| *i)
+                    .or_else(|| self.project.packages().iter().position(|p| p.name() == path.name));
+                let Some(index) = index else { continue };
+                let pkg = self.project.package(index);
+                let theirs = builtins::contributions(pkg.manifest(), target, pkg.root())?.dependencies;
+                let inherited: Vec<Dependency> = merge_deps(&pkg.manifest().dependencies_for(target), &theirs)
+                    .into_iter()
+                    .filter_map(|mut d| {
+                        if !d.bom {
+                            d.scope = inherited_scope(path.scope, d.scope, d.exported)?;
+                        }
+                        Some(d)
+                    })
+                    .collect();
+                merge_inherited(&mut dev_all, dev_own, inherited);
+                // The suite's direct Maven dependencies of the path package itself are handled
+                // through `local_dependencies_for_suite` artifacts; their versions come from the lock.
+            }
+        }
         // Test fixtures compile against their package's dev-dependencies, which the tests using them need too.
         for (_, index) in self.ws.path_dependencies().iter().filter(|(d, _)| d.test_fixtures && d.applies_to(target, true)) {
             let pkg = self.project.package(*index);
             let theirs = builtins::contributions(pkg.manifest(), target, pkg.root())?.dev_dependencies;
             merge_inherited(&mut dev_all, dev_own, merge_deps(&pkg.manifest().dev_dependencies, &theirs));
         }
+        if let Some(suite) = suite {
+            for path in &suite.path_dependencies {
+                if !path.test_fixtures {
+                    continue;
+                }
+                let Some(index) = self.project.packages().iter().position(|p| p.name() == path.name) else { continue };
+                let pkg = self.project.package(index);
+                let theirs = builtins::contributions(pkg.manifest(), target, pkg.root())?.dev_dependencies;
+                merge_inherited(&mut dev_all, dev_own, merge_deps(&pkg.manifest().dev_dependencies, &theirs));
+            }
+        }
         let (boms, main): (Vec<_>, Vec<_>) = all.into_iter().partition(|d| d.bom);
         let (dev_boms, dev): (Vec<_>, Vec<_>) = dev_all.into_iter().partition(|d| d.bom);
         let mut boms = boms;
         boms.extend(dev_boms);
         Ok(TargetSetup { target, contributions, main, dev, boms })
+    }
+
+    /// Every package the suite's tests reach through path dependencies: the main and dev
+    /// ones, plus the suite's own `path` dependencies, with their transitive main dependencies.
+    pub fn local_dependencies_for_suite(&self, target: TargetKind, suite: Option<&TestSuite>) -> Result<Vec<LocalDependency>> {
+        let mut out = self.local_dependencies(target, false)?;
+        out.extend(self.local_dependencies(target, true)?);
+        let Some(suite) = suite else {
+            return Ok(out);
+        };
+        for path in &suite.path_dependencies {
+            let Some(index) = self.project.packages().iter().position(|p| p.name() == path.name) else {
+                anyhow::bail!(
+                    "test suite `{}` depends on `{}` through `path`, which is not part of this project; add it with a `path` dependency",
+                    suite.name,
+                    path.name
+                );
+            };
+            if out.iter().any(|d| d.package == index) {
+                continue;
+            }
+            out.push(LocalDependency { package: index, scope: path.scope });
+            // The suite package's own main dependencies, as `local_dependencies` would add them.
+            for local in self.project.package(index).path_dependencies().iter().filter(|(d, _)| d.applies_to(target, false)) {
+                if let Some(s) = inherited_scope(path.scope, local.0.scope, local.0.exported)
+                    && !out.iter().any(|d| d.package == local.1)
+                {
+                    out.push(LocalDependency { package: local.1, scope: s });
+                }
+            }
+        }
+        out.retain(|d| d.package != self.package);
+        Ok(out)
     }
 
     fn inputs_fingerprint(&self, platform: &Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> String {

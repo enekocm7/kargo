@@ -1199,6 +1199,9 @@ struct TestArgs {
     /// Start the JVM tests suspended, waiting for a debugger on this port (default 5005)
     #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
     debug: Option<u16>,
+    /// Test suite to run: `unit` (the default, `tests/`), a `[test.suites.<name>]` suite such as `integration`, or `all` (repeatable, runs in order)
+    #[arg(long, value_name = "NAME")]
+    suite: Vec<String>,
     #[command(flatten)]
     android: Box<AndroidTestArgs>,
     /// Compile the tests and list them instead of running them (JVM and Native)
@@ -2632,6 +2635,8 @@ fn watch_options(watch: bool, args: &WatchArgs) -> Result<Option<WatchOptions>> 
 
 /// Compiles and runs the tests of the selected packages. `Ok(false)` when a test failed.
 fn run_tests(config: &Config, project: &Project, global: &GlobalArgs, build: &BuildArgs, opts: &TestOptions) -> Result<bool> {
+    let selected = project.select(&build.packages.selection())?;
+    ops::test::validate_suites(project, &selected, &opts.suites)?;
     let passed = build_packages(
         config,
         project,
@@ -3225,6 +3230,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             against_min,
             report,
             debug,
+            suite,
             android,
             list,
             format,
@@ -3263,6 +3269,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     ..Default::default()
                 },
                 env: env.options(),
+                suites: suite,
             };
             let Some(watch) = watch else {
                 return if run_tests(config, &project, global, &build, &opts)? {
@@ -5043,6 +5050,10 @@ mod tests {
         assert!(
             matches!(cli.command, Command::Test(TestArgs { debug: Some(5005), ref filter, .. }) if filter.as_deref() == Some("MathTest"))
         );
+        let cli = Cli::try_parse_from(["kargo", "test", "--suite", "unit", "--suite", "integration"]).unwrap();
+        assert!(matches!(cli.command, Command::Test(TestArgs { ref suite, .. }) if suite == &["unit", "integration"]));
+        let cli = Cli::try_parse_from(["kargo", "test", "--suite", "all"]).unwrap();
+        assert!(matches!(cli.command, Command::Test(TestArgs { ref suite, .. }) if suite == &["all"]));
         let cli = Cli::try_parse_from(["kargo", "metadata", "--no-deps", "--format", "json"]).unwrap();
         assert!(matches!(cli.command, Command::Metadata { no_deps: true, fingerprint: false, .. }));
         assert!(Cli::try_parse_from(["kargo", "metadata", "--format", "text"]).is_err());

@@ -93,10 +93,10 @@ The first build of the job starts a [compiler daemon](../build-performance/#the-
       - uses: mikepenz/action-junit-report@v5
         if: always()
         with:
-          report_paths: target/*/*/test-reports/*.xml
+          report_paths: target/*/*/test-reports*/*.xml
 ```
 
-`if: always()` publishes the results when tests fail, which is when you need them. In GitLab, list the same paths under `artifacts: reports: junit:`; in Jenkins, pass them to the `junit` step.
+Each [test suite](../testing/#test-suites) writes its own `test-reports-<name>/`, so `test-reports*` picks up the unit tests and every suite. `if: always()` publishes the results when tests fail, which is when you need them. In GitLab, list the same paths under `artifacts: reports: junit:`; in Jenkins, pass them to the `junit` step.
 
 ### Code coverage
 

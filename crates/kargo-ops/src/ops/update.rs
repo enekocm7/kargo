@@ -87,9 +87,40 @@ fn resolve_package(ctx: &BuildContext, previous: &Lockfile) -> Result<()> {
                 build::jvm_processor_path(ctx, &setup, test)?;
                 build::jvm_ksp_path(ctx, &setup, test)?;
             }
+            // Test suites have their own test classpath, locked separately.
+            for suite in ctx.ws.manifest().test.suites.values() {
+                let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                let test_key = format!("jvm/test-{}", suite.name);
+                ctx.resolve(
+                    &ctx.ws.lock_key(&test_key),
+                    kargo_maven::Platform::Jvm,
+                    &suite_setup.requests(&build::ALL_SCOPES, true),
+                    &suite_setup.boms,
+                )?;
+                build::jvm_processor_path_for_suite(ctx, &suite_setup, true, Some(suite))?;
+                build::jvm_ksp_path_for_suite(ctx, &suite_setup, true, Some(suite))?;
+            }
         }
         if target == TargetKind::Wasm {
             crate::web_resources::fetch(ctx)?;
+            for suite in ctx.ws.manifest().test.suites.values() {
+                let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                build::wasm_resolution_for_suite(ctx, &suite_setup, true, Some(suite))?;
+            }
+        }
+        if target == TargetKind::Js {
+            for suite in ctx.ws.manifest().test.suites.values() {
+                let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                build::js_resolution_for_suite(ctx, &suite_setup, true, Some(suite))?;
+            }
+        }
+        if target == TargetKind::Native {
+            for suite in ctx.ws.manifest().test.suites.values() {
+                let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                for p in build::native_platforms(ctx)? {
+                    build::native_resolution_for_suite(ctx, &suite_setup, &p, true, Some(suite))?;
+                }
+            }
         }
         relock_tools(ctx, target, previous)?;
     }

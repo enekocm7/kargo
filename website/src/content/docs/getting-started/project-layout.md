@@ -18,6 +18,7 @@ my-app/
 ├── tests/               common tests (kotlin.test)
 ├── android-tests/       Android instrumented tests (run on a device with `kargo test --instrumented`)
 ├── tests-jvm/           JVM-only tests (likewise tests-wasm/, tests-js/, tests-native/, tests-android/)
+├── integration-tests/   an extra [test suite](../../guides/testing/#test-suites) (`[test.suites.integration]`), run with `kargo test --suite integration`
 ├── test-fixtures/       test helpers shared with the tests of packages that depend on this one (JVM)
 ├── benches/             common benchmarks, run with kargo bench (JVM)
 ├── benches-jvm/         JVM-only benchmarks

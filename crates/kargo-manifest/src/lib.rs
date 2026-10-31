@@ -2106,13 +2106,23 @@ pub struct TestSettings {
     pub test_timeout: Option<Duration>,
     /// JVM arguments for the test process, after `[target.jvm] jvm-args`.
     pub jvm_args: Vec<String>,
+    /// Extra test suites by name (`[test.suites.<name>]`), such as `integration`.
+    /// The default `unit` suite (`tests/`, `tests-<target>/`) is always present and is not listed here.
+    pub suites: BTreeMap<String, TestSuite>,
     /// Code coverage of `kargo test --coverage` (JVM, JaCoCo).
     pub coverage: CoverageSettings,
 }
 
 impl Default for TestSettings {
     fn default() -> Self {
-        Self { fail_fast: true, timeout: None, test_timeout: None, jvm_args: Vec::new(), coverage: CoverageSettings::default() }
+        Self {
+            fail_fast: true,
+            timeout: None,
+            test_timeout: None,
+            jvm_args: Vec::new(),
+            suites: BTreeMap::new(),
+            coverage: CoverageSettings::default(),
+        }
     }
 }
 
@@ -2136,6 +2146,59 @@ impl CoverageSettings {
     pub fn line_threshold(&self, fail_under: Option<f64>) -> Option<f64> {
         fail_under.or(self.fail_under).or(self.min_line)
     }
+}
+
+impl TestSettings {
+    /// The default suite all projects have: `tests/` and `tests-<target>/`.
+    pub const UNIT: &'static str = "unit";
+    /// Selects every suite: the default one and each declared one (`--suite all`).
+    pub const ALL: &'static str = "all";
+
+    /// Whether `name` is a reserved suite name that cannot be declared.
+    pub fn is_reserved_suite(name: &str) -> bool {
+        matches!(name, "unit" | "all")
+    }
+
+    /// The declared suite named `name`, if any.
+    pub fn suite(&self, name: &str) -> Option<&TestSuite> {
+        self.suites.get(name)
+    }
+
+    /// The names of every suite: `unit` first, then the declared ones in order.
+    pub fn all_suite_names(&self) -> Vec<String> {
+        let mut out = vec![Self::UNIT.to_owned()];
+        out.extend(self.suites.keys().cloned());
+        out
+    }
+}
+
+/// `[test.suites.<name>]`: an extra test source set with its own sources and settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestSuite {
+    /// The suite name (`integration` for `[test.suites.integration]`).
+    pub name: String,
+    /// Test sources, relative to the package root (`integration-tests/`).
+    pub sources: PathBuf,
+    /// Test resources on the JVM classpath, relative to the package root (`integration-resources/`).
+    pub resources: PathBuf,
+    /// JVM arguments for the suite's test process, after `[test] jvm-args`.
+    pub jvm_args: Vec<String>,
+    /// Working directory of the suite's tests, relative to the package root; `None` runs in the root.
+    pub cwd: Option<PathBuf>,
+    /// How long the suite's run may take; `None` uses `[test] timeout`.
+    pub timeout: Option<Duration>,
+    /// How long one JVM test of the suite may take; `None` uses `[test] test-timeout`.
+    pub test_timeout: Option<Duration>,
+    /// Only run JVM tests with one of these JUnit tags.
+    pub include_tags: Vec<String>,
+    /// Skip JVM tests with one of these JUnit tags.
+    pub exclude_tags: Vec<String>,
+    /// Extra environment variables of the suite's tests, on top of `[env]`.
+    pub env: BTreeMap<String, String>,
+    /// Maven dependencies only the suite's tests compile and run against.
+    pub dependencies: Vec<Dependency>,
+    /// `path` dependencies only the suite's tests use (with `test-fixtures = true` allowed).
+    pub path_dependencies: Vec<PathDependency>,
 }
 
 /// How JMH measures a benchmark (`[bench] mode`, `kargo bench --mode`).

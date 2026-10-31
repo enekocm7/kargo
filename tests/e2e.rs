@@ -290,6 +290,43 @@ fn jvm_coverage_reports_covered_and_uncovered_lines() {
     t.kargo("cov").arg("coverage").assert().success().stdout(predicate::str::contains("coverage:"));
 }
 
+#[test]
+fn test_suites_run_in_order_with_their_own_settings() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write("app/tests/UnitTest.kt", "import kotlin.test.*\nclass UnitTest { @Test fun ok() {} }\n");
+    t.write("app/integration-tests/DatabaseTest.kt", "import kotlin.test.*\nclass DatabaseTest { @Test fun stores() {} }\n");
+    t.write("app/kargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[test.suites.integration]\n");
+    // The default suite runs `tests/`; `--suite integration` runs `integration-tests/`.
+    t.kargo("app")
+        .arg("test")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("UnitTest").and(predicate::str::contains("DatabaseTest").not()));
+    t.kargo("app")
+        .args(["test", "--suite", "integration"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DatabaseTest").and(predicate::str::contains("UnitTest").not()));
+    // `--suite all` runs every suite in order, and `--suite unit --suite integration` does too.
+    t.kargo("app")
+        .args(["test", "--suite", "all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("UnitTest").and(predicate::str::contains("DatabaseTest")));
+    t.kargo("app")
+        .args(["test", "--suite", "unit", "--suite", "integration", "--no-fail-fast", "--report", "junit"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test results by suite and target"));
+    // Each suite writes its own JUnit XML, so CI publishes one report per suite.
+    assert!(t.dir.path().join("app/target/debug/jvm/test-reports/TEST-junit-jupiter.xml").is_file());
+    assert!(t.dir.path().join("app/target/debug/jvm/test-reports-integration/TEST-junit-jupiter.xml").is_file());
+    // An unknown suite fails before compiling, with the declared suites named.
+    t.kargo("app").args(["test", "--suite", "nope"]).assert().failure().code(101).stderr(predicate::str::contains("no test suite `nope`"));
+}
+
 /// The JSON messages on a command's stdout, which must hold nothing else.
 fn json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
     let text = String::from_utf8_lossy(stdout);

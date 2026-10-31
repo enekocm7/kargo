@@ -118,6 +118,8 @@ logback = { coords = "ch.qos.logback:logback-classic:1.5.32", scope = "runtime" 
 "com.example:ranged" = "[1.2,2.0)"
 ```
 
+A [test suite](../testing/#test-suites) has its own `[test.suites.<name>.dependencies]` with the same forms, for libraries only that suite's tests use (locked as `jvm/test-<name>` in [`kargo.lock`](../../reference/lockfile/)).
+
 | Key | Meaning |
 |---|---|
 | `version` | A version or Maven range. Required unless a BOM manages it. |

@@ -150,6 +150,119 @@ fn validate_source_sets(raw: BTreeMap<String, RawSourceSet>) -> Result<Vec<Sourc
     Ok(groups)
 }
 
+/// Checks the `[test.suites.<name>]` tables: valid names, directories inside the
+/// package, and dependencies that parse. Returns the suites by name, sorted.
+fn validate_test_suites(raw: BTreeMap<String, RawTestSuite>, workspace: Option<&WorkspaceManifest>) -> Result<BTreeMap<String, TestSuite>> {
+    let mut suites: BTreeMap<String, TestSuite> = BTreeMap::new();
+    let mut used_sources: BTreeMap<String, String> = BTreeMap::new();
+    for (name, suite) in raw {
+        let section = format!("test.suites.{name}");
+        let valid =
+            name.starts_with(|c: char| c.is_ascii_alphabetic()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !valid {
+            bail!("invalid [{section}] name `{name}` (use letters, digits, `-` and `_`, starting with a letter)");
+        }
+        if TestSettings::is_reserved_suite(&name) {
+            bail!("[{section}] is reserved: `{name}` names the default tests (`tests/`); pick another name, like `integration`");
+        }
+        if name == "common" || name.parse::<TargetKind>().is_ok() {
+            bail!("[{section}] clashes with the source directories of a target; pick another name, like `integration`");
+        }
+        let sources = suite.sources.unwrap_or_else(|| PathBuf::from(format!("{name}-tests")));
+        let resources = suite.resources.unwrap_or_else(|| PathBuf::from(format!("{name}-resources")));
+        for (key, dir) in [("sources", &sources), ("resources", &resources)] {
+            let outside = dir.as_os_str().is_empty()
+                || dir.is_absolute()
+                || dir.to_string_lossy().starts_with('/')
+                || dir.components().any(|c| c.as_os_str() == ".." || c == std::path::Component::RootDir);
+            if outside {
+                bail!("[{section}] `{key}` lists `{}`; use a directory inside the package", dir.display());
+            }
+        }
+        if sources == resources {
+            bail!("[{section}] `sources` and `resources` are both `{}`; use different directories", sources.display());
+        }
+        // The default suite owns `tests/`, `tests-<target>/` and `test-resources/`.
+        for reserved in [Path::new("tests"), Path::new("test-resources")] {
+            if sources.as_path() == reserved {
+                bail!(
+                    "[{section}] `sources` is `{}`, which holds the default tests; pick another directory, like `{name}-tests`",
+                    reserved.display()
+                );
+            }
+            if resources.as_path() == reserved {
+                bail!(
+                    "[{section}] `resources` is `{}`, which holds the default tests; pick another directory, like `{name}-resources`",
+                    reserved.display()
+                );
+            }
+        }
+        for target in TargetKind::ALL {
+            let reserved = format!("tests-{}", target.as_str());
+            if sources.to_string_lossy() == reserved {
+                bail!("[{section}] `sources` is `{reserved}`, which holds the default tests; pick another directory, like `{name}-tests`");
+            }
+        }
+        if let Some(other) = used_sources.insert(sources.to_string_lossy().into_owned(), name.clone()) {
+            bail!("[test.suites.{name}] `sources` is also used by [test.suites.{other}]; use different directories");
+        }
+        if let Some(cwd) = &suite.cwd {
+            let outside = cwd.as_os_str().is_empty()
+                || cwd.is_absolute()
+                || cwd.to_string_lossy().starts_with('/')
+                || cwd.components().any(|c| c.as_os_str() == ".." || c == std::path::Component::RootDir);
+            if outside {
+                bail!("[{section}] `cwd` lists `{}`; use a directory inside the package", cwd.display());
+            }
+        }
+        for tag in suite.include_tags.iter().chain(&suite.exclude_tags) {
+            if tag.trim().is_empty() || tag.contains(char::is_whitespace) {
+                bail!("[{section}] has an empty tag; name JUnit tags such as `\"integration\"`");
+            }
+        }
+        for var in suite.env.keys() {
+            if !is_env_name(var) {
+                bail!(
+                    "[{section}.env] `{var}` is not a valid environment variable name (use letters, digits and `_`, not starting with a digit)"
+                );
+            }
+        }
+        let timeout = suite
+            .timeout
+            .as_deref()
+            .map(|v| parse_duration_in("[test]", "timeout", v))
+            .transpose()
+            .with_context(|| format!("invalid [{section}]"))?;
+        let test_timeout = suite
+            .test_timeout
+            .as_deref()
+            .map(|v| parse_duration_in("[test]", "test-timeout", v))
+            .transpose()
+            .with_context(|| format!("invalid [{section}]"))?;
+        let mut parser = DependencyParser { workspace, paths: Vec::new() };
+        let dependencies = parser.parse(&suite.dependencies, &format!("{section}.dependencies"), true, None)?;
+        let path_dependencies = parser.paths;
+        suites.insert(
+            name.clone(),
+            TestSuite {
+                name,
+                sources,
+                resources,
+                jvm_args: suite.jvm_args,
+                cwd: suite.cwd,
+                timeout,
+                test_timeout,
+                include_tags: suite.include_tags,
+                exclude_tags: suite.exclude_tags,
+                env: suite.env,
+                dependencies,
+                path_dependencies,
+            },
+        );
+    }
+    Ok(suites)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawBin {
@@ -428,6 +541,8 @@ struct RawTest {
     #[serde(default)]
     jvm_args: Vec<String>,
     #[serde(default)]
+    suites: BTreeMap<String, RawTestSuite>,
+    #[serde(default)]
     coverage: Option<RawCoverage>,
 }
 
@@ -446,6 +561,28 @@ struct RawCoverage {
     /// Source patterns left out of the report (gitignore syntax, relative to the package root).
     #[serde(default)]
     exclude: Vec<String>,
+}
+
+/// `[test.suites.<name>]`: an extra test suite with its own sources and settings,
+/// such as integration tests in `integration-tests/`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawTestSuite {
+    sources: Option<PathBuf>,
+    resources: Option<PathBuf>,
+    #[serde(default)]
+    jvm_args: Vec<String>,
+    cwd: Option<PathBuf>,
+    timeout: Option<String>,
+    test_timeout: Option<String>,
+    #[serde(default)]
+    include_tags: Vec<String>,
+    #[serde(default)]
+    exclude_tags: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    dependencies: toml::Table,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3289,6 +3426,7 @@ impl RawManifest {
         let build = self.build.validate("build")?;
         let source_sets = validate_source_sets(self.source_sets)?;
         let layout = self.layout.validate(&source_sets)?;
+        let suites = validate_test_suites(self.test.suites, workspace)?;
         if let Some(missing) = build.default_targets.iter().flatten().find(|t| !targets.is_enabled(**t)) {
             bail!("[build] `default-targets` names `{missing}`, which is not enabled; add a [target.{missing}] section");
         }
@@ -3317,6 +3455,7 @@ impl RawManifest {
                 timeout: self.test.timeout.as_deref().map(|v| parse_duration("timeout", v)).transpose()?,
                 test_timeout: self.test.test_timeout.as_deref().map(|v| parse_duration("test-timeout", v)).transpose()?,
                 jvm_args: self.test.jvm_args,
+                suites,
                 coverage: validate_coverage(self.test.coverage)?,
             },
             bench: BenchSettings {

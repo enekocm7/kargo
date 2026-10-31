@@ -399,6 +399,19 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 build::jvm_processor_path(ctx, &setup, false)?;
                 build::jvm_processor_path(ctx, &setup, true)?;
                 build::jvm_ksp_path(ctx, &setup, false)?;
+                // Test suites have their own test classpath, locked separately.
+                for suite in ctx.ws.manifest().test.suites.values() {
+                    let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                    let test_key = format!("jvm/test-{}", suite.name);
+                    ctx.resolve(
+                        &ctx.ws.lock_key(&test_key),
+                        kargo_maven::Platform::Jvm,
+                        &suite_setup.requests(&build::ALL_SCOPES, true),
+                        &suite_setup.boms,
+                    )?;
+                    build::jvm_processor_path_for_suite(ctx, &suite_setup, true, Some(suite))?;
+                    build::jvm_ksp_path_for_suite(ctx, &suite_setup, true, Some(suite))?;
+                }
                 lock_tools(ctx, target)?;
             }
             TargetKind::Wasm => {
@@ -420,6 +433,10 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                     crate::npm::fetch_for_tests(ctx, target, &test, &test_dir)?;
                 }
                 crate::web_resources::fetch(ctx)?;
+                for suite in ctx.ws.manifest().test.suites.values() {
+                    let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                    build::wasm_resolution_for_suite(ctx, &suite_setup, true, Some(suite))?;
+                }
             }
             TargetKind::Js => {
                 let setup = ctx.setup(target)?;
@@ -438,12 +455,22 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
                 if crate::npm::test_dependencies(ctx, target, &test)? != crate::npm::dependencies(ctx, target, &main)? {
                     crate::npm::fetch_for_tests(ctx, target, &test, &dir.join("test"))?;
                 }
+                for suite in ctx.ws.manifest().test.suites.values() {
+                    let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                    build::js_resolution_for_suite(ctx, &suite_setup, true, Some(suite))?;
+                }
             }
             TargetKind::Native => {
                 let setup = ctx.setup(target)?;
                 for p in native_platforms(ctx)? {
                     native_resolution(ctx, &setup, &p, false)?;
                     native_resolution(ctx, &setup, &p, true)?;
+                }
+                for suite in ctx.ws.manifest().test.suites.values() {
+                    let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
+                    for p in native_platforms(ctx)? {
+                        build::native_resolution_for_suite(ctx, &suite_setup, &p, true, Some(suite))?;
+                    }
                 }
                 lock_tools(ctx, target)?;
                 ctx.native_toolchain()?;

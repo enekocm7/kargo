@@ -3973,6 +3973,41 @@ fn test_coverage_flags_are_validated_before_compiling() {
 }
 
 #[test]
+fn test_suites_are_selected_and_validated() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[test.suites.integration]\n[test.suites.e2e]\nsources = \"e2e-tests\"\n"));
+    // Unknown suites fail before anything compiles, so this stays offline.
+    p.kargo()
+        .args(["--offline", "test", "--suite", "nope"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no test suite `nope`"))
+        .stderr(predicate::str::contains("integration"))
+        .stderr(predicate::str::contains("[test.suites.<name>]"));
+    // `--suite all` expands to every suite, and `--suite unit` is the default tests.
+    p.kargo()
+        .args(["--offline", "test", "--suite", "nope", "--suite", "integration"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("no test suite `nope`"));
+    // Reserved names cannot be declared: the manifest itself is rejected.
+    p.file("kargo.toml", &manifest("app", "[test.suites.unit]\n"));
+    p.kargo().args(["--offline", "test", "--suite", "unit"]).assert().failure().code(101).stderr(predicate::str::contains("is reserved"));
+    p.file("kargo.toml", &manifest("app", "[test.suites.integration]\nsources = \"tests\"\n"));
+    p.kargo()
+        .args(["--offline", "test", "--suite", "integration"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("holds the default tests"));
+    // A suite directory with sources but no declaration warns; `kargo metadata` lists the
+    // roots, and the warning itself is covered in `warnings::undeclared_suite_directories_warn`.
+    // (The warning is emitted by `kargo build` and `kargo test`, which need a compiler to run.)
+}
+
+#[test]
 fn wasm_target_options_are_validated() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("lib", "[target.wasm]\nenvironment = \"wasi\"\nkind = \"library\"\n"));

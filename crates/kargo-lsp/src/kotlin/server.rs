@@ -488,6 +488,38 @@ fn dependency_jars(meta: &Value) -> Vec<SourcesJar> {
                     }
                 }
             }
+            // Test suites have their own test classpath (such as `testcontainers` for `integration`),
+            // which editors need to resolve imports in `integration-tests/`.
+            for suite in target["test-suites"].as_array().into_iter().flatten() {
+                let compile: BTreeSet<&str> = suite
+                    .get("test-dependencies")
+                    .and_then(|d| d.as_array())
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|c| c["compile"].as_array().into_iter().flatten())
+                    .filter_map(|e| e["module"].as_str())
+                    .collect();
+                for classpaths in suite["test-dependencies"].as_array().into_iter().flatten() {
+                    for entry in classpaths["test"].as_array().into_iter().flatten() {
+                        let (Some(sources), Some(module)) = (entry["sources"].as_str(), entry["module"].as_str()) else { continue };
+                        if is_stdlib_module(module) || compile.contains(module) {
+                            continue;
+                        }
+                        let jar = jars.entry(PathBuf::from(sources)).or_insert_with(|| {
+                            let artifact = module.split_once(':').map_or(module, |(_, artifact)| artifact);
+                            let version = entry["version"].as_str().unwrap_or_default();
+                            SourcesJar {
+                                name: format!("{artifact} {version}"),
+                                jar: PathBuf::from(sources),
+                                main: Platforms::NONE,
+                                test: Platforms::NONE,
+                                java: true,
+                            }
+                        });
+                        jar.test = jar.test.union(platforms);
+                    }
+                }
+            }
         }
     }
     jars.into_values().collect()
@@ -548,6 +580,36 @@ fn dependency_compiled(meta: &Value) -> Vec<CompiledLibrary> {
                         } else {
                             library.test = library.test.union(platforms);
                         }
+                    }
+                }
+            }
+            for suite in target["test-suites"].as_array().into_iter().flatten() {
+                for classpaths in suite["test-dependencies"].as_array().into_iter().flatten() {
+                    for entry in classpaths["test"].as_array().into_iter().flatten() {
+                        let (Some(path), Some(module)) = (entry["path"].as_str(), entry["module"].as_str()) else { continue };
+                        if is_stdlib_module(module) {
+                            continue;
+                        }
+                        let path = PathBuf::from(path);
+                        if !path.extension().is_some_and(|e| e == "jar" || e == "klib") {
+                            continue;
+                        }
+                        let has_sources = !entry["sources"].is_null();
+                        if has_sources
+                            && !libraries.contains_key(&path)
+                            && !(path.extension().is_some_and(|e| e == "klib") && compiled::is_interop_klib(&path))
+                        {
+                            continue;
+                        }
+                        let library = libraries.entry(path.clone()).or_insert_with(|| {
+                            let artifact = module.split_once(':').map_or(module, |(_, artifact)| artifact);
+                            let version = entry["version"].as_str().unwrap_or_default();
+                            let name =
+                                if has_sources { format!("{artifact} {version} (cinterop)") } else { format!("{artifact} {version}") };
+                            let javadoc = entry["javadoc"].as_str().map(PathBuf::from);
+                            CompiledLibrary { name, path, main: Platforms::NONE, test: Platforms::NONE, known: None, javadoc }
+                        });
+                        library.test = library.test.union(platforms);
                     }
                 }
             }

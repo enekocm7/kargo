@@ -370,6 +370,45 @@ impl Workspace {
         dirs
     }
 
+    /// The test directories of one test suite for `target`: `tests/` and `tests-<target>/`
+    /// for the default `unit` suite, or the suite's own `sources/` and `sources-<target>/`.
+    pub fn suite_test_dirs(&self, target: TargetKind, suite: Option<&kargo_manifest::TestSuite>) -> Vec<PathBuf> {
+        match suite {
+            None => self.test_dirs(target),
+            Some(suite) => vec![self.root.join(&suite.sources), self.suite_target_tests(suite, target)],
+        }
+    }
+
+    /// The per-target directory of a test suite: `<sources>-<target>/` (such as
+    /// `integration-tests-jvm/` for `sources = "integration-tests"`).
+    pub fn suite_target_tests(&self, suite: &kargo_manifest::TestSuite, target: TargetKind) -> PathBuf {
+        self.root.join(format!("{}-{}", suite.sources.display(), target.as_str()))
+    }
+
+    /// The resources directory of one test suite: `test-resources/` for the default
+    /// suite, or the suite's own `resources/`.
+    pub fn suite_test_resources(&self, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+        match suite {
+            None => self.test_resources(),
+            Some(suite) => self.root.join(&suite.resources),
+        }
+    }
+
+    /// The directories of every declared test suite (`sources/` and `sources-<target>/`),
+    /// for `kargo fmt` and editors. Only existing ones are listed.
+    pub fn suite_source_roots(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        for suite in self.manifest().test.suites.values() {
+            dirs.push(PathBuf::from(&suite.sources));
+            for target in TargetKind::ALL {
+                dirs.push(PathBuf::from(format!("{}-{}", suite.sources.display(), target.as_str())));
+            }
+            // A suite's resources are not Kotlin sources, but editors treat them as test roots.
+            dirs.push(PathBuf::from(&suite.resources));
+        }
+        dirs.into_iter().filter(|d| self.root.join(d).is_dir()).collect()
+    }
+
     /// The instrumented tests of the Android target, which run on a device (`kargo test --instrumented`).
     pub fn instrumented_tests(&self) -> PathBuf {
         self.root.join(&self.manifest.layout.android_tests)
@@ -488,6 +527,13 @@ impl Workspace {
             }
         }
         push(layout.examples.clone());
+        // Test suites (`[test.suites.<name>]`) keep their sources next to `tests/`.
+        for suite in self.manifest().test.suites.values() {
+            push(PathBuf::from(&suite.sources));
+            for target in TargetKind::ALL {
+                push(PathBuf::from(format!("{}-{}", suite.sources.display(), target.as_str())));
+            }
+        }
         dirs.into_iter().filter(|d| self.root.join(d).is_dir()).collect()
     }
 
