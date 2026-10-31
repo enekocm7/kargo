@@ -214,47 +214,53 @@ class KargoImportPlanTest {
     }
 
     @Test
-    fun `a one-target Wasm package gets the npm declarations as a generated source root`() {
+    fun `a one-target Wasm package gets the generated declarations as generated source roots`() {
         val metadata = KargoMetadata.parse(
             """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"wasm","source-roots":["/a/src"],"test-roots":["/a/tests"],
-            "npm-declarations":"/a/target/debug/generated/npm","dependencies":null}]}]}""",
+            "npm-declarations":"/a/target/debug/generated/npm","js-declarations":"/a/target/debug/generated/js-sources","dependencies":null}]}]}""",
         )
-        assertEquals("/a/target/debug/generated/npm", metadata.packages.single().targets.single().npmDeclarations)
-        // `Files` pretends the directory doesn't exist yet: the root is kept anyway.
+        val target = metadata.packages.single().targets.single()
+        assertEquals("/a/target/debug/generated/npm", target.npmDeclarations)
+        assertEquals("/a/target/debug/generated/js-sources", target.jsDeclarations)
+        // `Files` pretends the directories don't exist yet: the roots are kept anyway.
         val module = KargoImportPlanner.plan(metadata, Files).modules.single()
-        assertEquals(listOf("/a", "/a/target/debug/generated/npm"), module.contents.map { it.root })
+        assertEquals(listOf("/a", "/a/target/debug/generated/npm", "/a/target/debug/generated/js-sources"), module.contents.map { it.root })
         assertEquals(listOf("/a/target"), module.contents.first().excluded)
-        val declarations = module.contents.last()
-        assertTrue(declarations.excluded.isEmpty())
-        assertEquals(1, declarations.roots.size)
-        assertEquals(RootKind.SOURCE, declarations.roots.single().kind)
-        assertTrue(declarations.roots.single().generated)
-        assertEquals(listOf("generated SOURCE /a/target/debug/generated/npm"), declarations.roots.map { it.toString() })
+        for (declarations in module.contents.drop(1)) {
+            assertTrue(declarations.excluded.isEmpty())
+            assertEquals(1, declarations.roots.size)
+            assertEquals(RootKind.SOURCE, declarations.roots.single().kind)
+            assertTrue(declarations.roots.single().generated)
+        }
+        assertEquals(
+            listOf("generated SOURCE /a/target/debug/generated/npm", "generated SOURCE /a/target/debug/generated/js-sources"),
+            module.contents.drop(1).flatMap { it.roots }.map { it.toString() },
+        )
     }
 
     @Test
-    fun `in a multi-target package only the Wasm module gets the npm declarations`() {
+    fun `in a multi-target package only the Wasm module gets the generated declarations`() {
         val metadata = KargoMetadata.parse(
             """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[
             {"kind":"jvm","source-roots":["/a/src"],"test-roots":["/a/tests"],"dependencies":null},
             {"kind":"wasm","source-roots":["/a/src"],"test-roots":["/a/tests"],
-             "npm-declarations":"/a/target/debug/generated/npm","dependencies":null}]}]}""",
+             "npm-declarations":"/a/target/debug/generated/npm","js-declarations":"/a/target/debug/generated/js-sources","dependencies":null}]}]}""",
         )
         val modules = KargoImportPlanner.plan(metadata, Files).modules.associateBy { it.name }
         assertTrue(modules.getValue("a.common").contents.flatMap { it.roots }.none { it.generated })
         assertTrue(modules.getValue("a.jvm").contents.flatMap { it.roots }.none { it.generated })
         val wasm = modules.getValue("a.wasm")
         val generated = wasm.contents.flatMap { it.roots }.filter { it.generated }
-        assertEquals(listOf("/a/target/debug/generated/npm"), generated.map { it.path })
-        assertEquals(ContentSpec("/a/target/debug/generated/npm", generated, emptyList()), wasm.contents.last())
+        assertEquals(listOf("/a/target/debug/generated/npm", "/a/target/debug/generated/js-sources"), generated.map { it.path })
+        assertEquals(ContentSpec("/a/target/debug/generated/js-sources", listOf(generated.last()), emptyList()), wasm.contents.last())
     }
 
     @Test
-    fun `a null npm-declarations value adds nothing`() {
+    fun `null declaration directories add nothing`() {
         for (json in listOf(
             """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"wasm","source-roots":["/a/src"],"test-roots":[],"dependencies":null}]}]}""",
-            """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"wasm","source-roots":["/a/src"],"test-roots":[],"npm-declarations":null,"dependencies":null}]}]}""",
-            """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"jvm","source-roots":["/a/src"],"test-roots":[],"npm-declarations":"/a/target/debug/generated/npm","dependencies":null}]}]}""",
+            """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"wasm","source-roots":["/a/src"],"test-roots":[],"npm-declarations":null,"js-declarations":null,"dependencies":null}]}]}""",
+            """{"version":1,"root":"/a","packages":[{"name":"a","root":"/a","targets":[{"kind":"jvm","source-roots":["/a/src"],"test-roots":[],"npm-declarations":"/a/target/debug/generated/npm","js-declarations":"/a/target/debug/generated/js-sources","dependencies":null}]}]}""",
         )) {
             val module = KargoImportPlanner.plan(KargoMetadata.parse(json), Files).modules.single()
             assertTrue(module.contents.flatMap { it.roots }.none { it.generated })

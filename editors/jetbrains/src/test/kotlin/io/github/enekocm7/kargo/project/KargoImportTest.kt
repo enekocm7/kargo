@@ -97,8 +97,7 @@ class KargoImportTest : UsefulTestCase() {
         "compiler-plugins" to emptyList<Any>(),
         "dependencies" to listOf(linkedMapOf("platform" to "native-$platform", "compile" to dependencies, "runtime" to dependencies, "test" to dependencies)),
     )
-
-    private fun wasmTarget(pkg: String, npmDeclarations: String?) = linkedMapOf<String, Any?>(
+    private fun wasmTarget(pkg: String, npmDeclarations: String?, jsDeclarations: String? = null) = linkedMapOf<String, Any?>(
         "kind" to "wasm",
         "source-roots" to listOf("$root/$pkg/src"),
         "test-roots" to listOf("$root/$pkg/tests"),
@@ -107,6 +106,7 @@ class KargoImportTest : UsefulTestCase() {
         "compiler-args" to emptyList<String>(),
         "compiler-plugins" to emptyList<Any>(),
         "npm-declarations" to npmDeclarations,
+        "js-declarations" to jsDeclarations,
         "dependencies" to listOf(linkedMapOf("platform" to "wasm-js", "compile" to emptyList<Any>(), "runtime" to emptyList<Any>(), "test" to emptyList<Any>())),
     )
 
@@ -342,22 +342,30 @@ class KargoImportTest : UsefulTestCase() {
 
     // --- Wasm ---------------------------------------------------------------------------------------------------
 
-    fun `test the npm declarations are a generated source root of the Wasm module`() {
-        // The directory doesn't exist yet: the import keeps it anyway, and the IDE picks the files up later.
-        val declarations = File(root, "app/target/debug/generated/npm")
+    fun `test the generated declarations are generated source roots of the Wasm module`() {
+        // The directories don't exist yet: the import keeps them anyway, and the IDE picks the files up later.
+        val npm = File(root, "app/target/debug/generated/npm")
+        val js = File(root, "app/target/debug/generated/js-sources")
         write("app/src/Main.kt", "fun main() {}\n")
         write("app/kargo.toml", "")
-        importMetadata(json { put("packages", listOf(pkg("app", wasmTarget("app", declarations.path)))) })
+        importMetadata(json { put("packages", listOf(pkg("app", wasmTarget("app", npm.path, js.path)))) })
         val module = ModuleManager.getInstance(project).findModuleByName("app")!!
         val roots = ModuleRootManager.getInstance(module)
-        val folder = runReadAction { roots.contentEntries.flatMap { it.sourceFolders.toList() }.single { it.url == VfsUtilCore.pathToUrl(declarations.invariantSeparatorsPath) } }
-        val properties = runReadAction { folder.jpsElement.getProperties(org.jetbrains.jps.model.java.JavaSourceRootType.SOURCE) }
-        assertTrue(properties.isForGeneratedSources)
-        // `target/` is excluded, but the declarations have a content root of their own, so they stay in source content.
+        val sourceUrls = runReadAction { roots.contentEntries.flatMap { it.sourceFolders.toList() }.map { it.url } }
+        assertTrue(sourceUrls.contains(VfsUtilCore.pathToUrl(npm.invariantSeparatorsPath)))
+        assertTrue(sourceUrls.contains(VfsUtilCore.pathToUrl(js.invariantSeparatorsPath)))
+        for (folder in runReadAction { roots.contentEntries.flatMap { it.sourceFolders.toList() } }) {
+            val properties = runReadAction { folder.jpsElement.getProperties(org.jetbrains.jps.model.java.JavaSourceRootType.SOURCE) }
+            assertTrue(properties.isForGeneratedSources)
+        }
+        // `target/` is excluded, but the declarations have content roots of their own, so they stay in source content.
         val index = runReadAction { com.intellij.openapi.roots.ProjectFileIndex.getInstance(project) }
-        val file = write("app/target/debug/generated/npm/express.kt", "package express\n")
-        val virtual = runReadAction { com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)!! }
-        assertTrue(runReadAction { index.isInSourceContent(virtual) })
+        val express = write("app/target/debug/generated/npm/express.kt", "package express\n")
+        val greeter = write("app/target/debug/generated/js-sources/greeter.kt", "package js\n")
+        val virtualNpm = runReadAction { com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(express)!! }
+        val virtualJs = runReadAction { com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(greeter)!! }
+        assertTrue(runReadAction { index.isInSourceContent(virtualNpm) })
+        assertTrue(runReadAction { index.isInSourceContent(virtualJs) })
         assertTrue(runReadAction { roots.contentEntries.flatMap { it.excludeFolderUrls.toList() }.any { it.endsWith("/target") } })
     }
 }

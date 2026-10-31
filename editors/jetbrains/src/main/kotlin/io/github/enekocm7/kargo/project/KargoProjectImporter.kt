@@ -144,7 +144,7 @@ object KargoProjectImporter {
             val entry = model.addContentEntry(VfsUtilCore.pathToUrl(content.root))
             for (root in content.roots) {
                 val url = VfsUtilCore.pathToUrl(root.path)
-                // A generated root (the npm declarations under `target/`) warns before it is edited.
+                // A generated root (the declarations under `target/`) warns before it is edited.
                 val properties = if (root.generated) JpsJavaExtensionService.getInstance().createSourceRootProperties("", true) else null
                 when (root.kind) {
                     RootKind.SOURCE -> if (properties != null) entry.addSourceFolder(url, JavaSourceRootType.SOURCE, properties)

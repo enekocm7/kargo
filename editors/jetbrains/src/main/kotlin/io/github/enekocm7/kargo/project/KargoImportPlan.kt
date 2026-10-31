@@ -143,7 +143,7 @@ object KargoImportPlanner {
                 target.testRoots.map { RootSpec(norm(it), RootKind.TEST) } +
                 target.resourceRoots.map { RootSpec(norm(it), RootKind.RESOURCE) } +
                 target.testResourceRoots.map { RootSpec(norm(it), RootKind.TEST_RESOURCE) } +
-                npmDeclarations(target) +
+                generatedDeclarations(target) +
                 examples()
             return module(pkg.name, contents(roots), target, dependsOn = emptyList(), target = target.kind)
         }
@@ -169,9 +169,10 @@ object KargoImportPlanner {
             add(target.testRoots, RootKind.TEST, shared.tests)
             add(target.resourceRoots, RootKind.RESOURCE, emptyList())
             add(target.testResourceRoots, RootKind.TEST_RESOURCE, emptyList())
-            // The Kotlin declarations generated for `npm-dependencies` are main code of the Wasm module.
-            // They sit under `target/`, so they are kept even before the first build creates them.
-            for (declarations in npmDeclarations(target)) {
+            // The Kotlin declarations generated from the npm packages and the package's own TypeScript
+            // modules are main code of the Wasm module. They sit under `target/`, so they are kept even
+            // before the first build creates them.
+            for (declarations in generatedDeclarations(target)) {
                 if (declarations.path !in contents.flatMap { it.roots }.map { it.path }) {
                     contents += ContentSpec(declarations.path, listOf(declarations), emptyList())
                 }
@@ -180,15 +181,15 @@ object KargoImportPlanner {
         }
 
         /**
-         * The Kotlin declarations generated for a Wasm target's `npm-dependencies`, as a generated source
-         * root: kept even before the first build creates the directory, so the IDE picks the files up when
-         * they appear. Never on the common module or the test roots.
+         * The Kotlin declarations the build generates for a Wasm target (`npm-declarations` from the npm
+         * packages' TypeScript declarations, `js-declarations` from the package's own TypeScript modules),
+         * as generated source roots: kept even before the first build creates the directories, so the IDE
+         * picks the files up when they appear. Never on the common module or the test roots.
          */
-        private fun npmDeclarations(target: KargoTarget): List<RootSpec> {
+        private fun generatedDeclarations(target: KargoTarget): List<RootSpec> {
             if (target.kind != "wasm") return emptyList()
-            val dir = target.npmDeclarations?.let(::norm) ?: return emptyList()
             // Unit tests don't parse `kargo.toml` and can hand any directory; the shape is what matters.
-            return listOf(RootSpec(dir, RootKind.SOURCE, generated = true))
+            return listOfNotNull(target.npmDeclarations, target.jsDeclarations).map { RootSpec(norm(it), RootKind.SOURCE, generated = true) }
         }
 
         /** `examples/` is compiled against the package's sources, so the IDE sees it as test code. */
