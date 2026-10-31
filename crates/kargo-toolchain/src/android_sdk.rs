@@ -28,6 +28,10 @@ pub const REPOSITORY_URL: &str = "https://dl.google.com/android/repository";
 /// The manifest of the packages, under [`REPOSITORY_URL`].
 pub const MANIFEST: &str = "repository2-3.xml";
 
+/// The manifest of the system images, in `sys-img/<tag family>/` under [`REPOSITORY_URL`]: Google keeps them apart
+/// from [`MANIFEST`] (the `sys-img` add-ons `sdkmanager` reads), and their archives are relative to that directory.
+const SYSTEM_IMAGE_MANIFEST: &str = "sys-img2-1.xml";
+
 /// The package with `adb`.
 pub const PLATFORM_TOOLS: &str = "platform-tools";
 
@@ -86,8 +90,13 @@ pub fn host_abi() -> &'static str {
 }
 
 /// The system image tags Kargo uses, best first: Google APIs without the Play Store, which can be rooted and
-/// logged out of, then the same with it.
-const IMAGE_TAGS: [&str; 2] = ["google_apis", "google_apis_playstore"];
+/// logged out of, then the same with it, then the plain AOSP image.
+const IMAGE_TAGS: [&str; 3] = ["google_apis", "google_apis_playstore", "default"];
+
+/// The directory under `sys-img/` whose manifest lists the images of `tag`.
+fn system_image_directory(tag: &str) -> &str {
+    if tag == "default" { "android" } else { tag }
+}
 
 /// The packages that run virtual devices: the emulator, `avdmanager` and `adb`.
 pub fn emulator_packages() -> Vec<String> {
@@ -230,10 +239,13 @@ pub fn avdmanager_in(sdk: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Picks the system image to install for platform `api`: the first tag and spelling that Google's repository has
-/// for this machine's ABI.
-pub fn system_image_for(repo: &Repository, api: u32) -> Option<String> {
-    IMAGE_TAGS.iter().flat_map(|tag| system_image_packages(api, tag, host_abi())).find(|path| repo.find(path).is_some())
+/// Picks the system image to install for platform `api` from `manifests`: the first tag and spelling that Google has
+/// for this machine's ABI. Returns the package and the index of the manifest it is in.
+pub fn system_image_for(manifests: &[Repository], api: u32) -> Option<(String, usize)> {
+    IMAGE_TAGS.iter().flat_map(|tag| system_image_packages(api, tag, host_abi())).find_map(|path| {
+        let index = manifests.iter().position(|repo| repo.find(&path).is_some())?;
+        Some((path, index))
+    })
 }
 
 /// Installs what a virtual device for platform `api` needs and returns the SDK directory and the system image: the
@@ -242,21 +254,39 @@ pub fn ensure_emulator(config: &Config, api: u32, licenses: Licenses) -> Result<
     let install = format!("kargo toolchain install android-sdk {api} --emulator");
     let sdk = config.android_sdk_dir();
     let mut packages = emulator_packages();
+    let mut extra = Vec::new();
     let image = match installed_system_image(&sdk, api) {
         Some(image) => image,
         None => {
-            let repo = Repository::fetch(config)?;
-            system_image_for(&repo, api).with_context(|| {
+            // The images are in one manifest per tag family; fetch them in order of preference, until one has an image.
+            let mut manifests = Vec::new();
+            let mut found = None;
+            let mut seen = Vec::new();
+            for tag in IMAGE_TAGS {
+                let directory = system_image_directory(tag);
+                if seen.contains(&directory) {
+                    continue;
+                }
+                seen.push(directory);
+                manifests.push(Repository::fetch_system_images(config, tag)?);
+                found = system_image_for(&manifests, api);
+                if found.is_some() {
+                    break;
+                }
+            }
+            let (image, index) = found.with_context(|| {
                 format!(
-                    "Google's repository has no `{}` system image for Android {api} on this machine ({REPOSITORY_URL}/{MANIFEST}); \
+                    "Google's repository has no `{}` system image for Android {api} on this machine ({REPOSITORY_URL}/sys-img/); \
                      pick another API level with `--api`",
                     host_abi()
                 )
-            })?
+            })?;
+            extra.push(manifests.swap_remove(index));
+            image
         }
     };
     packages.push(image.clone());
-    ensure(config, &packages, licenses, &install)?;
+    ensure_from(config, &packages, licenses, &install, &extra)?;
     Ok((sdk, image))
 }
 
@@ -312,6 +342,8 @@ pub struct RemotePackage {
     pub license: Option<String>,
     stable: bool,
     archives: Vec<Archive>,
+    /// The URL that the relative URLs of its archives are relative to.
+    base: String,
     /// Its element as a `localPackage`, the way `package.xml` repeats it.
     local_xml: String,
 }
@@ -343,8 +375,21 @@ impl Repository {
         Self::parse(&text).with_context(|| format!("failed to read {url}"))
     }
 
-    /// Parses a manifest.
+    /// Downloads and parses the manifest of the system images of `tag`, which [`MANIFEST`] does not list.
+    pub fn fetch_system_images(config: &Config, tag: &str) -> Result<Self> {
+        let base = format!("{REPOSITORY_URL}/sys-img/{}", system_image_directory(tag));
+        let url = format!("{base}/{SYSTEM_IMAGE_MANIFEST}");
+        let text = crate::download::get_text(config, &url).context("failed to download the Android SDK system image manifest")?;
+        Self::parse_at(&text, &base).with_context(|| format!("failed to read {url}"))
+    }
+
+    /// Parses a manifest whose archives are relative to [`REPOSITORY_URL`].
     pub fn parse(text: &str) -> Result<Self> {
+        Self::parse_at(text, REPOSITORY_URL)
+    }
+
+    /// Parses a manifest whose archives are relative to `base`.
+    pub fn parse_at(text: &str, base: &str) -> Result<Self> {
         let doc = roxmltree::Document::parse(text).context("invalid XML")?;
         let root = doc.root_element();
         let mut namespaces = String::new();
@@ -356,7 +401,11 @@ impl Repository {
                 common_prefix = Some(name.to_owned());
             }
         }
-        let common_prefix = common_prefix.context("the manifest does not declare the common repository namespace")?;
+        // The system image manifests do not declare the common namespace, but `package.xml` needs it.
+        let common_prefix = common_prefix.unwrap_or_else(|| {
+            namespaces.push_str(" xmlns:common=\"http://schemas.android.com/repository/android/common/02\"");
+            "common".to_owned()
+        });
         let mut licenses = BTreeMap::new();
         let mut packages = Vec::new();
         for node in root.children().filter(|n| n.is_element()) {
@@ -365,7 +414,7 @@ impl Repository {
                     let id = node.attribute("id").context("a license has no id")?;
                     licenses.insert(id.to_owned(), node.text().unwrap_or_default().to_owned());
                 }
-                "remotePackage" => packages.push(remote_package(text, node)?),
+                "remotePackage" => packages.push(remote_package(text, node, base)?),
                 _ => {}
             }
         }
@@ -419,7 +468,7 @@ impl Repository {
 }
 
 /// Reads a `remotePackage` element.
-fn remote_package(text: &str, node: roxmltree::Node) -> Result<RemotePackage> {
+fn remote_package(text: &str, node: roxmltree::Node, base: &str) -> Result<RemotePackage> {
     fn child<'a, 'input>(parent: roxmltree::Node<'a, 'input>, name: &str) -> Option<roxmltree::Node<'a, 'input>> {
         parent.children().find(|c| c.has_tag_name(name))
     }
@@ -479,6 +528,7 @@ fn remote_package(text: &str, node: roxmltree::Node) -> Result<RemotePackage> {
         license: child(node, "uses-license").and_then(|l| l.attribute("ref")).map(str::to_owned),
         stable: channel == STABLE_CHANNEL,
         archives,
+        base: base.to_owned(),
         local_xml,
     })
 }
@@ -508,16 +558,19 @@ fn record_acceptance(sdk: &Path, id: &str, text: &str) -> Result<()> {
 }
 
 /// Gets the user's acceptance of the licenses of `packages` not yet accepted in `sdk`, and records it.
-fn accept_licenses(config: &Config, sdk: &Path, repo: &Repository, packages: &[&RemotePackage], licenses: Licenses) -> Result<()> {
-    let mut ids: Vec<&str> = packages.iter().filter_map(|p| p.license.as_deref()).collect();
+fn accept_licenses(config: &Config, sdk: &Path, packages: &[(&Repository, &RemotePackage)], licenses: Licenses) -> Result<()> {
+    let mut ids: Vec<&str> = packages.iter().filter_map(|(_, p)| p.license.as_deref()).collect();
     ids.sort();
     ids.dedup();
     for id in ids {
-        let text = repo.license(id).with_context(|| format!("the repository manifest lacks the text of license `{id}`"))?;
+        let text = packages
+            .iter()
+            .find_map(|(repo, _)| repo.license(id))
+            .with_context(|| format!("the repository manifest lacks the text of license `{id}`"))?;
         if is_accepted(sdk, id, text) {
             continue;
         }
-        let names: Vec<&str> = packages.iter().filter(|p| p.license.as_deref() == Some(id)).map(|p| p.path.as_str()).collect();
+        let names: Vec<&str> = packages.iter().filter(|(_, p)| p.license.as_deref() == Some(id)).map(|(_, p)| p.path.as_str()).collect();
         let shell = config.shell();
         match licenses {
             Licenses::Accept => {
@@ -545,6 +598,11 @@ fn accept_licenses(config: &Config, sdk: &Path, repo: &Repository, packages: &[&
 /// Installs the `packages` (`sdkmanager` paths) missing from the managed SDK and returns its directory. `install` is
 /// the command that installs them by hand, for when automatic installs are off.
 pub fn ensure(config: &Config, packages: &[String], licenses: Licenses, install: &str) -> Result<PathBuf> {
+    ensure_from(config, packages, licenses, install, &[])
+}
+
+/// [`ensure`] with `extra` manifests (those of the system images) to look in after the main one.
+fn ensure_from(config: &Config, packages: &[String], licenses: Licenses, install: &str, extra: &[Repository]) -> Result<PathBuf> {
     let sdk = config.android_sdk_dir();
     let _lock = install_lock(config, "android-sdk")?;
     let missing = missing(&sdk, packages);
@@ -555,7 +613,7 @@ pub fn ensure(config: &Config, packages: &[String], licenses: Licenses, install:
     let repo = Repository::fetch(config)?;
     let mut remote = Vec::new();
     for path in &missing {
-        let Some(package) = repo.find(path) else {
+        let Some(package) = std::iter::once(&repo).chain(extra).find_map(|r| r.find(path).map(|p| (r, p))) else {
             bail!(
                 "the Android SDK package `{path}` is not in Google's repository for this platform ({REPOSITORY_URL}/{MANIFEST}); \
                  `kargo toolchain available android-sdk` lists the platforms you can install"
@@ -563,9 +621,9 @@ pub fn ensure(config: &Config, packages: &[String], licenses: Licenses, install:
         };
         remote.push(package);
     }
-    accept_licenses(config, &sdk, &repo, &remote, licenses)?;
-    for package in remote {
-        install_package(config, &sdk, &repo, package)
+    accept_licenses(config, &sdk, &remote, licenses)?;
+    for (repo, package) in remote {
+        install_package(config, &sdk, repo, package)
             .with_context(|| format!("failed to install the Android SDK package `{}`", package.path))?;
     }
     Ok(sdk)
@@ -574,7 +632,7 @@ pub fn ensure(config: &Config, packages: &[String], licenses: Licenses, install:
 /// Downloads, verifies and unpacks one package into `sdk`.
 fn install_package(config: &Config, sdk: &Path, repo: &Repository, package: &RemotePackage) -> Result<()> {
     let archive = package.archive().context("it has no archive for this platform")?;
-    let url = if archive.url.contains("://") { archive.url.clone() } else { format!("{REPOSITORY_URL}/{}", archive.url) };
+    let url = if archive.url.contains("://") { archive.url.clone() } else { format!("{}/{}", package.base, archive.url) };
     let name = archive.url.rsplit('/').next().unwrap_or(&archive.url);
     let file = config.toolchains_dir().join("downloads").join(format!("android-{name}"));
     if !(file.is_file() && verify_sha1(&file, &archive.sha1).is_ok()) {
@@ -741,16 +799,38 @@ mod tests {
         assert_eq!(system_image_packages(37, "google_apis", "arm64-v8a")[0], "system-images;android-37.0;google_apis;arm64-v8a");
         assert_eq!(emulator_packages(), ["emulator", "cmdline-tools;latest", "platform-tools"]);
 
-        // The repository's own spelling and tag are found; a preview-only or missing image is not.
-        let image = format!("system-images;android-35;google_apis_playstore;{}", host_abi());
-        let extra = format!(
-            "<remotePackage path=\"{image}\"><type-details xsi:type=\"generic:genericDetailsType\"/><revision><major>1</major></revision>\
-             <display-name>Image</display-name><uses-license ref=\"android-sdk-license\"/><archives><archive><complete><size>1</size>\
-             <checksum type=\"sha1\">aa</checksum><url>image.zip</url></complete></archive></archives></remotePackage></sdk:sdk-repository>"
+        // The main manifest lists no system images; Google's own are in manifests of their own, without the common
+        // namespace, whose archives are relative to their directory.
+        let abi = host_abi();
+        let image = format!("system-images;android-35;google_apis_playstore;{abi}");
+        let plain = format!("system-images;android-36;default;{abi}");
+        let sys_img = |path: &str| {
+            format!(
+                "<?xml version=\"1.0\"?><sys-img:sdk-sys-img xmlns:sys-img=\"http://schemas.android.com/sdk/android/repo/sys-img2/01\" \
+                 xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><license id=\"android-sdk-license\" type=\"text\">Terms</license>\
+                 <remotePackage path=\"{path}\"><type-details xsi:type=\"sys-img:sysImgDetailsType\"><api-level>35</api-level></type-details>\
+                 <revision><major>1</major></revision><display-name>Image</display-name><uses-license ref=\"android-sdk-license\"/>\
+                 <archives><archive><complete><size>1</size><checksum>aa</checksum><url>image.zip</url></complete></archive></archives>\
+                 </remotePackage></sys-img:sdk-sys-img>"
+            )
+        };
+        assert!(Repository::parse(&manifest(&[])).unwrap().find(&image).is_none());
+        let playstore = Repository::parse_at(&sys_img(&image), "base/google_apis_playstore").unwrap();
+        let android = Repository::parse_at(&sys_img(&plain), "base/android").unwrap();
+        let found = playstore.find(&image).unwrap();
+        assert_eq!(found.base, "base/google_apis_playstore");
+        assert_eq!(found.archive().unwrap().url, "image.zip");
+        let xml = playstore.package_xml(found);
+        assert!(
+            xml.contains("<common:repository ") && xml.contains("xmlns:common=\"http://schemas.android.com/repository/android/common/02\"")
         );
-        let repo = Repository::parse(&manifest(&[]).replace("</sdk:sdk-repository>", &extra)).unwrap();
-        assert_eq!(system_image_for(&repo, 35).as_deref(), Some(image.as_str()));
-        assert_eq!(system_image_for(&repo, 34), None);
+        assert!(xml.contains("<localPackage path=\"system-images;android-35;google_apis_playstore;"), "{xml}");
+        roxmltree::Document::parse(&xml).unwrap();
+        let manifests = [playstore, android];
+        assert_eq!(system_image_for(&manifests, 35), Some((image.clone(), 0)));
+        // The plain image is the fallback when no Google APIs image exists, and it comes from its own manifest.
+        assert_eq!(system_image_for(&manifests, 36), Some((plain, 1)));
+        assert_eq!(system_image_for(&manifests, 34), None);
 
         // Installed images, the tools and the emulator are read from the SDK's layout.
         let sdk = tempfile::tempdir().unwrap();

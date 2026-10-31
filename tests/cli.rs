@@ -2003,8 +2003,10 @@ const ABI: &str = if cfg!(target_arch = "aarch64") { "arm64-v8a" } else { "x86_6
 /// Serves a Google SDK repository with platform 36, build-tools 36.0.0 and platform-tools from `repo`, as the
 /// toolchain mirror of `p`.
 fn serve_android_repository(p: &Project, repo: &LocalRepo) {
-    let package = |path: &str, name: &str, revision: &str, top: &str, file: &str| {
-        let zip_path = repo.dir.path().join(format!("{top}.zip"));
+    // `dir` is where the archive is served from, relative to the repository: system images are in their own directory.
+    let package_in = |dir: &str, path: &str, name: &str, revision: &str, top: &str, file: &str| {
+        std::fs::create_dir_all(repo.dir.path().join(dir)).unwrap();
+        let zip_path = repo.dir.path().join(dir).join(format!("{top}.zip"));
         let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
         zip.start_file(format!("{top}/{file}"), zip::write::SimpleFileOptions::default()).unwrap();
         std::io::Write::write_all(&mut zip, b"x").unwrap();
@@ -2017,6 +2019,7 @@ fn serve_android_repository(p: &Project, repo: &LocalRepo) {
              </remotePackage>"
         )
     };
+    let package = |path: &str, name: &str, revision: &str, top: &str, file: &str| package_in("", path, name, revision, top, file);
     let packages = [
         package("platforms;android-36", "Android SDK Platform 36", "<major>2</major>", "android-36", "android.jar"),
         package(
@@ -2029,8 +2032,25 @@ fn serve_android_repository(p: &Project, repo: &LocalRepo) {
         package("platform-tools", "Android SDK Platform-Tools", "<major>37</major>", "platform-tools", "adb"),
         package("emulator", "Android Emulator", "<major>36</major>", "emulator", "emulator"),
         package("cmdline-tools;latest", "Android SDK Command-line Tools (latest)", "<major>20</major>", "cmdline-tools", "bin"),
-        package(&format!("system-images;android-36;google_apis;{ABI}"), "Google APIs System Image", "<major>1</major>", ABI, "system.img"),
     ];
+    // Google publishes the system images in manifests of their own, which do not declare the common namespace.
+    let image = package_in(
+        "sys-img/google_apis",
+        &format!("system-images;android-36;google_apis;{ABI}"),
+        "Google APIs System Image",
+        "<major>1</major>",
+        ABI,
+        "system.img",
+    );
+    repo.write(
+        "sys-img/google_apis/sys-img2-1.xml",
+        &format!(
+            "<?xml version=\"1.0\"?>\n<sys-img:sdk-sys-img xmlns:sys-img=\"http://schemas.android.com/sdk/android/repo/sys-img2/01\" \
+             xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
+             <license id=\"android-sdk-license\" type=\"text\">Terms of the fake license</license>\
+             <channel id=\"channel-0\">stable</channel>{image}</sys-img:sdk-sys-img>\n"
+        ),
+    );
     repo.write(
         "repository2-3.xml",
         &format!(
