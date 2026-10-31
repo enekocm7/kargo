@@ -54,6 +54,12 @@ Variables you set for your program, in [`[env]`](../manifest/#env) of kargo.toml
 | `CODEARTIFACT_AUTH_TOKEN` | Credentials (user `aws`) of an [AWS CodeArtifact](../manifest/#hosted-repositories) repository without `username-env` and `password-env` |
 | `COMPLETE` | Set by the `kargo completions` scripts when they ask Kargo for candidates; don't set it yourself |
 
+### In `kargo info` and `kargo report`
+
+[`kargo info`](../commands/#kargo-info) prints one `env:` line per variable, and [`kargo report`](../commands/#kargo-report) lists them in its report, but only from an allow list composed of this page's non-secret variables: the `KARGO_*` settings (locations, jobs, offline and vendored switches, daemon and incremental switches, browser, Android device, repository and release URLs), `JAVA_HOME`, `GRAALVM_HOME`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `KONAN_DATA_DIR`, `SOURCE_DATE_EPOCH`, `NPM_CONFIG_REGISTRY`, `NPM_CONFIG_USERCONFIG` (the path, not the file), `BROWSER`, the proxy variables, `NO_COLOR`, `CLICOLOR_FORCE`, `CI`, `TERM` and `SHELL`. Values are redacted: the home directory becomes `~`, and URLs lose their credentials and query string.
+
+The variables that hold credentials are never printed: `NPM_TOKEN`, `KARGO_SIGNING_KEY`, `KARGO_SIGNING_KEY_PASSPHRASE`, `KARGO_SIGNING_PASSWORD`, `KARGO_MAVEN_CENTRAL_PASSWORD`, `GITHUB_TOKEN`, `CI_JOB_TOKEN`, `CODEARTIFACT_AUTH_TOKEN`, and the repository `username-env` and `password-env` variables (the manifest shows the variable's name, not its value).
+
 ## Variables Kargo sets
 
 For tasks, hook plugins and `kargo-*` subcommands:

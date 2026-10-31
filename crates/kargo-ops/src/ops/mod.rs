@@ -25,6 +25,7 @@ pub mod packaging;
 pub mod preview;
 pub mod publish;
 pub mod publish_npm;
+pub mod report;
 pub mod run;
 pub mod self_update;
 pub mod target;

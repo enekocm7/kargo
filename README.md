@@ -101,7 +101,9 @@ There are many more: `check`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `ben
 
 ## Contributing
 
-Issues and pull requests are welcome. Kargo is written in Rust:
+Issues and pull requests are welcome. Found a bug? Run `kargo report` in the project: it writes a redacted report (versions, `kargo.toml`, the last failed build and `kargo doctor`) that you can paste into an issue, and `kargo report --open` opens a prefilled one. Nothing is uploaded.
+
+Kargo is written in Rust:
 
 ```sh
 cargo build

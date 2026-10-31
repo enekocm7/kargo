@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for taking the time to report a bug. Please search the [open issues](https://github.com/enekocm7/kargo/issues?q=is%3Aissue) and the [FAQ](https://enekocm7.github.io/kargo/reference/faq/) first.
 
-        Questions about how to do something belong in a *Question* issue. Do not post passwords, tokens or other secrets: remove them from `kargo.toml`, logs and `kargo doctor` output.
+        Questions about how to do something belong in a *Question* issue. Run `kargo report` in the project directory: it writes `target/.kargo/kargo-report.md` with the versions, your `kargo.toml`, the output of the last failed command and `kargo doctor`, and removes the home directory, user and machine names, URL credentials and tokens before you paste it. Read it once before posting, since a secret written somewhere Kargo does not know about (a task script, for example) is not removed.
   - type: textarea
     id: what-happened
     attributes:
@@ -59,10 +59,10 @@ body:
     validations:
       required: true
   - type: textarea
-    id: doctor
+    id: report
     attributes:
-      label: Environment (kargo doctor)
-      description: Run `kargo doctor --bug-report` in the project directory and paste the result. It reports the operating system, the JDK, the toolchains, the SDKs and the network, and shortens your home directory to `~`. It is already a Markdown code block, so paste it as it is.
+      label: Environment (kargo report)
+      description: Run `kargo report` in the project directory and paste `target/.kargo/kargo-report.md`, or run `kargo report --open` and submit the prefilled issue. It reports the versions, the JDK, the toolchains, the environment variables Kargo reads (never tokens or passwords), your `kargo.toml` with credentials removed, the output of the last failed command and `kargo doctor`. Attach `kargo report --format zip` instead when the output is long. For a problem outside a project, `kargo doctor --bug-report` also works.
     validations:
       required: true
   - type: textarea

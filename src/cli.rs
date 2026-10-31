@@ -69,6 +69,7 @@ const COMMON_COMMANDS: &[&str] = &[
     "task",
     "toolchain",
     "doctor",
+    "report",
 ];
 
 #[derive(Debug, Parser)]
@@ -897,6 +898,16 @@ enum FormatArg {
     #[default]
     Text,
     Json,
+}
+
+/// What `kargo report` writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum ReportFormatArg {
+    /// A Markdown block to paste into an issue
+    #[default]
+    Markdown,
+    /// A .zip with the Markdown and the logs
+    Zip,
 }
 
 /// The lowest severity that makes `kargo audit` fail.
@@ -1929,6 +1940,29 @@ Each check is ok, a warning or an error, with a one-line fix. Exits with 1 when 
         #[arg(long, value_enum, default_value_t)]
         format: FormatArg,
     },
+    /// Write a redacted report to paste into a bug report
+    #[command(long_about = "Write a redacted report for a bug report: the Kargo, JDK, Kotlin and OS versions, the \
+kargo.toml with credentials and tokens removed, the output of the last failed build, the checks of \
+`kargo doctor`, the hash of kargo.lock and, with --include-lock, the versions it resolved.
+
+Nothing is uploaded. Kargo writes a Markdown block (or a .zip with the logs), prints its path and \
+what it contains, and leaves the rest to you. --open opens a prefilled GitHub issue in the browser.
+The home directory becomes `~`, the user and machine names are replaced, URLs lose their credentials \
+and query strings, and only the environment variables Kargo reads are included.")]
+    Report {
+        /// What to write
+        #[arg(long, value_enum, default_value_t)]
+        format: ReportFormatArg,
+        /// Where to write it (default: target/.kargo/kargo-report.md or .zip, else Kargo home's reports/)
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Include every version kargo.lock resolved
+        #[arg(long)]
+        include_lock: bool,
+        /// Open a prefilled GitHub issue in the browser, for you to review and submit
+        #[arg(long)]
+        open: bool,
+    },
     /// Print a shell completion script
     #[command(long_about = "Print a shell completion script.
 
@@ -1958,6 +1992,7 @@ pub fn main() -> ExitCode {
 }
 
 fn run() -> ExitCode {
+    install_panic_hook();
     complete::complete_if_requested();
     ops::self_update::remove_stale_binary();
     let cli = parse();
@@ -1970,17 +2005,66 @@ fn run() -> ExitCode {
     };
     cli.global.color.apply();
     let shell = Shell::new(verbosity);
+    // `kargo report` attaches the output of the last failed build, `check`, `test` or `run`.
+    if let Some(command) = recorded_command(&cli.command) {
+        kargo_util::capture::start(command, env!("CARGO_PKG_VERSION"));
+    }
     match execute(cli, &shell) {
-        Ok(code) => match u8::try_from(code) {
-            Ok(code) => ExitCode::from(code),
-            // A program's full status (Windows exit codes are 32 bits) cannot go through `ExitCode`.
-            Err(_) => std::process::exit(code),
-        },
+        Ok(code) => {
+            kargo_util::capture::finish(code == 0);
+            match u8::try_from(code) {
+                Ok(code) => ExitCode::from(code),
+                // A program's full status (Windows exit codes are 32 bits) cannot go through `ExitCode`.
+                Err(_) => std::process::exit(code),
+            }
+        }
         Err(err) => {
             report_error(&shell, &err);
+            kargo_util::capture::finish(false);
             ExitCode::from(FAILURE as u8)
         }
     }
+}
+
+/// The commands whose output `kargo report` keeps when they fail.
+fn recorded_command(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Build { .. } => Some("build"),
+        Command::Check { .. } => Some("check"),
+        Command::Test { .. } => Some("test"),
+        Command::Run { .. } => Some("run"),
+        _ => None,
+    }
+}
+
+/// Prints a note with the version and the command to run after a panic, after the panic message
+/// itself. The exit code of a panic stays 101.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_owned());
+        let location = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
+        kargo_util::capture::panic(&format!("{payload}{location}"));
+        eprintln!();
+        eprintln!("{}", panic_note());
+    }));
+}
+
+/// The line a panic ends with: the build of Kargo, a request for `kargo report` and where to
+/// attach it.
+fn panic_note() -> String {
+    format!(
+        "note: this is a bug in kargo {} ({}); run `kargo report` and add its output to an issue: {}",
+        env!("CARGO_PKG_VERSION"),
+        kargo_ops::ops::report::COMMIT,
+        kargo_ops::ops::report::ISSUES_URL
+    )
 }
 
 /// Parses the command line. `kargo --help` lists the common commands and the current project's tasks, and `kargo` alone
@@ -2182,6 +2266,7 @@ fn report_error(shell: &Shell, err: &anyhow::Error) {
     shell.error(err);
     for cause in err.chain().skip(1) {
         eprintln!("\nCaused by:\n  {cause}");
+        kargo_util::capture::line(format!("Caused by: {cause}"));
     }
     let help = help::help_lines(err);
     if !help.is_empty() {
@@ -2223,7 +2308,24 @@ fn load_workspace(global: &GlobalArgs) -> Result<Workspace> {
 
 fn load_project(global: &GlobalArgs) -> Result<Project> {
     let cwd = std::env::current_dir().context("failed to read the current directory")?;
-    Project::discover(&cwd, global.manifest_path.as_deref())
+    let project = Project::discover(&cwd, global.manifest_path.as_deref())?;
+    kargo_util::capture::set_target_dir(project.target_dir());
+    Ok(project)
+}
+
+/// The project `kargo doctor` and `kargo report` work on: the loaded project, the manifest that
+/// does not load, or nothing outside a project.
+fn project_state<'a>(global: &GlobalArgs, loaded: &'a Result<Project>) -> Result<ops::doctor::ProjectState<'a>> {
+    let cwd = std::env::current_dir().context("failed to read the current directory")?;
+    let manifest = match &global.manifest_path {
+        Some(path) => Some(cwd.join(path)),
+        None => cwd.ancestors().map(|d| d.join(kargo_manifest::MANIFEST_NAME)).find(|p| p.is_file()),
+    };
+    Ok(match (loaded, manifest) {
+        (Ok(project), _) => ops::doctor::ProjectState::Loaded(project),
+        (Err(error), Some(manifest)) => ops::doctor::ProjectState::Broken { manifest, error },
+        (Err(_), None) => ops::doctor::ProjectState::None,
+    })
 }
 
 /// The package a single-package command such as `kargo add` works on.
@@ -3821,11 +3923,11 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let package = task_package(&project);
             match (format, package) {
                 (FormatArg::Text, Some(index)) => print_info(config, &project, project.package(index))?,
-                (FormatArg::Text, None) => print_workspace_info(&project),
+                (FormatArg::Text, None) => print_workspace_info(config, &project),
                 (FormatArg::Json, Some(index)) => {
                     println!("{}", serde_json::to_string_pretty(&info_json(config, project.package(index))?)?)
                 }
-                (FormatArg::Json, None) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(&project))?),
+                (FormatArg::Json, None) => println!("{}", serde_json::to_string_pretty(&workspace_info_json(config, &project))?),
             }
             Ok(0)
         }
@@ -3834,18 +3936,8 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             Ok(0)
         }
         Command::Doctor { fix, format, bug_report } => {
-            let cwd = std::env::current_dir().context("failed to read the current directory")?;
             let loaded = load_project(global);
-            // A manifest that does not load is a finding, not a reason to stop.
-            let manifest = match &global.manifest_path {
-                Some(path) => Some(cwd.join(path)),
-                None => cwd.ancestors().map(|d| d.join(kargo_manifest::MANIFEST_NAME)).find(|p| p.is_file()),
-            };
-            let state = match (&loaded, manifest) {
-                (Ok(project), _) => ops::doctor::ProjectState::Loaded(project),
-                (Err(error), Some(manifest)) => ops::doctor::ProjectState::Broken { manifest, error },
-                (Err(_), None) => ops::doctor::ProjectState::None,
-            };
+            let state = project_state(global, &loaded)?;
             let builtins = builtin_commands();
             let mut report = ops::doctor::diagnose(config, state, &|name| builtins.iter().any(|b| b == name));
             if fix {
@@ -3859,6 +3951,31 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 print!("{}", ops::doctor::render(&report));
             }
             Ok(if report.has_errors() { 1 } else { 0 })
+        }
+        Command::Report { format, output, include_lock, open } => {
+            let loaded = load_project(global);
+            let state = project_state(global, &loaded)?;
+            let builtins = builtin_commands();
+            let bundle = ops::report::build(config, &state, include_lock, &|name| builtins.iter().any(|b| b == name));
+            let project = match &state {
+                ops::doctor::ProjectState::Loaded(project) => Some(*project),
+                _ => None,
+            };
+            let dir = ops::report::output_dir(config, project);
+            let name = match format {
+                ReportFormatArg::Markdown => ops::report::REPORT_FILE,
+                ReportFormatArg::Zip => ops::report::ZIP_FILE,
+            };
+            let path = output.unwrap_or_else(|| dir.join(name));
+            ops::report::write(&path, &bundle, matches!(format, ReportFormatArg::Zip))?;
+            shell.status("Wrote", path.display());
+            shell.note(format!("Contains {}. Nothing was uploaded.", bundle.contents.join("; ")));
+            if open {
+                let url = ops::report::issue_url(&bundle.markdown);
+                kargo_ops::web::open_in_browser(std::ffi::OsStr::new(&url))?;
+                shell.status("Opened", format!("a prefilled issue in your browser: {url}"));
+            }
+            Ok(0)
         }
         Command::Completions { shell } => {
             complete::write_script(shell, &mut std::io::stdout().lock())?;
@@ -4254,7 +4371,7 @@ fn tree_targets(ctx: &BuildContext, target: Option<TargetArg>) -> Vec<TargetKind
 }
 
 /// `kargo info --format json` at the root of a workspace: its members, lockfile and build directory.
-fn workspace_info_json(project: &Project) -> serde_json::Value {
+fn workspace_info_json(config: &Config, project: &Project) -> serde_json::Value {
     let members: Vec<serde_json::Value> = project
         .members()
         .iter()
@@ -4271,15 +4388,21 @@ fn workspace_info_json(project: &Project) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({
+        "version": 1,
         "workspace": project.root().display().to_string(),
         "members": members,
         "default-members": project.default_members().iter().map(|&i| project.package(i).name()).collect::<Vec<_>>(),
         "lockfile": project.lockfile_path().display().to_string(),
         "target-dir": project.target_dir().display().to_string(),
+        "kargo": kargo_build_json(),
+        "environment": environment_json(),
+        "home": location_json(config.home()),
+        "cache": location_json(&config.home().join("cache")),
+        "daemons": kargo_compiler::daemon::running(config.home()).len(),
     })
 }
 
-fn print_workspace_info(project: &Project) {
+fn print_workspace_info(config: &Config, project: &Project) {
     let members: Vec<String> =
         project.members().iter().map(|&i| project.package(i)).map(|p| format!("{} v{}", p.name(), p.manifest().package.version)).collect();
     println!("workspace:    {}", project.root().display());
@@ -4305,6 +4428,30 @@ fn print_workspace_info(project: &Project) {
             }
         }
     }
+    print_machine_info(config);
+}
+
+/// The build of Kargo, for `kargo info --format json`.
+fn kargo_build_json() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": kargo_ops::ops::report::COMMIT,
+        "built": kargo_ops::ops::report::BUILD_DATE,
+        "target": kargo_ops::ops::self_update::TARGET,
+    })
+}
+
+/// The allow-listed environment variables, with their values redacted.
+fn environment_json() -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (name, value) in kargo_ops::ops::report::environment() {
+        map.insert(name, serde_json::Value::String(value));
+    }
+    serde_json::Value::Object(map)
+}
+
+fn location_json(path: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({ "path": path.display().to_string(), "bytes": kargo_ops::ops::report::directory_size(path) })
 }
 
 /// The versions of the frameworks of `ws`, with the modules their BOMs manage as `kargo.lock` resolved them for the
@@ -4328,6 +4475,8 @@ fn print_info(config: &Config, project: &Project, ws: &Workspace) -> Result<()> 
         println!("group:        {g}");
     }
     println!("kotlin:       {}", m.kotlin.version);
+    println!("jdk:          {}", kargo_ops::ops::report::jdk_summary(config, Some(m)));
+    println!("toolchains:   {}", kargo_ops::ops::report::toolchains_summary(config));
     let targets: Vec<&str> = m.targets.enabled().iter().map(|t| t.as_str()).collect();
     println!("targets:      {}", targets.join(", "));
     for (i, framework) in locked_framework_versions(ws)?.iter().enumerate() {
@@ -4357,7 +4506,22 @@ fn print_info(config: &Config, project: &Project, ws: &Workspace) -> Result<()> 
     }
     println!("root:         {}", ws.root().display());
     println!("target dir:   {}", ws.target_dir().display());
+    print_machine_info(config);
     Ok(())
+}
+
+/// The machine facts of `kargo info`: the Kargo build, the locations and sizes of the Kargo home
+/// and the cache, the compiler daemons and the environment variables Kargo read (with their
+/// values redacted by [`kargo_ops::ops::report::environment`]).
+fn print_machine_info(config: &Config) {
+    println!("kargo:        {}", kargo_ops::ops::report::version_line());
+    println!("home:         {} ({})", config.home().display(), kargo_ops::ops::report::size_label(config.home()));
+    let cache = config.home().join("cache");
+    println!("cache:        {} ({})", cache.display(), kargo_ops::ops::report::size_label(&cache));
+    println!("daemons:      {}", kargo_ops::ops::report::daemons_summary(config));
+    for (name, value) in kargo_ops::ops::report::environment() {
+        println!("{:<14}{name}={value}", "env:");
+    }
 }
 
 /// `kargo info --format json`.
@@ -4370,6 +4534,7 @@ fn info_json(config: &Config, ws: &Workspace) -> Result<serde_json::Value> {
             .collect()
     };
     Ok(serde_json::json!({
+        "version": 1,
         "package": {
             "name": m.package.name,
             "version": m.package.version,
@@ -4378,6 +4543,13 @@ fn info_json(config: &Config, ws: &Workspace) -> Result<serde_json::Value> {
         },
         "kotlin": m.kotlin.version,
         "jdk": m.toolchain.jdk.to_string(),
+        "jdk-toolchain": kargo_ops::ops::report::jdk_summary(config, Some(m)),
+        "toolchains": kargo_ops::ops::report::toolchains_summary(config),
+        "kargo": kargo_build_json(),
+        "environment": environment_json(),
+        "home": location_json(config.home()),
+        "cache": location_json(&config.home().join("cache")),
+        "daemons": kargo_compiler::daemon::running(config.home()).len(),
         "targets": m.targets.enabled().iter().map(|t| t.as_str()).collect::<Vec<_>>(),
         "frameworks": kargo_ops::builtins::enabled_frameworks(m),
         "framework-versions": frameworks
@@ -4470,6 +4642,15 @@ mod tests {
         assert!(hidden("completions"));
         // The command itself is unchanged, so completions and `kargo help lsp` still see it.
         assert!(!Cli::command().find_subcommand("lsp").unwrap().is_hide_set());
+    }
+
+    #[test]
+    fn a_panic_asks_for_a_report() {
+        let note = panic_note();
+        assert!(note.contains(env!("CARGO_PKG_VERSION")), "{note}");
+        assert!(note.contains("kargo report"), "{note}");
+        assert!(note.contains(kargo_ops::ops::report::ISSUES_URL), "{note}");
+        assert_eq!(note.lines().count(), 1, "{note}");
     }
 
     #[test]

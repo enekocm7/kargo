@@ -834,13 +834,13 @@ Show where the jar of a resolved dependency is, and what is in it: the `javap` o
 
 ```console
 $ kargo inspect g:util
-  Inspecting g:util:2.0 (jvm, runtime) /home/me/.kargo/cache/maven/g/util/2.0/util-2.0.jar
+  Inspecting g:util:2.0 (jvm, runtime) /home/me/.kargo/cache/g/util/2.0/util-2.0.jar
 com.acme.util.Strings
 com.acme.util.Strings.Companion
 note: 2 classes; name one to print its members: `kargo inspect g:util <class>`
 
 $ kargo inspect g:util Strings
-  Inspecting g:util:2.0 (jvm, runtime) /home/me/.kargo/cache/maven/g/util/2.0/util-2.0.jar
+  Inspecting g:util:2.0 (jvm, runtime) /home/me/.kargo/cache/g/util/2.0/util-2.0.jar
 public final class com.acme.util.Strings {
   public static final com.acme.util.Strings$Companion Companion;
   ...
@@ -867,8 +867,8 @@ Print the resolved classpath (JVM) or klib path (Wasm, JS, Native) of a target: 
 
 ```console
 $ kargo classpath --format lines
-/home/me/.kargo/cache/maven/io/ktor/ktor-server-core-jvm/3.2.3/ktor-server-core-jvm-3.2.3.jar
-/home/me/.kargo/cache/maven/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar
+/home/me/.kargo/cache/io/ktor/ktor-server-core-jvm/3.2.3/ktor-server-core-jvm-3.2.3.jar
+/home/me/.kargo/cache/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar
 ...
 ```
 
@@ -1273,6 +1273,8 @@ Each check is `ok`, a `warning` (something to know, or a build that will downloa
 | `--format <fmt>` | `text` (default) or `json`: `{ "version", "errors", "warnings", "checks": [{ "section", "name", "status", "message", "fix", "fixable" }], "fixed" }` |
 | `--bug-report` | Print the report as a Markdown code block to paste into a bug report, with your home directory shortened to `~` |
 
+[`kargo report`](#kargo-report) runs the same checks as part of a full, redacted report for an issue.
+
 ## `kargo version`
 
 Print the version of Kargo, like [`kargo --version`](#global-flags). It never reads a project. With `-v`, it also prints the release and the target the binary was built for. When a newer release exists, a note on stderr says so, at most once a day (see [`kargo self`](#kargo-self)).
@@ -1288,11 +1290,56 @@ host: x86_64-unknown-linux-gnu
 
 ## `kargo info`
 
-Print project information: package, targets, frameworks, path dependencies, repositories and paths. Each framework shows its version; for Spring Boot, the Spring Framework, Spring Security and Jackson versions that `kargo.lock` resolved follow it, in parentheses (see [Spring Boot versions](../../guides/spring-boot/#versions)). A repository that a [mirror](../../guides/offline-and-mirrors/#repository-mirrors) or `--vendored` replaces shows where it is fetched from (`maven-central (via https://nexus.corp/central)`), and a `config:` line lists the [configuration files](../../guides/offline-and-mirrors/#configuration-files) Kargo read. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the dependency graph between the members (`server -> core`); with `--format json`, each member lists its `dependencies`.
+Print project information: package, targets, frameworks, path dependencies, repositories and paths. Each framework shows its version; for Spring Boot, the Spring Framework, Spring Security and Jackson versions that `kargo.lock` resolved follow it, in parentheses (see [Spring Boot versions](../../guides/spring-boot/#versions)). A repository that a [mirror](../../guides/offline-and-mirrors/#repository-mirrors) or `--vendored` replaces shows where it is fetched from (`maven-central (via https://nexus.corp/central)`), and a `config:` line lists the [configuration files](../../guides/offline-and-mirrors/#configuration-files) Kargo read. At the root of a workspace, it prints the members, the default members, the Kotlin version, the lockfile, the target directory and the module graph.
+
+It also prints the machine facts a bug report needs:
+
+```console
+$ kargo info
+package:      app v0.1.0
+kotlin:       2.4.21
+jdk:          JDK 21 at /home/me/.kargo/toolchains/jdk/jdk-21.0.5+11 (pinned `[toolchain] jdk = "21"`, downloaded)
+toolchains:   JDK jdk-21.0.5+11, Gradle 9.6.0
+targets:      jvm
+dependencies: 0 (+0 dev)
+repositories: maven-central
+root:         /home/me/app
+target dir:   /home/me/app/target
+kargo:        0.1.4 (abc1234, built 2026-10-31, x86_64-unknown-linux-gnu)
+home:         /home/me/.kargo (1.2 GiB)
+cache:        /home/me/.kargo/cache (340.2 MiB)
+daemons:      none running
+env:          JAVA_HOME=/usr/lib/jvm/jdk-21
+```
+
+The `jdk:` line says where the JDK comes from: `JAVA_HOME`, `PATH`, a download for a pinned `[toolchain] jdk`, or a Kargo-managed JDK when the machine has none. `toolchains:` lists what is installed under the Kargo home, `home:` and `cache:` give their sizes, `daemons:` is the state of the [compiler daemons](#kargo-daemon), and `kargo:` is the version, commit and build date of the binary. Each `env:` line is one of the [environment variables Kargo reads](../environment/) that is set, with the home directory shortened to `~` and credentials removed; variables outside that list, such as `NPM_TOKEN` or `KARGO_SIGNING_KEY`, are never printed.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--format <fmt>` | `text` | `text` or `json`. `json` also lists every dependency and repository, with the `effective-url` it is fetched from. See [Machine-readable output](../machine-readable-output/#kargo-info---format-json) |
+| `--format <fmt>` | `text` | `text` or `json`. `json` adds `version` (1), `kargo` (`version`, `commit`, `built`, `target`), `jdk-toolchain`, `toolchains`, `environment` (the allow-listed variables, redacted), `home` and `cache` (`path`, `bytes`, which is `null` when the directory does not exist) and `daemons` (the number running), besides every dependency and repository with the `effective-url` it is fetched from. See [Machine-readable output](../machine-readable-output/#kargo-info---format-json) |
+
+## `kargo report`
+
+Write a redacted report for a bug report: the Kargo, JDK, Kotlin and OS versions, the `kargo.toml`, the output of the last failed command, the checks of [`kargo doctor`](#kargo-doctor), the hash of `kargo.lock` and, with `--include-lock`, every version it resolved. Kargo writes it next to the build, prints its path and what it contains, and uploads nothing.
+
+```console
+$ kargo report
+       Wrote /home/me/app/target/.kargo/kargo-report.md
+note: Contains versions and platform; the locations and sizes of KARGO_HOME, the cache and the toolchains; the installed toolchains and the compiler daemons; the environment variables Kargo reads (an allow list; no credentials); kargo.toml, with credentials, tokens and URL query strings removed; the output of the last failed command; the checks of kargo doctor; the hash of kargo.lock. Nothing was uploaded.
+```
+
+The report goes to `target/.kargo/` inside a project (the build directory, so `KARGO_TARGET_DIR` is honored) and to `reports/` in the Kargo home outside one. `--offline` makes the `kargo doctor` section skip contacting the repositories, as it does for `kargo doctor` itself. A `kargo.toml` that does not load is still included, redacted. `kargo build`, `kargo check`, `kargo test` and `kargo run` keep the output of the last one that failed in `target/.kargo/last-error.log`, which the report includes when it is there.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--format <fmt>` | `markdown` | `markdown`, a block to paste into an issue, or `zip`, an archive with `kargo-report.md`, the redacted `kargo.toml` and `last-error.log` |
+| `--output <path>` | `target/.kargo/kargo-report.md` or `.zip` | Where to write it |
+| `--include-lock` | | Add the versions `kargo.lock` resolved as a table |
+| `--open` | | Open a prefilled GitHub issue in your browser. Review it and submit it yourself; nothing is sent until you do |
+
+The redaction is fixed and tested. Your home directory becomes `~`; your user name and the machine name become `<user>` and `<host>`; URLs lose their user name, password and query string (`https://user:secret@nexus.corp/repo?token=x` becomes `https://***@nexus.corp/repo`); the values of keys such as `password`, `token`, `secret`, `passphrase` and `api-key` in `kargo.toml` become `***`; and the environment section only has the variables of the [allow list](../environment/), never the credentials (`NPM_TOKEN`, `KARGO_SIGNING_KEY`, `GITHUB_TOKEN`, repository passwords). Read the file before you paste it: a secret written in a place Kargo does not know about, such as a task script, is not covered.
+
+`--open` puts the Markdown in the issue body and stops at about 5,000 characters. Attach the file when the report is longer.
 
 ## `kargo metadata`
 

@@ -208,6 +208,7 @@ impl<W: Write> Relay<W> {
         }
         if !is_json() {
             let _ = writeln!(self.err, "{line}");
+            kargo_util::capture::line(line);
             return;
         }
         if let Some(diagnostic) = parse_header(line) {
@@ -246,6 +247,7 @@ impl<W: Write> Relay<W> {
                 emit(&summary.to_json());
             } else {
                 let _ = writeln!(self.err, "{}", summary.rendered);
+                kargo_util::capture::line(&summary.rendered);
             }
         }
     }

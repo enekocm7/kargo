@@ -187,7 +187,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
 /// Where the human-readable test report goes: stdout, or stderr when stdout carries
 /// JSON messages (`--message-format json`).
 pub(crate) fn human_out() -> Box<dyn Write> {
-    if diagnostics::is_json() { Box::new(anstream::stderr()) } else { Box::new(anstream::stdout()) }
+    if diagnostics::is_json() { Box::new(anstream::stderr()) } else { Box::new(kargo_util::capture::Tee::new(anstream::stdout())) }
 }
 
 /// Prints a test message as a JSON line, adding the package and target.

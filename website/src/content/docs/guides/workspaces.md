@@ -383,6 +383,11 @@ graph:
     core
     cli -> core
     server -> core
+kargo:        0.1.4 (abc1234, built 2026-10-31, x86_64-unknown-linux-gnu)
+home:         /home/me/.kargo (1.2 GiB)
+cache:        /home/me/.kargo/cache (340.2 MiB)
+daemons:      none running
+env:          JAVA_HOME=/usr/lib/jvm/jdk-21
 ```
 
 `kargo tree` shows the path dependencies of each member as a tree before its Maven dependencies, and `kargo metadata` describes every package with its `path-dependencies` (including `exported` and `test-fixtures`), the members and the `default-members`; `kargo info --format json` at the root lists each member's `dependencies`.
