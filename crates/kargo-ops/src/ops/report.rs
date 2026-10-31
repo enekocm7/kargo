@@ -75,7 +75,7 @@ const ALLOWED_ENV: &[&str] = &[
     "SHELL",
 ];
 
-/// `kargo 0.1.4 (abc1234, built 2026-10-31, x86_64-unknown-linux-gnu)`.
+/// `kargo 0.1.5 (abc1234, built 2026-10-31, x86_64-unknown-linux-gnu)`.
 pub fn version_line() -> String {
     format!("{} ({}, built {}, {})", env!("CARGO_PKG_VERSION"), COMMIT, BUILD_DATE, crate::ops::self_update::TARGET)
 }

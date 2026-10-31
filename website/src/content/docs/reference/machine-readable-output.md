@@ -316,7 +316,7 @@ $ kargo info --format json
   "home": { "path": "/home/me/.kargo", "bytes": 1288490188 },
   "jdk": "system",
   "jdk-toolchain": "JDK 21 at /usr/lib/jvm/jdk-21 (JAVA_HOME)",
-  "kargo": { "version": "0.1.4", "commit": "abc1234", "built": "2026-10-31", "target": "x86_64-unknown-linux-gnu" },
+  "kargo": { "version": "0.1.5", "commit": "abc1234", "built": "2026-10-31", "target": "x86_64-unknown-linux-gnu" },
   "kotlin": "2.4.21",
   "manifest": "/home/me/app/kargo.toml",
   "package": {
