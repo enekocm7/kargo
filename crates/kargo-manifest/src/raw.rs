@@ -226,6 +226,25 @@ struct RawTest {
     test_timeout: Option<String>,
     #[serde(default)]
     jvm_args: Vec<String>,
+    #[serde(default)]
+    coverage: Option<RawCoverage>,
+}
+
+/// `[test.coverage]`: code coverage of `kargo test --coverage` (JVM, JaCoCo).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawCoverage {
+    /// JaCoCo version; `None` uses Kargo's pinned default.
+    jacoco: Option<String>,
+    /// Minimum line coverage in percent (0-100); `None` means no minimum.
+    min_line: Option<f64>,
+    /// Minimum branch coverage in percent (0-100); `None` means no minimum.
+    min_branch: Option<f64>,
+    /// Overall line coverage that fails the run (`--fail-under` overrides it).
+    fail_under: Option<f64>,
+    /// Source patterns left out of the report (gitignore syntax, relative to the package root).
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3095,6 +3114,7 @@ impl RawManifest {
                 timeout: self.test.timeout.as_deref().map(|v| parse_duration("timeout", v)).transpose()?,
                 test_timeout: self.test.test_timeout.as_deref().map(|v| parse_duration("test-timeout", v)).transpose()?,
                 jvm_args: self.test.jvm_args,
+                coverage: validate_coverage(self.test.coverage)?,
             },
             bench: BenchSettings {
                 warmup: self.bench.warmup.as_deref().map(|v| BenchRounds::parse("[bench] `warmup`", v)).transpose()?,
@@ -3166,6 +3186,35 @@ fn validate_audit(raw: RawAudit) -> Result<AuditSettings> {
         ignore.push(AuditIgnore { id, reason, until });
     }
     Ok(AuditSettings { deny, ignore })
+}
+
+/// Validates `[test.coverage]`: percentages in 0-100 and non-empty exclude patterns.
+fn validate_coverage(raw: Option<RawCoverage>) -> Result<CoverageSettings> {
+    let Some(raw) = raw else { return Ok(CoverageSettings::default()) };
+    for (key, value) in [("min-line", raw.min_line), ("min-branch", raw.min_branch), ("fail-under", raw.fail_under)] {
+        if let Some(v) = value
+            && !(0.0..=100.0).contains(&v)
+        {
+            bail!("[test.coverage] `{key} = {v}` is not a percentage; use a number from 0 to 100, such as 80");
+        }
+    }
+    if let Some(version) = &raw.jacoco
+        && version.trim().is_empty()
+    {
+        bail!("[test.coverage] `jacoco` must not be empty; use a version such as \"0.8.12\"");
+    }
+    for pattern in &raw.exclude {
+        if pattern.trim().is_empty() {
+            bail!("[test.coverage] `exclude` lists an empty pattern; use a gitignore-style pattern such as \"**/generated/**\"");
+        }
+    }
+    Ok(CoverageSettings {
+        jacoco_version: raw.jacoco,
+        min_line: raw.min_line,
+        min_branch: raw.min_branch,
+        fail_under: raw.fail_under,
+        exclude: raw.exclude,
+    })
 }
 
 /// Whether `s` is a date such as `2026-12-31`.

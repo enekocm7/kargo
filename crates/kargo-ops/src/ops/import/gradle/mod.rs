@@ -1454,9 +1454,8 @@ fn advice(id: &str) -> Option<(&'static str, &'static str)> {
         "org.jetbrains.dokka" => ("`kargo doc` runs Dokka", "guides/documentation/"),
         "org.graalvm.buildtools.native" => ("`kargo package --format native-image` builds a GraalVM executable", "guides/distributing/"),
         "com.github.ben-manes.versions" => ("`kargo outdated` lists newer versions", "reference/commands/"),
-        "jacoco" | "org.sonarqube" => {
-            ("Kargo has no coverage or code-quality plugin; run the tool from a `[tasks]` entry", "guides/tasks-and-plugins/")
-        }
+        "jacoco" => ("`kargo test --coverage` measures JVM coverage with JaCoCo", "guides/testing/#coverage"),
+        "org.sonarqube" => ("upload the JaCoCo reports of `kargo test --coverage` from a `[tasks]` entry", "guides/tasks-and-plugins/"),
         _ => return None,
     })
 }

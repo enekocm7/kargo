@@ -1982,7 +1982,7 @@ pub struct LintSettings {
 }
 
 /// `[test]`: options for `kargo test`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TestSettings {
     /// Stop at the first target whose tests fail; `kargo test --no-fail-fast` overrides it.
     pub fail_fast: bool,
@@ -1992,11 +1992,35 @@ pub struct TestSettings {
     pub test_timeout: Option<Duration>,
     /// JVM arguments for the test process, after `[target.jvm] jvm-args`.
     pub jvm_args: Vec<String>,
+    /// Code coverage of `kargo test --coverage` (JVM, JaCoCo).
+    pub coverage: CoverageSettings,
 }
 
 impl Default for TestSettings {
     fn default() -> Self {
-        Self { fail_fast: true, timeout: None, test_timeout: None, jvm_args: Vec::new() }
+        Self { fail_fast: true, timeout: None, test_timeout: None, jvm_args: Vec::new(), coverage: CoverageSettings::default() }
+    }
+}
+
+/// `[test.coverage]`: thresholds and filters of `kargo test --coverage` (JVM, JaCoCo).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CoverageSettings {
+    /// JaCoCo version; `None` uses Kargo's pinned default.
+    pub jacoco_version: Option<String>,
+    /// Minimum line coverage in percent (0-100); `None` means no minimum.
+    pub min_line: Option<f64>,
+    /// Minimum branch coverage in percent (0-100); `None` means no minimum.
+    pub min_branch: Option<f64>,
+    /// Overall line coverage that fails the run; `--fail-under` overrides it.
+    pub fail_under: Option<f64>,
+    /// Source patterns left out of the report (gitignore syntax, relative to the package root).
+    pub exclude: Vec<String>,
+}
+
+impl CoverageSettings {
+    /// The effective line minimum: `--fail-under`, else `fail-under`, else `min-line`.
+    pub fn line_threshold(&self, fail_under: Option<f64>) -> Option<f64> {
+        fail_under.or(self.fail_under).or(self.min_line)
     }
 }
 
@@ -2376,7 +2400,7 @@ impl Generator {
 }
 
 /// A fully validated manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub package: Package,
     pub kotlin: KotlinSettings,

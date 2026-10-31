@@ -9,6 +9,7 @@ pub mod check;
 pub mod ci;
 pub mod classpath;
 pub mod context;
+pub mod coverage;
 pub mod dist;
 pub mod doc;
 pub mod doctor;
@@ -455,10 +456,14 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
     crate::generate::fetch_tools(ctx, &targets)?;
     if tools {
         fetch_pinned_jdk(ctx)?;
-        let (dokka, (ktlint, detekt)) = join(|| doc::fetch_tool(ctx), || join(|| fmt::fetch_tool(ctx), || lint::fetch_tool(ctx)));
+        let (dokka, (ktlint, (detekt, jacoco))) = join(
+            || doc::fetch_tool(ctx),
+            || join(|| fmt::fetch_tool(ctx), || join(|| lint::fetch_tool(ctx), || coverage::fetch_tools(ctx))),
+        );
         dokka?;
         ktlint?;
         detekt?;
+        jacoco?;
         if targets.contains(&TargetKind::Jvm) {
             ctx.r8_jar(packaging::R8_VERSION)?;
         }

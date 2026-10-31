@@ -84,13 +84,13 @@ Built-in [frameworks](https://enekocm7.github.io/kargo/guides/frameworks/) add t
 | `kargo new <dir>` | Create a project (`--lib`, `-t jvm,wasm,js,native,android`, `--with compose,ktor,...`, or `--template <git URL or path>` for your own) |
 | `kargo build` | Compile every target (`--release` for an optimized build) |
 | `kargo run` | Build and run the program, or serve a browser app (`--watch` restarts it on changes) |
-| `kargo test` | Compile and run the tests of every target |
+| `kargo test` | Compile and run the tests of every target (`--coverage` measures JVM code coverage) |
 | `kargo add <group:artifact>` | Add a dependency, at its latest version unless you give one |
 | `kargo package` | Build a fat jar, a runtime image, a native image, an installer or Android bundles |
 | `kargo publish` | Publish a library to Maven Central, a Maven repository or npm |
 | `kargo import` | Convert a Maven, Gradle or Kotlin Toolchain project, sources included |
 
-There are many more: `check`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `bench`, `script` for single files, and others. See the [commands reference](https://enekocm7.github.io/kargo/reference/commands/), or run `kargo --list`.
+There are many more: `check`, `coverage`, `fmt`, `lint`, `doc`, `tree`, `why`, `audit`, `bench`, `script` for single files, and others. See the [commands reference](https://enekocm7.github.io/kargo/reference/commands/), or run `kargo --list`.
 
 ## Learn more
 

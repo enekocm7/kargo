@@ -255,6 +255,41 @@ fn jvm_test_limits_exit_codes_tags_and_reruns() {
     t.kargo("reruns").args(["test", "--failed"]).assert().success().stderr(predicate::str::contains("no JVM test failed in the last run"));
 }
 
+#[test]
+fn jvm_coverage_reports_covered_and_uncovered_lines() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["cov"]);
+    t.write("cov/src/Main.kt", "package com.example\n\nfun covered() = 42\nfun uncovered() = 7\n");
+    // The template's own test targets its `greeting` sample, which the sources above replace.
+    std::fs::remove_file(t.dir.path().join("cov/tests/GreetingTest.kt")).unwrap();
+    t.write(
+        "cov/tests/CovTest.kt",
+        "package com.example\nimport kotlin.test.*\nclass CovTest { @Test fun usesCovered() = assertEquals(42, covered()) }\n",
+    );
+    t.kargo("cov").args(["test", "--coverage"]).assert().success().stdout(predicate::str::contains("coverage:"));
+    let dir = t.dir.path().join("cov/target/debug/jvm/coverage");
+    for file in ["jacoco.xml", "jacoco.csv", "lcov.info", "coverage.json", "cobertura.xml"] {
+        assert!(dir.join(file).is_file(), "{} was not written", dir.join(file).display());
+    }
+    assert!(dir.join("html/index.html").is_file(), "the HTML report was not written");
+    // The covered line ran, the uncovered one did not.
+    let lcov = std::fs::read_to_string(dir.join("lcov.info")).unwrap();
+    let record =
+        lcov.split("end_of_record").find(|r| r.contains("Main.kt")).unwrap_or_else(|| panic!("Main.kt missing from lcov.info:\n{lcov}"));
+    assert!(record.contains("DA:") && record.contains(",1"), "no covered line in lcov.info:\n{record}");
+    assert!(record.contains("DA:") && record.contains(",0"), "no uncovered line in lcov.info:\n{record}");
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("coverage.json")).unwrap()).unwrap();
+    assert!(json["lines"]["covered"].as_u64().unwrap_or(0) > 0 && json["lines"]["missed"].as_u64().unwrap_or(0) > 0, "{json}");
+    // An unreachable threshold fails the run, and `kargo coverage` renders the last run again.
+    t.kargo("cov")
+        .args(["test", "--coverage", "--fail-under", "100"])
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("below the minimum"));
+    t.kargo("cov").arg("coverage").assert().success().stdout(predicate::str::contains("coverage:"));
+}
+
 /// The JSON messages on a command's stdout, which must hold nothing else.
 fn json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
     let text = String::from_utf8_lossy(stdout);
