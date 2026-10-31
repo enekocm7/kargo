@@ -40,14 +40,13 @@ pub fn present(root: &Path) -> bool {
 }
 
 /// The package of the generated `Res` class: `[frameworks.compose] resources-package`, or
-/// `<group>.<name>.generated.resources` in lower case, as the Compose Gradle plugin names it.
+/// `<group>.<name>.generated.resources`, as the Compose Gradle plugin names it.
 pub fn package(manifest: &Manifest) -> String {
     if let Some(package) = manifest.frameworks.compose.as_ref().and_then(|c| c.resources_package.clone()) {
         return package;
     }
     let pkg = &manifest.package;
-    let group = pkg.group.as_ref().map(|g| g.to_lowercase());
-    format!("{}.generated.resources", build_config_package(group.as_deref(), &pkg.name.to_lowercase()))
+    format!("{}.generated.resources", build_config_package(pkg.group.as_deref(), &pkg.name))
 }
 
 /// What [`generate`] wrote.
@@ -619,7 +618,7 @@ mod tests {
 
     #[test]
     fn default_and_configured_packages() {
-        assert_eq!(package(&manifest("")), "com.example.notes_app.generated.resources");
+        assert_eq!(package(&manifest("")), "com.example.notesapp.generated.resources");
         assert_eq!(package(&manifest("[frameworks]\ncompose = { resources-package = \"com.example.res\" }")), "com.example.res");
         let no_group = Manifest::parse("[package]\nname = \"app\"\nversion = \"1\"\n").unwrap();
         assert_eq!(package(&no_group), "app.generated.resources");
@@ -681,8 +680,8 @@ mod tests {
         let generated = generate(root, &m, &out).unwrap().unwrap();
 
         let res = std::fs::read_to_string(&generated.source).unwrap();
-        let prefix = "composeResources/com.example.notes_app.generated.resources/";
-        assert!(res.contains("package com.example.notes_app.generated.resources\n"), "{res}");
+        let prefix = "composeResources/com.example.notesapp.generated.resources/";
+        assert!(res.contains("package com.example.notesapp.generated.resources\n"), "{res}");
         assert!(res.contains("internal object Res {"));
         assert!(res.contains("internal val Res.drawable.compose_logo: org.jetbrains.compose.resources.DrawableResource by lazy {"));
         assert!(res.contains(&format!(

@@ -155,7 +155,7 @@ The rules follow Compose Multiplatform's:
 - `files/` holds anything else, read with `Res.readBytes(path)` or `Res.getUri(path)`. It takes no qualifiers.
 - String values support Android's escapes: `\n`, `\t`, `\'`, `\"`, `\@` and `\uXXXX`.
 
-`Res` lives in `<group>.<name>.generated.resources` (lower case, `-` as `_`) and is `internal`. Both are configurable:
+`Res` lives in `<group>.<name>.generated.resources` (lower case, with `-` and `_` dropped) and is `internal`. Both are configurable:
 
 ```toml title="kargo.toml"
 [frameworks]

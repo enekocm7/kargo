@@ -77,11 +77,12 @@ impl NewOptions {
                 || (self.targets.contains(&TargetKind::Jvm) && self.targets.contains(&TargetKind::Android)))
     }
 
-    /// The Kotlin package of the generated code, e.g. `com.example.my_app`.
-    /// Segments that are Kotlin or Java keywords get a `_` suffix (`class` becomes `class_`).
+    /// The Kotlin package of the generated code, e.g. `com.example.myapp`: the group and name
+    /// lowercased, keeping only their letters and digits, so that ktlint's `standard:package-name`
+    /// and detekt's `PackageNaming` accept it (`my-app` and `my_app` both become `myapp`).
+    /// A segment that is a Kotlin or Java keyword gets a `_` suffix (`class` becomes `class_`).
     pub fn package(&self) -> String {
-        let ident: String = self.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
-        self.group.split('.').chain([ident.as_str()]).map(package_segment).collect::<Vec<_>>().join(".")
+        self.group.split('.').chain([self.name.as_str()]).map(package_segment).collect::<Vec<_>>().join(".")
     }
 
     fn validate(&self) -> Result<()> {
@@ -213,9 +214,16 @@ pub(crate) const RESERVED_WORDS: &[&str] = &[
     "while",
 ];
 
-/// Escapes a package segment that is a reserved word by appending `_`.
+/// A Kotlin package segment made from `segment`: lowercased letters and digits only, so that
+/// ktlint's `standard:package-name` and detekt's `PackageNaming` accept it (`my-app` and `my_app`
+/// both become `myapp`). A segment that would start with a digit gets a `_` prefix, and one that is
+/// a Kotlin or Java keyword gets a `_` suffix (`class` becomes `class_`).
 pub(crate) fn package_segment(segment: &str) -> String {
-    if RESERVED_WORDS.contains(&segment) { format!("{segment}_") } else { segment.to_owned() }
+    let mut clean: String = segment.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect();
+    if clean.starts_with(|c: char| c.is_ascii_digit()) {
+        clean.insert(0, '_');
+    }
+    if RESERVED_WORDS.contains(&clean.as_str()) { format!("{clean}_") } else { clean }
 }
 
 /// A file to write, relative to the project root.
@@ -927,7 +935,7 @@ mod tests {
             assert!(!manifest.contains(section), "default manifest should not contain {section}:\n{manifest}");
         }
         let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
-        assert!(main.contains("package com.example.hello_world"));
+        assert!(main.contains("package com.example.helloworld"));
         assert!(main.contains("fun main()"));
     }
 
@@ -974,7 +982,7 @@ mod tests {
         let sample = &files.iter().find(|f| f.path == Path::new("benches/SampleBench.kt")).unwrap().contents;
         assert!(
             sample.starts_with(
-                "package com.example.bench_demo
+                "package com.example.benchdemo
 "
             ),
             "{sample}"
@@ -1024,8 +1032,12 @@ class SampleBench"
     fn keyword_names_get_an_escaped_package() {
         assert_eq!(opts("class").package(), "com.example.class_");
         assert_eq!(opts("in").package(), "com.example.in_");
-        assert_eq!(opts("my-app").package(), "com.example.my_app");
+        // Separators are dropped, not turned into `_`, which ktlint and detekt reject.
+        assert_eq!(opts("my-app").package(), "com.example.myapp");
+        assert_eq!(opts("my_app").package(), "com.example.myapp");
+        assert_eq!(opts("My-App").package(), "com.example.myapp");
         assert_eq!(NewOptions { group: "org.package".into(), ..opts("fun") }.package(), "org.package_.fun_");
+        assert_eq!(NewOptions { group: "org.My_Company".into(), ..opts("my-app") }.package(), "org.mycompany.myapp");
         let files = template(&opts("object")).unwrap();
         let main = &files.iter().find(|f| f.path == Path::new("src/Main.kt")).unwrap().contents;
         assert!(main.starts_with(

@@ -258,23 +258,11 @@ pub fn example_keys(root: &Path) -> Result<Option<Vec<String>>> {
     Ok(Some(entries.into_iter().map(|(key, _, _)| key).collect()))
 }
 
-/// The Kotlin package of the generated `BuildConfig`: the group and name, each segment made into
-/// a valid identifier (`my-app` becomes `my_app`).
+/// The Kotlin package of the generated `BuildConfig`: the group and name made into package
+/// segments (`my-app` becomes `myapp`), as the package of a `kargo new` project is.
 pub fn build_config_package(group: Option<&str>, name: &str) -> String {
-    let full = match group {
-        Some(group) => format!("{group}.{name}"),
-        None => name.to_owned(),
-    };
-    full.split('.')
-        .map(|segment| {
-            let mut clean: String = segment.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
-            if clean.is_empty() || clean.starts_with(|c: char| c.is_ascii_digit()) {
-                clean.insert(0, '_');
-            }
-            package_segment(&clean)
-        })
-        .collect::<Vec<_>>()
-        .join(".")
+    let group = group.into_iter().flat_map(|group| group.split('.').filter(|segment| !segment.is_empty()));
+    group.chain([name]).map(package_segment).collect::<Vec<_>>().join(".")
 }
 
 /// The Kotlin source of the `BuildConfig` object that `[env] expose` asks for: a `const val` for
@@ -617,7 +605,10 @@ mod tests {
     #[test]
     fn build_config_package_makes_valid_identifiers() {
         assert_eq!(build_config_package(Some("com.example"), "demo"), "com.example.demo");
-        assert_eq!(build_config_package(None, "my-app"), "my_app");
+        // Lint-clean, like the package of a `kargo new` project: separators are dropped.
+        assert_eq!(build_config_package(None, "my-app"), "myapp");
+        assert_eq!(build_config_package(None, "my_app"), "myapp");
+        assert_eq!(build_config_package(Some("com.My_Company"), "My-App"), "com.mycompany.myapp");
         assert_eq!(build_config_package(Some("org.x"), "2fa"), "org.x._2fa");
         assert_eq!(build_config_package(None, "class"), "class_");
     }

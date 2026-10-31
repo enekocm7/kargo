@@ -1784,6 +1784,16 @@ fn lint_with_detekt() {
 }
 
 #[test]
+fn new_project_with_a_hyphenated_name_passes_fmt_and_lint() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["cli-app"]);
+    // The template's package is `com.example.cliapp`; `com.example.cli_app` failed both tools.
+    t.kargo("cli-app").args(["fmt", "--check"]).assert().success();
+    t.kargo("cli-app").arg("lint").assert().success();
+}
+
+#[test]
 fn doc_android_library() {
     require_e2e!();
     if std::env::var_os("KARGO_E2E_ANDROID").is_none() {
