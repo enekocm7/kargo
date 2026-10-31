@@ -1099,21 +1099,56 @@ struct NewArgs {
     /// Add a sample benchmark in benches/ (the same as `--with benchmark`)
     #[arg(long)]
     bench: bool,
-    /// Maven group / base package
-    #[arg(long, default_value = "com.example")]
-    group: String,
+    /// Maven group / base package (default: com.example, or the template's)
+    #[arg(long)]
+    group: Option<String>,
     /// Package name (defaults to the directory name)
     #[arg(long)]
     name: Option<String>,
-    /// Kotlin version
-    #[arg(long, default_value = kargo_manifest::DEFAULT_KOTLIN_VERSION)]
-    kotlin: String,
+    /// Kotlin version (default: Kargo's, or the template's)
+    #[arg(long)]
+    kotlin: Option<String>,
     /// Do not initialize a git repository (none is created inside an existing one either)
     #[arg(long)]
     no_vcs: bool,
     /// Create an empty workspace (a kargo.toml with [workspace]) instead of a package
-    #[arg(long, conflicts_with_all = ["lib", "targets", "frameworks", "bench", "name"])]
+    #[arg(long, conflicts_with_all = ["lib", "targets", "frameworks", "bench", "name", "template"])]
     workspace: bool,
+    #[command(flatten)]
+    template: TemplateOptions,
+}
+
+/// The arguments of `kargo new` and `kargo init` that choose a project template.
+#[derive(Debug, Args)]
+struct TemplateOptions {
+    /// Create the project from a template: a git URL (`URL#branch`), a directory, or a name from ~/.kargo/templates.toml
+    #[arg(long, value_name = "SOURCE", conflicts_with_all = ["lib", "targets", "frameworks", "bench"])]
+    template: Option<String>,
+    /// Branch, tag or commit of a template from a git repository
+    #[arg(long, value_name = "REV", requires = "template")]
+    rev: Option<String>,
+    /// Give a variable of the template a value instead of asking (repeatable)
+    #[arg(short = 'D', long = "define", value_name = "KEY=VALUE", requires = "template")]
+    define: Vec<String>,
+    /// Use the default of every variable of the template and ask nothing
+    #[arg(long, visible_alias = "yes", requires = "template")]
+    defaults: bool,
+    /// Allow the commands that the template runs after creating the project
+    #[arg(long, requires = "template")]
+    allow_scripts: bool,
+}
+
+/// The arguments of `kargo template`, in a struct of their own for the same reason as [`WhyArgs`].
+#[derive(Debug, Args)]
+struct TemplateArgs {
+    #[command(subcommand)]
+    command: TemplateCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TemplateCommand {
+    /// List the short names of ~/.kargo/templates.toml and where they point
+    List,
 }
 
 /// The arguments of `kargo run`, in a struct of their own for the same reason as [`WhyArgs`].
@@ -1190,6 +1225,8 @@ enum Command {
         #[command(flatten)]
         args: NewArgs,
     },
+    /// Work with project templates (`kargo new --template`)
+    Template(TemplateArgs),
     /// Create a new Kotlin project in an existing directory
     Init {
         /// Directory (defaults to the current one)
@@ -2674,14 +2711,19 @@ fn section(dev: bool, target: Option<TargetArg>) -> DependencySection {
     }
 }
 
-fn new_options(dir: &Path, args: NewArgs) -> Result<NewOptions> {
-    let name = match args.name {
-        Some(n) => n,
+/// The name of the package in `dir`: `--name`, else the directory's.
+fn package_name(dir: &Path, name: Option<String>) -> Result<String> {
+    match name {
+        Some(n) => Ok(n),
         None => {
             let dir = kargo_ops::workspace::dunce_canonicalize(dir);
-            dir.file_name().map(|n| n.to_string_lossy().into_owned()).context("cannot infer a package name; pass --name")?
+            dir.file_name().map(|n| n.to_string_lossy().into_owned()).context("cannot infer a package name; pass --name")
         }
-    };
+    }
+}
+
+fn new_options(dir: &Path, args: NewArgs) -> Result<NewOptions> {
+    let name = package_name(dir, args.name)?;
     let mut targets: Vec<TargetKind> = Vec::new();
     for t in args.targets {
         let t = t.into();
@@ -2693,14 +2735,79 @@ fn new_options(dir: &Path, args: NewArgs) -> Result<NewOptions> {
     if args.bench && !frameworks.iter().any(|f| f == "benchmark") {
         frameworks.push("benchmark".to_owned());
     }
-    Ok(NewOptions { name, group: args.group, lib: args.lib, targets, frameworks, kotlin_version: args.kotlin, vcs: !args.no_vcs })
+    let defaults = NewOptions::new("");
+    Ok(NewOptions {
+        name,
+        group: args.group.unwrap_or(defaults.group),
+        lib: args.lib,
+        targets,
+        frameworks,
+        kotlin_version: args.kotlin.unwrap_or(defaults.kotlin_version),
+        vcs: !args.no_vcs,
+    })
+}
+
+/// `kargo new --template` and `kargo init --template`: a package (or workspace) in `dir` from a template.
+fn create_from_template(config: &Config, dir: &Path, args: NewArgs) -> Result<i32> {
+    let shell = config.shell();
+    let TemplateOptions { template, rev, define, defaults, allow_scripts } = args.template;
+    let name = package_name(dir, args.name)?;
+    let workspace = ops::new::enclosing_workspace(dir)?;
+    let request = ops::template::Request {
+        source: template.unwrap_or_default(),
+        rev,
+        defines: define,
+        defaults,
+        allow_scripts,
+        name: name.clone(),
+        group: args.group,
+        kotlin: args.kotlin,
+        // A member shares the workspace's repository.
+        vcs: !args.no_vcs && workspace.is_none(),
+    };
+    let created = ops::template::create(config, dir, workspace.as_deref(), &request)?;
+    shell.status("Created", format!("`{name}` from the template `{}`", created.template));
+    if let Some(root) = workspace
+        && created.package
+        && dir.join(kargo_manifest::MANIFEST_NAME).is_file()
+        && let Some(member) = ops::new::add_to_workspace(&root, dir)?
+    {
+        shell.status("Adding", format!("`{member}` to the members of the workspace at {}", root.display()));
+    }
+    if let Some(message) = created.message {
+        shell.text(message.trim_end());
+    }
+    Ok(0)
+}
+
+/// `kargo template list`: the short names of `templates.toml`.
+fn list_templates(config: &Config) -> Result<i32> {
+    let registry = ops::template::Registry::load(config)?;
+    if registry.entries.is_empty() {
+        config.shell().note(format!(
+            "no templates in {}; add short names there, e.g. `[templates]` and `service = \"https://github.com/acme/service-template.git\"`",
+            registry.file.display()
+        ));
+        return Ok(0);
+    }
+    let width = registry.entries.iter().map(|e| e.name.chars().count()).max().unwrap_or(0);
+    for entry in &registry.entries {
+        let description = entry.description.as_deref().map(|d| format!("  {d}")).unwrap_or_default();
+        println!("{:<width$}  {}{description}", entry.name, entry.describe());
+    }
+    Ok(0)
 }
 
 /// `kargo new` and `kargo init`: a package in `dir` (added to the members of the workspace it is
 /// in, if any), or with `--workspace` an empty workspace.
-fn create_package(shell: &Shell, dir: &Path, args: NewArgs) -> Result<i32> {
+fn create_package(config: &Config, dir: &Path, args: NewArgs) -> Result<i32> {
+    let shell = config.shell();
+    if args.template.template.is_some() {
+        return create_from_template(config, dir, args);
+    }
     if args.workspace {
-        ops::new::create_workspace(dir, &args.kotlin, !args.no_vcs)?;
+        let kotlin = args.kotlin.as_deref().unwrap_or(kargo_manifest::DEFAULT_KOTLIN_VERSION);
+        ops::new::create_workspace(dir, kotlin, !args.no_vcs)?;
         let name = kargo_ops::workspace::dunce_canonicalize(dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         shell.status("Created", format!("workspace `{name}`"));
         return Ok(0);
@@ -2855,15 +2962,18 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             if path.exists() && path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(true) {
                 bail!("destination `{}` already exists; use `kargo init` to initialize an existing directory", path.display());
             }
-            create_package(shell, &path, args)
+            create_package(config, &path, args)
         }
         Command::Init { path, args } => {
             let dir = match path {
                 Some(p) => p,
                 None => std::env::current_dir()?,
             };
-            create_package(shell, &dir, args)
+            create_package(config, &dir, args)
         }
+        Command::Template(args) => match args.command {
+            TemplateCommand::List => list_templates(config),
+        },
         Command::InitCi { system, force, junit } => {
             let project = load_project(global)?;
             let report = ops::ci::init_ci(&project, &ops::ci::CiOptions { system: system.into(), force, junit })?;

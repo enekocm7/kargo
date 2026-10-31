@@ -1413,6 +1413,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "self",
         "completions",
         "init-ci",
+        "template",
         "inspect",
     ];
     let p = Project::new();
@@ -7565,4 +7566,295 @@ fn color_is_off_for_a_pipe_and_follows_the_flag() {
     assert!(!stderr(&["biuld"]).contains('\u{1b}'));
     assert!(stderr(&["--color", "always", "biuld"]).contains('\u{1b}'));
     assert!(!stderr(&["--color", "never", "biuld"]).contains('\u{1b}'));
+}
+
+/// A template directory in `p` named `tpl`, with a prompt for a Dockerfile and a database.
+fn write_template(p: &Project, extra_manifest: &str) {
+    p.file(
+        "tpl/kargo-template.toml",
+        &format!(
+            r#"[template]
+name = "company-service"
+message = "Next: cd {{{{name}}}} && kargo run"
+
+[variables.docker]
+prompt = "Add a Dockerfile?"
+default = false
+
+[variables.db]
+choices = ["postgres", "none"]
+default = "none"
+
+[[conditional]]
+path = "Dockerfile"
+when = "docker"
+
+[files]
+exclude = ["NOTES.md"]
+{extra_manifest}"#
+        ),
+    );
+    p.file("tpl/kargo.toml", "[package]\nname = \"{{name}}\"\nversion = \"0.1.0\"\ngroup = \"{{group}}\"\n");
+    p.file("tpl/src/{{package_path}}/Main.kt", "package {{package}}\n\nfun main() = println(\"{{name | pascal}} uses {{db}}\")\n");
+    p.file("tpl/Dockerfile", "FROM eclipse-temurin\n# {{name}}\n");
+    p.file("tpl/.github/workflows/ci.yml", "name: ${{ github.workflow }} for {{name}}\n");
+    p.file("tpl/NOTES.md", "not copied");
+}
+
+#[test]
+fn new_from_a_template_directory() {
+    let p = Project::new();
+    write_template(&p, "");
+    p.kargo()
+        .args(["new", "my-svc", "--template", "./tpl", "--defaults", "--no-vcs"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Using template `company-service`"))
+        .stderr(predicate::str::contains("Created `my-svc` from the template `company-service`"))
+        .stderr(predicate::str::contains("Next: cd my-svc && kargo run"));
+    let root = p.path().join("my-svc");
+    assert_eq!(p.read("my-svc/kargo.toml"), "[package]\nname = \"my-svc\"\nversion = \"0.1.0\"\ngroup = \"com.example\"\n");
+    assert_eq!(p.read("my-svc/src/com/example/mysvc/Main.kt"), "package com.example.mysvc\n\nfun main() = println(\"MySvc uses none\")\n");
+    assert!(!root.join("Dockerfile").exists(), "the Dockerfile needs docker");
+    assert!(!root.join("NOTES.md").exists() && !root.join("kargo-template.toml").exists());
+    assert_eq!(p.read("my-svc/.github/workflows/ci.yml"), "name: ${{ github.workflow }} for my-svc\n");
+
+    // Variables come from --define, and --group reaches the template.
+    p.kargo()
+        .args([
+            "new",
+            "other",
+            "--template",
+            "tpl",
+            "-D",
+            "docker=yes",
+            "--define",
+            "db=postgres",
+            "--group",
+            "org.acme",
+            "--defaults",
+            "--no-vcs",
+        ])
+        .assert()
+        .success();
+    assert!(p.path().join("other/Dockerfile").is_file());
+    assert!(p.read("other/src/org/acme/other/Main.kt").contains("Other uses postgres"));
+    assert!(p.read("other/kargo.toml").contains("group = \"org.acme\""));
+}
+
+#[test]
+fn a_template_without_an_answer_or_default_asks_for_a_define() {
+    let p = Project::new();
+    write_template(&p, "[variables.owner]\nprompt = \"Owner\"\n");
+    p.kargo()
+        .args(["new", "svc", "--template", "./tpl", "--no-vcs"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`owner` needs a value; pass --define owner=<value>"));
+    assert!(!p.path().join("svc").exists(), "nothing is left behind");
+    p.kargo()
+        .args(["new", "svc", "--template", "./tpl", "--no-vcs", "--define", "owner=me", "--define", "db=mysql"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`mysql` is not a choice of `db`"));
+    p.kargo()
+        .args(["new", "svc", "--template", "./tpl", "--no-vcs", "--define", "ownr=me"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no variable `ownr`").and(predicate::str::contains("did you mean `owner`?")));
+}
+
+#[test]
+fn template_flags_conflict_with_the_built_in_ones() {
+    let p = Project::new();
+    write_template(&p, "");
+    p.kargo().args(["new", "a", "--template", "./tpl", "--lib"]).assert().failure().code(2);
+    p.kargo().args(["new", "a", "--template", "./tpl", "--with", "ktor"]).assert().failure().code(2);
+    p.kargo().args(["new", "a", "--define", "x=1"]).assert().failure().code(2);
+    p.kargo()
+        .args(["new", "a", "--template", "./tpl", "--rev", "v1", "--defaults"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only applies to a template from a git repository"));
+}
+
+#[test]
+fn a_template_that_generates_an_invalid_manifest_leaves_nothing_behind() {
+    let p = Project::new();
+    write_template(&p, "");
+    p.file("tpl/kargo.toml", "[package]\nname = \"{{name}}\"\nversoin = \"0.1.0\"\n");
+    p.kargo()
+        .args(["new", "svc", "--template", "./tpl", "--defaults", "--no-vcs"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("the template generates an invalid kargo.toml"));
+    assert!(!p.path().join("svc").exists());
+    // The name is checked as `kargo new` checks it.
+    p.kargo()
+        .args(["new", "9lives", "--template", "./tpl", "--defaults", "--no-vcs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must start with a letter"));
+    assert!(!p.path().join("9lives").exists());
+}
+
+#[test]
+fn a_template_cannot_write_outside_the_project() {
+    let p = Project::new();
+    write_template(&p, "[variables.dir]\ndefault = \"../escape\"\n");
+    p.file("tpl/{{dir}}/x.txt", "x");
+    p.kargo()
+        .args(["new", "svc", "--template", "./tpl", "--defaults", "--no-vcs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a path inside the project"));
+    assert!(!p.path().join("svc").exists() && !p.path().join("escape").exists());
+}
+
+#[test]
+fn template_commands_need_allow_scripts() {
+    let p = Project::new();
+    let kargo = env!("CARGO_BIN_EXE_kargo");
+    write_template(&p, &format!("\n[[steps]]\nrun = ['{kargo}', '--version']\n\n[[steps]]\nbuiltin = \"git-init\"\n"));
+    p.kargo().args(["new", "svc", "--template", "./tpl", "--defaults"]).assert().failure().code(101).stderr(
+        predicate::str::contains("the template runs commands")
+            .and(predicate::str::contains("--version"))
+            .and(predicate::str::contains("--allow-scripts")),
+    );
+    assert!(!p.path().join("svc").exists(), "nothing is written before the commands are allowed");
+
+    p.kargo()
+        .args(["new", "svc", "--template", "./tpl", "--defaults", "--allow-scripts", "--no-vcs"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Running"));
+    assert!(!p.path().join("svc/.git").exists(), "--no-vcs skips the git-init step");
+    if which("git").is_some() {
+        p.kargo().args(["new", "svc2", "--template", "./tpl", "--yes", "--allow-scripts"]).assert().success();
+        assert!(p.path().join("svc2/.git").exists());
+    }
+}
+
+#[test]
+fn init_with_a_template_keeps_existing_files() {
+    let p = Project::new();
+    write_template(&p, "");
+    p.file("here/Dockerfile", "mine");
+    p.kargo()
+        .current_dir(p.path().join("here"))
+        .args(["init", "--template", "../tpl", "--defaults", "--define", "docker=true", "--no-vcs", "--name", "here"])
+        .assert()
+        .success();
+    assert_eq!(p.read("here/Dockerfile"), "mine");
+    assert!(p.read("here/kargo.toml").contains("name = \"here\""));
+    p.kargo()
+        .current_dir(p.path().join("here"))
+        .args(["init", "--template", "../tpl", "--defaults", "--no-vcs", "--name", "here"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already contains a kargo.toml"));
+}
+
+#[test]
+fn a_template_member_joins_the_workspace() {
+    let p = Project::new();
+    write_template(&p, "");
+    p.kargo().args(["new", "shop", "--workspace", "--no-vcs"]).assert().success();
+    p.kargo()
+        .current_dir(p.path().join("shop"))
+        .args(["new", "api", "--template", "../tpl", "--defaults"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Adding `api` to the members of the workspace"));
+    assert!(p.read("shop/kargo.toml").contains("members = [\"api\"]"));
+}
+
+#[test]
+fn short_names_come_from_the_templates_file() {
+    let p = Project::new();
+    write_template(&p, "");
+    p.kargo()
+        .args(["template", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no templates in"))
+        .stdout(predicate::str::is_empty());
+    let tpl = p.path().join("tpl");
+    std::fs::write(
+        p.home.path().join("templates.toml"),
+        format!(
+            "[templates]\n\"company/service\" = {{ path = '{}', description = \"The service layout\" }}\nlib = \"https://example.com/acme/lib.git#v2\"\n",
+            tpl.display()
+        ),
+    )
+    .unwrap();
+    p.kargo().args(["template", "list"]).assert().success().stdout(
+        predicate::str::contains("company/service")
+            .and(predicate::str::contains("The service layout"))
+            .and(predicate::str::contains("https://example.com/acme/lib.git#v2")),
+    );
+    p.kargo().args(["new", "svc", "--template", "company/service", "--defaults", "--no-vcs"]).assert().success();
+    assert!(p.path().join("svc/kargo.toml").is_file());
+    p.kargo()
+        .args(["new", "x", "--template", "company/servce", "--defaults"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no template `company/servce`").and(predicate::str::contains("did you mean `company/service`?")));
+}
+
+#[test]
+fn templates_from_a_git_repository() {
+    let Some(git) = which("git") else { return };
+    let p = Project::new();
+    write_template(&p, "");
+    let repo = p.path().join("tpl");
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new(&git)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    run(&["init", "--quiet", "-b", "main"]);
+    run(&["add", "."]);
+    run(&["commit", "--quiet", "-m", "first"]);
+    run(&["tag", "v1"]);
+    p.file("tpl/kargo.toml", "[package]\nname = \"{{name}}\"\nversion = \"2.0.0\"\ngroup = \"{{group}}\"\n");
+    run(&["commit", "--quiet", "-am", "second"]);
+    run(&["checkout", "--quiet", "-b", "feature"]);
+    p.file("tpl/kargo.toml", "[package]\nname = \"{{name}}\"\nversion = \"3.0.0\"\ngroup = \"{{group}}\"\n");
+    run(&["commit", "--quiet", "-am", "third"]);
+    run(&["checkout", "--quiet", "main"]);
+
+    let url = format!("file:///{}", repo.display().to_string().replace('\\', "/").trim_start_matches('/'));
+    let version = |dir: &str| p.read(&format!("{dir}/kargo.toml")).lines().find(|l| l.starts_with("version")).unwrap().to_owned();
+    p.kargo()
+        .args(["new", "latest", "--template", &url, "--defaults", "--no-vcs"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cloning"));
+    assert_eq!(version("latest"), "version = \"2.0.0\"");
+    p.kargo().args(["new", "tagged", "--template", &url, "--rev", "v1", "--defaults", "--no-vcs"]).assert().success();
+    assert_eq!(version("tagged"), "version = \"0.1.0\"");
+    p.kargo().args(["new", "branch", "--template", &format!("{url}#feature"), "--defaults", "--no-vcs"]).assert().success();
+    assert_eq!(version("branch"), "version = \"3.0.0\"");
+    p.kargo()
+        .args(["new", "missing", "--template", &url, "--rev", "nope", "--defaults", "--no-vcs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`nope` is not a branch, tag or commit"));
+
+    // The clone is kept: with --offline it is used as it is.
+    p.kargo().args(["--offline", "new", "again", "--template", &url, "--defaults", "--no-vcs"]).assert().success();
+    assert_eq!(version("again"), "version = \"2.0.0\"");
+    let other = format!("{url}x");
+    p.kargo()
+        .args(["--offline", "new", "never", "--template", &other, "--defaults", "--no-vcs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--offline"));
 }

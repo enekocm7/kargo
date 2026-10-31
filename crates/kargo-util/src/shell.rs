@@ -119,6 +119,32 @@ impl Shell {
         Some(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
     }
 
+    /// Asks `question` on the terminal for a line of text, showing `default` (if any) in brackets; an empty
+    /// answer is the default. `None` when there is no terminal to ask on or stdin ends.
+    pub fn prompt(&self, question: impl Display, default: Option<&str>) -> Option<String> {
+        if !self.is_interactive() {
+            return None;
+        }
+        {
+            let mut err = anstream::stderr().lock();
+            match default {
+                Some(default) if !default.is_empty() => {
+                    let _ = write!(err, "{question} [{default}] ");
+                }
+                _ => {
+                    let _ = write!(err, "{question} ");
+                }
+            }
+            let _ = err.flush();
+        }
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).ok()? == 0 {
+            return None;
+        }
+        let answer = answer.trim();
+        Some(if answer.is_empty() { default.unwrap_or_default().to_owned() } else { answer.to_owned() })
+    }
+
     /// Whether there is a person to ask: stdin and stderr are both terminals.
     pub fn is_interactive(&self) -> bool {
         std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stderr())

@@ -115,7 +115,10 @@ kargo new web -w spring-boot             # a Spring Boot app
 kargo new ui -w compose                  # a Compose Desktop app
 kargo new phone -t android -w compose    # a Jetpack Compose Android app
 kargo init                               # set up the current directory instead
+kargo new svc --template company/service # your own template (git URL, directory or short name)
 ```
+
+See [Project templates](../../guides/templates/) to write one.
 
 ## Cheat sheet
 
