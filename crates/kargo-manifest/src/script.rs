@@ -21,6 +21,7 @@ pub const ANNOTATIONS: &[(&str, &str)] = &[
     ("Kotlin", "the Kotlin version to compile the script with"),
     ("Jdk", "the JDK to compile and run the script with: a major version or \"system\""),
     ("Framework", "a built-in framework such as \"serialization\" or \"coroutines\""),
+    ("Target", "the target to build for: \"jvm\" or \"native\""),
 ];
 
 /// The `kotlin-main-kts` annotation Kargo does not support yet.
@@ -82,6 +83,45 @@ pub struct Settings {
     pub kotlin: Option<String>,
     pub jdk: Option<JdkRequest>,
     pub frameworks: Vec<String>,
+    pub target: Option<ScriptTarget>,
+}
+
+/// The target `kargo script` builds a file for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScriptTarget {
+    /// JVM bytecode, run with `java` (the default).
+    #[default]
+    Jvm,
+    /// A native executable for this machine, built with the Kotlin/Native toolchain.
+    Native,
+}
+
+impl ScriptTarget {
+    /// Parses `jvm` or `native`, as `@file:Target` and the `target` front matter key take them.
+    pub fn parse(text: &str) -> Result<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "jvm" => Ok(Self::Jvm),
+            "native" => Ok(Self::Native),
+            other => bail!("invalid target `{other}`: expected \"jvm\" or \"native\""),
+        }
+    }
+}
+
+impl fmt::Display for ScriptTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Jvm => f.write_str("jvm"),
+            Self::Native => f.write_str("native"),
+        }
+    }
+}
+
+impl std::str::FromStr for ScriptTarget {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        Self::parse(text)
+    }
 }
 
 /// Whether a `.kts` file is a Kargo script rather than a build script of some other tool. Outside
@@ -184,6 +224,7 @@ fn apply(settings: &mut Settings, annotation: &Annotation) -> Result<()> {
         "Kotlin" => settings.kotlin = Some(single(annotation)?),
         "Jdk" => settings.jdk = Some(single(annotation)?.parse()?),
         "Framework" => settings.frameworks.extend(annotation.args.iter().cloned()),
+        "Target" => settings.target = Some(ScriptTarget::parse(&single(annotation)?)?),
         other => bail!("unknown script annotation `@file:{other}`"),
     }
     Ok(())
@@ -235,8 +276,11 @@ pub fn parse_kt_front_matter(text: &str) -> Result<Option<Settings>> {
                     settings.dependencies.push(Coordinate::parse(&format!("{module}:{version}"))?);
                 }
             }
+            ("target", toml::Value::String(v)) => settings.target = Some(ScriptTarget::parse(v)?),
             (other, _) => {
-                bail!("unknown key `{other}` in the kargo front matter; expected kotlin, jdk, repositories, frameworks or dependencies")
+                bail!(
+                    "unknown key `{other}` in the kargo front matter; expected kotlin, jdk, repositories, frameworks, target or dependencies"
+                )
             }
         }
     }
