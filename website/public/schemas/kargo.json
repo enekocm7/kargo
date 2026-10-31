@@ -713,7 +713,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "jacoco": { "description": "Exact JaCoCo version.", "type": "string", "default": "0.8.12" },
+            "jacoco": { "description": "Exact JaCoCo version.", "type": "string", "default": "0.8.16" },
             "min-line": { "description": "Minimum overall line coverage in percent (0-100). The run fails below it.", "type": "number", "minimum": 0, "maximum": 100, "examples": [80] },
             "min-branch": { "description": "Minimum overall branch coverage in percent (0-100). The run fails below it.", "type": "number", "minimum": 0, "maximum": 100, "examples": [70] },
             "fail-under": { "description": "Overall line coverage that fails the run; `--fail-under` overrides it.", "type": "number", "minimum": 0, "maximum": 100, "examples": [80] },

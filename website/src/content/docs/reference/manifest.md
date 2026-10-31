@@ -346,7 +346,7 @@ Code coverage of `kargo test --coverage` (JVM, JaCoCo). Every key is optional.
 
 ```toml
 [test.coverage]
-jacoco = "0.8.12"
+jacoco = "0.8.16"
 min-line = 80
 min-branch = 70
 fail-under = 75
@@ -355,7 +355,7 @@ exclude = ["**/generated/**"]
 
 | Key | Default | Meaning |
 |---|---|---|
-| `jacoco` | `0.8.12` | Exact JaCoCo version |
+| `jacoco` | `0.8.16` | Exact JaCoCo version |
 | `min-line` | none | Minimum overall line coverage in percent (0-100). The run fails below it |
 | `min-branch` | none | Minimum overall branch coverage in percent (0-100). The run fails below it |
 | `fail-under` | none | Overall line coverage that fails the run. `kargo test --fail-under` and `kargo coverage --fail-under` override it |

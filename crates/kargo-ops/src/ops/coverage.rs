@@ -20,15 +20,18 @@ use anyhow::{Context, Result, bail};
 
 use super::context::BuildContext;
 use kargo_manifest::{CoverageSettings, TargetKind};
-use kargo_maven::{DependencyRequest, ModuleId};
 use kargo_util::{fs::write_string_atomic, process};
 
 /// JaCoCo version used unless `[test.coverage] jacoco` overrides it.
-pub const JACOCO_VERSION: &str = "0.8.12";
+pub const JACOCO_VERSION: &str = "0.8.16";
 
 const JACOCO_GROUP: &str = "org.jacoco";
 const AGENT_ARTIFACT: &str = "org.jacoco.agent";
+/// The classifier of the `-javaagent` jar: the plain `org.jacoco.agent` jar has no `Premain-Class`.
+const AGENT_CLASSIFIER: &str = "runtime";
 const CLI_ARTIFACT: &str = "org.jacoco.cli";
+/// The classifier of the self-contained CLI jar, with ASM and the other dependencies bundled.
+const CLI_CLASSIFIER: &str = "nodeps";
 
 /// Options of `kargo coverage`: render the report of the last `--coverage` run again.
 #[derive(Debug, Clone, Default)]
@@ -109,19 +112,20 @@ pub fn jacoco_version(settings: &CoverageSettings) -> &str {
 pub fn fetch_tools(ctx: &BuildContext) -> Result<()> {
     let version = jacoco_version(&ctx.ws.manifest().test.coverage);
     agent_jar(ctx, version)?;
-    cli_classpath(ctx, version)?;
+    cli_jar(ctx, version)?;
     Ok(())
 }
 
 /// The JaCoCo agent jar (`-javaagent`), locked in `kargo.lock` as `tools/org.jacoco.agent`.
 fn agent_jar(ctx: &BuildContext, version: &str) -> Result<PathBuf> {
-    ctx.tool_jar(JACOCO_GROUP, AGENT_ARTIFACT, version).with_context(|| format!("failed to fetch JaCoCo {version}"))
+    ctx.tool_classified_jar(JACOCO_GROUP, AGENT_ARTIFACT, AGENT_CLASSIFIER, version)
+        .with_context(|| format!("failed to fetch JaCoCo {version}"))
 }
 
-/// The JaCoCo CLI classpath (`org.jacoco.cli.Main`), locked as `tools/jacoco-cli`.
-fn cli_classpath(ctx: &BuildContext, version: &str) -> Result<Vec<PathBuf>> {
-    let root = DependencyRequest::new(ModuleId::new(JACOCO_GROUP, CLI_ARTIFACT), Some(version.to_owned()));
-    Ok(ctx.resolve_tool("jacoco-cli", &[root]).with_context(|| format!("failed to obtain JaCoCo {version}"))?.files())
+/// The self-contained JaCoCo CLI jar (`org.jacoco.cli.Main`), locked as `tools/org.jacoco.cli`.
+fn cli_jar(ctx: &BuildContext, version: &str) -> Result<PathBuf> {
+    ctx.tool_classified_jar(JACOCO_GROUP, CLI_ARTIFACT, CLI_CLASSIFIER, version)
+        .with_context(|| format!("failed to obtain JaCoCo {version}"))
 }
 
 /// Directory holding the execution data and every report: `target/<profile>/jvm/coverage`.
@@ -250,7 +254,7 @@ pub fn sourcefiles(ctx: &BuildContext) -> Vec<PathBuf> {
 /// Returns the paths of the XML file the other formats are derived from.
 pub fn run_cli_report(ctx: &BuildContext, exec: &Path, classfiles: &[PathBuf], sourcefiles: &[PathBuf], dir: &Path) -> Result<PathBuf> {
     let version = jacoco_version(&ctx.ws.manifest().test.coverage).to_owned();
-    let cli = cli_classpath(ctx, &version)?;
+    let cli = cli_jar(ctx, &version)?;
     if !exec.is_file() {
         bail!("no coverage data at {}; run `kargo test --coverage` first", exec.display());
     }
@@ -260,12 +264,7 @@ pub fn run_cli_report(ctx: &BuildContext, exec: &Path, classfiles: &[PathBuf], s
     std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let jdk = ctx.compiler_jdk()?;
     let mut cmd = Command::new(jdk.java());
-    cmd.args(jdk.default_run_args())
-        .arg("-cp")
-        .arg(kargo_util::fs::join_paths(&cli))
-        .arg("org.jacoco.cli.Main")
-        .arg("report")
-        .arg(process::slash(exec));
+    cmd.args(jdk.default_run_args()).arg("-jar").arg(process::slash(&cli)).arg("report").arg(process::slash(exec));
     for classes in classfiles {
         cmd.arg("--classfiles").arg(process::slash(classes));
     }
@@ -293,7 +292,10 @@ pub fn run_cli_report(ctx: &BuildContext, exec: &Path, classfiles: &[PathBuf], s
 
 /// Reads the JaCoCo XML report at `xml`, leaving out what `exclude` filters.
 pub fn parse_jacoco_xml(xml: &str, exclude: &[String]) -> Result<CoverageSummary> {
-    let doc = roxmltree::Document::parse(xml).context("failed to read the JaCoCo XML report")?;
+    // JaCoCo writes `<!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">`,
+    // which the XML reader refuses; it carries no information the report needs.
+    let xml = strip_doctype(xml);
+    let doc = roxmltree::Document::parse(&xml).context("failed to read the JaCoCo XML report")?;
     let root = doc.root_element();
     if root.tag_name().name() != "report" {
         bail!("failed to read the JaCoCo XML report: expected a <report> element");
@@ -395,6 +397,35 @@ fn apply_counter_file(file: &mut FileCoverage, node: &roxmltree::Node) {
         "LINE" => file.line = Counter { missed, covered },
         "BRANCH" => file.branch = Counter { missed, covered },
         _ => {}
+    }
+}
+
+/// Removes the `<!DOCTYPE ...>` declaration of an XML document, if any. The reader
+/// refuses documents with a DTD, and reports carry no internal subset worth keeping.
+fn strip_doctype(xml: &str) -> std::borrow::Cow<'_, str> {
+    let Some(start) = xml.find("<!DOCTYPE") else { return std::borrow::Cow::Borrowed(xml) };
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut end = None;
+    for (i, c) in xml[start..].char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '>' if !in_single && !in_double => {
+                end = Some(start + i + c.len_utf8());
+                break;
+            }
+            _ => {}
+        }
+    }
+    match end {
+        Some(end) => {
+            let mut out = String::with_capacity(xml.len());
+            out.push_str(&xml[..start]);
+            out.push_str(&xml[end..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(xml),
     }
 }
 
@@ -540,9 +571,10 @@ fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// Prints the terminal summary: totals plus one line per package.
-pub fn print_summary(shell: &kargo_util::shell::Shell, summary: &CoverageSummary) -> Result<()> {
-    let mut out = anstream::stdout();
+/// Prints the terminal summary: totals plus one line per package. It goes where the
+/// human-readable test report goes (see `super::test::human_out`).
+pub fn print_summary(summary: &CoverageSummary) -> Result<()> {
+    let mut out = super::test::human_out();
     writeln!(
         out,
         "\ncoverage: {:.1}% lines ({}/{}), {:.1}% branches ({}/{})",
@@ -556,7 +588,6 @@ pub fn print_summary(shell: &kargo_util::shell::Shell, summary: &CoverageSummary
     for pkg in &summary.packages {
         writeln!(out, "    {:<40} {:>5.1}% lines {:>5.1}% branches", pkg.name, pkg.line.percent(), pkg.branch.percent())?;
     }
-    let _ = shell;
     Ok(())
 }
 
@@ -619,7 +650,7 @@ pub fn finish(ctx: &BuildContext, xml: &Path, fail_under: Option<f64>) -> Result
     write_lcov(&dir.join("lcov.info"), &summary)?;
     write_cobertura(&dir.join("cobertura.xml"), &summary, &ctx.ws.manifest().package.name)?;
     write_json(&dir.join("coverage.json"), &summary, &ctx.ws.manifest().package.name)?;
-    print_summary(ctx.shell(), &summary)?;
+    print_summary(&summary)?;
     let shown = dir.strip_prefix(ctx.ws.root()).unwrap_or(&dir);
     ctx.shell().status("Reported", format!("coverage in {}", shown.display()));
     match check_thresholds(settings, &summary, fail_under) {
@@ -660,7 +691,7 @@ pub fn coverage(ctx: &BuildContext, opts: &CoverageOptions, main_classes: Option
 mod tests {
     use super::*;
 
-    const SAMPLE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+    const SAMPLE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">
 <report name="app">
   <package name="com/example">
     <class name="com/example/Calculator" sourcefilename="Calculator.kt">

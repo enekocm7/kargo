@@ -261,11 +261,13 @@ fn jvm_coverage_reports_covered_and_uncovered_lines() {
     let t = E2e::new();
     t.create(&["cov"]);
     t.write("cov/src/Main.kt", "package com.example\n\nfun covered() = 42\nfun uncovered() = 7\n");
+    // The template's own test targets its `greeting` sample, which the sources above replace.
+    std::fs::remove_file(t.dir.path().join("cov/tests/GreetingTest.kt")).unwrap();
     t.write(
         "cov/tests/CovTest.kt",
         "package com.example\nimport kotlin.test.*\nclass CovTest { @Test fun usesCovered() = assertEquals(42, covered()) }\n",
     );
-    t.kargo("cov").args(["test", "--coverage"]).assert().success().stderr(predicate::str::contains("coverage:"));
+    t.kargo("cov").args(["test", "--coverage"]).assert().success().stdout(predicate::str::contains("coverage:"));
     let dir = t.dir.path().join("cov/target/debug/jvm/coverage");
     for file in ["jacoco.xml", "jacoco.csv", "lcov.info", "coverage.json", "cobertura.xml"] {
         assert!(dir.join(file).is_file(), "{} was not written", dir.join(file).display());
@@ -285,7 +287,7 @@ fn jvm_coverage_reports_covered_and_uncovered_lines() {
         .assert()
         .code(101)
         .stderr(predicate::str::contains("below the minimum"));
-    t.kargo("cov").arg("coverage").assert().success().stderr(predicate::str::contains("coverage:"));
+    t.kargo("cov").arg("coverage").assert().success().stdout(predicate::str::contains("coverage:"));
 }
 
 /// The JSON messages on a command's stdout, which must hold nothing else.

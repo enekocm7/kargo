@@ -34,7 +34,7 @@ What the build downloads and runs is pinned too, under `tools/`, so a changed or
 | `tools/ksp` | The KSP tool and its dependencies, when a `ksp` dependency needs it |
 | `tools/dokka-cli`, `tools/dokka-plugins` | Dokka and its plugins, once `kargo doc` ran |
 | `tools/ktlint-cli`, `tools/detekt-cli` | ktlint and detekt, once `kargo fmt` or `kargo lint` ran |
-| `tools/org.jacoco.agent`, `tools/jacoco-cli` | The JaCoCo agent and CLI, once `kargo test --coverage` or `kargo coverage` ran |
+| `tools/org.jacoco.agent`, `tools/org.jacoco.cli` | The JaCoCo agent and CLI, once `kargo test --coverage` or `kargo coverage` ran |
 
 Each entry is recorded and checked like a dependency resolution, and `--locked` fails when one is missing or out of date. `kargo fetch` locks the tools of the enabled targets (`--tools` adds Dokka, ktlint, detekt and JaCoCo), `kargo update` locks again the ones the lockfile had, and a build locks any other the first time it runs it. A [Compose Desktop](../../guides/compose/) jar for other platforms (`kargo package --platforms`) pins the Skiko natives it adds the same way, as `tools/skiko-awt-runtime-<platform>`. In a workspace, every entry but the compiler's is keyed with its package's name, like the resolutions.
 

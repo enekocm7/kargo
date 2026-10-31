@@ -728,6 +728,12 @@ impl<'a> BuildContext<'a> {
         self.locked_tool_file(Artifact::new(ModuleId::new(group, artifact), version))
     }
 
+    /// A single tool jar with a Maven classifier (e.g. JaCoCo's `runtime` agent or `nodeps`
+    /// CLI), locked in `kargo.lock` as `tools/<artifact>` like [`BuildContext::tool_jar`].
+    pub fn tool_classified_jar(&self, group: &str, artifact: &str, classifier: &str, version: &str) -> Result<PathBuf> {
+        self.locked_tool_file(Artifact::new(ModuleId::new(group, artifact), version).with_classifier(Some(classifier.to_owned())))
+    }
+
     /// R8 is published only to Google's Maven repository, so use a dedicated client while still
     /// recording the verified artifact in the project's lockfile.
     pub fn r8_jar(&self, version: &str) -> Result<PathBuf> {
