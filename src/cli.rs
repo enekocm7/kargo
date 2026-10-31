@@ -3153,6 +3153,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(0);
             }
+            let mut any_duplicates = false;
             let found = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 let targets = tree_targets(ctx, target);
                 let pkg = &ctx.ws.manifest().package;
@@ -3167,7 +3168,9 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                                 print!("{}", ops::why::render_inverted(&title, &res, &query.module, depth));
                             }
                         } else if duplicates {
-                            for line in ops::tree::conflicts(&res)? {
+                            let lines = ops::tree::conflicts(&res)?;
+                            any_duplicates |= !lines.is_empty();
+                            for line in lines {
                                 println!("{line}");
                             }
                         } else {
@@ -3185,6 +3188,9 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 && !found.contains(&true)
             {
                 bail!("{}", not_found(query, configuration));
+            }
+            if duplicates && !any_duplicates {
+                println!("no duplicate modules");
             }
             Ok(0)
         }

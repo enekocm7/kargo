@@ -751,7 +751,7 @@ Show the resolved dependency graph. Conflicts are shown as `requested -> selecte
 | `-t, --target <target>` | first enabled | Which target |
 | `-c, --configuration <c>` | `runtime` | `compile`, `runtime` or `test` |
 | `--depth <n>` | unlimited | Maximum depth |
-| `-d, --duplicates` | | Only modules requested in several versions |
+| `-d, --duplicates` | | Only modules requested in several versions. Prints `no duplicate modules` when there are none |
 | `-i, --invert <module>` | | Show what depends on `<module>` (`group:artifact`, optionally `:version`), up to the project: the inverted tree |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | current package | Which packages to show |
 | `--format <fmt>` | `text` | `text` or `json`. `json` prints the whole resolved graph, with each module's version, files and direct dependencies (and for wasm and js the `npm` packages, see below); it can't be combined with `--depth`, `--duplicates` or `--invert`. When several packages are selected, the JSON output is an array with one document per package |
