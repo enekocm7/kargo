@@ -27,7 +27,8 @@ const OPTIMIZED_MARKER: &str = ".kargo-wasm-opt";
 pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> Result<()> {
     let optimized = ctx.ws.profile(&ctx.profile)?.optimize;
     let browser_app = build.environment == WasmEnvironment::Browser && build.kind == WasmKind::Application;
-    let bundling = browser_app && bundler::active(ctx.ws.manifest(), TargetKind::Wasm, optimized).is_some();
+    let library = build.kind == WasmKind::Library;
+    let bundling = (browser_app || library) && bundler::active(ctx.ws.manifest(), TargetKind::Wasm, optimized).is_some();
     if optimized {
         optimize(ctx, build, size_report)?;
         // The bundler minifies, hashes and drops the source maps of what it bundles.
@@ -44,33 +45,44 @@ pub fn finish(ctx: &BuildContext, build: &mut WasmBuild, size_report: bool) -> R
     if !bundling && ctx.ws.manifest().targets.wasm.as_ref().is_some_and(|w| w.content_hash) {
         hash_assets(build)?;
     }
-    if build.kind == WasmKind::Library {
-        let manifest = ctx.ws.manifest();
-        let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    let manifest = ctx.ws.manifest();
+    let wasm = manifest.targets.wasm.as_ref().context("the Wasm target is not enabled")?;
+    // The npm packages a library depends on stay imports of its bundle.
+    let dependencies = if library {
         let dependencies = crate::npm::dependencies(ctx, kargo_manifest::TargetKind::Wasm, &build.libraries)?;
-        let dependencies = crate::npm_package::published_dependencies(ctx.project, ctx.ws, dependencies);
-        let json = package_json(
-            &manifest.package,
-            wasm.npm_package_name(&manifest.package),
-            &build.name,
-            &dependencies,
-            manifest.publish.npm.as_ref(),
-        );
-        std::fs::write(build.dir.join("package.json"), json).context("failed to write package.json")?;
-    }
+        Some(crate::npm_package::published_dependencies(ctx.project, ctx.ws, dependencies))
+    } else {
+        None
+    };
     let mut bundle = None;
-    if browser_app {
-        if bundling {
-            let wasm = build.dir.join(format!("{}.wasm", build.name));
-            let input = bundler::Input {
-                target: TargetKind::Wasm,
-                name: &build.name,
-                module: &build.module,
-                dir: &build.dir,
-                wasm: wasm.is_file().then_some(wasm.as_path()),
-            };
-            bundle = Some(bundler::bundle(ctx, &input)?);
+    if bundling {
+        let file = build.dir.join(format!("{}.wasm", build.name));
+        let npm_name = wasm.npm_package_name(&manifest.package);
+        let input = bundler::Input {
+            target: TargetKind::Wasm,
+            name: &build.name,
+            module: &build.module,
+            dir: &build.dir,
+            wasm: file.is_file().then_some(file.as_path()),
+            browser: build.environment == WasmEnvironment::Browser,
+            library: dependencies
+                .as_ref()
+                .map(|deps| bundler::LibraryInput { package: &npm_name, dependencies: deps.keys().cloned().collect() }),
+        };
+        bundle = Some(bundler::bundle(ctx, &input)?);
+    }
+    if let Some(dependencies) = &dependencies {
+        let name = wasm.npm_package_name(&manifest.package);
+        let json = package_json(&manifest.package, name.clone(), &build.name, dependencies, manifest.publish.npm.as_ref(), None);
+        std::fs::write(build.dir.join("package.json"), json).context("failed to write package.json")?;
+        if let Some(bundle) = &bundle {
+            let formats =
+                (wasm.bundling.as_ref().map(|b| b.formats.as_slice()).unwrap_or_default(), crate::npm_package::bundled_files(&bundle.dir));
+            let json = package_json(&manifest.package, name, &build.name, dependencies, manifest.publish.npm.as_ref(), Some(formats));
+            std::fs::write(bundle.dir.join("package.json"), json).context("failed to write package.json")?;
         }
+    }
+    if browser_app {
         assemble_site(ctx, build, bundle.as_ref())?;
     }
     build.bundle = bundle.as_ref().map(|b| b.dir.clone());
@@ -475,7 +487,12 @@ fn package_json(
     module: &str,
     dependencies: &BTreeMap<String, String>,
     settings: Option<&kargo_manifest::NpmPublishSettings>,
+    bundled: Option<(&[kargo_manifest::LibraryFormat], Vec<String>)>,
 ) -> String {
+    let (formats, files) = match bundled {
+        Some((formats, files)) => (Some(formats), files),
+        None => (None, vec!["*.mjs".to_owned(), "*.wasm".to_owned(), "*.d.mts".to_owned()]),
+    };
     crate::npm_package::LibraryPackage {
         name: crate::npm_package::scoped_name(npm_name, settings),
         package,
@@ -484,7 +501,8 @@ fn package_json(
         extension: "mjs",
         types_extension: "d.mts",
         es: true,
-        files: vec!["*.mjs".to_owned(), "*.wasm".to_owned(), "*.d.mts".to_owned()],
+        formats,
+        files,
         dependencies,
     }
     .json()
@@ -822,7 +840,7 @@ mod tests {
             publish: true,
         };
         let deps = map(&[("@js-joda/core", "3.2.0")]);
-        let text = package_json(&package, "@acme/hello".to_owned(), "hello", &deps, None);
+        let text = package_json(&package, "@acme/hello".to_owned(), "hello", &deps, None, None);
         assert!(text.find("\"types\": \"./hello.d.mts\",\n      \"import\"").is_some(), "`types` comes first in `exports`:\n{text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["name"], "@acme/hello");
@@ -840,12 +858,12 @@ mod tests {
 
         let settings = kargo_manifest::NpmPublishSettings { scope: Some("acme".into()), ..Default::default() };
         let scoped: serde_json::Value =
-            serde_json::from_str(&package_json(&package, "hello".to_owned(), "hello", &deps, Some(&settings))).unwrap();
+            serde_json::from_str(&package_json(&package, "hello".to_owned(), "hello", &deps, Some(&settings), None)).unwrap();
         assert_eq!(scoped["name"], "@acme/hello", "`scope` names a package that has none");
 
         let bare = kargo_manifest::Package { description: None, authors: vec![], license: None, ..package };
         let json: serde_json::Value =
-            serde_json::from_str(&package_json(&bare, "hello".to_owned(), "hello", &BTreeMap::new(), None)).unwrap();
+            serde_json::from_str(&package_json(&bare, "hello".to_owned(), "hello", &BTreeMap::new(), None, None)).unwrap();
         assert!(json.get("dependencies").is_none() && json.get("author").is_none() && json.get("license").is_none());
     }
 

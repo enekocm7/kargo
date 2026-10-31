@@ -1182,6 +1182,81 @@ fn js_browser_app_is_bundled() {
 }
 
 #[test]
+fn js_library_is_bundled_in_its_formats() {
+    require_e2e!();
+    if which("npm").is_none() {
+        eprintln!("skipping: Node.js/npm not installed");
+        return;
+    }
+    let t = E2e::new();
+    t.create(&["parted", "--lib", "--target", "js"]);
+    t.write(
+        "parted/kargo.toml",
+        "[package]\nname = \"parted\"\nversion = \"0.1.0\"\n\n[target.js]\nkind = \"library\"\nbundler = \"rollup\"\n\
+         formats = [\"esm\", \"cjs\", \"umd\"]\nglobal-name = \"acme.Parted\"\n",
+    );
+    t.write(
+        "parted/src/Parted.kt",
+        "package com.example.parted\n\n@OptIn(ExperimentalJsExport::class)\n@JsExport\nfun added(a: Int, b: Int): Int = a + b\n",
+    );
+    t.kargo("parted")
+        .args(["build", "--release"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Bundling parted.mjs with rollup"))
+        .stderr(predicate::str::contains("Bundled parted.mjs, parted.cjs, parted.umd.js"));
+
+    let bundle = t.dir.path().join("parted/target/release/js-bundle");
+    for file in ["parted.mjs", "parted.cjs", "parted.umd.js", "parted.d.mts", "parted.d.cts", "package.json"] {
+        assert!(bundle.join(file).is_file(), "{file} is missing");
+    }
+    let package: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(bundle.join("package.json")).unwrap()).unwrap();
+    assert_eq!((package["main"].as_str(), package["module"].as_str()), (Some("./parted.cjs"), Some("./parted.mjs")));
+    assert_eq!((package["unpkg"].as_str(), package["types"].as_str()), (Some("./parted.umd.js"), Some("./parted.d.mts")));
+    assert_eq!(package["exports"]["."]["import"]["default"], "./parted.mjs");
+    assert_eq!(package["exports"]["."]["require"]["default"], "./parted.cjs");
+    let umd = std::fs::read_to_string(bundle.join("parted.umd.js")).unwrap();
+    assert!(umd.contains("acme") && umd.contains("Parted"), "the UMD file uses the global it was given:\n{umd}");
+
+    if which("node").is_some() {
+        let script = "console.log(require('./target/release/js-bundle/parted.cjs').added(2, 3))";
+        let output = StdCommand::new("node").args(["-e", script]).current_dir(t.dir.path().join("parted")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "5", "{}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn wasm_library_is_bundled() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["wlib", "--lib", "--target", "wasm"]);
+    t.write(
+        "wlib/kargo.toml",
+        "[package]\nname = \"wlib\"\nversion = \"0.1.0\"\n\n[target.wasm]\nenvironment = \"js\"\nkind = \"library\"\n\
+         bundler = \"bun\"\nwasm-opt = false\n",
+    );
+    t.write(
+        "wlib/src/Wlib.kt",
+        "package com.example.wlib\n\n@OptIn(ExperimentalJsExport::class)\n@JsExport\nfun greet(name: String): String = \"Hello, $name!\"\n",
+    );
+    t.kargo("wlib")
+        .args(["build", "--release"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Bundling wlib.mjs with bun"))
+        .stderr(predicate::str::contains("Bundled wlib.mjs"));
+
+    let bundle = t.dir.path().join("wlib/target/release/wasm-bundle");
+    for file in ["wlib.mjs", "wlib.wasm", "wlib.d.mts", "package.json"] {
+        assert!(bundle.join(file).is_file(), "{file} is missing");
+    }
+    let package: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(bundle.join("package.json")).unwrap()).unwrap();
+    assert_eq!((package["type"].as_str(), package["main"].as_str()), (Some("module"), Some("./wlib.mjs")));
+    let files: Vec<&str> = package["files"].as_array().unwrap().iter().filter_map(|f| f.as_str()).collect();
+    assert!(files.contains(&"*.mjs") && files.contains(&"*.wasm"), "{files:?}");
+}
+
+#[test]
 fn browser_app_forwards_api_requests_to_other_servers() {
     require_e2e!();
     use std::io::{Read, Write};

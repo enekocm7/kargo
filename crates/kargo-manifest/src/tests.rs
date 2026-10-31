@@ -460,66 +460,21 @@ wasm-debugger-custom-formatters = true
 
 #[test]
 fn browser_apps_are_bundled_and_proxied() {
-    let wasm = |t: &str| {
-        parse(&format!(
-            "{MINIMAL}
-{t}
-"
-        ))
-        .targets
-        .wasm
-        .unwrap()
-    };
-    assert!(
-        wasm(
-            "[target.wasm]
-environment = \"browser\""
-        )
-        .bundling
-        .is_none()
-    );
-    let bundled = wasm(
-        "[target.wasm]
-environment = \"browser\"
-bundler = \"rollup\"
-external = [\"react\"]",
-    )
-    .bundling
-    .unwrap();
+    let wasm = |t: &str| parse(&format!("{MINIMAL}\n{t}\n")).targets.wasm.unwrap();
+    assert!(wasm("[target.wasm]\nenvironment = \"browser\"").bundling.is_none());
+    let bundled = wasm("[target.wasm]\nenvironment = \"browser\"\nbundler = \"rollup\"\nexternal = [\"react\"]").bundling.unwrap();
     assert_eq!((bundled.bundler, bundled.bundler.as_str()), (Bundler::Rollup, "rollup"));
     assert_eq!(bundled.external, ["react"]);
     // Release builds bundle and write no source maps; the other builds are served unbundled with maps.
     assert!(bundled.applies(true) && !bundled.applies(false));
     assert!(!bundled.wants_source_maps(true) && bundled.wants_source_maps(false));
-    let always = wasm(
-        "[target.wasm]
-environment = \"browser\"
-bundler = \"bun\"
-bundle = true
-source-maps = true",
-    )
-    .bundling
-    .unwrap();
+    let always = wasm("[target.wasm]\nenvironment = \"browser\"\nbundler = \"bun\"\nbundle = true\nsource-maps = true").bundling.unwrap();
     assert!(always.applies(false) && always.wants_source_maps(true));
-    let never = wasm(
-        "[target.wasm]
-environment = \"browser\"
-bundler = \"bun\"
-bundle = false",
-    )
-    .bundling
-    .unwrap();
+    let never = wasm("[target.wasm]\nenvironment = \"browser\"\nbundler = \"bun\"\nbundle = false").bundling.unwrap();
     assert!(!never.applies(true));
 
     let served = wasm(
-        "[target.wasm]
-environment = \"browser\"
-[target.wasm.dev-server]
-port = 3000
-[target.wasm.dev-server.proxy]
-\"/api\" = \"http://localhost:8080\"
-\"/api/v2\" = \"http://[::1]:9000/backend/\"
-",
+        "[target.wasm]\nenvironment = \"browser\"\n[target.wasm.dev-server]\nport = 3000\n[target.wasm.dev-server.proxy]\n\"/api\" = \"http://localhost:8080\"\n\"/api/v2\" = \"http://[::1]:9000/backend/\"\n",
     );
     assert_eq!(served.port, Some(3000));
     // The longest prefix comes first, so it wins.
@@ -527,100 +482,90 @@ port = 3000
     assert_eq!((served.proxy[1].host.as_str(), served.proxy[1].port, served.proxy[1].base.as_deref()), ("localhost", 8080, None));
     assert_eq!((served.proxy[0].host.as_str(), served.proxy[0].port, served.proxy[0].base.as_deref()), ("[::1]", 9000, Some("/backend")));
 
-    let js = parse(&format!(
-        "{MINIMAL}
-[target.js]
-environment = \"browser\"
-bundler = \"bun\"
-[target.js.dev-server]
-port = 4000
-"
-    ))
-    .targets
-    .js
-    .unwrap();
+    let js = parse(&format!("{MINIMAL}\n[target.js]\nenvironment = \"browser\"\nbundler = \"bun\"\n[target.js.dev-server]\nport = 4000\n"))
+        .targets
+        .js
+        .unwrap();
     assert_eq!((js.bundling.unwrap().bundler, js.port), (Bundler::Bun, Some(4000)));
 }
 
 #[test]
-fn bundling_and_dev_server_errors() {
+fn libraries_are_bundled_in_several_formats() {
+    let parse_target = |t: &str| parse(&format!("{MINIMAL}\n{t}\n")).targets;
+    let js = parse_target(
+        "[target.js]\nkind = \"library\"\nbundler = \"rollup\"\nformats = [\"umd\", \"esm\", \"cjs\"]\nglobal-name = \"acme.Greeter\"\nexternal = [\"lodash\"]\n[target.js.globals]\nlodash = \"_\"\n",
+    )
+    .js
+    .unwrap();
+    let bundling = js.bundling.unwrap();
+    assert_eq!(bundling.formats, [LibraryFormat::Esm, LibraryFormat::Cjs, LibraryFormat::Umd], "sorted");
+    assert_eq!((bundling.global_name.as_deref(), bundling.globals["lodash"].as_str()), (Some("acme.Greeter"), "_"));
+    assert_eq!(LibraryFormat::Umd.extension(), "umd.js");
+    let cjs = parse_target("[target.js]\nkind = \"library\"\nbundler = \"bun\"\nformats = [\"cjs\"]\n").js.unwrap().bundling.unwrap();
+    assert_eq!(cjs.formats, [LibraryFormat::Cjs]);
+    let wasm = parse_target("[target.wasm]\nkind = \"library\"\nbundler = \"bun\"\n").wasm.unwrap().bundling.unwrap();
+    assert_eq!(wasm.formats, [LibraryFormat::Esm]);
+    // A library for Node.js is bundled too.
+    let node = parse_target("[target.wasm]\nenvironment = \"js\"\nkind = \"library\"\nbundler = \"bun\"\n").wasm.unwrap();
+    assert!(node.bundling.is_some());
+}
+
+#[test]
+fn proxy_targets_can_use_tls() {
     let wasm = |t: &str| {
-        parse_err(&format!(
-            "{MINIMAL}
-[target.wasm]
-{t}
-"
-        ))
+        parse(&format!("{MINIMAL}\n[target.wasm]\nenvironment = \"browser\"\n[target.wasm.dev-server.proxy]\n{t}\n")).targets.wasm.unwrap()
     };
-    let browser = "environment = \"browser\"
-";
+    let routes = wasm(
+        "\"/a\" = \"https://api.example.com\"\n\"/b\" = { target = \"https://localhost:8443/v1\", insecure = true }\n\"/c\" = \"wss://sockets.example.com:9000\"\n\"/d\" = \"ws://localhost\"",
+    )
+    .proxy;
+    let route = |prefix: &str| routes.iter().find(|r| r.prefix == prefix).unwrap();
+    assert!(route("/a").tls && !route("/a").insecure && route("/a").port == 443);
+    assert!(route("/b").tls && route("/b").insecure && route("/b").port == 8443 && route("/b").base.as_deref() == Some("/v1"));
+    assert!(route("/c").tls && route("/c").port == 9000);
+    assert!(!route("/d").tls && route("/d").port == 80);
+}
+
+#[test]
+fn bundling_and_dev_server_errors() {
+    let wasm = |t: &str| parse_err(&format!("{MINIMAL}\n[target.wasm]\n{t}\n"));
+    let browser = "environment = \"browser\"\n";
     assert!(wasm(&format!("{browser}bundler = \"webpack\"")).contains("unknown bundler `webpack` (expected `bun` or `rollup`)"));
-    assert!(wasm("bundler = \"bun\"").contains("`bundler` bundles a browser app"));
-    assert!(
-        wasm(&format!(
-            "{browser}kind = \"library\"
-bundler = \"bun\""
-        ))
-        .contains("kind = \"application\"")
-    );
+    assert!(wasm("bundler = \"bun\"").contains("`bundler` bundles a browser application or an npm library"));
     assert!(wasm(&format!("{browser}bundle = true")).contains("set `bundler = \"bun\"` or `\"rollup\"`"));
     assert!(wasm(&format!("{browser}source-maps = true")).contains("configure the bundler"));
-    assert!(
-        wasm(&format!(
-            "{browser}bundler = \"bun\"
-external = [\" \"]"
-        ))
-        .contains("`external` lists")
-    );
-    assert!(
-        wasm(
-            "[target.wasm.dev-server]
-port = 80"
-        )
-        .contains("configures the server `kargo run` starts")
-    );
-    assert!(
-        wasm(&format!(
-            "{browser}port = 80
-[target.wasm.dev-server]
-port = 81"
-        ))
-        .contains("both set the port")
-    );
-    let proxy = |route: &str| {
-        wasm(&format!(
-            "{browser}[target.wasm.dev-server.proxy]
-{route}"
-        ))
-    };
+    assert!(wasm(&format!("{browser}bundler = \"bun\"\nexternal = [\" \"]")).contains("`external` lists"));
+    assert!(wasm("[target.wasm.dev-server]\nport = 80").contains("configures the server `kargo run` starts"));
+    assert!(wasm(&format!("{browser}port = 80\n[target.wasm.dev-server]\nport = 81")).contains("both set the port"));
+    let proxy = |route: &str| wasm(&format!("{browser}[target.wasm.dev-server.proxy]\n{route}"));
     assert!(proxy("\"api\" = \"http://localhost\"").contains("is not a path prefix"));
-    assert!(proxy("\"/api\" = \"https://localhost\"").contains("`http://` URL"));
+    assert!(proxy("\"/api\" = \"ftp://localhost\"").contains("an `http://` or `https://` URL"));
+    assert!(proxy("\"/api\" = { target = \"http://localhost\", insecure = true }").contains("`insecure` is about the certificate"));
+    assert!(proxy("\"/api\" = { target = \"https://localhost\", verify = false }").contains("did not match any variant"));
+    assert!(proxy("\"/\" = \"http://localhost\"").contains("would hide the app's own files"));
     assert!(proxy("\"/api\" = \"http://localhost:http\"").contains("the port is not a number"));
     assert!(proxy("\"/api\" = \"http://\"").contains("no host"));
     assert!(proxy("\"/api\" = \"http://localhost/x?y\"").contains("no query"));
-    assert!(
-        proxy(
-            "\"/api\" = \"http://a\"
-\"/api/\" = \"http://b\""
-        )
-        .contains("lists `/api` twice")
-    );
-    let js = parse_err(&format!(
-        "{MINIMAL}
-[target.js]
-environment = \"browser\"
-module-kind = \"umd\"
-bundler = \"bun\"
-"
-    ));
-    assert!(js.contains("`bundler` bundles ES modules"), "{js}");
-    let node = parse_err(&format!(
-        "{MINIMAL}
-[target.js]
-bundler = \"bun\"
-"
-    ));
-    assert!(node.contains("[target.js] `bundler` bundles a browser app"), "{node}");
+    assert!(proxy("\"/api\" = \"http://a\"\n\"/api/\" = \"http://b\"").contains("lists `/api` twice"));
+
+    let js = |t: &str| parse_err(&format!("{MINIMAL}\n[target.js]\n{t}\n"));
+    let umd = js("environment = \"browser\"\nmodule-kind = \"umd\"\nbundler = \"bun\"");
+    assert!(umd.contains("`bundler` bundles ES modules"), "{umd}");
+    let node = js("bundler = \"bun\"");
+    assert!(node.contains("[target.js] `bundler` bundles a browser application"), "{node}");
+
+    let library = |t: &str| js(&format!("kind = \"library\"\nbundler = \"rollup\"\n{t}"));
+    assert!(library("formats = [\"amd\"]").contains("unknown format `amd`"));
+    assert!(library("formats = [\"esm\", \"esm\"]").contains("lists `esm` twice"));
+    assert!(library("globals = { react = \"React\" }").contains("for the `umd` format"));
+    assert!(library("formats = [\"umd\"]\nglobal-name = \"my lib\"").contains("`global-name` is `my lib`"));
+    assert!(library("formats = [\"umd\"]\nglobals = { react = \"1React\" }").contains("[target.js.globals] `react`"));
+    let bun_umd = js("kind = \"library\"\nbundler = \"bun\"\nformats = [\"umd\"]");
+    assert!(bun_umd.contains("the `umd` format needs `bundler = \"rollup\"`"), "{bun_umd}");
+    let app_formats = js("environment = \"browser\"\nbundler = \"bun\"\nformats = [\"esm\"]");
+    assert!(app_formats.contains("are about the files of a library"), "{app_formats}");
+    let wasm_cjs = wasm("kind = \"library\"\nbundler = \"rollup\"\nformats = [\"esm\", \"cjs\"]");
+    assert!(wasm_cjs.contains("can only be [\"esm\"] for Kotlin/Wasm"), "{wasm_cjs}");
 }
 
 #[test]

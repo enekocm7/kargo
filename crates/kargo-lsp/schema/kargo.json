@@ -248,10 +248,13 @@
             "web-init": { "description": "A script of a library (relative to the package) that the page Kargo generates for a dependent browser app imports before the app module. It is shipped like `web-resources`. Needs kind = \"library\".", "type": "string" },
             "js-sources": { "description": "Directories (relative to the package) of your own JavaScript and TypeScript modules. `.js`/`.mjs` files are copied to `js/` next to the module, `.ts`/`.mts` files are compiled there with tsc, and their exports get Kotlin declarations in the package `js.<path>`. Default: `js/` when it exists; `[]` turns it off. Not for environment = \"wasi\".", "type": "array", "items": { "type": "string" }, "default": ["js"] },
             "port": { "description": "The port `kargo run` serves a browser app on; `--port` overrides it. `0` picks a free one. Needs environment = \"browser\".", "type": "integer", "minimum": 0, "maximum": 65535, "default": 8080 },
-            "bundler": { "description": "Bundle the browser app with `bun` (`bun build`) or `rollup`: one tree-shaken, minified bundle with code splitting and content-hashed names. Release builds bundle; the other builds serve the modules as the compiler wrote them (see `bundle`). Needs environment = \"browser\" and kind = \"application\".", "enum": ["bun", "rollup"] },
+            "bundler": { "description": "Bundle the browser app or the npm library with `bun` (`bun build`) or `rollup`: one tree-shaken, minified bundle with code splitting and content-hashed names. Release builds bundle; the other builds serve the modules as the compiler wrote them (see `bundle`). Needs environment = \"browser\" and kind = \"application\", or kind = \"library\".", "enum": ["bun", "rollup"] },
             "bundle": { "description": "Whether builds bundle. Default: release builds (profiles that optimize). `true` bundles every build, `false` none. Needs `bundler`.", "type": "boolean" },
             "source-maps": { "description": "Write source maps for the bundle. Default: for builds that do not optimize. Needs `bundler`.", "type": "boolean" },
             "external": { "description": "npm packages the bundle leaves as `import`s for the page to provide, such as with its own import map. Needs `bundler`.", "type": "array", "items": { "type": "string" } },
+            "formats": { "description": "The module formats a bundled library is written in, in any order: `esm` (`<name>.mjs`), `cjs` (`<name>.cjs`) and `umd` (`<name>.umd.js`, Rollup only). Default: `[\"esm\"]`. Kotlin/Wasm can only be `esm`: its module awaits the Wasm instance at the top level. Needs `bundler` and kind = \"library\".", "type": "array", "items": { "enum": ["esm", "cjs", "umd"] } },
+            "globals": { "description": "For the `umd` format: the global variable of each npm package of `external` and of the library's dependencies, by package name (`lodash = \"_\"`).", "type": "object", "additionalProperties": { "type": "string" } },
+            "global-name": { "description": "For the `umd` format: the global variable the library puts itself in, such as `acme.Greeter`. Default: its npm package name without the scope, in PascalCase.", "type": "string", "pattern": "^[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*$" },
             "dev-server": { "$ref": "#/definitions/dev-server", "description": "How `kargo run` serves the browser app. Needs environment = \"browser\"." },
             "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the Wasm target only." }
           }
@@ -271,10 +274,13 @@
             "dev-npm-dependencies": { "$ref": "#/definitions/npm-dependencies", "description": "npm packages that only `kargo test` installs, next to the test module. `kargo add --npm --dev` writes here." },
             "js-sources": { "description": "Directories (relative to the package) of your own JavaScript and TypeScript modules. `.js`/`.mjs` files are copied to `js/` next to the module and `.ts`/`.mts` files are compiled there with tsc. Default: `js/` when it exists; `[]` turns it off.", "type": "array", "items": { "type": "string" }, "default": ["js"] },
             "port": { "description": "The port `kargo run` serves a browser app on; `--port` overrides it. `0` picks a free one. Needs environment = \"browser\".", "type": "integer", "minimum": 0, "maximum": 65535, "default": 8080 },
-            "bundler": { "description": "Bundle the browser app with `bun` (`bun build`) or `rollup`: one tree-shaken, minified bundle with code splitting and content-hashed names. Release builds bundle; the other builds serve the modules as the compiler wrote them (see `bundle`). Needs environment = \"browser\" and kind = \"application\" and module-kind = \"es\".", "enum": ["bun", "rollup"] },
+            "bundler": { "description": "Bundle the browser app or the npm library with `bun` (`bun build`) or `rollup`: one tree-shaken, minified bundle with code splitting and content-hashed names. Release builds bundle; the other builds serve the modules as the compiler wrote them (see `bundle`). Needs environment = \"browser\" and kind = \"application\" with module-kind = \"es\", or kind = \"library\".", "enum": ["bun", "rollup"] },
             "bundle": { "description": "Whether builds bundle. Default: release builds (profiles that optimize). `true` bundles every build, `false` none. Needs `bundler`.", "type": "boolean" },
             "source-maps": { "description": "Write source maps for the bundle. Default: for builds that do not optimize. Needs `bundler`.", "type": "boolean" },
             "external": { "description": "npm packages the bundle leaves as `import`s for the page to provide, such as with its own import map. Needs `bundler`.", "type": "array", "items": { "type": "string" } },
+            "formats": { "description": "The module formats a bundled library is written in, in any order: `esm` (`<name>.mjs`), `cjs` (`<name>.cjs`) and `umd` (`<name>.umd.js`, Rollup only). Default: `[\"esm\"]`. Kotlin/Wasm can only be `esm`: its module awaits the Wasm instance at the top level. Needs `bundler` and kind = \"library\".", "type": "array", "items": { "enum": ["esm", "cjs", "umd"] } },
+            "globals": { "description": "For the `umd` format: the global variable of each npm package of `external` and of the library's dependencies, by package name (`lodash = \"_\"`).", "type": "object", "additionalProperties": { "type": "string" } },
+            "global-name": { "description": "For the `umd` format: the global variable the library puts itself in, such as `acme.Greeter`. Default: its npm package name without the scope, in PascalCase.", "type": "string", "pattern": "^[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*$" },
             "dev-server": { "$ref": "#/definitions/dev-server", "description": "How `kargo run` serves the browser app. Needs environment = \"browser\"." },
             "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the JS target only." }
           }
@@ -827,9 +833,25 @@
       "properties": {
         "port": { "description": "The port to serve on, like the target's `port`; `--port` overrides it. Set one of the two.", "type": "integer", "minimum": 0, "maximum": 65535, "default": 8080 },
         "proxy": {
-          "description": "Forwards the requests below a path prefix to an HTTP server, such as the API of the app: `\"/api\" = \"http://localhost:8081\"`. A target URL with a path replaces the prefix with it. Only `http://` targets, and no WebSockets.",
+          "description": "Forwards the requests below a path prefix to a server, such as the API of the app: `\"/api\" = \"http://localhost:8081\"`. A target URL with a path replaces the prefix with it. WebSocket upgrades go through too. An `https://` target with a certificate of its own, as a development server has, is a table with `insecure = true`.",
           "type": "object",
-          "patternProperties": { "^/": { "description": "An `http://` URL.", "type": "string", "pattern": "^http://" } },
+          "patternProperties": {
+            "^/": {
+              "description": "An `http://`, `https://`, `ws://` or `wss://` URL, or a table with `target` and `insecure`.",
+              "anyOf": [
+                { "type": "string", "pattern": "^(https?|wss?)://" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["target"],
+                  "properties": {
+                    "target": { "description": "The URL of the server.", "type": "string", "pattern": "^(https?|wss?)://" },
+                    "insecure": { "description": "Accept any certificate of an `https://` target, such as the self-signed one of a development server.", "type": "boolean", "default": false }
+                  }
+                }
+              ]
+            }
+          },
           "additionalProperties": false
         }
       }

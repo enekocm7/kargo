@@ -127,7 +127,14 @@ $ kargo run -t wasm
 
 A request to `/api/users?id=7` now reaches the backend as `/api/users?id=7`, with its method, headers and body, and the response comes back as the backend sent it, streamed as it arrives. A route matches its prefix and the paths below it (`/api` and `/api/users`, not `/apiary`); with several routes the longest prefix wins. A target URL with a path replaces the prefix: `"/api" = "http://localhost:8081/backend"` sends `/api/users` to `/backend/users`.
 
-Only `http://` targets work, and the connection is closed after each request, so a WebSocket upgrade does not go through. If the backend is not running, the browser gets a `502 Bad Gateway` that names the address. Like the rest of the server, the proxy listens on `127.0.0.1` only and answers only requests that name that address as their host. The proxy is for `kargo run`; a deployed app needs its own reverse proxy.
+`http://` and `https://` targets work, and `ws://` and `wss://` name the same servers: a WebSocket upgrade is forwarded and, once the server has answered, the page and the server talk through Kargo until one of them hangs up. Any other request is closed after its response. An `https://` target whose certificate your machine does not trust, such as the self-signed one of a development server, is a table that says so:
+
+```toml title="kargo.toml"
+[target.wasm.dev-server.proxy]
+"/api" = { target = "https://localhost:8443", insecure = true }
+```
+
+The certificate authorities of [`[http] cainfo`](../offline-and-mirrors/#proxies-and-certificates) are trusted for the others. If the backend is not running, the browser gets a `502 Bad Gateway` that names the address. Like the rest of the server, the proxy listens on `127.0.0.1` only and answers only requests that name that address as their host. The proxy is for `kargo run`; a deployed app needs its own reverse proxy.
 
 ### The page
 
@@ -559,12 +566,28 @@ The names change when the contents do, so a server can send them with a long cac
 
 | Key | Default | Meaning |
 |---|---|---|
-| `bundler` | none | `bun` or `rollup`. Without it nothing is bundled |
+| `bundler` | none | `bun` or `rollup`. Without it nothing is bundled. A browser application and a library can set it |
 | `bundle` | `true` for builds that optimize, else `false` | `true` bundles every build, so `kargo run` serves a bundle too; `false` turns bundling off for all of them |
 | `source-maps` | `true` for builds that do not optimize, else `false` | Write a source map for the bundle |
 | `external` | none | npm packages the bundle leaves as `import`s, such as `["react"]`. Your page has to provide them, with an import map of its own for instance |
+| `formats` | `["esm"]` | The module formats a bundled library is written in. Kotlin/Wasm can only be `esm`; see [Libraries](#libraries) |
+| `globals`, `global-name` | none | For the `umd` format of a [Kotlin/JS library](../js/#libraries): the global variable of each npm package left external, and the one the library puts itself in |
 
 Minification follows the profile: a build that optimizes minifies, a development bundle (`bundle = true`) stays readable.
+
+### Libraries
+
+A [library](#libraries-and-npm-packages) is bundled too, so the package it publishes is one minified module rather than the compiler's output. The npm packages it needs stay `import`s, for the app that installs it to bundle, and the files keep the names its `package.json` points at: `kargo build --release` writes `target/<profile>/wasm-bundle/` with `package.json`, `<name>.mjs`, `<name>.wasm` and the declarations, and `kargo publish --npm` publishes that directory. `wasm-opt`, compression and the size report apply as they do to an app.
+
+```toml title="kargo.toml"
+[target.wasm]
+environment = "js"       # or "browser"
+kind = "library"
+bundler = "rollup"
+npm-name = "@acme/greeter"
+```
+
+A Kotlin/Wasm library is an ES module only: its module awaits the Wasm instance at the top level, which CommonJS and UMD cannot do, so `formats` stays `["esm"]` and `globals` and `global-name` are for Kotlin/JS. Its bundler needs Node.js or Bun like an app's, and `bundle = false` publishes the compiler's output, as a library without a bundler does.
 
 ### Bun and Rollup
 
@@ -578,7 +601,7 @@ A project needs no `package.json`, and neither bundler reads one. `kargo fetch` 
 Binaryen optimizes the module before it is bundled, so the `.wasm` file in the bundle is the optimized one. `compress` writes its compressed copies for the bundle's `.wasm` and `.js` files, `max-size` and `max-gzip-size` check the bundled module, and the `Size` line counts the whole bundle directory. The bundler minifies and hashes the glue itself, so `content-hash` has no effect on a bundled app.
 
 :::note
-Only browser applications are bundled: `bundler` needs `environment = "browser"` and `kind = "application"`. A library is published as the compiler wrote it (see [Libraries and npm packages](#libraries-and-npm-packages)). `kargo test` runs the compiler's modules, bundled or not.
+A browser application and a `kind = "library"` are bundled; `bundler` needs `environment = "browser"` and `kind = "application"`, or `kind = "library"`. Without a bundler, a library is published as the compiler wrote it (see [Libraries and npm packages](#libraries-and-npm-packages)). `kargo test` runs the compiler's modules, bundled or not.
 :::
 
 ## Module name and output files
@@ -596,7 +619,7 @@ A build writes these files to `target/<profile>/wasm/`, named after the package 
 | `index.html` and your `resources/` | The page of a `browser` app |
 | The libraries' web resources | The files your [libraries ship](#web-resources-from-libraries) to a `browser` app |
 
-With a [`bundler`](#bundling), the optimized app is in `target/<profile>/wasm-bundle/` and `target/<profile>/bundle-work/wasm/` holds what the bundler was given and wrote.
+With a [`bundler`](#bundling), the optimized app or library is in `target/<profile>/wasm-bundle/` and `target/<profile>/bundle-work/wasm/` holds what the bundler was given and wrote.
 
 Set `module-name` to change `<name>`, for example when the package name is not what the files should be called. It may contain letters, digits, `-`, `_` and `.`.
 

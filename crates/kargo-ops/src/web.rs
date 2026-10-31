@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 
 use kargo_manifest::ProxyRoute;
+use kargo_util::http::{Network, TlsStream};
 use kargo_util::process;
 
 /// URL prefix of the endpoints the test page reports to: `stdout`, `stderr`, `returned` and `failed`.
@@ -66,18 +67,20 @@ pub struct Site {
     mounts: Vec<(String, PathBuf)>,
     live_reload: bool,
     proxies: Vec<ProxyRoute>,
+    network: Network,
 }
 
 impl Site {
     /// A site that serves `root` at `/`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { mounts: vec![("/".to_owned(), root.into())], live_reload: false, proxies: Vec::new() }
+        Self { mounts: vec![("/".to_owned(), root.into())], live_reload: false, proxies: Vec::new(), network: Network::default() }
     }
 
     /// Forwards the requests below the prefix of each of `routes` to the server it names, in the order given, so the
-    /// longest prefix goes first.
-    pub fn proxy(mut self, routes: &[ProxyRoute]) -> Self {
+    /// longest prefix goes first. `network` has the certificate authorities `https://` targets are checked against.
+    pub fn proxy(mut self, routes: &[ProxyRoute], network: &Network) -> Self {
         self.proxies = routes.to_vec();
+        self.network = network.clone();
         self
     }
 
@@ -355,7 +358,7 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
         return stream_reloads(stream, shared);
     }
     if let Some(route) = site.route(path) {
-        return forward(stream, &request, route);
+        return forward(stream, &request, route, &site.network);
     }
     match request.method.as_str() {
         "GET" | "HEAD" => {
@@ -399,13 +402,67 @@ fn answer(stream: &mut TcpStream, site: &Site, events: Option<&Sender<PageEvent>
 /// How long Kargo waits to reach a server it forwards to, and for it to say something.
 const UPSTREAM_CONNECT: Duration = Duration::from_secs(5);
 const UPSTREAM_IDLE: Duration = Duration::from_secs(600);
+/// How long a tunnel waits for one side before it looks at the other.
+const TUNNEL_POLL: Duration = Duration::from_millis(10);
 
-/// The headers of a request that are for the connection to Kargo, not for the server it is forwarded to.
-fn is_hop_header(name: &str) -> bool {
+/// A connection to a server a request is forwarded to.
+enum Upstream {
+    Plain(TcpStream),
+    Tls(Box<TlsStream>),
+}
+
+impl Upstream {
+    fn socket(&self) -> &TcpStream {
+        match self {
+            Upstream::Plain(tcp) => tcp,
+            Upstream::Tls(tls) => &tls.sock,
+        }
+    }
+}
+
+impl Read for Upstream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Upstream::Plain(tcp) => tcp.read(buf),
+            Upstream::Tls(tls) => tls.read(buf),
+        }
+    }
+}
+
+impl Write for Upstream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Upstream::Plain(tcp) => tcp.write(buf),
+            Upstream::Tls(tls) => tls.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Upstream::Plain(tcp) => tcp.flush(),
+            Upstream::Tls(tls) => tls.flush(),
+        }
+    }
+}
+
+/// The headers of a request that are for the connection to Kargo, not for the server it is forwarded to. A WebSocket
+/// upgrade keeps `Connection` and `Upgrade`, which are what it asks for.
+fn is_hop_header(name: &str, upgrade: bool) -> bool {
+    if upgrade && (name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("upgrade")) {
+        return false;
+    }
     ["host", "connection", "keep-alive", "upgrade", "te", "trailer", "transfer-encoding", "content-length", "expect"]
         .iter()
         .any(|h| name.eq_ignore_ascii_case(h))
         || name.to_ascii_lowercase().starts_with("proxy-")
+}
+
+/// Whether `request` asks to switch to the WebSocket protocol.
+fn is_websocket_upgrade(request: &Request) -> bool {
+    let has = |name: &str, token: &str| {
+        request.headers.iter().any(|(n, v)| n.eq_ignore_ascii_case(name) && v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
+    };
+    request.method == "GET" && has("upgrade", "websocket") && has("connection", "upgrade")
 }
 
 /// The request line target the server of `route` gets for `target`: the path as it is, or with the prefix replaced by the
@@ -417,51 +474,105 @@ fn upstream_target(route: &ProxyRoute, target: &str) -> String {
     }
 }
 
-/// Sends `request` to the server of `route` and relays what it answers, as it comes. The connection is closed after one
-/// exchange (`Connection: close`), so the response ends when the server closes it and needs no parsing; a server that is
-/// not there is a 502.
-fn forward(stream: &mut TcpStream, request: &Request, route: &ProxyRoute) -> io::Result<()> {
-    let bad_gateway = |stream: &mut TcpStream, why: String| {
-        respond(stream, "502 Bad Gateway", "text/plain", format!("could not reach {}:{}: {why}", route.host, route.port).as_bytes(), false)
-    };
+/// Connects to the server of `route`, trying every address its name has (`localhost` may name an IPv6 address first, where a
+/// server listening on IPv4 only is not), and starts TLS for an `https://` target.
+fn connect(route: &ProxyRoute, network: &Network) -> Result<Upstream, String> {
     let host = route.host.trim_start_matches('[').trim_end_matches(']');
-    let Ok(addrs) = (host, route.port).to_socket_addrs() else { return bad_gateway(stream, "the host is unknown".to_owned()) };
-    // `localhost` may name an IPv6 address first, where a server listening on IPv4 only is not.
+    let addrs = (host, route.port).to_socket_addrs().map_err(|_| "the host is unknown".to_owned())?;
     let mut last = None;
-    let mut upstream = None;
     for addr in addrs {
         match TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT) {
-            Ok(connected) => {
-                upstream = Some(connected);
-                break;
+            Ok(tcp) => {
+                tcp.set_read_timeout(Some(UPSTREAM_IDLE)).map_err(|e| e.to_string())?;
+                tcp.set_write_timeout(Some(UPSTREAM_CONNECT)).map_err(|e| e.to_string())?;
+                if !route.tls {
+                    return Ok(Upstream::Plain(tcp));
+                }
+                let tls = kargo_util::http::tls_connect(network, host, tcp, !route.insecure).map_err(|e| format!("{e:#}"))?;
+                return Ok(Upstream::Tls(Box::new(tls)));
             }
             Err(e) => last = Some(e),
         }
     }
-    let Some(mut upstream) = upstream else {
-        return bad_gateway(stream, last.map_or_else(|| "the host has no address".to_owned(), |e| e.to_string()));
+    Err(last.map_or_else(|| "the host has no address".to_owned(), |e| e.to_string()))
+}
+
+fn is_idle(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
+/// Sends `request` to the server of `route` and relays what it answers, as it comes. The connection is closed after one
+/// exchange (`Connection: close`), so the response ends when the server closes it and needs no parsing; a server that is
+/// not there is a 502. A WebSocket upgrade is not closed: once the server has answered, the two sides talk through Kargo
+/// until one of them hangs up.
+fn forward(stream: &mut TcpStream, request: &Request, route: &ProxyRoute, network: &Network) -> io::Result<()> {
+    let bad_gateway = |stream: &mut TcpStream, why: String| {
+        respond(stream, "502 Bad Gateway", "text/plain", format!("could not reach {}:{}: {why}", route.host, route.port).as_bytes(), false)
     };
-    upstream.set_read_timeout(Some(UPSTREAM_IDLE))?;
-    upstream.set_write_timeout(Some(UPSTREAM_CONNECT))?;
-    let mut head = format!(
-        "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n",
-        request.method,
-        upstream_target(route, &request.target),
-        route.host,
-        route.port
-    );
-    for (name, value) in request.headers.iter().filter(|(name, _)| !is_hop_header(name)) {
+    let mut upstream = match connect(route, network) {
+        Ok(upstream) => upstream,
+        Err(why) => return bad_gateway(stream, why),
+    };
+    let upgrade = is_websocket_upgrade(request);
+    // The port is left out when it is the scheme's own, as a browser would.
+    let default_port = if route.tls { 443 } else { 80 };
+    let host = if route.port == default_port { route.host.clone() } else { format!("{}:{}", route.host, route.port) };
+    let mut head = format!("{} {} HTTP/1.1\r\nHost: {host}\r\n", request.method, upstream_target(route, &request.target));
+    if !upgrade {
+        head.push_str("Connection: close\r\n");
+    }
+    for (name, value) in request.headers.iter().filter(|(name, _)| !is_hop_header(name, upgrade)) {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     if !request.body.is_empty() {
         head.push_str(&format!("Content-Length: {}\r\n", request.body.len()));
     }
     head.push_str("\r\n");
-    if let Err(e) = upstream.write_all(head.as_bytes()).and_then(|()| upstream.write_all(&request.body)) {
+    if let Err(e) = upstream.write_all(head.as_bytes()).and_then(|()| upstream.write_all(&request.body)).and_then(|()| upstream.flush()) {
         return bad_gateway(stream, e.to_string());
     }
-    io::copy(&mut upstream, stream)?;
+    if upgrade {
+        return tunnel(stream, &mut upstream);
+    }
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match upstream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => stream.write_all(&buf[..n])?,
+            // A TLS server that closes without saying so ends its response too.
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+    }
     stream.flush()
+}
+
+/// Passes bytes between the page and the server, both ways, until either side closes.
+fn tunnel(client: &mut TcpStream, upstream: &mut Upstream) -> io::Result<()> {
+    client.set_read_timeout(Some(TUNNEL_POLL))?;
+    upstream.socket().set_read_timeout(Some(TUNNEL_POLL))?;
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match client.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                upstream.write_all(&buf[..n])?;
+                upstream.flush()?;
+            }
+            Err(e) if is_idle(&e) => {}
+            Err(e) => return Err(e),
+        }
+        match upstream.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                client.write_all(&buf[..n])?;
+                client.flush()?;
+            }
+            Err(e) if is_idle(&e) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Answers a page's request to [`RELOAD_PATH`] with an event stream: the generation now, then the new one after each
@@ -828,7 +939,7 @@ mod tests {
     }
 
     fn route(prefix: &str, target: &str) -> ProxyRoute {
-        ProxyRoute::parse(prefix, target).unwrap()
+        ProxyRoute::parse(prefix, target, false).unwrap()
     }
 
     #[test]
@@ -841,7 +952,7 @@ mod tests {
             assert!(!request.contains("127.0.0.1"), "{request}");
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"users\":[]}".to_owned()
         });
-        let site = site(dir.path()).proxy(&[route("/api", &format!("http://localhost:{api}"))]);
+        let site = site(dir.path()).proxy(&[route("/api", &format!("http://localhost:{api}"))], &Network::default());
         let server = Server::start(bind(0).unwrap(), site, None).unwrap();
         let response = exchange(
             server.port(),
@@ -864,7 +975,7 @@ mod tests {
             assert!(request.contains("Content-Length: 4") && request.ends_with("data"), "{request}");
             "HTTP/1.1 201 Created\r\nConnection: close\r\n\r\n".to_owned()
         });
-        let site = site(dir.path()).proxy(&[route("/api", &format!("http://localhost:{api}/backend/"))]);
+        let site = site(dir.path()).proxy(&[route("/api", &format!("http://localhost:{api}/backend/"))], &Network::default());
         let server = Server::start(bind(0).unwrap(), site, None).unwrap();
         let response = exchange(
             server.port(),
@@ -878,7 +989,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A port that was just free.
         let closed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
-        let site = site(dir.path()).proxy(&[route("/api", &format!("http://127.0.0.1:{closed}"))]);
+        let site = site(dir.path()).proxy(&[route("/api", &format!("http://127.0.0.1:{closed}"))], &Network::default());
         let server = Server::start(bind(0).unwrap(), site, None).unwrap();
         let response = get(&server, "/api/users");
         assert!(response.starts_with("HTTP/1.1 502 Bad Gateway") && response.contains("could not reach 127.0.0.1"), "{response}");
@@ -887,12 +998,134 @@ mod tests {
         assert!(foreign.starts_with("HTTP/1.1 403"), "{foreign}");
     }
 
+    trait Duplex: Read + Write {}
+    impl<T: Read + Write> Duplex for T {}
+
+    /// A server that takes one connection, over TLS with a self-signed certificate for `localhost` if `tls`, and
+    /// hands it to `handler`. Returns its port.
+    fn serve(tls: bool, handler: impl FnOnce(&mut dyn Duplex) + Send + 'static) -> u16 {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            if !tls {
+                return handler(&mut tcp);
+            }
+            let certs = vec![CertificateDer::from_pem_slice(include_bytes!("../testdata/localhost-cert.pem")).unwrap()];
+            let key = PrivateKeyDer::from_pem_slice(include_bytes!("../testdata/localhost-key.pem")).unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap();
+            let mut stream = rustls::StreamOwned::new(rustls::ServerConnection::new(Arc::new(config)).unwrap(), tcp);
+            handler(&mut stream);
+            stream.conn.send_close_notify();
+            let _ = stream.flush();
+        });
+        port
+    }
+
+    /// The head of a request, up to its blank line.
+    fn read_head(stream: &mut dyn Duplex) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if stream.read(&mut byte).unwrap() == 0 {
+                break;
+            }
+            head.push(byte[0]);
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    #[test]
+    fn forwards_to_https_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = serve(true, |stream| {
+            let head = read_head(stream);
+            assert!(head.starts_with("GET /api/users HTTP/1.1\r\n") && head.contains("Host: localhost:"), "{head}");
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n[\"ada\"]").unwrap();
+        });
+        // The certificate is self-signed, so the route has to say it does not mind.
+        let insecure = ProxyRoute::parse("/api", &format!("https://localhost:{api}"), true).unwrap();
+        let server = Server::start(bind(0).unwrap(), site(dir.path()).proxy(&[insecure], &Network::default()), None).unwrap();
+        let response = get(&server, "/api/users");
+        assert!(response.starts_with("HTTP/1.1 200 OK") && response.ends_with("[\"ada\"]"), "{response}");
+    }
+
+    #[test]
+    fn a_certificate_nobody_trusts_is_a_bad_gateway() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = serve(true, |stream| {
+            let _ = stream.read(&mut [0u8; 1]);
+        });
+        let strict = route("/api", &format!("https://localhost:{api}"));
+        let server = Server::start(bind(0).unwrap(), site(dir.path()).proxy(&[strict], &Network::default()), None).unwrap();
+        let response = get(&server, "/api/users");
+        assert!(response.starts_with("HTTP/1.1 502 Bad Gateway") && response.contains("certificate"), "{response}");
+    }
+
+    /// Opens a WebSocket through the proxy to a server that answers in capitals, and talks to it.
+    fn websocket_through_the_proxy(tls: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let api = serve(tls, |stream| {
+            let head = read_head(stream);
+            assert!(head.starts_with("GET /socket HTTP/1.1\r\n"), "{head}");
+            assert!(
+                head.contains("Upgrade: websocket") && head.contains("Connection: Upgrade") && head.contains("Sec-WebSocket-Key: abc"),
+                "{head}"
+            );
+            assert!(!head.contains("Connection: close"), "an upgrade keeps the connection:\n{head}");
+            stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
+            let mut word = [0u8; 5];
+            stream.read_exact(&mut word).unwrap();
+            stream.write_all(&word.to_ascii_uppercase()).unwrap();
+            stream.read_exact(&mut word).unwrap();
+            stream.write_all(&word.to_ascii_uppercase()).unwrap();
+        });
+        let scheme = if tls { "wss" } else { "ws" };
+        let route = ProxyRoute::parse("/socket", &format!("{scheme}://localhost:{api}"), tls).unwrap();
+        let server = Server::start(bind(0).unwrap(), site(dir.path()).proxy(&[route], &Network::default()), None).unwrap();
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(
+            client,
+            "GET /socket HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: abc\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            server.port()
+        )
+        .unwrap();
+        let head = read_head(&mut client);
+        assert!(head.starts_with("HTTP/1.1 101 Switching Protocols"), "{head}");
+        // Both directions work, and more than once.
+        for word in [b"hello", b"world"] {
+            client.write_all(word).unwrap();
+            let mut answer = [0u8; 5];
+            client.read_exact(&mut answer).unwrap();
+            assert_eq!(&answer, &word.to_ascii_uppercase().as_slice());
+        }
+    }
+
+    #[test]
+    fn websockets_go_through_the_proxy() {
+        websocket_through_the_proxy(false);
+    }
+
+    #[test]
+    fn websockets_go_through_the_proxy_over_tls() {
+        websocket_through_the_proxy(true);
+    }
+
     #[test]
     fn upstream_targets() {
         assert_eq!(upstream_target(&route("/api", "http://h:1"), "/api/x?y=1"), "/api/x?y=1");
         assert_eq!(upstream_target(&route("/api", "http://h:1/backend/"), "/api/x?y=1"), "/backend/x?y=1");
         assert_eq!(upstream_target(&route("/api", "http://h:1/backend"), "/api?y=1"), "/backend?y=1");
-        assert!(is_hop_header("Connection") && is_hop_header("proxy-authorization") && !is_hop_header("Accept"));
+        assert!(is_hop_header("Connection", false) && is_hop_header("proxy-authorization", false) && !is_hop_header("Accept", false));
+        assert!(!is_hop_header("Upgrade", true) && is_hop_header("Host", true));
     }
 
     #[test]

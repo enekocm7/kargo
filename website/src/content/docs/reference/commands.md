@@ -204,7 +204,7 @@ After a JVM build, `kargo build` prints a `Resolved` line for each enabled [fram
 
 Before compiling, `kargo build` (like `check`, `run`, `test` and `package`) runs the [`[[generate]]` steps](../../guides/code-generation/) that are out of date, and [warns](../warnings/) about projects that are valid but probably not what you meant: a target with no sources, Kotlin scripts (`.kts`) that are never compiled, a [task](../../guides/tasks-and-plugins/) hidden by a built-in command, and an odd package version.
 
-For Wasm, a release build removes dead code, downloads pinned Binaryen on demand, and reports raw, gzip and Brotli sizes. Optional size budgets can fail the build, and `--size-report` asks Binaryen for per-function metrics. See [WebAssembly](../../guides/wasm/). A `kind = "library"` project also gets a `package.json` and TypeScript declarations. A browser app with a [`bundler`](../../guides/wasm/#bundling) (Wasm or JS) is bundled by a release build into `target/<profile>/wasm-bundle/` or `js-bundle/`: one minified bundle with code splitting and content-hashed names, which the size report counts.
+For Wasm, a release build removes dead code, downloads pinned Binaryen on demand, and reports raw, gzip and Brotli sizes. Optional size budgets can fail the build, and `--size-report` asks Binaryen for per-function metrics. See [WebAssembly](../../guides/wasm/). A `kind = "library"` project also gets a `package.json` and TypeScript declarations. A browser app or a library with a [`bundler`](../../guides/wasm/#bundling) (Wasm or JS) is bundled by a release build into `target/<profile>/wasm-bundle/` or `js-bundle/`: one minified bundle with code splitting and content-hashed names, which the size report counts.
 
 ```sh
 kargo build

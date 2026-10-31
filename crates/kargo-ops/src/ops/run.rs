@@ -653,6 +653,8 @@ pub struct Served {
     node_modules: Option<PathBuf>,
     /// The requests forwarded to other servers (`[target.<wasm|js>.dev-server.proxy]`).
     proxy: Vec<kargo_manifest::ProxyRoute>,
+    /// The certificate authorities the proxy trusts.
+    network: kargo_util::http::Network,
     port: u16,
     open: bool,
 }
@@ -675,6 +677,7 @@ fn served(
         shown,
         node_modules: node_modules.map(Path::to_path_buf),
         proxy,
+        network: ctx.config.network().clone(),
         port: opts.port.or(configured).unwrap_or(DEFAULT_PORT),
         open: opts.open,
     })))
@@ -692,12 +695,14 @@ impl Served {
         if live_reload {
             site = site.live_reload();
         }
-        let server = web::Server::start(listener, site.proxy(&self.proxy), None)?;
+        let server = web::Server::start(listener, site.proxy(&self.proxy, &self.network), None)?;
         let reloading = if live_reload { "reloading on change, " } else { "" };
         shell.status("Serving", format!("{} at {} ({reloading}press Ctrl+C to stop)", self.shown, server.url()));
         for route in &self.proxy {
             let base = route.base.as_deref().unwrap_or_default();
-            shell.status("Proxying", format!("{} to http://{}:{}{base}", route.prefix, route.host, route.port));
+            let scheme = if route.tls { "https" } else { "http" };
+            let note = if route.insecure { " (its certificate is not checked)" } else { "" };
+            shell.status("Proxying", format!("{} to {scheme}://{}:{}{base}{note}", route.prefix, route.host, route.port));
         }
         if self.open {
             web::open_in_browser(std::ffi::OsStr::new(&server.url()))?;

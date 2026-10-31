@@ -1403,6 +1403,7 @@ dependencies = [
  "pgp",
  "rand",
  "roxmltree",
+ "rustls",
  "semver",
  "serde",
  "serde_json",
@@ -1446,6 +1447,7 @@ dependencies = [
  "hex",
  "ignore",
  "md-5 0.11.0",
+ "rustls",
  "serde",
  "sha1 0.11.0",
  "sha2 0.11.1",
@@ -1453,6 +1455,7 @@ dependencies = [
  "toml",
  "ureq",
  "walkdir",
+ "webpki-roots",
 ]
 
 [[package]]

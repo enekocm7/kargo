@@ -458,7 +458,53 @@ impl FromStr for Bundler {
     }
 }
 
-/// How a browser app is bundled: `bundler`, `bundle`, `source-maps` and `external` of `[target.wasm]` or `[target.js]`.
+/// A module format a bundled library is written in (`formats` of `[target.wasm]` or `[target.js]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LibraryFormat {
+    /// An ES module, `<name>.mjs`.
+    Esm,
+    /// A CommonJS module, `<name>.cjs`.
+    Cjs,
+    /// A UMD module for `<script>` tags, AMD and `require`, `<name>.umd.js`.
+    Umd,
+}
+
+impl LibraryFormat {
+    pub const ALL: [LibraryFormat; 3] = [LibraryFormat::Esm, LibraryFormat::Cjs, LibraryFormat::Umd];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LibraryFormat::Esm => "esm",
+            LibraryFormat::Cjs => "cjs",
+            LibraryFormat::Umd => "umd",
+        }
+    }
+
+    /// The extension of the file of this format, after the module's name.
+    pub fn extension(self) -> &'static str {
+        match self {
+            LibraryFormat::Esm => "mjs",
+            LibraryFormat::Cjs => "cjs",
+            LibraryFormat::Umd => "umd.js",
+        }
+    }
+}
+
+impl FromStr for LibraryFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "esm" => Ok(LibraryFormat::Esm),
+            "cjs" => Ok(LibraryFormat::Cjs),
+            "umd" => Ok(LibraryFormat::Umd),
+            other => bail!("unknown format `{other}` (expected `esm`, `cjs` or `umd`)"),
+        }
+    }
+}
+
+/// How a browser app or a library is bundled: `bundler`, `bundle`, `source-maps`, `external` and, for a library, `formats`,
+/// `globals` and `global-name` of `[target.wasm]` or `[target.js]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bundling {
     pub bundler: Bundler,
@@ -468,6 +514,12 @@ pub struct Bundling {
     pub source_maps: Option<bool>,
     /// Packages the bundle leaves as `import`s for the page to provide.
     pub external: Vec<String>,
+    /// The formats of a library, sorted; `[Esm]` unless `formats` says otherwise.
+    pub formats: Vec<LibraryFormat>,
+    /// For the UMD format: the global variable of each external package, by package name.
+    pub globals: BTreeMap<String, String>,
+    /// For the UMD format: the global variable the library puts itself in; `None` derives it from the package name.
+    pub global_name: Option<String>,
 }
 
 impl Bundling {
@@ -489,14 +541,19 @@ pub struct ProxyRoute {
     pub prefix: String,
     pub host: String,
     pub port: u16,
+    /// Whether the target is an `https://` (or `wss://`) URL: the connection is TLS.
+    pub tls: bool,
+    /// For a TLS target: accept any certificate, such as the self-signed one of a development server.
+    pub insecure: bool,
     /// The path of the target URL without a trailing slash: it replaces `prefix` in a forwarded request. Empty forwards the
     /// path as it is.
     pub base: Option<String>,
 }
 
 impl ProxyRoute {
-    /// The route for requests below `prefix` to the `http://` URL `target`.
-    pub fn parse(prefix: &str, target: &str) -> Result<ProxyRoute> {
+    /// The route for requests below `prefix` to the URL `target` (`http://`, `https://`, or `ws://` and `wss://`, which are
+    /// the same servers; WebSocket upgrades are forwarded whatever the scheme).
+    pub fn parse(prefix: &str, target: &str, insecure: bool) -> Result<ProxyRoute> {
         let invalid = |why: &str| anyhow::anyhow!("[dev-server.proxy] `{prefix}` = \"{target}\": {why}");
         if !prefix.starts_with('/') || prefix.contains(['?', '#', ' ']) {
             bail!("[dev-server.proxy] `{prefix}` is not a path prefix; start it with `/`, such as \"/api\"");
@@ -504,16 +561,23 @@ impl ProxyRoute {
         if prefix.trim_end_matches('/').is_empty() || prefix.starts_with("/__kargo") {
             bail!("[dev-server.proxy] `{prefix}` would hide the app's own files; name a prefix such as \"/api\"");
         }
-        let rest = target
-            .strip_prefix("http://")
-            .ok_or_else(|| invalid("the target is an `http://` URL (`https://` targets are not supported)"))?;
+        let (tls, rest) = if let Some(rest) = target.strip_prefix("http://").or_else(|| target.strip_prefix("ws://")) {
+            (false, rest)
+        } else if let Some(rest) = target.strip_prefix("https://").or_else(|| target.strip_prefix("wss://")) {
+            (true, rest)
+        } else {
+            return Err(invalid("the target is an `http://` or `https://` URL"));
+        };
+        if insecure && !tls {
+            return Err(invalid("`insecure` is about the certificate of an `https://` target"));
+        }
         let (authority, path) = match rest.find('/') {
             Some(at) => (&rest[..at], &rest[at..]),
             None => (rest, ""),
         };
         let (host, port) = match authority.rsplit_once(':') {
             Some((host, port)) if !port.contains(']') => (host, port.parse::<u16>().map_err(|_| invalid("the port is not a number"))?),
-            _ => (authority, 80),
+            _ => (authority, if tls { 443 } else { 80 }),
         };
         if host.is_empty() || host.contains(['@', ' ']) {
             return Err(invalid("the target has no host"));
@@ -522,7 +586,7 @@ impl ProxyRoute {
             return Err(invalid("the target has no query or fragment"));
         }
         let base = (!path.is_empty()).then(|| path.trim_end_matches('/').to_owned());
-        Ok(ProxyRoute { prefix: prefix.trim_end_matches('/').to_owned(), host: host.to_owned(), port, base })
+        Ok(ProxyRoute { prefix: prefix.trim_end_matches('/').to_owned(), host: host.to_owned(), port, tls, insecure, base })
     }
 }
 

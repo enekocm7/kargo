@@ -1,6 +1,8 @@
-//! Bundling browser apps (`bundler = "bun" | "rollup"` in `[target.wasm]` and `[target.js]`): the module the Kotlin
-//! compiler wrote, the npm packages it imports and its other JavaScript become one tree-shaken, minified
-//! bundle with code splitting and content-hashed names, next to the `.wasm` file (hashed too) that its glue loads.
+//! Bundling browser apps and npm libraries (`bundler = "bun" | "rollup"` in `[target.wasm]` and `[target.js]`): the
+//! module the Kotlin compiler wrote, the npm packages it imports and its other JavaScript become one tree-shaken,
+//! minified bundle with code splitting and content-hashed names, next to the `.wasm` file (hashed too) that its glue
+//! loads. A library keeps its names: it is written in each of its `formats` (`<name>.mjs`, `<name>.cjs`,
+//! `<name>.umd.js`) with the npm packages it depends on left as imports, for the apps that install it to bundle.
 //!
 //! Both bundlers run a script Kargo writes (`bundle_bun.mjs`, `bundle_rollup.mjs`) with a JSON file of
 //! options, so the project needs no `package.json` and no configuration of its own. Bun is the one on
@@ -15,7 +17,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::ops::context::BuildContext;
-use kargo_manifest::{Bundler, Bundling, Manifest, TargetKind};
+use kargo_manifest::{Bundler, Bundling, LibraryFormat, Manifest, TargetKind};
 use kargo_util::fs::remove_dir_all_if_exists;
 use kargo_util::hash::{Fingerprint, sha256_file};
 use kargo_util::process::{self, find_on_path};
@@ -43,6 +45,8 @@ pub struct Bundle {
     pub entry: String,
     /// The `.wasm` file in `dir`, for a Wasm app.
     pub wasm: Option<PathBuf>,
+    /// For a library: the file of each format, in `dir`.
+    pub formats: Vec<(LibraryFormat, String)>,
 }
 
 /// The module to bundle.
@@ -55,6 +59,18 @@ pub struct Input<'a> {
     pub dir: &'a Path,
     /// The `.wasm` file the module loads.
     pub wasm: Option<&'a Path>,
+    /// Whether the module runs in a browser, as opposed to Node.js.
+    pub browser: bool,
+    /// For a library: its npm package name and the npm packages it depends on.
+    pub library: Option<LibraryInput<'a>>,
+}
+
+/// What a library bundle needs to know besides the module.
+pub struct LibraryInput<'a> {
+    /// The name the package is published under, which the UMD global is derived from.
+    pub package: &'a str,
+    /// The npm packages the library depends on: they stay imports, for the apps that install it to bundle.
+    pub dependencies: Vec<String>,
 }
 
 /// The bundler settings of `target` when this build bundles: a bundler is chosen, and the profile is one that bundles
@@ -82,11 +98,40 @@ pub fn bundle(ctx: &BuildContext, input: &Input) -> Result<Bundle> {
     let assets = work.join("assets");
     let out = profile_dir.join(format!("{}-bundle", input.target));
 
-    // The `.wasm` file gets the hash of its contents in its name, which the glue is told about before it is bundled.
-    let wasm = input.wasm.map(|file| wasm_name(input.name, file)).transpose()?;
+    // The `.wasm` file of an app gets the hash of its contents in its name, which the glue is told about before it is
+    // bundled. A library keeps the names it has, which its consumers' bundlers hash.
+    let hashed = input.library.is_none();
+    let wasm = input.wasm.map(|file| wasm_name(input.name, file, hashed)).transpose()?;
     let replace = match &wasm {
-        Some((from, to, _)) => vec![serde_json::json!({ "dir": input.dir, "from": from, "to": to })],
-        None => Vec::new(),
+        Some((from, to, _)) if from != to => vec![serde_json::json!({ "dir": input.dir, "from": from, "to": to })],
+        _ => Vec::new(),
+    };
+    let mut external = bundling.external.clone();
+    let library = match &input.library {
+        Some(library) => {
+            external.extend(library.dependencies.iter().cloned());
+            external.sort();
+            external.dedup();
+            let name = global_name(bundling, library.package);
+            if bundling.formats.contains(&LibraryFormat::Umd) {
+                let missing: Vec<&str> =
+                    external.iter().map(String::as_str).filter(|package| !bundling.globals.contains_key(*package)).collect();
+                if !missing.is_empty() {
+                    bail!(
+                        "the `umd` format needs the global variable of each npm package it leaves out, but `globals` has none for {}; \
+                         add them under [target.{}.globals] (`{} = \"{}\"`)",
+                        missing.join(", "),
+                        input.target,
+                        missing[0],
+                        global_name_for(missing[0])
+                    );
+                }
+            }
+            let globals: BTreeMap<&String, &String> = bundling.globals.iter().collect();
+            let formats: Vec<&str> = bundling.formats.iter().map(|f| f.as_str()).collect();
+            Some(serde_json::json!({ "formats": formats, "name": name, "globals": globals }))
+        }
+        None => None,
     };
     let options = serde_json::json!({
         "input": input.module,
@@ -94,8 +139,10 @@ pub fn bundle(ctx: &BuildContext, input: &Input) -> Result<Bundle> {
         "manifest": work.join("manifest.json"),
         "minify": optimize,
         "sourceMaps": source_maps,
-        "external": bundling.external,
+        "platform": if input.browser { "browser" } else { "node" },
+        "external": external,
         "replace": replace,
+        "library": library,
     });
     let stamp = stamp(input, &options, bundling.bundler);
     let stamp_path = work.join(STAMP);
@@ -109,7 +156,7 @@ pub fn bundle(ctx: &BuildContext, input: &Input) -> Result<Bundle> {
         run(ctx, input, bundling.bundler, &work)?;
         std::fs::write(&stamp_path, stamp)?;
     }
-    let entry = read_entry(&manifest_path, &assets)?;
+    let (entry, files) = read_entry(&manifest_path, &assets, &bundling.formats)?;
 
     remove_dir_all_if_exists(&out)?;
     kargo_util::fs::copy_dir(&assets, &out).context("failed to copy the bundle")?;
@@ -121,18 +168,65 @@ pub fn bundle(ctx: &BuildContext, input: &Input) -> Result<Bundle> {
         }
         _ => None,
     };
-    let bundle = Bundle { dir: out, entry, wasm };
+    if input.library.is_some() {
+        copy_declarations(input, &out, &bundling.formats)?;
+    }
+    let formats = if input.library.is_some() { files } else { Vec::new() };
+    let bundle = Bundle { dir: out, entry, wasm, formats };
     if !cached {
         let size = std::fs::metadata(bundle.dir.join(&bundle.entry)).map(|m| m.len()).unwrap_or(0);
-        ctx.shell().status("Bundled", format!("{} ({})", bundle.entry, crate::wasm_output::human_size(size)));
+        let files = if bundle.formats.len() > 1 {
+            bundle.formats.iter().map(|(_, file)| file.as_str()).collect::<Vec<_>>().join(", ")
+        } else {
+            bundle.entry.clone()
+        };
+        ctx.shell().status("Bundled", format!("{files} ({})", crate::wasm_output::human_size(size)));
     }
     Ok(bundle)
 }
 
-/// `(from, to, hash)`: the name the module has for the `.wasm` file, the hashed name it gets, and the hash.
-fn wasm_name(name: &str, file: &Path) -> Result<(String, String, String)> {
+/// Copies the TypeScript declarations the compiler wrote (`<name>.d.mts`) into a library's `out`, and as `<name>.d.cts` for
+/// the formats a `require` loads.
+fn copy_declarations(input: &Input, out: &Path, formats: &[LibraryFormat]) -> Result<()> {
+    let declarations = input.dir.join(format!("{}.d.mts", input.name));
+    if !declarations.is_file() {
+        return Ok(());
+    }
+    std::fs::copy(&declarations, out.join(format!("{}.d.mts", input.name))).context("failed to copy the TypeScript declarations")?;
+    if formats.iter().any(|f| *f != LibraryFormat::Esm) {
+        std::fs::copy(&declarations, out.join(format!("{}.d.cts", input.name))).context("failed to copy the TypeScript declarations")?;
+    }
+    Ok(())
+}
+
+/// The global variable a UMD library puts itself in: `global-name`, else the package name (without its scope) in PascalCase.
+fn global_name(bundling: &Bundling, package: &str) -> String {
+    bundling.global_name.clone().unwrap_or_else(|| global_name_for(package.rsplit('/').next().unwrap_or(package)))
+}
+
+/// `left-pad` as a JavaScript name: `LeftPad`.
+fn global_name_for(package: &str) -> String {
+    let name: String = package
+        .trim_start_matches('@')
+        .rsplit('/')
+        .next()
+        .unwrap_or(package)
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map(|first| first.to_ascii_uppercase().to_string() + chars.as_str()).unwrap_or_default()
+        })
+        .collect();
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) { format!("_{name}") } else { name }
+}
+
+/// `(from, to, hash)`: the name the module has for the `.wasm` file, the name it gets (hashed when `hashed`), and the hash.
+fn wasm_name(name: &str, file: &Path, hashed: bool) -> Result<(String, String, String)> {
     let hash = sha256_file(file).with_context(|| format!("failed to read {}", file.display()))?[..12].to_owned();
-    Ok((format!("{name}.wasm"), format!("{name}.{hash}.wasm"), hash))
+    let from = format!("{name}.wasm");
+    let to = if hashed { format!("{name}.{hash}.wasm") } else { from.clone() };
+    Ok((from, to, hash))
 }
 
 /// What the bundle is made of: the modules and `.wasm` files of the compiler's output, the options and the bundler.
@@ -155,13 +249,24 @@ fn stamp(input: &Input, options: &serde_json::Value, bundler: Bundler) -> String
     fingerprint.finish()
 }
 
-fn read_entry(manifest: &Path, assets: &Path) -> Result<String> {
+/// The entry module the bundler wrote (and, for a library, the file of each of its `formats`).
+fn read_entry(manifest: &Path, assets: &Path, formats: &[LibraryFormat]) -> Result<(String, Vec<(LibraryFormat, String)>)> {
     let text = std::fs::read_to_string(manifest).with_context(|| format!("failed to read {}", manifest.display()))?;
-    let entry = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v["entry"].as_str().map(str::to_owned));
-    match entry.filter(|e| assets.join(e).is_file()) {
-        Some(entry) => Ok(entry),
-        None => bail!("the bundler wrote no entry module into {}", assets.display()),
+    let json = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+    let exists = |file: &str| assets.join(file).is_file();
+    let Some(entry) = json["entry"].as_str().filter(|e| exists(e)) else {
+        bail!("the bundler wrote no entry module into {}", assets.display());
+    };
+    let mut files = Vec::new();
+    if let Some(written) = json["formats"].as_object() {
+        for format in formats {
+            let Some(file) = written.get(format.as_str()).and_then(|f| f.as_str()).filter(|f| exists(f)) else {
+                bail!("the bundler wrote no {} file into {}", format.as_str(), assets.display());
+            };
+            files.push((*format, file.to_owned()));
+        }
     }
+    Ok((entry.to_owned(), files))
 }
 
 /// Runs the bundler's script over `work/options.json`.
@@ -253,7 +358,7 @@ mod tests {
 
     #[test]
     fn the_page_loads_the_entry_module() {
-        let bundle = Bundle { dir: "out".into(), entry: "app-AbC123.js".into(), wasm: None };
+        let bundle = Bundle { dir: "out".into(), entry: "app-AbC123.js".into(), wasm: None, formats: Vec::new() };
         let page = "<script type=\"module\" src=\"./app.mjs\"></script>\n<script>import('/app.mjs')</script>";
         let (html, loaded) = bundle.rewrite_page(page, "app");
         assert!(loaded);
@@ -267,12 +372,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("app.wasm");
         std::fs::write(&file, b"wasm bytes").unwrap();
-        let (from, to, hash) = wasm_name("app", &file).unwrap();
+        let (from, to, hash) = wasm_name("app", &file, true).unwrap();
         assert_eq!(from, "app.wasm");
         assert_eq!(hash.len(), 12);
         assert_eq!(to, format!("app.{hash}.wasm"));
         std::fs::write(&file, b"other bytes").unwrap();
-        assert_ne!(wasm_name("app", &file).unwrap().1, to);
+        assert_ne!(wasm_name("app", &file, true).unwrap().1, to);
+        assert_eq!(wasm_name("app", &file, false).unwrap().1, "app.wasm", "a library keeps the name");
     }
 
     #[test]
@@ -331,6 +437,8 @@ mod tests {
             module: &wasm_dir.join("app.mjs"),
             dir: &wasm_dir,
             wasm: Some(&wasm_dir.join("app.wasm")),
+            browser: true,
+            library: None,
         };
         let bundle = bundle(&ctx, &input).unwrap();
         assert_eq!(bundle.dir, dir.path().join("target/debug/wasm-bundle"));
@@ -359,12 +467,78 @@ mod tests {
         );
     }
 
+    /// Bundles a made-up Kotlin/JS library with the `bun` on `PATH` (the test is skipped without one): it keeps its names
+    /// and is written in the ES module and CommonJS formats, with its declarations.
+    #[test]
+    fn bun_bundles_a_library_in_its_formats() {
+        use crate::workspace::{ProfileKind, Project};
+        use kargo_util::config::Config;
+        use kargo_util::shell::{Shell, Verbosity};
+
+        if find_on_path("bun").is_none() {
+            eprintln!("skipping: bun is not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("kargo.toml"),
+            "[package]\nname = \"greeter\"\nversion = \"0.1.0\"\n[target.js]\nkind = \"library\"\n\
+             bundler = \"bun\"\nformats = [\"esm\", \"cjs\"]\n",
+        )
+        .unwrap();
+        let js_dir = dir.path().join("target/debug/js");
+        std::fs::create_dir_all(&js_dir).unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug/node_modules/left-pad")).unwrap();
+        std::fs::write(dir.path().join("target/debug/node_modules/left-pad/package.json"), r#"{"name":"left-pad","main":"index.js"}"#)
+            .unwrap();
+        std::fs::write(dir.path().join("target/debug/node_modules/left-pad/index.js"), "module.exports = (s, n) => String(s).padStart(n);")
+            .unwrap();
+        std::fs::write(js_dir.join("greeter.mjs"), "import pad from 'left-pad';\nexport const greet = (n) => pad(n, 4) + n;\n").unwrap();
+        std::fs::write(js_dir.join("greeter.d.mts"), "export declare function greet(name: string): string;\n").unwrap();
+
+        let project = Project::load(&dir.path().join("kargo.toml")).unwrap();
+        let config = Config::new(home.path().to_path_buf(), Shell::new(Verbosity::Quiet));
+        let ctx = BuildContext::new(&config, &project, 0, ProfileKind::Dev).unwrap();
+        let input = Input {
+            target: TargetKind::Js,
+            name: "greeter",
+            module: &js_dir.join("greeter.mjs"),
+            dir: &js_dir,
+            wasm: None,
+            browser: false,
+            library: Some(LibraryInput { package: "@acme/greeter", dependencies: Vec::new() }),
+        };
+        let bundle = bundle(&ctx, &input).unwrap();
+        assert_eq!(bundle.formats, [(LibraryFormat::Esm, "greeter.mjs".to_owned()), (LibraryFormat::Cjs, "greeter.cjs".to_owned())]);
+        let code = std::fs::read_to_string(bundle.dir.join("greeter.mjs")).unwrap();
+        assert!(code.contains("padStart") && !code.contains("\"left-pad\""), "the package is bundled:\n{code}");
+        assert!(bundle.wasm.is_none());
+        assert!(bundle.dir.join("greeter.cjs").is_file());
+        assert!(bundle.dir.join("greeter.d.mts").is_file() && bundle.dir.join("greeter.d.cts").is_file());
+    }
+
+    #[test]
+    fn libraries_get_a_javascript_global_name() {
+        assert_eq!(global_name_for("left-pad"), "LeftPad");
+        assert_eq!(global_name_for("@acme/left-pad"), "LeftPad");
+        assert_eq!(global_name_for("2fa"), "_2fa");
+    }
+
     #[test]
     fn the_stamp_follows_the_modules_and_options() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("app.mjs"), "export {}").unwrap();
         std::fs::write(dir.path().join("app.wasm"), "wasm").unwrap();
-        let input = Input { target: TargetKind::Wasm, name: "app", module: &dir.path().join("app.mjs"), dir: dir.path(), wasm: None };
+        let input = Input {
+            target: TargetKind::Wasm,
+            name: "app",
+            module: &dir.path().join("app.mjs"),
+            dir: dir.path(),
+            wasm: None,
+            browser: true,
+            library: None,
+        };
         let options = serde_json::json!({ "minify": true });
         let first = stamp(&input, &options, Bundler::Bun);
         assert_eq!(first, stamp(&input, &options, Bundler::Bun));
