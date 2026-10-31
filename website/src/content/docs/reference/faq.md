@@ -125,6 +125,14 @@ If the project really has several programs, keep them all: run one with `kargo r
 
 Kargo doesn't compile or run the Kotlin scripts (`.kts`) inside a project, and `kargo build` always runs the built-in command, not a task of that name. Both print a warning that says what to do instead: put the code in a `.kt` file, and run the task with `kargo task build` or rename it. See [Warnings](../warnings/). To run a script on its own, outside a project, use [`kargo script`](../../guides/scripts/).
 
+### `duplicate JVM class name` for two files with the same name
+
+```console
+error: duplicate JVM class name 'com/example/hello/PlatformKt' generated from: PlatformKt, PlatformKt
+```
+
+On the JVM and Android, the top-level functions and properties of a file compile into a class named after the file, so two files with the same name in the same package (`src/Platform.kt` and `src-jvm/Platform.kt`, the `expect` and its `actual`) both want `PlatformKt`. Kotlin doesn't allow that. Rename the file of one of them with the target as a suffix, `src-jvm/Platform.jvm.kt`, which compiles to `Platform_jvmKt`. See [Sharing code with `expect`/`actual`](../../guides/multiplatform/#sharing-code-with-expectactual).
+
 ### `cannot find symbol` for a generated class such as `AutoValue_Person`
 
 The annotation processor didn't run. Kargo only runs processors you declare with `scope = "processor"`; a processor that is merely on the classpath is ignored (JDK 23 and newer ignore it too). Move the processor artifact to `scope = "processor"`, keep its annotations as a `provided` dependency, and see [Annotation processors](../../guides/dependencies/#annotation-processors).
