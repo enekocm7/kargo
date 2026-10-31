@@ -1367,6 +1367,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "check",
         "run",
         "test",
+        "coverage",
         "bench",
         "watch",
         "add",
@@ -3926,6 +3927,49 @@ fn test_list_says_which_targets_it_cannot_list() {
         .stderr(predicate::str::contains("`--list` does not list wasm tests yet"));
     p.kargo().args(["test", "--format", "json"]).assert().failure().stderr(predicate::str::contains("--list"));
     p.kargo().args(["test", "--list", "--no-run"]).assert().failure().stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_coverage_flags_are_validated_before_compiling() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", ""));
+    p.file("src/Main.kt", "package com.example\n\nfun add(a: Int, b: Int) = a + b\n");
+    p.file("tests/MainTest.kt", "package com.example\nimport kotlin.test.*\nclass MainTest { @Test fun adds() {} }\n");
+    // Each mistake is reported before any toolchain is downloaded, so this stays offline.
+    p.kargo()
+        .args(["--offline", "test", "--coverage", "--no-run"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+    p.kargo()
+        .args(["--offline", "test", "--coverage", "--list"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+    p.kargo()
+        .args(["--offline", "test", "--coverage", "--fail-under", "200"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("is not a percentage"));
+    let w = Project::new();
+    w.file("kargo.toml", &manifest("web", "[target.wasm]\n"));
+    w.file("src/Main.kt", "fun main() {}\n");
+    w.kargo()
+        .args(["--offline", "test", "-t", "wasm", "--coverage"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("select the JVM target"));
+    p.kargo().args(["--offline", "coverage"]).assert().failure().code(101).stderr(predicate::str::contains("no coverage data"));
+    p.kargo()
+        .args(["--offline", "coverage", "--fail-under", "200"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("is not a percentage"));
 }
 
 #[test]

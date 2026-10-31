@@ -387,6 +387,8 @@ kargo test [filter] [options]
 | `--failed` | Rerun only the JVM test classes that failed in the last run. Conflicts with `--list` and `--no-run`. See [Rerunning failures](../../guides/testing/#rerunning-failures) |
 | `--against-min` | Run JVM tests with the R8-optimized jar on the runtime classpath; useful for finding missing keep rules |
 | `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
+| `--coverage` | Measure JVM line and branch coverage with JaCoCo into `target/<profile>/jvm/coverage/` (other targets run without it). Conflicts with `--list` and `--no-run`. See [Coverage](../../guides/testing/#coverage) |
+| `--fail-under <percent>` | With `--coverage`: fail below this overall line percentage instead of the manifest's thresholds. See [`[test.coverage]`](../manifest/#testcoverage) |
 | `--debug[=<port>]` | Start the JVM tests suspended until a debugger attaches over JDWP to `127.0.0.1:<port>` (default `5005`). Needs `-t jvm` in a project with several targets. See [Debugging tests](../../guides/testing/#debugging-tests) |
 | `--instrumented` | Android: run the tests of `android-tests/` on a device or emulator instead of the local unit tests. Conflicts with `--list` and `--watch`. See [Instrumented tests](../../guides/android/#instrumented-tests) |
 | `-s, --device <serial\|avd>` | With `--instrumented`: the device to run on, a serial or the name of a virtual device, which is started if it is not running. Also `KARGO_ANDROID_DEVICE`; without it the device is chosen as for `kargo run -t android` |
@@ -409,6 +411,25 @@ kargo test [filter] [options]
 By default `kargo test` stops at the first target whose tests fail or don't compile, and notes which targets it skipped. See [Testing every target](../../guides/testing/#testing-every-target).
 
 Wasm tests run on Node.js, or with `environment = "browser"` in a headless browser: Chrome, Edge, Chromium, Brave or Firefox, found on `PATH` or named by `KARGO_BROWSER`. See [Testing in a browser](../../guides/wasm/#testing-in-a-browser). JS tests run the same way, on Node.js or in a headless browser, with a runner of Kargo's own; see [JavaScript](../../guides/js/#run-and-test-with-nodejs).
+
+## `kargo coverage`
+
+Render the coverage report of the last `kargo test --coverage` run again, without running tests.
+
+```sh
+kargo coverage [options]
+```
+
+| Option | Meaning |
+|---|---|
+| `--fail-under <percent>` | Fail below this overall line percentage instead of the manifest's thresholds |
+| `--open` | Open the HTML report in a browser |
+| `-r, --release` | Report on the release profile |
+| `--profile <name>` | Report on a custom profile from kargo.toml instead of `dev` |
+| `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to report on, in dependency order |
+| `-j, --jobs <n>` | How many packages are reported on at the same time, as for `kargo build` |
+
+Reads `target/<profile>/jvm/coverage/jacoco.exec` of each package and writes the HTML, JaCoCo XML, Cobertura XML, LCOV and JSON reports again, then checks [`[test.coverage]`](../manifest/#testcoverage) (or `--fail-under`). Fails with `101` below the minimum, or when there is no execution data (`run kargo test --coverage first`). See [Coverage](../../guides/testing/#coverage).
 
 ## `kargo bench`
 
@@ -1031,7 +1052,7 @@ Download all dependencies and toolchains so later builds can run offline, and lo
 |---|---|
 | `-t, --target <target>` | Only this target (repeatable) |
 | `--sources` | Also download the `-sources.jar` of every resolved library (JVM and klib targets), so editors can show and step into library code. For a library that publishes none, download its `-javadoc.jar` instead, so editors still [show its documentation](../../guides/kotlin-server/#documentation-from-javadoc-jars). Libraries with neither are skipped. Sources and Javadoc jars are not recorded in `kargo.lock` |
-| `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint), [`kargo lint`](../../guides/formatting-and-linting/) (detekt) and R8 for JVM optimization |
+| `--tools` | Also download and lock the tools of [`kargo doc`](../../guides/documentation/) (Dokka), [`kargo fmt`](../../guides/formatting-and-linting/) (ktlint), [`kargo lint`](../../guides/formatting-and-linting/) (detekt), [`kargo test --coverage`](../../guides/testing/#coverage) (JaCoCo) and R8 for JVM optimization |
 | `-p, --package <name>`, `--workspace` | Which packages to fetch for |
 
 ```console

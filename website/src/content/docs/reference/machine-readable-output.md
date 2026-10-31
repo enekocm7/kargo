@@ -115,6 +115,16 @@ An ignored test gets a `test-finished` message without a `test-started` one. On 
 
 Each target ends with a `test-summary` message: the `passed`, `failed` and `ignored` counts and `success`. The exit code is the same as without the flag.
 
+With `--coverage`, each JVM package ends with a `coverage-summary` message after its `test-summary`:
+
+```console
+$ kargo test --coverage --message-format json 2>/dev/null | tail -n 2
+{"failed":0,"ignored":0,"package":"app","passed":1,"reason":"test-summary","success":true,"target":"jvm"}
+{"branches":{"covered":6,"missed":2,"percent":75.0},"lines":{"covered":14,"missed":2,"percent":87.5},"package":"app","reason":"coverage-summary","success":true,"target":"jvm"}
+```
+
+It carries the covered and missed line and branch counts with their percentages, and `success` (whether the [`[test.coverage]`](../manifest/#testcoverage) thresholds passed). `kargo coverage` emits the same message when it renders the report again.
+
 With `--message-format json`, stdout holds only JSON messages: the human-readable report (`test MathTest.adds ... ok`, JUnit's tree, the result table) moves to stderr. Native, Wasm and JS results come from the test runner's TeamCity messages as each test ends; Android results come from Gradle's JUnit XML once all tests have run, so there are no `test-started` messages.
 
 ## `kargo metadata`

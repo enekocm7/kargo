@@ -68,6 +68,10 @@ pub struct TestOptions {
     pub shard: Option<(u32, u32)>,
     /// Run the instrumented tests with Android Test Orchestrator (`--orchestrator`).
     pub orchestrator: bool,
+    /// Measure JVM line and branch coverage with JaCoCo (`--coverage`).
+    pub coverage: bool,
+    /// Fail below this overall line percentage instead of the manifest's thresholds (`--fail-under`).
+    pub fail_under: Option<f64>,
     /// The device, emulator and `--stop-emulator` of the instrumented tests.
     pub android: crate::android_device::AndroidRun,
 }
@@ -108,6 +112,19 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     if opts.debug.is_some() && targets != [TargetKind::Jvm] {
         anyhow::bail!("`--debug` runs the JVM tests under a debugger; select the JVM target with `-t jvm`");
     }
+    if opts.coverage {
+        if opts.no_run {
+            anyhow::bail!("`--coverage` measures the tests; leave out `--no-run` to run them");
+        }
+        if let Some(fail_under) = opts.fail_under
+            && !(0.0..=100.0).contains(&fail_under)
+        {
+            anyhow::bail!("`--fail-under {fail_under}` is not a percentage; use a number from 0 to 100");
+        }
+        if !targets.contains(&TargetKind::Jvm) {
+            anyhow::bail!("`--coverage` measures the JVM tests with JaCoCo; select the JVM target with `-t jvm`");
+        }
+    }
     note_jvm_only_options(ctx, &targets, opts);
     // Fails before anything compiles when a required variable is not set, unless only Android or
     // browser tests run, which get no environment.
@@ -142,7 +159,7 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
         }
         let passed = run.and_then(|run| match run {
             TestRun::Done(passed) => Ok(passed),
-            TestRun::Junit(cmd) => run_junit(ctx, cmd, opts, deadline),
+            TestRun::Junit(run) => run_junit(ctx, run, opts, deadline),
             TestRun::Reported(cmd, label) => run_reported(ctx, cmd, label, target, opts, deadline),
             TestRun::Browser(run) => run_in_browser(ctx, run, target, opts, deadline),
             TestRun::Android => test_android(ctx, opts, deadline),
@@ -239,13 +256,19 @@ enum TestRun {
     /// Nothing (left) to run; whether the target passed.
     Done(bool),
     /// The JUnit console launcher.
-    Junit(Command),
+    Junit(JunitRun),
     /// A test executable reporting TeamCity messages, with its label.
     Reported(Command, &'static str),
     /// Kotlin/Wasm or Kotlin/JS tests in a headless browser, which reports TeamCity messages to Kargo.
     Browser(BrowserRun),
     /// Gradle compiles and runs Android tests in one step.
     Android,
+}
+
+/// The JUnit console launcher with the main classes its coverage report reads.
+struct JunitRun {
+    cmd: Command,
+    main_classes: PathBuf,
 }
 
 /// Kotlin/Wasm or Kotlin/JS tests that run in a browser.
@@ -365,7 +388,8 @@ fn test_jvm(ctx: &BuildContext, opts: &TestOptions) -> Result<TestRun> {
     }
     let mode = if diagnostics::is_json() { JunitMode::Events } else { JunitMode::Run };
     let tests = JvmTestClasses { classes: test_classes, classpath };
-    Ok(TestRun::Junit(junit_command(ctx, opts, &tests, mode, rerun.as_deref())?))
+    let cmd = junit_command(ctx, opts, &tests, mode, rerun.as_deref())?;
+    Ok(TestRun::Junit(JunitRun { cmd, main_classes: main.classes.clone() }))
 }
 
 /// The test classes that failed in the last JVM run (`--failed`); `None` when no run has recorded any.
@@ -434,6 +458,9 @@ fn note_jvm_only_options(ctx: &BuildContext, targets: &[TargetKind], opts: &Test
     }
     if opts.failed {
         ctx.shell().warn(format!("`--failed` only reruns JVM tests; running all of the {others} tests"));
+    }
+    if opts.coverage {
+        ctx.shell().warn(format!("`--coverage` measures the JVM tests with JaCoCo; the {others} tests run without coverage"));
     }
 }
 
@@ -516,13 +543,20 @@ fn junit_command(
         cmd.arg(super::run::jdwp_option(port));
     }
     // The launcher loads the tests in its own class loader, so its JVM classpath is just the launcher.
-    // The JVM can't dump a class data archive with the debugger's agent loaded.
-    if opts.debug.is_none() {
+    // The JVM can't dump a class data archive with the debugger's agent loaded (and neither with JaCoCo's).
+    if opts.debug.is_none() && !opts.coverage {
         cmd.args(kargo_compiler::daemon::cds_options(jdk, "junit", std::slice::from_ref(&launcher)));
     }
     // Same order as `kargo run`: `[target.jvm]`, the profile, then `[test]`, which is the most specific.
     let profile = ctx.ws.profile(&ctx.profile)?;
     cmd.args(jdk.default_run_args()).args(&jvm.jvm_args).args(&profile.jvm_args).args(&ctx.ws.manifest().test.jvm_args);
+    if opts.coverage {
+        let exec = super::coverage::exec_file(ctx);
+        if let Some(parent) = exec.parent() {
+            std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        cmd.arg(super::coverage::agent_arg(ctx, &exec)?);
+    }
     // Without a terminal the launcher's probe for the terminal width prints `stty: /dev/tty: No such device`.
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         cmd.arg(format!("-D{JUNIT_USAGE_WIDTH_PROPERTY}=120"));
@@ -580,7 +614,8 @@ fn junit_command(
     Ok(cmd)
 }
 
-fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
+fn run_junit(ctx: &BuildContext, run: JunitRun, opts: &TestOptions, deadline: Option<Instant>) -> Result<bool> {
+    let JunitRun { mut cmd, main_classes } = run;
     // The launcher writes `TEST-junit-jupiter.xml` (one file per test engine); `--failed` reads the failures from it.
     let reports = reports_dir(ctx, TargetKind::Jvm)?;
     cmd.arg("--reports-dir").arg(&reports);
@@ -619,7 +654,15 @@ fn run_junit(ctx: &BuildContext, mut cmd: Command, opts: &TestOptions, deadline:
             ),
         }
     }
-    Ok(end.status.success())
+    let tests_passed = end.status.success();
+    if opts.coverage && end.status.code() != Some(JUNIT_NO_TESTS) {
+        let classfiles = super::coverage::classfiles(ctx, &main_classes);
+        let sourcefiles = super::coverage::sourcefiles(ctx);
+        let exec = super::coverage::exec_file(ctx);
+        let (_, coverage_passed) = super::coverage::report(ctx, &exec, &classfiles, &sourcefiles, opts.fail_under)?;
+        return Ok(tests_passed && coverage_passed);
+    }
+    Ok(tests_passed)
 }
 
 /// How the JUnit console launcher ended.

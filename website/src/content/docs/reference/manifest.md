@@ -324,6 +324,11 @@ fail-fast = false
 timeout = "10m"
 test-timeout = "30s"
 jvm-args = ["-Xmx1g"]
+
+[test.coverage]
+min-line = 80
+min-branch = 70
+exclude = ["**/generated/**"]
 ```
 
 | Key | Default | Meaning |
@@ -334,6 +339,29 @@ jvm-args = ["-Xmx1g"]
 | `jvm-args` | `[]` | JVM arguments for the test process, after `[target.jvm] jvm-args` and the profile's [`jvm-args`](#profilename) |
 
 See [Testing every target](../../guides/testing/#testing-every-target) and [Timeouts](../../guides/testing/#timeouts).
+
+## `[test.coverage]`
+
+Code coverage of `kargo test --coverage` (JVM, JaCoCo). Every key is optional.
+
+```toml
+[test.coverage]
+jacoco = "0.8.12"
+min-line = 80
+min-branch = 70
+fail-under = 75
+exclude = ["**/generated/**"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `jacoco` | `0.8.12` | Exact JaCoCo version |
+| `min-line` | none | Minimum overall line coverage in percent (0-100). The run fails below it |
+| `min-branch` | none | Minimum overall branch coverage in percent (0-100). The run fails below it |
+| `fail-under` | none | Overall line coverage that fails the run. `kargo test --fail-under` and `kargo coverage --fail-under` override it |
+| `exclude` | `[]` | Source patterns left out of the report (gitignore syntax, relative to the package root). A pattern naming generated code also leaves out classes whose name contains `Generated` |
+
+See [Coverage](../../guides/testing/#coverage).
 
 ## `[bench]`
 

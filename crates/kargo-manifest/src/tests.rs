@@ -1699,6 +1699,32 @@ fn test_section() {
 }
 
 #[test]
+fn test_coverage_section() {
+    assert_eq!(parse(MINIMAL).test.coverage, CoverageSettings::default(), "no coverage thresholds by default");
+    let coverage = parse(&format!(
+        "{MINIMAL}\n[test.coverage]\njacoco = \"0.8.12\"\nmin-line = 80\nmin-branch = 70\nfail-under = 75.5\nexclude = [\"**/generated/**\"]\n"
+    ))
+    .test
+    .coverage;
+    assert_eq!(coverage.jacoco_version.as_deref(), Some("0.8.12"));
+    assert_eq!(coverage.min_line, Some(80.0));
+    assert_eq!(coverage.min_branch, Some(70.0));
+    assert_eq!(coverage.fail_under, Some(75.5));
+    assert_eq!(coverage.exclude, ["**/generated/**"]);
+    assert_eq!(coverage.line_threshold(None), Some(75.5), "fail-under wins over min-line");
+    assert_eq!(coverage.line_threshold(Some(90.0)), Some(90.0), "--fail-under wins over the manifest");
+    let bare = parse(&format!("{MINIMAL}\n[test.coverage]\nmin-line = 80\n")).test.coverage;
+    assert_eq!(bare.line_threshold(None), Some(80.0));
+    assert_eq!(CoverageSettings::default().line_threshold(None), None);
+    for bad in ["min-line = 101", "min-line = -1", "min-branch = 200", "fail-under = -0.5"] {
+        let err = parse_err(&format!("{MINIMAL}\n[test.coverage]\n{bad}\n"));
+        assert!(err.contains("is not a percentage"), "{bad}: {err}");
+    }
+    assert!(parse_err(&format!("{MINIMAL}\n[test.coverage]\nexclude = [\"\"]\n")).contains("empty pattern"));
+    assert!(parse_err(&format!("{MINIMAL}\n[test.coverage]\nthreads = 2\n")).contains("threads"));
+}
+
+#[test]
 fn audit_section() {
     assert_eq!(parse(MINIMAL).audit, AuditSettings::default(), "nothing is set by default");
     let audit = parse(&format!(

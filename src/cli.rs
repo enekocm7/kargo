@@ -50,6 +50,7 @@ const COMMON_COMMANDS: &[&str] = &[
     "check",
     "run",
     "test",
+    "coverage",
     "bench",
     "watch",
     "add",
@@ -1151,6 +1152,81 @@ enum TemplateCommand {
     List,
 }
 
+/// The arguments of `kargo test`, in a struct of their own for the same reason as [`WhyArgs`].
+#[derive(Debug, Args)]
+struct TestArgs {
+    #[command(flatten)]
+    build: BuildArgs,
+    /// Only run tests whose `package.Class.method` name contains this string
+    filter: Option<String>,
+    /// Compile tests but do not run them
+    #[arg(long)]
+    no_run: bool,
+    /// Test every target even if one fails, then print a result per target
+    #[arg(long)]
+    no_fail_fast: bool,
+    /// Only run JVM tests with this JUnit `@Tag` (repeatable)
+    #[arg(long, value_name = "TAG")]
+    include_tag: Vec<String>,
+    /// Skip JVM tests with this JUnit `@Tag` (repeatable)
+    #[arg(long, value_name = "TAG")]
+    exclude_tag: Vec<String>,
+    /// Rerun only the JVM test classes that failed in the last run
+    #[arg(long, conflicts_with_all = ["list", "no_run"])]
+    failed: bool,
+    /// Run JVM tests against the R8-optimized package jar
+    #[arg(long, conflicts_with_all = ["list", "no_run"])]
+    against_min: bool,
+    /// Also write test reports: `junit` writes JUnit XML to target/<profile>/<target>/test-reports
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    report: Option<ReportArg>,
+    /// Start the JVM tests suspended, waiting for a debugger on this port (default 5005)
+    #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
+    debug: Option<u16>,
+    #[command(flatten)]
+    android: Box<AndroidTestArgs>,
+    /// Compile the tests and list them instead of running them (JVM and Native)
+    #[arg(long, conflicts_with_all = ["no_run", "report", "debug", "coverage"])]
+    list: bool,
+    /// Output format of `--list`; `json` prints one JSON object per test
+    #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
+    format: FormatArg,
+    /// Measure JVM line and branch coverage with JaCoCo into target/<profile>/jvm/coverage (other targets run without it)
+    #[arg(long, conflicts_with_all = ["list", "no_run"])]
+    coverage: bool,
+    /// With --coverage: fail below this overall line percentage instead of the manifest's thresholds
+    #[arg(long, value_name = "PERCENT", requires = "coverage")]
+    fail_under: Option<f64>,
+    /// Run the tests again when the project's files change (Ctrl+C stops it)
+    #[arg(long, conflicts_with_all = ["list", "debug"])]
+    watch: bool,
+    #[command(flatten)]
+    watch_args: WatchArgs,
+    #[command(flatten)]
+    env: EnvArgs,
+}
+
+/// The arguments of `kargo coverage`, in a struct of their own for the same reason as [`WhyArgs`].
+#[derive(Debug, Args)]
+struct CoverageArgs {
+    /// Report on the release profile
+    #[arg(short, long, conflicts_with = "profile")]
+    release: bool,
+    /// Report on a custom profile from kargo.toml
+    #[arg(long, value_name = "NAME", conflicts_with = "release")]
+    profile: Option<String>,
+    /// Fail below this overall line percentage instead of the manifest's thresholds
+    #[arg(long, value_name = "PERCENT")]
+    fail_under: Option<f64>,
+    /// Open the HTML report in a browser
+    #[arg(long)]
+    open: bool,
+    #[command(flatten)]
+    packages: PackageArgs,
+    #[command(flatten)]
+    jobs: JobsArg,
+}
+
 /// The arguments of `kargo run`, in a struct of their own for the same reason as [`WhyArgs`].
 #[derive(Debug, Args)]
 struct RunArgs {
@@ -1307,51 +1383,9 @@ enum Command {
     },
     /// Compile and run tests
     #[command(visible_alias = "t")]
-    Test {
-        #[command(flatten)]
-        build: BuildArgs,
-        /// Only run tests whose `package.Class.method` name contains this string
-        filter: Option<String>,
-        /// Compile tests but do not run them
-        #[arg(long)]
-        no_run: bool,
-        /// Test every target even if one fails, then print a result per target
-        #[arg(long)]
-        no_fail_fast: bool,
-        /// Only run JVM tests with this JUnit `@Tag` (repeatable)
-        #[arg(long, value_name = "TAG")]
-        include_tag: Vec<String>,
-        /// Skip JVM tests with this JUnit `@Tag` (repeatable)
-        #[arg(long, value_name = "TAG")]
-        exclude_tag: Vec<String>,
-        /// Rerun only the JVM test classes that failed in the last run
-        #[arg(long, conflicts_with_all = ["list", "no_run"])]
-        failed: bool,
-        /// Run JVM tests against the R8-optimized package jar
-        #[arg(long, conflicts_with_all = ["list", "no_run"])]
-        against_min: bool,
-        /// Also write test reports: `junit` writes JUnit XML to target/<profile>/<target>/test-reports
-        #[arg(long, value_enum, value_name = "FORMAT")]
-        report: Option<ReportArg>,
-        /// Start the JVM tests suspended, waiting for a debugger on this port (default 5005)
-        #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = DEFAULT_DEBUG_PORT)]
-        debug: Option<u16>,
-        #[command(flatten)]
-        android: Box<AndroidTestArgs>,
-        /// Compile the tests and list them instead of running them (JVM and Native)
-        #[arg(long, conflicts_with_all = ["no_run", "report", "debug"])]
-        list: bool,
-        /// Output format of `--list`; `json` prints one JSON object per test
-        #[arg(long, value_enum, default_value_t, value_name = "FMT", requires = "list")]
-        format: FormatArg,
-        /// Run the tests again when the project's files change (Ctrl+C stops it)
-        #[arg(long, conflicts_with_all = ["list", "debug"])]
-        watch: bool,
-        #[command(flatten)]
-        watch_args: WatchArgs,
-        #[command(flatten)]
-        env: EnvArgs,
-    },
+    Test(TestArgs),
+    /// Render the coverage report of the last `kargo test --coverage` run again, without running tests
+    Coverage(CoverageArgs),
     /// Compile and run benchmarks (JMH)
     Bench {
         #[command(flatten)]
@@ -2068,7 +2102,7 @@ fn recorded_command(command: &Command) -> Option<&'static str> {
     match command {
         Command::Build { .. } => Some("build"),
         Command::Check { .. } => Some("check"),
-        Command::Test { .. } => Some("test"),
+        Command::Test(..) => Some("test"),
         Command::Run { .. } => Some("run"),
         _ => None,
     }
@@ -2894,7 +2928,8 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
         cli.command,
         Command::Build { .. }
             | Command::Check { .. }
-            | Command::Test { .. }
+            | Command::Test(..)
+            | Command::Coverage(..)
             | Command::Bench { .. }
             | Command::Fetch { .. }
             | Command::Add(_)
@@ -3149,7 +3184,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             };
             kargo_ops::script::run(config, &source, &args)
         }
-        Command::Test {
+        Command::Test(TestArgs {
             build,
             filter,
             no_run,
@@ -3163,10 +3198,12 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             android,
             list,
             format,
+            coverage,
+            fail_under,
             watch,
             watch_args,
             env,
-        } => {
+        }) => {
             set_message_format(build.message_format);
             let watch = watch_options(watch, &watch_args)?;
             let project = load_project(global)?;
@@ -3187,6 +3224,8 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 instrumented: android.instrumented,
                 shard: android.shard,
                 orchestrator: android.orchestrator,
+                coverage,
+                fail_under,
                 android: kargo_ops::android_device::AndroidRun {
                     device: android.device,
                     emulator: kargo_ops::android_device::EmulatorOptions { headless: android.headless, ..Default::default() },
@@ -3214,6 +3253,31 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 Some(set)
             })?;
             Ok(0)
+        }
+        Command::Coverage(CoverageArgs { release, profile, fail_under, open, packages, jobs }) => {
+            if let Some(fail_under) = fail_under
+                && !(0.0..=100.0).contains(&fail_under)
+            {
+                bail!("`--fail-under {fail_under}` is not a percentage; use a number from 0 to 100");
+            }
+            let project = load_project(global)?;
+            let profile = profile_kind(release, profile.as_deref());
+            let opts = ops::coverage::CoverageOptions { fail_under, open };
+            let passed = build_packages(
+                config,
+                &project,
+                &packages.selection(),
+                global,
+                profile,
+                Packages { jobs: jobs.jobs, one_by_default: true, dev: true, keep_going: None },
+                |ctx| ops::coverage::coverage(ctx, &opts, None),
+            )?;
+            if passed.iter().all(|p| *p) {
+                Ok(0)
+            } else {
+                shell.error("coverage below the minimum");
+                Ok(FAILURE)
+            }
         }
         Command::Bench { build, filter, no_run, save, baseline, format, warmup, iterations, forks, mode, time_unit, env } => {
             set_message_format(build.message_format);
@@ -4819,7 +4883,7 @@ mod tests {
             matches!(cli.command, Command::Retrace { ref mapping, ref stack_trace, .. } if mapping == Path::new("mapping.txt") && stack_trace.as_deref() == Some(Path::new("crash.txt")))
         );
         let cli = Cli::try_parse_from(["kargo", "test", "--against-min"]).unwrap();
-        assert!(matches!(cli.command, Command::Test { against_min: true, .. }));
+        assert!(matches!(cli.command, Command::Test(TestArgs { against_min: true, .. })));
         let cli = Cli::try_parse_from(["kargo", "package", "--fat"]).unwrap();
         assert!(matches!(cli.command, Command::Package { fat: true, bin: None, format: None, desktop: false, .. }));
         let cli = Cli::try_parse_from(["kargo", "package", "--dist", "--archive", "zip,tar.gz", "--no-scripts"]).unwrap();
@@ -4864,7 +4928,7 @@ mod tests {
         assert!(Cli::try_parse_from(["kargo", "toolchain", "remove", "native"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "-v", "test", "MathTest", "--no-run"]).unwrap();
         assert!(cli.global.verbose);
-        assert!(matches!(cli.command, Command::Test { ref filter, no_run: true, .. } if filter.as_deref() == Some("MathTest")));
+        assert!(matches!(cli.command, Command::Test(TestArgs { ref filter, no_run: true, .. }) if filter.as_deref() == Some("MathTest")));
         let cli = Cli::try_parse_from(["kargo", "c", "--tests", "-r", "-t", "native"]).unwrap();
         assert!(
             matches!(cli.command, Command::Check { ref build, tests: true, keep_going: false } if build.release && build.options().targets == [TargetKind::Native])
@@ -4883,15 +4947,25 @@ mod tests {
             Cli::try_parse_from(["kargo", "check", "--keep-going"]).unwrap().command,
             Command::Check { keep_going: true, .. }
         ));
-        assert!(matches!(Cli::try_parse_from(["kargo", "t", "--no-fail-fast"]).unwrap().command, Command::Test { no_fail_fast: true, .. }));
+        assert!(matches!(
+            Cli::try_parse_from(["kargo", "t", "--no-fail-fast"]).unwrap().command,
+            Command::Test(TestArgs { no_fail_fast: true, .. })
+        ));
         let cli = Cli::try_parse_from(["kargo", "test", "--list", "--format", "json", "MathTest"]).unwrap();
-        assert!(matches!(cli.command, Command::Test { list: true, format: FormatArg::Json, .. }));
+        assert!(matches!(cli.command, Command::Test(TestArgs { list: true, format: FormatArg::Json, .. })));
         assert!(Cli::try_parse_from(["kargo", "test", "--format", "json"]).is_err());
         assert!(Cli::try_parse_from(["kargo", "test", "--list", "--no-run"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "test", "--coverage", "--fail-under", "80"]).unwrap();
+        assert!(matches!(cli.command, Command::Test(TestArgs { coverage: true, fail_under: Some(_), .. })));
+        assert!(Cli::try_parse_from(["kargo", "test", "--fail-under", "80"]).is_err(), "--fail-under needs --coverage");
+        assert!(Cli::try_parse_from(["kargo", "test", "--coverage", "--no-run"]).is_err());
+        assert!(Cli::try_parse_from(["kargo", "test", "--coverage", "--list"]).is_err());
+        let cli = Cli::try_parse_from(["kargo", "coverage", "--fail-under", "80", "--open"]).unwrap();
+        assert!(matches!(cli.command, Command::Coverage(CoverageArgs { fail_under: Some(_), open: true, .. })));
         let cli = Cli::try_parse_from(["kargo", "test", "--report", "junit", "--message-format", "json"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Test { report: Some(ReportArg::Junit), ref build, .. } if build.message_format == MessageFormatArg::Json
+            Command::Test(TestArgs { report: Some(ReportArg::Junit), ref build, .. }) if build.message_format == MessageFormatArg::Json
         ));
         assert!(matches!(
             Cli::try_parse_from(["kargo", "info", "--format", "json"]).unwrap().command,
@@ -4931,10 +5005,14 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "run", "--debug", "--", "x"]).unwrap();
         assert!(matches!(cli.command, Command::Run(RunArgs { debug: Some(5005), ref args, .. }) if args == &["x"]));
         let cli = Cli::try_parse_from(["kargo", "test", "--debug=6000", "MathTest"]).unwrap();
-        assert!(matches!(cli.command, Command::Test { debug: Some(6000), ref filter, .. } if filter.as_deref() == Some("MathTest")));
+        assert!(
+            matches!(cli.command, Command::Test(TestArgs { debug: Some(6000), ref filter, .. }) if filter.as_deref() == Some("MathTest"))
+        );
         // `--debug` never takes the next word as its port.
         let cli = Cli::try_parse_from(["kargo", "test", "--debug", "MathTest"]).unwrap();
-        assert!(matches!(cli.command, Command::Test { debug: Some(5005), ref filter, .. } if filter.as_deref() == Some("MathTest")));
+        assert!(
+            matches!(cli.command, Command::Test(TestArgs { debug: Some(5005), ref filter, .. }) if filter.as_deref() == Some("MathTest"))
+        );
         let cli = Cli::try_parse_from(["kargo", "metadata", "--no-deps", "--format", "json"]).unwrap();
         assert!(matches!(cli.command, Command::Metadata { no_deps: true, fingerprint: false, .. }));
         assert!(Cli::try_parse_from(["kargo", "metadata", "--format", "text"]).is_err());
@@ -4960,7 +5038,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "build", "-p", "app", "--package", "lib"]).unwrap();
         assert!(matches!(cli.command, Command::Build { ref build, .. } if build.packages.selection().packages == ["app", "lib"]));
         let cli = Cli::try_parse_from(["kargo", "test", "--workspace"]).unwrap();
-        assert!(matches!(cli.command, Command::Test { ref build, .. } if build.packages.workspace));
+        assert!(matches!(cli.command, Command::Test(TestArgs { ref build, .. }) if build.packages.workspace));
         assert!(Cli::try_parse_from(["kargo", "build", "--workspace", "-p", "app"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "run", "-p", "app", "--", "x"]).unwrap();
         assert!(
@@ -5012,7 +5090,7 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["kargo", "run", "--watch", "--debug"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "test", "--watch", "MathTest"]).unwrap();
-        assert!(matches!(cli.command, Command::Test { watch: true, ref filter, .. } if filter.as_deref() == Some("MathTest")));
+        assert!(matches!(cli.command, Command::Test(TestArgs { watch: true, ref filter, .. }) if filter.as_deref() == Some("MathTest")));
         assert!(Cli::try_parse_from(["kargo", "test", "--watch", "--list"]).is_err());
 
         let cli = Cli::try_parse_from(["kargo", "watch"]).unwrap();

@@ -707,7 +707,19 @@
         "fail-fast": { "description": "Stop at the first target whose tests fail.", "type": "boolean", "default": true },
         "timeout": { "description": "How long the whole test run may take, such as \"30s\", \"5m\" or \"1h\". The run is stopped when it passes.", "type": "string" },
         "test-timeout": { "description": "How long one JVM test may take, such as \"30s\" or \"2m\" (JUnit Jupiter's default timeout).", "type": "string" },
-        "jvm-args": { "description": "JVM arguments for the test process, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } }
+        "jvm-args": { "description": "JVM arguments for the test process, after [target.jvm] jvm-args.", "type": "array", "items": { "type": "string" } },
+        "coverage": {
+          "description": "Code coverage of `kargo test --coverage` (JVM, JaCoCo).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "jacoco": { "description": "Exact JaCoCo version.", "type": "string", "default": "0.8.12" },
+            "min-line": { "description": "Minimum overall line coverage in percent (0-100). The run fails below it.", "type": "number", "minimum": 0, "maximum": 100, "examples": [80] },
+            "min-branch": { "description": "Minimum overall branch coverage in percent (0-100). The run fails below it.", "type": "number", "minimum": 0, "maximum": 100, "examples": [70] },
+            "fail-under": { "description": "Overall line coverage that fails the run; `--fail-under` overrides it.", "type": "number", "minimum": 0, "maximum": 100, "examples": [80] },
+            "exclude": { "description": "Source patterns left out of the report (gitignore syntax, relative to the package root).", "type": "array", "items": { "type": "string" }, "examples": [["**/generated/**"]] }
+          }
+        }
       }
     },
     "bench": {

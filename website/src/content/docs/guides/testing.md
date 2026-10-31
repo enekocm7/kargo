@@ -118,6 +118,45 @@ Each report has one `<testsuite>` per test class, with each test's time, failure
 
 When a Kotlin/Native test fails, the failure list shows the assertion message first, then the stack trace without the Kotlin/Native runtime's own frames (they end with `... N runtime frames omitted`), so the first frame is yours.
 
+## Coverage
+
+`kargo test --coverage` measures JVM line and branch coverage with JaCoCo (other targets run their tests without it):
+
+```console
+$ kargo test --coverage
+     Running JVM tests (JUnit Platform)
+...
+coverage: 87.5% lines (14/16), 75.0% branches (6/8)
+    com.example                              87.5% lines  75.0% branches
+   Reported coverage in target/debug/jvm/coverage
+```
+
+JaCoCo is downloaded and pinned in `kargo.lock` like ktlint and detekt. The report covers the package's own classes plus the path dependencies its tests ran against, with Kotlin-aware filtering (inline functions, `when` over sealed classes, coroutine state machines, data class members). Each workspace member writes its own report under its own `target/`.
+
+| File in `target/<profile>/jvm/coverage/` | Format, for |
+|---|---|
+| `html/index.html` | HTML report, to read |
+| `jacoco.xml` | JaCoCo XML, for Codecov and SonarQube |
+| `cobertura.xml` | Cobertura XML, for SonarQube and Jenkins |
+| `lcov.info` | LCOV, for Codecov and editor gutters |
+| `coverage.json` | JSON summary with per-file uncovered lines, for scripts and editors |
+| `jacoco.csv` | CSV, from JaCoCo |
+
+`kargo coverage` renders the report of the last `--coverage` run again without running tests (with `--release` or `--profile` for another profile, `--open` to open the HTML report). With `--message-format json` each run ends with a `coverage-summary` message; see [Test results](../../reference/machine-readable-output/#test-results).
+
+Thresholds fail the run with exit code `101` below them:
+
+```toml title="kargo.toml"
+[test.coverage]
+min-line = 80      # overall line coverage in percent
+min-branch = 70    # overall branch coverage in percent
+exclude = ["**/generated/**"]
+```
+
+`--fail-under <percent>` checks the overall line coverage instead of the manifest's line minimum. `exclude` leaves source patterns out of the report (gitignore syntax, relative to the package root); a pattern naming generated code also leaves out classes whose name contains `Generated`, the `@Generated` convention. Native, Wasm, JS and Android have no coverage yet: Kotlin/Native LLVM source-based coverage is a later step.
+
+See [Code coverage](../ci/#code-coverage) for uploading the reports in CI.
+
 ## Filtering tests
 
 The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on the JVM, Native and Android:

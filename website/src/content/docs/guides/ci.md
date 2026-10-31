@@ -78,7 +78,7 @@ jobs:
           path: target/release/jvm/*-all.jar
 ```
 
-`--locked` makes the build fail if `kargo.lock` is out of date, so nobody forgets to commit it. It covers the Kotlin compiler, its plugins and the JUnit launcher too, which `kargo.lock` pins as [build tools](../../reference/lockfile/#build-tools); run `kargo fetch --tools` before committing if CI runs `kargo doc`, `fmt` or `lint` with `--locked`. With `--locked`, Kargo also refuses to send [repository credentials](../dependencies/#repositories) over plain `http://`. Add `--require-checksums` (or set `KARGO_REQUIRE_CHECKSUMS=1` for the job) to also fail on a newly resolved artifact whose repository publishes no checksum. A Kargo upgrade that changes how dependencies resolve also counts as out of date: build once locally without `--locked` and commit the new lockfile (see [`kargo.lock`](../../reference/lockfile/)). `kargo fmt --check` and `kargo lint` fail the job on unformatted code and detekt issues; see [Formatting and linting](../formatting-and-linting/). For an Android app, `kargo lint --android` fails it on Android lint errors and leaves SARIF, XML and HTML reports in `target/debug/android/lint/` to upload as artifacts or to code scanning (see [Lint](../android/#lint)).
+`--locked` makes the build fail if `kargo.lock` is out of date, so nobody forgets to commit it. It covers the Kotlin compiler, its plugins and the JUnit launcher too, which `kargo.lock` pins as [build tools](../../reference/lockfile/#build-tools); run `kargo fetch --tools` before committing if CI runs `kargo doc`, `fmt`, `lint` or `test --coverage` with `--locked`. With `--locked`, Kargo also refuses to send [repository credentials](../dependencies/#repositories) over plain `http://`. Add `--require-checksums` (or set `KARGO_REQUIRE_CHECKSUMS=1` for the job) to also fail on a newly resolved artifact whose repository publishes no checksum. A Kargo upgrade that changes how dependencies resolve also counts as out of date: build once locally without `--locked` and commit the new lockfile (see [`kargo.lock`](../../reference/lockfile/)). `kargo fmt --check` and `kargo lint` fail the job on unformatted code and detekt issues; see [Formatting and linting](../formatting-and-linting/). For an Android app, `kargo lint --android` fails it on Android lint errors and leaves SARIF, XML and HTML reports in `target/debug/android/lint/` to upload as artifacts or to code scanning (see [Lint](../android/#lint)).
 
 If the project has [`[[generate]]` steps](../code-generation/), `kargo build` and the other commands run them first, on the CI machine's own `target/`. Run `kargo generate` on its own to find a broken generator before anything compiles.
 
@@ -97,6 +97,21 @@ The first build of the job starts a [compiler daemon](../build-performance/#the-
 ```
 
 `if: always()` publishes the results when tests fail, which is when you need them. In GitLab, list the same paths under `artifacts: reports: junit:`; in Jenkins, pass them to the `junit` step.
+
+### Code coverage
+
+`kargo test --coverage` writes JaCoCo, Cobertura, LCOV and JSON reports to `target/<profile>/jvm/coverage/` (see [Coverage](../testing/#coverage)). Upload them so pull requests show what they cover, for example with Codecov:
+
+```yaml
+      - run: kargo test --locked --coverage
+      - uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          files: target/debug/jvm/coverage/lcov.info
+          fail_ci_if_error: true
+```
+
+Gate the job on a percentage with [`[test.coverage]`](../../reference/manifest/#testcoverage) (`min-line`, `min-branch`) or `--fail-under <percent>`: the run exits with `101` below it, so the job fails. In SonarQube, point `sonar.coverage.jacoco.xmlReportPaths` at `target/debug/jvm/coverage/jacoco.xml` (or the Cobertura file).
 
 ### Benchmarks
 

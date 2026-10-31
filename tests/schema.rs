@@ -270,6 +270,7 @@ fn schema_defaults_match_kargo() {
         (default(&props["doc"]["properties"]["dokka"]), kargo_ops::ops::doc::DOKKA_VERSION),
         (default(&props["fmt"]["properties"]["ktlint"]), kargo_ops::ops::fmt::KTLINT_VERSION),
         (default(&props["lint"]["properties"]["detekt"]), kargo_ops::ops::lint::DETEKT_VERSION),
+        (default(&props["test"]["properties"]["coverage"]["properties"]["jacoco"]), kargo_ops::ops::coverage::JACOCO_VERSION),
         (default(&props["target"]["properties"]["android"]["properties"]["agp-version"]), kargo_ops::gradle::AGP_VERSION),
         (framework("serialization"), SERIALIZATION_VERSION),
         (framework("compose"), COMPOSE_VERSION),
