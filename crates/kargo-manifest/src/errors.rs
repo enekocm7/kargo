@@ -15,7 +15,7 @@ pub(crate) fn explain(text: &str, err: Error) -> Error {
     let message = if has_excerpt {
         full.clone()
     } else {
-        match locate(text, &full, unknown.as_ref().map(|u| u.name.as_str())) {
+        match locate(text, &full, unknown.as_ref().map(|u| u.name.as_str())).or_else(|| spot_from_toml_edit(text)) {
             Some(spot) => format!("error at line {}, column {}\n{}\n{full}", spot.line + 1, spot.column + 1, excerpt(text, &spot)),
             None => full.clone(),
         }
@@ -107,6 +107,21 @@ fn locate(text: &str, message: &str, unknown: Option<&str>) -> Option<Spot> {
         }
     }
     None
+}
+
+/// The span from `toml_edit` when the deserializer's error has none (notably for some duplicate keys).
+fn spot_from_toml_edit(text: &str) -> Option<Spot> {
+    let err = text.parse::<toml_edit::DocumentMut>().err()?;
+    let span = err.span()?;
+    if span.start > text.len() || !text.is_char_boundary(span.start) {
+        return None;
+    }
+    let before = &text[..span.start];
+    Some(Spot {
+        line: before.bytes().filter(|b| *b == b'\n').count(),
+        column: span.start - before.rfind('\n').map_or(0, |i| i + 1),
+        width: span.end.saturating_sub(span.start),
+    })
 }
 
 /// Whether `word` could be a key or a table's name: letters, digits, `-`, `_`, `.` and `:` (a dependency).
@@ -281,6 +296,16 @@ jvm-target = \"abc\"
         assert!(text.contains("error at line 6, column 15"), "{text}");
         assert!(text.contains("6 | jvm-target = \"abc\""), "{text}");
         assert!(text.contains("invalid [target.jvm] jvm-target `abc`"), "{text}");
+    }
+
+    #[test]
+    fn a_duplicate_key_shows_its_line() {
+        let text = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.js]\nenvironment = \"node\"\nenvironment = \"browser\"\n";
+        let err = explain(text, anyhow::anyhow!("duplicate key"));
+        let text = format!("{err}");
+        assert!(text.contains("error at line 7, column 1"), "{text}");
+        assert!(text.contains("7 | environment = \"browser\""), "{text}");
+        assert!(text.contains("duplicate key"), "{text}");
     }
 
     #[test]

@@ -6980,6 +6980,18 @@ fn an_invalid_manifest_value_shows_its_line() {
 }
 
 #[test]
+fn a_duplicate_manifest_key_shows_its_line() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "\n[target.js]\nenvironment = \"node\"\nenvironment = \"browser\"\n"));
+    p.kargo().arg("build").assert().failure().stderr(
+        predicate::str::contains("failed to parse manifest at")
+            .and(predicate::str::contains("duplicate key"))
+            .and(predicate::str::contains("error at line 7, column 1"))
+            .and(predicate::str::contains("7 | environment = \"browser\"")),
+    );
+}
+
+#[test]
 fn a_mistyped_target_or_platform_suggests_the_valid_one() {
     let p = Project::new();
     // On the command line clap suggests the value.
