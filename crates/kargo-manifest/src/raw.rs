@@ -288,6 +288,7 @@ struct RawToolchain {
 struct RawBuild {
     jobs: Option<Value>,
     default_targets: Option<Vec<String>>,
+    platforms: Option<Vec<String>>,
 }
 
 impl RawBuild {
@@ -309,7 +310,23 @@ impl RawBuild {
             }
             None => None,
         };
-        Ok(BuildSettings { jobs, default_targets })
+        let platforms = match self.platforms {
+            Some(names) => {
+                let mut platforms: Vec<TargetPlatform> = Vec::new();
+                for name in &names {
+                    let platform: TargetPlatform = name.parse().with_context(|| format!("invalid [{section}] `platforms`"))?;
+                    if !platforms.contains(&platform) {
+                        platforms.push(platform);
+                    }
+                }
+                if platforms.is_empty() {
+                    bail!("[{section}] `platforms` is empty; leave it out to build for the host");
+                }
+                Some(platforms)
+            }
+            None => None,
+        };
+        Ok(BuildSettings { jobs, default_targets, platforms })
     }
 }
 

@@ -236,12 +236,14 @@ How the commands that build run. Every key is optional.
 [build]
 jobs = 2
 default-targets = ["jvm", "wasm"]
+platforms = ["linux-arm64"]
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
 | `default-targets` | every enabled target | The targets `kargo build`, `check`, `test`, `bench`, `doc` and `fetch` use when you don't pass `-t`: any of `jvm`, `wasm`, `js`, `native` and `android`. The manifest keeps all its `[target.*]` sections, so `-t android` still builds Android. Each one must be enabled in the package, and the list can't be empty |
 | `jobs` | `"auto"` | How many workspace members, and targets and Native platforms of each, build at the same time: a number, or `"auto"` (also `0`) for the number of CPUs within the free memory. `-j` and `KARGO_JOBS` override it, and it overrides `[build] jobs` of `config.toml`. `kargo test`, `bench`, `doc`, `fmt` and `lint` handle one member at a time when no number of jobs is set |
+| `platforms` | the host | The OS/CPU platforms `kargo build`, `check`, `test` and `bench` build for when you don't pass `--platform`: `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`, `macos-x64` or `macos-arm64` (also `amd64` for `x64`, `aarch64` for `arm64`). `--platform` and `KARGO_PLATFORM` override it. `kargo package --format jlink --platform` builds one runtime image per platform; see [Cross-compilation](../../guides/distributing/#cross-compilation) |
 
 In a workspace, write `jobs` as `[workspace.build]` in the root `kargo.toml`; a member's own `jobs` applies only when the member builds on its own. See [Limiting parallelism](../../guides/build-performance/#limiting-parallelism).
 

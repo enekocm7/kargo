@@ -77,6 +77,9 @@ pub fn metadata(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
     };
     let native = kargo_toolchain::NativeToolchain::find(ctx.config, &manifest.kotlin.version)?;
     let profile = ctx.profile.name();
+    let host_platform = kargo_manifest::TargetPlatform::host().map(|h| h.as_str().to_owned()).unwrap_or_default();
+    let build_platforms: Vec<String> =
+        manifest.build.platforms.as_ref().map(|p| p.iter().map(|t| t.as_str().to_owned()).collect()).unwrap_or_default();
     Ok(json!({
         "version": FORMAT_VERSION,
         "kargo-version": env!("CARGO_PKG_VERSION"),
@@ -90,6 +93,8 @@ pub fn metadata(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
         "target-dir": path(project.target_dir()),
         "profile": profile,
         "resolved": !opts.no_deps,
+        "host-platform": host_platform,
+        "platforms": build_platforms,
         "toolchain": {
             "kotlin": manifest.kotlin.version,
             "jdk": {

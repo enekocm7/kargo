@@ -17,8 +17,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::build::{
-    BuildOptions, add_npm_declarations, announce, buildable_native_platforms, compile_jvm, finished, for_platform, hook_env, js_libraries,
-    native_cinterop, native_cinterop_defs, native_libraries, native_programs, sources, warn_about_sources, wasm_libraries,
+    BuildOptions, add_npm_declarations, announce, buildable_native_platforms_for, compile_jvm, finished, for_platform, hook_env,
+    js_libraries, native_cinterop, native_cinterop_defs, native_libraries, native_programs, sources, warn_about_sources, wasm_libraries,
     without_platform_sets,
 };
 use super::context::BuildContext;
@@ -47,6 +47,14 @@ fn check_dir(ctx: &BuildContext, target: TargetKind) -> PathBuf {
 pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
     let start = Instant::now();
     let targets = opts.build.select(ctx)?;
+    let platforms = if opts.build.platforms.is_empty() {
+        ctx.ws.manifest().build.platforms.clone().unwrap_or_default()
+    } else {
+        opts.build.platforms.clone()
+    };
+    for target in &targets {
+        crate::platform::check_target_platforms(*target, &platforms, None)?;
+    }
     // Pre-build hooks may generate sources, so they run before checking.
     super::build::prepare_native_hooks(ctx, &targets)?;
     crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreBuild, &hook_env(ctx, &EnvOptions::default())?)?;
@@ -57,7 +65,7 @@ pub fn check(ctx: &BuildContext, opts: &CheckOptions) -> Result<()> {
         TargetKind::Jvm => check_jvm(ctx, opts.tests),
         TargetKind::Wasm => check_wasm(ctx, opts.tests),
         TargetKind::Js => check_js(ctx, opts.tests),
-        TargetKind::Native => check_native(ctx, opts.tests),
+        TargetKind::Native => check_native(ctx, opts.tests, &platforms),
         TargetKind::Android => crate::gradle::check(ctx, opts.tests),
     });
     super::collect_targets(ctx, "check", opts.build.keep_going, targets.iter().copied().zip(checked))?;
@@ -192,7 +200,7 @@ fn check_js(ctx: &BuildContext, tests: bool) -> Result<()> {
     Ok(())
 }
 
-fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
+fn check_native(ctx: &BuildContext, tests: bool, filter: &[kargo_manifest::TargetPlatform]) -> Result<()> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let main_sources = sources(ctx, TargetKind::Native, false, &["kt"])?;
@@ -204,7 +212,7 @@ fn check_native(ctx: &BuildContext, tests: bool) -> Result<()> {
     if !main_sources.kotlin_files().is_empty() {
         native_programs(ctx, native, &without_platform_sets(ctx, main_sources.clone()))?;
     }
-    let platforms = buildable_native_platforms(ctx)?;
+    let platforms = buildable_native_platforms_for(ctx, filter)?;
     if platforms.is_empty() {
         return Ok(());
     }

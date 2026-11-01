@@ -521,10 +521,16 @@ pub(crate) fn lock_tools(ctx: &BuildContext, target: TargetKind) -> Result<()> {
     Ok(())
 }
 
-/// Downloads the JDK that `[toolchain] jdk` pins. `system` is the JDK on the machine, which is left alone.
+/// Downloads the JDK that `[toolchain] jdk` pins (`system` is the JDK on the machine, which is
+/// left alone), and the foreign JDKs of `[build] platforms` for cross-platform `jlink`.
 fn fetch_pinned_jdk(ctx: &BuildContext) -> Result<()> {
     if ctx.ws.manifest().toolchain.jdk != JdkRequest::System {
         ctx.jdk()?;
+    }
+    if let Some(platforms) = &ctx.ws.manifest().build.platforms {
+        for platform in platforms.iter().filter(|p| !p.is_host()) {
+            ctx.jdk_for_platform(Some(*platform))?;
+        }
     }
     Ok(())
 }
@@ -571,6 +577,10 @@ pub struct PackageOptions {
     pub desktop: bool,
     /// `--platforms`: the Compose Desktop platforms whose Skiko natives the jar carries.
     pub platforms: Vec<String>,
+    /// `--platform`: the OS/CPU platforms to package for (repeatable, comma-separated).
+    /// `jlink` cross-builds a runtime image per platform; `native-image` and `installer` build for
+    /// the host, so a foreign `--platform` for those is an error.
+    pub platform: Vec<kargo_manifest::TargetPlatform>,
     /// `--dist`: build an application distribution archive instead of a jar.
     pub dist: Option<DistOptions>,
 }
@@ -590,7 +600,8 @@ pub struct DistOptions {
 /// unless `fat` asks for the self-contained jar. Other formats build a `jlink` runtime image,
 /// a GraalVM native executable or a `jpackage` installer (see [`packaging`]). `desktop` packages a
 /// Compose Desktop application: an installer by default, or with `platforms` a jar that runs on
-/// each of them (see [`crate::compose`]).
+/// each of them (see [`crate::compose`]). `platform` cross-builds `jlink` images (one per OS/CPU,
+/// each in its own directory, so they do not clobber each other); other formats build for the host.
 pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>> {
     let targets = &ctx.ws.manifest().targets;
     let target = match opts.target {
@@ -599,6 +610,13 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
         None if !targets.is_enabled(TargetKind::Jvm) && targets.is_enabled(TargetKind::Android) && !opts.desktop => TargetKind::Android,
         None => TargetKind::Jvm,
     };
+    if !opts.platform.is_empty() {
+        crate::platform::check_target_platforms(target, &opts.platform, opts.format.map(|f| f.as_str()))?;
+        if target == TargetKind::Android {
+            // Checked above with its own message.
+            unreachable!("Android takes no --platform");
+        }
+    }
     if opts.dist.is_some() {
         if let Some(format) = opts.format {
             bail!("`--dist` writes an application distribution and does not combine with `--format {}`", format.as_str());
@@ -608,6 +626,11 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
         }
         if target != TargetKind::Jvm {
             bail!("`--dist` packages a JVM application and needs the jvm target, not {target}");
+        }
+        if !opts.platform.is_empty() {
+            bail!(
+                "`--dist` writes a portable application distribution and takes no `--platform`; use `--format jlink --platform` for per-platform runtime images"
+            );
         }
     }
     let format = opts.format.unwrap_or(if opts.desktop { PackageFormat::Installer } else { PackageFormat::Jar });
@@ -642,6 +665,20 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
     if opts.optimize && (target != TargetKind::Jvm || format != PackageFormat::Jar) {
         bail!("`--optimize` shrinks JVM jars and needs `--format jar` on the jvm target");
     }
+    if !opts.platform.is_empty() && target != TargetKind::Jvm {
+        // Checked in `check_target_platforms`; Android is rejected there with its own message.
+        debug_assert_eq!(target, TargetKind::Jvm);
+    }
+    if !opts.platform.is_empty() && !opts.platforms.is_empty() {
+        bail!(
+            "`--platform` builds runtime images for other OS/CPU platforms and does not combine with `--platforms`, which adds Skiko natives to a jar; use one of them"
+        );
+    }
+    if !opts.platform.is_empty() && format == PackageFormat::Jar && !opts.desktop {
+        bail!(
+            "`--platform` cross-builds `--format jlink` runtime images and does not apply to `--format jar`; leave it out for a portable jar, or use `--format jlink --platform`"
+        );
+    }
     match target {
         TargetKind::Jvm => package_jvm(
             ctx,
@@ -650,6 +687,7 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
             opts.optimize || (ctx.profile == ProfileKind::Release && format == PackageFormat::Jar),
             format,
             &platforms,
+            &opts.platform,
             opts.dist.as_ref(),
         ),
         TargetKind::Android => {
@@ -675,6 +713,7 @@ fn package_android(ctx: &BuildContext) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn package_jvm(
     ctx: &BuildContext,
     bin: Option<&str>,
@@ -682,6 +721,7 @@ fn package_jvm(
     optimize: bool,
     format: PackageFormat,
     platforms: &[&str],
+    cross: &[kargo_manifest::TargetPlatform],
     dist: Option<&DistOptions>,
 ) -> Result<Vec<PathBuf>> {
     if !ctx.ws.manifest().targets.is_enabled(TargetKind::Jvm) {
@@ -717,9 +757,17 @@ fn package_jvm(
             vec![publish::package_library(ctx, &jvm)?]
         }
         PackageFormat::Jar => vec![fat_jar(ctx, &jvm, name, bin_main, platforms)?],
-        PackageFormat::Jlink => vec![packaging::jlink_image(ctx, &app(bin_main)?)?],
-        PackageFormat::NativeImage => vec![packaging::native_image(ctx, &app(bin_main)?)?],
-        PackageFormat::Installer => packaging::installer(ctx, &app(bin_main)?)?,
+        PackageFormat::Jlink if cross.is_empty() => vec![packaging::jlink_image(ctx, &app(bin_main)?, None)?],
+        PackageFormat::Jlink => {
+            let mut images = Vec::new();
+            for platform in cross {
+                // Each platform writes to its own directory, so outputs do not clobber each other.
+                images.push(packaging::jlink_image(ctx, &app(bin_main.clone())?, Some(*platform))?);
+            }
+            images
+        }
+        PackageFormat::NativeImage => vec![packaging::native_image(ctx, &app(bin_main)?, cross.first().copied())?],
+        PackageFormat::Installer => packaging::installer(ctx, &app(bin_main)?, cross.first().copied())?,
     };
     if optimize {
         if format != PackageFormat::Jar {

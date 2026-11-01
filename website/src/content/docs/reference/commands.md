@@ -212,6 +212,7 @@ Compile all enabled targets, or the ones you name. Targets build at the same tim
 | `--profile <name>` | Use a custom profile from kargo.toml, such as `staging`, instead of `dev` (see [Profiles](../manifest/#profilename)) |
 | `-t, --target <target>` | Only this target (repeatable). Default: `[build] default-targets` (`[workspace.build]` in a workspace), else every enabled target |
 | `--target-set <set>` | Instead of `-t`: `host` for the targets that build and run on this machine (JVM, Wasm, JS, and Native when this host's platform is in `platforms`), or `device` for the targets that run on a phone or an emulator (Android). An error when no enabled target is in the set. Ignores `[build] default-targets`. See [Target sets](../../guides/multiplatform/#target-sets) |
+| `--platform <os-arch>` | Only build for these OS/CPU platforms (repeatable, comma-separated): `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64` (also `KARGO_PLATFORM` or `[build] platforms`). JVM, Wasm and JS are portable and build once; Native builds the matching Konan targets; Android takes none. See [Cross-compilation](../../guides/distributing/#cross-compilation) |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | Which packages to build ([package selection](#package-selection)) |
 | `-j, --jobs <n>` | How many workspace members, and targets of each, build at the same time: a number, or `auto` (also `0`) for the CPUs within the free memory. Default: `KARGO_JOBS`, then `[build] jobs`, then `auto`. `-j 1` builds one thing at a time, in a fixed order. See [parallelism](../../guides/build-performance/#limiting-parallelism) |
 | `--size-report` | Print Binaryen per-function metrics for a Wasm release build |
@@ -949,7 +950,7 @@ See [JVM shrinking and obfuscation](../../guides/publishing/#jvm-shrinking-and-o
 
 `--dist` builds an application distribution instead: an archive with `bin/` start scripts and the jars in `lib/`, for machines that already have Java. It writes `target/dist/<name>-<version>.zip` and `.tar.gz` (`--archive zip`, `tar` or `tar.gz`, comma separated, picks some), prints their paths and leaves the unpacked tree in `target/dist/<name>-<version>/`. See [Distribution archives](../../guides/distributing/#distribution-archives).
 
-`jlink`, `native-image` and `installer` need a main class and build for the OS and CPU Kargo runs on. An installer can also register file associations, and on macOS be signed and notarized. See [Distributing applications](../../guides/distributing/).
+`jlink` cross-builds: `--platform linux-arm64,windows-x64` builds one runtime image per platform (`<name>-<version>-<platform>/`, so they do not clobber each other), with that platform's Java modules from a Temurin JDK Kargo downloads. `native-image` and `installer` build for the OS and CPU Kargo runs on, so a foreign `--platform` for those is an error naming where to build instead. An installer can also register file associations, and on macOS be signed and notarized. See [Distributing applications](../../guides/distributing/) and [Cross-compilation](../../guides/distributing/#cross-compilation).
 
 A library (a project without a `main` function or `main-class`) gets what you would publish instead: `target/<profile>/package/<name>-<version>.jar` with only its own classes (no Kotlin standard library, no `Class-Path`) and `<name>-<version>-sources.jar` next to it. Pass `--fat` for the fat jar anyway. `kargo publish --dry-run` shows everything a [publication](../../guides/publishing/) holds, POM included.
 
@@ -971,6 +972,7 @@ With `-t android` (the default when the JVM target is off and Android is on), it
 | `--message-format json` | Print compiler diagnostics, optimization reports and package paths as JSON lines |
 | `--desktop` | Package the [Compose Desktop](../../guides/compose/#distributing) application: an installer for this OS unless `--format` says otherwise, with the JDK modules, options and Skiko native library Compose needs. Needs `[frameworks] compose` |
 | `--platforms <list>` | With `--desktop --format jar`: the platforms whose Skiko natives the jar carries instead of only the host's, so it runs on each of them. `all`, or some of `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`, `linux-x64`, `linux-arm64` |
+| `--platform <os-arch>` | The OS/CPU platforms to package for (repeatable, comma-separated): `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64` (also `KARGO_PLATFORM` or `[build] platforms`). `jlink` builds one runtime image per platform; `native-image` and `installer` build for the host, so a foreign `--platform` for those is an error |
 | `-j, --jobs <n>` | How many targets and Native platforms build at the same time, as for [`kargo build`](#kargo-build-b) |
 
 ## `kargo retrace`

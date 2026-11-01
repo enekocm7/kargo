@@ -133,6 +133,239 @@ impl FromStr for TargetKind {
     }
 }
 
+/// The OS and CPU a `kargo build` or `kargo package` builds for (`--platform`), in the style of
+/// Go's `GOOS`/`GOARCH` and Cargo's `--target`: `linux-x64`, `linux-arm64`, `windows-x64`,
+/// `windows-arm64`, `macos-x64` and `macos-arm64`.
+///
+/// Unlike `--target` (`jvm`, `wasm`, ...), which picks what kind of output Kargo builds, a platform
+/// picks which OS and CPU that output runs on. JVM bytecode is portable, so `kargo build -t jvm
+/// --platform linux-arm64` builds the same classes on any host; `kargo package --format jlink
+/// --platform` builds a runtime image with that platform's Java modules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TargetPlatform {
+    os: PlatformOs,
+    arch: PlatformArch,
+}
+
+/// The OS of a [`TargetPlatform`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PlatformOs {
+    Linux,
+    Windows,
+    Macos,
+}
+
+/// The CPU of a [`TargetPlatform`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PlatformArch {
+    X64,
+    Arm64,
+}
+
+impl PlatformOs {
+    /// The name `std::env::consts::OS` uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlatformOs::Linux => "linux",
+            PlatformOs::Windows => "windows",
+            PlatformOs::Macos => "macos",
+        }
+    }
+
+    /// The name the Eclipse Adoptium (Temurin) API uses.
+    pub fn adoptium_str(self) -> &'static str {
+        match self {
+            PlatformOs::Linux => "linux",
+            PlatformOs::Windows => "windows",
+            PlatformOs::Macos => "mac",
+        }
+    }
+}
+
+impl PlatformArch {
+    /// The `x64`/`arm64` suffix of [`TargetPlatform::as_str`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlatformArch::X64 => "x64",
+            PlatformArch::Arm64 => "arm64",
+        }
+    }
+
+    /// The name `std::env::consts::ARCH` and Kotlin/Native use (`x86_64`, `aarch64`).
+    pub fn rust_str(self) -> &'static str {
+        match self {
+            PlatformArch::X64 => "x86_64",
+            PlatformArch::Arm64 => "aarch64",
+        }
+    }
+
+    /// The name the Eclipse Adoptium (Temurin) API uses.
+    pub fn adoptium_str(self) -> &'static str {
+        match self {
+            PlatformArch::X64 => "x64",
+            PlatformArch::Arm64 => "aarch64",
+        }
+    }
+}
+
+impl TargetPlatform {
+    /// Every platform Kargo can build for: the six `os-arch` combinations of Compose Desktop's
+    /// `--platforms`.
+    pub const ALL: [TargetPlatform; 6] = [
+        TargetPlatform { os: PlatformOs::Linux, arch: PlatformArch::X64 },
+        TargetPlatform { os: PlatformOs::Linux, arch: PlatformArch::Arm64 },
+        TargetPlatform { os: PlatformOs::Windows, arch: PlatformArch::X64 },
+        TargetPlatform { os: PlatformOs::Windows, arch: PlatformArch::Arm64 },
+        TargetPlatform { os: PlatformOs::Macos, arch: PlatformArch::X64 },
+        TargetPlatform { os: PlatformOs::Macos, arch: PlatformArch::Arm64 },
+    ];
+
+    /// The canonical `os-arch` name: `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`,
+    /// `macos-x64`, `macos-arm64`.
+    pub fn as_str(self) -> &'static str {
+        match (self.os, self.arch) {
+            (PlatformOs::Linux, PlatformArch::X64) => "linux-x64",
+            (PlatformOs::Linux, PlatformArch::Arm64) => "linux-arm64",
+            (PlatformOs::Windows, PlatformArch::X64) => "windows-x64",
+            (PlatformOs::Windows, PlatformArch::Arm64) => "windows-arm64",
+            (PlatformOs::Macos, PlatformArch::X64) => "macos-x64",
+            (PlatformOs::Macos, PlatformArch::Arm64) => "macos-arm64",
+        }
+    }
+
+    /// The platform of the machine building: `Host::current` in Kotlin/Native's terms.
+    pub fn host() -> Result<Self> {
+        Self::for_host(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    /// The platform described by `std::env::consts::OS` and `ARCH` names.
+    pub fn for_host(os: &str, arch: &str) -> Result<Self> {
+        let os = match os {
+            "linux" => PlatformOs::Linux,
+            "windows" => PlatformOs::Windows,
+            "macos" => PlatformOs::Macos,
+            other => bail!("Kargo cannot build for a {other} host (expected linux, windows or macos)"),
+        };
+        let arch = match arch {
+            "x86_64" => PlatformArch::X64,
+            "aarch64" => PlatformArch::Arm64,
+            other => bail!("Kargo cannot build for a host with a {other} CPU (expected x86_64 or aarch64)"),
+        };
+        Ok(Self { os, arch })
+    }
+
+    /// Whether this is the machine building.
+    pub fn is_host(self) -> bool {
+        Self::host().is_ok_and(|h| h == self)
+    }
+
+    /// The OS in `std::env::consts::OS` terms.
+    pub fn os(self) -> &'static str {
+        self.os.as_str()
+    }
+
+    /// The CPU in `std::env::consts::ARCH` terms.
+    pub fn arch(self) -> &'static str {
+        self.arch.rust_str()
+    }
+
+    /// The `(os, arch)` names the Eclipse Adoptium (Temurin) API uses.
+    pub fn adoptium(self) -> (&'static str, &'static str) {
+        (self.os.adoptium_str(), self.arch.adoptium_str())
+    }
+
+    /// The `(os, arch)` names the foojay Disco API (GraalVM) uses, with the archive format.
+    pub fn disco(self) -> (&'static str, &'static str, &'static str) {
+        let os = match self.os {
+            PlatformOs::Linux => "linux",
+            PlatformOs::Windows => "windows",
+            PlatformOs::Macos => "macos",
+        };
+        let archive = match self.os {
+            PlatformOs::Windows => "zip",
+            _ => "tar.gz",
+        };
+        let arch = match self.arch {
+            PlatformArch::X64 => "x64",
+            PlatformArch::Arm64 => "aarch64",
+        };
+        (os, arch, archive)
+    }
+
+    /// The Kotlin/Native Konan target that runs on this platform, if there is one. Apple phones
+    /// and watches are Konan targets without their own OS platform: `--platform macos-arm64` builds
+    /// `macos_arm64`, not the iOS ones listed in `[target.native] platforms`.
+    pub fn konan_target(self) -> Option<&'static str> {
+        match (self.os, self.arch) {
+            (PlatformOs::Linux, PlatformArch::X64) => Some("linux_x64"),
+            (PlatformOs::Linux, PlatformArch::Arm64) => Some("linux_arm64"),
+            (PlatformOs::Windows, PlatformArch::X64) => Some("mingw_x64"),
+            (PlatformOs::Macos, PlatformArch::X64) => Some("macos_x64"),
+            (PlatformOs::Macos, PlatformArch::Arm64) => Some("macos_arm64"),
+            // Kotlin/Native has no Windows/ARM64 target.
+            _ => None,
+        }
+    }
+
+    /// The directory suffix of per-platform output: `linux-arm64`, like [`Self::as_str`].
+    pub fn dir_name(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for TargetPlatform {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TargetPlatform {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        parse_platform(s)
+    }
+}
+
+/// Parses a `--platform` value: `os-arch` with `-` or `_` between them, case-insensitive, with the
+/// aliases Go and Rust use (`amd64`/`x64`/`x86_64`, `arm64`/`aarch64`) and `mac`/`darwin` for macOS.
+fn parse_platform(s: &str) -> Result<TargetPlatform> {
+    let expected = "linux-x64, linux-arm64, windows-x64, windows-arm64, macos-x64 or macos-arm64";
+    let normalized = s.trim().to_ascii_lowercase().replace('_', "-");
+    let (os, arch) = normalized
+        .split_once('-')
+        .filter(|(os, arch)| !os.is_empty() && !arch.is_empty())
+        .with_context(|| format!("unknown platform `{s}` (expected one of: {expected})"))?;
+    // `macos-arm64` splits into two parts; a stray second `-` (such as `linux-x86-64`) does not parse.
+    if arch.contains('-') {
+        bail!("unknown platform `{s}` (expected one of: {expected})");
+    }
+    let os = match os {
+        "linux" => PlatformOs::Linux,
+        "windows" | "win" => PlatformOs::Windows,
+        "macos" | "mac" | "darwin" | "osx" => PlatformOs::Macos,
+        _ => {
+            return Err(kargo_util::help::unknown(
+                format!("unknown platform `{s}` (expected one of: {expected})"),
+                s,
+                &TargetPlatform::ALL.map(TargetPlatform::as_str),
+            ));
+        }
+    };
+    let arch = match arch {
+        "x64" | "x86-64" | "x86_64" | "amd64" => PlatformArch::X64,
+        "arm64" | "aarch64" => PlatformArch::Arm64,
+        _ => {
+            return Err(kargo_util::help::unknown(
+                format!("unknown platform `{s}` (expected one of: {expected})"),
+                s,
+                &TargetPlatform::ALL.map(TargetPlatform::as_str),
+            ));
+        }
+    };
+    Ok(TargetPlatform { os, arch })
+}
+
 /// Which classpaths a dependency belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Scope {
@@ -2053,6 +2286,10 @@ pub struct BuildSettings {
     /// The targets the commands use without `-t`; `None` uses every enabled target. In a
     /// `[workspace.build]` it applies to the members that enable at least one of them.
     pub default_targets: Option<Vec<TargetKind>>,
+    /// The OS/CPU platforms the commands build for without `--platform`; `None` builds for the
+    /// host. `--platform` and `KARGO_PLATFORM` override it. Each entry is an `os-arch` name such as
+    /// `linux-arm64` (see [`TargetPlatform`]).
+    pub platforms: Option<Vec<TargetPlatform>>,
 }
 
 /// `[doc]`: options for `kargo doc` (Dokka).

@@ -230,6 +230,8 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `lockfile`, `target-dir` | The project's `kargo.lock` and build directory |
 | `profile` | `dev`, `release` with `--release`, or the name given to `--profile`: the profile whose output directories and compiler arguments are shown |
 | `resolved` | `false` with `--no-deps`. Then every `dependencies` is `null`, `toolchain.jdk.home` is `null` and plugins have no `jar` |
+| `host-platform` | The OS/CPU Kargo runs on: `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`, `macos-x64` or `macos-arm64` |
+| `platforms` | The `[build] platforms` of `kargo.toml` (`os-arch` names), or empty when the project builds for the host. See [Cross-compilation](../../guides/distributing/#cross-compilation) |
 | `toolchain.kotlin` | The Kotlin version |
 | `toolchain.jdk` | The `[toolchain] jdk` request, and the `home` and major `version` of the JDK it resolves to (`null` when there is none) |
 | `toolchain.kotlin-native` | The installed Kotlin/Native distribution (`version`, `home`), or `null` until it is installed |

@@ -23,7 +23,7 @@ To install a tool on your own machine instead, use [`kargo install`](../installi
 | `installer` | ~35 MB and up | JVM startup | a JDK 16 or newer, plus the OS's packaging tools |
 
 :::caution[Build on each OS]
-A runtime image, a native executable and an installer contain native code for the OS and CPU they were built on: build the Windows one on Windows, the macOS one on macOS (an Apple silicon Mac builds for Apple silicon) and the Linux one on Linux. A CI matrix does it in one go; see [Native executables and installers](../ci/#native-executables-and-installers).
+A native executable and an installer contain native code for the OS and CPU they were built on: build the Windows one on Windows, the macOS one on macOS (an Apple silicon Mac builds for Apple silicon) and the Linux one on Linux. A CI matrix does it in one go; see [Native executables and installers](../ci/#native-executables-and-installers). A `jlink` runtime image cross-builds with `--platform` (see below); without it, it also builds for the host.
 :::
 
 ## Distribution archives
@@ -107,6 +107,31 @@ modules = ["java.naming", "jdk.crypto.ec"]
 ```
 
 If `jdeps` fails on a dependency, set `jdeps = false` and list every module the runtime needs in `modules`.
+
+## Cross-compilation
+
+`kargo build -t jvm --platform linux-arm64` builds the same bytecode on any host, and `kargo package --format jlink --platform linux-arm64,windows-x64` builds one runtime image per platform, each in its own directory so they do not clobber each other (`<name>-<version>-<platform>/`). The host's `jlink` runs, with that platform's Java modules (a Temurin JDK Kargo downloads; only its `jmods` are read):
+
+```console
+$ kargo package --release --format jlink --platform linux-arm64,windows-x64
+   Packaging hello v0.1.0 runtime image for linux-arm64 (target/release/jvm/package/hello-0.1.0-linux-arm64)
+   Packaging hello v0.1.0 runtime image for windows-x64 (target/release/jvm/package/hello-0.1.0-windows-x64)
+target/release/jvm/package/hello-0.1.0-linux-arm64
+target/release/jvm/package/hello-0.1.0-windows-x64
+```
+
+`--platform` takes `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`, `macos-x64` and `macos-arm64` (also `amd64` for `x64`, `aarch64` for `arm64`), repeatable and comma-separated. `KARGO_PLATFORM` and `[build] platforms` of `kargo.toml` set it without the flag:
+
+```toml title="kargo.toml"
+[build]
+platforms = ["linux-arm64"]
+```
+
+```sh
+KARGO_PLATFORM=linux-arm64 kargo build
+```
+
+Wasm and JS are platform-independent: `--platform` builds the same module. Android runs on a device, so it takes no `--platform`. `native-image` and `installer` build for the OS they run on, so a foreign `--platform` for those is an error naming where to build instead; build each platform's on that platform (a CI matrix does it in one go). For Kotlin/Native, `--platform` maps onto `[target.native] platforms` (`linux-arm64` builds `linux_arm64` where the host toolchain can do it) and refuses early otherwise; see [Kotlin/Native](../native/). With `--message-format json`, each `package-artifact` line reports its `platform`, and `kargo metadata` lists the host platform and `[build] platforms`.
 
 ## Native executables
 

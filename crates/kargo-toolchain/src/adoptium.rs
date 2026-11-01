@@ -111,6 +111,12 @@ pub fn parse_release(json: &str) -> Result<Option<JdkPackage>> {
 /// The newest JDK build of a feature version.
 pub fn latest(config: &Config, major: u32) -> Result<JdkPackage> {
     let (os, arch) = platform()?;
+    latest_for(config, major, os, arch)
+}
+
+/// The newest JDK build of a feature version for `os`/`arch` (Adoptium names, see
+/// [`platform_for`]).
+pub fn latest_for(config: &Config, major: u32, os: &str, arch: &str) -> Result<JdkPackage> {
     let url = format!("{API}/assets/latest/{major}/hotspot?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse");
     let body = crate::download::get_text(config, &url).with_context(|| format!("failed to look up Temurin JDK {major}"))?;
     parse_latest(&body)?.with_context(|| format!("no Temurin JDK {major} build is available for {os}/{arch}"))
@@ -119,6 +125,11 @@ pub fn latest(config: &Config, major: u32) -> Result<JdkPackage> {
 /// A specific JDK release such as `jdk-21.0.5+11`.
 pub fn release(config: &Config, name: &str) -> Result<JdkPackage> {
     let (os, arch) = platform()?;
+    release_for(config, name, os, arch)
+}
+
+/// A specific JDK release such as `jdk-21.0.5+11` for `os`/`arch` (Adoptium names).
+pub fn release_for(config: &Config, name: &str, os: &str, arch: &str) -> Result<JdkPackage> {
     let encoded = name.replace('+', "%2B");
     let url = format!("{API}/assets/release_name/eclipse/{encoded}?architecture={arch}&image_type=jdk&os={os}&project=jdk");
     let body = crate::download::get_text(config, &url).with_context(|| format!("failed to look up Temurin release `{name}`"))?;

@@ -30,6 +30,7 @@ const ALLOWED_ENV: &[&str] = &[
     "KARGO_HOME",
     "KARGO_TARGET_DIR",
     "KARGO_JOBS",
+    "KARGO_PLATFORM",
     "KARGO_AUTO_INSTALL",
     "KARGO_OFFLINE",
     "KARGO_VENDORED",

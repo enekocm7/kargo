@@ -1033,6 +1033,11 @@ struct BuildArgs {
     /// Only the targets that run here (`host`: JVM, Wasm, JS, Native on this machine) or on a device (`device`: Android)
     #[arg(long, value_enum, value_name = "SET", conflicts_with = "targets")]
     target_set: Option<TargetSetArg>,
+    /// Only build for these OS/CPU platforms (repeatable, comma-separated): linux-x64, linux-arm64, windows-x64, windows-arm64, macos-x64, macos-arm64.
+    /// JVM bytecode is portable, so it builds the same classes; `kargo package --format jlink --platform` builds one runtime image per platform.
+    /// Wasm and JS ignore it (they are platform-independent) and Android takes none. Also `KARGO_PLATFORM` or `[build] platforms`
+    #[arg(long, value_name = "OS-ARCH", value_delimiter = ',', env = "KARGO_PLATFORM")]
+    platform: Vec<String>,
     #[command(flatten)]
     packages: PackageArgs,
     #[command(flatten)]
@@ -1052,8 +1057,31 @@ impl BuildArgs {
             profile: profile_kind(self.release, self.profile.as_deref()),
             size_report: self.size_report,
             target_set: self.target_set.map(Into::into).unwrap_or_default(),
+            // `platforms` is resolved in `run_command` (flag with `?`) so an unknown platform fails;
+            // `build` falls back to `[build] platforms` of each package when the flag is empty.
             ..Default::default()
         }
+    }
+
+    /// The `--platform` (or `KARGO_PLATFORM`) values, parsed. Empty when the flag was not given;
+    /// the caller falls back to `[build] platforms` of each package.
+    fn flag_platforms(&self) -> Result<Vec<kargo_manifest::TargetPlatform>> {
+        kargo_ops::platform::parse_values(&self.platform)
+    }
+
+    #[allow(dead_code)]
+    /// The platforms this command builds for: `--platform` (or `KARGO_PLATFORM`) when given, else
+    /// `[build] platforms` of `kargo.toml`, else the host. Fails on an unknown platform.
+    /// For multi-package builds the manifest fallback is per package (see `build`), so this is
+    /// only for single-package commands such as `kargo package`.
+    fn platforms(&self, manifest: &kargo_manifest::Manifest) -> Result<Vec<kargo_manifest::TargetPlatform>> {
+        if !self.platform.is_empty() {
+            return kargo_ops::platform::parse_values(&self.platform);
+        }
+        if let Some(platforms) = &manifest.build.platforms {
+            return Ok(platforms.clone());
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -1718,8 +1746,9 @@ compile run the steps they need first, so this command is for editors, CI checks
 `--dist` writes an application distribution: target/dist/<name>-<version>.zip and .tar.gz with
 bin/ start scripts and lib/ jars, for machines that have Java.
 
-jlink, native-image and installer build for the OS and CPU they run on. Their output goes to
-target/<profile>/jvm/package/.
+`jlink` cross-builds: `--platform linux-arm64,windows-x64` builds one runtime image per platform,
+each in its own directory so they do not clobber each other. `native-image` and `installer` build
+for the OS and CPU they run on. Their output goes to target/<profile>/jvm/package/.
 
 `--desktop` packages a Compose Desktop application ([frameworks] compose): an installer for this
 OS by default, with Skiko's native library next to the app so macOS signs and notarizes it.
@@ -1752,6 +1781,11 @@ OS by default, with Skiko's native library next to the app so macOS signs and no
         /// With --desktop --format jar: the platforms whose Skiko natives the jar carries (all, or e.g. windows-x64,macos-arm64)
         #[arg(long, value_name = "PLATFORMS", value_delimiter = ',', requires = "desktop")]
         platforms: Vec<String>,
+        /// The OS/CPU platforms to package for (repeatable, comma-separated): linux-x64, linux-arm64, windows-x64, windows-arm64, macos-x64, macos-arm64.
+        /// `jlink` builds one runtime image per platform; `native-image` and `installer` build for the host, so a foreign `--platform` for those is an error.
+        /// Also `KARGO_PLATFORM` or `[build] platforms`
+        #[arg(long, value_name = "OS-ARCH", value_delimiter = ',', env = "KARGO_PLATFORM")]
+        platform: Vec<String>,
         #[command(flatten)]
         dist: DistArgs,
         /// How to print compiler and package reports
@@ -3053,7 +3087,8 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             set_message_format(build.message_format);
             let project = load_project(global)?;
             let apple_files = kargo_ops::apple_package::AppleFiles { swift_package, cocoapods };
-            let opts = BuildOptions { keep_going, xcframework, apple_files, ..build.options() };
+            let mut opts = BuildOptions { keep_going, xcframework, apple_files, ..build.options() };
+            opts.platforms = build.flag_platforms()?;
             let results = build_packages(
                 config,
                 &project,
@@ -3069,7 +3104,9 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
         Command::Check { build, tests, keep_going } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
-            let opts = CheckOptions { build: BuildOptions { keep_going, ..build.options() }, tests };
+            let mut build_opts = build.options();
+            build_opts.platforms = build.flag_platforms()?;
+            let opts = CheckOptions { build: BuildOptions { keep_going, ..build_opts }, tests };
             let results = build_packages(
                 config,
                 &project,
@@ -3245,8 +3282,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let project = load_project(global)?;
             let junit_report = report == Some(ReportArg::Junit);
             let list = list.then_some(if format == FormatArg::Json { ListFormat::Json } else { ListFormat::Text });
+            let mut build_opts = build.options();
+            build_opts.platforms = build.flag_platforms()?;
             let opts = TestOptions {
-                build: build.options(),
+                build: build_opts,
                 filter,
                 no_run,
                 no_fail_fast,
@@ -3319,8 +3358,10 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
         Command::Bench { build, filter, no_run, save, baseline, format, warmup, iterations, forks, mode, time_unit, env } => {
             set_message_format(build.message_format);
             let project = load_project(global)?;
+            let mut bench_build = build.options();
+            bench_build.platforms = build.flag_platforms()?;
             let opts = BenchOptions {
-                build: BuildOptions { profile: bench_profile(&project, &build)?, ..build.options() },
+                build: BuildOptions { profile: bench_profile(&project, &build)?, ..bench_build },
                 env: env.options(),
                 filter,
                 no_run,
@@ -3955,6 +3996,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             format,
             desktop,
             platforms,
+            platform,
             dist,
             message_format,
             package,
@@ -3966,6 +4008,13 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             warn_manifest(shell, &project, project.package(index));
             resolve_jobs(config, &project, jobs.jobs);
             let ctx = context(config, &project, index, global, profile_kind(release, profile.as_deref()))?;
+            let cross = if !platform.is_empty() {
+                kargo_ops::platform::parse_values(&platform)?
+            } else if let Some(manifest_platforms) = &ctx.ws.manifest().build.platforms {
+                manifest_platforms.clone()
+            } else {
+                Vec::new()
+            };
             let opts = ops::PackageOptions {
                 target: target.map(Into::into),
                 bin,
@@ -3974,6 +4023,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 format: format.map(Into::into),
                 desktop,
                 platforms,
+                platform: cross.clone(),
                 dist: dist.options(),
             };
             let files = match ops::package(&ctx, &opts) {
@@ -3985,11 +4035,17 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                     return Err(error);
                 }
             };
-            for file in files {
+            for file in &files {
                 if message_format == MessageFormatArg::Json {
-                    kargo_compiler::diagnostics::emit(
-                        &serde_json::json!({ "reason": "package-artifact", "file": file.display().to_string() }),
-                    );
+                    let mut artifact = serde_json::json!({ "reason": "package-artifact", "file": file.display().to_string() });
+                    // A foreign `--platform` image carries its platform in its file name; report it
+                    // per artifact so `kargo image` and scripts can pick one without parsing paths.
+                    if cross.len() == files.len()
+                        && let Some(platform) = cross.iter().find(|p| !p.is_host() && file.display().to_string().contains(p.as_str()))
+                    {
+                        artifact["platform"] = serde_json::json!(platform.as_str());
+                    }
+                    kargo_compiler::diagnostics::emit(&artifact);
                 } else {
                     println!("{}", file.display());
                 }
@@ -4999,6 +5055,10 @@ mod tests {
         assert!(Cli::try_parse_from(["kargo", "test", "--coverage", "--list"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "coverage", "--fail-under", "80", "--open"]).unwrap();
         assert!(matches!(cli.command, Command::Coverage(CoverageArgs { fail_under: Some(_), open: true, .. })));
+        let cli = Cli::try_parse_from(["kargo", "build", "-t", "jvm", "--platform", "linux-arm64,windows-x64"]).unwrap();
+        assert!(matches!(cli.command, Command::Build { ref build, .. } if build.platform == ["linux-arm64", "windows-x64"]));
+        let cli = Cli::try_parse_from(["kargo", "package", "--format", "jlink", "--platform", "linux-arm64"]).unwrap();
+        assert!(matches!(cli.command, Command::Package { ref platform, .. } if platform == &["linux-arm64"]));
         let cli = Cli::try_parse_from(["kargo", "test", "--report", "junit", "--message-format", "json"]).unwrap();
         assert!(matches!(
             cli.command,
