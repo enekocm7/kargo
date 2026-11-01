@@ -2739,6 +2739,34 @@ fn build_default_targets() {
 }
 
 #[test]
+fn target_platforms() {
+    use std::str::FromStr;
+    assert_eq!(TargetPlatform::from_str("linux-arm64").unwrap().as_str(), "linux-arm64");
+    assert_eq!(TargetPlatform::from_str("linux-amd64").unwrap().as_str(), "linux-x64");
+    assert_eq!(TargetPlatform::from_str("linux-aarch64").unwrap().as_str(), "linux-arm64");
+    assert_eq!(TargetPlatform::from_str("MACOS-ARM64").unwrap().as_str(), "macos-arm64");
+    assert_eq!(TargetPlatform::from_str("windows_x64").unwrap().as_str(), "windows-x64");
+    assert!(TargetPlatform::from_str("freebsd-x64").is_err());
+    assert!(TargetPlatform::from_str("linux").is_err());
+    let host = TargetPlatform::host().unwrap();
+    assert!(host.is_host());
+    assert_ne!(TargetPlatform::ALL.len(), 0);
+}
+
+#[test]
+fn build_platforms() {
+    assert_eq!(parse(MINIMAL).build.platforms, None);
+    let m = parse(&format!("{MINIMAL}[build]\nplatforms = [\"linux-arm64\", \"linux-amd64\", \"linux-arm64\"]\n"));
+    assert_eq!(m.build.platforms.unwrap().iter().map(|p| p.as_str()).collect::<Vec<_>>(), ["linux-arm64", "linux-x64"]);
+    assert!(parse_err(&format!("{MINIMAL}[build]\nplatforms = []\n")).contains("`platforms` is empty"));
+    assert!(parse_err(&format!("{MINIMAL}[build]\nplatforms = [\"freebsd-x64\"]\n")).contains("unknown platform"));
+
+    let ws = WorkspaceManifest::parse("[workspace]\nmembers = []\n[workspace.build]\nplatforms = [\"windows-x64\"]\n", Path::new("/ws"))
+        .unwrap();
+    assert_eq!(ws.build.platforms.unwrap()[0].as_str(), "windows-x64");
+}
+
+#[test]
 fn source_sets() {
     assert!(parse(MINIMAL).source_sets.is_empty());
     assert_eq!(parse(MINIMAL).layout.src, [PathBuf::from("src")]);

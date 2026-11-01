@@ -23,6 +23,7 @@ pub mod npm_registry;
 pub mod npm_semver;
 pub mod ops;
 pub mod pkg_config;
+pub mod platform;
 pub mod plugins;
 pub mod publication;
 pub mod script;

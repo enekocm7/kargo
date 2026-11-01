@@ -336,6 +336,14 @@ pub fn test(ctx: &BuildContext, opts: &TestOptions) -> Result<bool> {
     }
     let start = Instant::now();
     let targets = opts.build.select(ctx)?;
+    let platforms = if opts.build.platforms.is_empty() {
+        ctx.ws.manifest().build.platforms.clone().unwrap_or_default()
+    } else {
+        opts.build.platforms.clone()
+    };
+    for target in &targets {
+        crate::platform::check_target_platforms(*target, &platforms, None)?;
+    }
     if opts.against_min && targets != [TargetKind::Jvm] {
         anyhow::bail!("`--against-min` runs JVM tests; select the JVM target with `-t jvm`");
     }

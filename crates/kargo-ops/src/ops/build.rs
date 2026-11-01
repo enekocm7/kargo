@@ -43,6 +43,10 @@ pub struct BuildOptions {
     pub size_report: bool,
     /// The kind of targets to use instead of `targets` or the defaults (`--target-set`).
     pub target_set: TargetSet,
+    /// The OS/CPU platforms to build for (`--platform`, `KARGO_PLATFORM` or `[build] platforms`).
+    /// JVM, Wasm and JS are portable, so they build once; Native builds the matching Konan targets;
+    /// Android takes none. `kargo package --format jlink` builds one runtime image per platform.
+    pub platforms: Vec<kargo_manifest::TargetPlatform>,
 }
 
 /// `--target-set`: the targets a command uses by where their code runs.
@@ -423,6 +427,12 @@ pub fn prepare_native_hooks(ctx: &BuildContext, targets: &[TargetKind]) -> Resul
 pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
     let start = Instant::now();
     let targets = opts.select(ctx)?;
+    // `--platform` (or `KARGO_PLATFORM`) overrides `[build] platforms`; empty means the host.
+    let platforms =
+        if opts.platforms.is_empty() { ctx.ws.manifest().build.platforms.clone().unwrap_or_default() } else { opts.platforms.clone() };
+    for target in &targets {
+        crate::platform::check_target_platforms(*target, &platforms, None)?;
+    }
     prepare_native_hooks(ctx, &targets)?;
     let env = hook_env(ctx, &EnvOptions::default())?;
     crate::plugins::run_hook(ctx.config, ctx.ws, Hook::PreBuild, &env)?;
@@ -437,7 +447,7 @@ pub fn build(ctx: &BuildContext, opts: &BuildOptions) -> Result<BuildResults> {
             TargetKind::Jvm => r.jvm = Some(build_jvm(ctx)?),
             TargetKind::Wasm => r.wasm = build_wasm(ctx, opts.size_report)?,
             TargetKind::Js => r.js = build_js(ctx)?,
-            TargetKind::Native => r.native = build_native(ctx)?,
+            TargetKind::Native => r.native = build_native_for(ctx, &platforms)?,
             TargetKind::Android => r.android = Some(crate::gradle::build(ctx)?),
         }
         Ok(r)
@@ -1141,6 +1151,16 @@ pub fn native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// The Konan targets of `[target.native] platforms` selected by `--platform` (`empty` keeps every
+/// one). Each requested OS/CPU must map to a Konan target the manifest lists.
+pub fn native_platforms_for(ctx: &BuildContext, filter: &[kargo_manifest::TargetPlatform]) -> Result<Vec<String>> {
+    let all = native_platforms(ctx)?;
+    if filter.is_empty() {
+        return Ok(all);
+    }
+    crate::platform::filter_native_platforms(&all, filter)
+}
+
 /// The reason `konan_target` cannot be built on this host, if there is one.
 pub fn native_host_limit(konan_target: &str) -> Option<&'static str> {
     if buildable_on_host(konan_target) {
@@ -1155,10 +1175,26 @@ pub fn native_host_limit(konan_target: &str) -> Option<&'static str> {
 /// The platforms of the Native target this host can build. The others get a note, so a project
 /// with an iOS target still builds its other targets on Windows and Linux.
 pub fn buildable_native_platforms(ctx: &BuildContext) -> Result<Vec<String>> {
-    let (buildable, skipped): (Vec<String>, Vec<String>) = native_platforms(ctx)?.into_iter().partition(|t| buildable_on_host(t));
+    buildable_native_platforms_for(ctx, &[])
+}
+
+/// Like [`buildable_native_platforms`], but only the Konan targets `--platform` selects. A
+/// requested platform this host cannot build is an error (see `check_native_platforms`), not a
+/// skipped note, so the command fails early instead of silently building nothing.
+pub fn buildable_native_platforms_for(ctx: &BuildContext, filter: &[kargo_manifest::TargetPlatform]) -> Result<Vec<String>> {
+    let all = native_platforms_for(ctx, filter)?;
+    let (buildable, skipped): (Vec<String>, Vec<String>) = all.into_iter().partition(|t| buildable_on_host(t));
+    if filter.is_empty() {
+        if let Some(first) = skipped.first() {
+            let reason = native_host_limit(first).unwrap_or_default();
+            ctx.shell().note(format!("skipping native {}: {reason}", skipped.join(", ")));
+        }
+        return Ok(buildable);
+    }
     if let Some(first) = skipped.first() {
         let reason = native_host_limit(first).unwrap_or_default();
-        ctx.shell().note(format!("skipping native {}: {reason}", skipped.join(", ")));
+        let host = kargo_manifest::TargetPlatform::host()?;
+        anyhow::bail!("cannot build `{}` on {host}: {reason}", skipped.join(", "));
     }
     Ok(buildable)
 }
@@ -1483,6 +1519,11 @@ pub fn native_programs(ctx: &BuildContext, native: &kargo_manifest::NativeTarget
 }
 
 pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
+    build_native_for(ctx, &[])
+}
+
+/// Like [`build_native`], but only the Konan targets `--platform` selects (`empty` keeps every one).
+pub fn build_native_for(ctx: &BuildContext, filter: &[kargo_manifest::TargetPlatform]) -> Result<Vec<NativeBuild>> {
     let manifest = ctx.ws.manifest();
     let native = manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let setup = ctx.setup(TargetKind::Native)?;
@@ -1490,7 +1531,7 @@ pub fn build_native(ctx: &BuildContext) -> Result<Vec<NativeBuild>> {
     if srcs.kotlin_files().is_empty() {
         return Ok(Vec::new());
     }
-    let platforms = buildable_native_platforms(ctx)?;
+    let platforms = buildable_native_platforms_for(ctx, filter)?;
     if platforms.is_empty() {
         return Ok(Vec::new());
     }

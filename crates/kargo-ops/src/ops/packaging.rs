@@ -8,7 +8,10 @@
 //! - `installer`: an `.msi`/`.exe`, `.dmg`/`.pkg` or `.deb`/`.rpm` built by `jpackage` around a
 //!   `jlink` runtime, with file associations, and on macOS signed and notarized.
 //!
-//! All three build for the host OS and CPU: build each platform's on that platform. With
+//! `jlink` cross-builds: `--platform linux-arm64` builds a runtime image with that platform's Java
+//! modules (a Temurin JDK Kargo downloads; only its `jmods` are read) using the host's `jlink`.
+//! A `native-image` and an installer contain native code for the OS they were built on, so a
+//! foreign `--platform` for those is an error naming where to build instead. With
 //! `[frameworks] compose`, the runtime gets the modules Compose needs and installers carry Skiko's
 //! native library next to the application (see [`crate::compose`]).
 
@@ -21,7 +24,7 @@ use super::build::JvmBuild;
 use super::context::BuildContext;
 use crate::compose;
 use kargo_compiler::jar::{JarManifest, write_jar};
-use kargo_manifest::{FileAssociation, InstallerSettings, InstallerType, NativeImageSettings, Notarization};
+use kargo_manifest::{FileAssociation, InstallerSettings, InstallerType, NativeImageSettings, Notarization, TargetPlatform};
 use kargo_toolchain::Jdk;
 use kargo_util::fs::{join_paths, remove_dir_all_if_exists};
 use kargo_util::process;
@@ -237,10 +240,8 @@ pub(super) fn optimize_jar(ctx: &BuildContext, input: &Path, name: &str, main_cl
     } else {
         ctx.shell().status("Optimized", format!("{}: {} -> {}", out.display(), human_size(before), human_size(after)));
     }
-    if settings.shrink {
-        if !kargo_compiler::diagnostics::is_json() {
-            ctx.shell().status("Removed", format!("{classes} classes, {methods} methods and {fields} fields (see {})", usage.display()));
-        }
+    if settings.shrink && !kargo_compiler::diagnostics::is_json() {
+        ctx.shell().status("Removed", format!("{classes} classes, {methods} methods and {fields} fields (see {})", usage.display()));
     }
     if !kargo_compiler::diagnostics::is_json() {
         ctx.shell().status("Mapping", mapping.display());
@@ -340,16 +341,33 @@ fn jlink_compress(jdk_version: u32) -> &'static str {
     if jdk_version >= 21 { "zip-6" } else { "2" }
 }
 
-/// Builds a Java runtime with only `modules` into `dest`.
-fn jlink(ctx: &BuildContext, modules: &[String], dest: &Path) -> Result<()> {
+/// Builds a Java runtime with only `modules` into `dest`. For `platform` (`None` is the host),
+/// the host's `jlink` runs with that platform's `jmods` on its module path, so the runtime holds
+/// the target's Java modules instead of the host's.
+fn jlink(ctx: &BuildContext, modules: &[String], dest: &Path, platform: Option<TargetPlatform>) -> Result<()> {
     let jdk = ctx.jdk()?;
     remove_dir_all_if_exists(dest)?;
     let mut cmd = Command::new(jdk_tool(jdk, "jlink"));
-    cmd.arg("--add-modules")
-        .arg(modules.join(","))
-        .args(["--strip-debug", "--no-header-files", "--no-man-pages", "--compress", jlink_compress(jdk.version)])
-        .arg("--output")
-        .arg(dest);
+    cmd.arg("--add-modules").arg(modules.join(",")).args([
+        "--strip-debug",
+        "--no-header-files",
+        "--no-man-pages",
+        "--compress",
+        jlink_compress(jdk.version),
+    ]);
+    if let Some(target) = platform.filter(|p| !p.is_host()) {
+        let foreign = ctx.jdk_for_platform(Some(target))?;
+        let jmods = foreign.home.join("jmods");
+        if !jmods.is_dir() {
+            bail!(
+                "the JDK for {target} at {} has no jmods directory; run `kargo toolchain install jdk {}` while online",
+                foreign.home.display(),
+                foreign.version
+            );
+        }
+        cmd.arg("--module-path").arg(&jmods);
+    }
+    cmd.arg("--output").arg(dest);
     output(ctx, &mut cmd, "jlink").map(drop)
 }
 
@@ -409,14 +427,23 @@ fn windows_launcher(main_class: &str, jvm_args: &[String], jars: &[String]) -> S
     lines.iter().map(|l| format!("{l}\r\n")).collect()
 }
 
-/// `--format jlink`: `target/<profile>/jvm/package/<name>-<version>/` with `bin/`, `lib/` and `runtime/`.
-pub fn jlink_image(ctx: &BuildContext, app: &App) -> Result<PathBuf> {
+/// `--format jlink`: `target/<profile>/jvm/package/<name>-<version>/` with `bin/`, `lib/` and `runtime/`
+/// (`<name>-<version>-<platform>/` for a foreign `--platform`, so per-platform images do not
+/// clobber each other).
+pub fn jlink_image(ctx: &BuildContext, app: &App, platform: Option<TargetPlatform>) -> Result<PathBuf> {
     let version = &ctx.ws.manifest().package.version;
-    let image = app.dir.join(format!("{}-{version}", app.name));
-    ctx.shell().status("Packaging", format!("{} v{version} runtime image ({})", app.name, image.display()));
+    let image = match platform.filter(|p| !p.is_host()) {
+        Some(target) => app.dir.join(format!("{}-{version}-{target}", app.name)),
+        None => app.dir.join(format!("{}-{version}", app.name)),
+    };
+    let what = match platform.filter(|p| !p.is_host()) {
+        Some(target) => format!("{} v{version} runtime image for {target} ({})", app.name, image.display()),
+        None => format!("{} v{version} runtime image ({})", app.name, image.display()),
+    };
+    ctx.shell().status("Packaging", what);
     let modules = runtime_modules(ctx, app)?;
     remove_dir_all_if_exists(&image)?;
-    jlink(ctx, &modules, &image.join("runtime"))?;
+    jlink(ctx, &modules, &image.join("runtime"), platform)?;
     let jars = app.stage_jars(ctx, &image.join("lib"), |_| false)?;
     let bin = image.join("bin");
     std::fs::create_dir_all(&bin)?;
@@ -495,7 +522,14 @@ fn native_image_config(ctx: &BuildContext, app: &App, dir: &Path) -> Result<()> 
 }
 
 /// `--format native-image`: `target/<profile>/jvm/package/<name>` (`.exe` on Windows).
-pub fn native_image(ctx: &BuildContext, app: &App) -> Result<PathBuf> {
+/// A foreign `platform` is an error: GraalVM builds an executable for the OS it runs on.
+pub fn native_image(ctx: &BuildContext, app: &App, platform: Option<TargetPlatform>) -> Result<PathBuf> {
+    if let Some(target) = platform.filter(|p| !p.is_host()) {
+        let host = TargetPlatform::host()?;
+        bail!(
+            "`--format native-image` builds a GraalVM executable for the OS it runs on, so it cannot build for {target} on {host}; run `kargo package --format native-image` on {target} instead"
+        )
+    }
     let settings = &ctx.ws.manifest().packaging.native_image;
     if settings.static_link && std::env::consts::OS != "linux" {
         bail!("[package.native-image] `static = true` links against musl and only works on Linux");
@@ -694,8 +728,15 @@ fn installer_outputs(dest: &Path, name: &str, kind: InstallerType) -> Vec<PathBu
 
 /// `--format installer`: `jpackage` around a `jlink` runtime, written to `target/<profile>/jvm/package/`.
 /// Builds each `[package.installer] type` that the host OS builds (its default type when none are
-/// listed), then notarizes the macOS ones when `notarize` is set.
-pub fn installer(ctx: &BuildContext, app: &App) -> Result<Vec<PathBuf>> {
+/// listed), then notarizes the macOS ones when `notarize` is set. A foreign `platform` is an
+/// error: `jpackage` builds installers for the OS it runs on.
+pub fn installer(ctx: &BuildContext, app: &App, platform: Option<TargetPlatform>) -> Result<Vec<PathBuf>> {
+    if let Some(target) = platform.filter(|p| !p.is_host()) {
+        let host = TargetPlatform::host()?;
+        bail!(
+            "`--format installer` builds a jpackage installer for the OS it runs on, so it cannot build for {target} on {host}; run `kargo package --format installer` on {target} instead"
+        )
+    }
     let manifest = ctx.ws.manifest();
     let settings = &manifest.packaging.installer;
     let os = std::env::consts::OS;
@@ -733,7 +774,7 @@ pub fn installer(ctx: &BuildContext, app: &App) -> Result<Vec<PathBuf>> {
     let work = app.dir.join(format!("{}-installer", app.name));
     remove_dir_all_if_exists(&work)?;
     let runtime = work.join("runtime");
-    jlink(ctx, &runtime_modules(ctx, app)?, &runtime)?;
+    jlink(ctx, &runtime_modules(ctx, app)?, &runtime, None)?;
     let input = work.join("input");
     // Skiko's native library goes next to the jars (jpackage's `$APPDIR`), where macOS signs it
     // with the rest of the application, instead of being unpacked from a jar at startup.

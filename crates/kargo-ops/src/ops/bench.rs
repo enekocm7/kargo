@@ -131,6 +131,14 @@ pub fn bench(ctx: &BuildContext, opts: &BenchOptions) -> Result<()> {
         bail!("benchmarks of the {other} target are not supported yet; `kargo bench` runs the JVM target's benchmarks (`-t jvm`)");
     }
     let targets = opts.build.select(ctx)?;
+    let platforms = if opts.build.platforms.is_empty() {
+        ctx.ws.manifest().build.platforms.clone().unwrap_or_default()
+    } else {
+        opts.build.platforms.clone()
+    };
+    for target in &targets {
+        crate::platform::check_target_platforms(*target, &platforms, None)?;
+    }
     if !targets.contains(&TargetKind::Jvm) {
         bail!("`kargo bench` runs the benchmarks of the JVM target, which is not enabled; add it with `kargo target add jvm`");
     }

@@ -413,6 +413,23 @@ impl<'a> BuildContext<'a> {
         })
     }
 
+    /// The JDK for `platform` (`None` is the host): a downloaded Temurin JDK in its own directory.
+    /// A foreign JDK's binaries cannot run on this host; `packaging` only reads its `jmods` to
+    /// cross-build a `jlink` runtime image with the host's `jlink`. The result is not cached in
+    /// [`BuildContext::jdk`], which stays the host's.
+    pub fn jdk_for_platform(&self, platform: Option<kargo_manifest::TargetPlatform>) -> Result<Jdk> {
+        let Some(target) = platform else {
+            return Ok(self.jdk()?.clone());
+        };
+        if target.is_host() {
+            return Ok(self.jdk()?.clone());
+        }
+        let manifest = self.ws.manifest();
+        let jdk = kargo_toolchain::jdks::resolve_for_platform(self.config, &manifest.toolchain.jdk, jdk_needs(manifest), Some(target))?;
+        jdk.require_version(MIN_JDK)?;
+        Ok(jdk)
+    }
+
     /// The JDK that runs the Kotlin compiler, checked against the Kotlin version
     /// so an unsupported combination fails with a clear message instead of a
     /// compiler stack trace.
