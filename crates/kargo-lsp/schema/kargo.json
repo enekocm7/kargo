@@ -1180,7 +1180,12 @@
               "description": { "type": "string" },
               "shell": { "enum": ["sh", "bash", "cmd", "powershell", "pwsh"] },
               "depends-on": { "type": "array", "items": { "type": "string" } },
-              "env": { "type": "object", "additionalProperties": { "type": "string" } },
+              "env": { "$ref": "#/definitions/task-env" },
+              "env-files": {
+                "description": "More `.env` files for this task only, relative to the package root (the workspace root for [workspace.tasks]), read after `--env-file`. `--no-env-file` skips them.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
               "cwd": { "description": "Working directory, relative to the project root.", "type": "string" },
               "hooks": { "type": "array", "items": { "$ref": "#/definitions/hook" } },
               "workspace": { "description": "In a member: inherit the task of the same name from [workspace.tasks] (alone, without other keys).", "const": true }
@@ -1283,6 +1288,12 @@
           "items": { "type": "string", "minLength": 1 }
         }
       },
+      "additionalProperties": { "$ref": "#/definitions/env-var" }
+    },
+    "task-env": {
+      "description": "Variables for this task only, layered over the project environment. Same format as `[env]` variables, without `env-files` and `expose`. Also as `[tasks.<name>.env]`.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
       "additionalProperties": { "$ref": "#/definitions/env-var" }
     },
     "env-var": {

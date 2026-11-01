@@ -1174,7 +1174,7 @@ A required variable that nothing sets is listed as `missing (required)`; the lis
 
 ## `kargo task`
 
-List tasks, or run one. Extra arguments are appended to the task's last command, or are the `args` of a task written as a [Kotlin script](../../guides/tasks-and-plugins/#kotlin-scripts) (`script = "..."`), which `kargo script` runs. The listing shows a script task as `kargo script <file>` when it has no description.
+List tasks, or run one. Extra arguments are appended to the task's last command, or are the `args` of a task written as a [Kotlin script](../../guides/tasks-and-plugins/#kotlin-scripts) (`script = "..."`), which `kargo script` runs. The listing shows a script task as `kargo script <file>` when it has no description, and a task's own variables as `[env: K1, K2]` without their values.
 
 ```sh
 kargo task               # list
@@ -1185,7 +1185,7 @@ kargo <name> [args]      # shorthand
 
 A first `--` after the task name is dropped in both forms, so `kargo task <name> -- <args>` and `kargo <name> -- <args>` pass the same arguments; a second `--` is passed on (`kargo say -- -- a` gives the task `-- a`).
 
-A package task starts with the [project environment](../../guides/environment/): `--env-file <path>` (repeatable) and `--no-env-file` choose its `.env` files, as they do for `kargo run`. They can come before the name or right after it, where they are taken from the front of the arguments: `kargo deploy --env-file .env.staging --dry-run` passes only `--dry-run` to the task. Workspace tasks run at the root and get no project environment.
+A package task starts with the [project environment](../../guides/environment/): `--env-file <path>` (repeatable) and `--no-env-file` choose its `.env` files, as they do for `kargo run`. They can come before the name or right after it, where they are taken from the front of the arguments: `kargo deploy --env-file .env.staging --dry-run` passes only `--dry-run` to the task. The task's own `env-files` and `env` are layered over them last, so they win over the project environment and the shell; each task in a `depends-on` chain resolves its own. `--no-env-file` skips the task's files too. Workspace tasks run at the root and get no project environment.
 
 In a workspace, a member's directory runs that member's tasks, and the root runs a `[workspace.tasks]` task; a name that only members define runs in every member that has it, in dependency order. See [Workspace tasks](../../guides/workspaces/#tasks-and-plugins).
 

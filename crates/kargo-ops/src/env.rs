@@ -215,6 +215,105 @@ pub fn resolve(ws: &Workspace, profile: &str, opts: &EnvOptions) -> Result<Proje
     ProjectEnv::load(ws.root(), profile, &manifest.env, profile_env, opts, &shell)
 }
 
+/// Extra environment for one task, layered over the project environment.
+///
+/// Reads the task's `env-files` (unless `no_files`, which is `--no-env-file`) and applies its
+/// `env` table. Both win over `base` (the project's variables, `KARGO_*` and hook variables)
+/// and over the shell, so two tasks can have truly separate environments. Returns the variables
+/// to add and the files that were read (for the tracked-secret warning).
+#[allow(clippy::type_complexity)]
+pub fn task_overlay(
+    root: &Path,
+    task_name: &str,
+    task: &EnvTable,
+    base: &[(String, String)],
+    no_files: bool,
+) -> Result<(Vec<(String, String)>, Vec<LoadedFile>)> {
+    let shell: BTreeMap<String, String> =
+        std::env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+    let base_map: BTreeMap<&str, &str> = base.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let mut files: BTreeMap<String, Var> = BTreeMap::new();
+    let mut loaded = Vec::new();
+    if !no_files {
+        for name in &task.files {
+            let path = root.join(name);
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    bail!("task `{task_name}`: `env-files` names `{}`, which does not exist", path.display())
+                }
+                Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+            };
+            let file = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+            let known = |key: &str| {
+                files
+                    .get(key)
+                    .map(|var| var.value.clone())
+                    .or_else(|| base_map.get(key).map(|v| (*v).to_owned()))
+                    .or_else(|| shell.get(key).cloned())
+            };
+            let entries = parse_dotenv(&file, &text, &known)?;
+            loaded.push(LoadedFile { file: file.clone(), secret_keys: secret_keys(&entries) });
+            for (key, value, line) in entries {
+                files.insert(key, Var { value, source: Source::File { file: file.clone(), line } });
+            }
+        }
+    }
+
+    let section = format!("[tasks.{task_name}.env]");
+    let mut missing = Vec::new();
+    let mut vars: BTreeMap<String, String> = BTreeMap::new();
+    for (name, var) in &task.vars {
+        match &var.value {
+            None => {
+                // `required = true` without a `value`: it must come from the shell, a task file or the project environment.
+                if !shell.contains_key(name) && !files.contains_key(name) && !base_map.contains_key(name.as_str()) {
+                    missing.push((name.clone(), Source::Manifest(section.clone())));
+                }
+            }
+            Some(_) => {
+                // A task's own `env` wins over the project environment and the shell, so `force` needs no check.
+                vars.insert(name.clone(), manifest_value(var, root));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let names: Vec<String> = missing.iter().map(|(name, source)| format!("`{name}` (declared in {})", source.describe())).collect();
+        let (noun, pronoun) = if names.len() == 1 { ("variable", "it") } else { ("variables", "them") };
+        bail!(
+            "required environment {noun} not set: {}\nset {pronoun} in your shell or in a task `env-files` file, or give {pronoun} a `value` in kargo.toml",
+            names.join(", ")
+        );
+    }
+
+    let mut overlay: Vec<(String, String)> = files.into_iter().map(|(k, var)| (k, var.value)).collect();
+    for (k, v) in vars {
+        if let Some(existing) = overlay.iter_mut().find(|(key, _)| *key == k) {
+            existing.1 = v;
+        } else {
+            overlay.push((k, v));
+        }
+    }
+    Ok((overlay, loaded))
+}
+
+/// Warnings for task `env-files` that git tracks while they set secret-looking variables, like
+/// [`ProjectEnv::tracked_secret_warnings`].
+pub fn task_tracked_warnings(files: &[LoadedFile], root: &Path) -> Vec<String> {
+    files
+        .iter()
+        .filter(|f| !f.secret_keys.is_empty() && is_tracked(root, &f.file))
+        .map(|f| {
+            format!(
+                "`{}` is tracked by git but sets {}; keep secrets in a git-ignored `.local` file or in your shell",
+                f.file,
+                f.secret_keys.join(", ")
+            )
+        })
+        .collect()
+}
+
 /// The keys of `.env` entries that look like secrets and have a value.
 fn secret_keys(entries: &[(String, String, usize)]) -> Vec<String> {
     entries
@@ -639,5 +738,60 @@ mod tests {
         assert_eq!(env.files, [LoadedFile { file: ".env".to_owned(), secret_keys: vec!["API_TOKEN".to_owned()] }]);
         // Outside a git repository nothing is tracked, so there is nothing to warn about.
         assert!(env.tracked_secret_warnings(dir.path()).is_empty());
+    }
+
+    fn task_table(vars: &[(&str, EnvVar)], files: &[&str]) -> EnvTable {
+        EnvTable {
+            vars: vars.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            files: files.iter().map(|s| s.to_string()).collect(),
+            expose: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn task_files_and_vars_win_over_the_project_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env.frontend"), "API_URL=file\nEXTRA=file\n").unwrap();
+        let task = task_table(&[("API_URL", var("manifest")), ("DATABASE_URL", var("postgres://task"))], &[".env.frontend"]);
+        let base = [("API_URL".to_owned(), "base".to_owned()), ("BASE_ONLY".to_owned(), "base".to_owned())];
+        let (overlay, loaded) = task_overlay(dir.path(), "frontend", &task, &base, false).unwrap();
+        let map: BTreeMap<_, _> = overlay.into_iter().collect();
+        // The task's own `env` wins over its `env-files`, which win over the project environment.
+        assert_eq!(map["API_URL"], "manifest");
+        assert_eq!(map["EXTRA"], "file");
+        assert_eq!(map["DATABASE_URL"], "postgres://task");
+        assert!(!map.contains_key("BASE_ONLY"), "the overlay holds only the task's keys");
+        assert_eq!(loaded, [LoadedFile { file: ".env.frontend".to_owned(), secret_keys: Vec::new() }]);
+        assert!(task_tracked_warnings(&loaded, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn task_overlay_skips_files_with_no_files_and_reports_missing_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.env"), "A=1\n").unwrap();
+        let task = task_table(&[], &["a.env"]);
+        let (overlay, _) = task_overlay(dir.path(), "a", &task, &[], true).unwrap();
+        assert!(overlay.is_empty(), "--no-env-file skips task files too");
+
+        let missing = task_table(&[], &["gone.env"]);
+        let err = task_overlay(dir.path(), "a", &missing, &[], false).unwrap_err().to_string();
+        assert!(err.contains("task `a`") && err.contains("gone.env"), "{err}");
+    }
+
+    #[test]
+    fn task_required_and_relative_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let required = task_table(&[("DATABASE_URL", EnvVar { required: true, ..Default::default() })], &[]);
+        let err = task_overlay(dir.path(), "backend", &required, &[], false).unwrap_err().to_string();
+        assert!(err.contains("`DATABASE_URL` (declared in [tasks.backend.env])"), "{err}");
+
+        std::fs::write(dir.path().join("db.env"), "DATABASE_URL=postgres://file\n").unwrap();
+        let with_file = task_table(&[("DATABASE_URL", EnvVar { required: true, ..Default::default() })], &["db.env"]);
+        let (overlay, _) = task_overlay(dir.path(), "backend", &with_file, &[], false).unwrap();
+        assert_eq!(overlay, [("DATABASE_URL".to_owned(), "postgres://file".to_owned())]);
+
+        let relative = task_table(&[("CONFIG_DIR", EnvVar { relative: true, ..var("config") })], &[]);
+        let (overlay, _) = task_overlay(dir.path(), "tool", &relative, &[], false).unwrap();
+        assert_eq!(overlay[0].1, dir.path().join("config").to_string_lossy());
     }
 }

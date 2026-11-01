@@ -1067,6 +1067,48 @@ fn task_errors() {
 }
 
 #[test]
+fn tasks_have_their_own_env_and_env_files() {
+    let var = |value: &str| EnvVar { value: Some(value.to_owned()), ..Default::default() };
+    let m = parse(&format!(
+        "{MINIMAL}\n[tasks.frontend]\nrun = \"npm run dev\"\nenv-files = [\".env.frontend\"]\n[tasks.frontend.env]\nAPI_URL = \"https://staging.example.com\"\nPORT = 8080\nFLAG = true\nDATABASE_URL = {{ required = true }}\nCONFIG_DIR = {{ value = \"config\", relative = true }}\nFORCED = {{ value = \"kargo\", force = true }}\n"
+    ));
+    let frontend = &m.tasks["frontend"];
+    assert_eq!(frontend.env.files, [".env.frontend"]);
+    assert_eq!(frontend.env.vars["API_URL"], var("https://staging.example.com"));
+    assert_eq!(frontend.env.vars["PORT"], var("8080"));
+    assert_eq!(frontend.env.vars["FLAG"], var("true"));
+    assert_eq!(frontend.env.vars["DATABASE_URL"], EnvVar { required: true, ..Default::default() });
+    assert_eq!(frontend.env.vars["CONFIG_DIR"], EnvVar { relative: true, ..var("config") });
+    assert_eq!(frontend.env.vars["FORCED"], EnvVar { force: true, ..var("kargo") });
+    assert!(frontend.env.expose.is_empty());
+
+    // The inline form holds the same keys.
+    let m = parse(&format!(
+        "{MINIMAL}\n[tasks]\nbackend = {{ run = \"echo\", env-files = [\".env.backend\"], env = {{ API_URL = \"https://api.example.com\" }} }}\n"
+    ));
+    assert_eq!(m.tasks["backend"].env.files, [".env.backend"]);
+    assert_eq!(m.tasks["backend"].env.vars["API_URL"], var("https://api.example.com"));
+
+    // A variable named `run` inside `env` is fine: it is a variable, not the task's command.
+    let m = parse(&format!("{MINIMAL}\n[tasks]\na = {{ run = \"echo\", env = {{ run = \"x\" }} }}\n"));
+    assert_eq!(m.tasks["a"].env.vars["run"], var("x"));
+
+    let with = |t: &str| format!("{MINIMAL}\n[tasks]\n{t}\n");
+    assert!(parse_err(&with("a = { run = \"x\", env = { \"1BAD\" = \"y\" } }")).contains("invalid variable name"));
+    assert!(parse_err(&with("a = { run = \"x\", env = { B = {} } }")).contains("needs a `value`"));
+    assert!(
+        parse_err(&with("a = { run = \"x\", env = { B = { value = \"v\", required = true } } }")).contains("both `value` and `required`")
+    );
+    assert!(parse_err(&with("a = { run = \"x\", env-files = [\"\"] }")).contains("`env-files` must be an array"));
+    assert!(parse_err(&with("a = { run = \"x\", env-files = \"x\" }")).contains("invalid task `a`"));
+    assert!(
+        parse_err(&format!("{MINIMAL}\n[tasks.a]\nrun = \"echo\"\n[tasks.a.env]\nexpose = [\"A\"]\n"))
+            .contains("`expose` belongs in [env]")
+    );
+    assert!(parse_err(&format!("{MINIMAL}\n[tasks.a]\nrun = \"echo\"\n[tasks.a.env]\nenv-files = [\"x\"]\n")).contains("not in its `env`"));
+}
+
+#[test]
 fn tasks_and_plugins_can_run_kotlin_scripts() {
     let m = parse(&format!(
         "{MINIMAL}

@@ -1135,7 +1135,8 @@ pub struct Task {
     /// The shell the commands run in; `None` is the platform shell (`sh` on Unix, `cmd` on Windows).
     pub shell: Option<TaskShell>,
     pub depends_on: Vec<String>,
-    pub env: BTreeMap<String, String>,
+    /// Extra environment variables and `.env` files, layered over the project environment.
+    pub env: EnvTable,
     pub cwd: Option<PathBuf>,
     /// Built-in hooks this task attaches to.
     pub hooks: Vec<Hook>,

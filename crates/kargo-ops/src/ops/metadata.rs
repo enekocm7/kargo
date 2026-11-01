@@ -130,12 +130,16 @@ fn package(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
         .tasks
         .values()
         .map(|t| {
+            let mut keys: Vec<&String> = t.env.vars.keys().collect();
+            keys.sort();
             json!({
                 "name": t.name,
                 "description": t.description,
                 "run": t.platform_run(),
                 "script": t.script.as_ref().map(|s| path(&ws.root().join(s))),
                 "depends-on": t.depends_on,
+                "env": keys,
+                "env-files": t.env.files,
             })
         })
         .collect();

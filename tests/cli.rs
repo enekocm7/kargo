@@ -5948,6 +5948,146 @@ fn tasks_run_with_the_project_environment() {
 }
 
 #[test]
+fn tasks_layer_their_own_env_files_and_vars_over_the_project() {
+    let p = Project::new();
+    let (frontend_unix, frontend_windows) = ("echo $API_URL $MODE > frontend.txt", "echo %API_URL% %MODE%> frontend.txt");
+    let (backend_unix, backend_windows) = ("echo $API_URL $MODE > backend.txt", "echo %API_URL% %MODE%> backend.txt");
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tasky",
+            &format!(
+                "[env]\nAPI_URL = \"https://base.example.com\"\nMODE = \"base\"\n\n[tasks.frontend]\nrun = \"{frontend_unix}\"\nwindows-run = \"{frontend_windows}\"\nenv-files = [\".env.frontend\"]\n[tasks.frontend.env]\nAPI_URL = \"https://staging.example.com\"\nMODE = {{ value = \"front\", force = true }}\n\n[tasks.backend]\nrun = \"{backend_unix}\"\nwindows-run = \"{backend_windows}\"\n[tasks.backend.env]\nAPI_URL = \"https://api.example.com\"\n"
+            ),
+        ),
+    );
+    p.file(".env.frontend", "API_URL=https://file.example.com\nEXTRA=file\n");
+    p.file("staging.env", "API_URL=https://cli.example.com\n");
+    // The task's `env` wins over its `env-files`, which win over `--env-file` and `[env]`.
+    p.kargo().args(["task", "--env-file", "staging.env", "frontend"]).assert().success();
+    assert_eq!(p.read("frontend.txt").trim(), "https://staging.example.com front");
+    p.kargo().args(["task", "backend"]).assert().success();
+    assert_eq!(p.read("backend.txt").trim(), "https://api.example.com base");
+}
+
+#[cfg(unix)]
+#[test]
+fn each_task_in_a_chain_keeps_its_own_environment() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tasky",
+            "[tasks]\nfirst = { run = \"echo $ONLY_FIRST > first.txt\", env = { ONLY_FIRST = \"one\" } }\nsecond = { run = \"echo $ONLY_FIRST-$ONLY_SECOND > second.txt\", env = { ONLY_SECOND = \"two\" }, depends-on = [\"first\"] }\n",
+        ),
+    );
+    p.kargo().args(["task", "second"]).assert().success();
+    assert_eq!(p.read("first.txt").trim(), "one");
+    // Nothing leaks sideways: `second` does not see `first`'s variables.
+    assert_eq!(p.read("second.txt").trim(), "-two");
+}
+
+#[test]
+fn tasks_fail_on_their_own_required_and_relative_variables() {
+    let p = Project::new();
+    let (rel_unix, rel_windows) = ("echo $CONFIG_DIR > out.txt", "echo %CONFIG_DIR%> out.txt");
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tasky",
+            &format!(
+                "[tasks]\nneed = {{ run = \"echo hi\", env = {{ DATABASE_URL = {{ required = true }} }} }}\nrel = {{ run = \"{rel_unix}\", windows-run = \"{rel_windows}\", env = {{ CONFIG_DIR = {{ value = \"config\", relative = true }} }} }}\n"
+            ),
+        ),
+    );
+    p.kargo()
+        .args(["task", "need"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`DATABASE_URL` (declared in [tasks.need.env])"));
+    p.file(".env.task", "DATABASE_URL=postgres://file\n");
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tasky",
+            &format!(
+                "[tasks]\nneed = {{ run = \"echo hi\", env-files = [\".env.task\"], env = {{ DATABASE_URL = {{ required = true }} }} }}\nrel = {{ run = \"{rel_unix}\", windows-run = \"{rel_windows}\", env = {{ CONFIG_DIR = {{ value = \"config\", relative = true }} }} }}\n"
+            ),
+        ),
+    );
+    p.kargo().args(["task", "need"]).assert().success();
+    p.kargo().args(["task", "rel"]).assert().success();
+    assert_eq!(p.read("out.txt").trim(), p.path().join("config").to_string_lossy().as_ref());
+}
+
+#[test]
+fn tasks_report_a_missing_env_file_and_skip_files_with_no_env_file() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("tasky", "[tasks]\nshow = { run = \"echo hi\", env-files = [\"gone.env\"] }\n"));
+    p.kargo()
+        .args(["task", "show"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("task `show`").and(predicate::str::contains("gone.env")));
+
+    #[cfg(unix)]
+    {
+        p.file(".env.task", "FROM_FILE=file\n");
+        p.file(
+            "kargo.toml",
+            &manifest(
+                "tasky",
+                "[tasks]\nshow = { run = \"echo ${FROM_FILE:-missing} > out.txt\", shell = \"sh\", env-files = [\".env.task\"] }\n",
+            ),
+        );
+        p.kargo().args(["task", "--no-env-file", "show"]).assert().success();
+        assert_eq!(p.read("out.txt").trim(), "missing");
+    }
+}
+
+#[test]
+fn task_lists_and_metadata_show_env_keys_without_values() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "tasky",
+            "[tasks.frontend]\nrun = \"echo hi\"\nenv-files = [\".env.frontend\"]\n[tasks.frontend.env]\nAPI_URL = \"https://staging.example.com\"\nDATABASE_URL = { required = true }\n",
+        ),
+    );
+    p.kargo()
+        .args(["task", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[env: API_URL, DATABASE_URL]").and(predicate::str::contains("https://staging").not()))
+        .stdout(predicate::str::contains("https://staging").not());
+    let out = p.kargo().args(["metadata", "--no-deps"]).assert().success().get_output().stdout.clone();
+    let metadata: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let task = &metadata["packages"][0]["tasks"].as_array().unwrap().iter().find(|t| t["name"] == "frontend").unwrap();
+    assert_eq!(task["env"], serde_json::json!(["API_URL", "DATABASE_URL"]), "{task}");
+    assert_eq!(task["env-files"], serde_json::json!([".env.frontend"]), "{task}");
+}
+
+#[test]
+fn hook_tasks_see_the_hook_and_win_only_for_the_keys_they_set() {
+    let p = Project::new();
+    let (unix, windows) = ("echo $KARGO_HOOK $KEPT $OWN > hook.txt", "echo %KARGO_HOOK% %KEPT% %OWN%> hook.txt");
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "hooked",
+            &format!(
+                "[env]\nKEPT = \"base\"\nOWN = \"base\"\n\n[tasks]\nlog = {{ run = \"{unix}\", windows-run = \"{windows}\", hooks = [\"pre-build\"], env = {{ OWN = \"task\" }} }}\n"
+            ),
+        ),
+    );
+    p.kargo().args(["--offline", "build"]).assert().failure();
+    assert_eq!(p.read("hook.txt").trim(), "pre-build base task");
+}
+
+#[test]
 fn script_needs_a_file_or_code() {
     let p = Project::new();
     // clap rejects the missing file as a usage error.

@@ -1207,15 +1207,20 @@ Hooks: `pre-build`, `post-build`, `pre-test`, `post-test`, `pre-run`, `post-pack
 ```toml
 [tasks]
 simple = "echo hi"
-full = { run = ["cmd1", "cmd2"], description = "...", depends-on = ["simple"], env = { K = "v" }, cwd = "sub", hooks = ["pre-build"] }
+full = { run = ["cmd1", "cmd2"], description = "...", depends-on = ["simple"], env = { K = "v" }, env-files = [".env.task"], cwd = "sub", hooks = ["pre-build"] }
 posix = { run = "echo $KARGO_PKG_NAME", shell = "sh" }
 portable = { run = "echo $KARGO_PKG_NAME", windows-run = "echo %KARGO_PKG_NAME%" }
 gen = { script = "scripts/gen.kts", description = "Generate code", hooks = ["pre-build"] }
+
+[tasks.frontend.env]
+API_URL = "https://staging.example.com"
 ```
 
 `script` is a Kotlin file that [`kargo script`](../../guides/scripts/) runs instead of `run`: a `.kts` script or a `.kt` file with a front matter. It is relative to the project root (the workspace root for a task of `[workspace.tasks]`, and for one a member inherits), and the arguments after the task name are its `args`. A task has a `script` or a `run`: `windows-run` and `shell` go with `run`, and the manifest rejects the combination. A task of only `depends-on` runs its dependencies.
 
 `shell` picks the shell the commands run in: `sh`, `bash`, `cmd`, `powershell` or `pwsh`. The default is `sh` on Unix and `cmd` on Windows. `windows-run` (a command or a list) replaces `run` on Windows. When it is not set, `run` is used on every platform.
+
+`env` holds the task's own variables, in the same format as [`[env]`](#env) variables (a string, integer, boolean or a table with `value`, `force`, `relative` and `required`), without `expose`. It can also be written as `[tasks.<name>.env]`. `env-files` names more `.env` files for the task only, relative to the package root (the workspace root for `[workspace.tasks]`, absolute for a task a member inherits), read after `--env-file`. A missing one is an error, and `--no-env-file` skips them. Each task in a `depends-on` chain resolves its own files and variables; a task's `env` always wins over the project environment and the shell.
 
 A task can have any name without spaces, but one named like a built-in command (`build`, `test`, `fmt`, ...) or its alias (`b`, `t`, ...) runs only as `kargo task <name>`, and Kargo [warns](../warnings/#tasks-hidden-by-built-in-commands) about it.
 

@@ -2406,7 +2406,9 @@ struct RawTask {
     #[serde(default)]
     depends_on: Vec<String>,
     #[serde(default)]
-    env: BTreeMap<String, String>,
+    env: toml::Table,
+    #[serde(default)]
+    env_files: Vec<String>,
     cwd: Option<PathBuf>,
     #[serde(default)]
     hooks: Vec<String>,
@@ -2515,6 +2517,22 @@ fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
         if run.is_empty() && script.is_none() && raw.depends_on.is_empty() {
             bail!("task `{name}` has nothing to do: add `run`, `script` or `depends-on`");
         }
+        for file in &raw.env_files {
+            if file.is_empty() {
+                bail!("task `{name}`: `env-files` must be an array of non-empty strings");
+            }
+        }
+        let mut vars = BTreeMap::new();
+        for (var, value) in &raw.env {
+            if var == "env-files" {
+                bail!("task `{name}`: `env-files` goes with the task, not in its `env`; write it next to `run`");
+            }
+            if var == "expose" {
+                bail!("task `{name}`: `expose` belongs in [env]; it is the only table that generates BuildConfig");
+            }
+            vars.insert(var.clone(), parse_env_var(var, value, &what)?);
+        }
+        let env = EnvTable { vars, files: raw.env_files, expose: Vec::new() };
         tasks.insert(
             name.clone(),
             Task {
@@ -2525,7 +2543,7 @@ fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
                 script,
                 shell,
                 depends_on: raw.depends_on,
-                env: raw.env,
+                env,
                 cwd: raw.cwd,
                 hooks: parse_hooks(&raw.hooks, &format!("task `{name}`"))?,
             },
@@ -2550,6 +2568,20 @@ fn absolutize_script(value: &mut Value, root: &Path) {
         let absolute = root.join(script).to_string_lossy().into_owned();
         value.as_table_mut().expect("a plugin or task is a table").insert("script".to_owned(), Value::String(absolute));
     }
+}
+
+/// Makes the `env-files` of an inherited task absolute, so they stay the workspace's files
+/// whichever member runs it.
+fn absolutize_task_files(value: &mut Value, root: &Path) {
+    let Some(files) = value.get("env-files").and_then(Value::as_array).cloned() else { return };
+    let absolute: Vec<Value> = files
+        .into_iter()
+        .map(|f| match f {
+            Value::String(s) if !Path::new(&s).is_absolute() => Value::String(root.join(s).to_string_lossy().into_owned()),
+            other => other,
+        })
+        .collect();
+    value.as_table_mut().expect("a task is a table").insert("env-files".to_owned(), Value::Array(absolute));
 }
 
 /// Whether `value` is an inheritance marker: `{ workspace = true }`.
@@ -2600,6 +2632,9 @@ pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManife
             if section == "plugins" || section == "tasks" {
                 absolutize_script(&mut value, &workspace.root);
             }
+            if section == "tasks" {
+                absolutize_task_files(&mut value, &workspace.root);
+            }
             entries.insert(key, value);
         }
         // A task inherited from the workspace brings the workspace tasks it depends on.
@@ -2621,6 +2656,7 @@ pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManife
                 for dep in missing {
                     let mut task = workspace.raw_tasks[&dep].clone();
                     absolutize_script(&mut task, &workspace.root);
+                    absolutize_task_files(&mut task, &workspace.root);
                     entries.insert(dep, task);
                 }
             }

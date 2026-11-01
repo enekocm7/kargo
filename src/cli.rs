@@ -2303,6 +2303,11 @@ fn tasks_help() -> Option<String> {
 
 fn task_description(task: &kargo_manifest::Task, builtins: &[String]) -> String {
     let mut desc = task.description.clone().unwrap_or_else(|| task.summary());
+    if !task.env.vars.is_empty() {
+        let mut keys: Vec<&str> = task.env.vars.keys().map(String::as_str).collect();
+        keys.sort();
+        desc.push_str(&format!(" [env: {}]", keys.join(", ")));
+    }
     if !task.hooks.is_empty() {
         let hooks: Vec<&str> = task.hooks.iter().map(|h| h.as_str()).collect();
         desc.push_str(&format!(" [hooks: {}]", hooks.join(", ")));
@@ -4431,14 +4436,14 @@ fn run_task(config: &Config, project: &Project, name: &str, args: &[String], env
         let ws = project.package(index);
         if ws.manifest().tasks.contains_key(name) {
             let vars = task_env(shell, project, ws, &env)?;
-            kargo_ops::tasks::run(config, ws.root(), &ws.manifest().tasks, name, args, &vars)?;
+            kargo_ops::tasks::run(config, ws.root(), &ws.manifest().tasks, name, args, &vars, env.no_files)?;
             return Ok(true);
         }
     }
     let Some(workspace) = project.workspace_manifest() else { return Ok(false) };
     if workspace.tasks.contains_key(name) {
         let env = kargo_ops::plugins::workspace_env(project);
-        kargo_ops::tasks::run(config, project.root(), &workspace.tasks, name, args, &env)?;
+        kargo_ops::tasks::run(config, project.root(), &workspace.tasks, name, args, &env, false)?;
         return Ok(true);
     }
     if package.is_some() {
@@ -4452,7 +4457,7 @@ fn run_task(config: &Config, project: &Project, name: &str, args: &[String], env
     for &index in &members {
         let ws = project.package(index);
         let vars = task_env(shell, project, ws, &env)?;
-        kargo_ops::tasks::run(config, ws.root(), &ws.manifest().tasks, name, args, &vars)
+        kargo_ops::tasks::run(config, ws.root(), &ws.manifest().tasks, name, args, &vars, env.no_files)
             .with_context(|| format!("task `{name}` of `{}` failed", ws.name()))?;
     }
     Ok(!members.is_empty())

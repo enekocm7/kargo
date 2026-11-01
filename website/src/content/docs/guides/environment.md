@@ -102,6 +102,8 @@ Without `force`, a variable you export in your shell beats everything in the pro
 $ LOG_LEVEL=trace kargo run
 ```
 
+A task's own `env-files` and `env` win over all of the above (and over the shell, so two tasks stay isolated). See [Per-task environment](../tasks-and-plugins/#per-task-environment).
+
 ## Required variables
 
 `required = true` says the program can't work without the variable. `kargo run`, `kargo test` and `kargo task` check for it before they build or run anything:
@@ -173,7 +175,7 @@ $ kargo task --env-file .env.staging deploy
 $ kargo deploy --env-file=.env.staging
 ```
 
-Flags after the task name are taken only from the front of its arguments, so `kargo deploy --env-file .env.staging --dry-run` passes `--dry-run` on to the task. Workspace tasks run at the root, which has no `[env]` of its own, so they get no project environment.
+Flags after the task name are taken only from the front of its arguments, so `kargo deploy --env-file .env.staging --dry-run` passes `--dry-run` on to the task. Workspace tasks run at the root, which has no `[env]` of its own, so they get no project environment. A task's own `env-files` and `env` still apply: `--no-env-file` skips the task's files too.
 
 Build commands don't take these flags. Their hooks read the standard files.
 
@@ -209,7 +211,7 @@ A [`build-config` generator](../code-generation/#buildconfig) can also write the
 |---|---|---|
 | `kargo run` on the JVM, Native, and Wasm with `node` | Yes | Yes |
 | `kargo test` on the JVM, Native, and Wasm tests on Node.js | Yes | Yes |
-| `kargo task` and `kargo <task>` (package tasks) | Yes; a task's own `env` still wins | Yes |
+| `kargo task` and `kargo <task>` (package tasks) | Yes; a task's own `env-files` and `env` still win | Yes, including the task's own `required` variables |
 | Build hooks and [hook plugins](../tasks-and-plugins/#hooks) | Yes, the variables that are set | No |
 | Wasm browser apps and browser tests | No: the browser doesn't read process variables | No |
 | Android (`kargo run -t android`, `kargo test -t android`) | No: Gradle installs the app, which gets no process variables | No |

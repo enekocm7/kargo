@@ -16,7 +16,7 @@ Write tasks and hooks as [Kotlin scripts](../scripts/). A script is the same lan
 
 ## Tasks
 
-A package's tasks start with its [environment variables](../environment/): the ones from `[env]` and the `.env` files, then the task's own `env`, which wins over them. `--env-file` picks other `.env` files for a task, as in `kargo task --env-file .env.staging deploy`.
+A package's tasks start with its [environment variables](../environment/): the ones from `[env]` and the `.env` files, then `--env-file` files from the command line, then the task's own `env-files` and `env`, which win over them. `--env-file` picks other `.env` files for a task, as in `kargo task --env-file .env.staging deploy`.
 
 ```toml title="kargo.toml"
 [tasks]
@@ -43,11 +43,32 @@ Built-in commands take precedence: a task named `build`, `test` or `fmt` runs on
 | `shell` | The shell to run the commands in: `sh`, `bash`, `cmd`, `powershell` or `pwsh` (default: `sh` on Unix, `cmd` on Windows) |
 | `description` | Shown by `kargo task`, `kargo --help` and [shell completions](../../getting-started/installation/#4-shell-completions-optional) |
 | `depends-on` | Tasks to run first (cycles are rejected) |
-| `env` | Extra environment variables |
+| `env` | Extra environment variables for this task only, same format as [`[env]`](../../reference/manifest/#env) variables (a string, number, boolean or a table with `value`, `force`, `relative` and `required`), without `expose`. Also as `[tasks.<name>.env]` |
+| `env-files` | More `.env` files for this task only, relative to the package root, read after `--env-file`. A missing one is an error. `--no-env-file` skips them |
 | `cwd` | Working directory, relative to the project root |
 | `hooks` | Lifecycle hooks that run this task automatically |
 
 A task has a `script` or a `run`, not both: `windows-run` and `shell` go with `run`, and Kargo rejects a task that mixes them with `script`. A task with only `depends-on` runs its dependencies.
+
+### Per-task environment
+
+Give two tasks truly separate environments without wrapper scripts: each task layers its own `env-files` and `env` over the [project environment](../environment/), with the same validation (`value`, `force`, `relative`, `required` and variable names) and the same secret handling as `[env]`. A task's `env` always wins over the project environment and the shell, so `force` needs no setting to isolate a task.
+
+```toml title="kargo.toml"
+[tasks.frontend]
+run = "npm run dev"
+env-files = [".env.frontend"]          # read after `--env-file`
+[tasks.frontend.env]
+API_URL = "https://staging.example.com"
+DATABASE_URL = { required = true }     # must come from the shell or a task file
+
+[tasks.backend]
+run = "./gradlew bootRun"
+[tasks.backend.env]
+API_URL = "https://api.example.com"
+```
+
+From the lowest priority to the highest, a task sees: `[env]` and `[profile.dev.env]`, the standard `.env` files, their `env-files`, `--env-file` files, the task's own `env-files`, then the task's own `env`. Each task in a `depends-on` chain resolves its own files and variables; nothing leaks sideways. A task that runs as a hook gets the hook variables too, and its own `env` and `env-files` win over them only for the keys they set. `KARGO_TASK` is still injected, and `kargo task` lists a task's keys without their values (`[env: API_URL, DATABASE_URL]`), as does [`kargo metadata`](../../reference/machine-readable-output/#kargo-metadata) for editors.
 
 ### Kotlin scripts
 
