@@ -700,6 +700,37 @@ note: `org.jetbrains.kotlinx:kotlinx-datetime` 0.8.0 is available but not compat
 
 Dependencies inherited with `workspace = true` are skipped; upgrade them in the workspace's `kargo.toml`. "Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). npm packages are upgraded too, keeping the `^` or `~` of the entry: `left-pad = "^1.0.0"` becomes `"^1.3.0"`, or with `--incompatible` the newest version, `"^2.0.0"`; a spec that isn't a single version is skipped (naming it says so). `kargo.lock` is re-resolved on the next build because the manifest changed.
 
+## `kargo tidy`
+
+Report the dependencies that no source uses, and remove them with `--fix`.
+
+```sh
+kargo tidy [options]
+```
+
+```console
+$ kargo tidy
+unused dependencies in app v0.1.0:
+  com.google.guava:guava  [dependencies]
+dependencies only tests use (move them to [dev-dependencies]) in app v0.1.0:
+  io.mockk:mockk  [dependencies]
+error: 1 unused dependency; remove them with `kargo tidy --fix`
+```
+
+A Maven module is **used** when a source mentions a package of its jar: an `import`, a star import or a fully qualified name. Kargo reads the jar from the resolution a build uses, so no compiler runs. The sources are `src/`, `src-<target>/`, the source sets, generated sources, `tests/`, test fixtures, the sources of `[test.suites.*]` and `benches/`. A [`path` dependency](../../guides/dependencies/#local-packages) is used when a source mentions a package that its own sources declare; `kargo tidy` flags the edge in your `kargo.toml` and never touches the dependency's manifest. A dependency in `[dependencies]` that only tests use is reported as **dev-only** and is not removed.
+
+Never reported: `runtime`, `provided`, `processor` and `ksp` dependencies, BOMs, `force = true` versions, dependencies with a `classifier` or `extension`, `exported` path dependencies, `kotlin-stdlib*` and what `[frameworks]` adds. Kargo reads the jar on the JVM and the klib on Wasm, JS and Native, so each target's dependencies are checked against its own resolution; a common dependency is used when any target's package for it is mentioned. Android dependencies are resolved by Gradle and are not checked, and a dependency whose resolution has no classes to read is listed in a note. A dependency that only a Kotlin script uses (a `.kts` file in the project directory, or the `script` of a task or plugin) is kept unless you pass `--strict`.
+
+| Option | Meaning |
+| --- | --- |
+| `--fix` | Remove the unused dependencies from `kargo.toml`, keeping its formatting. `kargo.lock` follows on the next build. |
+| `--npm` | Also check `[target.wasm]` and `[target.js]` npm packages: used when a Kotlin source mentions the package's generated Kotlin package, or a source in `js-sources` names the module. Packages that only configure tools (bundlers, `typescript`) look unused; check them before using `--fix`. |
+| `--strict` | Also report dependencies that only scripts use. |
+| `-p`, `--package`, `--workspace`, `--exclude` | Select packages, as for `kargo build`. |
+| `--format json` | Print `{ package, version, checked, unused, dev-only, notes }` per package (an array in a workspace); each entry has `name`, `kind` (`maven`, `path` or `npm`) and `table`. |
+
+Exits with `101` when unused dependencies remain, so it works as a CI step; with `--fix` it removes them and exits `0`.
+
 ## `kargo audit`
 
 Check every dependency against the [OSV](https://osv.dev) database of known security advisories, and fail when one is serious enough.

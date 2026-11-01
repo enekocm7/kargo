@@ -69,6 +69,18 @@ The npm packages of the wasm and js targets are listed and upgraded next to the 
 
 `kargo upgrade` changes what you declared in `kargo.toml`. To move versions in `kargo.lock` only, for example a transitive dependency, use `kargo update` (see [The lockfile](#the-lockfile)).
 
+## Removing unused dependencies
+
+While prototyping you add dependencies and later delete the code that used them. `kargo tidy` lists the ones no source imports, and `kargo tidy --fix` removes them from `kargo.toml`:
+
+```console
+$ kargo tidy
+unused dependencies in app v0.1.0:
+  com.google.guava:guava  [dependencies]
+```
+
+A dependency in `[dependencies]` that only tests use is reported separately, so you can move it to `[dev-dependencies]` and keep it out of the published POM. Runtime-only, `provided`, processor and KSP dependencies are never reported. See [`kargo tidy`](../../reference/commands/#kargo-tidy) for what counts as used.
+
 ## Security advisories
 
 `kargo audit` looks up every resolved dependency, transitive ones and the npm packages of Wasm and JS included, in the [OSV](https://osv.dev) database of security advisories:

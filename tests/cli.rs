@@ -1394,6 +1394,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "outdated",
         "upgrade",
         "audit",
+        "tidy",
         "vendor",
         "generate",
         "preview",
@@ -8190,4 +8191,58 @@ fn templates_from_a_git_repository() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("--offline"));
+}
+
+#[test]
+fn tidy_reports_and_removes_unused_dependencies() {
+    let class = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52, 0, 1, 0, 0x21];
+    let repo = LocalRepo::new();
+    repo.publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[])
+        .publish("org.jetbrains.kotlin:kotlin-test-junit5", "2.4.21", &[])
+        .publish("org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, &[]);
+    for (module, version, package) in
+        [("g:used", "1.0", "com/used"), ("g:unused", "1.0", "com/unused"), ("g:testonly", "1.0", "com/testonly")]
+    {
+        repo.publish(module, version, &[]);
+        let (group, artifact) = module.split_once(':').unwrap();
+        let jar = repo.dir.path().join(format!("{group}/{artifact}/{version}/{artifact}-{version}.jar"));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        zip.start_file(format!("{package}/Api.class"), zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, &class).unwrap();
+        zip.finish().unwrap();
+    }
+
+    let p = Project::new();
+    let extra = format!(
+        "[kotlin]
+version = \"2.4.21\"
+[dependencies]
+\"g:used\" = \"1.0\"
+\"g:unused\" = \"1.0\"
+\"g:testonly\" = \"1.0\"
+[repositories]
+local = \"{}\"
+",
+        repo.url()
+    );
+    p.file("kargo.toml", &manifest("app", &extra))
+        .file("src/Main.kt", "import com.used.Api\nfun main() {}\n")
+        .file("tests/MainTest.kt", "import com.testonly.Api\nclass MainTest\n");
+
+    let out = p.kargo().args(["--offline", "tidy"]).assert().failure().code(101).get_output().clone();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("g:unused") && stdout.contains("g:testonly"), "{stdout}");
+    assert!(!stdout.contains("g:used "), "{stdout}");
+    let unused_part = stdout.split("only tests use").next().unwrap();
+    assert!(unused_part.contains("g:unused") && !unused_part.contains("g:testonly"), "{stdout}");
+
+    let json = p.kargo().args(["--offline", "tidy", "--format", "json"]).assert().failure().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(json["unused"][0]["name"], "g:unused");
+    assert_eq!(json["dev-only"][0]["name"], "g:testonly");
+
+    p.kargo().args(["--offline", "tidy", "--fix"]).assert().success();
+    let text = p.read("kargo.toml");
+    assert!(!text.contains("g:unused") && text.contains("g:used") && text.contains("g:testonly"), "{text}");
+    p.kargo().args(["--offline", "tidy"]).assert().success();
 }
