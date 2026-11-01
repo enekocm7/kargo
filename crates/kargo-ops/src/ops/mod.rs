@@ -32,6 +32,7 @@ pub mod self_update;
 pub mod target;
 pub mod template;
 pub mod test;
+pub mod tidy;
 pub mod toolchain;
 pub mod tree;
 pub mod update;

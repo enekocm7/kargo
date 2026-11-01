@@ -1604,6 +1604,28 @@ Exits with 101 when an advisory at or above the --deny severity (default: [audit
         #[arg(long, value_enum, default_value_t)]
         format: FormatArg,
     },
+    /// Report the dependencies no source uses, and remove them with --fix
+    #[command(long_about = "Report the dependencies no source uses.
+
+A Maven module is unused when no source of the package (src/, src-<target>/, tests/, test fixtures, test suites, benches, generated sources) mentions a package of its jar; a path dependency, when none mentions a package its sources declare. A dependency in [dependencies] that only tests use is reported as dev-only. Never reported: runtime, provided, processor and ksp dependencies, BOMs, `force`d versions, classifiers, `exported` path dependencies and what [frameworks] adds. Dependencies of targets other than the JVM are not checked (their jars are not read). Dependencies that only a Kotlin script uses are kept unless --strict.
+
+Exits with 101 when unused dependencies remain. With --fix, they are removed from kargo.toml (the lockfile follows on the next build).")]
+    Tidy {
+        /// Remove the unused dependencies from kargo.toml
+        #[arg(long)]
+        fix: bool,
+        /// Also check the npm packages of Wasm and Kotlin/JS
+        #[arg(long)]
+        npm: bool,
+        /// Also report dependencies that only Kotlin scripts use
+        #[arg(long)]
+        strict: bool,
+        #[command(flatten)]
+        packages: PackageArgs,
+        /// Output format
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
+    },
     /// Enable, disable or list the project's targets (jvm, wasm, js, native, android)
     Target {
         #[command(subcommand)]
@@ -2965,6 +2987,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
             | Command::Update { .. }
             | Command::Upgrade { .. }
             | Command::Audit { .. }
+            | Command::Tidy { .. }
             | Command::Target { .. }
     );
     let result = run_command(cli.command, &global, &config, shell);
@@ -3860,6 +3883,44 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
                 shell.warn(format!("{reported} {} below the `{deny}` severity{ignored}", plural(reported, "advisory")));
             } else {
                 shell.status("Audited", format!("{audited} {}: no known advisories{ignored}", plural(audited, "package")));
+            }
+            Ok(0)
+        }
+        Command::Tidy { fix, npm, strict, packages, format } => {
+            let project = load_project(global)?;
+            let opts = ops::tidy::TidyOptions { npm, strict };
+            let reports = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+                let report = ops::tidy::tidy(ctx, &opts)?;
+                let removed = if fix { ops::tidy::fix(ctx, &report)? } else { 0 };
+                Ok((report, removed))
+            })?;
+            if format == FormatArg::Json {
+                let mut documents: Vec<serde_json::Value> = reports.iter().map(|(r, _)| ops::tidy::json(r)).collect();
+                let output = if documents.len() == 1 { documents.remove(0) } else { serde_json::Value::Array(documents) };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                for (report, _) in &reports {
+                    for note in &report.notes {
+                        shell.note(note);
+                    }
+                    print!("{}", ops::tidy::render(report));
+                }
+            }
+            let removed: usize = reports.iter().map(|(_, n)| n).sum();
+            let checked: usize = reports.iter().map(|(r, _)| r.checked).sum();
+            let unused: usize = reports.iter().map(|(r, _)| r.unused().count()).sum();
+            let dev_only: usize = reports.iter().map(|(r, _)| r.dev_only().count()).sum();
+            if removed > 0 {
+                shell.status(
+                    "Removed",
+                    format!("{removed} unused {} from kargo.toml; kargo.lock follows on the next build", plural(removed, "dependency")),
+                );
+            } else if unused > 0 {
+                shell.error(format!("{unused} unused {}; remove them with `kargo tidy --fix`", plural(unused, "dependency")));
+                return Ok(FAILURE);
+            }
+            if unused == 0 && dev_only == 0 {
+                shell.status("Tidy", format!("{checked} {} checked, all used", plural(checked, "dependency")));
             }
             Ok(0)
         }
