@@ -143,7 +143,9 @@ pub fn run_kotlin_script(
 }
 
 /// Runs a task (and its dependencies). `args` are appended to the last command
-/// of the requested task, or are the arguments of its script.
+/// of the requested task, or are the arguments of its script. Each task in the chain resolves its
+/// own `env` and `env-files` over `env` (the project environment and hook variables), so nothing
+/// leaks sideways and a task's own variables win over the hook's for the keys they set.
 pub fn run(
     config: &Config,
     root: &Path,
@@ -151,15 +153,20 @@ pub fn run(
     name: &str,
     args: &[String],
     env: &[(String, String)],
+    no_files: bool,
 ) -> Result<()> {
     let shell = config.shell();
     let order = plan(tasks, name)?;
     for task in order {
         shell.status("Running", format!("task `{}`", task.name));
         let cwd = task.cwd.as_ref().map(|c| root.join(c)).unwrap_or_else(|| root.to_path_buf());
+        let (overlay, loaded) = crate::env::task_overlay(root, &task.name, &task.env, env, no_files)?;
+        for warning in crate::env::task_tracked_warnings(&loaded, root) {
+            shell.warn(warning);
+        }
         let mut task_env: Vec<(String, String)> = env.to_vec();
         task_env.push(("KARGO_TASK".to_owned(), task.name.clone()));
-        task_env.extend(task.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        task_env.extend(overlay);
         if let Some(script) = &task.script {
             let args = if task.name == name { args } else { &[] };
             run_kotlin_script(config, root, script, args, &cwd, &task_env, &format!("task `{}`", task.name))?;
@@ -252,11 +259,11 @@ mod tests {
         let out = dir.path().join("out.txt");
         let script = if cfg!(windows) { "echo %GREETING% %KARGO_TASK%> out.txt" } else { "echo $GREETING $KARGO_TASK > out.txt" };
         let t = tasks(&format!("hello = {{ run = '{script}', env = {{ GREETING = \"hi\" }} }}\n"));
-        run(&quiet(), dir.path(), &t, "hello", &[], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "hello", &[], &[], false).unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "hi hello");
 
         let failing = tasks("bad = \"exit 3\"\n");
-        let err = run(&quiet(), dir.path(), &failing, "bad", &[], &[]).unwrap_err();
+        let err = run(&quiet(), dir.path(), &failing, "bad", &[], &[], false).unwrap_err();
         assert!(err.to_string().contains("exit code 3"), "{err}");
     }
 
@@ -267,7 +274,7 @@ mod tests {
             "pick = { run = \"echo unix> out.txt\", windows-run = \"echo windows> out.txt\" }
 ",
         );
-        run(&quiet(), dir.path(), &t, "pick", &[], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "pick", &[], &[], false).unwrap();
         let expected = if cfg!(windows) { "windows" } else { "unix" };
         assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap().trim(), expected);
     }
@@ -283,7 +290,7 @@ mod tests {
             "posix = { run = 'echo \"$GREETING $KARGO_TASK\" > out.txt', shell = \"sh\", env = { GREETING = \"hi\" } }
 ",
         );
-        run(&quiet(), dir.path(), &t, "posix", &["it's".into()], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "posix", &["it's".into()], &[], false).unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap().trim(), "hi posix it's");
     }
 
@@ -292,7 +299,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = tasks("say = \"echo\"\n");
         // Only checks that it runs successfully with arguments that need quoting.
-        run(&quiet(), dir.path(), &t, "say", &["hello world".into(), "x".into()], &[]).unwrap();
+        run(&quiet(), dir.path(), &t, "say", &["hello world".into(), "x".into()], &[], false).unwrap();
         assert_eq!(quote_for_shell(TaskShell::Sh, "plain-arg"), "plain-arg");
         assert_eq!(quote_for_shell(TaskShell::Sh, "it's"), r"'it'\''s'");
         assert_eq!(quote_for_shell(TaskShell::Cmd, "a \"b\""), "\"a \"\"b\"\"\"");
@@ -315,7 +322,7 @@ mod tests {
 ",
         );
         let quiet = quiet();
-        run(&quiet, dir.path(), &t, "say", &["%COMPUTERNAME%".into(), "a b".into()], &[]).unwrap();
+        run(&quiet, dir.path(), &t, "say", &["%COMPUTERNAME%".into(), "a b".into()], &[], false).unwrap();
         let written = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
         assert_eq!(written.trim(), "%COMPUTERNAME% \"a b\"");
     }
@@ -333,7 +340,7 @@ mod tests {
             "bad = {{ run = [\"{fail}\", \"echo done > out.txt\"], shell = \"pwsh\" }}
 "
         ));
-        let err = run(&quiet, dir.path(), &t, "bad", &[], &[]).unwrap_err();
+        let err = run(&quiet, dir.path(), &t, "bad", &[], &[], false).unwrap_err();
         assert!(err.to_string().contains("exit code 3"), "{err}");
         assert!(!dir.path().join("out.txt").exists());
 
@@ -341,7 +348,7 @@ mod tests {
             "bad = {{ run = \"{fail}; echo done > out.txt\", shell = \"pwsh\" }}
 "
         ));
-        let err = run(&quiet, dir.path(), &one_script, "bad", &[], &[]).unwrap_err();
+        let err = run(&quiet, dir.path(), &one_script, "bad", &[], &[], false).unwrap_err();
         assert!(err.to_string().contains("exit code 3"), "{err}");
         assert!(!dir.path().join("out.txt").exists());
     }
@@ -354,7 +361,7 @@ mod tests {
 ci = { depends-on = [\"gen\"], run = \"echo done > out.txt\" }
 ",
         );
-        let err = run(&quiet(), dir.path(), &t, "ci", &[], &[]).unwrap_err().to_string();
+        let err = run(&quiet(), dir.path(), &t, "ci", &[], &[], false).unwrap_err().to_string();
         assert!(err.contains("task `gen`: script `scripts") && err.contains("not found"), "{err}");
         assert!(!dir.path().join("out.txt").exists(), "the dependent task did not run");
     }
@@ -365,5 +372,42 @@ ci = { depends-on = [\"gen\"], run = \"echo done > out.txt\" }
         let hooked: Vec<_> = tasks_for_hook(&t, Hook::PreBuild).iter().map(|t| t.name.clone()).collect();
         assert_eq!(hooked, ["gen"]);
         assert!(tasks_for_hook(&t, Hook::PostBuild).is_empty());
+    }
+
+    #[test]
+    fn each_task_resolves_its_own_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env.frontend"), "API_URL=file-frontend\n").unwrap();
+        std::fs::write(dir.path().join(".env.backend"), "API_URL=file-backend\n").unwrap();
+        let t = tasks(
+            "frontend = { run = \"echo $API_URL $MODE > frontend.txt\", shell = \"sh\", env-files = [\".env.frontend\"], env = { API_URL = \"task-frontend\", MODE = \"front\" } }\n\
+             backend = { run = \"echo $API_URL $MODE > backend.txt\", shell = \"sh\", env-files = [\".env.backend\"], env = { MODE = \"back\" }, depends-on = [\"frontend\"] }\n",
+        );
+        if process::find_posix_shell("sh").is_none() {
+            eprintln!("skipping: no sh available");
+            return;
+        }
+        let base = [("API_URL".to_owned(), "base".to_owned()), ("MODE".to_owned(), "base".to_owned())];
+        run(&quiet(), dir.path(), &t, "backend", &[], &base, false).unwrap();
+        // Each task's files and vars win over the base, and nothing leaks sideways.
+        assert_eq!(std::fs::read_to_string(dir.path().join("frontend.txt")).unwrap().trim(), "task-frontend front");
+        assert_eq!(std::fs::read_to_string(dir.path().join("backend.txt")).unwrap().trim(), "file-backend back");
+    }
+
+    #[test]
+    fn table_form_task_env_wins_over_the_shell() {
+        if process::find_posix_shell("sh").is_none() {
+            eprintln!("skipping: no sh available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let t = tasks(
+            "show = { run = 'echo \"$KARGO_TASK_TEST_URL\" > out.txt', shell = \"sh\", env = { KARGO_TASK_TEST_URL = { value = \"task\", force = false } } }\n",
+        );
+        unsafe { std::env::set_var("KARGO_TASK_TEST_URL", "shell") };
+        let result = run(&quiet(), dir.path(), &t, "show", &[], &[], false);
+        unsafe { std::env::remove_var("KARGO_TASK_TEST_URL") };
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap().trim(), "task");
     }
 }

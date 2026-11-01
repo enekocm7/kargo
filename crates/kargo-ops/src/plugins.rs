@@ -70,7 +70,7 @@ pub fn run_hook(config: &Config, ws: &Workspace, hook: Hook, env: &[(String, Str
     env.push(("KARGO_HOOK".to_owned(), hook.as_str().to_owned()));
 
     for task in tasks::tasks_for_hook(&manifest.tasks, hook) {
-        tasks::run(config, ws.root(), &manifest.tasks, &task.name, &[], &env)?;
+        tasks::run(config, ws.root(), &manifest.tasks, &task.name, &[], &env, false)?;
     }
 
     for plugin in manifest.process_plugins.iter().filter(|p| p.hooks.contains(&hook)) {
