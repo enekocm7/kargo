@@ -680,6 +680,13 @@ fn delegate_problem(an: &Analyzer, u: UnitId, tok: usize) -> Option<Problem> {
         .and_then(|t| an.ty_of_ref(t, Ctx { unit: u, decl: Some(file.decls.iter().position(|x| std::ptr::eq(x, d))?) }, &Subst::new()))?;
     let got = functions(&delegate, "getValue").into_iter().find_map(|m| an.value_ty(m.sym, &m.subst))?;
     if features::fully_known(&declared) && features::fully_known(&got) && an.type_fit(&got, &declared).is_none() {
+        // The compiler infers reified type parameters from the declared type
+        // (`by viewModels()` for `val v: MainViewModel`); the server falls back
+        // to their upper bounds, so a delegate call that leaves them unbound and
+        // whose upper-bound type the declared type fits is not a mismatch.
+        if an.type_fit(&declared, &got).is_some() && an.delegate_has_unbound(u, tok + 1, end) {
+            return None;
+        }
         let message = format!(
             "the type of the delegate is `{}`, not the declared `{}`",
             features::display_ty(an, &got),

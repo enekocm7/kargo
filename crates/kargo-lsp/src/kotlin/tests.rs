@@ -3775,6 +3775,43 @@ class Provider { operator fun provideDelegate(r: Any?, p: KProperty<*>): Cell = 
     one("val a: Int by Provider()", "not the declared `Int`");
 }
 
+#[test]
+fn infers_delegate_type_arguments_from_the_declared_type() {
+    // Issue #514: `by viewModels()` leaves `VM` unbound, so the server falls back
+    // to its upper bound. The compiler solves it from the declared property type.
+    let decls = "import kotlin.reflect.KProperty
+open class ViewModel
+class MainViewModel : ViewModel()
+class LazyVM<T>(val value: T) {
+    operator fun getValue(thisRef: Any?, prop: KProperty<*>): T = value
+}
+fun <VM : ViewModel> viewModels(): LazyVM<VM> = TODO()
+";
+    let problems = |member: &str| {
+        operator_problems(&format!(
+            "{decls}class H {{
+    {member}
+}}
+"
+        ))
+    };
+    assert!(problems("val viewModel: MainViewModel by viewModels()").is_empty());
+    // An explicit type argument already worked.
+    assert!(problems("val viewModel: MainViewModel by viewModels<MainViewModel>()").is_empty());
+    // A declared type the bound does not allow is still an error.
+    let bad = problems("val s: String by viewModels()");
+    assert!(bad.len() == 1 && bad[0].contains("not the declared"), "{bad:?}");
+    // A bound type argument is not solved from the declared type.
+    let bound = operator_problems(&format!(
+        "{decls}fun <T> lazyBox(v: T): LazyVM<T> = TODO()
+class H {{
+    val viewModel: MainViewModel by lazyBox(ViewModel())
+}}
+"
+    ));
+    assert!(bound.len() == 1 && bound[0].contains("not the declared"), "{bound:?}");
+}
+
 // ----- completion outside expressions -----
 
 impl Fixture {

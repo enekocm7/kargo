@@ -877,6 +877,88 @@ impl<'a> Analyzer<'a> {
         self.value_ty(m.sym, &m.subst)
     }
 
+    /// Whether the delegate expression `start..end` is a call whose type parameters
+    /// value arguments and explicit type arguments leave unbound, so the declared
+    /// type of the property could still solve them (e.g., `by viewModels()` for
+    /// `val v: Foo`). The compiler infers reified type parameters from the expected
+    /// type; the server falls back to their upper bounds, which `delegate_problem`
+    /// must not report as a mismatch.
+    pub fn delegate_has_unbound(&self, u: UnitId, start: usize, end: usize) -> bool {
+        let file = self.file(u);
+        let lx = &file.lexed;
+        let n = lx.tokens.len();
+        let end = end.min(n);
+        if start >= end {
+            return false;
+        }
+        // The first `(` or `{` is the call's argument list; without one the delegate
+        // is a value (`by map`, `by ::prop`), not a call with type parameters.
+        let open = (start..end).find(|&k| matches!(lx.kind(k), Some(Tok::LParen | Tok::LBrace)));
+        let Some(open) = open else { return false };
+        if open == start || open == 0 {
+            return false;
+        }
+        // The callee name, skipping over explicit type arguments (`inject<Foo>()`).
+        let prev = open - 1;
+        let name_tok = if lx.kind(prev) == Some(Tok::Gt) {
+            match matching_lt(lx, prev).and_then(|lt| lt.checked_sub(1)) {
+                Some(name) => name,
+                None => return false,
+            }
+        } else {
+            prev
+        };
+        if name_tok < start || lx.kind(name_tok) != Some(Tok::Ident) {
+            return false;
+        }
+        let at = name_tok + 1;
+        if at >= n {
+            return false;
+        }
+        let Some((_, members)) = self.callee(u, at) else { return false };
+        if members.is_empty() {
+            return false;
+        }
+        let targs = self.explicit_type_args(u, at).map(|t| t.0).unwrap_or_default();
+        let (args, _) = self.call_args(u, at, end);
+        let refs: Vec<&Member> = members.iter().collect();
+        let Some(m) = self.pick_overload(u, &refs, &args) else { return false };
+        let d = self.decl(m.sym);
+        let mut subst = m.subst.clone();
+        for (tp, ta) in d.type_params.iter().zip(targs.iter()) {
+            if let Some(t) = ta {
+                subst.insert(tp.name.clone(), t.clone());
+            }
+        }
+        // Bind from value arguments, as `call_ret` does; for a class the primary
+        // constructor's arguments bind the class's type parameters.
+        match d.kind {
+            Kind::Function => {
+                self.bind_args(m, &mut subst, u, &args, false);
+                d.type_params.iter().any(|tp| !subst.contains_key(&tp.name))
+            }
+            k if k.is_class() => {
+                let ctor = Member { sym: m.sym, subst: subst.clone() };
+                self.bind_args(&ctor, &mut subst, u, &args, false);
+                d.type_params.iter().any(|tp| !subst.contains_key(&tp.name))
+            }
+            Kind::Constructor => {
+                self.bind_args(m, &mut subst, u, &args, false);
+                let file_m = self.file(m.sym.unit_id());
+                let all: Vec<String> = file_m
+                    .owner_class(m.sym.decl_id())
+                    .map(|c| &file_m.decls[c])
+                    .unwrap_or(d)
+                    .type_params
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect();
+                all.iter().any(|name| !subst.contains_key(name))
+            }
+            _ => false,
+        }
+    }
+
     /// The end of the iterated expression of a `for` loop starting at `start`: its `)`.
     pub(super) fn iterated_end(&self, u: UnitId, start: usize) -> usize {
         let lx = &self.file(u).lexed;
