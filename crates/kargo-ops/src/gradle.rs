@@ -384,11 +384,6 @@ impl GeneratedDirs {
 }
 
 /// Renders `build.gradle.kts` for a single-project Android build.
-/// Whether the package has a KSP processor for Android.
-fn uses_ksp(manifest: &kargo_manifest::Manifest) -> bool {
-    manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp)
-}
-
 pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     build_gradle_with(ws, android, &GradleModule::default())
 }
