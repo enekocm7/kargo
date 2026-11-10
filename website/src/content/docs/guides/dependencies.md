@@ -258,6 +258,28 @@ Since 2.3.0, KSP versions no longer follow Kotlin versions, so one KSP release w
 
 As with `processor`, KSP processors and their dependencies never reach the compile or runtime classpath, are not packaged, and are pinned in `kargo.lock` (under `jvm/ksp`, and `jvm/test-ksp` when you have test-only processors). Processors in `[dependencies]` or `[target.jvm.dependencies]` run for the main and test sources; a processor in `[dev-dependencies]` runs for the tests only. On Android, the scope maps to the Gradle KSP plugin's `ksp(...)` and `kspTest(...)` configurations.
 
+### Processor options
+
+Processors read options from `[kotlin] ksp-options`. Room needs `room.schemaLocation` to export its schema JSON, which auto-migrations and schema validation depend on:
+
+```toml title="kargo.toml"
+[kotlin.ksp-options]
+"room.schemaLocation" = "schemas"
+"room.generateKotlin" = true
+```
+
+On the JVM, Kargo passes each option to KSP as `-apoption=name=value`; on Android, the generated build gets `ksp { arg("name", "value") }`. Values may be strings, numbers or booleans. A relative value of an option whose name ends in `Location`, `Dir`, `Directory` or `Path` is relative to the package root, so `schemas` writes into the repository and not `target/`. Changing an option reruns KSP.
+
+For options that differ per platform, set `ksp-options` in `[target.jvm]` or `[target.android]`. They are added to the `[kotlin]` ones and win when both set the same name:
+
+```toml title="kargo.toml"
+[kotlin.ksp-options]
+"room.schemaLocation" = "schemas"
+
+[target.android.ksp-options]
+"room.generateKotlin" = true
+```
+
 KSP processes JVM and Android code. Wasm, JS and Native ignore `ksp` dependencies.
 
 :::note[What about kapt?]

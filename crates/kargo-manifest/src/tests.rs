@@ -2920,3 +2920,43 @@ alpha = {{ id = \"a.plugin\", apply = false }}
     assert_eq!(plugins[0].1.version.as_deref(), Some("1"));
     assert!(plugins[0].1.apply && !plugins[1].1.apply);
 }
+
+#[test]
+fn ksp_options_are_strings_and_locations_resolve_against_the_root() {
+    let m = Manifest::parse(
+        "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[kotlin.ksp-options]\n\"room.schemaLocation\" = \"schemas\"\n\"room.generateKotlin\" = true\n\"x.dir\" = \"/abs\"\n",
+    )
+    .unwrap();
+    let options = m.ksp_options_for(TargetKind::Jvm, Path::new("/proj"));
+    assert!(options.contains(&("room.schemaLocation".to_owned(), "/proj/schemas".to_owned())));
+    assert!(options.contains(&("room.generateKotlin".to_owned(), "true".to_owned())));
+    assert!(options.contains(&("x.dir".to_owned(), "/abs".to_owned())));
+    let err = Manifest::parse("[package]\nname = \"a\"\nversion = \"0.1.0\"\n[kotlin.ksp-options]\nx = [1]\n").unwrap_err();
+    assert!(format!("{err:#}").contains("ksp-options"), "{err:#}");
+}
+
+#[test]
+fn target_ksp_options_override_the_shared_ones() {
+    let m = Manifest::parse(
+        "[package]
+name = \"a\"
+version = \"0.1.0\"
+[kotlin.ksp-options]
+a = \"1\"
+b = \"1\"
+[target.jvm.ksp-options]
+b = \"2\"
+[target.android]
+namespace = \"com.a\"
+[target.android.ksp-options]
+c = 3
+",
+    )
+    .unwrap();
+    let root = Path::new("/p");
+    assert_eq!(m.ksp_options_for(TargetKind::Jvm, root), [("a".to_owned(), "1".to_owned()), ("b".to_owned(), "2".to_owned())]);
+    assert_eq!(
+        m.ksp_options_for(TargetKind::Android, root),
+        [("a".to_owned(), "1".to_owned()), ("b".to_owned(), "1".to_owned()), ("c".to_owned(), "3".to_owned())]
+    );
+}

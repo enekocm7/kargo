@@ -334,8 +334,7 @@ pub fn plugins(manifest: &Manifest, android: &AndroidTarget) -> Vec<GradlePlugin
     if fw.lombok.is_some() {
         out.push(plugin("org.jetbrains.kotlin.plugin.lombok", kotlin, true));
     }
-    let uses_ksp = manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp);
-    if uses_ksp {
+    if uses_ksp(manifest) {
         out.push(plugin("com.google.devtools.ksp", builtins::ksp_version(manifest), true));
     }
     // `[target.android.plugins]`, in order after Kargo's own. Kotlin's plugins default to the Kotlin version.
@@ -385,6 +384,11 @@ impl GeneratedDirs {
 }
 
 /// Renders `build.gradle.kts` for a single-project Android build.
+/// Whether the package has a KSP processor for Android.
+fn uses_ksp(manifest: &kargo_manifest::Manifest) -> bool {
+    manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp)
+}
+
 pub fn build_gradle(ws: &Workspace, android: &AndroidTarget) -> Result<String> {
     build_gradle_with(ws, android, &GradleModule::default())
 }
@@ -590,6 +594,20 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
             list(&main_fragments)
         );
         let _ = writeln!(s, "}}\n");
+    }
+
+    // KSP processor options.
+    let ksp_options = manifest.ksp_options_for(TargetKind::Android, ws.root());
+    if uses_ksp(manifest) && !ksp_options.is_empty() {
+        let _ = writeln!(s, "ksp {{");
+        for (key, value) in ksp_options {
+            let _ = writeln!(s, "    arg({}, {})", kts_string(&key), kts_string(&value));
+        }
+        let _ = writeln!(
+            s,
+            "}}
+"
+        );
     }
 
     // Dependencies.
@@ -2392,6 +2410,29 @@ x = { id = \"p.q\", files = [\"missing.json\"] }
         assert!(text.contains("tasks.register(\"kargoDocClasspath\")"), "the task `kargo doc` runs");
         let kotlin = &ws.manifest().kotlin.version;
         assert!(text.contains(&format!("id(\"org.jetbrains.kotlin.android\") version \"{kotlin}\" apply false")), "{text}");
+    }
+
+    #[test]
+    fn ksp_options_become_ksp_args() {
+        let (_d, ws) = workspace(
+            "[dependencies]
+\"x:p\" = { version = \"1\", scope = \"ksp\" }
+[kotlin.ksp-options]
+\"room.schemaLocation\" = \"schemas\"
+\"room.generateKotlin\" = true
+",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(
+            text.contains(
+                "ksp {
+    arg(\"room.generateKotlin\", \"true\")
+    arg(\"room.schemaLocation\", \""
+            ),
+            "{text}"
+        );
+        assert!(text.contains("/schemas\")"), "{text}");
     }
 
     #[test]
