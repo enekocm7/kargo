@@ -115,6 +115,7 @@ fn resolve_package(ctx: &BuildContext, previous: &Lockfile) -> Result<()> {
             }
         }
         if target == TargetKind::Native {
+            build::native_ksp_path(ctx, &ctx.setup(target)?)?;
             for suite in ctx.ws.manifest().test.suites.values() {
                 let suite_setup = ctx.setup_for_suite(target, Some(suite))?;
                 for p in build::native_platforms(ctx)? {
@@ -162,6 +163,9 @@ fn relock_tools(ctx: &BuildContext, target: TargetKind, previous: &Lockfile) -> 
         if had(&ctx.ws.lock_key("jvm/bench-tools")) {
             super::bench::fetch(ctx)?;
         }
+    }
+    if target == TargetKind::Native && had(&ctx.tool_key("ksp")) && !build::native_ksp_path(ctx, &setup)?.is_empty() {
+        ctx.ksp_tool()?;
     }
     Ok(())
 }

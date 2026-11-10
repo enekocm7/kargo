@@ -889,7 +889,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     manifest.targets.native.as_ref().context("the Native target is not enabled")?;
     let host = Host::current()?.konan_target.to_owned();
     let setup = ctx.setup(TargetKind::Native)?;
-    let main_sources = super::build::for_platform(ctx, sources(ctx, TargetKind::Native, false, &["kt"])?, &host);
+    let mut main_sources = super::build::for_platform(ctx, sources(ctx, TargetKind::Native, false, &["kt"])?, &host);
     if let Program::Main(entry) = program {
         super::build::validate_native_entry(&main_sources, entry, "`--main`")?;
     }
@@ -907,6 +907,7 @@ fn build_native_program(ctx: &BuildContext, program: &Program) -> Result<PathBuf
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut libraries = native_libraries(ctx, &setup, &host, example.is_some())?;
     libraries.extend(native_cinterop(ctx, &host)?);
+    super::build::run_native_ksp(ctx, &host, &libraries, &mut main_sources)?;
     let link = crate::native_interop::native_link(ctx, &host)?;
 
     let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(&host);

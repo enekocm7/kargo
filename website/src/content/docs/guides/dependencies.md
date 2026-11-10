@@ -247,7 +247,7 @@ $ kargo run
 
 On the JVM target, Kargo runs KSP2 standalone (`symbol-processing-aa-embeddable`) right before the Kotlin compiler, once for the main sources and once for the tests. The Kotlin and Java files it generates under `target/<profile>/jvm/generated/ksp/<main|test>/` are compiled with your sources, and generated resources are copied into the output. KSP reruns only when a source, a dependency or a processor changed. It analyzes the sources with your `[kotlin] language-version` and `api-version`, which default to the major and minor version of `[kotlin] version`.
 
-Kargo uses KSP 2.3.12 unless you pick another version in `[kotlin]`. It applies to the JVM and to the Gradle KSP plugin on Android:
+Kargo uses KSP 2.3.12 unless you pick another version in `[kotlin]`. It applies to the JVM, to Kotlin/Native and to the Gradle KSP plugin on Android:
 
 ```toml title="kargo.toml"
 [kotlin]
@@ -268,9 +268,9 @@ Processors read options from `[kotlin] ksp-options`. Room needs `room.schemaLoca
 "room.generateKotlin" = true
 ```
 
-On the JVM, Kargo passes each option to KSP as `-apoption=name=value`; on Android, the generated build gets `ksp { arg("name", "value") }`. Values may be strings, numbers or booleans. A relative value of an option whose name ends in `Location`, `Dir`, `Directory` or `Path` is relative to the package root, so `schemas` writes into the repository and not `target/`. Changing an option reruns KSP.
+On the JVM and Native, Kargo passes the options to KSP's `-processor-options`; on Android, the generated build gets `ksp { arg("name", "value") }`. Values may be strings, numbers or booleans. KSP separates options with the platform's path separator (`;` on Windows, `:` elsewhere), so a value can't contain it. A relative value of an option whose name ends in `Location`, `Dir`, `Directory` or `Path` is relative to the package root, so `schemas` writes into the repository and not `target/`. Changing an option reruns KSP.
 
-For options that differ per platform, set `ksp-options` in `[target.jvm]` or `[target.android]`. They are added to the `[kotlin]` ones and win when both set the same name:
+For options that differ per platform, set `ksp-options` in `[target.jvm]` or `[target.android]` (Native uses the `[kotlin]` ones). They are added to the `[kotlin]` ones and win when both set the same name:
 
 ```toml title="kargo.toml"
 [kotlin.ksp-options]
@@ -280,7 +280,28 @@ For options that differ per platform, set `ksp-options` in `[target.jvm]` or `[t
 "room.generateKotlin" = true
 ```
 
-KSP processes JVM and Android code. Wasm, JS and Native ignore `ksp` dependencies.
+### KSP on Kotlin/Native
+
+On the [Native target](../native/), Kargo runs KSP once per platform (KSP's `KSPNativeMain` with that platform's `-target`), before each Kotlin/Native compilation of the main sources. Processors that support Kotlin Multiplatform, such as Room 2.7 and newer, Koin annotations or kotlin-inject, work on Native as they do on the JVM:
+
+```toml title="kargo.toml"
+[target.native]
+kind = "framework"
+platforms = ["ios_arm64", "ios_simulator_arm64"]
+
+[dependencies]
+"androidx.room:room-runtime" = "2.8.0"
+"androidx.sqlite:sqlite-bundled" = "2.6.0"
+
+[target.native.dependencies]
+"androidx.room:room-compiler" = { version = "2.8.0", scope = "ksp" }
+```
+
+KSP reads the sources that platform compiles (`src/`, the [source sets](../multiplatform/#source-sets-for-several-targets) that include it and `src-native/`) against the platform's klibs, the standard library and the platform libraries. The Kotlin files it writes under `target/<profile>/native/<platform>/generated/ksp/main/` are compiled with your sources into the platform's executable, library or framework. A generated `actual`, such as the one Room writes for an `expect object` that implements `RoomDatabaseConstructor`, goes into the platform's fragment, below the `expect` in `src/`. As on the JVM, KSP reruns only when a source, a library or a processor changed.
+
+The processors are JVM programs, so they resolve as jars and are pinned in `kargo.lock` under `native/ksp`, apart from the klibs the sources link. On Native, KSP processes the main sources only: the tests compile against what it generated for them, but the test sources themselves are not processed, and `ksp` dev-dependencies don't apply.
+
+Wasm and JS ignore `ksp` dependencies. Kargo [warns](../../reference/warnings/#ksp-processors-on-wasm-or-js) when one applies to them; declare such processors under `[target.jvm.dependencies]` or `[target.native.dependencies]` instead of `[dependencies]`.
 
 :::note[What about kapt?]
 Kargo doesn't support kapt. It is in maintenance mode, slow (it generates Java stubs for all your Kotlin code first) and the libraries that needed it now ship KSP processors. A Java-only processor that runs on Java sources works with [`scope = "processor"`](#annotation-processors).
@@ -404,7 +425,7 @@ Its jar (or klib, for Wasm, JS and Native) ends up on your classpaths, with its 
 
 ## Repositories
 
-Maven Central is used first, and Google's Maven repository is added automatically for Android and Compose. Add others in `[repositories]`; they are asked after those, in the order you write them:
+Maven Central is used first, and Google's Maven repository is added automatically for Android, Compose and any `androidx.*` dependency (such as Room on Native or the JVM). Add others in `[repositories]`; they are asked after those, in the order you write them:
 
 ```toml title="kargo.toml"
 [repositories]

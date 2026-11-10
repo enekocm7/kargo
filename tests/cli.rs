@@ -808,6 +808,31 @@ fn update_locks_processors_apart_from_the_classpaths() {
 }
 
 #[test]
+fn update_locks_native_ksp_processors_as_jvm_jars() {
+    let repo = LocalRepo::new();
+    repo.publish("g:codegen", "1.0", &[("g:poet", "1.0")]).publish("g:poet", "1.0", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "shared",
+            &format!(
+                "[kotlin]\nversion = \"2.4.21\"\n[target.native]\nplatforms = [\"linux_x64\"]\n\
+                 [target.native.dependencies]\n\"g:codegen\" = {{ version = \"1.0\", scope = \"ksp\" }}\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    p.kargo().args(["update", "--offline"]).assert().success();
+    let lock = kargo_ops::lockfile::Lockfile::load(&p.path().join("kargo.lock")).unwrap();
+    let modules = |key: &str| -> Vec<String> { lock.resolutions[key].packages.iter().map(|p| p.module.clone()).collect() };
+    // The processors run in KSP's JVM, so they resolve as jars, apart from the klibs the sources link.
+    assert_eq!(modules("native/ksp"), ["g:codegen", "g:poet"]);
+    let main = modules("native-linux_x64/main");
+    assert!(!main.iter().any(|m| m == "g:codegen"), "processors stay off the klibs: {main:?}");
+}
+
+#[test]
 fn a_group_a_repository_includes_never_comes_from_another() {
     // A public repository that has a higher version of the private library: dependency confusion.
     let public = LocalRepo::new();

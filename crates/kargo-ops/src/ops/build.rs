@@ -14,7 +14,7 @@ use crate::workspace::{ProfileKind, Workspace};
 use kargo_compiler::jar::{JarManifest, manifest_matches, write_jar};
 use kargo_compiler::js::JsCompilation;
 use kargo_compiler::jvm::JvmCompilation;
-use kargo_compiler::ksp::KspRun;
+use kargo_compiler::ksp::{KspPlatform, KspRun};
 use kargo_compiler::mainclass::{EntryPoint, find_entry_point_in, find_entry_points, find_jvm_main_class, find_single_entry_point};
 use kargo_compiler::native::{CinteropUnit, NativeCompilation};
 use kargo_compiler::wasm::WasmCompilation;
@@ -674,12 +674,13 @@ pub(crate) fn run_jvm_ksp_for_suite(
     let tool_classpath = ctx.ksp_tool()?;
     let run = KspRun {
         name: unit.name,
+        key: None,
         source_roots,
         libraries: unit.libraries,
         friends: unit.friends,
         processor_path: &processor_path,
         tool_classpath: &tool_classpath,
-        jvm_target: unit.jvm_target,
+        platform: KspPlatform::Jvm { jvm_target: unit.jvm_target },
         language_version: &language_version,
         api_version: &api_version,
         output: ws.output_dir(&ctx.profile, TargetKind::Jvm).join("generated").join("ksp").join(dir),
@@ -688,14 +689,93 @@ pub(crate) fn run_jvm_ksp_for_suite(
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     let generated = run.run(ctx.shell(), unit.jdk, &fp_dir, &|| announce(ctx, "Processing", TargetKind::Jvm, what))?;
-    // Generated files join the platform fragment, unless that would turn a single-fragment
-    // compilation (only `src/` has Kotlin) into a multiplatform one.
-    if sources.has_platform_kotlin() {
-        sources.platform.extend(generated.sources);
-    } else {
-        sources.common.extend(generated.sources);
-    }
+    add_ksp_sources(sources, generated.sources);
     resources.extend(generated.resources);
+    Ok(())
+}
+
+/// Adds what KSP generated to the platform fragment, unless that would turn a single-fragment
+/// compilation (only `src/` has Kotlin) into a multiplatform one for no reason: a generated
+/// `actual` (Room's `RoomDatabaseConstructor`) must be in a fragment below the `expect`.
+fn add_ksp_sources(sources: &mut SourceSet, generated: Vec<PathBuf>) {
+    let declares_actual = |line: &str| {
+        let line = line.trim_start();
+        !line.starts_with("//") && !line.starts_with('*') && line.split_whitespace().any(|w| w == "actual")
+    };
+    let has_actual = || generated.iter().any(|f| std::fs::read_to_string(f).is_ok_and(|text| text.lines().any(declares_actual)));
+    if sources.has_platform_kotlin() || has_actual() {
+        sources.platform.extend(generated);
+    } else {
+        sources.common.extend(generated);
+    }
+}
+
+/// The KSP processor path of the Native target: `scope = "ksp"` dependencies (JVM jars, since the
+/// processors run in KSP's JVM), locked in `kargo.lock` as `native/ksp`.
+pub fn native_ksp_path(ctx: &BuildContext, setup: &TargetSetup) -> Result<Vec<PathBuf>> {
+    let requests = setup.requests(&[Scope::Ksp], false);
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(ctx.resolve("native/ksp", Platform::Jvm, &requests, &setup.boms)?.files())
+}
+
+/// Runs the KSP processors over the Native main sources for `konan_target` and adds the Kotlin files they
+/// generate to `sources` (already narrowed with [`for_platform`]). `libraries` are the klibs the sources
+/// compile against. Does nothing when no `scope = "ksp"` dependency applies to the Native target.
+pub(crate) fn run_native_ksp(ctx: &BuildContext, konan_target: &str, libraries: &[PathBuf], sources: &mut SourceSet) -> Result<()> {
+    let setup = ctx.setup(TargetKind::Native)?;
+    let processor_path = native_ksp_path(ctx, &setup)?;
+    if processor_path.is_empty() {
+        return Ok(());
+    }
+    let ws = ctx.ws;
+    let manifest = ws.manifest();
+    let kotlin = &manifest.kotlin;
+    let language_version = kotlin.language_version.clone().unwrap_or_else(|| kargo_compiler::ksp::language_version(&kotlin.version));
+    let api_version = kotlin.api_version.clone().unwrap_or_else(|| language_version.clone());
+    // What `for_platform` keeps: not the source sets of other platforms, which do not compile for this one.
+    let mut source_roots = ws.common_source_dirs();
+    for (group, _) in manifest.source_groups_for(TargetKind::Native) {
+        source_roots.extend(ws.group_source_dirs(&group.name));
+    }
+    source_roots.extend(ws.target_source_dirs(TargetKind::Native));
+    for (group, _) in manifest.native_platform_groups(Some(konan_target)) {
+        source_roots.extend(ws.group_source_dirs(&group.name));
+    }
+    source_roots.extend(crate::generate::dirs(ws, &ctx.profile, TargetKind::Native, GeneratedKind::Sources));
+    // KSP's analysis needs the standard library and the platform libraries, which `konanc` adds by itself.
+    let toolchain = ctx.native_toolchain()?;
+    let mut all_libraries = vec![toolchain.home.join("klib").join("common").join("stdlib")];
+    let platform_dir = toolchain.home.join("klib").join("platform").join(konan_target);
+    if let Ok(entries) = std::fs::read_dir(&platform_dir) {
+        let mut platform: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        platform.sort();
+        all_libraries.extend(platform);
+    }
+    all_libraries.extend(libraries.iter().cloned());
+    let tool_classpath = ctx.ksp_tool()?;
+    let key = format!("{}-{konan_target}", manifest.package.name);
+    let run = KspRun {
+        name: &manifest.package.name,
+        key: Some(&key),
+        source_roots,
+        libraries: all_libraries,
+        friends: Vec::new(),
+        processor_path: &processor_path,
+        tool_classpath: &tool_classpath,
+        platform: KspPlatform::Native { konan_target },
+        language_version: &language_version,
+        api_version: &api_version,
+        output: ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target).join("generated").join("ksp").join("main"),
+        project_dir: ws.root(),
+        options: manifest.ksp_options_for(TargetKind::Native, ws.root()),
+    };
+    let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
+    std::fs::create_dir_all(&fp_dir)?;
+    let what = format!(", {konan_target}, ksp");
+    let generated = run.run(ctx.shell(), ctx.compiler_jdk()?, &fp_dir, &|| announce(ctx, "Processing", TargetKind::Native, &what))?;
+    add_ksp_sources(sources, generated.sources);
     Ok(())
 }
 
@@ -1270,11 +1350,13 @@ pub fn native_klib(ctx: &BuildContext, konan_target: &str) -> Result<Option<Path
     };
     let mut libraries = native_libraries(ctx, &setup, konan_target, false)?;
     libraries.extend(native_cinterop(ctx, konan_target)?);
+    let mut platform_srcs = for_platform(ctx, srcs, konan_target);
+    run_native_ksp(ctx, konan_target, &libraries, &mut platform_srcs)?;
     let unit = NativeCompilation {
         name: &manifest.package.name,
         konan_target: konan_target.to_owned(),
         kind: NativeKind::Library,
-        sources: for_platform(ctx, srcs, konan_target),
+        sources: platform_srcs,
         libraries,
         plugins: &plugins,
         kotlin_args: &kotlin_args,
@@ -1563,7 +1645,8 @@ pub fn build_native_for(ctx: &BuildContext, filter: &[kargo_manifest::TargetPlat
         libraries.extend(native_cinterop(ctx, konan_target)?);
         let link = native_interop::native_link(ctx, konan_target)?;
         let exported = native_interop::exported_klibs(ctx, &setup, konan_target)?;
-        let platform_srcs = for_platform(ctx, srcs.clone(), konan_target);
+        let mut platform_srcs = for_platform(ctx, srcs.clone(), konan_target);
+        run_native_ksp(ctx, konan_target, &libraries, &mut platform_srcs)?;
         let out = ctx.ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target);
         let mut builds = Vec::new();
         for program in &programs {
@@ -1690,4 +1773,34 @@ pub fn create_xcframework(ctx: &BuildContext, builds: &[NativeBuild]) -> Result<
     xcodebuild.arg("-output").arg(&output);
     kargo_util::process::run(ctx.shell(), &mut xcodebuild, "xcodebuild")?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_generated_actual_goes_below_the_expect() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("Dao_Impl.kt");
+        let actual = dir.path().join("Constructor.kt");
+        std::fs::write(&plain, "// The actual implementation\nclass Dao_Impl : Dao\n").unwrap();
+        std::fs::write(&actual, "public actual object DbConstructor : RoomDatabaseConstructor<Db>\n").unwrap();
+
+        // Only `src/` has Kotlin: plain generated files keep the compilation single-fragment.
+        let mut sources = SourceSet::new(vec!["src/Db.kt".into()], Vec::new(), "native");
+        add_ksp_sources(&mut sources, vec![plain.clone()]);
+        assert_eq!(sources.platform, Vec::<PathBuf>::new());
+        assert!(sources.fragment_args().is_empty());
+
+        // An `actual` cannot sit in the fragment of its `expect`.
+        let mut sources = SourceSet::new(vec!["src/Db.kt".into()], Vec::new(), "native");
+        add_ksp_sources(&mut sources, vec![plain.clone(), actual.clone()]);
+        assert_eq!(sources.platform, [plain.clone(), actual]);
+
+        // With platform sources, everything generated is the platform's.
+        let mut sources = SourceSet::new(vec!["src/Db.kt".into()], vec!["src-native/Main.kt".into()], "native");
+        add_ksp_sources(&mut sources, vec![plain.clone()]);
+        assert_eq!(sources.platform, [PathBuf::from("src-native/Main.kt"), plain]);
+    }
 }

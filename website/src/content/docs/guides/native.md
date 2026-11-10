@@ -120,6 +120,10 @@ linker-options = ["-lm"]
 linker-options = ["-lws2_32"]
 ```
 
+## KSP processors
+
+Dependencies with `scope = "ksp"` run on Native too: Kargo runs KSP for each platform before compiling it, so processors such as Room's generate their code (and the `actual` declarations they promise) for iOS, macOS, Linux and Windows. See [KSP on Kotlin/Native](../dependencies/#ksp-on-kotlinnative).
+
 ## Build speed
 
 Most of a small Kotlin/Native build is the standard library: unless told otherwise, the compiler loads and lowers all of it again on every build. For debug builds Kargo tells it to link a precompiled copy instead, as the Gradle plugin does. Rebuilding a small program takes about half the time (10 seconds instead of 5 on one machine, 16 instead of 6 on a slower one).

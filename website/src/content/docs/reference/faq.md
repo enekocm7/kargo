@@ -149,7 +149,7 @@ The annotation processor didn't run. Kargo only runs processors you declare with
 
 ### `unresolved reference` for a class a KSP processor generates, such as `PersonJsonAdapter`
 
-The KSP processor didn't run. Declare it with `scope = "ksp"`, not `processor` (which only runs `javac` processors over Java sources), and see [Kotlin Symbol Processing](../../guides/dependencies/#kotlin-symbol-processing-ksp). With `-v`, Kargo prints the arguments it passes to KSP; the generated files are under `target/<profile>/jvm/generated/ksp/`.
+The KSP processor didn't run. Declare it with `scope = "ksp"`, not `processor` (which only runs `javac` processors over Java sources), and see [Kotlin Symbol Processing](../../guides/dependencies/#kotlin-symbol-processing-ksp). With `-v`, Kargo prints the arguments it passes to KSP; the generated files are under `target/<profile>/jvm/generated/ksp/` (on Native, `target/<profile>/native/<platform>/generated/ksp/`). Wasm and JS don't run KSP.
 
 ### `Node.js is required to run Kotlin/Wasm programs`
 

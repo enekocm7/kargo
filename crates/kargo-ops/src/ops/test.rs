@@ -1923,7 +1923,6 @@ fn compile_native_tests_for_suite(ctx: &BuildContext, suite: Option<&kargo_manif
         return Ok(None);
     }
     let setup = ctx.setup_for_suite(TargetKind::Native, suite)?;
-    let _ = native_libraries_for_suite(ctx, &ctx.setup_for_suite(TargetKind::Native, None)?, host, false, None)?;
     let mut libraries = native_libraries_for_suite(ctx, &setup, host, true, suite)?;
     libraries.extend(native_cinterop(ctx, host)?);
     let toolchain = ctx.native_toolchain()?;
@@ -1931,6 +1930,8 @@ fn compile_native_tests_for_suite(ctx: &BuildContext, suite: Option<&kargo_manif
     let profile = ctx.ws.profile(&ctx.profile)?;
     let kotlin_args = common_kotlin_args(manifest, profile, &setup.contributions.compiler_args);
     let mut all = for_platform(ctx, sources(ctx, TargetKind::Native, false, &["kt"])?, host);
+    let main_libraries = native_libraries_for_suite(ctx, &ctx.setup_for_suite(TargetKind::Native, None)?, host, false, None)?;
+    super::build::run_native_ksp(ctx, host, &main_libraries, &mut all)?;
     all.extend(&for_platform(ctx, tests, host));
     let name = match suite {
         None => format!("{}-test", manifest.package.name),

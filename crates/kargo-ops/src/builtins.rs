@@ -30,7 +30,7 @@ pub const KOTLINX_BENCHMARK_VERSION: &str = "0.5.0";
 pub const JMH_VERSION: &str = "1.37";
 /// The oldest JDK that runs JUnit 6 and its console launcher, which are compiled for Java 17.
 pub const JUNIT_MIN_JDK: u32 = 17;
-/// KSP2 (`com.google.devtools.ksp`), used for `scope = "ksp"` dependencies on the JVM and Android
+/// KSP2 (`com.google.devtools.ksp`), used for `scope = "ksp"` dependencies on the JVM, Native and Android
 /// unless `[kotlin] ksp` overrides it.
 pub const KSP_VERSION: &str = "2.3.12";
 

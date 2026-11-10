@@ -2569,6 +2569,80 @@ class PersonTest {
     assert!(std::fs::read_to_string(t.dir.path().join("ksp/kargo.lock")).unwrap().contains("[resolution.\"jvm/ksp\"]"));
 }
 
+/// Room's KSP processor on Kotlin/Native: it generates the `actual` of the `expect` database constructor and the
+/// `_Impl` classes, which the klib for linux_x64 (buildable from every host) needs to compile.
+#[test]
+fn ksp_processor_on_native() {
+    require_e2e!();
+    require_native!();
+    let t = E2e::new();
+    t.create(&["shared", "--lib", "--target", "native"]);
+    t.write(
+        "shared/kargo.toml",
+        "[package]
+name = \"shared\"
+version = \"0.1.0\"
+
+[target.native]
+kind = \"library\"
+platforms = [\"linux_x64\"]
+
+[dependencies]
+\"androidx.room:room-runtime\" = \"2.8.0\"
+\"androidx.sqlite:sqlite-bundled\" = \"2.6.0\"
+\"androidx.room:room-compiler\" = { version = \"2.8.0\", scope = \"ksp\" }
+",
+    );
+    for dir in ["src", "src-native", "tests", "tests-native"] {
+        let _ = std::fs::remove_dir_all(t.dir.path().join("shared").join(dir));
+    }
+    t.write(
+        "shared/src/Notes.kt",
+        "package com.example.shared
+
+import androidx.room.ConstructedBy
+import androidx.room.Dao
+import androidx.room.Database
+import androidx.room.Entity
+import androidx.room.Insert
+import androidx.room.PrimaryKey
+import androidx.room.Query
+import androidx.room.RoomDatabase
+import androidx.room.RoomDatabaseConstructor
+
+@Entity
+data class Note(@PrimaryKey val id: Long, val text: String)
+
+@Dao
+interface NoteDao {
+    @Insert suspend fun insert(note: Note)
+    @Query(\"SELECT * FROM Note\") suspend fun all(): List<Note>
+}
+
+@Database(entities = [Note::class], version = 1, exportSchema = false)
+@ConstructedBy(NotesConstructor::class)
+abstract class Notes : RoomDatabase() {
+    abstract fun notes(): NoteDao
+}
+
+@Suppress(\"NO_ACTUAL_FOR_EXPECT\")
+expect object NotesConstructor : RoomDatabaseConstructor<Notes> {
+    override fun initialize(): Notes
+}
+",
+    );
+    t.kargo("shared")
+        .args(["build", "-t", "native"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Processing shared v0.1.0 (native, linux_x64, ksp)"));
+    let generated = t.dir.path().join("shared/target/debug/native/linux_x64/generated/ksp/main/kotlin/com/example/shared");
+    assert!(generated.join("Notes_Impl.kt").is_file(), "nothing generated in {}", generated.display());
+    assert!(std::fs::read_to_string(t.dir.path().join("shared/kargo.lock")).unwrap().contains("[resolution.\"native/ksp\"]"));
+    // Unchanged sources are not processed again.
+    t.kargo("shared").args(["build", "-t", "native"]).assert().success().stderr(predicate::str::contains("Processing").not());
+}
+
 #[test]
 fn ktor_compiles() {
     require_e2e!();
