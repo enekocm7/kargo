@@ -107,6 +107,14 @@ warning: Compose Multiplatform 1.12.1 for web and iOS works best with Kotlin 2.2
 
 Compose Multiplatform 1.9.0 and newer, used with a `[target.wasm]` or `[target.native]` target, works best on Kotlin 2.2.20 or newer, as JetBrains recommends for the platforms whose support evolves fastest. The build still runs. Raise `[kotlin] version`, or pin an older release with `version` under [`[frameworks.compose]`](../manifest/#frameworks). Combinations that cannot work are an error, not a warning: see [Kotlin and Compose versions](../../guides/compose/#kotlin-and-compose-versions).
 
+## KSP processors on Wasm or JS
+
+```text
+warning: the wasm target ignores `scope = "ksp"` dependencies: KSP runs for the JVM, Native and Android targets only, so code that needs what the processors generate does not compile there; declare the processors under [target.<target>.dependencies] of the targets that run them
+```
+
+A [KSP processor](../../guides/dependencies/#kotlin-symbol-processing-ksp) in `[dependencies]` or `[dev-dependencies]` applies to every target, but the Wasm and JS targets don't run KSP. Code that uses what the processor generates then fails there with unresolved references or a missing `actual`, far from the cause. Move the processor to `[target.jvm.dependencies]` or `[target.native.dependencies]` (the targets that run it) and keep the code that needs it out of `src/` for Wasm and JS.
+
 ## `.env` file tracked by git
 
 ```text

@@ -247,7 +247,7 @@ $ kargo run
 
 On the JVM target, Kargo runs KSP2 standalone (`symbol-processing-aa-embeddable`) right before the Kotlin compiler, once for the main sources and once for the tests. The Kotlin and Java files it generates under `target/<profile>/jvm/generated/ksp/<main|test>/` are compiled with your sources, and generated resources are copied into the output. KSP reruns only when a source, a dependency or a processor changed. It analyzes the sources with your `[kotlin] language-version` and `api-version`, which default to the major and minor version of `[kotlin] version`.
 
-Kargo uses KSP 2.3.12 unless you pick another version in `[kotlin]`. It applies to the JVM and to the Gradle KSP plugin on Android:
+Kargo uses KSP 2.3.12 unless you pick another version in `[kotlin]`. It applies to the JVM, to Kotlin/Native and to the Gradle KSP plugin on Android:
 
 ```toml title="kargo.toml"
 [kotlin]
@@ -258,7 +258,28 @@ Since 2.3.0, KSP versions no longer follow Kotlin versions, so one KSP release w
 
 As with `processor`, KSP processors and their dependencies never reach the compile or runtime classpath, are not packaged, and are pinned in `kargo.lock` (under `jvm/ksp`, and `jvm/test-ksp` when you have test-only processors). Processors in `[dependencies]` or `[target.jvm.dependencies]` run for the main and test sources; a processor in `[dev-dependencies]` runs for the tests only. On Android, the scope maps to the Gradle KSP plugin's `ksp(...)` and `kspTest(...)` configurations.
 
-KSP processes JVM and Android code. Wasm, JS and Native ignore `ksp` dependencies.
+### KSP on Kotlin/Native
+
+On the [Native target](../native/), Kargo runs KSP once per platform (KSP's `KSPNativeMain` with that platform's `-target`), before each Kotlin/Native compilation of the main sources. Processors that support Kotlin Multiplatform, such as Room 2.7 and newer, Koin annotations or kotlin-inject, work on Native as they do on the JVM:
+
+```toml title="kargo.toml"
+[target.native]
+kind = "framework"
+platforms = ["ios_arm64", "ios_simulator_arm64"]
+
+[dependencies]
+"androidx.room:room-runtime" = "2.8.0"
+"androidx.sqlite:sqlite-bundled" = "2.6.0"
+
+[target.native.dependencies]
+"androidx.room:room-compiler" = { version = "2.8.0", scope = "ksp" }
+```
+
+KSP reads the sources that platform compiles (`src/`, the [source sets](../multiplatform/#source-sets-for-several-targets) that include it and `src-native/`) against the platform's klibs, the standard library and the platform libraries. The Kotlin files it writes under `target/<profile>/native/<platform>/generated/ksp/main/` are compiled with your sources into the platform's executable, library or framework. A generated `actual`, such as the one Room writes for an `expect object` that implements `RoomDatabaseConstructor`, goes into the platform's fragment, below the `expect` in `src/`. As on the JVM, KSP reruns only when a source, a library or a processor changed.
+
+The processors are JVM programs, so they resolve as jars and are pinned in `kargo.lock` under `native/ksp`, apart from the klibs the sources link. On Native, KSP processes the main sources only: the tests compile against what it generated for them, but the test sources themselves are not processed, and `ksp` dev-dependencies don't apply.
+
+Wasm and JS ignore `ksp` dependencies. Kargo [warns](../../reference/warnings/#ksp-processors-on-wasm-or-js) when one applies to them; declare such processors under `[target.jvm.dependencies]` or `[target.native.dependencies]` instead of `[dependencies]`.
 
 :::note[What about kapt?]
 Kargo doesn't support kapt. It is in maintenance mode, slow (it generates Java stubs for all your Kotlin code first) and the libraries that needed it now ship KSP processors. A Java-only processor that runs on Java sources works with [`scope = "processor"`](#annotation-processors).

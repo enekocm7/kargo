@@ -501,7 +501,7 @@ pub fn fetch(ctx: &BuildContext, targets: &[TargetKind], tools: bool) -> Result<
 
 /// Downloads and locks in `kargo.lock` what builds of `target` run besides the project's dependencies: the
 /// Kotlin compiler (JVM, Wasm and JS), the frameworks' compiler plugins and, on the JVM, the JUnit console
-/// launcher, KSP when a processor needs it and what `kargo bench` runs. `kargo fetch` and `kargo update` call it.
+/// launcher and what `kargo bench` runs, and (JVM and Native) KSP when a processor needs it. `kargo fetch` and `kargo update` call it.
 pub(crate) fn lock_tools(ctx: &BuildContext, target: TargetKind) -> Result<()> {
     let setup = ctx.setup(target)?;
     if target != TargetKind::Native {
@@ -518,6 +518,9 @@ pub(crate) fn lock_tools(ctx: &BuildContext, target: TargetKind) -> Result<()> {
             ctx.ksp_tool()?;
         }
         bench::fetch(ctx)?;
+    }
+    if target == TargetKind::Native && !build::native_ksp_path(ctx, &setup)?.is_empty() {
+        ctx.ksp_tool()?;
     }
     Ok(())
 }
@@ -553,6 +556,9 @@ pub fn update(ctx: &BuildContext) -> Result<()> {
             build::jvm_processor_path(ctx, &setup, true)?;
             build::jvm_ksp_path(ctx, &setup, false)?;
             build::jvm_ksp_path(ctx, &setup, true)?;
+        }
+        if target == TargetKind::Native {
+            build::native_ksp_path(ctx, &ctx.setup(target)?)?;
         }
         if target == TargetKind::Wasm {
             crate::web_resources::fetch(ctx)?;

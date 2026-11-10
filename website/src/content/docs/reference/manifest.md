@@ -1051,7 +1051,7 @@ mathlib = { path = "../mathlib", test-fixtures = true }         # also its test 
 | `version` | | Version or Maven range. Optional when a BOM manages it. Required for BOMs. |
 | `group`, `artifact` | | Coordinates when the key isn't `group:artifact` |
 | `coords` | | `group:artifact[:version]` in one string |
-| `scope` | `compile` | `compile`, `runtime`, `provided`, `processor` (a Java [annotation processor](../../guides/dependencies/#annotation-processors)) or `ksp` (a [KSP processor](../../guides/dependencies/#kotlin-symbol-processing-ksp)); `processor` and `ksp` apply to the JVM and Android only |
+| `scope` | `compile` | `compile`, `runtime`, `provided`, `processor` (a Java [annotation processor](../../guides/dependencies/#annotation-processors)) or `ksp` (a [KSP processor](../../guides/dependencies/#kotlin-symbol-processing-ksp)); `processor` applies to the JVM and Android only, `ksp` to the JVM, Native and Android |
 | `classifier` | | Artifact classifier. Selects one file of the module; declare the module again without it for the main jar ([native libraries](../../guides/dependencies/#classifiers-and-native-libraries)) |
 | `extension` (alias `type`) | `jar` | Artifact extension |
 | `exclude` | `[]` | `group:artifact` or `group:*` to exclude transitively |

@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kargo_manifest::{Manifest, TargetKind};
+use kargo_manifest::{Manifest, Scope, TargetKind};
 use kargo_util::fs::collect_files;
 use kargo_util::process::slash;
 use kargo_util::shell::Shell;
@@ -45,8 +45,30 @@ pub fn manifest(manifest: &Manifest, is_builtin_command: impl Fn(&str) -> bool) 
         ));
     }
     messages.extend(npm_publishing(manifest));
+    messages.extend(ignored_ksp(manifest));
     messages.extend(crate::builtins::compose_platform_advice(manifest));
     messages
+}
+
+/// Warns when `scope = "ksp"` dependencies apply to the Wasm or JS target, which KSP does not run for: the
+/// declarations the processors would generate are missing there, which fails far from the cause.
+fn ignored_ksp(manifest: &Manifest) -> Vec<String> {
+    let enabled = manifest.targets.enabled();
+    let targets: Vec<&str> = [TargetKind::Wasm, TargetKind::Js]
+        .into_iter()
+        .filter(|t| enabled.contains(t))
+        .filter(|t| manifest.dependencies_for(*t).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp))
+        .map(|t| t.as_str())
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "the {} target{} ignore{} `scope = \"ksp\"` dependencies: KSP runs for the JVM, Native and Android targets only, so code that          needs what the processors generate does not compile there; declare the processors under [target.<target>.dependencies]          of the targets that run them",
+        targets.join(" and "),
+        if targets.len() == 1 { "" } else { "s" },
+        if targets.len() == 1 { "s" } else { "" },
+    )]
 }
 
 /// Warnings about `[publish.npm]`: a table that has no package to publish, and an npm package without the
@@ -280,6 +302,44 @@ mod tests {
         assert!(manifest(&package("1.0.0", &complete), |_| false).is_empty());
         let without_table = "[target.wasm]\nkind = \"library\"\nenvironment = \"js\"\n";
         assert!(manifest(&package("1.0.0", without_table), |_| false).is_empty(), "only a project that publishes to npm is told");
+    }
+
+    #[test]
+    fn ksp_on_wasm_and_js_warns() {
+        let ksp = "[dependencies]
+\"g:processor\" = { version = \"1\", scope = \"ksp\" }
+";
+        let messages = manifest(
+            &package(
+                "1.0.0",
+                &format!(
+                    "{ksp}[target.jvm]
+[target.native]
+"
+                ),
+            ),
+            |_| false,
+        );
+        assert!(messages.is_empty(), "the JVM and Native run KSP: {messages:?}");
+        let messages = manifest(
+            &package(
+                "1.0.0",
+                &format!(
+                    "{ksp}[target.jvm]
+[target.wasm]
+[target.js]
+"
+                ),
+            ),
+            |_| false,
+        );
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].starts_with("the wasm and js targets ignore `scope = \"ksp\"` dependencies"), "{messages:?}");
+        let jvm_only = "[target.jvm.dependencies]
+\"g:processor\" = { version = \"1\", scope = \"ksp\" }
+[target.wasm]
+";
+        assert!(manifest(&package("1.0.0", jvm_only), |_| false).is_empty(), "a JVM-only processor is not ignored anywhere");
     }
 
     #[test]
