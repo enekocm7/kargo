@@ -3538,6 +3538,16 @@ impl RawManifest {
 
         let dependencies = deps.parse(&self.dependencies, "dependencies", false, None)?;
         let dev_dependencies = deps.parse(&self.dev_dependencies, "dev-dependencies", true, None)?;
+        // AndroidX libraries (Room, SQLite, Lifecycle, ...) are hosted by Google, their Kotlin Multiplatform
+        // artifacts too, so a package that uses one gets Google Maven without an Android target.
+        let androidx = |d: &Dependency| d.module.group.starts_with("androidx.");
+        if default_repositories
+            && !repositories.iter().any(|r| r.url == kargo_maven::repo::GOOGLE)
+            && (dependencies.iter().chain(&dev_dependencies).any(androidx)
+                || TargetKind::ALL.iter().any(|t| targets.dependencies(*t).iter().any(androidx)))
+        {
+            repositories.insert(1, Repository::google());
+        }
         let profiles = resolve_profiles(self.profile, &mut deps)?;
         let path_dependencies = deps.paths;
         for (i, dep) in path_dependencies.iter().enumerate() {

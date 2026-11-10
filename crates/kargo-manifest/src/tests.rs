@@ -1000,6 +1000,25 @@ fn maven_local_repository() {
 }
 
 #[test]
+fn androidx_dependencies_add_google_maven() {
+    let google = |m: &Manifest| m.repositories.iter().filter(|r| r.url == kargo_maven::repo::GOOGLE).count();
+    assert_eq!(google(&parse(MINIMAL)), 0, "a plain package asks Maven Central only");
+    for deps in [
+        "[dependencies]\n\"androidx.room:room-runtime\" = \"2.8.0\"\n",
+        "[target.native]\n[target.native.dependencies]\n\"androidx.room:room-compiler\" = { version = \"2.8.0\", scope = \"ksp\" }\n",
+        "[dev-dependencies]\n\"androidx.sqlite:sqlite-bundled\" = \"2.6.0\"\n",
+    ] {
+        let m = parse(&format!("{MINIMAL}\n{deps}"));
+        assert_eq!(m.repositories[1].url, kargo_maven::repo::GOOGLE, "{deps}");
+        assert_eq!(google(&m), 1, "{deps}");
+    }
+    let without_defaults = parse(&format!(
+        "{MINIMAL}\n[dependencies]\n\"androidx.room:room-runtime\" = \"2.8.0\"\n[repositories]\ndefaults = false\nm = \"https://m.example/maven\"\n"
+    ));
+    assert_eq!(google(&without_defaults), 0, "`defaults = false` keeps Google out");
+}
+
+#[test]
 fn framework_toggles() {
     let with = |f: &str| format!("{MINIMAL}\n[frameworks]\n{f}\n");
     let off = parse(&with("compose = false\nserialization = false\ncoroutines = false"));

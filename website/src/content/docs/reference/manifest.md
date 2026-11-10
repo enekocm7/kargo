@@ -1077,7 +1077,7 @@ jitpack = "https://jitpack.io"
 company = { url = "https://repo.example.com/maven", username-env = "REPO_USER", password-env = "REPO_PASS" }
 ```
 
-Maven Central is used first, and Google Maven is added automatically for Android and Compose. Your repositories come after them, in the order you write them.
+Maven Central is used first, and Google Maven is added automatically for Android, Compose and any `androidx.*` dependency. Your repositories come after them, in the order you write them.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

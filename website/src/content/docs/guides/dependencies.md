@@ -403,7 +403,7 @@ Its jar (or klib, for Wasm, JS and Native) ends up on your classpaths, with its 
 
 ## Repositories
 
-Maven Central is used first, and Google's Maven repository is added automatically for Android and Compose. Add others in `[repositories]`; they are asked after those, in the order you write them:
+Maven Central is used first, and Google's Maven repository is added automatically for Android, Compose and any `androidx.*` dependency (such as Room on Native or the JVM). Add others in `[repositories]`; they are asked after those, in the order you write them:
 
 ```toml title="kargo.toml"
 [repositories]
