@@ -2231,8 +2231,8 @@ impl Layout {
 }
 
 impl Manifest {
-    /// The KSP processor options of `target` (`Jvm` or `Android`): `[kotlin] ksp-options` with the
-    /// target's own `ksp-options` over them. Relative values of options whose last name segment
+    /// The KSP processor options of `target`: `[kotlin] ksp-options`, with the target's own `ksp-options`
+    /// over them on the JVM and Android (Native has only the shared ones). Relative values of options whose last name segment
     /// ends in `Location`, `Dir`, `Directory` or `Path` (Room's `room.schemaLocation`) are
     /// relative to `root`, the package root.
     pub fn ksp_options_for(&self, target: TargetKind, root: &Path) -> Vec<(String, String)> {

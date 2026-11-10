@@ -769,6 +769,7 @@ pub(crate) fn run_native_ksp(ctx: &BuildContext, konan_target: &str, libraries: 
         api_version: &api_version,
         output: ws.output_dir(&ctx.profile, TargetKind::Native).join(konan_target).join("generated").join("ksp").join("main"),
         project_dir: ws.root(),
+        options: manifest.ksp_options_for(TargetKind::Native, ws.root()),
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Native);
     std::fs::create_dir_all(&fp_dir)?;

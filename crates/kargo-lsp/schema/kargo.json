@@ -163,7 +163,7 @@
         "language-version": { "description": "Passed as `-language-version`.", "type": "string", "examples": ["2.4"] },
         "api-version": { "description": "Passed as `-api-version`.", "type": "string", "examples": ["2.4"] },
         "ksp": { "description": "KSP version for `scope = \"ksp\"` dependencies.", "type": "string", "default": "2.3.12" },
-        "ksp-options": { "description": "Options passed to KSP processors (`-apoption` on the JVM, `ksp { arg(...) }` on Android). A relative value of an option whose name ends in Location, Dir, Directory or Path is relative to the package root.", "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] }, "examples": [{ "room.schemaLocation": "schemas" }] },
+        "ksp-options": { "description": "Options passed to KSP processors (`-processor-options` on the JVM and Native, `ksp { arg(...) }` on Android). A relative value of an option whose name ends in Location, Dir, Directory or Path is relative to the package root.", "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] }, "examples": [{ "room.schemaLocation": "schemas" }] },
         "opt-in": { "description": "Annotations to opt in to everywhere.", "type": "array", "items": { "type": "string" } },
         "compiler-args": { "description": "Extra arguments for every compilation.", "type": "array", "items": { "type": "string" } },
         "warnings-as-errors": { "description": "Fail on compiler warnings.", "type": "boolean", "default": false }

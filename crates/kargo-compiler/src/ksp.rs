@@ -54,7 +54,8 @@ pub struct KspRun<'a> {
     /// Root of the generated files: `kotlin/`, `java/`, `resources/`, `classes/` and `caches/`.
     pub output: PathBuf,
     pub project_dir: &'a Path,
-    /// Options for the processors (`[kotlin] ksp-options`), passed as `-apoption=key=value`.
+    /// Options for the processors (`[kotlin] ksp-options`), passed as one `-processor-options=a=1;b=2`
+    /// (KSP splits it at the platform's path separator, like its lists).
     pub options: Vec<(String, String)>,
 }
 
@@ -131,8 +132,10 @@ impl KspRun<'_> {
         if !self.friends.is_empty() {
             args.push(format!("-friends={}", join_paths(&self.friends)));
         }
-        for (key, value) in &self.options {
-            args.push(format!("-apoption={key}={value}"));
+        if !self.options.is_empty() {
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            let options: Vec<String> = self.options.iter().map(|(key, value)| format!("{key}={value}")).collect();
+            args.push(format!("-processor-options={}", options.join(sep)));
         }
         args.push(join_paths(self.processor_path));
         args
@@ -231,7 +234,7 @@ mod tests {
             api_version: "2.4",
             output: "gen".into(),
             project_dir: dir.path(),
-            options: vec![("room.schemaLocation".into(), "/p/schemas".into())],
+            options: vec![("room.schemaLocation".into(), "/p/schemas".into()), ("room.generateKotlin".into(), "true".into())],
         };
         let args = run.args(&jdk);
         assert_eq!(args[..3], ["-cp".to_owned(), "ksp.jar".to_owned(), KSP_MAIN.to_owned()]);
@@ -242,7 +245,9 @@ mod tests {
         assert!(args.contains(&"-kotlin-output-dir=gen/kotlin".to_owned()));
         assert!(args.contains(&"-libraries=moshi.jar".to_owned()));
         assert!(args.contains(&"-friends=classes".to_owned()));
-        assert!(args.contains(&"-apoption=room.schemaLocation=/p/schemas".to_owned()));
+        // KSP2 has no `-apoption`: all options go in one argument, split like its lists.
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        assert!(args.contains(&format!("-processor-options=room.schemaLocation=/p/schemas{sep}room.generateKotlin=true")), "{args:?}");
         // The processor classpath is the positional argument at the end.
         assert_eq!(args.last().unwrap(), &join_paths(&processors));
     }
@@ -269,11 +274,13 @@ mod tests {
             api_version: "2.4",
             output: "gen".into(),
             project_dir: dir.path(),
+            options: vec![("room.generateKotlin".into(), "true".into())],
         };
         let args = run.args(&jdk);
         assert_eq!(args[..3], ["-cp".to_owned(), "ksp.jar".to_owned(), KSP_NATIVE_MAIN.to_owned()]);
         assert!(args.contains(&"-module-name=shared".to_owned()));
         assert!(args.contains(&"-target=ios_arm64".to_owned()));
+        assert!(args.contains(&"-processor-options=room.generateKotlin=true".to_owned()));
         assert!(args.contains(&format!("-libraries={}", join_paths(&libraries))));
         // KSPNativeMain knows no JVM options.
         assert!(!args.iter().any(|a| a.starts_with("-jvm-target") || a.starts_with("-jdk-home") || a.starts_with("-java-")), "{args:?}");
