@@ -494,6 +494,8 @@ pub struct KotlinSettings {
     pub api_version: Option<String>,
     /// KSP version (`[kotlin] ksp`); `None` uses the version Kargo pins.
     pub ksp_version: Option<String>,
+    /// Options for KSP processors (`[kotlin] ksp-options`), as written.
+    pub ksp_options: BTreeMap<String, String>,
     pub opt_in: Vec<String>,
     pub compiler_args: Vec<String>,
     pub warnings_as_errors: bool,
@@ -508,6 +510,8 @@ pub struct JvmTarget {
     pub jvm_args: Vec<String>,
     /// Extra `javac` arguments for Java sources (`javac-args`).
     pub javac_args: Vec<String>,
+    /// KSP processor options for the JVM (`ksp-options`), over `[kotlin] ksp-options`.
+    pub ksp_options: BTreeMap<String, String>,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -2227,6 +2231,33 @@ impl Layout {
 }
 
 impl Manifest {
+    /// The KSP processor options of `target` (`Jvm` or `Android`): `[kotlin] ksp-options` with the
+    /// target's own `ksp-options` over them. Relative values of options whose last name segment
+    /// ends in `Location`, `Dir`, `Directory` or `Path` (Room's `room.schemaLocation`) are
+    /// relative to `root`, the package root.
+    pub fn ksp_options_for(&self, target: TargetKind, root: &Path) -> Vec<(String, String)> {
+        let mut options = self.kotlin.ksp_options.clone();
+        let own = match target {
+            TargetKind::Jvm => self.targets.jvm.as_ref().map(|j| &j.ksp_options),
+            TargetKind::Android => self.targets.android.as_ref().map(|a| &a.config.ksp_options),
+            _ => None,
+        };
+        options.extend(own.into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())));
+        options
+            .into_iter()
+            .map(|(key, value)| {
+                let last = key.rsplit('.').next().unwrap_or(&key);
+                let is_path = ["Location", "Dir", "Directory", "Path"].iter().any(|s| last.ends_with(s));
+                let value = if is_path && !value.is_empty() && Path::new(&value).is_relative() {
+                    root.join(&value).to_string_lossy().replace('\\', "/")
+                } else {
+                    value
+                };
+                (key, value)
+            })
+            .collect()
+    }
+
     /// The source sets of whole targets that `target` compiles, widest first (a set comes after every set that
     /// holds more targets than it does), each with the names of the sets it refines directly. `src/` refines
     /// nothing, and `src-<target>/` refines the sets that no other set of the list refines.

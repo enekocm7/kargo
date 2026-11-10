@@ -803,11 +803,38 @@ struct RawKotlin {
     api_version: Option<String>,
     ksp: Option<String>,
     #[serde(default)]
+    ksp_options: BTreeMap<String, Value>,
+    #[serde(default)]
     opt_in: Vec<String>,
     #[serde(default)]
     compiler_args: Vec<String>,
     #[serde(default)]
     warnings_as_errors: bool,
+}
+
+/// Deserializes a `ksp-options` table inside a target.
+fn scalar_options<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error> {
+    let raw = BTreeMap::<String, Value>::deserialize(deserializer)?;
+    ksp_options("ksp-options", raw).map_err(|err| serde::de::Error::custom(format!("{err:#}")))
+}
+
+/// `ksp-options` of `section`: scalars become the strings KSP passes to processors.
+fn ksp_options(section: &str, raw: BTreeMap<String, Value>) -> Result<BTreeMap<String, String>> {
+    raw.into_iter()
+        .map(|(key, value)| {
+            if key.is_empty() {
+                bail!("`{section}`: option names can't be empty");
+            }
+            let text = match value {
+                Value::String(s) => s,
+                Value::Boolean(b) => b.to_string(),
+                Value::Integer(i) => i.to_string(),
+                Value::Float(f) => f.to_string(),
+                _ => bail!("`{section}`: `{key}` must be a string, number or boolean"),
+            };
+            Ok((key, text))
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -829,6 +856,8 @@ struct RawJvm {
     jvm_args: Vec<String>,
     #[serde(default)]
     javac_args: Vec<String>,
+    #[serde(default, deserialize_with = "scalar_options")]
+    ksp_options: BTreeMap<String, String>,
     #[serde(default)]
     dependencies: toml::Table,
 }
@@ -1435,6 +1464,9 @@ pub struct AndroidConfig {
     /// Android lint.
     #[serde(default)]
     pub lint: AndroidLint,
+    /// Options for KSP processors on Android (`ksp-options`), over `[kotlin] ksp-options`.
+    #[serde(default, deserialize_with = "scalar_options")]
+    pub ksp_options: BTreeMap<String, String>,
     /// Signing configurations by build type (`debug` or `release`).
     #[serde(default)]
     pub signing: BTreeMap<String, AndroidSigning>,
@@ -2966,6 +2998,7 @@ impl RawManifest {
             compiler_args.extend(kotlin.compiler_args);
             kotlin.compiler_args = compiler_args;
         }
+        let ksp_options = ksp_options("[kotlin] ksp-options", std::mem::take(&mut kotlin.ksp_options))?;
         let shared_jvm_target = workspace.and_then(|w| w.kotlin.jvm_target.clone());
         if let Some(ksp) = &kotlin.ksp {
             validate_exact_version("[kotlin] `ksp`", "1.2.3", ksp)?;
@@ -2988,6 +3021,7 @@ impl RawManifest {
                     main_class: None,
                     jvm_args: Vec::new(),
                     javac_args: Vec::new(),
+                    ksp_options: BTreeMap::new(),
                     dependencies: Vec::new(),
                 }),
                 ..Default::default()
@@ -3006,6 +3040,7 @@ impl RawManifest {
                                 main_class: j.main_class,
                                 jvm_args: j.jvm_args,
                                 javac_args: j.javac_args,
+                                ksp_options: j.ksp_options,
                                 dependencies: deps.parse(&j.dependencies, "target.jvm.dependencies", false, Some(TargetKind::Jvm))?,
                             })
                         })
@@ -3622,6 +3657,7 @@ impl RawManifest {
                 language_version: kotlin.language_version,
                 api_version: kotlin.api_version,
                 ksp_version: kotlin.ksp,
+                ksp_options,
                 opt_in: kotlin.opt_in,
                 compiler_args: kotlin.compiler_args,
                 warnings_as_errors: kotlin.warnings_as_errors,

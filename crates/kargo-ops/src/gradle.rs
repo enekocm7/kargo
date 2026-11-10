@@ -334,8 +334,7 @@ pub fn plugins(manifest: &Manifest, android: &AndroidTarget) -> Vec<GradlePlugin
     if fw.lombok.is_some() {
         out.push(plugin("org.jetbrains.kotlin.plugin.lombok", kotlin, true));
     }
-    let uses_ksp = manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp);
-    if uses_ksp {
+    if uses_ksp(manifest) {
         out.push(plugin("com.google.devtools.ksp", builtins::ksp_version(manifest), true));
     }
     // `[target.android.plugins]`, in order after Kargo's own. Kotlin's plugins default to the Kotlin version.
@@ -581,6 +580,9 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let test_fragments = fragment_args(&common_test_dirs, group_fragments(Workspace::group_test_dirs), &android_test_first);
     if !main_fragments.is_empty() || !test_fragments.is_empty() {
         let list = |args: &[String]| format!("listOf({})", args.iter().map(|a| kts_string(a)).collect::<Vec<_>>().join(", "));
+        if uses_ksp(manifest) {
+            let _ = writeln!(s, "val kargoKspRoot = layout.buildDirectory.dir(\"generated/ksp\")");
+        }
         let _ = writeln!(s, "tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{");
         let _ = writeln!(s, "    val unitTest = name.contains(\"UnitTest\")");
         let _ = writeln!(
@@ -589,7 +591,37 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
             list(&test_fragments),
             list(&main_fragments)
         );
+        // KSP writes the variant's Kotlin files into the build directory only when the build runs, and
+        // in fragment mode every source must belong to a fragment: they are the platform's, listed when
+        // the compiler's arguments are read, after the `ksp<Variant>Kotlin` task.
+        if uses_ksp(manifest) {
+            let platform = TargetKind::Android.as_str();
+            let _ = writeln!(s, "    val fragments = if (unitTest) {} else {}", !test_fragments.is_empty(), !main_fragments.is_empty());
+            let _ = writeln!(
+                s,
+                "    val variant = name.removePrefix(\"compile\").removeSuffix(\"Kotlin\").replaceFirstChar {{ it.lowercase() }}"
+            );
+            let _ = writeln!(s, "    val kspOutput = kargoKspRoot.map {{ it.dir(\"$variant/kotlin\") }}");
+            let _ = writeln!(s, "    compilerOptions.freeCompilerArgs.addAll(kspOutput.map {{ dir ->");
+            let _ = writeln!(s, "        if (!fragments) listOf() else dir.asFileTree.matching {{ include(\"**/*.kt\") }}.files.sorted()");
+            let _ = writeln!(s, "            .map {{ \"-Xfragment-sources={platform}:${{it.path}}\" }}");
+            let _ = writeln!(s, "    }})");
+        }
         let _ = writeln!(s, "}}\n");
+    }
+
+    // KSP processor options.
+    let ksp_options = manifest.ksp_options_for(TargetKind::Android, ws.root());
+    if uses_ksp(manifest) && !ksp_options.is_empty() {
+        let _ = writeln!(s, "ksp {{");
+        for (key, value) in ksp_options {
+            let _ = writeln!(s, "    arg({}, {})", kts_string(&key), kts_string(&value));
+        }
+        let _ = writeln!(
+            s,
+            "}}
+"
+        );
     }
 
     // Dependencies.
@@ -667,6 +699,11 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let _ = writeln!(s, "}}");
     s.push_str(&doc_classpath_task_kts(&variant_name(&default_flavors(cfg, &[])?, "debug")));
     Ok(s)
+}
+
+/// Whether the Android build runs KSP: a `scope = "ksp"` dependency or dev-dependency.
+fn uses_ksp(manifest: &Manifest) -> bool {
+    manifest.dependencies_for(TargetKind::Android).iter().chain(&manifest.dev_dependencies).any(|d| d.scope == Scope::Ksp)
 }
 
 /// The compiler arguments that make the Kotlin files of `common` and of `platform` two fragments of one
@@ -2395,6 +2432,29 @@ x = { id = \"p.q\", files = [\"missing.json\"] }
     }
 
     #[test]
+    fn ksp_options_become_ksp_args() {
+        let (_d, ws) = workspace(
+            "[dependencies]
+\"x:p\" = { version = \"1\", scope = \"ksp\" }
+[kotlin.ksp-options]
+\"room.schemaLocation\" = \"schemas\"
+\"room.generateKotlin\" = true
+",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(
+            text.contains(
+                "ksp {
+    arg(\"room.generateKotlin\", \"true\")
+    arg(\"room.schemaLocation\", \""
+            ),
+            "{text}"
+        );
+        assert!(text.contains("/schemas\")"), "{text}");
+    }
+
+    #[test]
     fn ksp_dependencies_apply_the_ksp_plugin() {
         let (_d, ws) = workspace("");
         let android = ws.manifest().targets.android.clone().unwrap();
@@ -2698,6 +2758,26 @@ x = { id = \"p.q\", files = [\"missing.json\"] }
         };
         assert!(text.contains(&sources([("common", &common), ("android", &actual)])), "{text}");
         assert!(text.contains(&sources([("common", &common_test), ("android", &actual_test)])), "{text}");
+        // Without KSP nothing reads its output.
+        assert!(!text.contains("generated/ksp"), "{text}");
+    }
+
+    #[test]
+    fn ksp_output_joins_the_android_fragment() {
+        // Issue #522: KSP's files are compiled too, so they must be in `-Xfragment-sources`.
+        let (dir, ws) = workspace("[dependencies]\n\"androidx.room:room-compiler\" = { version = \"2.8.4\", scope = \"ksp\" }\n");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        for path in ["src/Platform.kt", "src-android/Platform.android.kt"] {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "").unwrap();
+        }
+        let text = build_gradle(&ws, &android).unwrap();
+        assert!(text.contains("val kargoKspRoot = layout.buildDirectory.dir(\"generated/ksp\")"), "{text}");
+        let block = text.split("tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>()").nth(1).unwrap();
+        assert!(block.contains("val fragments = if (unitTest) false else true"), "{text}");
+        assert!(block.contains("val kspOutput = kargoKspRoot.map { it.dir(\"$variant/kotlin\") }"), "{text}");
+        assert!(block.contains(".map { \"-Xfragment-sources=android:${it.path}\" }"), "{text}");
     }
 
     #[test]
