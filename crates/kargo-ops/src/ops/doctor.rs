@@ -966,9 +966,11 @@ fn lockfile(project: &Project, out: &mut Vec<Check>) {
     // A Kotlin Multiplatform library is locked under its platform's module, such as `-jvm`.
     let locked = |module: &str| lock.contains_module(module) || lock.module_versions().keys().any(|m| m.starts_with(&format!("{module}-")));
     let unlocked: Vec<&String> = declared.iter().filter(|m| !locked(m)).collect();
-    if unlocked.is_empty() {
+    let skipped = skipped_native_resolutions(project, &lock);
+    if unlocked.is_empty() && skipped.is_empty() {
         out.push(Check::ok(s, "kargo.lock", "in sync with kargo.toml"));
-    } else {
+    }
+    if !unlocked.is_empty() {
         out.push(Check::warning(
             s,
             "kargo.lock",
@@ -976,6 +978,40 @@ fn lockfile(project: &Project, out: &mut Vec<Check>) {
             "run `kargo fetch` to update it",
         ));
     }
+    if !skipped.is_empty() {
+        out.push(Check::warning(
+            s,
+            "kargo.lock",
+            format!("has no resolutions for {}, which this host skips, so `--locked` builds on macOS fail", skipped.join(", ")),
+            "run `kargo fetch` (it resolves every platform, no Xcode needed) and commit kargo.lock",
+        ));
+    }
+}
+
+/// The Native platforms of the members that this host cannot build and whose main resolution `kargo.lock` lacks,
+/// as their `kargo.lock` key without `/main` (`shared/native-ios_arm64`). `kargo build` skips them here, so only `kargo fetch` locks them.
+fn skipped_native_resolutions(project: &Project, lock: &Lockfile) -> Vec<String> {
+    let mut out = Vec::new();
+    for &i in project.members() {
+        let ws = project.package(i);
+        let Some(native) = ws.manifest().targets.native.as_ref() else { continue };
+        let mut seen = Vec::new();
+        for platform in &native.platforms {
+            let Ok(konan_target) = kargo_toolchain::native::resolve_platform(platform) else { continue };
+            if seen.contains(&konan_target) || super::build::native_host_limit(&konan_target).is_none() {
+                continue;
+            }
+            // A profile with dependencies of its own locks `<key>@<profile>`.
+            let name = ws.lock_key(&format!("native-{konan_target}"));
+            let key = format!("{name}/main");
+            let profiled = format!("{key}@");
+            if !lock.resolutions.keys().any(|k| *k == key || k.starts_with(&profiled)) {
+                out.push(name);
+            }
+            seen.push(konan_target);
+        }
+    }
+    out
 }
 
 /// The user and password of a URL, replaced: `https://u:p@host` becomes `https://***@host`.

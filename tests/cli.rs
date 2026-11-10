@@ -3089,10 +3089,33 @@ fn an_apple_native_platform_is_skipped_off_macos_and_doctor_warns() {
         .args(["build", "-t", "native"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("skipping native ios_arm64: Apple platforms need macOS with Xcode"));
+        .stderr(predicate::str::contains("skipping native ios_arm64: Apple platforms need macOS with Xcode"))
+        .stderr(predicate::str::contains("kargo.lock has no resolutions for them, so run `kargo fetch`"));
 
     let java_home = fake_java_home(p.home.path(), 21);
     doctor(&p, &java_home).assert().stdout(predicate::str::contains("which this host cannot build"));
+
+    // A lock written on this host lacks the skipped platform's resolution, which macOS `--locked` builds need (#525).
+    p.file("kargo.lock", "version = 1\n\n[resolution.\"jvm/runtime\"]\ninputs = \"x\"\nroots = []\n");
+    let out = doctor(&p, &java_home).args(["--format", "json"]).output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let lock = doctor_checks(&report, "kargo.lock");
+    assert_eq!(lock.len(), 1, "{report:#}");
+    assert_eq!(lock[0]["status"], "warning", "{report:#}");
+    assert!(lock[0]["message"].as_str().unwrap().contains("has no resolutions for native-ios_arm64, which this host skips"), "{report:#}");
+    assert!(lock[0]["fix"].as_str().unwrap().contains("kargo fetch"), "{report:#}");
+
+    // Once `kargo fetch` has locked it, the lock is in sync and the build's note drops the hint.
+    p.file("kargo.lock", "version = 1\n\n[resolution.\"native-ios_arm64/main\"]\ninputs = \"x\"\nroots = []\n");
+    let out = doctor(&p, &java_home).args(["--format", "json"]).output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doctor_checks(&report, "kargo.lock")[0]["status"], "ok", "{report:#}");
+    p.kargo()
+        .args(["build", "-t", "native"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Apple platforms need macOS with Xcode"))
+        .stderr(predicate::str::contains("kargo fetch").not());
 }
 
 #[test]

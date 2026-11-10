@@ -96,6 +96,17 @@ sha256 = "91d0..."
 - The cache keeps the files of each repository apart. Files from Maven Central and Google (or their mirrors) are stored by their plain Maven path, `~/.kargo/cache/maven/<group>/<artifact>/<version>/`, since a release there never changes. Everything else, including every SNAPSHOT, is stored in a directory of its repository, `~/.kargo/cache/maven/@<name>-<hash of the URL>/<group>/...`. So a private or forked artifact that reuses the coordinates of a public one never replaces it, and one repository's copy is never used for another. `kargo.lock` lists the plain Maven path without the repository directory, and a locked build uses the cached copy that matches the lock. Files cached by an older Kargo that are not from Central or Google are downloaded again once.
 - When you change dependencies in `kargo.toml`, only the affected resolutions are recomputed.
 - The file is only rewritten when its content changes.
+- A command locks only the resolutions it uses: `kargo build -t jvm` locks the JVM classpaths, `kargo test` adds the test ones, and so on. `kargo fetch` locks every enabled target's main and test resolutions at once, so run it before committing when CI builds targets you didn't build locally.
+
+### Apple platforms locked from Linux or Windows
+
+Off macOS, `kargo build`, `check`, `test` and `run` skip the Apple platforms of `[target.native] platforms` (`ios_arm64`, `macos_arm64`, ...), so they never lock their resolutions (`native-ios_arm64/main`, `native-ios_arm64/test`). A `kargo.lock` committed from that host then fails a `--locked` build on macOS:
+
+```console
+error: kargo.lock needs to be updated for `shared/native-ios_arm64/main` but --locked was passed; run `kargo update` (or `kargo fetch`) without --locked and commit kargo.lock
+```
+
+Resolving them needs no Xcode, so run `kargo fetch` on that host before committing: it locks every platform in `platforms`. The skip note of the build says so while the lock lacks them, and [`kargo doctor`](../commands/#kargo-doctor) warns about each one.
 
 ## SNAPSHOT versions
 

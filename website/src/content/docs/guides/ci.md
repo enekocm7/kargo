@@ -171,6 +171,8 @@ jobs:
     runs-on: ${{ matrix.os }}
 ```
 
+A build locks only the targets and platforms it builds, and off macOS `kargo build` skips Apple platforms such as `ios_arm64`, so a `kargo.lock` committed from Linux or Windows has no resolutions for them and the macOS job fails with `--locked`. Run `kargo fetch` before committing: it locks every enabled target and platform without building, and needs no Xcode. `kargo doctor` warns when the lock lacks a platform the host skips (see [Apple platforms locked from Linux or Windows](../../reference/lockfile/#apple-platforms-locked-from-linux-or-windows)).
+
 ### Native executables and installers
 
 [`kargo package --format jlink`, `native-image` and `installer`](../distributing/) build for the OS they run on, so build each platform's on its own runner:
