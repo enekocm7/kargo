@@ -684,6 +684,7 @@ pub(crate) fn run_jvm_ksp_for_suite(
         api_version: &api_version,
         output: ws.output_dir(&ctx.profile, TargetKind::Jvm).join("generated").join("ksp").join(dir),
         project_dir: ws.root(),
+        options: ws.manifest().ksp_options_for(TargetKind::Jvm, ws.root()),
     };
     let fp_dir = ctx.fingerprint_dir(TargetKind::Jvm);
     let generated = run.run(ctx.shell(), unit.jdk, &fp_dir, &|| announce(ctx, "Processing", TargetKind::Jvm, what))?;

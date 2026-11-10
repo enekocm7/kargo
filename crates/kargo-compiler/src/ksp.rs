@@ -40,6 +40,8 @@ pub struct KspRun<'a> {
     /// Root of the generated files: `kotlin/`, `java/`, `resources/`, `classes/` and `caches/`.
     pub output: PathBuf,
     pub project_dir: &'a Path,
+    /// Options for the processors (`[kotlin] ksp-options`), passed as `-apoption=key=value`.
+    pub options: Vec<(String, String)>,
 }
 
 /// What a KSP pass generated.
@@ -101,6 +103,9 @@ impl KspRun<'_> {
         }
         if !self.friends.is_empty() {
             args.push(format!("-friends={}", join_paths(&self.friends)));
+        }
+        for (key, value) in &self.options {
+            args.push(format!("-apoption={key}={value}"));
         }
         args.push(join_paths(self.processor_path));
         args
@@ -186,6 +191,7 @@ mod tests {
             api_version: "2.4",
             output: "gen".into(),
             project_dir: dir.path(),
+            options: vec![("room.schemaLocation".into(), "/p/schemas".into())],
         };
         let args = run.args(&jdk);
         assert_eq!(args[..3], ["-cp".to_owned(), "ksp.jar".to_owned(), KSP_MAIN.to_owned()]);
@@ -196,6 +202,7 @@ mod tests {
         assert!(args.contains(&"-kotlin-output-dir=gen/kotlin".to_owned()));
         assert!(args.contains(&"-libraries=moshi.jar".to_owned()));
         assert!(args.contains(&"-friends=classes".to_owned()));
+        assert!(args.contains(&"-apoption=room.schemaLocation=/p/schemas".to_owned()));
         // The processor classpath is the positional argument at the end.
         assert_eq!(args.last().unwrap(), &join_paths(&processors));
     }
@@ -217,6 +224,7 @@ mod tests {
             api_version: "2.4",
             output: out.clone(),
             project_dir: dir.path(),
+            options: vec![],
         };
         let shell = Shell::new(kargo_util::shell::Verbosity::Quiet);
         let jdk = Jdk { home: PathBuf::from("/jdk"), version: 21 };

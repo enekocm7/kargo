@@ -163,6 +163,7 @@
         "language-version": { "description": "Passed as `-language-version`.", "type": "string", "examples": ["2.4"] },
         "api-version": { "description": "Passed as `-api-version`.", "type": "string", "examples": ["2.4"] },
         "ksp": { "description": "KSP version for `scope = \"ksp\"` dependencies.", "type": "string", "default": "2.3.12" },
+        "ksp-options": { "description": "Options passed to KSP processors (`-apoption` on the JVM, `ksp { arg(...) }` on Android). A relative value of an option whose name ends in Location, Dir, Directory or Path is relative to the package root.", "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] }, "examples": [{ "room.schemaLocation": "schemas" }] },
         "opt-in": { "description": "Annotations to opt in to everywhere.", "type": "array", "items": { "type": "string" } },
         "compiler-args": { "description": "Extra arguments for every compilation.", "type": "array", "items": { "type": "string" } },
         "warnings-as-errors": { "description": "Fail on compiler warnings.", "type": "boolean", "default": false }
@@ -218,6 +219,7 @@
             "main-class": { "description": "The JVM main class. Default: detected from a Kotlin `fun main`.", "type": "string", "examples": ["com.example.app.MainKt"] },
             "jvm-args": { "description": "JVM options for `kargo run` and `kargo test`.", "type": "array", "items": { "type": "string" } },
             "javac-args": { "description": "Extra javac options for Java sources.", "type": "array", "items": { "type": "string" } },
+            "ksp-options": { "description": "KSP processor options for this target, over [kotlin] ksp-options.", "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } },
             "dependencies": { "$ref": "#/definitions/dependencies", "description": "Dependencies of the JVM target only." }
           }
         },
@@ -481,6 +483,7 @@
               },
               "examples": [{ "google-services": { "id": "com.google.gms.google-services", "version": "4.4.2" } }]
             },
+            "ksp-options": { "description": "KSP processor options for Android (`ksp { arg(...) }`), over [kotlin] ksp-options.", "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } },
             "lint": {
               "description": "Android lint, run by `kargo lint --android` and `kargo android lint`.",
               "type": "object",

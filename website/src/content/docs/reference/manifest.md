@@ -183,6 +183,7 @@ version = "2.4.21"                        # default 2.4.21
 language-version = "2.4"
 api-version = "2.4"
 ksp = "2.3.12"                            # default 2.3.12
+ksp-options = { "room.schemaLocation" = "schemas" }   # options for KSP processors
 opt-in = ["kotlin.ExperimentalStdlibApi"]
 compiler-args = ["-Xcontext-parameters"]
 warnings-as-errors = false
@@ -194,6 +195,7 @@ warnings-as-errors = false
 | `language-version` | | `-language-version` |
 | `api-version` | | `-api-version` |
 | `ksp` | `2.3.12` | [KSP](../../guides/dependencies/#kotlin-symbol-processing-ksp) version for `scope = "ksp"` dependencies (the standalone tool on the JVM, the Gradle plugin on Android). One exact version |
+| `ksp-options` | none | Options for [KSP processors](../../guides/dependencies/#processor-options): names to strings, numbers or booleans. A relative value of an option whose name ends in `Location`, `Dir`, `Directory` or `Path` is relative to the package root. Not inherited from `[workspace.kotlin]` |
 | `opt-in` | `[]` | Annotations to opt in to everywhere |
 | `compiler-args` | `[]` | Extra arguments for every compilation |
 | `warnings-as-errors` | `false` | Fail on warnings. The compiler's `warnings found and -Werror specified` summary is printed [after the diagnostics](../warnings/#warnings-as-errors) |
@@ -576,11 +578,12 @@ jvm-target = "25"                       # 8 (or 1.8) and up; default "25", lower
 main-class = "com.example.app.MainKt"   # default: detected from a Kotlin `fun main`; set it for a Java main
 jvm-args = ["-Xmx1g"]                   # for kargo run and kargo test
 javac-args = ["-Xlint:all"]             # extra javac options for Java sources
+ksp-options = { "room.generateKotlin" = true }   # KSP options for the JVM only
 ```
 
 On JDK 21 and newer, `kargo run` and `kargo test` put `-XX:+EnableDynamicAgentLoading` and `--enable-native-access=ALL-UNNAMED` before `jvm-args`, so libraries that load an agent (MockK) or native code (Compose) don't print JVM warnings into your output. Turn one off by adding the opposite option, for example `jvm-args = ["-XX:-EnableDynamicAgentLoading"]`.
 
-`javac-args` are appended to the `javac` command line for main and test Java sources, after the options Kargo sets (`-d`, `-encoding UTF-8`, `--release` from `jvm-target`, `-classpath`, and the [annotation processor](../../guides/dependencies/#annotation-processors) options). Use it for lint flags, `-parameters` or processor options such as `-Akey=value`. It has no effect on Kotlin sources; use `[kotlin] compiler-args` for those.
+`javac-args` are appended to the `javac` command line for main and test Java sources, after the options Kargo sets (`-d`, `-encoding UTF-8`, `--release` from `jvm-target`, `-classpath`, and the [annotation processor](../../guides/dependencies/#annotation-processors) options). Use it for lint flags, `-parameters` or processor options such as `-Akey=value`. It has no effect on Kotlin sources; use `[kotlin] compiler-args` for those. `ksp-options` are [KSP processor options](../../guides/dependencies/#processor-options) for the JVM, added to `[kotlin] ksp-options` and winning when both set a name; `[target.android]` has the same key.
 
 `jvm-target` is a Java version: `8`, or `9` and up (`11`, `17`, `21`, ...). `1.8` is accepted as another spelling of `8`. Kargo checks the value when it loads `kargo.toml`, so a typo such as `"abc"` or `"1.9"` fails with the list of valid values before any compiler starts. It passes `1.8` to the Kotlin compiler (which doesn't accept `8`) and `--release 8` to `javac`.
 

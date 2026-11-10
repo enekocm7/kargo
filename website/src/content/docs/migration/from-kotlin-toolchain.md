@@ -199,6 +199,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `settings.lombok` | `[frameworks] lombok` |
 | `settings.kotlin.allOpen`, `noArg` | `[plugins.allopen]`, `[plugins.noarg]` |
 | `settings.kotlin.ksp.version`, `processors` | `[kotlin] ksp` and dependencies with `scope = "ksp"` |
+| `settings.kotlin.ksp.processorOptions` | [`[kotlin.ksp-options]`](../../guides/dependencies/#processor-options) |
 | `settings.java.annotationProcessing.processors` | Dependencies with `scope = "processor"` |
 | `settings.jvm.jdk.version` | `[toolchain] jdk` |
 | `settings.jvm.release` | `[target.jvm] jvm-target` |
