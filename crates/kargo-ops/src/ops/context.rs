@@ -697,6 +697,13 @@ impl<'a> BuildContext<'a> {
         Ok(if profile.dependencies.is_empty() { key.to_owned() } else { format!("{key}@{}", self.profile.name()) })
     }
 
+    /// Whether `kargo.lock` holds the resolution `key` of this profile (for any inputs).
+    pub fn has_locked(&self, key: &str) -> bool {
+        let Ok(key) = self.profile_resolution(key) else { return false };
+        let key = self.ws.lock_key(&key);
+        self.shared.lock.lock().expect("lock poisoned").resolutions.contains_key(&key)
+    }
+
     /// Resolves `roots` for `platform`, reusing `kargo.lock` when possible.
     pub fn resolve(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
         self.resolve_at(&self.ws.lock_key(&self.profile_resolution(key)?), platform, roots, boms)

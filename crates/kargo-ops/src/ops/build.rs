@@ -1187,7 +1187,15 @@ pub fn buildable_native_platforms_for(ctx: &BuildContext, filter: &[kargo_manife
     if filter.is_empty() {
         if let Some(first) = skipped.first() {
             let reason = native_host_limit(first).unwrap_or_default();
-            ctx.shell().note(format!("skipping native {}: {reason}", skipped.join(", ")));
+            // Resolving them needs no Xcode, but a build here never does it, so a lock committed from this
+            // host would fail `--locked` builds on macOS.
+            let unlocked = skipped.iter().any(|t| !ctx.has_locked(&format!("native-{t}/main")));
+            let hint = if unlocked {
+                "; kargo.lock has no resolutions for them, so run `kargo fetch` before committing it or `--locked` builds on macOS fail"
+            } else {
+                ""
+            };
+            ctx.shell().note(format!("skipping native {}: {reason}{hint}", skipped.join(", ")));
         }
         return Ok(buildable);
     }
