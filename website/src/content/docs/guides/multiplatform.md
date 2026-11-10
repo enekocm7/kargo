@@ -82,7 +82,7 @@ package com.example.hello
 actual fun platformName(): String = "Android ${android.os.Build.VERSION.RELEASE}"
 ```
 
-On Android, Kargo has Gradle compile `src/` and `src-android/` as two fragments of one compilation, the way the other targets do, so the `expect` in `src/` finds its `actual` in `src-android/`. The same holds for `tests/` and `tests-android/`. The fragments are only declared when both directories hold Kotlin files.
+On Android, Kargo has Gradle compile `src/` and `src-android/` as two fragments of one compilation, the way the other targets do, so the `expect` in `src/` finds its `actual` in `src-android/`. The same holds for `tests/` and `tests-android/`. The fragments are only declared when both directories hold Kotlin files. The Kotlin files a [KSP](../dependencies/#kotlin-symbol-processing-ksp) processor generates (Room's DAOs and databases, for example) belong to the Android fragment, so the generated code can implement and use the declarations of both.
 
 :::caution
 Give each `actual` file a name of its own, with the target as a suffix, as the examples do. On the JVM and Android, the top-level declarations of a file compile into a class named after the file (`PlatformKt`). A `src/Platform.kt` and a `src-jvm/Platform.kt` in the same package would both produce `com/example/hello/PlatformKt`, and the build fails with `duplicate JVM class name`. Wasm, JS and Native have no such class, so the clash only shows up on the JVM and Android, but the suffix keeps the names the same everywhere. See [the FAQ](../../reference/faq/#duplicate-jvm-class-name-for-two-files-with-the-same-name).
