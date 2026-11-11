@@ -198,14 +198,14 @@ fn test_classes_dir(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite
     ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(name)
 }
 
-/// The file that records the JVM test classes that failed in the last run of `suite`:
+/// The file that records the test classes of `target` that failed in the last run of `suite`:
 /// `test-failures` for the default suite, `test-failures-<name>` for a declared one.
-fn failures_file_for_suite(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
+fn failures_file_for_suite(ctx: &BuildContext, target: TargetKind, suite: Option<&kargo_manifest::TestSuite>) -> PathBuf {
     let name = match suite {
         None => "test-failures".to_owned(),
         Some(suite) => format!("test-failures-{}", suite.name),
     };
-    ctx.ws.output_dir(&ctx.profile, TargetKind::Jvm).join(name)
+    ctx.ws.output_dir(&ctx.profile, target).join(name)
 }
 
 /// The output directory of the Wasm test module of `suite`:
@@ -660,12 +660,19 @@ fn test_android(ctx: &BuildContext, opts: &TestOptions, deadline: Option<Instant
         no_tests(ctx, TargetKind::Android);
         return Ok(true);
     }
+    let rerun = if opts.no_run { None } else { rerun_for_suite(ctx, opts, TargetKind::Android, None)? };
+    if rerun.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(true);
+    }
     let reports = (opts.junit_report && !opts.no_run).then(|| reports_dir(ctx, TargetKind::Android)).transpose()?;
-    let passed = crate::gradle::test(ctx, opts.filter.as_deref(), opts.no_run, reports.as_deref())?;
+    let run = crate::gradle::test(ctx, opts.filter.as_deref(), rerun.as_deref(), opts.no_run, reports.as_deref())?;
     if let Some(dir) = &reports {
         wrote_reports(ctx, dir);
     }
-    Ok(passed)
+    if !opts.no_run {
+        record_failures_for_suite(ctx, TargetKind::Android, run.failed_classes.as_deref(), None)?;
+    }
+    Ok(run.passed)
 }
 
 /// `--instrumented`: the tests of `android-tests/` on a device, which is chosen like `kargo run -t android` does and
@@ -742,20 +749,8 @@ fn test_jvm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kar
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
-    let rerun = if opts.failed { failed_jvm_classes_for_suite(ctx, suite)? } else { None };
-    if opts.failed && rerun.is_none() {
-        let where_ = match suite {
-            None => "no failed JVM tests are recorded; running all of them".to_owned(),
-            Some(suite) => format!("no failed JVM tests of the `{}` suite are recorded; running all of them", suite.name),
-        };
-        ctx.shell().note(where_);
-    }
+    let rerun = rerun_for_suite(ctx, opts, TargetKind::Jvm, suite)?;
     if rerun.as_ref().is_some_and(Vec::is_empty) {
-        let where_ = match suite {
-            None => "no JVM test failed in the last run".to_owned(),
-            Some(suite) => format!("no JVM test of the `{}` suite failed in the last run", suite.name),
-        };
-        ctx.shell().note(where_);
         return Ok(TestRun::Done(true));
     }
     let mode = if diagnostics::is_json() { JunitMode::Events } else { JunitMode::Run };
@@ -764,9 +759,52 @@ fn test_jvm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&kar
     Ok(TestRun::Junit(JunitRun { cmd, main_classes: main.classes.clone() }))
 }
 
-/// The test classes that failed in the last JVM run (`--failed`); `None` when no run has recorded any.
-fn failed_jvm_classes_for_suite(ctx: &BuildContext, suite: Option<&kargo_manifest::TestSuite>) -> Result<Option<Vec<String>>> {
-    let path = failures_file_for_suite(ctx, suite);
+/// How the messages of `--failed` name a target's tests: `JVM tests`, `Native tests`, ...
+fn target_title(target: TargetKind) -> &'static str {
+    match target {
+        TargetKind::Jvm => "JVM",
+        TargetKind::Wasm => "Wasm",
+        TargetKind::Js => "JS",
+        TargetKind::Native => "Native",
+        TargetKind::Android => "Android",
+    }
+}
+
+/// `--failed`: the test classes of `target` that failed in the last run of `suite`, which are the
+/// ones to run again. `None` runs every test: without `--failed`, or when no finished run recorded
+/// its failures. An empty list runs none, since the last run passed. Both are noted.
+fn rerun_for_suite(
+    ctx: &BuildContext,
+    opts: &TestOptions,
+    target: TargetKind,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Option<Vec<String>>> {
+    if !opts.failed {
+        return Ok(None);
+    }
+    let rerun = failed_classes_for_suite(ctx, target, suite)?;
+    let title = target_title(target);
+    match (&rerun, suite) {
+        (None, None) => ctx.shell().note(format!("no failed {title} tests are recorded; running all of them")),
+        (None, Some(suite)) => {
+            ctx.shell().note(format!("no failed {title} tests of the `{}` suite are recorded; running all of them", suite.name))
+        }
+        (Some(classes), None) if classes.is_empty() => ctx.shell().note(format!("no {title} test failed in the last run")),
+        (Some(classes), Some(suite)) if classes.is_empty() => {
+            ctx.shell().note(format!("no {title} test of the `{}` suite failed in the last run", suite.name))
+        }
+        (Some(_), _) => {}
+    }
+    Ok(rerun)
+}
+
+/// The test classes of `target` that failed in the last run (`--failed`); `None` when no run has recorded any.
+fn failed_classes_for_suite(
+    ctx: &BuildContext,
+    target: TargetKind,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<Option<Vec<String>>> {
+    let path = failures_file_for_suite(ctx, target, suite);
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(Some(text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -774,10 +812,28 @@ fn failed_jvm_classes_for_suite(ctx: &BuildContext, suite: Option<&kargo_manifes
     }
 }
 
-/// Records the JVM test classes that failed in the last run, for `--failed`. `None` forgets them,
-/// which is what an unfinished run leaves: its failures are unknown.
-fn record_jvm_failures_for_suite(ctx: &BuildContext, failed: Option<&[String]>, suite: Option<&kargo_manifest::TestSuite>) -> Result<()> {
-    let path = failures_file_for_suite(ctx, suite);
+/// The classes of the failed tests among `cases`, in name order.
+pub(crate) fn failed_classes_of(cases: &[testreport::TestCase]) -> Vec<String> {
+    let classes: std::collections::BTreeSet<&str> = cases
+        .iter()
+        .filter(|case| matches!(case.outcome, CaseOutcome::Failed { .. }) && !case.class.is_empty())
+        .map(|case| case.class.as_str())
+        .collect();
+    classes.into_iter().map(str::to_owned).collect()
+}
+
+/// Records the test classes of `target` that failed in the last run, for `--failed`. `None` forgets
+/// them, which is what an unfinished run leaves: its failures are unknown.
+fn record_failures_for_suite(
+    ctx: &BuildContext,
+    target: TargetKind,
+    failed: Option<&[String]>,
+    suite: Option<&kargo_manifest::TestSuite>,
+) -> Result<()> {
+    let path = failures_file_for_suite(ctx, target, suite);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    }
     match failed {
         Some(classes) => {
             let text: String = classes.iter().map(|class| format!("{class}\n")).collect();
@@ -797,11 +853,7 @@ fn failed_classes(reports: &Path) -> Result<Vec<String>> {
     for file in kargo_util::fs::collect_files(reports, &["xml"]) {
         let xml = std::fs::read_to_string(&file).with_context(|| format!("failed to read {}", file.display()))?;
         let summary = testreport::report_junit_xml(&xml, std::io::sink()).with_context(|| format!("failed to read {}", file.display()))?;
-        for case in summary.cases.iter().filter(|case| matches!(case.outcome, CaseOutcome::Failed { .. })) {
-            if !case.class.is_empty() {
-                classes.insert(case.class.clone());
-            }
-        }
+        classes.extend(failed_classes_of(&summary.cases));
     }
     Ok(classes.into_iter().collect())
 }
@@ -824,8 +876,8 @@ fn note_jvm_only_options(ctx: &BuildContext, targets: &[TargetKind], opts: &Test
     if ctx.ws.manifest().test.test_timeout.is_some() {
         ctx.shell().warn(format!("`[test] test-timeout` only applies to JVM tests; the {others} tests have no per-test limit"));
     }
-    if opts.failed {
-        ctx.shell().warn(format!("`--failed` only reruns JVM tests; running all of the {others} tests"));
+    if opts.failed && opts.filter.is_some() {
+        ctx.shell().warn(format!("with `--failed`, the {others} tests rerun the classes that failed and ignore the filter"));
     }
     if opts.coverage {
         ctx.shell().warn(format!("`--coverage` measures the JVM tests with JaCoCo; the {others} tests run without coverage"));
@@ -1018,15 +1070,15 @@ fn run_junit_for_suite(
     }
     if end.timed_out {
         ctx.shell().error(format!("{} {}", label, timed_out_message_for_suite(ctx, suite)));
-        record_jvm_failures_for_suite(ctx, None, suite)?;
+        record_failures_for_suite(ctx, TargetKind::Jvm, None, suite)?;
         return Ok(false);
     }
     if let Some(reason) = end.abnormal() {
         ctx.shell().error(format!("test JVM {reason} before finishing"));
-        record_jvm_failures_for_suite(ctx, None, suite)?;
+        record_failures_for_suite(ctx, TargetKind::Jvm, None, suite)?;
         return Ok(false);
     }
-    record_jvm_failures_for_suite(ctx, Some(&failed_classes(&reports)?), suite)?;
+    record_failures_for_suite(ctx, TargetKind::Jvm, Some(&failed_classes(&reports)?), suite)?;
     let filter = opts.filter.as_deref();
     let tagged = !suite_include_tags(opts, suite).is_empty() || !suite_exclude_tags(opts, suite).is_empty();
     if end.status.code() == Some(JUNIT_NO_TESTS) {
@@ -1469,6 +1521,9 @@ fn finish_reported_for_suite(
         wrote_reports(ctx, &dir);
     }
     summary.crashed = abnormal.is_some() && (timed_out || summary.failed == 0);
+    // A run that crashed or timed out leaves its failures unknown, so `--failed` runs everything next time.
+    let failed = (!summary.crashed).then(|| failed_classes_of(&summary.cases));
+    record_failures_for_suite(ctx, target, failed.as_deref(), suite)?;
     emit_summary_for_suite(ctx, target, suite, summary.passed, summary.failed, summary.ignored, summary.success());
     if summary.crashed && !summary.ran_tests() {
         ctx.shell().error(format!("{label} {}", abnormal.unwrap_or_default()));
@@ -1740,15 +1795,19 @@ fn test_wasm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&ka
     } else {
         main_node_modules
     };
+    let rerun = if opts.no_run { None } else { rerun_for_suite(ctx, opts, TargetKind::Wasm, suite)? };
+    if rerun.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(TestRun::Done(true));
+    }
+    let args = crate::wasm_output::test_arguments(opts.filter.as_deref(), rerun.as_deref());
     if wasm.environment == WasmEnvironment::Browser {
-        return browser_tests_for_suite(ctx, opts, &unit, node_modules, suite);
+        return browser_tests_for_suite(ctx, opts, &unit, node_modules, &args);
     }
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
     let mut cmd = Command::new(kargo_toolchain::node()?);
     cmd.arg("-e").arg(format!("import({:?}).then(m => m.startUnitTests())", process::file_url(&unit.module_path())));
-    let args = crate::wasm_output::test_arguments(opts.filter.as_deref());
     if !args.is_empty() {
         // kotlin-test reads `process.argv.slice(2)`, and with `-e` the first argument after `--` is `argv[1]`.
         cmd.arg("--").arg("kargo").args(args);
@@ -1758,13 +1817,14 @@ fn test_wasm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&ka
     Ok(TestRun::Reported(cmd, label))
 }
 
-/// Writes the page that runs the compiled Wasm tests and finds the browser to run it in.
+/// Writes the page that runs the compiled Wasm tests with the test runner's `args` (see
+/// [`crate::wasm_output::test_arguments`]) and finds the browser to run it in.
 fn browser_tests_for_suite(
     ctx: &BuildContext,
     opts: &TestOptions,
     unit: &WasmCompilation,
     node_modules: Option<PathBuf>,
-    _suite: Option<&kargo_manifest::TestSuite>,
+    args: &[String],
 ) -> Result<TestRun> {
     let imports = node_modules.as_deref().map(crate::wasm_output::import_map).unwrap_or_default();
     // The tests get the web resources of the package's libraries and of the package itself, after theirs.
@@ -1772,8 +1832,7 @@ fn browser_tests_for_suite(
     shipments.extend(crate::web_resources::own(ctx.ws, false)?);
     crate::wasm_output::copy_site_files(&unit.output, &[], &shipments)?;
     let inits = crate::web_resources::init_scripts(&shipments);
-    let args = crate::wasm_output::test_arguments(opts.filter.as_deref());
-    std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports, &inits, &args))
+    std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports, &inits, args))
         .context("failed to write the test page")?;
     if opts.no_run {
         return Ok(TestRun::Done(true));
@@ -1859,7 +1918,12 @@ fn test_js_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&karg
         (Some(node_modules), true) => crate::wasm_output::import_map(node_modules),
         _ => Default::default(),
     };
-    crate::js_output::write_test_files(&output, &name, browser, opts.filter.as_deref(), &imports)?;
+    let rerun = if opts.no_run { None } else { rerun_for_suite(ctx, opts, TargetKind::Js, suite)? };
+    if rerun.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(TestRun::Done(true));
+    }
+    let options = crate::js_output::runner_options(opts.filter.as_deref(), rerun.as_deref());
+    crate::js_output::write_test_files(&output, &name, browser, &options, &imports)?;
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
@@ -1874,10 +1938,9 @@ fn test_js_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&karg
     }
     let quoted = |s: &str| serde_json::to_string(s).expect("a string serializes");
     let script = format!(
-        "import({}).then(r => r.run(() => import({}), {{ filter: {} }})).then(failed => {{ process.exitCode = failed ? 1 : 0 }})",
+        "import({}).then(r => r.run(() => import({}), {options})).then(failed => {{ process.exitCode = failed ? 1 : 0 }})",
         quoted(&process::file_url(&output.join(crate::js_output::TEST_RUNNER))),
         quoted(&process::file_url(&unit.module_path())),
-        quoted(opts.filter.as_deref().unwrap_or_default()),
     );
     let mut cmd = Command::new(kargo_toolchain::node()?);
     cmd.arg("--enable-source-maps")
@@ -1896,12 +1959,27 @@ fn test_native_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
+    let rerun = rerun_for_suite(ctx, opts, TargetKind::Native, suite)?;
+    if rerun.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(TestRun::Done(true));
+    }
     let mut cmd = Command::new(executable);
     cmd.arg("--ktest_logger=TEAMCITY").current_dir(suite_cwd(ctx, suite)).envs(suite_project_env(ctx, opts, suite)?.for_child());
-    if let Some(filter) = &opts.filter {
-        cmd.arg(format!("--ktest_filter=*{filter}*"));
+    if let Some(filter) = native_filter(opts.filter.as_deref(), rerun.as_deref()) {
+        cmd.arg(format!("--ktest_filter={filter}"));
     }
     Ok(TestRun::Reported(cmd, "native tests"))
+}
+
+/// The `--ktest_filter` of a Kotlin/Native test executable: the tests whose `package.Class.method`
+/// name contains `filter`, or with `--failed` those of the `classes` that failed last time. Its
+/// patterns are globs, separated by `:`.
+fn native_filter(filter: Option<&str>, classes: Option<&[String]>) -> Option<String> {
+    match (classes, filter) {
+        (Some(classes), _) => Some(classes.iter().map(|class| format!("{class}.*")).collect::<Vec<_>>().join(":")),
+        (None, Some(filter)) => Some(format!("*{}*", filter.replace('#', "."))),
+        (None, None) => None,
+    }
 }
 
 /// Compiles the Kotlin/Native tests for this host into a test executable. Returns `None`

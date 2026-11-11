@@ -185,17 +185,26 @@ fn report_size(ctx: &BuildContext, build: &JsBuild, bundle: Option<&Bundle>) {
     }
 }
 
+/// The options of the test runner's `run` (see `js_test_runner.mjs`), as a JavaScript object: the
+/// tests whose name contains `filter`, or with `--failed` the tests of `classes`.
+pub fn runner_options(filter: Option<&str>, classes: Option<&[String]>) -> String {
+    match classes {
+        Some(classes) => serde_json::json!({ "classes": classes }).to_string(),
+        None => serde_json::json!({ "filter": filter.unwrap_or_default() }).to_string(),
+    }
+}
+
 /// Writes the test runner next to the test module `module` (an ES module, `<module>.mjs`) in `dir`,
-/// and for a browser the page that runs them (see [`crate::wasm_output::reporting_page`]).
-pub fn write_test_files(dir: &Path, module: &str, browser: bool, filter: Option<&str>, imports: &BTreeMap<String, String>) -> Result<()> {
+/// and for a browser the page that runs them (see [`crate::wasm_output::reporting_page`]) with the
+/// runner's `options` (see [`runner_options`]).
+pub fn write_test_files(dir: &Path, module: &str, browser: bool, options: &str, imports: &BTreeMap<String, String>) -> Result<()> {
     std::fs::write(dir.join(TEST_RUNNER), include_str!("js_test_runner.mjs")).context("failed to write the test runner")?;
     if browser {
         let quoted = |s: &str| serde_json::to_string(s).expect("a string serializes");
         let run = format!(
-            "const {{ run }} = await import({});\n      await run(() => import({}), {{ filter: {} }});",
+            "const {{ run }} = await import({});\n      await run(() => import({}), {options});",
             quoted(&format!("./{TEST_RUNNER}")),
             quoted(&format!("./{module}.mjs")),
-            quoted(filter.unwrap_or_default())
         );
         let page = crate::wasm_output::reporting_page("Kotlin/JS", &run, imports);
         std::fs::write(dir.join("index.html"), page).context("failed to write the test page")?;
@@ -311,13 +320,21 @@ mod tests {
         let (root, script) = (compose.find("<div id=\"root\"></div>").unwrap(), compose.find("<script").unwrap());
         assert!(root < script, "the root element comes before the script: {compose}");
         let dir = tempfile::tempdir().unwrap();
-        write_test_files(dir.path(), "app-test", true, Some("MathTest"), &BTreeMap::new()).unwrap();
+        write_test_files(dir.path(), "app-test", true, &runner_options(Some("MathTest"), None), &BTreeMap::new()).unwrap();
         let page = std::fs::read_to_string(dir.path().join("index.html")).unwrap();
-        assert!(page.contains("await run(() => import(\"./app-test.mjs\"), { filter: \"MathTest\" });"), "{page}");
+        assert!(page.contains("await run(() => import(\"./app-test.mjs\"), {\"filter\":\"MathTest\"});"), "{page}");
         assert!(page.contains("Kotlin/JS tests"), "{page}");
         assert!(dir.path().join(TEST_RUNNER).is_file());
         let node = tempfile::tempdir().unwrap();
-        write_test_files(node.path(), "app-test", false, None, &BTreeMap::new()).unwrap();
+        write_test_files(node.path(), "app-test", false, &runner_options(None, None), &BTreeMap::new()).unwrap();
         assert!(!node.path().join("index.html").exists(), "Node.js needs no page");
+    }
+
+    #[test]
+    fn runner_options_take_the_failed_classes_over_the_filter() {
+        assert_eq!(runner_options(None, None), r#"{"filter":""}"#);
+        assert_eq!(runner_options(Some("adds"), None), r#"{"filter":"adds"}"#);
+        let classes = ["com.example.MathTest".to_owned()];
+        assert_eq!(runner_options(Some("adds"), Some(&classes)), r#"{"classes":["com.example.MathTest"]}"#);
     }
 }

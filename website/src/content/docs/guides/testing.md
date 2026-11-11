@@ -215,16 +215,25 @@ Both take a whole number and a unit: `500ms`, `30s`, `5m` or `1h`.
 
 ## Rerunning failures
 
-`kargo test --failed` runs only the JVM test classes that had a failing test in the last run, so a long suite can be fixed one class at a time:
+`kargo test --failed` runs only the test classes that had a failing test in the last run, on every target, so a long suite can be fixed one class at a time:
 
 ```sh
 $ kargo test          # some tests fail
 $ kargo test --failed # runs the classes that failed, and nothing else
 ```
 
-Every JVM run records its failing classes in `target/<profile>/jvm/test-failures`, replacing the previous record. A run that passed records none, and `--failed` then says nothing failed and runs nothing. Without a record, `--failed` runs every test and says so. A run that didn't finish, such as one that was killed, records nothing for the same reason.
+Every run records the failing classes of each target in `target/<profile>/<target>/test-failures` (`test-failures-<suite>` for a [test suite](#test-suites)), replacing that target's previous record. A target whose last run passed records none, and `--failed` then says so and skips it, while the targets that failed run their failed classes:
 
-The rerun works on whole test classes, not single methods, so a class with a failing test runs in full. `--failed` applies to the JVM target only; other targets run all their tests.
+```console
+$ kargo test --failed
+note: no JVM test failed in the last run
+     Running native tests
+test com.example.ParserTest.parsesNumbers ... FAILED (0ms)
+```
+
+Without a record, `--failed` runs every test of that target and says so. A run that didn't finish, such as one that was killed or timed out, records nothing for the same reason.
+
+The rerun works on whole test classes, not single methods, so a class with a failing test runs in full. On the JVM a filter narrows the rerun further. On the other targets the failed classes take the place of the filter, and Kargo warns that the filter is ignored. Instrumented Android tests keep their own record; see [Instrumented tests](../android/#instrumented-tests).
 
 ## When a test run stops early
 
