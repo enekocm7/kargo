@@ -325,12 +325,24 @@ fn default_page(page: &Page, inits: &[String]) -> String {
 /// `globalThis.arguments` in a browser. A pattern is a glob over the qualified name of a test or of
 /// its class, so `*filter*` is a substring match. The runner splits its arguments on spaces and
 /// commas, which become `*` here: a filter with them still keeps every test it matches.
-pub fn test_arguments(filter: Option<&str>) -> Vec<String> {
-    let Some(filter) = filter else {
-        return Vec::new();
-    };
-    let mut pattern = String::from("*");
-    for c in filter.chars().chain(['*']) {
+///
+/// `classes` (from `--failed`) runs the tests of those classes instead, with one `<class>.*`
+/// pattern each.
+pub fn test_arguments(filter: Option<&str>, classes: Option<&[String]>) -> Vec<String> {
+    if let Some(classes) = classes {
+        let patterns: Vec<String> = classes.iter().map(|class| glob(&format!("{class}.*"))).collect();
+        return vec!["--include".to_owned(), patterns.join(",")];
+    }
+    match filter {
+        Some(filter) => vec!["--include".to_owned(), glob(&format!("*{filter}*"))],
+        None => Vec::new(),
+    }
+}
+
+/// `pattern` as kotlin-test's runner reads it: no spaces or commas, and no run of stars.
+fn glob(pattern: &str) -> String {
+    let mut glob = String::new();
+    for c in pattern.chars() {
         let c = match c {
             '#' => '.',
             ',' => '*',
@@ -338,11 +350,11 @@ pub fn test_arguments(filter: Option<&str>) -> Vec<String> {
             c => c,
         };
         // kotlin-test looks for the character after a `*` in the name, so `**` would match nothing.
-        if !(c == '*' && pattern.ends_with('*')) {
-            pattern.push(c);
+        if !(c == '*' && glob.ends_with('*')) {
+            glob.push(c);
         }
     }
-    vec!["--include".to_owned(), pattern]
+    glob
 }
 
 /// The page that runs the tests and reports their output to `kargo test` (see [`crate::web`]). It
@@ -852,7 +864,7 @@ mod tests {
         assert!(tests.contains("import(\"./hello-test.mjs\")") && tests.contains("tests.startUnitTests()"), "{tests}");
         assert!(!tests.contains("globalThis.arguments"), "{tests}");
         // A filter reaches kotlin-test as `globalThis.arguments`, set before the tests load.
-        let filtered = test_page("hello-test", &BTreeMap::new(), &[], &test_arguments(Some("MathTest")));
+        let filtered = test_page("hello-test", &BTreeMap::new(), &[], &test_arguments(Some("MathTest"), None));
         let arguments = filtered.find("globalThis.arguments = [\"--include\",\"*MathTest*\"];").expect("the arguments are set");
         assert!(arguments < filtered.find("hello-test.mjs").unwrap(), "{filtered}");
         let with_init = test_page("hello-test", &BTreeMap::new(), &["./init.mjs".to_owned()], &[]);
@@ -869,14 +881,17 @@ mod tests {
 
     #[test]
     fn test_arguments_match_the_filter_as_a_substring() {
-        assert!(test_arguments(None).is_empty());
-        assert_eq!(test_arguments(Some("MathTest")), ["--include", "*MathTest*"]);
-        assert_eq!(test_arguments(Some("com.example.MathTest.adds")), ["--include", "*com.example.MathTest.adds*"]);
-        assert_eq!(test_arguments(Some("MathTest#adds")), ["--include", "*MathTest.adds*"]);
+        assert!(test_arguments(None, None).is_empty());
+        assert_eq!(test_arguments(Some("MathTest"), None), ["--include", "*MathTest*"]);
+        assert_eq!(test_arguments(Some("com.example.MathTest.adds"), None), ["--include", "*com.example.MathTest.adds*"]);
+        assert_eq!(test_arguments(Some("MathTest#adds"), None), ["--include", "*MathTest.adds*"]);
         // kotlin-test splits its arguments on spaces and commas, so they must not reach it.
         // A run of stars is one: kotlin-test's glob finds nothing for `**`.
-        assert_eq!(test_arguments(Some("adds two, numbers")), ["--include", "*adds*two*numbers*"]);
-        assert_eq!(test_arguments(Some("*Test.adds*")), ["--include", "*Test.adds*"]);
+        assert_eq!(test_arguments(Some("adds two, numbers"), None), ["--include", "*adds*two*numbers*"]);
+        assert_eq!(test_arguments(Some("*Test.adds*"), None), ["--include", "*Test.adds*"]);
+        // `--failed` runs the recorded classes, in place of the filter.
+        let classes = ["com.example.MathTest".to_owned(), "RootTest".to_owned()];
+        assert_eq!(test_arguments(Some("adds"), Some(&classes)), ["--include", "com.example.MathTest.*,RootTest.*"]);
     }
 
     #[test]

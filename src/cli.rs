@@ -1215,7 +1215,7 @@ struct TestArgs {
     /// Skip JVM tests with this JUnit `@Tag` (repeatable)
     #[arg(long, value_name = "TAG")]
     exclude_tag: Vec<String>,
-    /// Rerun only the JVM test classes that failed in the last run
+    /// Rerun only the test classes of each target that failed in the last run
     #[arg(long, conflicts_with_all = ["list", "no_run"])]
     failed: bool,
     /// Run JVM tests against the R8-optimized package jar

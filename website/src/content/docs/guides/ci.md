@@ -284,7 +284,7 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 | `kargo audit` | Fail on dependencies with known security advisories. See [Security advisories](#security-advisories) |
 | `[test] timeout` | Stop a hung test run and fail it, rather than waiting for the CI's own job limit. See [Timeouts](../testing/#timeouts) |
 | `kargo bench --format json` | JMH's results as JSON on stdout, for tracking performance. See [Benchmarks](#benchmarks) |
-| `kargo test --failed` | Rerun only the JVM test classes that failed in the last run, on a retry job |
+| `kargo test --failed` | Rerun only the test classes that failed in the last run, on every target, on a retry job |
 | `--message-format json` | Compiler diagnostics as JSON, to annotate them on the changed lines. See [Machine-readable output](../../reference/machine-readable-output/) |
 | `-q`, `--quiet` | Less log noise |
 | `-v`, `--verbose` | Print the exact compiler commands when debugging |
