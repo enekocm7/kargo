@@ -100,7 +100,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Code coverage (JaCoCo) | Supported | [`kargo test --coverage`](../../guides/testing/#coverage) |
 | Test fixtures | Supported | [Test fixtures](../../guides/testing/#test-fixtures) |
 | Benchmarks (kotlinx-benchmark, JMH) | Supported | [`kargo bench`](../../guides/benchmarking/) |
-| Android local and instrumented tests | Planned | [#221](https://github.com/enekocm7/kargo/issues/221). `kargo android connectedAndroidTest` runs them today |
+| Android local and instrumented tests | Supported | `kargo test -t android` and `kargo test -t android --instrumented`; see [Build, run, test](../../guides/android/#build-run-test) and [Instrumented tests](../../guides/android/#instrumented-tests). Test suites on Android are [#537](https://github.com/enekocm7/kargo/issues/537) |
 
 ## Packaging and publishing
 
@@ -132,7 +132,10 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | App Bundles (`.aab`) | Supported | `kargo package -t android` ([Release builds](../../guides/android/#release-builds)) |
 | NDK, CMake, ndk-build, prebuilt `.so` libraries | Supported | [Native code](../../guides/android/#native-code) |
 | Manifest placeholders, resource locale filters | Supported | [Manifest placeholders](../../guides/android/#manifest-placeholders), [Resources](../../guides/android/#resources) |
-| Custom build types, baseline profiles, macrobenchmarks, Play uploads | Planned | [#228](https://github.com/enekocm7/kargo/issues/228) |
+| Custom build types | Planned | [#536](https://github.com/enekocm7/kargo/issues/536). The Android target builds the `dev` and `release` profiles |
+| Baseline profiles | Gap | |
+| Macrobenchmarks | Gap | |
+| Play Store uploads | Gap | Upload the `.aab` of `kargo package -t android` with a [task](../../guides/tasks-and-plugins/) |
 | Hand-written Gradle files | Not planned | Kargo generates the Gradle project; put the settings in `kargo.toml` |
 
 ## IDE support and CI
@@ -150,7 +153,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Gradle plugin | In Kargo |
 |---|---|
 | Shadow (`shadowJar`) | `kargo package` (`--fat` for a library) with [`[package.shade]`](../../guides/distributing/#shading) for `relocate`, `exclude`, `minimize()` and service merging |
-| Kover, JaCoCo | [#218](https://github.com/enekocm7/kargo/issues/218). |
+| Kover, JaCoCo | [`kargo test --coverage`](../../guides/testing/#coverage) |
 | detekt | [`kargo lint`](../../guides/formatting-and-linting/), with `[lint] config` for your `detekt.yml` |
 | ktlint | [`kargo fmt`](../../guides/formatting-and-linting/) |
 | Spotless | `kargo fmt` for Kotlin. Other languages: a [task](../../guides/tasks-and-plugins/) that calls your formatter |
