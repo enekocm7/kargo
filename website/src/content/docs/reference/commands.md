@@ -384,13 +384,13 @@ kargo test [filter] [options]
 
 | Option | Meaning |
 |---|---|
-| `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
+| `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
 | `--no-fail-fast` | Test every target even if one fails, then print a result per target. In a workspace, also test the other members when one cannot be compiled or started. Overrides [`[test] fail-fast`](../manifest/#test) |
 | `--suite <name>` | Test suite to run: `unit` (the default, `tests/`), a [`[test.suites.<name>]`](../manifest/#testsuitesname) suite such as `integration`, or `all`. Repeatable, runs in order. In a workspace, members without the suite are skipped. See [Test suites](../../guides/testing/#test-suites) |
 | `--include-tag <tag>` | Only run JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
 | `--exclude-tag <tag>` | Skip JVM tests with this JUnit `@Tag`. Repeatable. See [Tags](../../guides/testing/#tags) |
-| `--failed` | Rerun only the JVM test classes that failed in the last run. Conflicts with `--list` and `--no-run`. See [Rerunning failures](../../guides/testing/#rerunning-failures) |
+| `--failed` | Rerun only the test classes of each target that failed in the last run. Conflicts with `--list` and `--no-run`. See [Rerunning failures](../../guides/testing/#rerunning-failures) |
 | `--against-min` | Run JVM tests with the R8-optimized jar on the runtime classpath; useful for finding missing keep rules |
 | `--report junit` | Also write JUnit XML reports to `target/<profile>/<target>/test-reports/` for CI systems. See [Test reports for CI](../../guides/testing/#test-reports-for-ci) |
 | `--coverage` | Measure JVM line and branch coverage with JaCoCo into `target/<profile>/jvm/coverage/` (other targets run without it). Conflicts with `--list` and `--no-run`. See [Coverage](../../guides/testing/#coverage) |

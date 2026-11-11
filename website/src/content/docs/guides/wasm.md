@@ -182,7 +182,7 @@ test com.example.hello.GreetingTest.greetsByName ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored
 ```
 
-What the tests print, failures with their stack traces and `--report junit` all work as for Node.js. Test name filters are not supported on Wasm.
+What the tests print, failures with their stack traces and `--report junit` all work as for Node.js, and so does a [test filter](../testing/#filtering-tests).
 
 Kargo looks for a browser in this order: the one named by `KARGO_BROWSER`, then Chrome, Chromium, Edge, Brave and Firefox on your `PATH` and in their usual install locations. Each run uses a throwaway profile, so a browser you have open is left alone. Kargo treats an executable whose name contains `firefox` as Firefox and anything else as a Chromium-based browser (Chrome, Edge, Chromium, Brave), because the two take different command lines. When the tests are done Kargo stops the browser; it asks Firefox to close its window instead of ending its process, since Firefox can hand over to another process, for example when it applies an update on startup. Without a browser, `kargo test` fails and tells you to install one; `kargo test --no-run` doesn't need one.
 
@@ -643,6 +643,5 @@ The Kotlin docs cover [JavaScript interop for Wasm](https://kotlinlang.org/docs/
 
 - **Compose for Web** needs `environment = "browser"`. See [Compose for the web](../compose/#compose-for-the-web). Compose HTML (DOM elements) does not run on Wasm; it is for the [JS target](../compose/#compose-html-dom-elements).
 - Libraries must publish a Wasm variant (`wasmJs` or `wasmWasi`). JVM-only libraries can't be used.
-- Test name filters are ignored on Wasm; all tests run.
 - Packages that only ship CommonJS can't be used in the `browser` environment without bundling them yourself.
 - `kargo run` serves a browser app as it is. It doesn't rebuild or reload the page when your sources change; run it again.

@@ -9,9 +9,10 @@ const escape = (value) =>
 
 const show = (error) => (error instanceof Error ? String(error.stack || error) : String(error));
 
-// Loads the tests with `load` and runs those whose `package.Class.test` name contains `filter`.
+// Loads the tests with `load` and runs those whose `package.Class.test` name contains `filter`, or
+// with `classes` (`kargo test --failed`) the tests of those `package.Class` names.
 // `write` prints one line. Returns how many tests failed.
-export async function run(load, { filter = '', write = (line) => console.log(line) } = {}) {
+export async function run(load, { filter = '', classes = null, write = (line) => console.log(line) } = {}) {
   const root = { children: [] };
   let current = root;
   globalThis.kotlinTest = {
@@ -37,7 +38,11 @@ export async function run(load, { filter = '', write = (line) => console.log(lin
   const message = (name, attributes) =>
     write(`##teamcity[${name}${Object.entries(attributes).map(([key, value]) => ` ${key}='${escape(value)}'`).join('')}]`);
   const selected = (node, path) =>
-    node.children ? node.children.some((child) => selected(child, [...path, child.name])) : path.join('.').includes(filter);
+    node.children
+      ? node.children.some((child) => selected(child, [...path, child.name]))
+      : classes
+        ? classes.includes(path.slice(0, -1).filter(Boolean).join('.'))
+        : path.join('.').includes(filter);
   let failed = 0;
   const visit = async (node, path, ignored) => {
     for (const child of node.children) {

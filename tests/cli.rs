@@ -2552,6 +2552,53 @@ const LINT_SARIF: &str = r#"{"version":"2.1.0","runs":[{"results":[
   {"ruleId":"HardcodedText","level":"warning","message":{"text":"Hardcoded string"},
    "locations":[{"physicalLocation":{"artifactLocation":{"uri":"file:///src/res/layout/main.xml"},"region":{"startLine":12,"startColumn":5}}}]}]}]}"#;
 
+fn unit_test_xml(failing: bool) -> String {
+    let broken = if failing {
+        r#"<testcase name="fails" classname="com.example.BrokenTest" time="0.01"><failure message="boom">boom</failure></testcase>"#
+    } else {
+        r#"<testcase name="fails" classname="com.example.BrokenTest" time="0.01"/>"#
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><testsuite name="fake" tests="2"><testcase name="works" classname="com.example.GoodTest" time="0.01"/>{broken}</testsuite>"#
+    )
+}
+
+#[test]
+fn android_unit_tests_rerun_the_failed_classes() {
+    let p = Project::new();
+    android_app(&p);
+    p.file(
+        "tests/BrokenTest.kt",
+        "class BrokenTest
+",
+    );
+    let fake = common::FakeAndroid::new("");
+    let test = |xml: &str, args: &[&str]| {
+        let mut cmd = p.kargo();
+        fake.apply(&mut cmd);
+        cmd.env("FAKE_UNIT_TEST_XML", xml).args(["--system-gradle", "test", "-t", "android"]).args(args);
+        cmd
+    };
+
+    // Without a recorded run, `--failed` runs every test, and the failures are recorded.
+    test(&unit_test_xml(true), &["--failed"]).assert().failure().stderr(predicate::str::contains("no failed Android tests are recorded"));
+    let failures = std::fs::read_to_string(p.path().join("target/debug/android/test-failures")).unwrap();
+    assert_eq!(failures.trim(), "com.example.BrokenTest");
+
+    // The next `--failed` run asks Gradle for the failed class only.
+    test(&unit_test_xml(false), &["--failed"]).assert().success();
+    let log = fake.log();
+    let runs: Vec<&str> = log.lines().filter(|line| line.starts_with("gradle ") && line.contains("UnitTest")).collect();
+    assert_eq!(runs.len(), 2, "{log}");
+    assert!(!runs[0].contains("--tests") && runs[1].contains("--tests com.example.BrokenTest"), "{log}");
+
+    // It passed, so nothing is left to rerun.
+    test(&unit_test_xml(false), &["--failed"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no Android test failed in the last run"));
+}
+
 #[test]
 fn android_lint_runs_the_default_variant_and_keeps_the_reports() {
     let p = Project::new();

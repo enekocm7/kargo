@@ -10,6 +10,7 @@
 //! - `am-fails`, `crash`, `emulator-fails`: switches for the failure cases.
 //! - `no-default`: `am start` only resolves an activity started by name (`-n`), as with a launcher filter without a DEFAULT category.
 //! - `FAKE_LINT_SARIF` (environment): the SARIF report that `gradle lint<Variant>` writes to `build/reports`; `FAKE_LINT_FAIL` makes that task fail.
+//! - `FAKE_UNIT_TEST_XML` (environment): the JUnit XML that `gradle test<Variant>UnitTest` writes to `build/test-results`; the task fails when it has a `<failure`.
 //! - `no-resolve`: `cmd package resolve-activity` fails (an old device). `no-launcher`: no activity has the LAUNCHER category.
 
 use std::io::Read;
@@ -33,6 +34,7 @@ fn main() {
             log.push_str(&format!("gradle-env ANDROID_SERIAL={}\n", std::env::var("ANDROID_SERIAL").unwrap_or_else(|_| "none".into())));
             std::fs::write(state.join("log"), log).unwrap();
             gradle_lint(&args);
+            gradle_unit_tests(&args);
         }
         other => panic!("unknown tool {other}"),
     }
@@ -52,6 +54,24 @@ fn gradle_lint(args: &[String]) {
         std::fs::write(reports.join(format!("lint-results-{variant}.html")), "<html/>").unwrap();
     }
     if std::env::var_os("FAKE_LINT_FAIL").is_some() {
+        std::process::exit(1);
+    }
+}
+
+/// A local unit test task writes the JUnit XML in `FAKE_UNIT_TEST_XML` (when set) where AGP does, and fails like
+/// Gradle when a test in it failed.
+fn gradle_unit_tests(args: &[String]) {
+    let Some(task) = args.iter().find(|a| a.starts_with("test") && a.ends_with("UnitTest")) else {
+        return;
+    };
+    let Ok(xml) = std::env::var("FAKE_UNIT_TEST_XML") else {
+        return;
+    };
+    let project = args.iter().position(|a| a == "--project-dir").and_then(|i| args.get(i + 1)).expect("--project-dir");
+    let results = PathBuf::from(project).join("build/test-results").join(task);
+    std::fs::create_dir_all(&results).unwrap();
+    std::fs::write(results.join("TEST-fake.xml"), &xml).unwrap();
+    if xml.contains("<failure") {
         std::process::exit(1);
     }
 }

@@ -1961,21 +1961,41 @@ fn sarif_path(uri: &str) -> String {
     }
 }
 
+/// What `kargo test --target android` ran.
+pub struct LocalTestRun {
+    /// Whether Gradle succeeded and every test passed.
+    pub passed: bool,
+    /// The classes with a failed test, when Gradle reported its tests; `None` when it ran none.
+    pub failed_classes: Option<Vec<String>>,
+}
+
 /// `kargo test --target android`: runs local unit tests and reports the
 /// results Gradle writes as JUnit XML, copying those files to `report_dir` if given.
-pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: Option<&Path>) -> Result<bool> {
+/// `classes` (`--failed`) runs the tests of those classes instead of the ones `filter` matches.
+pub fn test(
+    ctx: &BuildContext,
+    filter: Option<&str>,
+    classes: Option<&[String]>,
+    no_run: bool,
+    report_dir: Option<&Path>,
+) -> Result<LocalTestRun> {
     compiling(ctx, TargetKind::Android, ", gradle tests");
     let variant = default_variant(ctx)?;
     let task = format!("test{variant}UnitTest");
     if no_run {
-        return gradle(ctx, &[format!("compile{variant}UnitTestSources")]);
+        let passed = gradle(ctx, &[format!("compile{variant}UnitTestSources")])?;
+        return Ok(LocalTestRun { passed, failed_classes: None });
     }
     let results = ctx.ws.work_dir("android").join("build/test-results").join(&task);
     if results.exists() {
         std::fs::remove_dir_all(&results).with_context(|| format!("failed to clear {}", results.display()))?;
     }
     let mut args = vec![task.clone()];
-    if let Some(filter) = filter {
+    if let Some(classes) = classes {
+        for class in classes {
+            args.extend(["--tests".to_owned(), class.clone()]);
+        }
+    } else if let Some(filter) = filter {
         // Gradle matches `package.Class.method`; accept `Class#method` too.
         args.extend(["--tests".to_owned(), format!("*{}*", filter.replace('#', "."))]);
     }
@@ -2003,21 +2023,22 @@ pub fn test(ctx: &BuildContext, filter: Option<&str>, no_run: bool, report_dir: 
         .with_context(|| format!("failed to parse {}", report.display()))?;
         summary.merge(part);
     }
-    if summary == TestSummary::default() && (filter.is_none() || !gradle_ok) {
+    if summary == TestSummary::default() && ((filter.is_none() && classes.is_none()) || !gradle_ok) {
         if gradle_ok {
             // Guards against Gradle silently skipping the sources (`NO-SOURCE`).
             ctx.shell().error(format!("Gradle `{task}` ran no tests although the project has test sources"));
         } else {
             ctx.shell().error(format!("Gradle `{task}` failed"));
         }
-        return Ok(false);
+        return Ok(LocalTestRun { passed: false, failed_classes: None });
     }
+    let failed_classes = Some(crate::ops::test::failed_classes_of(&summary.cases));
     emit_summary(ctx, TargetKind::Android, summary.passed, summary.failed, summary.ignored, gradle_ok && summary.success());
     testreport::print_summary(&summary, None, human_out())?;
     if !gradle_ok && summary.success() {
         ctx.shell().error(format!("Gradle `{task}` failed"));
     }
-    Ok(gradle_ok && summary.success())
+    Ok(LocalTestRun { passed: gradle_ok && summary.success(), failed_classes })
 }
 
 /// Where AGP writes the JUnit XML of the instrumented tests, one directory per device.
