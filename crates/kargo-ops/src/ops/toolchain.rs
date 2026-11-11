@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 
-use kargo_manifest::{AndroidSdkRequest, GraalvmRequest, JdkRequest, Manifest, TargetKind};
+use kargo_manifest::{AndroidSdkRequest, GraalvmRequest, JdkRequest, JdkVendor, Manifest, TargetKind};
 use kargo_maven::MavenClient;
 use kargo_toolchain::android_sdk::{self, Licenses};
 use kargo_toolchain::archive::{dir_size, human_size};
@@ -59,13 +59,17 @@ fn native_platforms(project: &Manifest) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Whether a managed JDK is the one `request` selects among `installed`.
-fn is_selected(jdk: &ManagedJdk, request: &JdkRequest, installed: &[ManagedJdk]) -> bool {
+/// Whether a managed JDK is the one `request` of `vendor` selects among `installed`.
+fn is_selected(jdk: &ManagedJdk, request: &JdkRequest, vendor: JdkVendor, installed: &[ManagedJdk]) -> bool {
+    if jdk.vendor != vendor.as_str() {
+        return false;
+    }
     match request {
         JdkRequest::System => false,
         JdkRequest::Release(r) => &jdk.release == r,
         JdkRequest::Major(m) => {
-            jdk.major == *m && installed.iter().rfind(|j| j.major == *m).is_some_and(|newest| newest.release == jdk.release)
+            let newest = installed.iter().filter(|j| j.vendor == jdk.vendor).rfind(|j| j.major == *m);
+            jdk.major == *m && newest.is_some_and(|newest| newest.release == jdk.release)
         }
     }
 }
@@ -74,7 +78,7 @@ fn is_selected(jdk: &ManagedJdk, request: &JdkRequest, installed: &[ManagedJdk])
 pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
     let mut out = String::new();
     let installed = jdks::installed(config)?;
-    let jdk_request = project.map(|m| m.toolchain.jdk.clone());
+    let jdk_request = project.map(|m| (m.toolchain.jdk.clone(), m.toolchain.jdk_vendor));
     let system = Jdk::find();
     // A project on the system JDK uses a managed one on a machine without Java.
     let fallback = match project {
@@ -89,11 +93,11 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
         let _ = writeln!(out, "    (none installed)");
     }
     for jdk in &installed {
-        let used = jdk_request.as_ref().is_some_and(|r| is_selected(jdk, r, &installed))
-            || fallback.as_ref().is_some_and(|f| f.release == jdk.release);
+        let used = jdk_request.as_ref().is_some_and(|(r, vendor)| is_selected(jdk, r, *vendor, &installed))
+            || fallback.as_ref().is_some_and(|f| f.dir == jdk.dir);
         let _ = writeln!(
             out,
-            "    {:<22} {:>3}  {:<8} {:>10}{}",
+            "    {:<22} {:>3}  {:<11} {:>10}{}",
             jdk.release,
             jdk.major,
             jdk.vendor,
@@ -103,7 +107,7 @@ pub fn list(config: &Config, project: Option<&Manifest>) -> Result<String> {
     }
     match system {
         Ok(Some(system)) => {
-            let used = matches!(jdk_request, Some(JdkRequest::System));
+            let used = matches!(jdk_request, Some((JdkRequest::System, _)));
             let _ = writeln!(
                 out,
                 "    system: JDK {} at {}{}",
@@ -254,21 +258,31 @@ Kotlin language servers and debug adapter ({}):",
     Ok(out)
 }
 
+/// Installs a JDK (`kargo toolchain install jdk`): `version`, else the project's `[toolchain] jdk`. The
+/// vendor is `vendor` (`--vendor`), else without a `version` the project's, else Temurin.
+pub fn install_jdk(config: &Config, project: Option<&Manifest>, version: Option<&str>, vendor: Option<JdkVendor>) -> Result<String> {
+    let config = &config.clone().with_auto_install(true);
+    let (request, project_vendor): (JdkRequest, JdkVendor) = match (version, project) {
+        (Some(v), _) => (v.parse()?, JdkVendor::Temurin),
+        (None, Some(m)) if m.toolchain.jdk != JdkRequest::System => (m.toolchain.jdk.clone(), m.toolchain.jdk_vendor),
+        (None, _) => bail!("which JDK? e.g. `kargo toolchain install jdk 21` (or set [toolchain] jdk in kargo.toml)"),
+    };
+    let vendor = vendor.unwrap_or(project_vendor);
+    let jdk = jdks::install(config, &request, vendor)?;
+    let title = match vendor {
+        JdkVendor::Temurin => String::new(),
+        other => format!(" ({})", other.title()),
+    };
+    Ok(format!("JDK {}{title} at {}", jdk.release, jdk.home.display()))
+}
+
 /// Installs a toolchain. `version` defaults to what the project needs; `licenses` says how the licenses of
 /// Android SDK packages get accepted.
 pub fn install(config: &Config, project: Option<&Manifest>, kind: ToolKind, version: Option<&str>, licenses: Licenses) -> Result<String> {
     // Asked for by name, so `KARGO_AUTO_INSTALL=0` doesn't apply.
     let config = &config.clone().with_auto_install(true);
     match kind {
-        ToolKind::Jdk => {
-            let request: JdkRequest = match (version, project) {
-                (Some(v), _) => v.parse()?,
-                (None, Some(m)) if m.toolchain.jdk != JdkRequest::System => m.toolchain.jdk.clone(),
-                (None, _) => bail!("which JDK? e.g. `kargo toolchain install jdk 21` (or set [toolchain] jdk in kargo.toml)"),
-            };
-            let jdk = jdks::install(config, &request)?;
-            Ok(format!("JDK {} at {}", jdk.release, jdk.home.display()))
-        }
+        ToolKind::Jdk => install_jdk(config, project, version, None),
         ToolKind::Graalvm => {
             let request: GraalvmRequest = match (version, project) {
                 (Some(v), _) => v.parse()?,
@@ -415,12 +429,22 @@ pub fn remove(config: &Config, kind: ToolKind, selector: &str) -> Result<Vec<Str
     }
 }
 
-/// Renders what can be installed: JDK feature versions, or with `kind` the Android SDK platforms and build-tools.
-pub fn available(config: &Config, kind: Option<ToolKind>) -> Result<String> {
+/// Renders what can be installed: JDK feature versions (of `vendor`, Temurin by default), or with `kind` the
+/// Android SDK platforms and build-tools.
+pub fn available(config: &Config, kind: Option<ToolKind>, vendor: Option<JdkVendor>) -> Result<String> {
     match kind {
         None | Some(ToolKind::Jdk) => {}
-        Some(ToolKind::AndroidSdk) => return available_android(config),
+        Some(ToolKind::AndroidSdk) if vendor.is_none() => return available_android(config),
+        Some(ToolKind::AndroidSdk) => bail!("`--vendor` picks a JDK vendor; it does not apply to `android-sdk`"),
         Some(_) => bail!("`kargo toolchain available` lists JDK versions, and Android SDK platforms with `android-sdk`"),
+    }
+    if let Some(vendor) = vendor.filter(|v| *v != JdkVendor::Temurin) {
+        let mut out =
+            format!("{} JDK versions (install with `kargo toolchain install jdk <version> --vendor {vendor}`):\n", vendor.title());
+        for v in kargo_toolchain::disco::available(config, vendor)?.iter().rev() {
+            let _ = writeln!(out, "    {v:>3}");
+        }
+        return Ok(out);
     }
     let releases = adoptium::available(config)?;
     let mut out = String::from("Temurin JDK versions (install with `kargo toolchain install jdk <version>`):\n");
@@ -572,7 +596,7 @@ mod tests {
 
         assert_eq!(remove(&config, ToolKind::AndroidSdk, "35").unwrap(), ["Android SDK package platforms;android-35"]);
         assert!(remove(&config, ToolKind::AndroidSdk, "35").is_err());
-        assert!(available(&config, Some(ToolKind::Gradle)).is_err());
+        assert!(available(&config, Some(ToolKind::Gradle), None).is_err());
     }
 
     #[test]

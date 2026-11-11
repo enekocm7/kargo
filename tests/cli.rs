@@ -2000,6 +2000,43 @@ fn android_package_and_run_flags() {
 }
 
 #[test]
+fn toolchain_jdk_vendors() {
+    let p = Project::new();
+    // An installed Zulu JDK, the way Kargo lays one out.
+    let dir = p.home.path().join("toolchains/jdk/zulu-jdk-21.0.5+11");
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" }), "").unwrap();
+    std::fs::write(dir.join("kargo-jdk.json"), r#"{"release":"jdk-21.0.5+11","major":21,"vendor":"zulu","home":""}"#).unwrap();
+    p.file("kargo.toml", &manifest("app", "[toolchain]\njdk = { version = \"21\", vendor = \"zulu\" }\n"));
+
+    p.kargo()
+        .args(["toolchain", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"jdk-21\.0\.5\+11 +21  zulu .*used by this project").unwrap());
+    // Another vendor's JDK of the same version doesn't count.
+    p.file("kargo.toml", &manifest("app", "[toolchain]\njdk = { version = \"21\", vendor = \"corretto\" }\n"));
+    p.kargo()
+        .args(["--offline", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Corretto JDK 21 is not installed").and(predicate::str::contains("--vendor corretto")));
+
+    p.kargo()
+        .args(["toolchain", "install", "gradle", "--vendor", "zulu"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--vendor` picks a JDK vendor"));
+    p.kargo()
+        .args(["toolchain", "install", "jdk", "21", "--vendor", "acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown JDK vendor `acme`"));
+    p.file("kargo.toml", &manifest("app", "[toolchain]\njdk = { version = \"21\", vendor = \"acme\" }\n"));
+    p.kargo().args(["build"]).assert().failure().stderr(predicate::str::contains("unknown JDK vendor `acme`"));
+}
+
+#[test]
 fn toolchain_manages_gradle() {
     let p = Project::new();
     let gradle = p.home.path().join("toolchains/gradle/9.6.0/bin").join(if cfg!(windows) { "gradle.bat" } else { "gradle" });

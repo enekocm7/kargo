@@ -609,6 +609,9 @@ enum ToolchainCommand {
         /// android-sdk: also install the emulator, `avdmanager` and a system image, to run the app on a virtual device
         #[arg(long)]
         emulator: bool,
+        /// JDK: the vendor to download (temurin, corretto, zulu, liberica, semeru, oracle, microsoft, sap-machine; default: the project's, else temurin)
+        #[arg(long, value_name = "VENDOR")]
+        vendor: Option<String>,
     },
     /// Remove an installed toolchain
     #[command(visible_alias = "rm")]
@@ -624,6 +627,9 @@ enum ToolchainCommand {
     Available {
         #[arg(value_enum)]
         kind: Option<ToolArg>,
+        /// The JDK vendor whose versions to show (default: temurin)
+        #[arg(long, value_name = "VENDOR")]
+        vendor: Option<String>,
     },
     /// Show which toolchains this project uses
     Which,
@@ -4430,11 +4436,16 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
     let shell = config.shell();
     match command {
         ToolchainCommand::List => print!("{}", toolchain_ops::list(config, manifest)?),
-        ToolchainCommand::Install { kind: Some(kind), version, accept_licenses, emulator } => {
+        ToolchainCommand::Install { kind: Some(kind), version, accept_licenses, emulator, vendor } => {
             if emulator && !matches!(kind, ToolArg::AndroidSdk) {
                 bail!("`--emulator` installs the Android emulator and needs `android-sdk`");
             }
-            let what = toolchain_ops::install(config, manifest, kind.into(), version.as_deref(), licenses(accept_licenses))?;
+            let vendor = vendor.as_deref().map(str::parse::<kargo_manifest::JdkVendor>).transpose()?;
+            let what = match (kind, vendor) {
+                (ToolArg::Jdk, vendor) => toolchain_ops::install_jdk(config, manifest, version.as_deref(), vendor)?,
+                (_, Some(_)) => bail!("`--vendor` picks a JDK vendor and needs `jdk`"),
+                (kind, None) => toolchain_ops::install(config, manifest, kind.into(), version.as_deref(), licenses(accept_licenses))?,
+            };
             shell.status("Installed", what);
             if emulator {
                 let what = toolchain_ops::install_android_emulator(config, manifest, version.as_deref(), licenses(accept_licenses))?;
@@ -4469,14 +4480,21 @@ fn toolchain(config: &Config, global: &GlobalArgs, command: ToolchainCommand) ->
                 shell.status("Removed", what);
             }
         }
-        ToolchainCommand::Available { kind } => print!("{}", toolchain_ops::available(config, kind.map(Into::into))?),
+        ToolchainCommand::Available { kind, vendor } => {
+            let vendor = vendor.as_deref().map(str::parse::<kargo_manifest::JdkVendor>).transpose()?;
+            print!("{}", toolchain_ops::available(config, kind.map(Into::into), vendor)?)
+        }
         ToolchainCommand::Which => {
             let project = project.as_ref().context("`kargo toolchain which` must run inside a Kargo project")?;
             let ws = ws.context("`kargo toolchain which` must run inside a Kargo project")?;
             let ctx = context(config, project, project.current().unwrap_or(project.members()[0]), global, ProfileKind::Dev)?;
             let m = ws.manifest();
             let jdk = ctx.jdk()?;
-            println!("jdk:           {} (JDK {} at {})", m.toolchain.jdk, jdk.version, jdk.home.display());
+            let vendor = match m.toolchain.jdk_vendor {
+                kargo_manifest::JdkVendor::Temurin => String::new(),
+                other => format!(" {}", other.title()),
+            };
+            println!("jdk:           {}{vendor} (JDK {} at {})", m.toolchain.jdk, jdk.version, jdk.home.display());
             println!("kotlin:        {}", m.kotlin.version);
             if m.targets.is_enabled(TargetKind::Native) {
                 match kargo_toolchain::NativeToolchain::find(config, &m.kotlin.version)? {

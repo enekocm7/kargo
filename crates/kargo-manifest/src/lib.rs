@@ -1694,10 +1694,105 @@ impl fmt::Display for JdkRequest {
     }
 }
 
+/// The distribution of a JDK that Kargo downloads (`[toolchain] jdk = { version = "21", vendor = "corretto" }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum JdkVendor {
+    /// Eclipse Temurin, from the Adoptium API (the default).
+    #[default]
+    Temurin,
+    /// Amazon Corretto.
+    Corretto,
+    /// Azul Zulu.
+    Zulu,
+    /// BellSoft Liberica.
+    Liberica,
+    /// IBM Semeru (OpenJ9).
+    Semeru,
+    /// Oracle JDK.
+    Oracle,
+    /// Microsoft Build of OpenJDK.
+    Microsoft,
+    /// SAP Machine.
+    SapMachine,
+}
+
+impl JdkVendor {
+    /// Every vendor, in the order the docs and errors list them.
+    pub const ALL: [JdkVendor; 8] = [
+        JdkVendor::Temurin,
+        JdkVendor::Corretto,
+        JdkVendor::Zulu,
+        JdkVendor::Liberica,
+        JdkVendor::Semeru,
+        JdkVendor::Oracle,
+        JdkVendor::Microsoft,
+        JdkVendor::SapMachine,
+    ];
+
+    /// The name in `kargo.toml`, on the command line and in the install directory.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JdkVendor::Temurin => "temurin",
+            JdkVendor::Corretto => "corretto",
+            JdkVendor::Zulu => "zulu",
+            JdkVendor::Liberica => "liberica",
+            JdkVendor::Semeru => "semeru",
+            JdkVendor::Oracle => "oracle",
+            JdkVendor::Microsoft => "microsoft",
+            JdkVendor::SapMachine => "sap-machine",
+        }
+    }
+
+    /// The name people know it by, for messages.
+    pub fn title(self) -> &'static str {
+        match self {
+            JdkVendor::Temurin => "Temurin",
+            JdkVendor::Corretto => "Corretto",
+            JdkVendor::Zulu => "Zulu",
+            JdkVendor::Liberica => "Liberica",
+            JdkVendor::Semeru => "Semeru",
+            JdkVendor::Oracle => "Oracle JDK",
+            JdkVendor::Microsoft => "Microsoft OpenJDK",
+            JdkVendor::SapMachine => "SapMachine",
+        }
+    }
+
+    /// The `distribution` of the foojay Disco API.
+    pub fn disco_distribution(self) -> &'static str {
+        match self {
+            JdkVendor::SapMachine => "sap_machine",
+            other => other.as_str(),
+        }
+    }
+}
+
+impl FromStr for JdkVendor {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+        JdkVendor::ALL
+            .into_iter()
+            .find(|v| v.as_str().eq_ignore_ascii_case(s) || (s == "sap_machine" && *v == JdkVendor::SapMachine))
+            .with_context(|| {
+                let names: Vec<&str> = JdkVendor::ALL.iter().map(|v| v.as_str()).collect();
+                format!("unknown JDK vendor `{s}`; use one of {}", names.join(", "))
+            })
+    }
+}
+
+impl fmt::Display for JdkVendor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// `[toolchain]`: toolchains Kargo should provision for this project.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ToolchainSettings {
     pub jdk: JdkRequest,
+    /// The distribution Kargo downloads for `jdk` (`vendor` of the table form). Temurin unless set.
+    pub jdk_vendor: JdkVendor,
     /// The GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use.
     pub graalvm: GraalvmRequest,
     /// The Android SDK that builds the Android target.

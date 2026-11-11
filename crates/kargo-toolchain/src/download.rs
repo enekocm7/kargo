@@ -137,7 +137,26 @@ pub fn get_text(config: &Config, url: &str) -> Result<String> {
     })
 }
 
-/// Downloads `url` to `dest`, verifying `sha256` when given. The file only
+/// The URL `url` redirects to (that of its last response), without reading the body.
+pub fn final_url(config: &Config, url: &str) -> Result<String> {
+    use ureq::ResponseExt;
+    let url = &mirrored(config, url);
+    if local_path(url).is_some() {
+        return Ok(url.clone());
+    }
+    ensure_online(config, url)?;
+    config.shell().verbose("Fetching", url);
+    retrying(config, url, || {
+        let response = send(config, url)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(Failure::Permanent(anyhow!("unexpected HTTP {status} from {url}")));
+        }
+        Ok(response.get_uri().to_string())
+    })
+}
+
+/// Downloads `url` to `dest`, verifying `sha256` when given (see [`verify`]). The file only
 /// appears at `dest` once it is complete and verified.
 pub fn download(config: &Config, url: &str, dest: &Path, sha256: Option<&str>) -> Result<()> {
     let url = &mirrored(config, url);
@@ -180,9 +199,12 @@ fn fetch_to(config: &Config, url: &str, dest: &Path) -> Result<(), Failure> {
 
 /// Checks a file's SHA-256 against `expected` (hex, case-insensitive).
 pub fn verify(file: &Path, expected: &str) -> Result<()> {
-    let actual = hash::sha256_file(file).with_context(|| format!("failed to hash {}", file.display()))?;
-    if !actual.eq_ignore_ascii_case(expected.trim()) {
-        bail!("checksum mismatch for {}: expected sha256 {expected}, got {actual}", file.display());
+    let expected = expected.trim();
+    // A 40-digit checksum is a SHA-1, for the few vendors that publish nothing stronger.
+    let (algorithm, actual) = if expected.len() == 40 { ("sha1", hash::sha1_file(file)) } else { ("sha256", hash::sha256_file(file)) };
+    let actual = actual.with_context(|| format!("failed to hash {}", file.display()))?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("checksum mismatch for {}: expected {algorithm} {expected}, got {actual}", file.display());
     }
     Ok(())
 }

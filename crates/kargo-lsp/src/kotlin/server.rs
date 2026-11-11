@@ -420,7 +420,9 @@ fn fallback_model(root: &Path) -> Model {
 /// machine without one. A missing JDK isn't downloaded here; `kargo build` does that.
 fn project_jdk(config: &Config, root: &Path) -> Option<Arc<Jdk>> {
     let manifest = kargo_manifest::Manifest::load(&root.join(kargo_manifest::MANIFEST_NAME)).ok();
-    let installed = manifest.as_ref().and_then(|m| kargo_toolchain::jdks::find_installed(config, &m.toolchain.jdk).ok().flatten());
+    let installed = manifest
+        .as_ref()
+        .and_then(|m| kargo_toolchain::jdks::find_installed(config, &m.toolchain.jdk, m.toolchain.jdk_vendor).ok().flatten());
     let (home, version) = match installed {
         Some(installed) => (installed.jdk().home, installed.major),
         None => match kargo_toolchain::Jdk::find().ok()? {

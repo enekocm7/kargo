@@ -130,7 +130,7 @@ fn run_jvm(config: &Config, script: &Script, args: &[String], around: &Surroundi
     let entry = config.scripts_cache().join(cache_key(script, &kotlin, &jdk_request, &repositories, &frameworks, ScriptTarget::Jvm, None));
 
     let needs = jdks::JdkNeeds { max: kargo_toolchain::kotlin::max_compiler_jdk(&kotlin), ..Default::default() };
-    let jdk = jdks::resolve_for(config, &jdk_request, needs)?;
+    let jdk = jdks::resolve_for(config, &jdk_request, kargo_manifest::JdkVendor::Temurin, needs)?;
     if let Some(cached) = Cached::read(&entry) {
         shell.verbose("Cached", format!("`{}`", script.name));
         return launch(config, &jdk, &cached.classes, &cached.classpath, &cached.main_class, args, around);

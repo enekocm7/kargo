@@ -406,14 +406,19 @@ impl<'a> BuildContext<'a> {
     pub fn jdk(&self) -> Result<&Jdk> {
         self.shared.jdk.get_or_try_init(|| {
             let manifest = self.ws.manifest();
-            let jdk = kargo_toolchain::jdks::resolve_for(self.config, &manifest.toolchain.jdk, jdk_needs(manifest))?;
+            let jdk = kargo_toolchain::jdks::resolve_for(
+                self.config,
+                &manifest.toolchain.jdk,
+                manifest.toolchain.jdk_vendor,
+                jdk_needs(manifest),
+            )?;
             jdk.require_version(MIN_JDK)?;
             self.shell().verbose("Using", format!("JDK {} at {}", jdk.version, jdk.home.display()));
             Ok(jdk)
         })
     }
 
-    /// The JDK for `platform` (`None` is the host): a downloaded Temurin JDK in its own directory.
+    /// The JDK for `platform` (`None` is the host): a downloaded JDK in its own directory.
     /// A foreign JDK's binaries cannot run on this host; `packaging` only reads its `jmods` to
     /// cross-build a `jlink` runtime image with the host's `jlink`. The result is not cached in
     /// [`BuildContext::jdk`], which stays the host's.
@@ -425,7 +430,13 @@ impl<'a> BuildContext<'a> {
             return Ok(self.jdk()?.clone());
         }
         let manifest = self.ws.manifest();
-        let jdk = kargo_toolchain::jdks::resolve_for_platform(self.config, &manifest.toolchain.jdk, jdk_needs(manifest), Some(target))?;
+        let jdk = kargo_toolchain::jdks::resolve_for_platform(
+            self.config,
+            &manifest.toolchain.jdk,
+            manifest.toolchain.jdk_vendor,
+            jdk_needs(manifest),
+            Some(target),
+        )?;
         jdk.require_version(MIN_JDK)?;
         Ok(jdk)
     }

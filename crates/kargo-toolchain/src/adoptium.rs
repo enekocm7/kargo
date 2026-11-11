@@ -14,6 +14,8 @@ pub const API: &str = "https://api.adoptium.net/v3";
 /// A downloadable JDK build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JdkPackage {
+    /// Who builds it: Temurin from this API, the other vendors from the foojay Disco API (see [`crate::disco`]).
+    pub vendor: kargo_manifest::JdkVendor,
     /// Release name, e.g. `jdk-21.0.5+11`.
     pub release: String,
     pub major: u32,
@@ -85,6 +87,7 @@ pub struct AvailableReleases {
 
 fn package(binary: Binary, release: String, major: u32) -> Result<JdkPackage> {
     Ok(JdkPackage {
+        vendor: kargo_manifest::JdkVendor::Temurin,
         archive: ArchiveKind::from_name(&binary.package.name)?,
         release,
         major,

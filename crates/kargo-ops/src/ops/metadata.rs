@@ -99,6 +99,7 @@ pub fn metadata(ctx: &BuildContext, opts: &MetadataOptions) -> Result<Value> {
             "kotlin": manifest.kotlin.version,
             "jdk": {
                 "request": manifest.toolchain.jdk.to_string(),
+                "vendor": manifest.toolchain.jdk_vendor.as_str(),
                 "home": jdk.map(|j| path(&j.home)),
                 "version": jdk.map(|j| j.version),
             },

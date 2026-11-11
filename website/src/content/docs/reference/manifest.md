@@ -207,11 +207,14 @@ In a workspace, `[workspace.kotlin]` sets these for every member: a member's `op
 ```toml
 [toolchain]
 jdk = "21"         # "system" (default), a major version, or an exact release like "21.0.5+11"
+# jdk = { version = "21", vendor = "corretto" }   # a JDK from another vendor (default: "temurin")
 graalvm = "25"     # "system" (default), a Java version for GraalVM CE, or "oracle-25" for Oracle GraalVM
 android-sdk = "36" # "system" (default), or a platform API level that Kargo installs
 kargo = ">=0.1.2"    # the Kargo versions this project builds with (default: any)
 typescript = "^6"  # the TypeScript compiler for the .ts modules of js/ (default: the newest release, pinned in kargo.lock)
 ```
+
+`jdk` is the JDK that builds, runs and tests the project. A string or a number picks a [Temurin](https://adoptium.net) JDK; the table form `{ version = "21", vendor = "zulu" }` picks another vendor: `temurin`, `corretto`, `zulu`, `liberica`, `semeru`, `oracle`, `microsoft` or `sap-machine`. A vendor needs a version, not `system`. See [Pinning a JDK](../../guides/toolchains/#pinning-a-jdk).
 
 `graalvm` is the GraalVM that `kargo package --format native-image` and `kargo run --native-agent` use. `system` looks at `GRAALVM_HOME`, then a `JAVA_HOME` with `native-image`, then `native-image` on `PATH`.
 

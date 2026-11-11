@@ -570,7 +570,7 @@ mod tests {
         let env = at_path(&["target", "wasm", "environment"]);
         let values: Vec<String> = values(env[0]).iter().map(|(v, _)| json_text(v)).collect();
         assert_eq!(values, ["js", "browser", "wasi"]);
-        assert_eq!(types(at_path(&["toolchain", "jdk"])[0]), ["string", "integer"]);
+        assert_eq!(types(at_path(&["toolchain", "jdk"])[0]), ["string", "integer", "object"]);
         assert!(at_path(&["nope"]).is_empty());
     }
 
@@ -603,6 +603,9 @@ build-docs = { run = ["a", "b"], description = "x" }
 "#;
         assert_eq!(violations(text), []);
         assert_eq!(violations("[workspace]\nmembers = [\"a\"]\n"), []);
+        let vendor = "[package]\nname = \"a\"\nversion = \"1\"\n[toolchain]\njdk = { version = \"21\", vendor = \"corretto\" }\n";
+        assert_eq!(violations(vendor), []);
+        assert_eq!(violations(&vendor.replace("corretto", "acme")).len(), 1);
     }
 
     #[test]

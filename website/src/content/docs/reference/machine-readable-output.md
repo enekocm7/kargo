@@ -149,7 +149,7 @@ $ kargo metadata
   "resolved": true,
   "toolchain": {
     "kotlin": "2.4.21",
-    "jdk": { "request": "system", "home": "/usr/lib/jvm/temurin-25", "version": 25 },
+    "jdk": { "request": "system", "vendor": "temurin", "home": "/usr/lib/jvm/temurin-25", "version": 25 },
     "kotlin-native": null
   },
   "packages": [
@@ -233,7 +233,7 @@ The metadata depends only on the files in `watch`: every `kargo.toml` of the pro
 | `host-platform` | The OS/CPU Kargo runs on: `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`, `macos-x64` or `macos-arm64` |
 | `platforms` | The `[build] platforms` of `kargo.toml` (`os-arch` names), or empty when the project builds for the host. See [Cross-compilation](../../guides/distributing/#cross-compilation) |
 | `toolchain.kotlin` | The Kotlin version |
-| `toolchain.jdk` | The `[toolchain] jdk` request, and the `home` and major `version` of the JDK it resolves to (`null` when there is none) |
+| `toolchain.jdk` | The `[toolchain] jdk` request, its `vendor` (`temurin` unless the table form names another), and the `home` and major `version` of the JDK it resolves to (`null` when there is none) |
 | `toolchain.kotlin-native` | The installed Kotlin/Native distribution (`version`, `home`), or `null` until it is installed |
 
 ### Packages

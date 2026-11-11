@@ -131,6 +131,7 @@ Every toolchain download goes through it, the longest matching prefix wins, and 
 | Toolchain | URLs |
 |---|---|
 | Temurin JDKs (`[toolchain] jdk`, `kargo toolchain install`) | `https://api.adoptium.net/v3` (the release lookup), then the archive it names, on `https://github.com/adoptium/...` |
+| Other JDK vendors (`jdk = { vendor = ... }`) | `https://api.foojay.io/disco/v3.0`, then the archive and checksum it names on the vendor's host; Corretto from `https://corretto.aws/downloads/latest/...` and `latest_sha256/...` |
 | GraalVM (`[toolchain] graalvm`) | `https://api.foojay.io/disco/v3.0`, then the archive it names, usually on `https://github.com/...` |
 | GraalVM reachability metadata | `https://github.com/oracle/graalvm-reachability-metadata/releases/...` |
 | Gradle (Android builds) | `https://services.gradle.org/distributions` |

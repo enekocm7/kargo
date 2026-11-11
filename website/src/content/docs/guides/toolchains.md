@@ -81,6 +81,30 @@ With anything other than `system`, Kargo downloads that [Eclipse Temurin](https:
 
 A major version like `"21"` uses the newest release of 21 you have installed, and downloads one if you have none.
 
+### JDK vendors
+
+Temurin is the default. To build with another vendor's JDK, use the table form:
+
+```toml title="kargo.toml"
+[toolchain]
+jdk = { version = "21", vendor = "corretto" }
+```
+
+| `vendor` | JDK | Downloaded from |
+|---|---|---|
+| `temurin` (default) | [Eclipse Temurin](https://adoptium.net) | Adoptium |
+| `corretto` | [Amazon Corretto](https://aws.amazon.com/corretto/) | `corretto.aws` |
+| `zulu` | [Azul Zulu](https://www.azul.com/downloads/) | the [foojay Disco API](https://api.foojay.io) |
+| `liberica` | [BellSoft Liberica](https://bell-sw.com/libericajdk/) | foojay |
+| `semeru` | [IBM Semeru](https://developer.ibm.com/languages/java/semeru-runtimes/) (OpenJ9) | foojay |
+| `oracle` | [Oracle JDK](https://www.oracle.com/java/) | foojay |
+| `microsoft` | [Microsoft Build of OpenJDK](https://www.microsoft.com/openjdk) | foojay |
+| `sap-machine` | [SapMachine](https://sap.github.io/SapMachine/) | foojay |
+
+Kargo verifies every download against the checksum its vendor publishes: SHA-256, except Liberica, which publishes only SHA-1. Other vendors' JDKs install under `~/.kargo/toolchains/jdk/<vendor>-<release>`, so a Zulu 21 and a Temurin 21 live side by side, and a project only uses a JDK of its own vendor. Corretto is pinned by feature version (`"21"`), not by exact release.
+
+`kargo toolchain install jdk 21 --vendor zulu` installs one ahead of time, and `kargo toolchain available jdk --vendor zulu` lists the versions you can install. Without `--vendor`, `kargo toolchain install` in a project installs the project's vendor.
+
 Kargo also checks that `[target.jvm] jvm-target` is not newer than the JDK that builds the project (the pinned one, or `JAVA_HOME`/`PATH` with `jdk = "system"`), so you get a clear error with a hint to set `[toolchain] jdk`, instead of a confusing compiler failure. If you don't set `jvm-target`, it defaults to 25, lowered to the JDK's version when the JDK is older, so pinning `jdk = "21"` alone is enough.
 
 ### Older Kotlin versions on new JDKs
@@ -122,6 +146,7 @@ $ kargo toolchain available          # JDK versions you can install (LTS release
 $ kargo toolchain available android-sdk   # Android SDK platforms and build-tools you can install
 $ kargo toolchain install jdk 21     # newest 21
 $ kargo toolchain install jdk 21.0.5+11
+$ kargo toolchain install jdk 21 --vendor corretto   # another vendor's JDK (see JDK vendors)
 $ kargo toolchain install graalvm 25 # newest GraalVM CE for JDK 25 (or: graalvm oracle-25)
 $ kargo toolchain install native 2.4.21
 $ kargo toolchain install gradle     # the Gradle this Android project needs (or: gradle 9.6.0)
