@@ -159,7 +159,7 @@ See [Code coverage](../ci/#code-coverage) for uploading the reports in CI.
 
 ## Filtering tests
 
-The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on the JVM, Native and Android:
+The filter keeps the tests whose fully qualified `package.Class.method` name contains it, on every target:
 
 | Filter | Runs |
 |---|---|
@@ -169,6 +169,8 @@ The filter keeps the tests whose fully qualified `package.Class.method` name con
 | `adds` | every test method whose name contains `adds` |
 
 On the JVM, a filter that matches a test class name selects whole classes, which works with every JUnit Platform engine. A filter that matches no class name is matched against method names, which only finds tests of method-based engines such as JUnit Jupiter (what `kotlin.test` uses), not Kotest specs.
+
+On Wasm, kotlin-test's runner does the matching, and a `*` in the filter matches any run of characters. Its arguments can't hold spaces or commas, so in a filter for a test named with backticks each space or comma matches any run of characters too.
 
 ## Tags
 
@@ -286,8 +288,6 @@ Editors that use the [`kargo dap`](../editors/#debug-adapter) debug adapter do t
 | JS | Node.js, or a headless browser with `environment = "browser"`, through Kargo's own runner | `kotlin-test-js` |
 | Native | the native test binary | built into Kotlin/Native |
 | Android | Gradle local unit tests (`testDebugUnitTest`); with `--instrumented`, the tests of `android-tests/` on a device (`connectedDebugAndroidTest`) | `kotlin-test-junit`, `junit` (instrumented: also AndroidX Test) |
-
-Test filters are not supported on Wasm; all tests run. They work on JS. See [JavaScript](../js/#run-and-test-with-nodejs).
 
 JVM tests run on JUnit 6, which needs JDK 17 or newer, because `kargo test` starts its launcher on the project's JDK. If the JDK that builds your project is older, pin a newer one with [`[toolchain] jdk`](../toolchains/).
 

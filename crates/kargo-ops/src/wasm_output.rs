@@ -318,13 +318,45 @@ fn default_page(page: &Page, inits: &[String]) -> String {
     )
 }
 
+/// The arguments that make kotlin-test's Wasm runner run only the tests whose `package.Class.method`
+/// name contains `filter` (`Class#method` is `Class.method`), as on the other targets.
+///
+/// The runner reads `--include <pattern>` from the process arguments on Node.js and WASI, and from
+/// `globalThis.arguments` in a browser. A pattern is a glob over the qualified name of a test or of
+/// its class, so `*filter*` is a substring match. The runner splits its arguments on spaces and
+/// commas, which become `*` here: a filter with them still keeps every test it matches.
+pub fn test_arguments(filter: Option<&str>) -> Vec<String> {
+    let Some(filter) = filter else {
+        return Vec::new();
+    };
+    let mut pattern = String::from("*");
+    for c in filter.chars().chain(['*']) {
+        let c = match c {
+            '#' => '.',
+            ',' => '*',
+            c if c.is_whitespace() => '*',
+            c => c,
+        };
+        // kotlin-test looks for the character after a `*` in the name, so `**` would match nothing.
+        if !(c == '*' && pattern.ends_with('*')) {
+            pattern.push(c);
+        }
+    }
+    vec!["--include".to_owned(), pattern]
+}
+
 /// The page that runs the tests and reports their output to `kargo test` (see [`crate::web`]). It
-/// imports the `inits` scripts (see [`crate::web_resources`]) first.
-pub fn test_page(module: &str, imports: &BTreeMap<String, String>, inits: &[String]) -> String {
+/// imports the `inits` scripts (see [`crate::web_resources`]) first, and gives the test runner
+/// `args` (see [`test_arguments`]) as `globalThis.arguments`, where kotlin-test reads them in a browser.
+pub fn test_page(module: &str, imports: &BTreeMap<String, String>, inits: &[String], args: &[String]) -> String {
     let module = serde_json::to_string(&format!("./{module}.mjs")).expect("a string serializes");
     let inits = serde_json::to_string(inits).expect("strings serialize");
+    let arguments = match args {
+        [] => String::new(),
+        args => format!("globalThis.arguments = {};\n      ", serde_json::to_string(args).expect("strings serialize")),
+    };
     let run = format!(
-        "for (const init of {inits}) await import(init);\n      const tests = await import({module});\n      await tests.startUnitTests();"
+        "{arguments}for (const init of {inits}) await import(init);\n      const tests = await import({module});\n      await tests.startUnitTests();"
     );
     reporting_page("Kotlin/Wasm", &run, imports)
 }
@@ -816,9 +848,14 @@ mod tests {
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{page}");
         assert!(!page.contains("src="), "{page}");
 
-        let tests = test_page("hello-test", &map(&[("a", "/node_modules/a/index.js")]), &[]);
+        let tests = test_page("hello-test", &map(&[("a", "/node_modules/a/index.js")]), &[], &[]);
         assert!(tests.contains("import(\"./hello-test.mjs\")") && tests.contains("tests.startUnitTests()"), "{tests}");
-        let with_init = test_page("hello-test", &BTreeMap::new(), &["./init.mjs".to_owned()]);
+        assert!(!tests.contains("globalThis.arguments"), "{tests}");
+        // A filter reaches kotlin-test as `globalThis.arguments`, set before the tests load.
+        let filtered = test_page("hello-test", &BTreeMap::new(), &[], &test_arguments(Some("MathTest")));
+        let arguments = filtered.find("globalThis.arguments = [\"--include\",\"*MathTest*\"];").expect("the arguments are set");
+        assert!(arguments < filtered.find("hello-test.mjs").unwrap(), "{filtered}");
+        let with_init = test_page("hello-test", &BTreeMap::new(), &["./init.mjs".to_owned()], &[]);
         assert!(
             with_init.find("for (const init of [\"./init.mjs\"]) await import(init);").unwrap() < with_init.find("hello-test.mjs").unwrap()
         );
@@ -828,6 +865,18 @@ mod tests {
         );
         // The page asks Kargo when to quit, with the path the server answers to.
         assert!(tests.contains(&format!("fetch('{}').then(() => window.close()", crate::web::QUIT_PATH)), "{tests}");
+    }
+
+    #[test]
+    fn test_arguments_match_the_filter_as_a_substring() {
+        assert!(test_arguments(None).is_empty());
+        assert_eq!(test_arguments(Some("MathTest")), ["--include", "*MathTest*"]);
+        assert_eq!(test_arguments(Some("com.example.MathTest.adds")), ["--include", "*com.example.MathTest.adds*"]);
+        assert_eq!(test_arguments(Some("MathTest#adds")), ["--include", "*MathTest.adds*"]);
+        // kotlin-test splits its arguments on spaces and commas, so they must not reach it.
+        // A run of stars is one: kotlin-test's glob finds nothing for `**`.
+        assert_eq!(test_arguments(Some("adds two, numbers")), ["--include", "*adds*two*numbers*"]);
+        assert_eq!(test_arguments(Some("*Test.adds*")), ["--include", "*Test.adds*"]);
     }
 
     #[test]

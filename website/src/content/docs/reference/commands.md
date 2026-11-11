@@ -384,7 +384,7 @@ kargo test [filter] [options]
 
 | Option | Meaning |
 |---|---|
-| `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. Ignored on Wasm. See [Filtering tests](../../guides/testing/#filtering-tests). |
+| `filter` | Only run tests whose `package.Class.method` name contains this string, for example `MathTest` or `MathTest.adds`. See [Filtering tests](../../guides/testing/#filtering-tests). |
 | `--no-run` | Compile tests but don't run them |
 | `--no-fail-fast` | Test every target even if one fails, then print a result per target. In a workspace, also test the other members when one cannot be compiled or started. Overrides [`[test] fail-fast`](../manifest/#test) |
 | `--suite <name>` | Test suite to run: `unit` (the default, `tests/`), a [`[test.suites.<name>]`](../manifest/#testsuitesname) suite such as `integration`, or `all`. Repeatable, runs in order. In a workspace, members without the suite are skipped. See [Test suites](../../guides/testing/#test-suites) |

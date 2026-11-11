@@ -1746,14 +1746,14 @@ fn test_wasm_for_suite(ctx: &BuildContext, opts: &TestOptions, suite: Option<&ka
     if opts.no_run {
         return Ok(TestRun::Done(true));
     }
-    if opts.filter.is_some() {
-        ctx.shell().warn("test filters are not supported for the wasm target; running all tests");
-    }
     let mut cmd = Command::new(kargo_toolchain::node()?);
-    cmd.arg("-e")
-        .arg(format!("import({:?}).then(m => m.startUnitTests())", process::file_url(&unit.module_path())))
-        .current_dir(suite_cwd(ctx, suite))
-        .envs(suite_project_env(ctx, opts, suite)?.for_child());
+    cmd.arg("-e").arg(format!("import({:?}).then(m => m.startUnitTests())", process::file_url(&unit.module_path())));
+    let args = crate::wasm_output::test_arguments(opts.filter.as_deref());
+    if !args.is_empty() {
+        // kotlin-test reads `process.argv.slice(2)`, and with `-e` the first argument after `--` is `argv[1]`.
+        cmd.arg("--").arg("kargo").args(args);
+    }
+    cmd.current_dir(suite_cwd(ctx, suite)).envs(suite_project_env(ctx, opts, suite)?.for_child());
     let label: &'static str = "Wasm tests (Node.js)";
     Ok(TestRun::Reported(cmd, label))
 }
@@ -1772,13 +1772,11 @@ fn browser_tests_for_suite(
     shipments.extend(crate::web_resources::own(ctx.ws, false)?);
     crate::wasm_output::copy_site_files(&unit.output, &[], &shipments)?;
     let inits = crate::web_resources::init_scripts(&shipments);
-    std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports, &inits))
+    let args = crate::wasm_output::test_arguments(opts.filter.as_deref());
+    std::fs::write(unit.output.join("index.html"), crate::wasm_output::test_page(unit.name, &imports, &inits, &args))
         .context("failed to write the test page")?;
     if opts.no_run {
         return Ok(TestRun::Done(true));
-    }
-    if opts.filter.is_some() {
-        ctx.shell().warn("test filters are not supported for the wasm target; running all tests");
     }
     let browser = browser::browser()?;
     let mut site = Site::new(&unit.output);
