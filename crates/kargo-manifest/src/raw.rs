@@ -35,6 +35,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     frameworks: RawFrameworks,
     #[serde(default)]
+    substitute: toml::Table,
+    #[serde(default)]
     plugins: toml::Table,
     #[serde(default)]
     tasks: toml::Table,
@@ -2675,11 +2677,11 @@ fn is_inherited(value: &Value) -> bool {
     value.as_table().is_some_and(|t| t.contains_key("workspace"))
 }
 
-/// Replaces the `{ workspace = true }` entries of `[package]`, `[frameworks]`, `[plugins]` and
+/// Replaces the `{ workspace = true }` entries of `[package]`, `[frameworks]`, `[substitute]`, `[plugins]` and
 /// `[tasks]` in a member's manifest with the workspace's. Returns `None` when there is nothing to
 /// inherit, so the manifest is parsed from its text (with line numbers in errors).
 pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManifest>) -> Result<Option<toml::Table>> {
-    const SECTIONS: [&str; 4] = ["package", "frameworks", "plugins", "tasks"];
+    const SECTIONS: [&str; 5] = ["package", "frameworks", "substitute", "plugins", "tasks"];
     let marked = SECTIONS.iter().any(|s| table.get(*s).and_then(Value::as_table).is_some_and(|t| t.values().any(is_inherited)));
     if !marked {
         return Ok(None);
@@ -2698,6 +2700,7 @@ pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManife
             let (shared, from) = match section {
                 "package" => (&workspace.package, "workspace.package"),
                 "frameworks" => (&workspace.frameworks, "workspace.frameworks"),
+                "substitute" => (&workspace.substitute, "workspace.substitute"),
                 "plugins" => (&workspace.plugins, "workspace.plugins"),
                 _ => (&workspace.raw_tasks, "workspace.tasks"),
             };
@@ -2714,6 +2717,14 @@ pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManife
                     let absolute = workspace.root.join(command).to_string_lossy().into_owned();
                     value.as_table_mut().expect("a plugin is a table").insert("command".to_owned(), Value::String(absolute));
                 }
+            }
+            if section == "substitute"
+                && let Some(Value::String(path)) = value.get("path")
+                && !Path::new(path).is_absolute()
+            {
+                // A package next to the workspace's kargo.toml stays there.
+                let absolute = workspace.root.join(path).to_string_lossy().into_owned();
+                value.as_table_mut().expect("a substitution with a path is a table").insert("path".to_owned(), Value::String(absolute));
             }
             if section == "plugins" || section == "tasks" {
                 absolutize_script(&mut value, &workspace.root);
@@ -2749,6 +2760,61 @@ pub(super) fn inherit(mut table: toml::Table, workspace: Option<&WorkspaceManife
         }
     }
     Ok(Some(table))
+}
+
+/// Parses `[substitute]` and `[workspace.substitute]`: `"group:artifact" = "group:artifact:version"` replaces a module
+/// with another, `"group:artifact" = { path = "../package" }` with a Kargo package built from source.
+fn parse_substitutions(table: &toml::Table, section: &str) -> Result<Vec<Substitution>> {
+    let mut out: Vec<Substitution> = Vec::new();
+    for (key, value) in table {
+        let ctx = || format!("invalid substitution `{key}` in [{section}]");
+        let module: ModuleId = key.parse().map_err(|e| anyhow::anyhow!("{}: {e}; write the key as `group:artifact`", ctx()))?;
+        let with = match value {
+            Value::String(text) => {
+                let spec: CoordSpec = text.parse().map_err(|e| anyhow::anyhow!("{}: {e}", ctx()))?;
+                let Some(version) = spec.version else {
+                    bail!("{}: `{text}` has no version; write the replacement as `group:artifact:version`", ctx());
+                };
+                if spec.classifier.is_some() || spec.extension.is_some() {
+                    bail!("{}: a replacement is `group:artifact:version`, without a classifier or extension", ctx());
+                }
+                validate_version_string("version", &version).with_context(ctx)?;
+                Replacement::Module { module: spec.module, version }
+            }
+            Value::Table(t) => {
+                if let Some(other) = t.keys().find(|k| *k != "path") {
+                    bail!("{}: unknown key `{other}`; a table replacement is `{{ path = \"../package\" }}`", ctx());
+                }
+                match t.get("path") {
+                    Some(Value::String(path)) if !path.trim().is_empty() => Replacement::Package(PathBuf::from(path)),
+                    _ => bail!("{}: `path` must be the directory of a Kargo package, such as \"../package\"", ctx()),
+                }
+            }
+            _ => bail!("{}: expected \"group:artifact:version\" or {{ path = \"../package\" }}", ctx()),
+        };
+        if matches!(&with, Replacement::Module { module: target, .. } if *target == module) {
+            bail!(
+                "{}: a module cannot replace itself; to change its version, set `version` in [dependencies] (with `force = true` to pin it)",
+                ctx()
+            );
+        }
+        out.push(Substitution { module, with });
+    }
+    for entry in &out {
+        if let Replacement::Module { module: target, .. } = &entry.with
+            && let Some(next) = out.iter().find(|e| e.module == *target)
+        {
+            let by = match &next.with {
+                Replacement::Module { module, version } => format!("by {module}:{version}"),
+                Replacement::Package(path) => format!("by the package at {}", path.display()),
+            };
+            bail!(
+                "invalid substitution `{}` in [{section}]: `{target}` is replaced too ({by}); point it at the final module, since substitutions do not chain",
+                entry.module
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// A parsed `[dependencies]` entry: a Maven module or another Kargo package on disk.
@@ -3698,6 +3764,7 @@ impl RawManifest {
             dependencies,
             dev_dependencies,
             path_dependencies,
+            substitutions: parse_substitutions(&self.substitute, "substitute")?,
             repositories,
             frameworks,
             compiler_plugins,
@@ -4138,6 +4205,8 @@ struct RawWorkspace {
     #[serde(default)]
     frameworks: toml::Table,
     #[serde(default)]
+    substitute: toml::Table,
+    #[serde(default)]
     plugins: toml::Table,
     #[serde(default)]
     tasks: toml::Table,
@@ -4210,9 +4279,13 @@ impl RawWorkspaceManifest {
         let jvm_target =
             kotlin.jvm_target.as_deref().map(normalize_jvm_target).transpose().context("invalid [workspace.kotlin] `jvm-target`")?;
 
-        for (section, table) in
-            [("package", &raw.package), ("frameworks", &raw.frameworks), ("plugins", &raw.plugins), ("tasks", &raw.tasks)]
-        {
+        for (section, table) in [
+            ("package", &raw.package),
+            ("frameworks", &raw.frameworks),
+            ("substitute", &raw.substitute),
+            ("plugins", &raw.plugins),
+            ("tasks", &raw.tasks),
+        ] {
             if let Some(key) = table.iter().find(|(_, v)| is_inherited(v)).map(|(k, _)| k) {
                 bail!("[workspace.{section}] `{key}`: `workspace = true` is only valid in a member's kargo.toml");
             }
@@ -4225,6 +4298,7 @@ impl RawWorkspaceManifest {
         for (name, value) in &raw.plugins {
             let _: RawPlugin = value.clone().try_into().with_context(|| format!("invalid plugin `{name}` in [workspace.plugins]"))?;
         }
+        parse_substitutions(&raw.substitute, "workspace.substitute")?;
         let tasks = parse_tasks(&raw.tasks).context("invalid [workspace.tasks]")?;
         let build = raw.build.validate("workspace.build")?;
 
@@ -4248,6 +4322,7 @@ impl RawWorkspaceManifest {
             dependencies: raw.dependencies,
             package: raw.package,
             frameworks: raw.frameworks,
+            substitute: raw.substitute,
             plugins: raw.plugins,
             raw_tasks: raw.tasks,
         };

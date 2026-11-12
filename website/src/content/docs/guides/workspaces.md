@@ -218,6 +218,7 @@ Members share the workspace's settings, and inherit what they opt in to:
 | `[workspace.kotlin]` | `version` (the Kotlin version of every member), `language-version`, `api-version`, `ksp`, `opt-in`, `compiler-args`, `warnings-as-errors` and `jvm-target` apply to every member. A member's own `opt-in` and `compiler-args` are added to these, and its other `[kotlin]` keys (and `[target.jvm] jvm-target`) take precedence. A different `version` is an error |
 | `[workspace.dependencies]` | Dependencies inherited by name with `name = { workspace = true }` |
 | `[workspace.frameworks]` | Frameworks inherited with `name = { workspace = true }` in `[frameworks]` |
+| `[workspace.substitute]` | [Substitutions](../dependencies/#substituting-a-module) inherited with `"group:artifact" = { workspace = true }` in `[substitute]`. A `path` is relative to the workspace root, and a package that replaces a module is a path dependency of each member that inherits it |
 | `[workspace.plugins]` | Plugins inherited with `name = { workspace = true }` in `[plugins]` |
 | `[workspace.tasks]` | Tasks that run at the workspace root, and that members inherit with `name = { workspace = true }` in `[tasks]` (see [Tasks](#tasks-and-plugins)) |
 

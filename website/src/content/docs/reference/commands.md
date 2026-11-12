@@ -890,9 +890,17 @@ The `selected` line says what decided the version:
 | `the highest version that satisfies <ranges>` | A request was a Maven range |
 | `locked in kargo.lock` | `kargo.lock` holds this version, and resolving again would pick another one; the line says which and why. `kargo update <group:artifact>` takes the new one |
 
-`requested` lists every version asked for in the resolved graph, and who asked: `kargo.toml` (a dependency you declare, `force = true` noted), another module (`g:left:1.0`), a BOM (`BOM g:bom:1.0`), a platform another module depends on (`platform g:bom:1.0 of g:api:1.0`), a Gradle module metadata constraint (`(dependency constraint)`), a module whose POM relocates to this one (`(relocated)`) or a Kotlin Multiplatform module whose variant for the target is this one (`(Gradle module metadata variant)`). A rejected version shows as `1.0 -> 2.0` with what it lost to. Requests from modules that are no longer in the graph (an older version's dependencies) are not listed.
+`requested` lists every version asked for in the resolved graph, and who asked: `kargo.toml` (a dependency you declare, `force = true` noted), another module (`g:left:1.0`), a BOM (`BOM g:bom:1.0`), a platform another module depends on (`platform g:bom:1.0 of g:api:1.0`), a Gradle module metadata constraint (`(dependency constraint)`), a [substitution](../manifest/#substitute) (`[substitute] of <module>`), a module whose POM relocates to this one (`(relocated)`) or a Kotlin Multiplatform module whose variant for the target is this one (`(Gradle module metadata variant)`). A rejected version shows as `1.0 -> 2.0` with what it lost to. Requests from modules that are no longer in the graph (an older version's dependencies) are not listed.
 
 `path` is the shortest chain of dependencies from `kargo.toml` to the module; `--all-paths` lists every one, shortest first (at most 100).
+
+A module that a [`[substitute]`](../manifest/#substitute) entry replaced is not on the classpath, but `kargo why` still answers for it, with what replaced it. The replacement lists the substitution among its `requested` versions, as `by [substitute] of <module>`:
+
+```console
+$ kargo why commons-logging:commons-logging
+commons-logging:commons-logging (jvm, runtime)
+  replaced by org.slf4j:jcl-over-slf4j:2.0.16 ([substitute] in kargo.toml)
+```
 
 | Option | Default | Meaning |
 |---|---|---|

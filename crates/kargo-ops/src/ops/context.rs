@@ -14,7 +14,9 @@ use crate::workspace::{ProfileKind, Project, Workspace};
 use kargo_compiler::ResolvedPlugin;
 use kargo_manifest::{Dependency, JsEnvironment, Manifest, Scope, TargetKind, TestSuite, WasmEnvironment};
 use kargo_maven::resolver::ResolvedNode;
-use kargo_maven::{Artifact, DependencyRequest, Exclusion, Explanation, MavenClient, ModuleId, Platform, Repository, Resolution, Resolver};
+use kargo_maven::{
+    Artifact, DependencyRequest, Exclusion, Explanation, MavenClient, ModuleId, Platform, Replacement, Repository, Resolution, Resolver,
+};
 use kargo_toolchain::jdks::JdkNeeds;
 use kargo_toolchain::{Jdk, KotlinCompiler, NativeToolchain};
 use kargo_util::config::Config;
@@ -689,6 +691,19 @@ impl<'a> BuildContext<'a> {
         for b in boms {
             fp.str(&format!("{}:{:?}", b.module, b.version));
         }
+        // Only substitutions change the fingerprint, so the locks of projects without them stay valid. A package
+        // is not part of it (its path is the machine's, and its dependencies are among the roots): the module is
+        // just not in the graph.
+        let substitutions = &self.ws.manifest().substitutions;
+        if !substitutions.is_empty() {
+            fp.str("--substitute");
+            for s in substitutions {
+                fp.str(&match &s.with {
+                    Replacement::Module { module, version } => format!("{} -> {module}:{version}", s.module),
+                    Replacement::Package(_) => format!("{} -> package", s.module),
+                });
+            }
+        }
         fp.str("--repos");
         // The declared repositories, so a mirror or `--vendored` keeps the lock.
         for repo in self.client.declared_repositories() {
@@ -699,6 +714,19 @@ impl<'a> BuildContext<'a> {
             }
         }
         fp.finish()
+    }
+
+    /// A resolver for `platform` that manages the versions of `boms` and applies the `[substitute]` entries.
+    fn resolver(&self, platform: Platform, boms: &[Dependency]) -> Result<Resolver<'_>> {
+        let mut resolver = Resolver::new(&self.client, platform);
+        for bom in boms {
+            let version = bom.version.as_deref().context("BOM without version")?;
+            resolver.import_bom(&bom.module, version)?;
+        }
+        for substitution in &self.ws.manifest().substitutions {
+            resolver.substitute(substitution.module.clone(), substitution.with.clone());
+        }
+        Ok(resolver)
     }
 
     /// The resolution `key` of this profile. A profile with dependencies of its own resolves them with
@@ -724,23 +752,14 @@ impl<'a> BuildContext<'a> {
     /// Kargo does not build itself and so does not pin: the libraries of an Android package, which Gradle resolves,
     /// but whose jars editors need (`kargo metadata`).
     pub fn resolve_unlocked(&self, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Resolution> {
-        let mut resolver = Resolver::new(&self.client, platform);
-        for bom in boms {
-            let version = bom.version.as_deref().context("BOM without version")?;
-            resolver.import_bom(&bom.module, version)?;
-        }
-        resolver.resolve(roots).context("failed to resolve dependencies")
+        self.resolver(platform, boms)?.resolve(roots).context("failed to resolve dependencies")
     }
 
     /// Resolves `roots` again, without `kargo.lock` and without downloading artifacts, to say why each module
     /// of the resolution `key` has its version (`kargo why`).
     pub fn explain(&self, key: &str, platform: Platform, roots: &[DependencyRequest], boms: &[Dependency]) -> Result<Explanation> {
-        let mut resolver = Resolver::new(&self.client, platform);
-        for bom in boms {
-            let version = bom.version.as_deref().context("BOM without version")?;
-            resolver.import_bom(&bom.module, version)?;
-        }
-        let (_, explanation) = resolver.explain(roots).with_context(|| format!("failed to resolve dependencies for `{key}`"))?;
+        let (_, explanation) =
+            self.resolver(platform, boms)?.explain(roots).with_context(|| format!("failed to resolve dependencies for `{key}`"))?;
         Ok(explanation)
     }
 
@@ -768,7 +787,7 @@ impl<'a> BuildContext<'a> {
             );
         }
         self.shell().verbose("Resolving", key);
-        let mut resolver = Resolver::new(&self.client, platform);
+        let mut resolver = self.resolver(platform, boms)?;
         if let Some(plan) = &self.update {
             for (module, version, build) in plan.pins(key, &inputs) {
                 match build {
@@ -776,10 +795,6 @@ impl<'a> BuildContext<'a> {
                     None => resolver.pin(module, &version),
                 }
             }
-        }
-        for bom in boms {
-            let version = bom.version.as_deref().context("BOM without version")?;
-            resolver.import_bom(&bom.module, version)?;
         }
         let resolution = resolver.resolve(roots).with_context(|| format!("failed to resolve dependencies for `{key}`"))?;
         // Verifying the artifacts takes network requests and hashing, so the lockfile is not held meanwhile.

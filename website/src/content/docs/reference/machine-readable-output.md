@@ -428,14 +428,14 @@ $ kargo why g:util --format json
 }
 ```
 
-`results` has one entry per resolution that has the module: `jvm`, `wasm-js`, `js`, `native-<platform>`. Several packages print an array with one document per package.
+`results` has one entry per resolution that has the module: `jvm`, `wasm-js`, `js`, `native-<platform>`. `replaced` has one entry per resolution where a [`[substitute]`](../manifest/#substitute) entry replaced the module, so it is not on the classpath: `{ "target": "jvm", "module": "commons-logging:commons-logging", "replaced-by": { "kind": "module", "module": "org.slf4j:jcl-over-slf4j", "version": "2.0.16" } }`, or `{ "kind": "package", "path": "../toolkit" }` for a local package. Several packages print an array with one document per package.
 
 | Field | Meaning |
 |---|---|
 | `version` | The version on the classpath |
 | `reason.kind` | `highest`, `forced`, `range` (with the `ranges`), `pinned`, or `locked` when `kargo.lock` holds a version that resolving again would not pick; then `fresh-version` and `fresh-reason` say which one and why |
 | `requests` | Every version asked for: `version` as written (a range stays a range), whether it is the `selected` one, and `from` |
-| `from.kind` | `project` (with `force`), `dependency`, `relocation`, `variant`, `constraint` (each with the `module` and `version` that asked), `platform` (also with the `platform` and `platform-version`) or `bom` (the BOM's `module` and `version`) |
+| `from.kind` | `project` (with `force`), `dependency`, `relocation`, `variant`, `constraint` (each with the `module` and `version` that asked), `platform` (also with the `platform` and `platform-version`), `bom` (the BOM's `module` and `version`) or `substitute` (the `module` that was replaced) |
 | `paths` | Each path from a dependency in `kargo.toml` to the module, as `group:artifact:version`: the shortest one, or all of them (at most 100) with `--all-paths` |
 | `truncated` | Whether there were more paths than were listed |
 

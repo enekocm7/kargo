@@ -1060,6 +1060,114 @@ g:util:2.0 (jvm, runtime)
 }
 
 #[test]
+fn substitute_replaces_a_module_everywhere_and_why_says_so() {
+    // `g:app` brings `c:logging`, which a bridge module replaces.
+    let repo = LocalRepo::new();
+    repo.publish("g:app", "1.0", &[("c:logging", "1.2")])
+        .publish("c:logging", "1.2", &[("g:log-only", "1.0")])
+        .publish("g:log-only", "1.0", &[])
+        .publish("s:bridge", "2.0", &[("g:bridge-dep", "1.0")])
+        .publish("s:bridge", "3.0", &[])
+        .publish("g:bridge-dep", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "subapp",
+            &format!(
+                "[dependencies]\n\"g:app\" = \"1.0\"\n[substitute]\n\"c:logging\" = \"s:bridge:2.0\"\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    );
+    let stdout = |args: &[&str]| -> String {
+        let out = p.kargo().args(args).arg("--offline").assert().success().get_output().stdout.clone();
+        String::from_utf8(out).unwrap()
+    };
+
+    let tree = stdout(&["tree"]);
+    assert!(tree.contains("s:bridge:2.0") && tree.contains("g:bridge-dep:1.0"), "{tree}");
+    assert!(!tree.contains("c:logging") && !tree.contains("g:log-only"), "{tree}");
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("module = \"s:bridge\"") && !lock.contains("c:logging"), "{lock}");
+
+    let why = stdout(&["why", "c:logging"]);
+    assert_eq!(why, "c:logging (jvm, runtime)\n  replaced by s:bridge:2.0 ([substitute] in kargo.toml)\n");
+    let why = stdout(&["why", "s:bridge"]);
+    assert!(why.contains("selected 2.0, the only version requested"), "{why}");
+    assert!(why.contains("2.0  by [substitute] of c:logging"), "{why}");
+    let json: serde_json::Value = serde_json::from_str(&stdout(&["why", "c:logging", "--format", "json"])).unwrap();
+    assert_eq!(
+        json["replaced"][0],
+        serde_json::json!({"target": "jvm", "module": "c:logging", "replaced-by": {"kind": "module", "module": "s:bridge", "version": "2.0"}})
+    );
+    assert_eq!(json["results"], serde_json::json!([]));
+
+    // A changed substitution invalidates the lock.
+    p.kargo().args(["tree", "--locked", "--offline"]).assert().success();
+    p.file("kargo.toml", &p.read("kargo.toml").replace("s:bridge:2.0", "s:bridge:3.0"));
+    p.kargo()
+        .args(["tree", "--locked", "--offline"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("kargo.lock needs to be updated for `jvm/runtime`"));
+    assert!(stdout(&["tree"]).contains("s:bridge:3.0"));
+    assert!(p.read("kargo.lock").contains("version = \"3.0\""));
+
+    // Without the table the module is back.
+    p.file("kargo.toml", &p.read("kargo.toml").replace("[substitute]\n\"c:logging\" = \"s:bridge:3.0\"\n", ""));
+    assert!(stdout(&["tree"]).contains("c:logging:1.2"));
+
+    // A module cannot replace itself.
+    p.file("kargo.toml", &format!("{}[substitute]\n\"c:logging\" = \"c:logging:1.2\"\n", p.read("kargo.toml")));
+    p.kargo().args(["tree", "--offline"]).assert().failure().stderr(predicate::str::contains("a module cannot replace itself"));
+}
+
+#[test]
+fn substitute_with_a_package_inherited_from_the_workspace() {
+    // `logging` replaces `c:logging` for `app`, which gets the package and its dependencies instead.
+    let repo = LocalRepo::new();
+    repo.publish("g:app", "1.0", &[("c:logging", "1.2")])
+        .publish("c:logging", "1.2", &[("g:log-only", "1.0")])
+        .publish("g:log-only", "1.0", &[])
+        .publish("g:local-dep", "1.0", &[])
+        .publish("org.jetbrains.kotlin:kotlin-stdlib", "2.4.21", &[]);
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        "[workspace]\nmembers = [\"app\", \"logging\"]\n\n[workspace.substitute]\n\"c:logging\" = { path = \"logging\" }\n",
+    )
+    .file(
+        "app/kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "[dependencies]\n\"g:app\" = \"1.0\"\n[substitute]\n\"c:logging\" = {{ workspace = true }}\n[repositories]\nlocal = \"{}\"\n",
+                repo.url()
+            ),
+        ),
+    )
+    .file("logging/kargo.toml", &manifest("logging", "[dependencies]\n\"g:local-dep\" = \"1.0\"\n"));
+
+    let out = p.kargo().args(["tree", "-p", "app", "--offline"]).assert().success().get_output().stdout.clone();
+    let tree = String::from_utf8(out).unwrap();
+    assert!(tree.contains("logging v0.1.0 ("), "the package is a path dependency: {tree}");
+    assert!(tree.contains("g:local-dep:1.0") && tree.contains("g:app:1.0"), "{tree}");
+    assert!(!tree.contains("c:logging") && !tree.contains("g:log-only"), "{tree}");
+    let lock = p.read("kargo.lock");
+    assert!(lock.contains("module = \"g:local-dep\"") && !lock.contains("c:logging"), "{lock}");
+
+    p.kargo()
+        .args(["why", "c:logging", "-p", "app", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("c:logging (jvm, runtime)\n  replaced by the package at "));
+    p.kargo().args(["tree", "-p", "app", "--offline", "--locked"]).assert().success();
+}
+
+#[test]
 fn classifier_dependencies_keep_both_jars() {
     // Native libraries are declared twice: the module, and its classifier jar. Both belong on the
     // runtime classpath and in kargo.lock, and neither may replace the other.
