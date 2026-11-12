@@ -3108,6 +3108,36 @@ fn a_script_sees_the_declarations_of_the_scripts_it_imports() {
     assert!(!has(&labels, "helpless"), "only the imported script is seen: {labels:?}");
 }
 
+#[test]
+fn an_import_chain_shares_its_top_level_private_declarations() {
+    // The scripts an `@file:Import` chain merges are compiled as one file, so a top-level `private`
+    // declaration covers all of them.
+    let mut f = fixture(&[
+        ("loose/main.kts", "private fun local() = 1\n$0"),
+        ("loose/lib.kts", "private fun helper() = 1\n"),
+        ("loose/other.kts", "private fun helpless() = 1\n"),
+    ]);
+    let labels = f.labels();
+    assert!(!has(&labels, "helper"), "scripts are separate unless one imports another: {labels:?}");
+    let units: Vec<Arc<Unit>> = f
+        .proj
+        .units
+        .iter()
+        .map(|unit| {
+            let mut script = Unit::new(unit.path.clone(), unit.text.clone(), Origin::Loose);
+            if unit.path.ends_with("main.kts") {
+                script.imports = vec![PathBuf::from("/project/loose/lib.kts")];
+            }
+            Arc::new(script)
+        })
+        .collect();
+    f.proj = Index::new(false, units);
+    let labels = f.labels();
+    assert!(has(&labels, "helper"), "an imported script's private declaration is in the same file: {labels:?}");
+    assert!(has(&labels, "local"), "so is the importing script's own: {labels:?}");
+    assert!(!has(&labels, "helpless"), "a script outside the chain is not: {labels:?}");
+}
+
 const STREAM_JDK: &[(&str, &str)] = &[
     (
         "java.base/module-info.java",

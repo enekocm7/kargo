@@ -386,8 +386,14 @@ fn split_header(code: &str) -> Header<'_> {
         pos = skip_trivia(code, pos);
         let rest = &code[pos..];
         let end = if rest.starts_with(FILE_PREFIX) {
-            let Ok((_, end)) = read_annotation(code, pos) else { break };
-            annotations.push(&code[pos..end]);
+            // An annotation whose arguments are not string literals, such as
+            // `@file:OptIn(ExperimentalStdlibApi::class)`, still has to open the file: the imports
+            // that follow it would otherwise keep it from being a file annotation.
+            let end = match read_annotation(code, pos) {
+                Ok((_, end)) => end,
+                Err(_) => annotation_end(code, pos),
+            };
+            annotations.push(code[pos..end].trim());
             end
         } else if rest.strip_prefix("import").is_some_and(|after| after.starts_with(char::is_whitespace)) {
             let end = pos + rest.find('\n').unwrap_or(rest.len());
@@ -400,6 +406,29 @@ fn split_header(code: &str) -> Header<'_> {
         pos = end;
     }
     Header { annotations, imports, body: blank(code, &spans) }
+}
+
+/// The end of the `@file:` annotation at `pos` whose arguments [`read_annotation`] does not read, such
+/// as `@file:OptIn(ExperimentalStdlibApi::class)`: past its parentheses, or the end of its line when it
+/// has none.
+fn annotation_end(code: &str, pos: usize) -> usize {
+    let rest = &code[pos..];
+    let line = pos + rest.find('\n').unwrap_or(rest.len());
+    let Some(open) = rest.find('(').filter(|open| !rest[..*open].contains('\n')) else { return line };
+    let mut depth = 0usize;
+    for (i, c) in rest.char_indices().skip(open) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return pos + i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    line
 }
 
 fn apply(settings: &mut Settings, annotation: &Annotation) -> Result<()> {

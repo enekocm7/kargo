@@ -2368,6 +2368,20 @@ mod script {
     }
 
     #[test]
+    fn annotations_whose_arguments_are_not_strings_also_open_the_file() {
+        // `@file:OptIn(ExperimentalStdlibApi::class)` has no string argument, so the annotation reader
+        // leaves it alone; the `import` after it would then name a place its annotation cannot follow.
+        let dir = scripts(&[("lib.kts", "@file:OptIn(ExperimentalStdlibApi::class)\nimport kotlin.math.max\nfun f() = max(1, 2)\n")]);
+        let text = "@file:Import(\"lib.kts\")\n@file:Suppress(\"UNUSED\")\nimport java.util.UUID\nprintln(f())\n";
+        let code = resolve_kts(Some(&dir.path().join("main.kts")), text).unwrap().code;
+        let header =
+            "@file:OptIn(ExperimentalStdlibApi::class)\n@file:Suppress(\"UNUSED\")\nimport kotlin.math.max\nimport java.util.UUID\n";
+        assert!(code.starts_with(header), "{code}");
+        let body = &code[header.len()..];
+        assert!(!body.contains("import ") && !body.contains("@file"), "{body}");
+    }
+
+    #[test]
     fn a_script_without_imports_keeps_its_code() {
         let text = "#!/usr/bin/env -S kargo script\nimport java.io.File\n@file:DependsOn(\"a:b:1\")\nprintln(1)\n";
         let resolved = resolve_kts(Some(std::path::Path::new("main.kts")), text).unwrap();
