@@ -856,12 +856,15 @@ local = \"{}\"
     let with = |policy: &str| p.file("kargo.toml", &manifest("app", &format!("{deps}\n[licenses]\n{policy}\n")));
     with("deny = [\"GPL-3.0-only\"]");
     licenses()
+        .args(["--notice", "target/NOTICE-failed.txt"])
         .assert()
         .code(101)
         .stderr(predicate::str::contains("com.acme:copyleft:1.0 is under GPL-3.0-only, which [licenses] deny lists"))
         .stderr(predicate::str::contains("com.acme:dual").not())
         .stderr(predicate::str::contains("com.acme:legacy").not())
         .stderr(predicate::str::contains("1 package against the [licenses] policy"));
+    // The notice is written even when the policy fails.
+    assert!(p.read("target/NOTICE-failed.txt").contains("  com.acme:copyleft:1.0\n"), "the notice after a failure");
 
     // An allow list also fails on the licenses it does not list and on unknown ones.
     with("allow = [\"Apache-2.0\", \"MIT\"]");

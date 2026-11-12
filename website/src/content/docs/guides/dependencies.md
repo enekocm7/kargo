@@ -108,12 +108,12 @@ The audit fails (exit code `101`) on advisories of `high` severity or worse, whi
 
 ```console
 $ kargo licenses
-Apache-2.0  41  org.jetbrains.kotlin:kotlin-stdlib:2.2.20, org.jetbrains:annotations:13.0, com.acme:app:1.0, ... (+38 more)
-MIT          6  org.slf4j:slf4j-api:2.0.16, com.acme:util:1.2, com.acme:text:3.0, ... (+3 more)
-unknown      1  com.example:legacy:1.0
+Apache-2.0  41  org.jetbrains.kotlin:kotlin-stdlib:2.2.20, org.jetbrains:annotations:13.0, com.acme:core:1.0, ... (+38 more)
+MIT         6  org.slf4j:slf4j-api:2.0.16, com.acme:util:1.2, com.acme:text:3.0, ... (+3 more)
+unknown     1  com.example:legacy:1.0
 ```
 
-POMs write licenses as free text, so Kargo maps the common names and URLs to ids; a license it does not know, or none, is `unknown`. Test dependencies and the build's tools are left out unless you pass `--all`. `--format markdown` prints a table of every package for a release page, and `--notice NOTICE-third-party.txt` writes the third-party notice file of a distribution, which [`kargo package --dist`](../distributing/) picks up from the project root.
+POMs write licenses as free text, so Kargo maps the common names and URLs to ids; a license it does not know, or none, is `unknown`. The dependencies a build only compiles against, the test dependencies and the build's tools are left out unless you pass `--all`. `--format markdown` prints a table of every package for a release page, and `--notice NOTICE-third-party.txt` writes the third-party notice file of a distribution, which [`kargo package --dist`](../distributing/) picks up from the project root.
 
 To fail on the licenses you cannot ship, say which ones you can in [`[licenses]`](../../reference/manifest/#licenses):
 

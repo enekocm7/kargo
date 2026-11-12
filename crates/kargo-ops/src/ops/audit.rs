@@ -380,7 +380,7 @@ fn add_npm(
                 subjects.add(query, path, resolution, tooling, Vec::new());
             }
             None => skipped.push(format!(
-                "npm package `{name}` {spec} is not installed, so its version is unknown; build the target once to install it, then audit again"
+                "npm package `{name}` {spec} is not installed, so its version is unknown; build the target once to install it, then run this command again"
             )),
         }
     }

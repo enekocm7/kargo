@@ -796,10 +796,9 @@ kargo licenses [options]
 $ kargo licenses
 Apache-2.0           41  org.jetbrains.kotlin:kotlin-stdlib:2.2.20, org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2, org.jetbrains:annotations:13.0, ... (+38 more)
 MIT                   6  org.slf4j:slf4j-api:2.0.16, com.acme:util:1.2, com.acme:text:3.0, ... (+3 more)
-EPL-2.0               1  org.junit.jupiter:junit-jupiter:5.11.4
 GPL-3.0-only OR MIT   1  com.acme:dual:1.0
 unknown               1  com.example:legacy:1.0
-    Checked the licenses of 49 packages
+     Checked the licenses of 49 packages
 ```
 
 Each row is a license, how many packages are under it and the first of them, the most used first and `unknown` last. For every package, use `--format json` or `--format markdown`.
@@ -807,7 +806,7 @@ Each row is a license, how many packages are under it and the first of them, the
 | Option | Default | Meaning |
 |---|---|---|
 | `-t, --target <target>` | every enabled target | Only these targets (repeatable) |
-| `--all` | | Also the test dependencies and the build's tools (see below) |
+| `--all` | | Also the dependencies a build does not ship and the test dependencies, and the build's tools (see below) |
 | `--format <fmt>` | `text` | `text`, `json` or `markdown` |
 | `--notice <path>` | | Write a third-party notice file listing the licenses and the packages under them |
 | `-p, --package <name>`, `--workspace`, `--exclude <name>` | current package | Which packages to check |
@@ -816,12 +815,12 @@ What is checked, by default, is what a build ships:
 
 - **Maven modules**: the runtime resolution of every enabled target (the JVM runtime classpath and the main resolutions of Wasm, JS and every Native platform), resolved as a build would (with `--locked`, from `kargo.lock` only). A module's licenses are the `<licenses>` of its POM, or of the nearest parent POM that declares any. They are free text, so Kargo maps the common names and URLs (`The Apache Software License, Version 2.0`, `https://opensource.org/licenses/MIT`, `GNU Lesser General Public License v2.1`, ...) to [SPDX ids](https://spdx.org/licenses/). A license it cannot map is `unknown`, and so is a module without any; give the license in [`[licenses] exceptions`](../manifest/#licenses) after checking it. A POM that lists several licenses lets you choose one of them: the module is under `GPL-3.0-only OR MIT`, and the policy accepts it when either is fine. Kargo reads the POMs from the Maven cache, so `--offline` works for anything a build has fetched.
 - **npm packages** of Wasm and Kotlin/JS: the `license` field of every package installed in the target's `node_modules`, read as an SPDX expression (`(MIT OR Apache-2.0)`, `MIT AND Zlib`). The old `{ "type": ... }` object and the `licenses` array are read too. Text that is not an expression, such as `SEE LICENSE IN LICENSE.txt`, is `unknown`. A package that is not installed yet has no `package.json` to read, so build the target once first.
-- **`--all`** adds the test classpaths and the build's tools as `kargo.lock` holds them (the Kotlin compiler, KSP, the JUnit launcher, compiler plugins and `[[generate]]` tools, and the npm packages of the TypeScript compiler); run `kargo fetch --tools` or a build first, so they are locked.
+- **`--all`** adds the JVM compile classpath (which brings in the `provided` dependencies a build does not ship), the test classpaths and the build's tools as `kargo.lock` holds them (the Kotlin compiler, KSP, the JUnit launcher, compiler plugins and `[[generate]]` tools, and the npm packages of the TypeScript compiler); run `kargo fetch --tools` or a build first, so they are locked.
 - Android dependencies are resolved by Gradle and are not checked.
 
 With a [`[licenses]`](../manifest/#licenses) policy, the command exits with `101` when a package is under a license in `deny`, under one that `allow` does not list, or (when `allow` is set) under an unknown one, unless `exceptions` names it. A package with several licenses to choose from passes when one of them does. Each package that fails is named on stderr with the reason. Without a policy, nothing fails.
 
-`--format json` prints one object per package (an array for several): `package`, `policy` (`allow`, `deny` and `exceptions`), `violations` (how many packages fail), `skipped` (notes about packages that could not be checked) and `licenses`, each with `license`, `count` and `packages`. A package has `ecosystem` (`maven` or `npm`), `name`, `version`, `declared` (the `name` and `url` of each license as the POM writes it, or the npm `license` text as `name`), `path`, `resolutions`, `tooling`, `exception` and `violation` (`null`, or `denied`, `not-allowed` or `unknown`). `--format markdown` prints a table of every package with its license, for a release page.
+`--format json` prints one object per workspace member (an array for several): `package`, `policy` (`allow`, `deny` and `exceptions`), `violations` (how many packages fail), `skipped` (notes about packages that could not be checked) and `licenses`, each with `license`, `count` and `packages`. A package has `ecosystem` (`maven` or `npm`), `name`, `version`, `declared` (the `name` and `url` of each license as the POM writes it, or the npm `license` text as `name`), `path`, `resolutions`, `tooling`, `exception` and `violation` (`null`, or `denied`, `not-allowed` or `unknown`). `--format markdown` prints a table of every package with its license, for a release page.
 
 `--notice <path>` writes the third-party notice file of a distribution: each license, the URLs of its text from the POMs, and the packages under it (the packages of every checked member of a workspace, once). It is written even when the policy fails. Write it to a file in the project root whose name starts with `NOTICE`, such as `kargo licenses --notice NOTICE-third-party.txt`, and [`kargo package --dist`](../../guides/distributing/) puts it in the archives with the project's other notice files (any other path can go in [`[package.dist] include`](../manifest/#packagedist)).
 

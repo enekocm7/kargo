@@ -941,7 +941,7 @@ struct LicensesArgs {
     /// Only these targets [default: every enabled one]
     #[arg(short, long = "target", value_enum)]
     targets: Vec<TargetArg>,
-    /// Also the licenses of test dependencies and of the build's tools that kargo.lock holds (Kotlin compiler, KSP, JUnit launcher, compiler plugins, `[[generate]]` tools) and the TypeScript compiler's npm packages
+    /// Also the dependencies a build only compiles against (`provided`) and the test dependencies, plus the build's tools that kargo.lock holds (Kotlin compiler, KSP, JUnit launcher, compiler plugins, `[[generate]]` tools) and the TypeScript compiler's npm packages
     #[arg(long)]
     all: bool,
     /// Write a third-party notice file listing the licenses and packages
@@ -1672,7 +1672,7 @@ Exits with 101 when an advisory at or above the --deny severity (default: [audit
     /// Report the licenses of the dependencies, and fail when [licenses] forbids one
     #[command(long_about = "Report the licenses of the dependencies.
 
-Lists the packages a build ships (the Maven modules of every target, or the ones given with --target, and the npm packages of Wasm and Kotlin/JS) grouped by SPDX license id, read from their POMs (with the licenses a parent POM declares) and package.json files. Test dependencies and the build's tools are left out unless --all. Licenses written as free text in a POM are mapped to SPDX ids; those Kargo cannot map are reported as `unknown`. --offline reads the POMs from the cache.
+Lists the packages a build ships (the Maven modules of every target, or the ones given with --target, and the npm packages of Wasm and Kotlin/JS) grouped by SPDX license id, read from their POMs (with the licenses a parent POM declares) and package.json files. The dependencies a build only compiles against, the test dependencies and the build's tools are left out unless --all. Licenses written as free text in a POM are mapped to SPDX ids; those Kargo cannot map are reported as `unknown`. --offline reads the POMs from the cache.
 
 With [licenses] in kargo.toml, exits with 101 when a package is under a license in `deny`, one that `allow` does not list, or (when `allow` is set) an unknown one, unless [licenses] exceptions names the package. --notice writes the third-party notice file of a distribution.")]
     Licenses(LicensesArgs),
