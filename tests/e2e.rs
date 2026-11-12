@@ -3766,6 +3766,51 @@ fn scripts_report_failures_like_programs() {
 }
 
 #[test]
+fn scripts_import_other_scripts() {
+    require_e2e!();
+    let e = E2e::new();
+    e.write("shared/text.kts", "import java.util.Locale\n\nprintln(\"text loaded\")\nfun shout(s: String) = s.uppercase(Locale.ROOT)\n");
+    e.write(
+        "tools/git.kts",
+        "@file:Import(\"../shared/text.kts\")\n@file:DependsOn(\"org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2\")\n\nimport kotlinx.coroutines.runBlocking\n\nfun branch() = runBlocking { shout(\"main\") }\n",
+    );
+    e.write(
+        "tools/main.kts",
+        "#!/usr/bin/env -S kargo script\n@file:Import(\"git.kts\", \"../shared/text.kts\")\n\nimport java.io.File\n\nprintln(branch() + \" \" + args.joinToString(\"|\") + \" \" + File(\".\").name)\n",
+    );
+    // The imported scripts run first, each once, then the script itself.
+    e.kargo("")
+        .args(["script", "tools/main.kts", "a", "b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("text loaded\nMAIN a|b .\n").normalize());
+    e.kargo("")
+        .args(["script", "tools/main.kts", "a", "b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("text loaded\nMAIN a|b .\n").normalize())
+        .stderr(predicate::str::contains("Compiling").not());
+    // A change to an imported script compiles the script again.
+    e.write("shared/text.kts", "fun shout(s: String) = s.lowercase() + \"!\"\n");
+    e.kargo("").args(["script", "tools/main.kts"]).assert().success().stdout(predicate::str::diff("main!  .\n").normalize());
+}
+
+#[test]
+fn kotlin_files_compile_with_their_sources() {
+    require_e2e!();
+    let e = E2e::new();
+    e.write("tool/Helper.kt", "package tool\n\nfun help() = \"helped\"\n");
+    e.write("tool/lib/More.kt", "package tool.lib\n\nfun more() = \"more\"\n");
+    e.write(
+        "tool/Tool.kt",
+        "/* kargo\nsources = [\"Helper.kt\", \"lib\"]\n*/\nimport tool.help\nimport tool.lib.more\n\nfun main() {\n    println(help() + \" \" + more())\n}\n",
+    );
+    e.kargo("").args(["script", "tool/Tool.kt"]).assert().success().stdout(predicate::str::diff("helped more\n").normalize());
+    e.write("tool/Helper.kt", "package tool\n\nfun help() = \"changed\"\n");
+    e.kargo("").args(["script", "tool/Tool.kt"]).assert().success().stdout(predicate::str::diff("changed more\n").normalize());
+}
+
+#[test]
 fn kotlin_files_with_front_matter_and_expressions() {
     require_e2e!();
     let e = E2e::new();

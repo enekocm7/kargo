@@ -1704,6 +1704,7 @@ impl State {
                                 self.changed();
                             }
                         }
+                        self.reload_imports();
                     }
                 }
                 "workspace/didChangeWatchedFiles" => {
@@ -1915,7 +1916,11 @@ impl State {
 
     fn set_file(&mut self, path: PathBuf, text: String) {
         let origin = self.model.origin(&path);
-        let unit = Arc::new(Unit::new(path.clone(), text, origin));
+        let mut unit = Unit::new(path.clone(), text, origin);
+        if is_script_path(&path) {
+            unit.imports = self.load_imports(&path, &unit.text);
+        }
+        let unit = Arc::new(unit);
         let replaced = self.files.insert(path.clone(), Arc::clone(&unit)).is_some();
         // A changed file updates its own entries; a new one shifts the unit numbers.
         let patched = replaced
@@ -1930,6 +1935,32 @@ impl State {
             self.generation += 1;
         } else {
             self.changed();
+        }
+    }
+
+    /// The scripts that the script at `path` imports. The ones the editor does not have open are read
+    /// from disk, as they are now, so the script sees their declarations.
+    fn load_imports(&mut self, path: &Path, text: &str) -> Vec<PathBuf> {
+        let imports = kargo_manifest::script::imported_files(path, text);
+        for imported in &imports {
+            if self.open.values().any(|open| open == imported) {
+                continue;
+            }
+            let Ok(disk) = std::fs::read_to_string(imported) else { continue };
+            if self.files.get(imported).is_none_or(|unit| unit.text != disk) {
+                self.set_file(imported.clone(), disk);
+            }
+        }
+        imports
+    }
+
+    /// Reads the imports of every open script again, after a file they may import was closed.
+    fn reload_imports(&mut self) {
+        let scripts: Vec<PathBuf> = self.open.values().filter(|path| is_script_path(path)).cloned().collect();
+        for path in scripts {
+            if let Some(text) = self.files.get(&path).map(|unit| unit.text.clone()) {
+                self.set_file(path, text);
+            }
         }
     }
 
@@ -1965,7 +1996,7 @@ impl State {
             return;
         }
         let Some(text) = self.files.get(path).map(|unit| unit.text.clone()) else { return };
-        let declared = kargo_ops::script::declared_dependencies(&text);
+        let declared = kargo_ops::script::declared_dependencies(path, &text);
         if declared.is_empty() {
             if self.scripts.remove(path).is_some() {
                 self.generation += 1;
@@ -2000,7 +2031,7 @@ impl State {
         let (generation, base, jdk) = (self.libraries_generation, self.lib.units.clone(), self.lib.jdk.clone());
         let (fetch, path, text) = (self.load_options.fetch_sources, path.to_owned(), text.to_owned());
         thread::spawn(move || {
-            let index = kargo_ops::script::dependency_metadata(&config, &text, fetch).ok().map(|meta| {
+            let index = kargo_ops::script::dependency_metadata(&config, &path, &text, fetch).ok().map(|meta| {
                 let mut units = base;
                 units.extend(library::units(&config, &cache, &dependency_jars(&meta)));
                 units.extend(library::compiled_units(&config, &cache, &dependency_compiled(&meta)));

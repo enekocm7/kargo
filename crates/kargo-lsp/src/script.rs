@@ -39,11 +39,16 @@ pub fn is_kargo_script(path: &Path, text: &str) -> bool {
     kargo_manifest::script::is_kargo_script(text, !manifests.is_empty()) || manifests.iter().any(|dir| runs_from_manifest(dir, path))
 }
 
-/// Whether the manifest in `dir` names `path` as the `script` of a task or hook plugin.
+/// Whether the manifest in `dir` names `path` as the `script` of a task or hook plugin, or one of
+/// those scripts imports it.
 fn runs_from_manifest(dir: &Path, path: &Path) -> bool {
     let Ok(manifest) = std::fs::read_to_string(dir.join(kargo_manifest::MANIFEST_NAME)) else { return false };
     let path = normalized(path);
-    kargo_manifest::script::manifest_scripts(&manifest).iter().any(|script| normalized(&dir.join(script)) == path)
+    kargo_manifest::script::manifest_scripts(&manifest).iter().map(|script| dir.join(script)).any(|script| {
+        let text = std::fs::read_to_string(&script).unwrap_or_default();
+        normalized(&script) == path
+            || kargo_manifest::script::imported_files(&script, &text).iter().any(|imported| normalized(imported) == path)
+    })
 }
 
 /// `path` without its `.` and `..` components, which a `script` of `./scripts/../gen.kts` may have.
@@ -164,9 +169,9 @@ pub fn hover(text: &str, offset: usize) -> Option<Value> {
     Some(json!({ "contents": { "kind": "markdown", "value": format!("**`@file:{name}`**: {doc}.") } }))
 }
 
-/// The problems of a script's header as diagnostics.
-pub fn diagnostics(text: &str) -> Vec<Value> {
-    kargo_ops::script::problems(text)
+/// The problems of the header of the script at `path` as diagnostics.
+pub fn diagnostics(path: &Path, text: &str) -> Vec<Value> {
+    kargo_ops::script::problems(path, text)
         .into_iter()
         .map(|problem| json!({ "range": text::range(text, problem.range), "severity": 1, "source": "kargo", "message": problem.message }))
         .collect()
@@ -244,12 +249,13 @@ mod tests {
 
     #[test]
     fn reports_header_problems_as_diagnostics() {
-        let found = diagnostics("@file:DependsOn(\"a:b\")\n@file:Framework(\"flask\")\nprintln(1)\n");
+        let path = Path::new("a.kts");
+        let found = diagnostics(path, "@file:DependsOn(\"a:b\")\n@file:Framework(\"flask\")\nprintln(1)\n");
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(found[0]["range"]["start"]["line"], 0);
         assert_eq!(found[1]["range"]["start"]["line"], 1);
         assert!(found[1]["message"].as_str().unwrap().contains("unknown framework `flask`"));
-        assert!(diagnostics("@file:Kotlin(\"2.3.0\")\nprintln(1)\n").is_empty());
+        assert!(diagnostics(path, "@file:Kotlin(\"2.3.0\")\nprintln(1)\n").is_empty());
     }
 
     #[test]
@@ -282,5 +288,20 @@ hooks = [\"post-build\"]
         assert!(is_kargo_script(&dir.path().join("scripts").join("gen.kts"), "println(1)"));
         assert!(is_kargo_script(&dir.path().join("scripts").join("notify.kts"), "println(1)"));
         assert!(!is_kargo_script(&dir.path().join("scripts").join("other.kts"), "println(1)"));
+    }
+
+    #[test]
+    fn the_scripts_that_tasks_import_are_kargo_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("kargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[tasks]\ngen = { script = \"scripts/gen.kts\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("scripts").join("gen.kts"), "@file:Import(\"common.kts\")\nhelp()\n").unwrap();
+        std::fs::write(dir.path().join("scripts").join("common.kts"), "fun help() = 1\n").unwrap();
+        assert!(is_kargo_script(&dir.path().join("scripts").join("common.kts"), "fun help() = 1"));
+        assert!(!is_kargo_script(&dir.path().join("scripts").join("other.kts"), "fun help() = 1"));
     }
 }

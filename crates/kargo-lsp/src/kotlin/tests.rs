@@ -3081,6 +3081,33 @@ fn scripts_have_args_and_top_level_statements() {
     assert!(file.jvm_multifile);
 }
 
+#[test]
+fn a_script_sees_the_declarations_of_the_scripts_it_imports() {
+    let mut f = fixture(&[
+        ("loose/main.kts", "fun local() = 1\nhel$0\n"),
+        ("loose/lib.kts", "fun helper() = 1\n"),
+        ("loose/other.kts", "fun helpless() = 1\n"),
+    ]);
+    let labels = f.labels();
+    assert!(!has(&labels, "helper") && !has(&labels, "helpless"), "scripts are separate unless one imports another: {labels:?}");
+    let units: Vec<Arc<Unit>> = f
+        .proj
+        .units
+        .iter()
+        .map(|unit| {
+            let mut script = Unit::new(unit.path.clone(), unit.text.clone(), Origin::Loose);
+            if unit.path.ends_with("main.kts") {
+                script.imports = vec![PathBuf::from("/project/loose/lib.kts")];
+            }
+            Arc::new(script)
+        })
+        .collect();
+    f.proj = Index::new(false, units);
+    let labels = f.labels();
+    assert!(has(&labels, "helper"), "{labels:?}");
+    assert!(!has(&labels, "helpless"), "only the imported script is seen: {labels:?}");
+}
+
 const STREAM_JDK: &[(&str, &str)] = &[
     (
         "java.base/module-info.java",

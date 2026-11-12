@@ -705,8 +705,8 @@ impl Server {
                 let theirs = message["params"]["diagnostics"].as_array().cloned().unwrap_or_default();
                 let key = check::uri_key(&uri);
                 let mut ours = self.check_diagnostics(&key);
-                if let Some(text) = self.docs.get(&uri).filter(|_| script::is_script_uri(&uri)) {
-                    ours.extend(script::diagnostics(text));
+                if let Some((path, text)) = text::uri_to_path(&uri).zip(self.docs.get(&uri)).filter(|_| script::is_script_uri(&uri)) {
+                    ours.extend(script::diagnostics(&path, text));
                 }
                 message["params"]["diagnostics"] = json!(check::merge(&theirs, &ours));
                 self.backend_pushed.insert(key, theirs);
@@ -1383,7 +1383,7 @@ impl Server {
         }
         let Some(request) = script::request(text, offset) else { return script::Answer::Backend };
         if matches!(&request, script::Request::Value { name, .. } if name == "DependsOn" || name == "Kotlin") {
-            self.script_versions(message["id"].clone(), text.clone(), request);
+            self.script_versions(message["id"].clone(), &uri, text.clone(), request);
             return script::Answer::Later;
         }
         script::Answer::Now(json!({ "isIncomplete": false, "items": script::completion(text, &request) }))
@@ -1391,9 +1391,10 @@ impl Server {
 
     /// Completes the coordinate or version of `@file:DependsOn`, and the version of `@file:Kotlin`,
     /// on a worker thread: coordinates from the search, versions from the script's repositories.
-    fn script_versions(&self, id: Value, text: String, request: script::Request) {
+    fn script_versions(&self, id: Value, uri: &str, text: String, request: script::Request) {
         let (config, searcher, tx) = (self.config.clone(), Arc::clone(&self.searcher), self.tx.clone());
-        let repositories = kargo_ops::script::declared_repositories(&text);
+        let path = text::uri_to_path(uri).unwrap_or_default();
+        let repositories = kargo_ops::script::declared_repositories(&path, &text);
         thread::spawn(move || {
             let script::Request::Value { name, partial, range } = &request else {
                 let _ = tx.send(Event::Reply(jsonrpc::response(&id, json!({ "isIncomplete": false, "items": [] }))));
@@ -1463,8 +1464,8 @@ impl Server {
     /// Publishes the problems of a tracked Kargo script's header; the backend's own diagnostics are
     /// added to them when it reports.
     fn publish_script(&mut self, uri: &str) -> Result<()> {
-        let Some(text) = self.docs.get(uri) else { return Ok(()) };
-        let diagnostics = script::diagnostics(text);
+        let Some((path, text)) = text::uri_to_path(uri).zip(self.docs.get(uri)) else { return Ok(()) };
+        let diagnostics = script::diagnostics(&path, text);
         self.notify("textDocument/publishDiagnostics", json!({ "uri": uri, "diagnostics": diagnostics }))
     }
 

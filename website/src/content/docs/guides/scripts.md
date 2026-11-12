@@ -46,6 +46,7 @@ A `.kts` script declares its settings with `@file:` annotations at the top of th
 | `@file:Jdk("21")` | The JDK to compile and run with: a major version, a release such as `"21.0.5+11"`, or `"system"` for `JAVA_HOME` or `java` on `PATH`. Default: `system` |
 | `@file:Framework("coroutines")` | A [built-in framework](../frameworks/). Those that need a Kotlin compiler plugin, `serialization`, `compose`, `lombok` and `spring-boot`, need a `.kt` file instead; see [Limits](#limits) |
 | `@file:Target("native")` | Build for this target: `"jvm"` (the default) or `"native"` for a native executable of a `.kt` file; see [Native scripts](#native-scripts). A `.kts` script with `"native"` is an error |
+| `@file:Import("common.kts", "../shared/git.kts")` | Other scripts to share code with, relative to this one; see [Share code between scripts](#share-code-between-scripts) |
 
 Other `@file:` annotations, such as `@file:Suppress`, stay in the file for the Kotlin compiler.
 
@@ -74,9 +75,59 @@ $ kargo script tool.kt a b
 tool a, b
 ```
 
-The front matter takes the same settings as the annotations, with these keys: `kotlin`, `jdk`, `repositories` (a list of URLs), `frameworks` (a list of names), `target` (`"jvm"` or `"native"`; see [Native scripts](#native-scripts)) and `dependencies` (a table from `"group:artifact"` to the version). A `.kt` file without a front matter needs no settings at all. Unlike a `.kts` script, a `.kt` file can use any framework, including those that need a compiler plugin.
+The front matter takes the same settings as the annotations, with these keys: `kotlin`, `jdk`, `repositories` (a list of URLs), `frameworks` (a list of names), `target` (`"jvm"` or `"native"`; see [Native scripts](#native-scripts)), `sources` (a list of Kotlin files to compile with it; see [Share code between scripts](#share-code-between-scripts)) and `dependencies` (a table from `"group:artifact"` to the version). A `.kt` file without a front matter needs no settings at all. Unlike a `.kts` script, a `.kt` file can use any framework, including those that need a compiler plugin.
 
 Use a `.kt` file when the script grows into several declarations or needs a compiler plugin. Its `main` runs the same way it would in a project.
+
+## Share code between scripts
+
+Several scripts often need the same helpers. A `.kts` script imports other scripts with `@file:Import`, as it does in `kotlin-main-kts`; the paths are relative to the script that names them:
+
+```kotlin title="scripts/git.kts"
+@file:Import("../shared/text.kts")
+
+fun branch() = shout("main")
+```
+
+```kotlin title="shared/text.kts"
+fun shout(text: String) = text.uppercase()
+```
+
+```kotlin title="scripts/release.kts"
+@file:Import("git.kts", "../shared/text.kts")
+
+println(branch())
+```
+
+```console
+$ kargo script scripts/release.kts
+MAIN
+```
+
+The declarations of an imported script are visible in the script that imports it, and the code of each imported script runs once, before the code of the script that imports it. Imports can be nested, and a script that is imported from several places is read once.
+
+- **Dependencies come along.** The `@file:DependsOn`, `@file:Repository` and `@file:Framework` annotations of an imported script apply to every script that imports it, directly or not. `@file:Kotlin`, `@file:Jdk` and `@file:Target` describe how the whole script is compiled and run, so only the ones in the script you run count; the ones in an imported script are ignored.
+- **Cycles are errors.** A script that imports itself, directly or through others, fails before anything compiles with the chain of files: `import cycle: a.kts -> b.kts -> a.kts`. So does an import that does not exist, one that is not a `.kts` file, and one whose own header is invalid.
+- **The cache covers them.** A change to an imported script, or to its dependencies, compiles the scripts that import it again; see [How runs are cached](#how-runs-are-cached).
+- **They are merged into one script.** Kargo puts the code of the imported scripts and the script into a single file for the Kotlin compiler, with the `@file:` annotations and `import` lines of all of them at its top. Two scripts that declare the same name at the top level clash, and a `private` declaration of an imported script is visible to the others. Compiler messages name that merged copy in the cache, whose line numbers count the imported scripts first.
+
+`-e` code has no directory to import from, so `@file:Import` in it is an error.
+
+A `.kt` file lists the Kotlin files to compile with it in `sources` in its front matter instead, each a `.kt` file or a directory (all the `.kt` files below it), relative to the file:
+
+```kotlin title="tool/Tool.kt"
+/* kargo
+sources = ["Helper.kt", "lib"]
+*/
+
+import tool.help
+
+fun main() {
+    println(help())
+}
+```
+
+These files are plain Kotlin sources, compiled with the script on the JVM and with `--target native` alike: they take the script's dependencies and settings, and their own front matter is not read. The script itself, and a file named twice, are compiled once. The cache covers them too.
 
 ## Native scripts
 
@@ -109,7 +160,7 @@ The first native run compiles the file with `konanc` and links the binary, which
 
 ## How runs are cached
 
-Kargo keeps each script's output in `~/.kargo/cache/scripts`, one directory per script. The directory is keyed by the script's code and everything that changes what it compiles to: its Kotlin version, JDK request, repositories, dependencies, frameworks and target (with the host platform for `native`). Changing any of them compiles the script again. `KARGO_HOME` moves the cache with the rest of Kargo's files.
+Kargo keeps each script's output in `~/.kargo/cache/scripts`, one directory per script. The directory is keyed by the script's code and everything that changes what it compiles to: the code of the scripts it [imports](#share-code-between-scripts) or the `sources` it lists, its Kotlin version, JDK request, repositories, dependencies (its imports' too), frameworks and target (with the host platform for `native`). Changing any of them compiles the script again. `KARGO_HOME` moves the cache with the rest of Kargo's files.
 
 The first run of a `.kts` script compiles it, and the Kotlin compiler runs the script as part of that step, so the first run takes a few seconds longer. Later runs start the compiled classes with `java` and do not compile, so they start in JVM-startup time. Output and exit codes are the same either way: a script that throws exits with `1`, and one that does not compile exits with `101`.
 
@@ -157,13 +208,13 @@ The script still takes its dependencies, Kotlin version and JDK from its own hea
 
 The [language server](../editors/#language-server) treats a `.kts` file as a Kargo script when it lies outside any project, when its shebang runs `kargo script`, or when the project's `kargo.toml` runs it as the `script` of a task or hook plugin. Any other `.kts` file inside a project is a build script that Kargo does not run, so the server leaves it alone unless its shebang says otherwise. In Zed, a folder with only scripts needs a setting to start the server; see [Kargo scripts in Zed](../editors/#kargo-scripts-in-zed).
 
-For a Kargo script, the server completes the annotation names, the values of `@file:Jdk`, `@file:Framework`, `@file:Repository` and `@file:Target`, the coordinates and versions of `@file:DependsOn`, and the versions of `@file:Kotlin`. It shows what each annotation means on hover, and it reports a header that `kargo script` would reject, such as a dependency without a version, as a diagnostic on that annotation.
+For a Kargo script, the server completes the annotation names, the values of `@file:Jdk`, `@file:Framework`, `@file:Repository` and `@file:Target`, the coordinates and versions of `@file:DependsOn`, and the versions of `@file:Kotlin`. It shows what each annotation means on hover, and it reports a header that `kargo script` would reject, such as a dependency without a version or an `@file:Import` that cannot be read or closes a cycle, as a diagnostic on that annotation.
 
-The rest of the file goes to the Kotlin server, which reads its top-level statements and `args` as it runs the script. The libraries of its `@file:DependsOn` declarations are loaded for that script alone, so completion, hover and go to definition work on them, while the project's own files don't see them. The [Kotlin server](../kotlin-server/) page explains where those libraries come from.
+The rest of the file goes to the Kotlin server, which reads its top-level statements and `args` as it runs the script. The scripts it imports are read too, so completion, hover and go to definition see their declarations, and the libraries of the `@file:DependsOn` declarations of the script and of its imports are loaded for that script alone, so they work on those libraries while the project's own files don't see them. A `.kts` file that the script of a task or hook plugin imports is a Kargo script too, not a build script. The [Kotlin server](../kotlin-server/) page explains where those libraries come from.
 
 ## Limits
 
-- `@file:Import` is not supported yet. Put the shared code in a `.kt` file in a project, or copy it into the script.
+- `@file:Import` merges the imported scripts into the importing one (see [Share code between scripts](#share-code-between-scripts)), so there are no namespaces: two scripts that declare the same name clash.
 - Compiler plugins do not run in a `.kts` script. `@file:Framework("serialization")`, `"compose"`, `"lombok"` and `"spring-boot"` need a `.kt` file, which runs them the way a project does. `"coroutines"` and `"ktor"` are libraries and work in scripts.
 - Native scripts must be `.kt` files with a top-level `fun main`. `.kts` scripts and `-e` code run on the JVM only.
 - A native script resolves its dependencies for the host platform, so only klib-based (multiplatform) libraries work. A JVM-only artifact, such as a `-jvm` classifier, does not resolve.

@@ -198,7 +198,7 @@ impl<'a> Analyzer<'a> {
         let source = self.unit(from);
         match (&source.origin, &target.origin) {
             (_, Origin::Library { main, test, .. }) => !d.is_internal() && self.library_in_scope(&source.origin, *main, *test),
-            (_, Origin::Loose) => s.unit_id() == from,
+            (_, Origin::Loose) => s.unit_id() == from || source.imports.contains(&target.path),
             (Origin::Library { .. }, _) => false,
             (Origin::Loose, Origin::Source(t)) => t.kind == SetKind::Main,
             (Origin::Source(f), Origin::Source(t)) => {

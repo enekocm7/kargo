@@ -1,7 +1,8 @@
 //! `kargo script`: runs one Kotlin file without a project. A `.kts` script takes its dependencies,
 //! repositories, Kotlin version, JDK and frameworks from its `@file:` annotations; a `.kt` file
 //! takes them from a `/* kargo ... */` front matter. Both resolve with Kargo's resolver and use
-//! its JDKs and caches.
+//! its JDKs and caches. A `.kts` script can `@file:Import` other scripts, whose code is merged into
+//! its own; a `.kt` file can list more Kotlin files to compile with it (`sources`).
 //!
 //! A `.kts` script is compiled with the Kotlin scripting compiler, which runs it as it compiles.
 //! The compiled classes go to a cache entry, and later runs start them with `java` without
@@ -30,7 +31,7 @@ use kargo_toolchain::kotlin::{JVM_COMPILER_MAIN, KOTLIN_GROUP, KotlinCompiler, c
 use kargo_toolchain::native::Host;
 use kargo_toolchain::{Jdk, NativeToolchain, jdks};
 use kargo_util::config::Config;
-use kargo_util::fs::{join_paths, remove_dir_all_if_exists, write_string_atomic};
+use kargo_util::fs::{collect_files, dunce_canonicalize, join_paths, remove_dir_all_if_exists, write_string_atomic};
 use kargo_util::hash::Fingerprint;
 use kargo_util::process::{self, slash, write_argfile};
 use kargo_util::shell::Shell;
@@ -71,6 +72,8 @@ struct Script {
     code: String,
     /// The `.kt` file, compiled where it is so compiler messages name it.
     file: Option<PathBuf>,
+    /// The other Kotlin files compiled with a `.kt` file (`sources` of its front matter) and their text.
+    sources: Vec<(PathBuf, String)>,
     settings: Settings,
 }
 
@@ -225,7 +228,8 @@ fn build_native(
     }
 
     let entry_point = find_entry_point_in(file, true)?.native_entry();
-    let sources = SourceSet::new(vec![file.to_path_buf()], Vec::new(), "native");
+    let files = std::iter::once(file.to_path_buf()).chain(script.sources.iter().map(|(path, _)| path.clone())).collect();
+    let sources = SourceSet::new(files, Vec::new(), "native");
     let unit = NativeCompilation {
         name: "script",
         konan_target: konan_target.to_owned(),
@@ -285,30 +289,66 @@ fn launch_native(config: &Config, binary: &Path, args: &[String], around: &Surro
 fn load(source: &Source) -> Result<Script> {
     match source {
         Source::Expression(code) => {
-            let parsed = script::parse_kts(code)?;
-            let settings = script::settings_from_annotations(code, &parsed.annotations)?;
-            Ok(Script { name: EXPRESSION.to_owned(), is_script: true, code: parsed.code, file: None, settings })
+            let resolved = script::resolve_kts(None, code)?;
+            Ok(Script {
+                name: EXPRESSION.to_owned(),
+                is_script: true,
+                code: resolved.code,
+                file: None,
+                sources: Vec::new(),
+                settings: resolved.settings,
+            })
         }
         Source::File(path) => {
             let text = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
             match path.extension().and_then(|e| e.to_str()) {
                 Some("kts") => {
-                    let parsed = script::parse_kts(&text).with_context(|| format!("invalid header in {}", path.display()))?;
-                    let settings = script::settings_from_annotations(&text, &parsed.annotations)
-                        .with_context(|| format!("invalid header in {}", path.display()))?;
-                    Ok(Script { name, is_script: true, code: parsed.code, file: None, settings })
+                    let resolved =
+                        script::resolve_kts(Some(path), &text).with_context(|| format!("invalid header in {}", path.display()))?;
+                    Ok(Script { name, is_script: true, code: resolved.code, file: None, sources: Vec::new(), settings: resolved.settings })
                 }
                 Some("kt") => {
                     let settings = script::parse_kt_front_matter(&text)
                         .with_context(|| format!("invalid front matter in {}", path.display()))?
                         .unwrap_or_default();
-                    Ok(Script { name, is_script: false, code: text, file: Some(path.clone()), settings })
+                    let sources = kotlin_sources(path, &settings)?;
+                    Ok(Script { name, is_script: false, code: text, file: Some(path.clone()), sources, settings })
                 }
                 _ => bail!("`kargo script` runs a .kts script or a .kt file, not {}", path.display()),
             }
         }
     }
+}
+
+/// The Kotlin files that the `sources` of a `.kt` file's front matter add: each entry is a `.kt` file
+/// or a directory of them, relative to the file. They are read now, so the cache key covers their text.
+fn kotlin_sources(path: &Path, settings: &Settings) -> Result<Vec<(PathBuf, String)>> {
+    let dir = path.parent().unwrap_or(Path::new(""));
+    let own = dunce_canonicalize(path);
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in &settings.sources {
+        let found = dir.join(entry);
+        let listed = if found.is_dir() {
+            collect_files(&found, &["kt"])
+        } else if found.is_file() && found.extension().is_some_and(|e| e == "kt") {
+            vec![found]
+        } else {
+            bail!("`sources` entry `{entry}` of {} is not a .kt file or a directory", path.display());
+        };
+        for file in listed.iter().map(|file| dunce_canonicalize(file)) {
+            if file != own && !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+        .into_iter()
+        .map(|file| {
+            let text = std::fs::read_to_string(&file).with_context(|| format!("failed to read {}", file.display()))?;
+            Ok((file, text))
+        })
+        .collect()
 }
 
 fn kotlin_version(settings: &Settings) -> Result<String> {
@@ -360,9 +400,9 @@ pub struct Problem {
 
 /// The problems `kargo script` would report for the header of a `.kts` script, found without
 /// compiling it: a malformed annotation, an unknown framework or one that needs a compiler plugin,
-/// or a native target (only `.kt` files run natively).
-/// The language server shows them as diagnostics.
-pub fn problems(text: &str) -> Vec<Problem> {
+/// a native target (only `.kt` files run natively), or an import of the script at `path` that cannot
+/// be resolved. The language server shows them as diagnostics.
+pub fn problems(path: &Path, text: &str) -> Vec<Problem> {
     let parsed = match script::parse_kts(text) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -388,6 +428,7 @@ pub fn problems(text: &str) -> Vec<Problem> {
             out.push(Problem { range: annotation.span.clone(), message: format!("{error:#}") });
         }
     }
+    out.extend(script::import_errors(path, text).into_iter().map(|(range, error)| Problem { range, message: format!("{error:#}") }));
     out
 }
 
@@ -403,38 +444,41 @@ fn line_span(text: &str, line: usize) -> Range<usize> {
     text.len()..text.len()
 }
 
-/// The repositories a `.kts` script declares, after Maven Central, for the language server's
-/// version completion. A script that does not parse declares none.
-pub fn declared_repositories(text: &str) -> Vec<Repository> {
-    let settings = settings_of(text).unwrap_or_default();
+/// The repositories the `.kts` script `text` of the file at `path` declares, with the ones of the
+/// scripts it imports, after Maven Central, for the language server's version completion. A script
+/// that does not parse declares none.
+pub fn declared_repositories(path: &Path, text: &str) -> Vec<Repository> {
+    let settings = settings_of(path, text).unwrap_or_default();
     repositories(&settings)
 }
 
-/// The settings of a `.kts` script's annotations, which an error from a malformed one fails.
-fn settings_of(text: &str) -> Result<Settings> {
-    let parsed = script::parse_kts(text)?;
-    script::settings_from_annotations(text, &parsed.annotations)
+/// The settings of a `.kts` script and of the scripts it imports, which an error from a malformed
+/// annotation or an import that cannot be read fails.
+fn settings_of(path: &Path, text: &str) -> Result<Settings> {
+    Ok(script::resolve_kts(Some(path), text)?.settings)
 }
 
-/// What a `.kts` script declares for its dependencies, for the language server to compare when the
-/// script changes: its `@file:DependsOn` coordinates, then its `@file:Repository` URLs. Empty for a
-/// script that declares neither, or that does not parse (its problems say why).
-pub fn declared_dependencies(text: &str) -> Vec<String> {
-    let Ok(settings) = settings_of(text) else { return Vec::new() };
+/// What a `.kts` script and the scripts it imports declare for their dependencies, for the language
+/// server to compare when the script changes: the `@file:DependsOn` coordinates, then the
+/// `@file:Repository` URLs. Empty for a script that declares neither, or that does not parse (its
+/// problems say why).
+pub fn declared_dependencies(path: &Path, text: &str) -> Vec<String> {
+    let Ok(settings) = settings_of(path, text) else { return Vec::new() };
     let coordinates = settings.dependencies.iter().map(ToString::to_string);
     coordinates
         .chain(settings.repositories.iter().filter(|url| url.as_str() != "mavenCentral").map(|url| format!("repository {url}")))
         .collect()
 }
 
-/// The libraries a `.kts` script's `@file:DependsOn` declarations resolve to, for the language server.
+/// The libraries the `@file:DependsOn` declarations of a `.kts` script and of its imports resolve to,
+/// for the language server.
 /// They are listed as `kargo metadata` lists a package's dependencies (one JVM target whose `compile`
 /// scope holds every resolved file, with the sources jar of its module when one is available), so the
 /// server reads them as it reads a project's. Sources jars are downloaded as `kargo fetch --sources`
 /// does when `fetch_sources` is set, or read from the cache when it is not or the network is not
 /// reachable. A script without dependencies gets an empty list.
-pub fn dependency_metadata(config: &Config, text: &str, fetch_sources: bool) -> Result<Value> {
-    let settings = settings_of(text).context("invalid script header")?;
+pub fn dependency_metadata(config: &Config, path: &Path, text: &str, fetch_sources: bool) -> Result<Value> {
+    let settings = settings_of(path, text).context("invalid script header")?;
     let mut entries = Vec::new();
     if !settings.dependencies.is_empty() {
         let client = MavenClient::new(config, repositories(&settings));
@@ -493,6 +537,9 @@ fn cache_key(
 ) -> String {
     let mut fp = Fingerprint::new();
     fp.str(FORMAT).str(&script.name).str(if script.is_script { "kts" } else { "kt" }).str(&script.code);
+    for (path, text) in &script.sources {
+        fp.str(&path.display().to_string()).str(text);
+    }
     fp.str(kotlin).str(&jdk.to_string());
     for repo in repositories {
         fp.str(&repo.url);
@@ -637,6 +684,7 @@ fn build(
         trailing.extend(args.iter().cloned());
     } else {
         options.push(slash(&source));
+        options.extend(script.sources.iter().map(|(path, _)| slash(path)));
     }
     let status = kotlinc(shell, jdk, &compiler_classpath, &entry.join("kotlinc.args"), &options, &trailing, around)?;
 
@@ -777,8 +825,14 @@ mod tests {
 
     #[test]
     fn keys_depend_on_the_code_and_the_settings() {
-        let script =
-            |code: &str| Script { name: "a.kts".into(), is_script: true, code: code.into(), file: None, settings: Settings::default() };
+        let script = |code: &str| Script {
+            name: "a.kts".into(),
+            is_script: true,
+            code: code.into(),
+            file: None,
+            sources: Vec::new(),
+            settings: Settings::default(),
+        };
         let repos = [Repository::maven_central()];
         let key = |s: &Script, kotlin: &str| cache_key(s, kotlin, &JdkRequest::System, &repos, &[], ScriptTarget::Jvm, None);
         assert_eq!(key(&script("1"), "2.4.21"), key(&script("1"), "2.4.21"));
@@ -788,8 +842,14 @@ mod tests {
 
     #[test]
     fn keys_separate_jvm_and_native_and_hosts() {
-        let script =
-            |code: &str| Script { name: "a.kt".into(), is_script: false, code: code.into(), file: None, settings: Settings::default() };
+        let script = |code: &str| Script {
+            name: "a.kt".into(),
+            is_script: false,
+            code: code.into(),
+            file: None,
+            sources: Vec::new(),
+            settings: Settings::default(),
+        };
         let repos = [Repository::maven_central()];
         let jvm = cache_key(&script("1"), "2.4.21", &JdkRequest::System, &repos, &[], ScriptTarget::Jvm, None);
         let native = cache_key(&script("1"), "2.4.21", &JdkRequest::System, &repos, &[], ScriptTarget::Native, Some("linux_x64"));
@@ -819,51 +879,64 @@ mod tests {
     #[test]
     fn native_needs_a_kt_file() {
         let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
-        let script = Script { name: "a.kts".into(), is_script: true, code: "println(1)".into(), file: None, settings: Settings::default() };
+        let script = Script {
+            name: "a.kts".into(),
+            is_script: true,
+            code: "println(1)".into(),
+            file: None,
+            sources: Vec::new(),
+            settings: Settings::default(),
+        };
         let err = format!("{:#}", run_native(&config, &script, &[], &Surroundings::default()).unwrap_err());
         assert!(err.contains("--target native") && err.contains(".kt file"), "{err}");
     }
 
     #[test]
     fn reports_header_problems_without_compiling() {
-        let found = problems("@file:DependsOn(\"a:b\")\n@file:Framework(\"serialization\")\n@file:Kotlin(\"2.3.0\")\nprintln(1)\n");
+        let found = problems(
+            Path::new("a.kts"),
+            "@file:DependsOn(\"a:b\")\n@file:Framework(\"serialization\")\n@file:Kotlin(\"2.3.0\")\nprintln(1)\n",
+        );
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(found[0].range, 0..22);
         assert!(found[0].message.contains("version pinned"), "{}", found[0].message);
         assert!(found[1].message.contains("needs the Kotlin compiler plugin"), "{}", found[1].message);
-        assert!(problems("@file:Kotlin(\"2.3.0\")\n@file:Framework(\"coroutines\")\nprintln(1)\n").is_empty());
+        assert!(problems(Path::new("a.kts"), "@file:Kotlin(\"2.3.0\")\n@file:Framework(\"coroutines\")\nprintln(1)\n").is_empty());
         // Only the header counts: an annotation after the first statement is not a script annotation.
-        assert!(problems("println(1)\n@file:Jdk(\"x\n").is_empty());
-        let bad = problems("\n@file:Jdk(\"x\nprintln(1)\n");
+        assert!(problems(Path::new("a.kts"), "println(1)\n@file:Jdk(\"x\n").is_empty());
+        let bad = problems(Path::new("a.kts"), "\n@file:Jdk(\"x\nprintln(1)\n");
         assert_eq!(bad.len(), 1);
         assert!(bad[0].message.starts_with("line 2:"), "{}", bad[0].message);
         assert_eq!(bad[0].range, 1..13);
-        let native = problems("@file:Target(\"native\")\nprintln(1)\n");
+        let native = problems(Path::new("a.kts"), "@file:Target(\"native\")\nprintln(1)\n");
         assert_eq!(native.len(), 1, "{native:?}");
         assert!(native[0].message.contains("needs a .kt file"), "{}", native[0].message);
-        assert!(problems("@file:Target(\"jvm\")\nprintln(1)\n").is_empty());
-        let bad_target = problems("@file:Target(\"wasm\")\nprintln(1)\n");
+        assert!(problems(Path::new("a.kts"), "@file:Target(\"jvm\")\nprintln(1)\n").is_empty());
+        let bad_target = problems(Path::new("a.kts"), "@file:Target(\"wasm\")\nprintln(1)\n");
         assert_eq!(bad_target.len(), 1, "{bad_target:?}");
         assert!(bad_target[0].message.contains("invalid target"), "{}", bad_target[0].message);
     }
 
     #[test]
     fn declares_repositories_after_maven_central() {
-        let repos = declared_repositories("@file:Repository(\"https://jitpack.io/\")\n@file:Repository(\"mavenCentral\")\n");
+        let repos =
+            declared_repositories(Path::new("a.kts"), "@file:Repository(\"https://jitpack.io/\")\n@file:Repository(\"mavenCentral\")\n");
         let urls: Vec<&str> = repos.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(urls, [kargo_maven::repo::MAVEN_CENTRAL, "https://jitpack.io"]);
     }
 
     #[test]
     fn declares_dependencies_for_the_language_server() {
+        let path = Path::new("a.kts");
         let text = "@file:DependsOn(\"g:a:1\")
 @file:Repository(\"https://jitpack.io\")
 @file:Repository(\"mavenCentral\")
 println(1)
 ";
-        assert_eq!(declared_dependencies(text), ["g:a:1", "repository https://jitpack.io"]);
+        assert_eq!(declared_dependencies(path, text), ["g:a:1", "repository https://jitpack.io"]);
         assert!(
             declared_dependencies(
+                path,
                 "println(1)
 "
             )
@@ -871,6 +944,7 @@ println(1)
         );
         assert!(
             declared_dependencies(
+                path,
                 "@file:DependsOn(\"g:a\")
 "
             )
@@ -881,12 +955,168 @@ println(1)
         let config = Config::new(std::env::temp_dir(), kargo_util::shell::Shell::new(kargo_util::shell::Verbosity::Quiet));
         let meta = dependency_metadata(
             &config,
+            path,
             "println(1)
 ",
             false,
         )
         .unwrap();
         assert_eq!(meta["packages"][0]["targets"][0]["dependencies"][0]["compile"], json!([]));
+    }
+
+    #[test]
+    fn declares_what_imported_scripts_need() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.kts"),
+            "@file:DependsOn(\"g:lib:2\")
+@file:Repository(\"https://repo.example\")
+fun f() = 1
+",
+        )
+        .unwrap();
+        let main = dir.path().join("main.kts");
+        let text = "@file:Import(\"lib.kts\")
+@file:DependsOn(\"g:a:1\")
+println(f())
+";
+        assert_eq!(declared_dependencies(&main, text), ["g:a:1", "g:lib:2", "repository https://repo.example"]);
+        let urls: Vec<String> = declared_repositories(&main, text).into_iter().map(|r| r.url).collect();
+        assert_eq!(urls, [kargo_maven::repo::MAVEN_CENTRAL, "https://repo.example"]);
+    }
+
+    #[test]
+    fn reports_imports_that_cannot_be_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.kts"),
+            "@file:Import(\"b.kts\")
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.kts"),
+            "@file:Import(\"a.kts\")
+",
+        )
+        .unwrap();
+        let text = "@file:Import(\"missing.kts\")
+@file:Import(\"b.kts\")
+println(1)
+";
+        let found = problems(&dir.path().join("a.kts"), text);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].range, 0..27);
+        assert!(found[0].message.contains("cannot import `missing.kts`"), "{}", found[0].message);
+        assert!(found[1].message.contains("import cycle: a.kts -> b.kts -> a.kts"), "{}", found[1].message);
+    }
+
+    #[test]
+    fn code_given_with_e_cannot_import() {
+        let err = format!(
+            "{:#}",
+            load(&Source::Expression(
+                "@file:Import(\"a.kts\")
+println(1)
+"
+                .into()
+            ))
+            .err()
+            .expect("an error")
+        );
+        assert!(err.contains("`-e` code has no directory to import from"), "{err}");
+    }
+
+    #[test]
+    fn keys_cover_the_imported_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib.kts");
+        let main = dir.path().join("main.kts");
+        std::fs::write(
+            &main,
+            "@file:Import(\"lib.kts\")
+println(f())
+",
+        )
+        .unwrap();
+        let key = || {
+            let script = load(&Source::File(main.clone())).unwrap();
+            cache_key(&script, "2.4.21", &JdkRequest::System, &[Repository::maven_central()], &[], ScriptTarget::Jvm, None)
+        };
+        std::fs::write(
+            &lib,
+            "fun f() = 1
+",
+        )
+        .unwrap();
+        let first = key();
+        assert_eq!(first, key());
+        std::fs::write(
+            &lib,
+            "fun f() = 2
+",
+        )
+        .unwrap();
+        assert_ne!(first, key(), "a change to an imported script compiles the importing one again");
+    }
+
+    #[test]
+    fn keys_cover_the_extra_sources_of_a_kt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("Helper.kt");
+        let main = dir.path().join("tool.kt");
+        std::fs::write(
+            &main,
+            "/* kargo
+sources = [\"Helper.kt\"]
+*/
+fun main() = println(help())
+",
+        )
+        .unwrap();
+        let key = || {
+            let script = load(&Source::File(main.clone())).unwrap();
+            cache_key(&script, "2.4.21", &JdkRequest::System, &[Repository::maven_central()], &[], ScriptTarget::Jvm, None)
+        };
+        std::fs::write(
+            &helper,
+            "fun help() = 1
+",
+        )
+        .unwrap();
+        let first = key();
+        std::fs::write(
+            &helper,
+            "fun help() = 2
+",
+        )
+        .unwrap();
+        assert_ne!(first, key());
+    }
+
+    #[test]
+    fn finds_the_extra_sources_of_a_kt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("lib").join("util")).unwrap();
+        for file in ["Top.kt", "lib/A.kt", "lib/util/B.kt", "lib/notes.txt"] {
+            std::fs::write(root.join(file), "").unwrap();
+        }
+        let main = root.join("Top.kt");
+        let settings = |sources: &[&str]| Settings { sources: sources.iter().map(|s| s.to_string()).collect(), ..Settings::default() };
+        let names = |sources: &[&str]| -> Vec<String> {
+            kotlin_sources(&main, &settings(sources))
+                .unwrap()
+                .iter()
+                .map(|(path, _)| path.strip_prefix(dunce_canonicalize(root)).unwrap().to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+        // A directory is read through its subdirectories; the script itself and repeats are left out.
+        assert_eq!(names(&["lib", "lib/A.kt", "Top.kt"]), ["lib/A.kt", "lib/util/B.kt"]);
+        let err = format!("{:#}", kotlin_sources(&main, &settings(&["lib/notes.txt"])).unwrap_err());
+        assert!(err.contains("`sources` entry `lib/notes.txt`"), "{err}");
+        let err = format!("{:#}", kotlin_sources(&main, &settings(&["nope"])).unwrap_err());
+        assert!(err.contains("not a .kt file or a directory"), "{err}");
     }
 
     #[test]
