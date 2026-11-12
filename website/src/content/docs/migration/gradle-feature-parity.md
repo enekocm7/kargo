@@ -107,7 +107,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Gradle feature | Status | In Kargo |
 |---|---|---|
 | Executable and fat jars | Supported | `kargo package`; see [Distributing](../../guides/distributing/) |
-| Application distribution (`installDist`, `distZip`, `distTar`) | Supported | `kargo package --dist`; see [Distribution archives](../../guides/distributing/#distribution-archives). A bundled runtime is `--bundle-runtime`; `kargo publish` attaching the archive is not done yet ([#535](https://github.com/enekocm7/kargo/issues/535)) |
+| Application distribution (`installDist`, `distZip`, `distTar`) | Supported | `kargo package --dist`; see [Distribution archives](../../guides/distributing/#distribution-archives). A bundled runtime is `--bundle-runtime`, and `kargo publish` attaches the archives to the publication with [`dist = true`](../../guides/publishing/#distribution-archives) (`artifact(tasks.distZip)`) |
 | jlink and jpackage | Supported | `--format jlink`, `--format installer` |
 | GraalVM native image | Supported | `--format native-image` |
 | Shadow relocation, resource merging, `minimize()` | Supported | [`[package.shade]`](../../guides/distributing/#shading) |

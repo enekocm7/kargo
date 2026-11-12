@@ -1567,6 +1567,8 @@ pub struct PublishSettings {
     pub kind: PublishKind,
     /// The former coordinates of the package: each gets a relocation POM pointing at the current ones.
     pub relocations: Vec<ModuleId>,
+    /// Attach the archives of `kargo package --dist` to the JVM module, with the classifier `dist`.
+    pub dist: bool,
     /// `[publish.npm]`: where and how `kargo publish --npm` publishes a Wasm or JS library; `None` when the table is absent.
     pub npm: Option<NpmPublishSettings>,
 }
@@ -1630,6 +1632,7 @@ impl Default for PublishSettings {
             central_publishing: CentralPublishing::Manual,
             kind: PublishKind::Library,
             relocations: Vec::new(),
+            dist: false,
             npm: None,
         }
     }

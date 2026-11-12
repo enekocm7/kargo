@@ -872,6 +872,7 @@
         "central-publishing": { "description": "What Maven Central does with a validated upload.", "enum": ["manual", "automatic"], "default": "manual" },
         "kind": { "description": "What is published: \"library\" (the jars and klibs) or \"bom\" (a POM that pins the versions of [dependencies] and of the path dependencies' modules).", "enum": ["library", "bom"], "default": "library" },
         "relocations": { "description": "Former coordinates (group:artifact) of the package; each gets a relocation POM that points at the current ones.", "type": "array", "items": { "type": "string", "pattern": "^[^:\\s]+:[^:\\s]+$" }, "uniqueItems": true },
+        "dist": { "description": "Attach the archives of `kargo package --dist` (zip and tar.gz, see [package.dist]) to the JVM module with the classifier `dist`: signed, checksummed and listed in its `.module`.", "type": "boolean", "default": false },
         "npm": {
           "description": "Where and how `kargo publish --npm` publishes the npm package of a Wasm or JS library (`kind = \"library\"`). Credentials are never set here: use NPM_TOKEN or your .npmrc. With this table set, `kargo publish` publishes to npm too.",
           "type": "object",

@@ -194,6 +194,14 @@ pub fn publish(ctx: &BuildContext, opts: &PublishOptions) -> Result<Vec<StagedMo
     if manifest.publish.relocations.contains(&root) {
         bail!("[publish] `relocations` lists `{root}`, the package's own coordinates; list the coordinates it was published under before");
     }
+    if manifest.publish.dist {
+        if bom {
+            bail!("[publish] `dist = true` attaches a distribution archive, which a BOM (`kind = \"bom\"`) does not have");
+        }
+        if !manifest.targets.is_enabled(TargetKind::Jvm) {
+            bail!("[publish] `dist = true` attaches the distribution of the jvm target, which `{}` does not enable", pkg.name);
+        }
+    }
     // Fail on a missing key before compiling anything.
     let signer = if sign { Some(Signer::from_env(ctx.shell())?) } else { None };
 
@@ -587,6 +595,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     dependencies,
                     main_class: jvm.main_class.clone(),
                     web_resources: None,
+                    dist: if manifest.publish.dist { dist_archives(ctx, &jvm)? } else { Vec::new() },
                 });
             }
             TargetKind::Wasm => {
@@ -604,6 +613,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     dependencies: published_dependencies(ctx, &setup.main, &setup.boms, target, &[&resolution])?,
                     main_class: None,
                     web_resources,
+                    dist: Vec::new(),
                 });
             }
             TargetKind::Js => {
@@ -619,6 +629,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                     dependencies: published_dependencies(ctx, &setup.main, &setup.boms, target, &[&resolution])?,
                     main_class: None,
                     web_resources: None,
+                    dist: Vec::new(),
                 });
             }
             TargetKind::Native => {
@@ -639,6 +650,7 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
                         dependencies: published_dependencies(ctx, &setup.main, &setup.boms, target, &[&resolution])?,
                         main_class: None,
                         web_resources: None,
+                        dist: Vec::new(),
                     });
                 }
             }
@@ -646,6 +658,15 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
         }
     }
     Ok(platforms)
+}
+
+/// The archives `kargo package --dist` writes for the JVM build, as (extension, path): the publication
+/// attaches them to the JVM module.
+fn dist_archives(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Result<Vec<(String, PathBuf)>> {
+    let options = super::DistOptions { archives: Vec::new(), scripts: true };
+    let files = super::distribution(ctx, jvm, None, &options)
+        .context("failed to build the distribution that `dist = true` in [publish] attaches")?;
+    Ok(super::dist::Archive::DEFAULT.iter().map(|kind| kind.extension().to_owned()).zip(files).collect())
 }
 
 /// The AAR of an Android library's release build, which Gradle assembles, with its dependencies as
@@ -665,6 +686,7 @@ fn android_platform(ctx: &BuildContext) -> Result<PlatformPublication> {
         dependencies: published_dependencies(ctx, &main, &boms, TargetKind::Android, &[])?,
         main_class: None,
         web_resources: None,
+        dist: Vec::new(),
     })
 }
 

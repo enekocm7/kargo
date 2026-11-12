@@ -506,6 +506,7 @@ central-publishing = "manual"
 | `central-publishing` | `"manual"` | What Maven Central does with a validated upload: `"manual"` waits for you to release it in the Central Portal, `"automatic"` releases it |
 | `kind` | `"library"` | `"library"` publishes the jars and klibs; `"bom"` publishes only a POM whose `<dependencyManagement>` pins the versions of `[dependencies]` (a `bom = true` entry is imported) and of every module the path dependencies publish. Nothing is compiled |
 | `relocations` | `[]` | Former coordinates of the package (`"group:artifact"`). Each gets a relocation POM at the same version that sends Maven, Gradle and Kargo to the current coordinates |
+| `dist` | `false` | Attach the archives of [`kargo package --dist`](../../guides/distributing/#distribution-archives) (zip and tar.gz, shaped by [`[package.dist]`](#packagedist)) to the JVM module with the classifier `dist`: signed, checksummed and listed in its `.module`. See [Distribution archives](../../guides/publishing/#distribution-archives) |
 
 See [Publishing a library](../../guides/publishing/).
 

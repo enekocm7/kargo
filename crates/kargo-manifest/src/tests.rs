@@ -909,6 +909,7 @@ javadoc = "empty"
 central-publishing = "automatic"
 kind = "bom"
 relocations = ["org.old:lib"]
+dist = true
 "#,
     );
     assert_eq!(m.package.homepage.as_deref(), Some("https://example.com/lib"));
@@ -924,6 +925,7 @@ relocations = ["org.old:lib"]
             central_publishing: CentralPublishing::Automatic,
             kind: PublishKind::Bom,
             relocations: vec![ModuleId::new("org.old", "lib")],
+            dist: true,
             npm: None,
         }
     );

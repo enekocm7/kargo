@@ -189,7 +189,13 @@ pub struct PlatformPublication {
     /// `web-resources` classifier and announced by POM properties. It is not part of any variant of the
     /// `.module`, so no consumer puts it on a classpath.
     pub web_resources: Option<WebResourcesArchive>,
+    /// The archives of `kargo package --dist` (`[publish] dist`) as (extension, path): published under the
+    /// `dist` classifier and listed in a `distribution` variant of the `.module`, which no library consumer selects.
+    pub dist: Vec<(String, PathBuf)>,
 }
+
+/// The classifier of the distribution archives of a JVM application.
+pub const DIST_CLASSIFIER: &str = "dist";
 
 /// The zip of a Wasm library's web resources and the name of its init script inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,12 +292,18 @@ impl Publication<'_> {
             if let Some(web) = &platform.web_resources {
                 writer.copy(Some(crate::web_resources::CLASSIFIER), "zip", &web.zip)?;
             }
-            // An AAR always comes with its `.module`, whose attributes tell Gradle it is the release variant.
-            let gradle_metadata = self.multiplatform() || platform.kind == PlatformKind::Android;
+            let dist = platform
+                .dist
+                .iter()
+                .map(|(extension, path)| writer.copy(Some(DIST_CLASSIFIER), extension, path))
+                .collect::<Result<Vec<_>>>()?;
+            // An AAR always comes with its `.module`, whose attributes tell Gradle it is the release variant,
+            // and so does a distribution, which a POM cannot describe.
+            let gradle_metadata = self.multiplatform() || platform.kind == PlatformKind::Android || !dist.is_empty();
             if gradle_metadata {
                 let mut files = vec![main];
                 files.extend(extra);
-                let metadata = self.platform_metadata(platform, &module, files, sources);
+                let metadata = self.platform_metadata(platform, &module, files, sources, dist);
                 writer.write(None, "module", &metadata)?;
             }
             let packaging = (platform.kind.extension() != "jar").then_some(platform.kind.extension());
@@ -390,6 +402,7 @@ impl Publication<'_> {
         module: &ModuleId,
         files: Vec<FileEntry>,
         sources: Option<FileEntry>,
+        dist: Vec<FileEntry>,
     ) -> String {
         let version = self.version();
         let root = self.root();
@@ -421,6 +434,17 @@ impl Publication<'_> {
                 "name": format!("{target}SourcesElements-published"),
                 "attributes": attributes,
                 "files": [sources.to_json()],
+            }));
+        }
+        if !dist.is_empty() {
+            let mut attributes = platform.kind.attributes();
+            attributes.retain(|k, _| k == "org.jetbrains.kotlin.platform.type");
+            attributes.insert("org.gradle.category".into(), json!("distribution"));
+            attributes.insert("org.gradle.usage".into(), json!("java-runtime"));
+            variants.push(json!({
+                "name": format!("{target}DistributionElements-published"),
+                "attributes": attributes,
+                "files": dist.iter().map(FileEntry::to_json).collect::<Vec<_>>(),
             }));
         }
         // A platform module of a multiplatform library points back at its root module.
@@ -816,6 +840,7 @@ mod tests {
                 dependencies: vec![stdlib, logback, bom],
                 main_class: Some("com.acme.MainKt".into()),
                 web_resources: None,
+                dist: Vec::new(),
             }],
             common_sources: None,
             common_javadoc: None,
@@ -846,6 +871,47 @@ mod tests {
         assert_eq!(parsed.properties.get(MAIN_CLASS_PROPERTY).map(String::as_str), Some("com.acme.MainKt"));
     }
 
+    #[test]
+    fn a_distribution_is_a_classifier_archive_listed_in_the_module_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package();
+        let publication = Publication {
+            group: "com.acme".into(),
+            package: &pkg,
+            platforms: vec![PlatformPublication {
+                kind: PlatformKind::Jvm { jvm_version: Some(17) },
+                artifact: file(dir.path(), "classes.jar"),
+                extra: Vec::new(),
+                sources: None,
+                javadoc: None,
+                dependencies: Vec::new(),
+                main_class: Some("com.acme.MainKt".into()),
+                web_resources: None,
+                dist: vec![("zip".into(), file(dir.path(), "dist.zip")), ("tar.gz".into(), file(dir.path(), "dist.tar.gz"))],
+            }],
+            common_sources: None,
+            common_javadoc: None,
+        };
+        let staged = publication.stage(&dir.path().join("repo")).unwrap();
+        assert_eq!(
+            staged[0].files,
+            ["mathlib-1.2.0.jar", "mathlib-1.2.0-dist.zip", "mathlib-1.2.0-dist.tar.gz", "mathlib-1.2.0.module", "mathlib-1.2.0.pom"]
+        );
+        // A distribution is only described by Gradle module metadata, so a plain JVM module gets one.
+        let pom = std::fs::read_to_string(staged[0].dir.join("mathlib-1.2.0.pom")).unwrap();
+        assert!(kargo_maven::pom::Pom::parse(&pom).unwrap().has_gradle_metadata);
+        let module: Value = serde_json::from_str(&std::fs::read_to_string(staged[0].dir.join("mathlib-1.2.0.module")).unwrap()).unwrap();
+        let variants = module["variants"].as_array().unwrap();
+        let dist = variants.iter().find(|v| v["name"] == "jvmDistributionElements-published").expect("a distribution variant");
+        assert_eq!(dist["attributes"]["org.gradle.category"], "distribution");
+        let names: Vec<&str> = dist["files"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["mathlib-1.2.0-dist.zip", "mathlib-1.2.0-dist.tar.gz"]);
+        assert_eq!(dist["files"][0]["size"], "dist.zip".len());
+        // Library variants only list the jar.
+        let runtime = variants.iter().find(|v| v["name"] == "jvmRuntimeElements-published").unwrap();
+        assert_eq!(runtime["files"].as_array().unwrap().len(), 1);
+    }
+
     fn android(dir: &Path, dependencies: Vec<PublishedDependency>) -> PlatformPublication {
         PlatformPublication {
             kind: PlatformKind::Android,
@@ -856,6 +922,7 @@ mod tests {
             dependencies,
             main_class: None,
             web_resources: None,
+            dist: Vec::new(),
         }
     }
 
@@ -905,6 +972,7 @@ mod tests {
             dependencies: Vec::new(),
             main_class: None,
             web_resources: None,
+            dist: Vec::new(),
         };
         let publication = Publication {
             group: "com.acme".into(),
@@ -946,6 +1014,7 @@ mod tests {
                     dependencies: vec![coroutines, runtime],
                     main_class: None,
                     web_resources: None,
+                    dist: Vec::new(),
                 },
                 PlatformPublication {
                     kind: PlatformKind::Native { konan_target: "linux_x64".into() },
@@ -956,6 +1025,7 @@ mod tests {
                     dependencies: Vec::new(),
                     main_class: None,
                     web_resources: None,
+                    dist: Vec::new(),
                 },
             ],
             common_sources: Some(file(dir.path(), "common-src.jar")),
@@ -1036,6 +1106,7 @@ mod tests {
                 dependencies: Vec::new(),
                 main_class: None,
                 web_resources: Some(WebResourcesArchive { zip: file(dir.path(), "web.zip"), init: Some("init.mjs".into()) }),
+                dist: Vec::new(),
             }],
             common_sources: None,
             common_javadoc: None,
