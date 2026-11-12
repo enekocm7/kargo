@@ -6266,6 +6266,102 @@ fn script_reports_its_header_before_compiling() {
 }
 
 #[test]
+fn script_reports_unresolvable_imports_before_compiling() {
+    let p = Project::new();
+    p.file(
+        "missing.kts",
+        "@file:Import(\"nope.kts\")
+println(1)
+",
+    );
+    p.kargo().args(["script", "missing.kts"]).assert().failure().code(101).stderr(
+        predicate::str::contains("line 1: cannot import `nope.kts`").and(predicate::str::contains("invalid header in missing.kts")),
+    );
+    p.file(
+        "a.kts",
+        "@file:Import(\"lib/b.kts\")
+println(1)
+",
+    )
+    .file(
+        "lib/b.kts",
+        "@file:Import(\"../a.kts\")
+",
+    );
+    p.kargo()
+        .args(["script", "a.kts"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("import cycle: a.kts -> b.kts -> a.kts"));
+    p.file(
+        "kotlin.kts",
+        "@file:Import(\"Helper.kt\")
+println(1)
+",
+    )
+    .file(
+        "Helper.kt",
+        "fun f() = 1
+",
+    );
+    p.kargo()
+        .args(["script", "kotlin.kts"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("only .kts scripts can be imported"));
+    // The header of an imported script is read like the script's own.
+    p.file(
+        "unpinned.kts",
+        "@file:Import(\"lib/c.kts\")
+println(1)
+",
+    )
+    .file(
+        "lib/c.kts",
+        "@file:DependsOn(\"org.example:lib\")
+",
+    );
+    p.kargo()
+        .args(["script", "unpinned.kts"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("invalid header in").and(predicate::str::contains("version pinned")));
+    p.kargo()
+        .args([
+            "script",
+            "-e",
+            "@file:Import(\"a.kts\")
+println(1)",
+        ])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`-e` code has no directory to import from"));
+}
+
+#[test]
+fn script_reports_unusable_extra_sources_before_compiling() {
+    let p = Project::new();
+    p.file(
+        "tool.kt",
+        "/* kargo
+sources = [\"Missing.kt\"]
+*/
+fun main() {}
+",
+    );
+    p.kargo()
+        .args(["script", "tool.kt"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`sources` entry `Missing.kt`").and(predicate::str::contains("not a .kt file or a directory")));
+}
+
+#[test]
 fn script_native_needs_a_kt_file() {
     let p = Project::new();
     p.file("tool.kts", "println(1)\n");
@@ -8566,6 +8662,35 @@ local = \"{}\"
     let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(json["unused"][0]["name"], "g:unused");
     assert_eq!(json["dev-only"][0]["name"], "g:testonly");
+
+    // A script that a task runs, and the scripts it imports, are sources: only `--strict` ignores them.
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "{extra}[tasks]
+gen = {{ script = \"scripts/gen.kts\" }}
+"
+            ),
+        ),
+    )
+    .file(
+        "scripts/gen.kts",
+        "@file:Import(\"common.kts\")
+println(1)
+",
+    )
+    .file(
+        "scripts/common.kts",
+        "import com.unused.Api
+",
+    );
+    let out = p.kargo().args(["--offline", "tidy"]).assert().success().get_output().clone();
+    assert!(!String::from_utf8(out.stdout).unwrap().contains("g:unused"));
+    let out = p.kargo().args(["--offline", "tidy", "--strict"]).assert().failure().code(101).get_output().clone();
+    assert!(String::from_utf8(out.stdout).unwrap().contains("g:unused"));
+    p.file("kargo.toml", &manifest("app", &extra));
 
     p.kargo().args(["--offline", "tidy", "--fix"]).assert().success();
     let text = p.read("kargo.toml");

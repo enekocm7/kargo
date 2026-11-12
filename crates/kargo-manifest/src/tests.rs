@@ -2218,6 +2218,7 @@ fn env_table_rejects_bad_files_and_expose() {
 mod script {
     use crate::JdkRequest;
     use crate::script::*;
+    use kargo_util::fs::dunce_canonicalize;
 
     fn kts(text: &str) -> KtsScript {
         parse_kts(text).unwrap_or_else(|e| panic!("{e:#}"))
@@ -2293,9 +2294,135 @@ mod script {
     }
 
     #[test]
-    fn rejects_import_until_it_is_supported() {
-        let err = format!("{:#}", parse_kts("@file:Import(\"other.kts\")\n").unwrap_err());
-        assert!(err.contains("@file:Import is not supported yet"), "{err}");
+    fn reads_import_arguments() {
+        let script = kts("@file:Import(\"a.kts\", \"../b.kts\")\n@file:Import([\"c.kts\"])\nprintln(1)\n");
+        let args: Vec<&[String]> = script.annotations.iter().map(|a| a.args.as_slice()).collect();
+        assert_eq!(args, [&["a.kts".to_owned(), "../b.kts".to_owned()][..], &["c.kts".to_owned()][..]]);
+        assert!(!script.code.contains("@file"));
+    }
+
+    /// Writes `files` (name, text) into a new directory.
+    fn scripts(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        dir
+    }
+
+    fn names(dir: &tempfile::TempDir, imports: &[std::path::PathBuf]) -> Vec<String> {
+        let root = dunce_canonicalize(dir.path());
+        imports.iter().map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect()
+    }
+
+    #[test]
+    fn imports_are_read_relative_to_the_importing_script() {
+        let dir = scripts(&[
+            ("main.kts", "@file:Import(\"lib/a.kts\", \"b.kts\")\nprintln(a() + b())\n"),
+            ("lib/a.kts", "@file:Import(\"../c.kts\")\nfun a() = c()\n"),
+            ("b.kts", "@file:Import(\"c.kts\")\nfun b() = c()\n"),
+            ("c.kts", "fun c() = 1\n"),
+        ]);
+        let text = std::fs::read_to_string(dir.path().join("main.kts")).unwrap();
+        let resolved = resolve_kts(Some(&dir.path().join("main.kts")), &text).unwrap();
+        // Each script once, after the ones it imports.
+        assert_eq!(names(&dir, &resolved.imports), ["c.kts", "lib/a.kts", "b.kts"]);
+        let order: Vec<usize> =
+            ["fun c()", "fun a()", "fun b()", "println(a() + b())"].iter().map(|code| resolved.code.find(code).unwrap()).collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{}", resolved.code);
+        assert!(!resolved.code.contains("@file:Import"));
+    }
+
+    #[test]
+    fn imports_add_dependencies_repositories_and_frameworks_but_not_the_toolchain() {
+        let dir = scripts(&[(
+            "lib.kts",
+            "@file:DependsOn(\"g:lib:2\")\n@file:Repository(\"https://repo.example\")\n@file:Framework(\"coroutines\")\n@file:Kotlin(\"2.0.0\")\n@file:Jdk(\"17\")\n",
+        )]);
+        let text = "@file:Import(\"lib.kts\")\n@file:DependsOn(\"g:a:1\")\n@file:Kotlin(\"2.3.0\")\n";
+        let settings = resolve_kts(Some(&dir.path().join("main.kts")), text).unwrap().settings;
+        let dependencies: Vec<String> = settings.dependencies.iter().map(ToString::to_string).collect();
+        assert_eq!(dependencies, ["g:a:1", "g:lib:2"]);
+        assert_eq!(settings.repositories, ["https://repo.example"]);
+        assert_eq!(settings.frameworks, ["coroutines"]);
+        assert_eq!(settings.kotlin.as_deref(), Some("2.3.0"));
+        assert_eq!(settings.jdk, None);
+    }
+
+    #[test]
+    fn imported_code_goes_under_one_header() {
+        let dir = scripts(&[(
+            "lib.kts",
+            "#!/usr/bin/env -S kargo script\n@file:Suppress(\"UNUSED\")\nimport java.io.File\nimport kotlin.math.max\nfun f(file: File) = max(1, 2)\n",
+        )]);
+        let text =
+            "@file:Import(\"lib.kts\")\n@file:Suppress(\"UNUSED\")\nimport java.io.File\nimport java.util.UUID\nprintln(f(File(\"x\")))\n";
+        let code = resolve_kts(Some(&dir.path().join("main.kts")), text).unwrap().code;
+        let header = "@file:Suppress(\"UNUSED\")\nimport java.io.File\nimport kotlin.math.max\nimport java.util.UUID\n";
+        assert!(code.starts_with(header), "{code}");
+        let body = &code[header.len()..];
+        assert!(!body.contains("import ") && !body.contains("@file") && !body.contains("#!"), "{body}");
+        assert!(body.find("fun f(").unwrap() < body.find("println(").unwrap(), "{body}");
+    }
+
+    #[test]
+    fn annotations_whose_arguments_are_not_strings_also_open_the_file() {
+        // `@file:OptIn(ExperimentalStdlibApi::class)` has no string argument, so the annotation reader
+        // leaves it alone; the `import` after it would then name a place its annotation cannot follow.
+        let dir = scripts(&[("lib.kts", "@file:OptIn(ExperimentalStdlibApi::class)\nimport kotlin.math.max\nfun f() = max(1, 2)\n")]);
+        let text = "@file:Import(\"lib.kts\")\n@file:Suppress(\"UNUSED\")\nimport java.util.UUID\nprintln(f())\n";
+        let code = resolve_kts(Some(&dir.path().join("main.kts")), text).unwrap().code;
+        let header =
+            "@file:OptIn(ExperimentalStdlibApi::class)\n@file:Suppress(\"UNUSED\")\nimport kotlin.math.max\nimport java.util.UUID\n";
+        assert!(code.starts_with(header), "{code}");
+        let body = &code[header.len()..];
+        assert!(!body.contains("import ") && !body.contains("@file"), "{body}");
+    }
+
+    #[test]
+    fn a_script_without_imports_keeps_its_code() {
+        let text = "#!/usr/bin/env -S kargo script\nimport java.io.File\n@file:DependsOn(\"a:b:1\")\nprintln(1)\n";
+        let resolved = resolve_kts(Some(std::path::Path::new("main.kts")), text).unwrap();
+        assert_eq!(resolved.code, kts(text).code);
+        assert!(resolved.imports.is_empty());
+    }
+
+    #[test]
+    fn rejects_import_cycles_and_unreadable_imports() {
+        let dir = scripts(&[
+            ("a.kts", "@file:Import(\"b.kts\")\n"),
+            ("b.kts", "@file:Import(\"c.kts\")\n"),
+            ("c.kts", "\n@file:Import(\"a.kts\")\n"),
+            ("notes.txt", ""),
+        ]);
+        let path = dir.path().join("a.kts");
+        let err = format!("{:#}", resolve_kts(Some(&path), &std::fs::read_to_string(&path).unwrap()).unwrap_err());
+        assert!(err.contains("line 2: import cycle: a.kts -> b.kts -> c.kts -> a.kts"), "{err}");
+        assert!(err.contains("invalid header in"), "{err}");
+        let own = scripts(&[("self.kts", "@file:Import(\"self.kts\")\n")]);
+        let err = format!("{:#}", resolve_kts(Some(&own.path().join("self.kts")), "@file:Import(\"self.kts\")\n").unwrap_err());
+        assert!(err.contains("import cycle: self.kts -> self.kts"), "{err}");
+        let main = dir.path().join("x.kts");
+        let err = format!("{:#}", resolve_kts(Some(&main), "\n@file:Import(\"gone.kts\")\n").unwrap_err());
+        assert!(err.contains("line 2: cannot import `gone.kts`"), "{err}");
+        let err = format!("{:#}", resolve_kts(Some(&main), "@file:Import(\"notes.txt\")\n").unwrap_err());
+        assert!(err.contains("only .kts scripts can be imported"), "{err}");
+        let err = format!("{:#}", resolve_kts(None, "@file:Import(\"a.kts\")\n").unwrap_err());
+        assert!(err.contains("`-e` code has no directory to import from"), "{err}");
+    }
+
+    #[test]
+    fn finds_the_imports_to_blame() {
+        let dir = scripts(&[("ok.kts", "")]);
+        let main = dir.path().join("main.kts");
+        let text = "@file:Import(\"ok.kts\")\n@file:Import(\"gone.kts\")\n";
+        let errors = import_errors(&main, text);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(&text[errors[0].0.clone()], "@file:Import(\"gone.kts\")");
+        assert_eq!(imported_files(&main, "@file:Import(\"ok.kts\")\n").len(), 1);
+        assert!(imported_files(&main, text).is_empty(), "an import that cannot be read leaves none");
     }
 
     #[test]
@@ -2349,11 +2476,20 @@ rel = { script = \"rel.kts\" }
     fn reads_kt_front_matter() {
         let text = "#!/usr/bin/env -S kargo script\n/* kargo\nkotlin = \"2.3.0\"\njdk = \"21\"\nrepositories = [\"https://jitpack.io\"]\nframeworks = [\"serialization\"]\n[dependencies]\n\"com.github.ajalt.clikt:clikt\" = \"5.0.0\"\n*/\nfun main() {}\n";
         let s = parse_kt_front_matter(text).unwrap().expect("front matter");
+        assert!(s.sources.is_empty());
         assert_eq!(s.kotlin.as_deref(), Some("2.3.0"));
         assert_eq!(s.jdk, Some(JdkRequest::Major(21)));
         assert_eq!(s.repositories, ["https://jitpack.io"]);
         assert_eq!(s.frameworks, ["serialization"]);
         assert_eq!(s.dependencies[0].to_string(), "com.github.ajalt.clikt:clikt:5.0.0");
+    }
+
+    #[test]
+    fn reads_the_sources_of_a_kt_file() {
+        let s = parse_kt_front_matter("/* kargo\nsources = [\"Helper.kt\", \"lib\"]\n*/\nfun main() {}\n").unwrap().unwrap();
+        assert_eq!(s.sources, ["Helper.kt", "lib"]);
+        let err = format!("{:#}", parse_kt_front_matter("/* kargo\nsources = [1]\n*/\n").unwrap_err());
+        assert!(err.contains("sources must be strings"), "{err}");
     }
 
     #[test]

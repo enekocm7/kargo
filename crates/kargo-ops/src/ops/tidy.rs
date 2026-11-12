@@ -191,6 +191,13 @@ fn gather(ctx: &BuildContext) -> Sources {
     if let Ok(text) = std::fs::read_to_string(ws.manifest_path()) {
         out.scripts.extend(kargo_manifest::script::manifest_scripts(&text).into_iter().map(|p| ws.root().join(p)).filter(|p| p.is_file()));
     }
+    // The scripts they import with `@file:Import` are sources too, wherever they are.
+    let imported: Vec<PathBuf> = out
+        .scripts
+        .iter()
+        .flat_map(|script| kargo_manifest::script::imported_files(script, &std::fs::read_to_string(script).unwrap_or_default()))
+        .collect();
+    out.scripts.extend(imported);
     out
 }
 

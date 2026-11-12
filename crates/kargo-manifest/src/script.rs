@@ -4,9 +4,10 @@
 
 use std::fmt;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use kargo_util::fs::dunce_canonicalize;
 
 use crate::JdkRequest;
 
@@ -22,10 +23,8 @@ pub const ANNOTATIONS: &[(&str, &str)] = &[
     ("Jdk", "the JDK to compile and run the script with: a major version or \"system\""),
     ("Framework", "a built-in framework such as \"serialization\" or \"coroutines\""),
     ("Target", "the target to build for: \"jvm\" or \"native\""),
+    ("Import", "other scripts to share code with, relative to this one"),
 ];
-
-/// The `kotlin-main-kts` annotation Kargo does not support yet.
-const UNSUPPORTED_ANNOTATIONS: &[&str] = &["Import"];
 
 /// One `@file:` annotation Kargo understands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +83,19 @@ pub struct Settings {
     pub jdk: Option<JdkRequest>,
     pub frameworks: Vec<String>,
     pub target: Option<ScriptTarget>,
+    /// Extra Kotlin files compiled with a `.kt` file (`sources`), as written: files and
+    /// directories relative to it.
+    pub sources: Vec<String>,
+}
+
+impl Settings {
+    /// Adds what an imported script needs: its dependencies, repositories and frameworks. How the
+    /// whole script is compiled and run (Kotlin, JDK and target) comes from the script that runs.
+    fn add_imported(&mut self, imported: Settings) {
+        self.dependencies.extend(imported.dependencies);
+        self.repositories.extend(imported.repositories);
+        self.frameworks.extend(imported.frameworks);
+    }
 }
 
 /// The target `kargo script` builds a file for.
@@ -177,12 +189,8 @@ pub fn parse_kts(text: &str) -> Result<KtsScript> {
         let name_len: usize = text[name_start..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').map(char::len_utf8).sum();
         let name = &text[name_start..name_start + name_len];
         let known = ANNOTATIONS.iter().any(|(n, _)| *n == name);
-        let unsupported = UNSUPPORTED_ANNOTATIONS.contains(&name);
         match read_annotation(text, pos) {
-            Ok((args, end)) if known || unsupported => {
-                if unsupported {
-                    bail!("line {}: @file:{name} is not supported yet; put the code in the script or in a project", line_of(text, pos));
-                }
+            Ok((args, end)) if known => {
                 let annotation = Annotation { name: name.to_owned(), args, span: pos..end };
                 spans.push(annotation.span.clone());
                 annotations.push(annotation);
@@ -209,6 +217,220 @@ pub fn settings_from_annotations(text: &str, annotations: &[Annotation]) -> Resu
     Ok(settings)
 }
 
+/// A script imported with `@file:Import`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Imported {
+    /// The file, canonical, so a script imported twice is read once.
+    pub path: PathBuf,
+    pub text: String,
+    pub script: KtsScript,
+}
+
+/// A `.kts` script ready to compile: what it and the scripts it imports declare, and the code of all
+/// of them in one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedScript {
+    pub settings: Settings,
+    /// The script's code. With imports, it is the code of the imported scripts followed by the
+    /// script's own, under one list of `@file:` annotations and import directives.
+    pub code: String,
+    /// The scripts it imports, directly and through each other, each after the ones it imports.
+    pub imports: Vec<PathBuf>,
+}
+
+/// Reads the `.kts` script `text` of the file at `path` and the scripts it imports with
+/// `@file:Import`, which `path` is the directory of. Their dependencies, repositories and
+/// frameworks are added to the script's own; the Kotlin version, JDK and target are the script's.
+/// `-e` code has no file, so it cannot import.
+pub fn resolve_kts(path: Option<&Path>, text: &str) -> Result<ResolvedScript> {
+    let parsed = parse_kts(text)?;
+    let mut settings = settings_from_annotations(text, &parsed.annotations)?;
+    let imported = match path {
+        Some(path) => imported_scripts(path, text, &parsed)?,
+        None if parsed.annotations.iter().any(|a| a.name == "Import") => {
+            bail!("@file:Import needs a script file: `-e` code has no directory to import from")
+        }
+        None => Vec::new(),
+    };
+    for script in &imported {
+        let declared = settings_from_annotations(&script.text, &script.script.annotations)
+            .with_context(|| format!("invalid header in {}", script.path.display()))?;
+        settings.add_imported(declared);
+    }
+    let code = merge(&parsed, &imported);
+    Ok(ResolvedScript { settings, code, imports: imported.into_iter().map(|script| script.path).collect() })
+}
+
+/// The scripts that `text`, the `.kts` script at `path`, imports; empty when it does not parse or an
+/// import cannot be read. Editors and `kargo tidy` use it to find the files a script is made of.
+pub fn imported_files(path: &Path, text: &str) -> Vec<PathBuf> {
+    let Ok(script) = parse_kts(text) else { return Vec::new() };
+    imported_scripts(path, text, &script).map_or_else(|_| Vec::new(), |found| found.into_iter().map(|script| script.path).collect())
+}
+
+/// The imports of the script at `path` that cannot be resolved, each with the annotation to blame.
+pub fn import_errors(path: &Path, text: &str) -> Vec<(Range<usize>, anyhow::Error)> {
+    let Ok(script) = parse_kts(text) else { return Vec::new() };
+    let mut errors = Vec::new();
+    for annotation in script.annotations.iter().filter(|a| a.name == "Import") {
+        for arg in &annotation.args {
+            let mut stack = vec![dunce_canonicalize(path)];
+            if let Err(error) = import_one(path, text, annotation, arg, &mut stack, &mut Vec::new()) {
+                errors.push((annotation.span.clone(), error));
+            }
+        }
+    }
+    errors
+}
+
+fn imported_scripts(path: &Path, text: &str, script: &KtsScript) -> Result<Vec<Imported>> {
+    let mut out = Vec::new();
+    collect_imports(path, text, script, &mut vec![dunce_canonicalize(path)], &mut out)?;
+    Ok(out)
+}
+
+/// Adds the scripts imported by `script`, the text of the file at `path`, to `out`. `stack` holds the
+/// scripts whose imports are being read, to find a cycle.
+fn collect_imports(path: &Path, text: &str, script: &KtsScript, stack: &mut Vec<PathBuf>, out: &mut Vec<Imported>) -> Result<()> {
+    for annotation in script.annotations.iter().filter(|a| a.name == "Import") {
+        for arg in &annotation.args {
+            import_one(path, text, annotation, arg, stack, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads the script that `arg` of `annotation` names, relative to the script at `path`, and the
+/// scripts it imports, then adds them to `out`.
+fn import_one(
+    path: &Path,
+    text: &str,
+    annotation: &Annotation,
+    arg: &str,
+    stack: &mut Vec<PathBuf>,
+    out: &mut Vec<Imported>,
+) -> Result<()> {
+    let line = line_of(text, annotation.span.start);
+    let target = path.parent().unwrap_or(Path::new("")).join(arg);
+    let id = dunce_canonicalize(&target);
+    if let Some(start) = stack.iter().position(|p| *p == id) {
+        let chain: Vec<String> =
+            stack[start..].iter().chain([&id]).map(|p| p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().into_owned()).collect();
+        bail!("line {line}: import cycle: {}", chain.join(" -> "));
+    }
+    if out.iter().any(|imported| imported.path == id) {
+        return Ok(());
+    }
+    if target.extension().is_none_or(|e| e != "kts") {
+        bail!("line {line}: cannot import `{arg}`: only .kts scripts can be imported");
+    }
+    let imported_text = std::fs::read_to_string(&target)
+        .with_context(|| format!("line {line}: cannot import `{arg}`: failed to read {}", target.display()))?;
+    let invalid = || format!("invalid header in {}", target.display());
+    let script = parse_kts(&imported_text).with_context(invalid)?;
+    stack.push(id.clone());
+    collect_imports(&target, &imported_text, &script, stack, out).with_context(invalid)?;
+    stack.pop();
+    out.push(Imported { path: id, text: imported_text, script });
+    Ok(())
+}
+
+/// The code of `root` with the scripts it imports. The `@file:` annotations and import directives of
+/// all of them open the file, since Kotlin allows them nowhere else. Then come the imported scripts,
+/// each after the ones it imports, and the script itself, so top-level code runs in that order.
+/// Without imports the code is the script's own.
+fn merge(root: &KtsScript, imported: &[Imported]) -> String {
+    if imported.is_empty() {
+        return root.code.clone();
+    }
+    let mut annotations: Vec<&str> = Vec::new();
+    let mut directives: Vec<&str> = Vec::new();
+    let mut bodies = String::new();
+    let parts = imported.iter().map(|script| (Some(&script.path), &script.script.code)).chain([(None, &root.code)]);
+    for (path, code) in parts {
+        let header = split_header(code);
+        for (list, found) in [(&mut annotations, header.annotations), (&mut directives, header.imports)] {
+            for item in found {
+                if !list.contains(&item) {
+                    list.push(item);
+                }
+            }
+        }
+        if let Some(path) = path {
+            bodies.push_str(&format!("// imported from {}\n", path.display()));
+        }
+        bodies.push_str(&header.body);
+        bodies.push('\n');
+    }
+    let mut out = String::new();
+    for line in annotations.into_iter().chain(directives) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out + &bodies
+}
+
+/// The head of a script's code: its `@file:` annotations and import directives, and the rest.
+struct Header<'a> {
+    annotations: Vec<&'a str>,
+    imports: Vec<&'a str>,
+    /// The code without the head and the shebang line, which are blanked out.
+    body: String,
+}
+
+fn split_header(code: &str) -> Header<'_> {
+    let mut pos = shebang_end(code);
+    let mut spans: Vec<Range<usize>> = std::iter::once(0..pos).collect();
+    let (mut annotations, mut imports) = (Vec::new(), Vec::new());
+    loop {
+        pos = skip_trivia(code, pos);
+        let rest = &code[pos..];
+        let end = if rest.starts_with(FILE_PREFIX) {
+            // An annotation whose arguments are not string literals, such as
+            // `@file:OptIn(ExperimentalStdlibApi::class)`, still has to open the file: the imports
+            // that follow it would otherwise keep it from being a file annotation.
+            let end = match read_annotation(code, pos) {
+                Ok((_, end)) => end,
+                Err(_) => annotation_end(code, pos),
+            };
+            annotations.push(code[pos..end].trim());
+            end
+        } else if rest.strip_prefix("import").is_some_and(|after| after.starts_with(char::is_whitespace)) {
+            let end = pos + rest.find('\n').unwrap_or(rest.len());
+            imports.push(code[pos..end].trim());
+            end
+        } else {
+            break;
+        };
+        spans.push(pos..end);
+        pos = end;
+    }
+    Header { annotations, imports, body: blank(code, &spans) }
+}
+
+/// The end of the `@file:` annotation at `pos` whose arguments [`read_annotation`] does not read, such
+/// as `@file:OptIn(ExperimentalStdlibApi::class)`: past its parentheses, or the end of its line when it
+/// has none.
+fn annotation_end(code: &str, pos: usize) -> usize {
+    let rest = &code[pos..];
+    let line = pos + rest.find('\n').unwrap_or(rest.len());
+    let Some(open) = rest.find('(').filter(|open| !rest[..*open].contains('\n')) else { return line };
+    let mut depth = 0usize;
+    for (i, c) in rest.char_indices().skip(open) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return pos + i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    line
+}
+
 fn apply(settings: &mut Settings, annotation: &Annotation) -> Result<()> {
     match annotation.name.as_str() {
         "DependsOn" => {
@@ -225,6 +447,8 @@ fn apply(settings: &mut Settings, annotation: &Annotation) -> Result<()> {
         "Jdk" => settings.jdk = Some(single(annotation)?.parse()?),
         "Framework" => settings.frameworks.extend(annotation.args.iter().cloned()),
         "Target" => settings.target = Some(ScriptTarget::parse(&single(annotation)?)?),
+        // The imported scripts are read by `resolve_kts`.
+        "Import" => {}
         other => bail!("unknown script annotation `@file:{other}`"),
     }
     Ok(())
@@ -277,9 +501,14 @@ pub fn parse_kt_front_matter(text: &str) -> Result<Option<Settings>> {
                 }
             }
             ("target", toml::Value::String(v)) => settings.target = Some(ScriptTarget::parse(v)?),
+            ("sources", toml::Value::Array(items)) => {
+                for item in items {
+                    settings.sources.push(item.as_str().context("sources must be strings")?.to_owned());
+                }
+            }
             (other, _) => {
                 bail!(
-                    "unknown key `{other}` in the kargo front matter; expected kotlin, jdk, repositories, frameworks, target or dependencies"
+                    "unknown key `{other}` in the kargo front matter; expected kotlin, jdk, repositories, frameworks, target, sources or dependencies"
                 )
             }
         }

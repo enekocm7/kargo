@@ -191,14 +191,17 @@ impl<'a> Analyzer<'a> {
         if d.hidden {
             return false;
         }
-        if d.is_private() {
-            return s.unit_id() == from;
-        }
         let target = self.unit(s.unit_id());
         let source = self.unit(from);
+        // The scripts an `@file:Import` chain merges are compiled as one file, so their top-level
+        // declarations share the file privacy of that one file.
+        let merged = s.unit_id() != from && (source.imports.contains(&target.path) || target.imports.contains(&source.path));
+        if d.is_private() {
+            return s.unit_id() == from || (merged && d.parent.is_none() && !d.local);
+        }
         match (&source.origin, &target.origin) {
             (_, Origin::Library { main, test, .. }) => !d.is_internal() && self.library_in_scope(&source.origin, *main, *test),
-            (_, Origin::Loose) => s.unit_id() == from,
+            (_, Origin::Loose) => s.unit_id() == from || merged,
             (Origin::Library { .. }, _) => false,
             (Origin::Loose, Origin::Source(t)) => t.kind == SetKind::Main,
             (Origin::Source(f), Origin::Source(t)) => {

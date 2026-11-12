@@ -158,6 +158,9 @@ pub struct Unit {
     pub text: String,
     pub file: File,
     pub origin: Origin,
+    /// The scripts this one imports with `@file:Import`, directly and through each other: it sees
+    /// their declarations.
+    pub imports: Vec<PathBuf>,
     /// The identifier tokens by name, built on the first lookup (see [`Unit::ident_tokens`]).
     idents: OnceLock<HashMap<String, Vec<usize>>>,
 }
@@ -167,12 +170,12 @@ impl Unit {
     /// file keeps only what is public.
     pub fn new(path: PathBuf, text: String, origin: Origin) -> Self {
         let file = Self::parse(&path, &text, &origin);
-        Self { path, text, file, origin, idents: OnceLock::new() }
+        Self { path, text, file, origin, imports: Vec::new(), idents: OnceLock::new() }
     }
 
     /// A file whose syntax tree was parsed before (see [`super::parsed`]).
     pub fn with_file(path: PathBuf, text: String, file: File, origin: Origin) -> Self {
-        Self { path, text, file, origin, idents: OnceLock::new() }
+        Self { path, text, file, origin, imports: Vec::new(), idents: OnceLock::new() }
     }
 
     /// Parses `text` as `new` does.

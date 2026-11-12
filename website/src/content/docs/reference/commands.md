@@ -355,7 +355,7 @@ How each target runs:
 
 ## `kargo script`
 
-Run a single Kotlin file without a project. A `.kts` script takes its dependencies, repositories, Kotlin version, JDK, frameworks and target from `@file:` annotations at its top; a `.kt` file takes them from a `/* kargo ... */` front matter. See [Kotlin scripts](../../guides/scripts/).
+Run a single Kotlin file without a project. A `.kts` script takes its dependencies, repositories, Kotlin version, JDK, frameworks and target from `@file:` annotations at its top; a `.kt` file takes them from a `/* kargo ... */` front matter. A `.kts` script shares code with others through `@file:Import("other.kts")`, and a `.kt` file through `sources = [...]` in its front matter. See [Kotlin scripts](../../guides/scripts/).
 
 ```sh
 kargo script fetch.kts https://example.com
@@ -720,7 +720,7 @@ error: 1 unused dependency; remove them with `kargo tidy --fix`
 
 A Maven module is **used** when a source mentions a package of its jar: an `import`, a star import or a fully qualified name. Kargo reads the jar from the resolution a build uses, so no compiler runs. The sources are `src/`, `src-<target>/`, the source sets, generated sources, `tests/`, test fixtures, the sources of `[test.suites.*]` and `benches/`. A [`path` dependency](../../guides/dependencies/#local-packages) is used when a source mentions a package that its own sources declare; `kargo tidy` flags the edge in your `kargo.toml` and never touches the dependency's manifest. A dependency in `[dependencies]` that only tests use is reported as **dev-only** and is not removed.
 
-Never reported: `runtime`, `provided`, `processor` and `ksp` dependencies, BOMs, `force = true` versions, dependencies with a `classifier` or `extension`, `exported` path dependencies, `kotlin-stdlib*` and what `[frameworks]` adds. Kargo reads the jar on the JVM and the klib on Wasm, JS and Native, so each target's dependencies are checked against its own resolution; a common dependency is used when any target's package for it is mentioned. Android dependencies are resolved by Gradle and are not checked, and a dependency whose resolution has no classes to read is listed in a note. A dependency that only a Kotlin script uses (a `.kts` file in the project directory, or the `script` of a task or plugin) is kept unless you pass `--strict`.
+Never reported: `runtime`, `provided`, `processor` and `ksp` dependencies, BOMs, `force = true` versions, dependencies with a `classifier` or `extension`, `exported` path dependencies, `kotlin-stdlib*` and what `[frameworks]` adds. Kargo reads the jar on the JVM and the klib on Wasm, JS and Native, so each target's dependencies are checked against its own resolution; a common dependency is used when any target's package for it is mentioned. Android dependencies are resolved by Gradle and are not checked, and a dependency whose resolution has no classes to read is listed in a note. A dependency that only a Kotlin script uses (a `.kts` file in the project directory, or the `script` of a task or plugin, and the scripts they [`@file:Import`](../../guides/scripts/#share-code-between-scripts)) is kept unless you pass `--strict`.
 
 | Option | Meaning |
 | --- | --- |
