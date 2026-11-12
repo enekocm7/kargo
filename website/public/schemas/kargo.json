@@ -845,6 +845,21 @@
         }
       }
     },
+    "licenses": {
+      "description": "The policy `kargo licenses` checks the licenses of the dependencies against.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": { "description": "SPDX ids that may be used. When it is not empty, a dependency under any other license, or under one Kargo cannot identify, fails `kargo licenses` (exit code 101).", "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "examples": [["Apache-2.0", "MIT", "BSD-3-Clause"]] },
+        "deny": { "description": "SPDX ids that fail `kargo licenses`. A license cannot be in both `allow` and `deny`.", "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "examples": [["GPL-3.0-only", "AGPL-3.0-only"]] },
+        "exceptions": {
+          "description": "Packages accepted under the license given, whatever their POM or package.json says, whether or not `allow` and `deny` list it. The key is a Maven module (`group:artifact`) or the name of an npm package.",
+          "type": "object",
+          "additionalProperties": { "description": "The SPDX id of the license the package is under.", "type": "string", "minLength": 1 },
+          "examples": [{ "com.example:legacy": "Apache-2.0" }]
+        }
+      }
+    },
     "publish": {
       "description": "Options for `kargo publish`.",
       "type": "object",

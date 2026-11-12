@@ -1901,6 +1901,47 @@ ignore = [
 }
 
 #[test]
+fn licenses_section() {
+    assert_eq!(parse(MINIMAL).licenses, LicenseSettings::default(), "nothing is set by default");
+    assert!(parse(MINIMAL).licenses.is_empty());
+    let licenses = parse(&format!(
+        "{MINIMAL}
+[licenses]
+allow = [\"Apache-2.0\", \" MIT \"]
+deny = [\"GPL-3.0-only\"]
+exceptions = {{ \"com.example:legacy\" = \"Apache-2.0\", left-pad = \"WTFPL\" }}
+"
+    ))
+    .licenses;
+    assert_eq!(licenses.allow, ["Apache-2.0", "MIT"]);
+    assert_eq!(licenses.deny, ["GPL-3.0-only"]);
+    assert_eq!(licenses.exceptions["com.example:legacy"], "Apache-2.0");
+    assert_eq!(licenses.exceptions["left-pad"], "WTFPL");
+    assert!(!licenses.is_empty());
+
+    let licenses = |body: &str| {
+        parse_err(&format!(
+            "{MINIMAL}
+[licenses]
+{body}
+"
+        ))
+    };
+    assert!(licenses("allow = [\"MIT\", \" \"]").contains("`allow` has an empty entry"));
+    assert!(licenses("deny = [\"\"]").contains("`deny` has an empty entry"));
+    assert!(
+        licenses(
+            "allow = [\"MIT\"]
+deny = [\"mit\"]"
+        )
+        .contains("`MIT` in both `allow` and `deny`")
+    );
+    assert!(licenses("exceptions = { \"g:a\" = \" \" }").contains("`exceptions` needs a package and the license"));
+    assert!(licenses("exceptions = { \"g:a\" = 1 }").contains("exceptions"));
+    assert!(licenses("warn = [\"MIT\"]").contains("unknown field"));
+}
+
+#[test]
 fn deny_levels() {
     assert!(DenyLevel::High.denies(Some(Severity::Critical)));
     assert!(DenyLevel::High.denies(Some(Severity::High)));

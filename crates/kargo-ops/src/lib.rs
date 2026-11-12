@@ -28,6 +28,7 @@ pub mod plugins;
 pub mod publication;
 pub mod script;
 pub mod signing;
+pub mod spdx;
 pub mod tasks;
 pub mod warnings;
 pub mod wasm_output;

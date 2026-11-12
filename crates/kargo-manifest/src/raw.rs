@@ -59,6 +59,8 @@ pub(super) struct RawManifest {
     #[serde(default)]
     audit: RawAudit,
     #[serde(default)]
+    licenses: RawLicenses,
+    #[serde(default)]
     publish: RawPublish,
     #[serde(default)]
     build: RawBuild,
@@ -630,6 +632,17 @@ struct RawAuditIgnore {
     id: String,
     reason: Option<String>,
     until: Option<Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawLicenses {
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
+    #[serde(default)]
+    exceptions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3737,6 +3750,7 @@ impl RawManifest {
                 jvm_args: self.bench.jvm_args,
             },
             audit: validate_audit(self.audit)?,
+            licenses: validate_licenses(self.licenses)?,
             package: Package {
                 name: self.package.name,
                 version: self.package.version,
@@ -3800,6 +3814,35 @@ fn validate_audit(raw: RawAudit) -> Result<AuditSettings> {
         ignore.push(AuditIgnore { id, reason, until });
     }
     Ok(AuditSettings { deny, ignore })
+}
+
+/// Validates `[licenses]`: no empty ids or package names, and no license both allowed and denied.
+fn validate_licenses(raw: RawLicenses) -> Result<LicenseSettings> {
+    let list = |key: &str, ids: Vec<String>| -> Result<Vec<String>> {
+        ids.into_iter()
+            .map(|id| match id.trim() {
+                "" => bail!("[licenses] `{key}` has an empty entry; list SPDX ids such as \"Apache-2.0\""),
+                id => Ok(id.to_owned()),
+            })
+            .collect()
+    };
+    let allow = list("allow", raw.allow)?;
+    let deny = list("deny", raw.deny)?;
+    if let Some(id) = allow.iter().find(|a| deny.iter().any(|d| d.eq_ignore_ascii_case(a))) {
+        bail!("[licenses] lists `{id}` in both `allow` and `deny`; keep it in one");
+    }
+    let mut exceptions = BTreeMap::new();
+    for (package, license) in raw.exceptions {
+        let package = package.trim().to_owned();
+        let license = license.trim().to_owned();
+        if package.is_empty() || license.is_empty() {
+            bail!(
+                "[licenses] `exceptions` needs a package and the license it has, such as \"com.example:legacy\" = \"Apache-2.0\"; got `{package}` = `{license}`"
+            );
+        }
+        exceptions.insert(package, license);
+    }
+    Ok(LicenseSettings { allow, deny, exceptions })
 }
 
 /// Validates `[test.coverage]`: percentages in 0-100 and non-empty exclude patterns.
