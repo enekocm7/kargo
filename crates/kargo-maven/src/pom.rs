@@ -56,6 +56,13 @@ impl PomDependency {
     }
 }
 
+/// A `<license>` of a POM: free text, which `kargo licenses` maps to an SPDX id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PomLicense {
+    pub name: Option<String>,
+    pub url: Option<String>,
+}
+
 /// A raw POM as written on disk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pom {
@@ -68,6 +75,7 @@ pub struct Pom {
     pub dependency_management: Vec<PomDependency>,
     pub dependencies: Vec<PomDependency>,
     pub relocation: Option<(Option<String>, Option<String>, Option<String>)>,
+    pub licenses: Vec<PomLicense>,
     pub has_gradle_metadata: bool,
 }
 
@@ -146,6 +154,16 @@ impl Pom {
             dependency_management,
             dependencies: parse_dependency_list(child(project, "dependencies")),
             relocation,
+            licenses: child(project, "licenses")
+                .map(|licenses| {
+                    licenses
+                        .children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "license")
+                        .map(|n| PomLicense { name: text(n, "name"), url: text(n, "url") })
+                        .filter(|l| l.name.is_some() || l.url.is_some())
+                        .collect()
+                })
+                .unwrap_or_default(),
             has_gradle_metadata: xml.contains(GRADLE_METADATA_MARKER),
         })
     }
@@ -229,6 +247,12 @@ fn chain_properties(chain: &[Pom], module: &ModuleId, version: &str) -> (String,
         props.insert("parent.version".into(), parent.version.clone());
     }
     (group, pom_version, props)
+}
+
+/// The licenses of the POM of `module:version`: its own `<licenses>`, else the nearest parent's, as Maven
+/// inherits them.
+pub fn licenses(source: &dyn PomSource, module: &ModuleId, version: &str) -> Result<Vec<PomLicense>> {
+    Ok(pom_chain(source, module, version)?.into_iter().map(|pom| pom.licenses).find(|l| !l.is_empty()).unwrap_or_default())
 }
 
 /// The properties `${...}` placeholders in the POM of `module:version` resolve to: its own and its
@@ -558,5 +582,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pom.relocation, Some((Some("new.group".into()), None, None)));
+    }
+
+    #[test]
+    fn licenses_are_inherited_from_the_nearest_parent_that_declares_them() {
+        let licensed = r#"<project><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0</version>
+  <licenses>
+    <license><name>The Apache Software License, Version 2.0</name><url>https://www.apache.org/licenses/LICENSE-2.0.txt</url></license>
+    <license><url>https://example.com/other</url></license>
+    <license/>
+  </licenses></project>"#;
+        let own = r#"<project><parent><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>own</artifactId><licenses><license><name>MIT</name></license></licenses></project>"#;
+        let inherits = r#"<project><parent><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>inherits</artifactId></project>"#;
+        let source = MapSource(HashMap::from([
+            ("com.acme:parent:1.0".to_owned(), licensed),
+            ("com.acme:own:1.0".to_owned(), own),
+            ("com.acme:inherits:1.0".to_owned(), inherits),
+        ]));
+        let of = |artifact: &str| licenses(&source, &ModuleId::new("com.acme", artifact), "1.0").unwrap();
+        assert_eq!(of("own"), [PomLicense { name: Some("MIT".into()), url: None }]);
+        let inherited = of("inherits");
+        assert_eq!(inherited.len(), 2, "a license without a name or URL is not one: {inherited:?}");
+        assert_eq!(inherited[0].url.as_deref(), Some("https://www.apache.org/licenses/LICENSE-2.0.txt"));
+        assert_eq!(inherited[1], PomLicense { name: None, url: Some("https://example.com/other".into()) });
+        assert!(
+            licenses(
+                &MapSource(HashMap::from([("g:a:1".to_owned(), "<project><artifactId>a</artifactId></project>")])),
+                &ModuleId::new("g", "a"),
+                "1"
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 }

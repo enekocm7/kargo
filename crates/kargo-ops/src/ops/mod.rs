@@ -18,6 +18,7 @@ pub mod fmt;
 pub mod import;
 pub mod inspect;
 pub mod install;
+pub mod licenses;
 pub mod lint;
 pub mod local;
 pub mod metadata;

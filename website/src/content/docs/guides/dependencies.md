@@ -102,6 +102,30 @@ ignore = [{ id = "CVE-2024-1234", reason = "we never parse untrusted XML", until
 
 The audit fails (exit code `101`) on advisories of `high` severity or worse, which makes it a CI step (see [Security advisories in CI](../ci/#security-advisories)). It is the only command that sends your dependency list anywhere: the names and versions go to `api.osv.dev`, and the answers are cached for a day. See [`kargo audit`](../../reference/commands/#kargo-audit) for the options.
 
+## Licenses
+
+`kargo licenses` reads the license of every package a build ships, from the POMs (and the parent POMs) of Maven modules and the `package.json` files of npm packages, and groups them by [SPDX](https://spdx.org/licenses/) id:
+
+```console
+$ kargo licenses
+Apache-2.0  41  org.jetbrains.kotlin:kotlin-stdlib:2.2.20, org.jetbrains:annotations:13.0, com.acme:app:1.0, ... (+38 more)
+MIT          6  org.slf4j:slf4j-api:2.0.16, com.acme:util:1.2, com.acme:text:3.0, ... (+3 more)
+unknown      1  com.example:legacy:1.0
+```
+
+POMs write licenses as free text, so Kargo maps the common names and URLs to ids; a license it does not know, or none, is `unknown`. Test dependencies and the build's tools are left out unless you pass `--all`. `--format markdown` prints a table of every package for a release page, and `--notice NOTICE-third-party.txt` writes the third-party notice file of a distribution, which [`kargo package --dist`](../distributing/) picks up from the project root.
+
+To fail on the licenses you cannot ship, say which ones you can in [`[licenses]`](../../reference/manifest/#licenses):
+
+```toml title="kargo.toml"
+[licenses]
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause"]    # anything else fails, unknown licenses too
+deny = ["GPL-3.0-only"]                           # or list only the ones that fail
+exceptions = { "com.example:legacy" = "Apache-2.0" }   # checked by hand
+```
+
+`kargo licenses` then exits with `101` and names each package that fails and why. To get past one, replace the dependency, or, after reading its license, give it in `exceptions`. Unlike advisories, licenses do not change under you, so this is a check for the pull request that adds a dependency (see [License checks in CI](../ci/#license-checks)). See [`kargo licenses`](../../reference/commands/#kargo-licenses) for the options.
+
 ## Writing dependencies by hand
 
 All of these forms are valid in `[dependencies]`, `[dev-dependencies]` and `[target.<name>.dependencies]`:

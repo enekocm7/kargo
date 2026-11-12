@@ -158,6 +158,16 @@ jobs:
 
 `--locked` audits exactly what `kargo.lock` pins. `--deny <severity>` (or [`[audit] deny`](../../reference/manifest/#audit)) moves the bar, and `--format json` gives the findings to other tools. An advisory that does not affect you goes in [`[audit] ignore`](../../reference/manifest/#audit) with a reason, and an `until` date so it is looked at again. This is the only step that contacts `api.osv.dev`; with `--offline` it audits from the advisories cached under `~/.kargo/advisories`.
 
+### License checks
+
+`kargo licenses` exits with `101` when a dependency is under a license your [`[licenses]`](../../reference/manifest/#licenses) policy denies or does not allow, so a pull request that adds a copyleft or unlicensed dependency fails (see [`kargo licenses`](../../reference/commands/#kargo-licenses)). A step next to the tests is enough, since a license only changes when a dependency does:
+
+```yaml
+      - run: kargo licenses --locked --offline
+```
+
+`--locked` checks exactly what `kargo.lock` pins, and `--offline` reads the POMs from the cache the build just filled, so the step needs no network. `--format json` gives the findings to other tools, and `--notice NOTICE-third-party.txt` writes the third-party notices that `kargo package --dist` ships.
+
 ### Several operating systems
 
 Kotlin/Native and Compose Desktop produce OS-specific output. Use a matrix:
@@ -282,6 +292,7 @@ Kargo exits with status `101` on build and test failures, like Cargo.
 | `kargo build --keep-going` | Build every target (and, in a workspace, every member whose dependencies built) and report all failures, not just the first |
 | `kargo test --report junit` | Write JUnit XML reports for the CI's test summary |
 | `kargo audit` | Fail on dependencies with known security advisories. See [Security advisories](#security-advisories) |
+| `kargo licenses` | Fail on dependencies under licenses `[licenses]` denies or does not allow. See [License checks](#license-checks) |
 | `[test] timeout` | Stop a hung test run and fail it, rather than waiting for the CI's own job limit. See [Timeouts](../testing/#timeouts) |
 | `kargo bench --format json` | JMH's results as JSON on stdout, for tracking performance. See [Benchmarks](#benchmarks) |
 | `kargo test --failed` | Rerun only the test classes that failed in the last run, on every target, on a retry job |

@@ -923,6 +923,37 @@ enum FormatArg {
     Json,
 }
 
+/// Output format of `kargo licenses`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum LicensesFormatArg {
+    /// A table of the licenses and how many packages are under each
+    #[default]
+    Text,
+    /// Every package with its declared licenses, its path and what the policy says about it
+    Json,
+    /// A table of every package and its license
+    Markdown,
+}
+
+/// The arguments of `kargo licenses`, in a struct of their own for the same reason as [`WhyArgs`].
+#[derive(Debug, Args)]
+struct LicensesArgs {
+    /// Only these targets [default: every enabled one]
+    #[arg(short, long = "target", value_enum)]
+    targets: Vec<TargetArg>,
+    /// Also the licenses of test dependencies and of the build's tools that kargo.lock holds (Kotlin compiler, KSP, JUnit launcher, compiler plugins, `[[generate]]` tools) and the TypeScript compiler's npm packages
+    #[arg(long)]
+    all: bool,
+    /// Write a third-party notice file listing the licenses and packages
+    #[arg(long, value_name = "PATH")]
+    notice: Option<PathBuf>,
+    #[command(flatten)]
+    packages: PackageArgs,
+    /// Output format
+    #[arg(long, value_enum, default_value_t)]
+    format: LicensesFormatArg,
+}
+
 /// What `kargo report` writes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 enum ReportFormatArg {
@@ -1638,6 +1669,13 @@ Exits with 101 when an advisory at or above the --deny severity (default: [audit
         #[arg(long, value_enum, default_value_t)]
         format: FormatArg,
     },
+    /// Report the licenses of the dependencies, and fail when [licenses] forbids one
+    #[command(long_about = "Report the licenses of the dependencies.
+
+Lists the packages a build ships (the Maven modules of every target, or the ones given with --target, and the npm packages of Wasm and Kotlin/JS) grouped by SPDX license id, read from their POMs (with the licenses a parent POM declares) and package.json files. Test dependencies and the build's tools are left out unless --all. Licenses written as free text in a POM are mapped to SPDX ids; those Kargo cannot map are reported as `unknown`. --offline reads the POMs from the cache.
+
+With [licenses] in kargo.toml, exits with 101 when a package is under a license in `deny`, one that `allow` does not list, or (when `allow` is set) an unknown one, unless [licenses] exceptions names the package. --notice writes the third-party notice file of a distribution.")]
+    Licenses(LicensesArgs),
     /// Report the dependencies no source uses, and remove them with --fix
     #[command(long_about = "Report the dependencies no source uses.
 
@@ -3032,6 +3070,7 @@ fn execute(cli: Cli, shell: &Shell) -> Result<i32> {
             | Command::Update { .. }
             | Command::Upgrade { .. }
             | Command::Audit { .. }
+            | Command::Licenses(..)
             | Command::Tidy { .. }
             | Command::Target { .. }
     );
@@ -3883,7 +3922,7 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
         }
         Command::Audit { targets, deny, tooling, fix, packages, format } => {
             let project = load_project(global)?;
-            let opts = ops::audit::AuditOptions { targets: targets.into_iter().map(Into::into).collect(), tooling };
+            let opts = ops::audit::AuditOptions { targets: targets.into_iter().map(Into::into).collect(), tooling, runtime_only: false };
             let reports = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 let report = ops::audit::audit(ctx, &opts)?;
                 let deny = deny.map(kargo_manifest::DenyLevel::from).or(ctx.ws.manifest().audit.deny).unwrap_or_default();
@@ -3936,6 +3975,41 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             } else {
                 shell.status("Audited", format!("{audited} {}: no known advisories{ignored}", plural(audited, "package")));
             }
+            Ok(0)
+        }
+        Command::Licenses(LicensesArgs { targets, all, notice, packages, format }) => {
+            let project = load_project(global)?;
+            let opts = ops::licenses::LicensesOptions { targets: targets.into_iter().map(Into::into).collect(), all };
+            let reports = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
+                ops::licenses::licenses(ctx, &opts)
+            })?;
+            for note in reports.iter().flat_map(|r| &r.skipped) {
+                shell.note(note);
+            }
+            match format {
+                LicensesFormatArg::Json => {
+                    let mut documents: Vec<serde_json::Value> = reports.iter().map(ops::licenses::json).collect();
+                    // One package prints one object; a workspace prints one per member.
+                    let output = if documents.len() == 1 { documents.remove(0) } else { serde_json::Value::Array(documents) };
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                LicensesFormatArg::Markdown => reports.iter().for_each(|r| print!("{}", ops::licenses::markdown(r))),
+                LicensesFormatArg::Text => reports.iter().for_each(|r| print!("{}", ops::licenses::render(r))),
+            }
+            if let Some(path) = notice {
+                ops::licenses::write_notice(shell, &path, &reports)?;
+            }
+            let violations = ops::licenses::report_violations(shell, &reports);
+            if violations > 0 {
+                shell.error(format!(
+                    "{violations} {} against the [licenses] policy; replace them, or give their license in [licenses] exceptions after checking it",
+                    plural(violations, "package")
+                ));
+                return Ok(FAILURE);
+            }
+            let checked: usize = reports.iter().map(|r| r.packages.len()).sum();
+            let policy = if reports.iter().all(|r| r.policy.is_empty()) { " (set [licenses] allow or deny to check them)" } else { "" };
+            shell.status("Checked", format!("the licenses of {checked} {}{policy}", plural(checked, "package")));
             Ok(0)
         }
         Command::Tidy { fix, npm, strict, packages, format } => {

@@ -3,7 +3,8 @@
 //! database ([`crate::advisories`]), and with `--fix` raises the versions in `kargo.toml` to ones that
 //! fix what it finds.
 //!
-//! This is the one command that contacts the advisory database; nothing else does.
+//! This is the one command that contacts the advisory database; nothing else does. The packages it
+//! collects ([`collect`]) are also the ones `kargo licenses` reports on.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
@@ -27,6 +28,8 @@ pub struct AuditOptions {
     /// Also the build's tools: what `kargo.lock` holds for the Kotlin compiler, KSP, the JUnit
     /// launcher, compiler plugins and `[[generate]]` tools, and the npm packages of the TypeScript compiler.
     pub tooling: bool,
+    /// Only what a build ships: the runtime resolutions, not the compile-only and test ones.
+    pub runtime_only: bool,
 }
 
 /// A package version that was audited, and where the project gets it from.
@@ -40,6 +43,9 @@ pub struct Subject {
     pub resolutions: Vec<String>,
     /// Whether only the build's tools use it.
     pub tooling: bool,
+    /// The `license` fields of an npm package as its `package.json` writes them (empty for a Maven module,
+    /// whose licenses are in its POM).
+    pub licenses: Vec<String>,
 }
 
 /// An advisory that affects an audited package.
@@ -140,10 +146,11 @@ pub fn collect(ctx: &BuildContext, opts: &AuditOptions) -> Result<(Vec<Subject>,
     let mut skipped = Vec::new();
     for target in targets {
         if target == TargetKind::Android {
-            skipped.push("the dependencies of the Android target are resolved by Gradle and are not audited".to_owned());
+            skipped.push("the dependencies of the Android target are resolved by Gradle and are not checked".to_owned());
             continue;
         }
         let configurations: &[Configuration] = match target {
+            _ if opts.runtime_only => &[Configuration::Runtime],
             TargetKind::Jvm => &[Configuration::Compile, Configuration::Runtime, Configuration::Test],
             _ => &[Configuration::Runtime, Configuration::Test],
         };
@@ -181,9 +188,14 @@ struct Collector {
 }
 
 impl Collector {
-    fn add(&mut self, query: Query, path: Vec<String>, resolution: &str, tooling: bool) {
-        let subject =
-            self.subjects.entry(query.clone()).or_insert_with(|| Subject { query, path: path.clone(), resolutions: Vec::new(), tooling });
+    fn add(&mut self, query: Query, path: Vec<String>, resolution: &str, tooling: bool, licenses: Vec<String>) {
+        let subject = self.subjects.entry(query.clone()).or_insert_with(|| Subject {
+            query,
+            path: path.clone(),
+            resolutions: Vec::new(),
+            tooling,
+            licenses,
+        });
         // A path through the project's own dependencies says more than one through a tool.
         if subject.tooling && !tooling {
             subject.path = path;
@@ -197,7 +209,7 @@ impl Collector {
     fn add_graph(&mut self, graph: &Graph, resolution: &str, tooling: bool) {
         for (module, path) in graph.paths() {
             let query = Query { ecosystem: Ecosystem::Maven, name: module.to_owned(), version: graph.nodes[module].0.clone() };
-            self.add(query, path, resolution, tooling);
+            self.add(query, path, resolution, tooling, Vec::new());
         }
     }
 }
@@ -277,6 +289,8 @@ struct NpmPackage {
     version: String,
     /// The packages it depends on, by name.
     dependencies: Vec<String>,
+    /// Its `license` fields.
+    licenses: Vec<String>,
 }
 
 /// The npm packages of `target`: the ones installed next to the build output (with the ones they pull in),
@@ -352,7 +366,7 @@ fn add_npm(
         chain.reverse();
         base.extend(chain);
         let query = Query { ecosystem: Ecosystem::Npm, name: package.name.clone(), version: package.version.clone() };
-        subjects.add(query, base, resolution, tooling);
+        subjects.add(query, base, resolution, tooling, package.licenses.clone());
     }
     for (name, (spec, path)) in asked {
         if versions.contains_key(name.as_str()) {
@@ -363,7 +377,7 @@ fn add_npm(
                 let mut path = path.clone();
                 path.push(format!("{name}@{version}"));
                 let query = Query { ecosystem: Ecosystem::Npm, name: name.clone(), version: version.to_owned() };
-                subjects.add(query, path, resolution, tooling);
+                subjects.add(query, path, resolution, tooling, Vec::new());
             }
             None => skipped.push(format!(
                 "npm package `{name}` {spec} is not installed, so its version is unknown; build the target once to install it, then audit again"
@@ -421,7 +435,12 @@ fn installed_npm(node_modules: &Path) -> Vec<NpmPackage> {
                     .filter_map(|key| manifest.get(*key).and_then(Value::as_object))
                     .flat_map(|deps| deps.keys().cloned())
                     .collect();
-                self.out.push(NpmPackage { name: name.to_owned(), version: version.to_owned(), dependencies });
+                self.out.push(NpmPackage {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                    dependencies,
+                    licenses: declared_licenses(&manifest),
+                });
             }
             let nested = dir.join("node_modules");
             if nested.is_dir() {
@@ -442,8 +461,19 @@ fn installed_npm(node_modules: &Path) -> Vec<NpmPackage> {
     scan.out
 }
 
+/// The licenses a `package.json` declares: `license` as a string (an SPDX expression) or the old
+/// `{ "type": ... }` object, and the old `licenses` array of them.
+fn declared_licenses(manifest: &Value) -> Vec<String> {
+    let name = |license: &Value| match license {
+        Value::String(text) => Some(text.trim().to_owned()),
+        other => other.get("type").and_then(Value::as_str).map(|t| t.trim().to_owned()),
+    };
+    let listed = manifest.get("licenses").and_then(Value::as_array).into_iter().flatten();
+    manifest.get("license").into_iter().chain(listed).filter_map(name).filter(|l| !l.is_empty()).collect()
+}
+
 /// How a package is named in the output: `group:artifact`, or the npm package with `(npm)`.
-fn display_name(query: &Query) -> String {
+pub(super) fn display_name(query: &Query) -> String {
     match query.ecosystem {
         Ecosystem::Maven => query.name.clone(),
         Ecosystem::Npm => format!("{} (npm)", query.name),
@@ -740,5 +770,24 @@ mod tests {
         assert!(subjects.subjects.values().any(|s| s.query.name == "pinned" && s.query.version == "2.0.0"));
         assert_eq!(skipped.len(), 1, "{skipped:?}");
         assert!(skipped[0].contains("`missing` ^2.0.0 is not installed"), "{skipped:?}");
+    }
+
+    #[test]
+    fn reads_the_licenses_of_npm_packages() {
+        let licenses = |json: &str| declared_licenses(&serde_json::from_str(json).unwrap());
+        assert_eq!(licenses(r#"{"license":"MIT"}"#), ["MIT"]);
+        assert_eq!(licenses(r#"{"license":" (MIT OR Apache-2.0) "}"#), ["(MIT OR Apache-2.0)"]);
+        assert_eq!(licenses(r#"{"license":{"type":"ISC","url":"https://example.com"}}"#), ["ISC"]);
+        assert_eq!(
+            licenses(r#"{"licenses":[{"type":"MIT"},{"type":"Apache-2.0"},"BSD-3-Clause"]}"#),
+            ["MIT", "Apache-2.0", "BSD-3-Clause"]
+        );
+        assert!(licenses(r#"{"name":"x","license":""}"#).is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("node_modules/left-pad");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("package.json"), r#"{"name":"left-pad","version":"1.3.0","license":"WTFPL"}"#).unwrap();
+        assert_eq!(installed_npm(&dir.path().join("node_modules"))[0].licenses, ["WTFPL"]);
     }
 }

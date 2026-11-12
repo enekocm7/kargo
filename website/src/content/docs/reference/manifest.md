@@ -459,6 +459,29 @@ Each `ignore` entry is a table:
 
 An ignored advisory is left out of the report and of the exit code, but still in `--format json` (with its `ignored` reason). An entry that matches no advisory of the audited packages gets a note, so stale entries do not pile up.
 
+## `[licenses]`
+
+The policy [`kargo licenses`](../commands/#kargo-licenses) checks the licenses of the dependencies against. Every key is optional, and without `allow` and `deny` the command only reports.
+
+```toml
+[licenses]
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause"]
+deny = ["GPL-3.0-only", "AGPL-3.0-only"]
+exceptions = { "com.example:legacy" = "Apache-2.0" }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `allow` | `[]` | SPDX ids that may be used. When it is not empty, a dependency under any other license, or under one Kargo cannot identify, fails the check |
+| `deny` | `[]` | SPDX ids that fail the check. A license in both `allow` and `deny` is an error |
+| `exceptions` | `{}` | Packages accepted under the license given, whatever their POM or `package.json` says |
+
+Ids are compared without regard to case, and the deprecated `GPL-3.0` and `GPL-3.0+` mean `GPL-3.0-only` and `GPL-3.0-or-later`. An id with an exception is its own id: list `GPL-2.0-only WITH Classpath-exception-2.0` to allow the GPL with the classpath exception, which `GPL-2.0-only` does not cover. A dependency that offers licenses to choose from (`GPL-3.0-only OR MIT`) passes when one of them does.
+
+An `exceptions` key is a Maven module (`group:artifact`) or the name of an npm package, and its value is the license the package is under. The package is reported under that license and is accepted even when `allow` does not list it or `deny` does: use it for a dependency whose license a POM gets wrong or leaves out, or that you have checked and accepted. An entry that matches no package gets a note, so stale entries do not pile up.
+
+See [License checks](../../guides/dependencies/#licenses).
+
 ## `[publish]`
 
 Options for `kargo publish`. Every key is optional.

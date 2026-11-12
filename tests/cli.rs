@@ -712,6 +712,195 @@ ignore = [{{ id = \"CVE-2026-1111\", reason = \"old\", until = 2020-01-01 }}]
     assert!(p.read("kargo.toml").contains("\"com.acme:direct\" = \"1.0.3\"  # keep me"));
 }
 
+/// Publishes `coord:version` under a POM with `licenses` (the XML inside `<licenses>`) and, when given, the
+/// `parent` coordinate (version 1).
+fn publish_licensed(repo: &LocalRepo, coord: &str, version: &str, parent: Option<&str>, licenses: &str) {
+    repo.publish(coord, version, &[]);
+    let (group, artifact) = coord.split_once(':').unwrap();
+    let parent = parent.map_or(String::new(), |p| {
+        let (g, a) = p.split_once(':').unwrap();
+        format!("<parent><groupId>{g}</groupId><artifactId>{a}</artifactId><version>1</version></parent>")
+    });
+    let licenses = if licenses.is_empty() { String::new() } else { format!("<licenses>{licenses}</licenses>") };
+    repo.write(
+        &format!("{}/{artifact}/{version}/{artifact}-{version}.pom", group.replace('.', "/")),
+        &format!(
+            "<project>{parent}<groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version>{licenses}</project>"
+        ),
+    );
+}
+
+fn license(name: &str, url: &str) -> String {
+    format!("<license><name>{name}</name><url>{url}</url></license>")
+}
+
+#[test]
+fn licenses_group_by_spdx_id_and_fail_on_the_policy() {
+    let repo = LocalRepo::new();
+    let apache = license("The Apache Software License, Version 2.0", "https://www.apache.org/licenses/LICENSE-2.0.txt");
+    let kotlin = kargo_manifest::DEFAULT_KOTLIN_VERSION;
+    publish_licensed(&repo, "org.jetbrains.kotlin:kotlin-stdlib", kotlin, None, &apache);
+    publish_licensed(&repo, "com.acme:apache", "1.0", None, &apache);
+    publish_licensed(&repo, "com.acme:mit", "1.0", None, &license("The MIT License", "https://opensource.org/licenses/MIT"));
+    // `child` has no license of its own: it is its parent's.
+    repo.write(
+        "com/acme/parent/1/parent-1.pom",
+        &format!(
+            "<project><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1</version><packaging>pom</packaging><licenses>{}</licenses></project>",
+            license("Eclipse Public License v2.0", "")
+        ),
+    );
+    publish_licensed(&repo, "com.acme:child", "1.0", Some("com.acme:parent"), "");
+    publish_licensed(
+        &repo,
+        "com.acme:dual",
+        "1.0",
+        None,
+        &format!("{}{}", license("GNU General Public License, version 3", ""), license("MIT", "")),
+    );
+    publish_licensed(&repo, "com.acme:copyleft", "1.0", None, &license("", "https://www.gnu.org/licenses/gpl-3.0.html"));
+    publish_licensed(&repo, "com.acme:legacy", "1.0", None, &license("Custom License", "https://example.com/license"));
+    publish_licensed(&repo, "com.acme:nolicense", "1.0", None, "");
+    // Only the tests use these.
+    publish_licensed(&repo, "com.acme:testing", "1.0", None, &license("GNU Affero General Public License v3", ""));
+    publish_licensed(&repo, "org.jetbrains.kotlin:kotlin-test-junit5", kotlin, None, &apache);
+    publish_licensed(&repo, "org.junit.jupiter:junit-jupiter", kargo_ops::builtins::JUNIT_VERSION, None, &license("EPL 2.0", ""));
+
+    let deps = format!(
+        "
+[dependencies]
+\"com.acme:apache\" = \"1.0\"
+\"com.acme:mit\" = \"1.0\"
+\"com.acme:child\" = \"1.0\"
+\"com.acme:dual\" = \"1.0\"
+\"com.acme:copyleft\" = \"1.0\"
+\"com.acme:legacy\" = \"1.0\"
+\"com.acme:nolicense\" = \"1.0\"
+
+[dev-dependencies]
+\"com.acme:testing\" = \"1.0\"
+
+[repositories]
+local = \"{}\"
+",
+        repo.url()
+    );
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", &deps));
+    let licenses = || {
+        let mut cmd = p.kargo();
+        cmd.args(["licenses", "--offline"]);
+        cmd
+    };
+    // The text table: the license, how many packages are under it, and the packages.
+    let row = |license: &str, count: usize, packages: &str| format!("{license:<19}  {count}  {packages}\n");
+
+    // Without a policy it only reports: the runtime dependencies, grouped by SPDX id.
+    let out = licenses().assert().success().get_output().clone();
+    let (stdout, stderr) = (String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
+    assert_eq!(
+        stdout,
+        [
+            row("Apache-2.0", 2, &format!("com.acme:apache:1.0, org.jetbrains.kotlin:kotlin-stdlib:{kotlin}")),
+            row("EPL-2.0", 1, "com.acme:child:1.0"),
+            row("GPL-3.0-only", 1, "com.acme:copyleft:1.0"),
+            row("GPL-3.0-only OR MIT", 1, "com.acme:dual:1.0"),
+            row("MIT", 1, "com.acme:mit:1.0"),
+            row("unknown", 2, "com.acme:legacy:1.0, com.acme:nolicense:1.0"),
+        ]
+        .concat()
+    );
+    assert!(stderr.contains("Checking the licenses of app v0.1.0 (8 packages)"), "{stderr}");
+    assert!(stderr.contains("Checked the licenses of 8 packages (set [licenses] allow or deny to check them)"), "{stderr}");
+
+    // `--all` adds the dependencies of the tests.
+    licenses()
+        .arg("--all")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("AGPL-3.0-only").and(predicate::str::contains("com.acme:testing:1.0")));
+
+    let out = licenses().args(["--format", "json"]).assert().success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["violations"], 0);
+    let groups = json["licenses"].as_array().unwrap();
+    assert_eq!((groups[0]["license"].as_str(), groups[0]["count"].as_u64()), (Some("Apache-2.0"), Some(2)));
+    let legacy = groups.iter().flat_map(|g| g["packages"].as_array().unwrap()).find(|p| p["name"] == "com.acme:legacy").unwrap();
+    assert_eq!(legacy["declared"][0], serde_json::json!({ "name": "Custom License", "url": "https://example.com/license" }));
+    assert_eq!(legacy["path"], serde_json::json!(["com.acme:legacy:1.0"]));
+    assert_eq!(groups.last().unwrap()["license"], "unknown");
+
+    licenses()
+        .args(["--format", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("## Licenses of app v0.1.0\n\n| Package | Version | License |\n"))
+        .stdout(predicate::str::contains("| `com.acme:child` | 1.0 | EPL-2.0 |\n"))
+        .stdout(predicate::str::contains("| `com.acme:dual` | 1.0 | GPL-3.0-only OR MIT |\n"));
+
+    // The notice file names every license, where its text is and the packages under it.
+    licenses()
+        .args(["--notice", "target/NOTICE.txt"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Wrote the third-party notices to target"));
+    let notice = p.read("target/NOTICE.txt");
+    assert!(notice.starts_with("THIRD-PARTY NOTICES\n"), "{notice}");
+    assert!(notice.contains("License text: https://www.apache.org/licenses/LICENSE-2.0.txt\n"), "{notice}");
+    assert!(notice.contains("  com.acme:apache:1.0\n"), "{notice}");
+    assert!(notice.contains("  com.acme:legacy:1.0 (Custom License, https://example.com/license)\n"), "{notice}");
+    assert!(notice.contains("  com.acme:nolicense:1.0 (no license)\n"), "{notice}");
+    assert!(!notice.contains("com.acme:testing"), "only what the build ships: {notice}");
+
+    // A deny list fails on a package under a denied license, unless another license of its own is fine.
+    let with = |policy: &str| p.file("kargo.toml", &manifest("app", &format!("{deps}\n[licenses]\n{policy}\n")));
+    with("deny = [\"GPL-3.0-only\"]");
+    licenses()
+        .assert()
+        .code(101)
+        .stderr(predicate::str::contains("com.acme:copyleft:1.0 is under GPL-3.0-only, which [licenses] deny lists"))
+        .stderr(predicate::str::contains("com.acme:dual").not())
+        .stderr(predicate::str::contains("com.acme:legacy").not())
+        .stderr(predicate::str::contains("1 package against the [licenses] policy"));
+
+    // An allow list also fails on the licenses it does not list and on unknown ones.
+    with("allow = [\"Apache-2.0\", \"MIT\"]");
+    let stderr = String::from_utf8(licenses().assert().code(101).get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("com.acme:child:1.0 is under EPL-2.0, which [licenses] allow does not list"), "{stderr}");
+    assert!(stderr.contains("com.acme:copyleft:1.0 is under GPL-3.0-only, which [licenses] allow does not list"), "{stderr}");
+    assert!(
+        stderr.contains("com.acme:legacy:1.0 has a license Kargo cannot identify (Custom License, https://example.com/license)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("com.acme:nolicense:1.0 has a license Kargo cannot identify (no license)"), "{stderr}");
+    assert!(!stderr.contains("com.acme:dual"), "it can be used under the MIT license: {stderr}");
+    assert!(stderr.contains("4 packages against the [licenses] policy"), "{stderr}");
+    let out = licenses().args(["--format", "json"]).assert().code(101).get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["violations"], 4);
+    assert_eq!(json["policy"]["allow"], serde_json::json!(["Apache-2.0", "MIT"]));
+
+    // An exception gives a package the license it has and accepts it.
+    with(
+        "allow = [\"Apache-2.0\", \"MIT\"]
+deny = [\"GPL-3.0-only\"]
+exceptions = { \"com.acme:child\" = \"EPL-2.0\", \"com.acme:copyleft\" = \"GPL-3.0\", \"com.acme:legacy\" = \"apache-2.0\", \"com.acme:nolicense\" = \"MIT\", \"com.acme:gone\" = \"MIT\" }",
+    );
+    licenses()
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(row(
+                "Apache-2.0",
+                3,
+                &format!("com.acme:apache:1.0, com.acme:legacy:1.0, org.jetbrains.kotlin:kotlin-stdlib:{kotlin}"),
+            ))
+            .and(predicate::str::contains("unknown").not()),
+        )
+        .stderr(predicate::str::contains("[licenses] exceptions entry `com.acme:gone` matches no package (without --all)"))
+        .stderr(predicate::str::contains("Checked the licenses of 8 packages\n"));
+}
+
 #[test]
 fn update_selected_modules_precisely_or_as_a_dry_run() {
     let repo = LocalRepo::new();
@@ -1419,6 +1608,7 @@ fn short_help_lists_common_commands_and_list_lists_all() {
         "outdated",
         "upgrade",
         "audit",
+        "licenses",
         "tidy",
         "vendor",
         "generate",

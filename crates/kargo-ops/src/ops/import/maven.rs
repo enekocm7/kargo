@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use kargo_manifest::{DEFAULT_KOTLIN_VERSION, validate_package_name};
 use kargo_maven::pom::{
-    EffectivePom, Pom, PomDependency, PomSource, effective_pom_without_imports, effective_properties, interpolate, pom_chain,
+    EffectivePom, Pom, PomDependency, PomLicense, PomSource, effective_pom_without_imports, effective_properties, interpolate, pom_chain,
 };
 use kargo_maven::{Artifact, MavenClient, ModuleId, Repository as MavenRepository};
 use kargo_util::config::Config;
@@ -97,7 +97,7 @@ struct Extras {
     modules: Vec<String>,
     description: Option<String>,
     url: Option<String>,
-    licenses: Vec<String>,
+    licenses: Vec<PomLicense>,
     scm_url: Option<String>,
     developers: Vec<(String, Option<String>)>,
     source_directory: Option<String>,
@@ -141,7 +141,7 @@ impl Extras {
                 .child("licenses")
                 .into_iter()
                 .flat_map(|l| l.named("license"))
-                .map(|l| format!("{} {}", l.text_at(&["name"]).unwrap_or_default(), l.text_at(&["url"]).unwrap_or_default()))
+                .map(|l| PomLicense { name: l.text_at(&["name"]), url: l.text_at(&["url"]) })
                 .collect(),
             scm_url: project.text_at(&["scm", "url"]),
             developers: project
@@ -598,7 +598,7 @@ fn package(
     package.description = own.description.as_deref().map(&interp);
     package.homepage = own.url.as_deref().map(&interp).filter(|u| u.starts_with("http://") || u.starts_with("https://"));
     package.repository = own.scm_url.as_deref().map(&interp).filter(|u| u.starts_with("http://") || u.starts_with("https://"));
-    package.license = own.licenses.iter().find_map(|l| spdx(l));
+    package.license = own.licenses.iter().find_map(|l| crate::spdx::from_pom(l.name.as_deref(), l.url.as_deref())).map(str::to_owned);
     if !own.licenses.is_empty() && package.license.is_none() {
         imported.manual(
             format!("the license of `{name}` is not one Kargo knows by its SPDX id; set `license` in kargo.toml"),
@@ -789,31 +789,6 @@ pub(super) fn java_target(text: &str) -> Option<String> {
     let number = text.strip_prefix("1.").filter(|n| *n == "8").unwrap_or(text);
     let value: u32 = number.parse().ok()?;
     (value >= 8).then(|| number.to_owned())
-}
-
-/// The SPDX id of a license from its POM name and URL, for the common ones.
-fn spdx(license: &str) -> Option<String> {
-    let lower = license.to_ascii_lowercase();
-    let id = if lower.contains("apache") && (lower.contains("2.0") || lower.contains("license-2")) {
-        "Apache-2.0"
-    } else if lower.contains("mit license") || lower.contains("opensource.org/licenses/mit") || lower.trim_start().starts_with("mit ") {
-        "MIT"
-    } else if lower.contains("bsd") && lower.contains('3') {
-        "BSD-3-Clause"
-    } else if lower.contains("bsd") && lower.contains('2') {
-        "BSD-2-Clause"
-    } else if lower.contains("eclipse public license") && lower.contains("2.0") {
-        "EPL-2.0"
-    } else if lower.contains("eclipse public license") {
-        "EPL-1.0"
-    } else if lower.contains("mozilla public license") && lower.contains("2.0") {
-        "MPL-2.0"
-    } else if lower.contains("lgpl") || lower.contains("lesser general public") {
-        "LGPL-3.0-only"
-    } else {
-        return None;
-    };
-    Some(id.to_owned())
 }
 
 /// The dependencies of the POM, split into the ones for the main code and for the tests, and its BOM imports.
@@ -1286,11 +1261,9 @@ mod tests {
 
     #[test]
     fn licenses_map_to_spdx() {
-        assert_eq!(
-            spdx("The Apache Software License, Version 2.0 https://www.apache.org/licenses/LICENSE-2.0.txt").as_deref(),
-            Some("Apache-2.0")
-        );
-        assert_eq!(spdx("MIT License https://opensource.org/licenses/MIT").as_deref(), Some("MIT"));
-        assert_eq!(spdx("Proprietary"), None);
+        let spdx = |name: &str, url: &str| crate::spdx::from_pom(Some(name), Some(url));
+        assert_eq!(spdx("The Apache Software License, Version 2.0", "https://www.apache.org/licenses/LICENSE-2.0.txt"), Some("Apache-2.0"));
+        assert_eq!(spdx("MIT License", "https://opensource.org/licenses/MIT"), Some("MIT"));
+        assert_eq!(spdx("Proprietary", ""), None);
     }
 }

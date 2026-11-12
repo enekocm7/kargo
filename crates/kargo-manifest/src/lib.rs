@@ -2793,6 +2793,26 @@ pub struct AuditIgnore {
     pub until: Option<String>,
 }
 
+/// `[licenses]`: the policy `kargo licenses` checks the dependencies' licenses against.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LicenseSettings {
+    /// SPDX ids that may be used. When it is not empty, a dependency under any other license, or under an
+    /// unknown one, fails the check.
+    pub allow: Vec<String>,
+    /// SPDX ids that fail the check.
+    pub deny: Vec<String>,
+    /// Packages (`group:artifact`, or the name of an npm package) accepted under the license given, whatever
+    /// their POM or `package.json` says and whether or not `allow` and `deny` list it.
+    pub exceptions: BTreeMap<String, String>,
+}
+
+impl LicenseSettings {
+    /// Whether the check can fail at all.
+    pub fn is_empty(&self) -> bool {
+        self.allow.is_empty() && self.deny.is_empty()
+    }
+}
+
 /// A named program from `[[bin]]`, run with `kargo run --bin <name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bin {
@@ -2978,6 +2998,7 @@ pub struct Manifest {
     pub test: TestSettings,
     pub bench: BenchSettings,
     pub audit: AuditSettings,
+    pub licenses: LicenseSettings,
     pub publish: PublishSettings,
 }
 
