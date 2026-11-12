@@ -912,6 +912,78 @@ mod tests {
         assert_eq!(runtime["files"].as_array().unwrap().len(), 1);
     }
 
+    #[test]
+    fn a_distribution_is_never_selected_for_a_consumer() {
+        use kargo_maven::module::{ModuleMetadata, select_variant};
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package();
+        let publication = Publication {
+            group: "com.acme".into(),
+            package: &pkg,
+            platforms: vec![PlatformPublication {
+                kind: PlatformKind::Jvm { jvm_version: Some(17) },
+                artifact: file(dir.path(), "classes.jar"),
+                extra: Vec::new(),
+                sources: Some(file(dir.path(), "sources.jar")),
+                javadoc: None,
+                dependencies: Vec::new(),
+                main_class: None,
+                web_resources: None,
+                dist: vec![("zip".into(), file(dir.path(), "dist.zip"))],
+            }],
+            common_sources: None,
+            common_javadoc: None,
+        };
+        let staged = publication.stage(&dir.path().join("repo")).unwrap();
+        let json = std::fs::read_to_string(staged[0].dir.join("mathlib-1.2.0.module")).unwrap();
+        let meta = ModuleMetadata::parse(&json).unwrap();
+        let module = ModuleId::new("com.acme", "mathlib");
+        let chosen = select_variant(&meta, &module, &kargo_maven::Platform::Jvm).expect("a library variant");
+        assert_eq!(chosen.name, "jvmRuntimeElements-published");
+        assert_eq!(chosen.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["mathlib-1.2.0.jar"]);
+        // Every file the metadata lists is the one that was staged: same size and checksum.
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let dist = value["variants"].as_array().unwrap().iter().find(|v| v["name"] == "jvmDistributionElements-published").unwrap();
+        let listed = &dist["files"][0];
+        let staged_zip = std::fs::read(staged[0].dir.join("mathlib-1.2.0-dist.zip")).unwrap();
+        assert_eq!(listed["size"], staged_zip.len());
+        assert_eq!(listed["url"], "mathlib-1.2.0-dist.zip");
+    }
+
+    #[test]
+    fn a_multiplatform_library_keeps_its_distribution_in_the_jvm_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package();
+        let jvm = |dist: Vec<(String, PathBuf)>| PlatformPublication {
+            kind: PlatformKind::Jvm { jvm_version: Some(17) },
+            artifact: file(dir.path(), "classes.jar"),
+            extra: Vec::new(),
+            sources: None,
+            javadoc: None,
+            dependencies: Vec::new(),
+            main_class: None,
+            web_resources: None,
+            dist,
+        };
+        let publication = Publication {
+            group: "com.acme".into(),
+            package: &pkg,
+            platforms: vec![
+                jvm(vec![("zip".into(), file(dir.path(), "dist.zip"))]),
+                PlatformPublication { kind: PlatformKind::Js, artifact: file(dir.path(), "js.klib"), ..jvm(Vec::new()) },
+            ],
+            common_sources: None,
+            common_javadoc: None,
+        };
+        let staged = publication.stage(&dir.path().join("repo")).unwrap();
+        let by_module = |artifact: &str| staged.iter().find(|m| m.module.artifact == artifact).unwrap();
+        assert!(by_module("mathlib-jvm").files.contains(&"mathlib-jvm-1.2.0-dist.zip".to_owned()));
+        assert!(by_module("mathlib-js").files.iter().all(|f| !f.contains("-dist")));
+        assert!(by_module("mathlib").files.iter().all(|f| !f.contains("-dist")));
+        let root = std::fs::read_to_string(by_module("mathlib").dir.join("mathlib-1.2.0.module")).unwrap();
+        assert!(!root.contains("Distribution"), "{root}");
+    }
+
     fn android(dir: &Path, dependencies: Vec<PublishedDependency>) -> PlatformPublication {
         PlatformPublication {
             kind: PlatformKind::Android,
