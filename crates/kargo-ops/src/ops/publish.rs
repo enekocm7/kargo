@@ -663,8 +663,8 @@ fn build_platforms(ctx: &BuildContext, targets: &[TargetKind], jars: &Path) -> R
 /// The archives `kargo package --dist` writes for the JVM build, as (extension, path): the publication
 /// attaches them to the JVM module.
 fn dist_archives(ctx: &BuildContext, jvm: &super::build::JvmBuild) -> Result<Vec<(String, PathBuf)>> {
-    let options = super::DistOptions { archives: Vec::new(), scripts: true };
-    let files = super::distribution(ctx, jvm, None, &options)
+    let options = super::DistOptions { archives: Vec::new(), scripts: true, bundle_runtime: false };
+    let files = super::distribution(ctx, jvm, None, &options, &[])
         .context("failed to build the distribution that `dist = true` in [publish] attaches")?;
     Ok(super::dist::Archive::DEFAULT.iter().map(|kind| kind.extension().to_owned()).zip(files).collect())
 }
