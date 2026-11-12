@@ -4113,6 +4113,53 @@ fn jvm_packages_an_application_distribution() {
 }
 
 #[test]
+fn jvm_packages_a_distribution_with_a_bundled_runtime() {
+    require_e2e!();
+    let t = E2e::new();
+    t.create(&["app"]);
+    t.write(
+        "app/src/Main.kt",
+        r#"fun main(args: Array<String>) { println(System.getProperty("greeting") + " " + args.joinToString("|")) }"#,
+    );
+    let manifest = std::fs::read_to_string(t.dir.path().join("app/kargo.toml")).unwrap();
+    t.write("app/kargo.toml", &format!("{manifest}\n[target.jvm]\njvm-args = [\"-Dgreeting=Hi there\"]\n"));
+
+    // `--bundle-runtime` puts a trimmed runtime in the archive, and the start script runs on it without Java.
+    let out = t.kargo("app").args(["package", "-q", "--dist", "--bundle-runtime", "--archive", "zip,tar"]).assert().success();
+    let files: Vec<PathBuf> = String::from_utf8(out.get_output().stdout.clone()).unwrap().lines().map(PathBuf::from).collect();
+    let java = if cfg!(windows) { "app-0.1.0/runtime/bin/java.exe" } else { "app-0.1.0/runtime/bin/java" };
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&files[0]).unwrap()).unwrap();
+    assert!(zip.by_name(java).is_ok() && zip.by_name("app-0.1.0/bin/app").is_ok());
+    let mut script = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("app-0.1.0/bin/app").unwrap(), &mut script).unwrap();
+    assert!(script.contains("runtime/bin/java"), "{script}");
+    let home = t.dir.path().join("app/target/dist/app-0.1.0");
+    let release = std::fs::read_to_string(home.join("runtime/release")).unwrap();
+    assert!(release.contains("java.base") && !release.contains("java.desktop"), "a trimmed runtime: {release}");
+    let launcher = home.join("bin").join(if cfg!(windows) { "app.bat" } else { "app" });
+    let out = run_without_java(&launcher, &["a b", "c"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hi there a b|c");
+
+    // The same archive again is byte for byte the same, and the manifest key does what the flag does.
+    let first = std::fs::read(&files[0]).unwrap();
+    t.write(
+        "app/kargo.toml",
+        &format!("{manifest}\n[target.jvm]\njvm-args = [\"-Dgreeting=Hi there\"]\n\n[package.dist]\nruntime = \"jlink\"\n"),
+    );
+    t.kargo("app").args(["package", "-q", "--dist", "--archive", "zip,tar"]).assert().success();
+    assert_eq!(std::fs::read(&files[0]).unwrap(), first, "a reproducible archive");
+
+    // `--platform` writes one distribution per platform, with that platform's runtime.
+    let platform = if cfg!(all(target_os = "linux", target_arch = "aarch64")) { "linux-x64" } else { "linux-arm64" };
+    let out = t.kargo("app").args(["package", "-q", "--dist", "--archive", "tar.gz", "--platform", platform]).assert().success();
+    let out = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(out.trim().ends_with(&format!("app-0.1.0-{platform}.tar.gz")), "{out}");
+    let foreign = t.dir.path().join(format!("app/target/dist/app-0.1.0-{platform}"));
+    assert!(foreign.join("runtime/bin/java").is_file() && foreign.join("bin/app").is_file());
+}
+
+#[test]
 fn compose_desktop_resources_and_packages() {
     require_e2e!();
     let t = E2e::new();

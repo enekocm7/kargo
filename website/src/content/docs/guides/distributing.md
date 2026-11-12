@@ -28,7 +28,7 @@ A native executable and an installer contain native code for the OS and CPU they
 
 ## Distribution archives
 
-`--dist` is Gradle's `distZip`: the program's jars and start scripts in an archive that people unpack and run where Java is installed. It is the smallest thing to ship and the one that needs no OS-specific build, so the archive built on any machine runs on every OS.
+`--dist` is Gradle's `distZip`: the program's jars and start scripts in an archive that people unpack and run where Java is installed. It is the smallest thing to ship and the one that needs no OS-specific build, so the archive built on any machine runs on every OS. To ship a Java runtime inside it, see [Bundling a runtime](#bundling-a-runtime).
 
 ```console
 $ kargo package --release --dist
@@ -62,6 +62,7 @@ A start script is written for the project's main class and for each [`[[bin]]`](
 |---|---|
 | `--archive <formats>` | `zip`, `tar` or `tar.gz`, comma separated. The default is `zip,tar.gz` |
 | `--no-scripts` | Write no `bin/` scripts: a distribution of `lib/` for a library, or one with your own scripts. Needs no main class |
+| `--bundle-runtime` | Put a trimmed Java runtime in `runtime/` (see below). Same as `[package.dist] runtime = "jlink"` |
 
 Add files with [`[package.dist]`](../../reference/manifest/#packagedist):
 
@@ -70,9 +71,43 @@ Add files with [`[package.dist]`](../../reference/manifest/#packagedist):
 include = ["conf", "docs/CHANGELOG.md"]
 ```
 
-Each path is copied to the same place in the archive, and must exist. Archives are reproducible: entries are sorted, timestamps are fixed, there are no owners, and the start scripts are executable (mode 0755) no matter which OS built them, so the same sources give the same bytes.
+Each path is copied to the same place in the archive, and must exist. Archives are reproducible: entries are sorted, timestamps are fixed, there are no owners, and the start scripts (and the runtime's launchers, below) are executable (mode 0755) no matter which OS built them, so the same sources and the same runtime give the same bytes.
 
-The distribution contains no Java runtime; for one that does, use [`--format jlink`](#runtime-images).
+### Bundling a runtime
+
+Without a runtime, the archive needs a matching Java on every machine that runs it. `--bundle-runtime` adds one, built the way [`--format jlink`](#runtime-images) builds it: `jdeps` finds the JDK modules the program and its dependencies use (plus `[package.jlink] modules`), and `jlink` puts only those in `runtime/`.
+
+```console
+$ kargo package --release --dist --bundle-runtime
+target/dist/hello-0.1.0.zip
+target/dist/hello-0.1.0.tar.gz
+```
+
+```toml title="kargo.toml"
+[package.dist]
+runtime = "jlink"   # the same as --bundle-runtime on every `kargo package --dist`
+```
+
+```text
+hello-0.1.0/
+├── bin/
+├── lib/
+└── runtime/           # bin/java, lib/modules, ... from jlink
+```
+
+`bin/hello` and `bin/hello.bat` use `runtime/bin/java` when it exists, then `JAVA_HOME`, then the `PATH`, so the archive runs on a machine with no Java, and a `JAVA_HOME` there is ignored. Delete `runtime/` to go back to the installed Java. The runtime is the JDK's of the build and holds native code for one OS and CPU, so an archive with a runtime runs where it was built, unless you ask for other platforms:
+
+```console
+$ kargo package --release --dist --bundle-runtime --platform linux-arm64,windows-x64
+   Packaging hello v0.1.0 distribution for linux-arm64 (target/dist/hello-0.1.0-linux-arm64)
+   Packaging hello v0.1.0 distribution for windows-x64 (target/dist/hello-0.1.0-windows-x64)
+target/dist/hello-0.1.0-linux-arm64.zip
+target/dist/hello-0.1.0-linux-arm64.tar.gz
+target/dist/hello-0.1.0-windows-x64.zip
+target/dist/hello-0.1.0-windows-x64.tar.gz
+```
+
+Each platform gets its own directory and archives, named with the platform (`hello-0.1.0-linux-arm64/` is also the top-level directory inside), with that platform's runtime: as in [Cross-compilation](#cross-compilation), the host's `jlink` reads the `jmods` of a JDK for that platform (of the vendor `[toolchain] jdk` names), which Kargo downloads. `--platform`, `KARGO_PLATFORM` and `[build] platforms` apply to a distribution only when it bundles a runtime; for one without, `--platform` is an error.
 
 ## Runtime images
 
@@ -110,7 +145,7 @@ If `jdeps` fails on a dependency, set `jdeps = false` and list every module the 
 
 ## Cross-compilation
 
-`kargo build -t jvm --platform linux-arm64` builds the same bytecode on any host, and `kargo package --format jlink --platform linux-arm64,windows-x64` builds one runtime image per platform, each in its own directory so they do not clobber each other (`<name>-<version>-<platform>/`). The host's `jlink` runs, with that platform's Java modules (a Temurin JDK Kargo downloads; only its `jmods` are read):
+`kargo build -t jvm --platform linux-arm64` builds the same bytecode on any host, and `kargo package --format jlink --platform linux-arm64,windows-x64` builds one runtime image per platform, each in its own directory so they do not clobber each other (`<name>-<version>-<platform>/`). With `--dist --bundle-runtime`, the same flag writes one [distribution archive](#bundling-a-runtime) per platform. The host's `jlink` runs, with that platform's Java modules (a Temurin JDK Kargo downloads; only its `jmods` are read):
 
 ```console
 $ kargo package --release --format jlink --platform linux-arm64,windows-x64

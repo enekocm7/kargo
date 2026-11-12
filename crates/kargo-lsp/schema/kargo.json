@@ -35,7 +35,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "include": { "description": "Files and directories of the project, copied into the archive at the same relative path. README, LICENSE and NOTICE files in the project root are always included.", "type": "array", "items": { "type": "string", "minLength": 1 }, "examples": [["conf", "docs/CHANGELOG.md"]] }
+            "include": { "description": "Files and directories of the project, copied into the archive at the same relative path. README, LICENSE and NOTICE files in the project root are always included.", "type": "array", "items": { "type": "string", "minLength": 1 }, "examples": [["conf", "docs/CHANGELOG.md"]] },
+            "runtime": { "description": "The Java runtime the archive carries in `runtime/`, which the start scripts prefer over `JAVA_HOME` and the `PATH`. `jlink` builds one trimmed to the JDK modules the program uses, as `--format jlink` does. Without it the archive uses the installed Java. `kargo package --dist --bundle-runtime` does the same for one run.", "type": "string", "enum": ["jlink"] }
           }
         },
         "optimize": {

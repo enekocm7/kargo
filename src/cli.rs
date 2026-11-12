@@ -310,11 +310,18 @@ struct DistArgs {
     /// With --dist: leave out the bin/ start scripts
     #[arg(long, requires = "dist")]
     no_scripts: bool,
+    /// With --dist: put a jlink Java runtime in runtime/ (or set [package.dist] runtime); with --platform, one archive per platform
+    #[arg(long, requires = "dist")]
+    bundle_runtime: bool,
 }
 
 impl DistArgs {
     fn options(self) -> Option<ops::DistOptions> {
-        self.dist.then(|| ops::DistOptions { archives: self.archive.into_iter().map(Into::into).collect(), scripts: !self.no_scripts })
+        self.dist.then(|| ops::DistOptions {
+            archives: self.archive.into_iter().map(Into::into).collect(),
+            scripts: !self.no_scripts,
+            bundle_runtime: self.bundle_runtime,
+        })
     }
 }
 
@@ -1042,7 +1049,7 @@ struct BuildArgs {
     #[arg(long, value_enum, value_name = "SET", conflicts_with = "targets")]
     target_set: Option<TargetSetArg>,
     /// Only build for these OS/CPU platforms (repeatable, comma-separated): linux-x64, linux-arm64, windows-x64, windows-arm64, macos-x64, macos-arm64.
-    /// JVM bytecode is portable, so it builds the same classes; `kargo package --format jlink --platform` builds one runtime image per platform.
+    /// JVM bytecode is portable, so it builds the same classes; `kargo package --format jlink --platform` (or `--dist --bundle-runtime --platform`) builds one runtime image or distribution per platform.
     /// Wasm and JS ignore it (they are platform-independent) and Android takes none. Also `KARGO_PLATFORM` or `[build] platforms`
     #[arg(long, value_name = "OS-ARCH", value_delimiter = ',', env = "KARGO_PLATFORM")]
     platform: Vec<String>,
@@ -1774,7 +1781,9 @@ compile run the steps they need first, so this command is for editors, CI checks
   installer     an .msi, .dmg or .deb (see [package.installer] type) built by jpackage
 
 `--dist` writes an application distribution: target/dist/<name>-<version>.zip and .tar.gz with
-bin/ start scripts and lib/ jars, for machines that have Java.
+bin/ start scripts and lib/ jars, for machines that have Java. `--bundle-runtime` (or
+[package.dist] runtime) adds a trimmed Java runtime in runtime/ that the scripts prefer,
+and `--platform` then writes one archive per platform.
 
 `jlink` cross-builds: `--platform linux-arm64,windows-x64` builds one runtime image per platform,
 each in its own directory so they do not clobber each other. `native-image` and `installer` build
@@ -5068,7 +5077,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kargo", "package", "--dist", "--archive", "zip,tar.gz", "--no-scripts"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Package { dist: DistArgs { dist: true, no_scripts: true, ref archive }, .. } if archive.len() == 2
+            Command::Package { dist: DistArgs { dist: true, no_scripts: true, ref archive, .. }, .. } if archive.len() == 2
         ));
         assert!(Cli::try_parse_from(["kargo", "package", "--no-scripts"]).is_err(), "--no-scripts needs --dist");
         let cli = Cli::try_parse_from(["kargo", "package", "--desktop", "--format", "jar", "--platforms", "all,linux-x64"]).unwrap();

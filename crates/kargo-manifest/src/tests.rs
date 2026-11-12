@@ -2480,6 +2480,9 @@ category = "Development"
     assert!(parse_err(&with("[package.jlink]\njdeps = false")).contains("needs `modules`"));
     assert_eq!(parse(&with("[package.dist]\ninclude = [\"conf\", \"docs/NOTICE\"]")).packaging.dist.include.len(), 2);
     assert!(parse_err(&with("[package.dist]\ninclude = [\"../secret\"]")).contains("inside the project"));
+    assert_eq!(parse(MINIMAL).packaging.dist.runtime, None);
+    assert_eq!(parse(&with("[package.dist]\nruntime = \"jlink\"")).packaging.dist.runtime, Some(DistRuntime::Jlink));
+    assert!(parse_err(&with("[package.dist]\nruntime = \"docker\"")).contains("`runtime` must be one of jlink, got `docker`"));
     assert!(parse_err(&with("[package.native-image]\nstatic = \"yes\"")).contains("static"));
 }
 

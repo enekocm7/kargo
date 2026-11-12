@@ -1981,6 +1981,27 @@ pub struct ShadeSettings {
 pub struct DistSettings {
     /// Files and directories of the project, relative to its root, copied into the archive at the same path.
     pub include: Vec<PathBuf>,
+    /// `runtime`: the Java runtime the archive carries under `runtime/`; `None` carries none.
+    pub runtime: Option<DistRuntime>,
+}
+
+/// `[package.dist] runtime`: how the Java runtime of a distribution is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistRuntime {
+    /// A runtime trimmed by `jlink` to the JDK modules the program uses, as `--format jlink` builds it.
+    Jlink,
+}
+
+impl DistRuntime {
+    /// Every runtime, in the order the error message lists them.
+    pub const ALL: [DistRuntime; 1] = [DistRuntime::Jlink];
+
+    /// The name written in `runtime`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DistRuntime::Jlink => "jlink",
+        }
+    }
 }
 
 /// `[package.optimize]`: R8's JVM class-file shrinking and obfuscation settings.

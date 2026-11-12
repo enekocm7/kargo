@@ -6336,6 +6336,30 @@ fn package_dist_include_must_stay_inside_the_project() {
 }
 
 #[test]
+fn package_dist_runtime_must_be_jlink() {
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &format!(
+            "{}
+[package.dist]
+runtime = \"docker\"
+",
+            manifest(
+                "app",
+                "[target.jvm]
+"
+            )
+        ),
+    );
+    p.kargo()
+        .args(["package", "--dist"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[package.dist] `runtime` must be one of jlink, got `docker`"));
+}
+
+#[test]
 fn package_formats_check_their_flags_first() {
     let p = Project::new();
     p.file("kargo.toml", &manifest("app", "[target.jvm]\n[target.wasm]\n"));
@@ -6364,6 +6388,17 @@ fn package_formats_check_their_flags_first() {
         .failure()
         .stderr(predicate::str::contains("`--dist` packages a JVM application and needs the jvm target, not wasm"));
     p.kargo().args(["package", "--archive", "zip"]).assert().failure().stderr(predicate::str::contains("--dist"));
+    p.kargo().args(["package", "--bundle-runtime"]).assert().failure().stderr(predicate::str::contains("--dist"));
+    p.kargo()
+        .args(["package", "--dist", "--platform", "linux-arm64"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("`--platform` picks the Java runtime a distribution carries; add `--bundle-runtime`"));
+    // A bundled runtime accepts `--platform`: the check for `--format jar` does not apply to a distribution.
+    p.kargo().args(["--offline", "package", "--dist", "--bundle-runtime", "--platform", "linux-arm64"]).assert().failure().stderr(
+        predicate::str::contains("does not apply to `--format jar`").not().and(predicate::str::contains("`--platform` picks").not()),
+    );
     p.kargo().args(["package", "--dist", "--archive", "rar"]).assert().failure().stderr(predicate::str::contains("invalid value 'rar'"));
     p.kargo()
         .args(["run", "--native-agent", "--target", "wasm"])
