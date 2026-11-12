@@ -67,6 +67,8 @@ A compatible version has the same major version as the current one (for `0.x`, t
 
 The npm packages of the wasm and js targets are listed and upgraded next to the Maven ones, against the npm registry, within the range in `kargo.toml`: `^1.0.0` moves to the newest `1.x`, and `-i` crosses to the next major version. Only `1.2.3`, `^1.2.3` and `~1.2.3` are rewritten; other ranges are left alone.
 
+`kargo upgrade --group org.jetbrains.kotlinx` upgrades one Maven group, and both commands take `--format json` for scripts. To get these updates as pull requests, with a scheduled workflow or Renovate, see [Automated dependency updates](../dependency-updates/).
+
 `kargo upgrade` changes what you declared in `kargo.toml`. To move versions in `kargo.lock` only, for example a transitive dependency, use `kargo update` (see [The lockfile](#the-lockfile)).
 
 ## Removing unused dependencies

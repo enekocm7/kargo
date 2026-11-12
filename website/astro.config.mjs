@@ -100,6 +100,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Managing JDKs', slug: 'guides/toolchains' },
 						{ label: 'Continuous integration', slug: 'guides/ci' },
+						{ label: 'Automated dependency updates', slug: 'guides/dependency-updates' },
 						{ label: 'Build performance', slug: 'guides/build-performance' },
 						{ label: 'Offline and corporate builds', slug: 'guides/offline-and-mirrors' },
 					],

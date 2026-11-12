@@ -924,7 +924,7 @@ impl OnePackageArg {
     }
 }
 
-/// Output format of `kargo info` and `kargo tree`.
+/// Output format of the commands that print a table: `text` for people, `json` for scripts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 enum FormatArg {
     #[default]
@@ -1431,6 +1431,9 @@ enum Command {
         /// Publish the JUnit test reports in the run summary
         #[arg(long)]
         junit: bool,
+        /// Write a scheduled workflow that upgrades the dependencies and opens a pull request, instead of the CI workflow
+        #[arg(long, conflicts_with = "junit")]
+        updates: bool,
     },
     /// Compile the project
     #[command(visible_alias = "b")]
@@ -1634,6 +1637,9 @@ enum Command {
         /// Consider pre-release versions
         #[arg(long)]
         pre: bool,
+        /// Output format: `json` prints the newer versions on stdout
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -1641,6 +1647,9 @@ enum Command {
     Upgrade {
         /// Only these dependencies (group:artifact or the manifest key)
         names: Vec<String>,
+        /// Also the Maven dependencies of this group, such as `org.jetbrains.kotlinx` (repeatable)
+        #[arg(short, long = "group", value_name = "GROUP")]
+        groups: Vec<String>,
         /// Upgrade to the newest version even if it is not compatible (a new major version)
         #[arg(short, long)]
         incompatible: bool,
@@ -1650,6 +1659,9 @@ enum Command {
         /// Show what would change without writing kargo.toml
         #[arg(long)]
         dry_run: bool,
+        /// Output format: `json` prints the dependencies that changed on stdout
+        #[arg(long, value_enum, default_value_t)]
+        format: FormatArg,
         #[command(flatten)]
         package: OnePackageArg,
     },
@@ -3155,9 +3167,9 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
         Command::Template(args) => match args.command {
             TemplateCommand::List => list_templates(config),
         },
-        Command::InitCi { system, force, junit } => {
+        Command::InitCi { system, force, junit, updates } => {
             let project = load_project(global)?;
-            let report = ops::ci::init_ci(&project, &ops::ci::CiOptions { system: system.into(), force, junit })?;
+            let report = ops::ci::init_ci(&project, &ops::ci::CiOptions { system: system.into(), force, junit, updates })?;
             shell.status("Created", report.path.display());
             for step in &report.left_out {
                 shell.note(format!("left out {step}"));
@@ -4067,20 +4079,25 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             }
             Ok(0)
         }
-        Command::Outdated { names, pre, package } => {
+        Command::Outdated { names, pre, format, package } => {
             let ws = load_one(global, &package, "`kargo outdated`")?;
             let rows = ops::upgrade::outdated(config, &ws, &names, pre)?;
-            if rows.is_empty() {
+            if format == FormatArg::Json {
+                println!("{}", serde_json::to_string_pretty(&ops::upgrade::outdated_json(&ws, &rows))?);
+            } else if rows.is_empty() {
                 shell.status("Fresh", "every dependency in kargo.toml is on its newest version");
             } else {
                 print!("{}", ops::upgrade::render(&rows));
             }
             Ok(0)
         }
-        Command::Upgrade { names, incompatible, pre, dry_run, package } => {
+        Command::Upgrade { names, groups, incompatible, pre, dry_run, format, package } => {
             let ws = load_one(global, &package, "`kargo upgrade`")?;
-            let opts = ops::upgrade::UpgradeOptions { names, incompatible, prerelease: pre, dry_run };
-            if ops::upgrade::upgrade(config, &ws, &opts)?.is_empty() {
+            let opts = ops::upgrade::UpgradeOptions { names, groups, incompatible, prerelease: pre, dry_run };
+            let changed = ops::upgrade::upgrade(config, &ws, &opts)?;
+            if format == FormatArg::Json {
+                println!("{}", serde_json::to_string_pretty(&ops::upgrade::upgraded_json(&ws, &changed, dry_run))?);
+            } else if changed.is_empty() {
                 shell.status("Fresh", "no dependency in kargo.toml has a newer version to upgrade to");
             }
             Ok(0)
@@ -5256,6 +5273,11 @@ mod tests {
         assert!(Cli::try_parse_from(["kargo", "update", "--precise", "1.2"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "upgrade", "-i", "g:a", "--dry-run"]).unwrap();
         assert!(matches!(cli.command, Command::Upgrade { ref names, incompatible: true, dry_run: true, .. } if names == &["g:a"]));
+        let cli =
+            Cli::try_parse_from(["kargo", "upgrade", "-g", "org.jetbrains.kotlinx", "--group", "io.ktor", "--format", "json"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Upgrade { ref groups, format: FormatArg::Json, .. } if groups == &["org.jetbrains.kotlinx", "io.ktor"])
+        );
         let cli = Cli::try_parse_from(["kargo", "rm", "g:a", "-t", "wasm"]).unwrap();
         assert!(matches!(cli.command, Command::Remove(RemoveArgs { target: Some(TargetArg::Wasm), .. })));
         let cli = Cli::try_parse_from(["kargo", "doc", "--open", "-t", "jvm"]).unwrap();
@@ -5299,6 +5321,9 @@ mod tests {
         );
         let cli = Cli::try_parse_from(["kargo", "init-ci", "--junit", "--force"]).unwrap();
         assert!(matches!(cli.command, Command::InitCi { force: true, junit: true, .. }));
+        let cli = Cli::try_parse_from(["kargo", "init-ci", "--updates"]).unwrap();
+        assert!(matches!(cli.command, Command::InitCi { updates: true, .. }));
+        assert!(Cli::try_parse_from(["kargo", "init-ci", "--updates", "--junit"]).is_err());
         let cli = Cli::try_parse_from(["kargo", "build", "--vendored"]).unwrap();
         assert!(cli.global.vendored);
         let cli = Cli::try_parse_from(["kargo", "fetch", "--sources"]).unwrap();

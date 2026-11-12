@@ -180,7 +180,7 @@ The command refuses a directory that already has a `kargo.toml`, plans every mov
 Write a CI workflow for the project, from its `kargo.toml`.
 
 ```sh
-kargo init-ci [--system github|gitlab] [--junit] [--force]
+kargo init-ci [--system github|gitlab] [--junit | --updates] [--force]
 ```
 
 ```console
@@ -194,6 +194,7 @@ $ kargo init-ci
 |---|---|
 | `--system <name>` | The CI system: `github` (GitHub Actions, writes `.github/workflows/ci.yml`; the default) or `gitlab` (GitLab CI, writes `.gitlab-ci.yml`) |
 | `--junit` | Run `kargo test --report junit` and publish the reports: in the run summary on GitHub, as a JUnit report on GitLab |
+| `--updates` | Write the GitHub Actions `.github/workflows/kargo-updates.yml` instead of the CI workflow: a weekly workflow that runs `kargo upgrade` and `kargo update` and opens a pull request. Not with `--junit` or `--system gitlab`. See [Automated dependency updates](../../guides/dependency-updates/) |
 | `--force` | Replace the workflow if it exists. Without it, an existing file is an error |
 
 It prints what it wrote and each step it left out, with the reason. See [Continuous integration](../../guides/ci/#generating-a-workflow) for the workflows, the `setup-kargo` action of the GitHub one and the GitLab pipeline.
@@ -648,7 +649,7 @@ Path dependencies are removed by their key: `kargo remove mathlib`. Without an o
 List the dependencies in `kargo.toml` that have newer versions in your repositories.
 
 ```sh
-kargo outdated [group:artifact or key or npm package]... [--pre]
+kargo outdated [group:artifact or key or npm package]... [--pre] [--format json]
 ```
 
 ```console
@@ -670,6 +671,7 @@ left-pad                                ^1.0.0   ^1.3.0      ^1.3.0   target.was
 |---|---|
 | `names` | Only check these dependencies |
 | `--pre` | Consider pre-release versions. Dependencies already on a pre-release always consider them |
+| `--format <text\|json>` | `json` prints one JSON object with the newer versions on stdout instead of the table, even when there are none. See [Automated dependency updates](../../guides/dependency-updates/#machine-readable-output) |
 | `-p, --package <name>` | The workspace member to check |
 
 A dependency stays on its variant: `33.0.0-jre` is compared with other `-jre` versions, and a plain version never moves to a `-compat` one. Dependencies declared with a version range or without a version (managed by a BOM) are skipped. The command only reads; nothing is changed.
@@ -681,7 +683,7 @@ The npm packages of `[target.wasm.npm-dependencies]`, `[target.js.npm-dependenci
 Raise the versions in `kargo.toml` to the newest compatible versions, keeping the file's formatting and comments.
 
 ```sh
-kargo upgrade [group:artifact or key]... [options]
+kargo upgrade [group:artifact or key]... [-g <group>]... [options]
 ```
 
 ```console
@@ -694,9 +696,11 @@ note: `org.jetbrains.kotlinx:kotlinx-datetime` 0.8.0 is available but not compat
 | Option | Meaning |
 |---|---|
 | `names` | Only upgrade these dependencies |
+| `-g, --group <group>` | Also upgrade every Maven dependency of this group, such as `org.jetbrains.kotlinx` (repeatable). Fails when no declared dependency belongs to it. With `names` or `--group`, nothing else changes |
 | `-i, --incompatible` | Upgrade to the newest version even across a major version (or a `0.x` minor version) |
 | `--pre` | Consider pre-release versions |
 | `--dry-run` | Print the changes without writing `kargo.toml` |
+| `--format <text\|json>` | `json` prints one JSON object with the dependencies that changed (`from` and `to`) on stdout; the `Upgrading` lines stay on stderr. See [Automated dependency updates](../../guides/dependency-updates/#machine-readable-output) |
 | `-p, --package <name>` | The workspace member whose `kargo.toml` to edit |
 
 Dependencies inherited with `workspace = true` are skipped; upgrade them in the workspace's `kargo.toml`. "Compatible" follows the same rule as the `compatible` column of [`kargo outdated`](#kargo-outdated). npm packages are upgraded too, keeping the `^` or `~` of the entry: `left-pad = "^1.0.0"` becomes `"^1.3.0"`, or with `--incompatible` the newest version, `"^2.0.0"`; a spec that isn't a single version is skipped (naming it says so). `kargo.lock` is re-resolved on the next build because the manifest changed.

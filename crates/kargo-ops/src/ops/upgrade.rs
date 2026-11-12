@@ -3,6 +3,7 @@
 //! and the same of `js`), and bump them in place.
 
 use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 
 use crate::npm_registry::Registry;
 use crate::npm_semver::{Pinned, newer};
@@ -29,6 +30,14 @@ impl Section {
             Section::Npm { target, dev } => format!("target.{target}.{}", npm_table_key(dev)),
         }
     }
+
+    /// Where the dependency is published: `maven` or `npm`.
+    pub fn ecosystem(self) -> &'static str {
+        match self {
+            Section::Maven(_) => "maven",
+            Section::Npm { .. } => "npm",
+        }
+    }
 }
 
 /// A declared dependency and the newer versions available for it.
@@ -46,10 +55,29 @@ pub struct Outdated {
     pub latest: Option<String>,
 }
 
+impl Outdated {
+    /// This dependency after `kargo upgrade` moved it to `to`.
+    fn upgraded(self, to: String) -> Upgraded {
+        Upgraded { name: self.name, module: self.module, section: self.section, from: self.current, to }
+    }
+}
+
+/// A dependency `kargo upgrade` moved to a new version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upgraded {
+    pub name: String,
+    pub module: String,
+    pub section: Section,
+    pub from: String,
+    pub to: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UpgradeOptions {
-    /// Only these dependencies (`group:artifact` or manifest key); all when empty.
+    /// Only these dependencies (`group:artifact` or manifest key); all when empty and no `groups`.
     pub names: Vec<String>,
+    /// Also the Maven dependencies of these groups (`org.jetbrains.kotlinx`).
+    pub groups: Vec<String>,
     /// Also consider versions that are not compatible with the current one.
     pub incompatible: bool,
     /// Consider pre-release versions (always done for dependencies already on a pre-release).
@@ -89,9 +117,9 @@ pub(crate) fn declared_npm(manifest: &Manifest) -> Vec<(TargetKind, bool, String
 type NpmDeclaration = (TargetKind, bool, String, String);
 type Selected<'m> = (Vec<(DependencySection, &'m Dependency)>, Vec<NpmDeclaration>);
 
-/// The declared Maven dependencies and npm packages selected by `names` (all when empty), failing on a name
-/// that matches neither.
-fn selected<'m>(manifest: &'m Manifest, names: &[String]) -> Result<Selected<'m>> {
+/// The declared Maven dependencies and npm packages selected by `names` and the Maven `groups` (all when both
+/// are empty), failing on a name or group that matches nothing.
+fn selected<'m>(manifest: &'m Manifest, names: &[String], groups: &[String]) -> Result<Selected<'m>> {
     let all = declared(manifest);
     let npm = declared_npm(manifest);
     for name in names {
@@ -99,9 +127,17 @@ fn selected<'m>(manifest: &'m Manifest, names: &[String]) -> Result<Selected<'m>
             bail!("dependency `{name}` is not declared in kargo.toml");
         }
     }
-    let maven =
-        all.into_iter().filter(|(_, d)| names.is_empty() || names.iter().any(|n| d.name == *n || d.module.to_string() == *n)).collect();
-    let npm = npm.into_iter().filter(|(_, _, n, _)| names.is_empty() || names.contains(n)).collect();
+    for group in groups {
+        if !all.iter().any(|(_, d)| d.module.group == *group) {
+            bail!("no dependency of group `{group}` is declared in kargo.toml");
+        }
+    }
+    let everything = names.is_empty() && groups.is_empty();
+    let maven = all
+        .into_iter()
+        .filter(|(_, d)| everything || names.iter().any(|n| d.name == *n || d.module.to_string() == *n) || groups.contains(&d.module.group))
+        .collect();
+    let npm = npm.into_iter().filter(|(_, _, n, _)| everything || names.contains(n)).collect();
     Ok((maven, npm))
 }
 
@@ -144,7 +180,7 @@ fn check(client: &MavenClient, section: Section, dep: &Dependency, prerelease: b
 
 /// `kargo outdated`: the declared dependencies, then the npm packages, that have newer versions.
 pub fn outdated(config: &Config, ws: &Workspace, names: &[String], prerelease: bool) -> Result<Vec<Outdated>> {
-    let (maven, npm) = selected(ws.manifest(), names)?;
+    let (maven, npm) = selected(ws.manifest(), names, &[])?;
     let mut out = Vec::new();
     if !maven.is_empty() {
         let client = MavenClient::new(config, ws.manifest().repositories.clone());
@@ -184,18 +220,62 @@ pub fn render(rows: &[Outdated]) -> String {
     out
 }
 
+/// Describes `kargo outdated` results for `--format json`.
+pub fn outdated_json(ws: &Workspace, rows: &[Outdated]) -> Value {
+    let rows: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "module": r.module,
+                "ecosystem": r.section.ecosystem(),
+                "section": r.section.display(),
+                "current": r.current,
+                "compatible": r.compatible,
+                "latest": r.latest,
+            })
+        })
+        .collect();
+    json!({ "package": package_json(ws), "outdated": rows })
+}
+
+/// Describes the changes of `kargo upgrade` for `--format json`.
+pub fn upgraded_json(ws: &Workspace, rows: &[Upgraded], dry_run: bool) -> Value {
+    let rows: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "module": r.module,
+                "ecosystem": r.section.ecosystem(),
+                "section": r.section.display(),
+                "from": r.from,
+                "to": r.to,
+            })
+        })
+        .collect();
+    json!({ "package": package_json(ws), "dry-run": dry_run, "upgraded": rows })
+}
+
+fn package_json(ws: &Workspace) -> Value {
+    let package = &ws.manifest().package;
+    json!({ "name": package.name, "version": package.version })
+}
+
 /// `kargo upgrade`: rewrites the versions in `kargo.toml` to the newest compatible versions (or
 /// the newest overall with `incompatible`), preserving formatting. Returns the changes made.
-pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result<Vec<Outdated>> {
+pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result<Vec<Upgraded>> {
     let client = MavenClient::new(config, ws.manifest().repositories.clone());
     let registry = Registry::new(config, ws.root());
     let mut editor = ManifestEditor::load(&ws.manifest_path())?;
     let mut changed = Vec::new();
-    let (maven, npm) = selected(ws.manifest(), &opts.names)?;
+    let (maven, npm) = selected(ws.manifest(), &opts.names, &opts.groups)?;
     let named = |name: &str, module: &str| opts.names.iter().any(|n| n == name || n == module);
+    // The dependencies the user asked for, by name or by group: they get a note when they are skipped.
+    let asked = |dep: &Dependency| named(&dep.name, &dep.module.to_string()) || opts.groups.contains(&dep.module.group);
     for (section, dep) in maven {
         if editor.is_inherited(section, &dep.name) {
-            if named(&dep.name, &dep.module.to_string()) {
+            if asked(dep) {
                 config
                     .shell()
                     .note(format!("`{}` is inherited from [workspace.dependencies]; upgrade it in the workspace's kargo.toml", dep.name));
@@ -203,7 +283,7 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
             continue;
         }
         let Some(o) = check(&client, Section::Maven(section), dep, opts.prerelease)? else {
-            if named(&dep.name, &dep.module.to_string()) {
+            if asked(dep) {
                 config.shell().note(format!("`{}` has no single version to upgrade (a range or a BOM-managed version)", dep.name));
             }
             continue;
@@ -211,7 +291,7 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
         let Some(target) = pick(config, opts, &o) else { continue };
         editor.set_dependency_version(section, &dep.module, &target)?;
         config.shell().status("Upgrading", format!("{} v{} -> v{target} in [{}]", o.name, o.current, section.display()));
-        changed.push(o);
+        changed.push(o.upgraded(target));
     }
     for (kind, dev, name, spec) in npm {
         let Some(o) = check_npm(&registry, kind, dev, &name, &spec, opts.prerelease)? else {
@@ -225,7 +305,7 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
         let Some(target) = pick(config, opts, &o) else { continue };
         editor.set_npm_version(kind, dev, &name, &target)?;
         config.shell().status("Upgrading", format!("{name} {spec} -> {target} in [{}]", o.section.display()));
-        changed.push(o);
+        changed.push(o.upgraded(target));
     }
     if opts.dry_run {
         config.shell().warn("aborting upgrade due to dry run; kargo.toml was not changed");
@@ -323,5 +403,38 @@ mod tests {
         let text = std::fs::read_to_string(ws.manifest_path()).unwrap();
         assert!(text.contains("\"com.acme:datetime\" = \"0.8.0\""), "plain version, not the compat variant: {text}");
         assert!(text.contains("\"com.acme:widget\" = \"1.2.0\""), "only the named dependency: {text}");
+    }
+
+    #[test]
+    fn upgrade_one_group_and_describe_the_changes() {
+        let (_p, _h, config, ws) = setup(
+            "[dependencies]
+\"com.acme:widget\" = \"1.0.0\"
+\"org.other:tool\" = \"1.0\"
+
+[dev-dependencies]
+\"com.acme:datetime\" = \"0.6.0\"
+",
+        );
+        let opts = UpgradeOptions { groups: vec!["com.acme".into()], dry_run: true, ..Default::default() };
+        let changed = upgrade(&config, &ws, &opts).unwrap();
+        let names: Vec<&str> = changed.iter().map(|c| c.module.as_str()).collect();
+        assert_eq!(names, ["com.acme:widget", "com.acme:datetime"]);
+        assert_eq!((changed[0].from.as_str(), changed[0].to.as_str()), ("1.0.0", "1.2.0"));
+
+        let json = upgraded_json(&ws, &changed, true);
+        assert_eq!(json["dry-run"], true);
+        assert_eq!(json["package"]["name"], "p");
+        assert_eq!(json["upgraded"][1]["section"], "dev-dependencies");
+        assert_eq!(json["upgraded"][1]["ecosystem"], "maven");
+        assert_eq!(json["upgraded"][1]["to"], "0.6.2");
+
+        let rows = outdated(&config, &ws, &["com.acme:widget".into()], false).unwrap();
+        let json = outdated_json(&ws, &rows);
+        assert_eq!(json["outdated"][0]["latest"], "2.0.0");
+        assert_eq!(json["outdated"][0]["compatible"], "1.2.0");
+
+        let err = upgrade(&config, &ws, &UpgradeOptions { groups: vec!["com.nope".into()], ..Default::default() }).unwrap_err();
+        assert!(err.to_string().contains("no dependency of group `com.nope`"), "{err}");
     }
 }
