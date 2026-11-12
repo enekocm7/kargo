@@ -560,6 +560,67 @@ fn outdated_and_upgrade_edit_versions_in_kargo_toml() {
     p.kargo().args(["upgrade", "com.acme:nope"]).assert().failure().stderr(predicate::str::contains("not declared"));
 }
 
+#[test]
+fn upgrade_one_group_and_print_json() {
+    let repo = LocalRepo::new();
+    for v in ["1.0.0", "1.4.0", "2.0.0"] {
+        repo.publish("com.acme:widget", v, &[]);
+    }
+    for v in ["1.0.0", "1.1.0"] {
+        repo.publish("org.other:tool", v, &[]);
+    }
+    let p = Project::new();
+    p.file(
+        "kargo.toml",
+        &manifest(
+            "app",
+            &format!(
+                "
+[dependencies]
+\"com.acme:widget\" = \"1.0.0\"
+\"org.other:tool\" = \"1.0.0\"
+
+[repositories]
+local = \"{}\"
+",
+                repo.url()
+            ),
+        ),
+    );
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = p.kargo().args(args).assert().success().get_output().stdout.clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+
+    let outdated = json(&["outdated", "--format", "json"]);
+    assert_eq!(outdated["package"]["name"], "app");
+    assert_eq!(outdated["outdated"][0]["module"], "com.acme:widget");
+    assert_eq!(outdated["outdated"][0]["compatible"], "1.4.0");
+    assert_eq!(outdated["outdated"][0]["latest"], "2.0.0");
+    assert_eq!(outdated["outdated"][1]["section"], "dependencies");
+
+    let dry = json(&["upgrade", "--group", "org.other", "--dry-run", "--format", "json", "-p", "app"]);
+    assert_eq!(dry["dry-run"], true);
+    assert_eq!(dry["upgraded"].as_array().unwrap().len(), 1);
+    assert!(p.read("kargo.toml").contains("\"org.other:tool\" = \"1.0.0\""));
+
+    let done = json(&["upgrade", "-g", "org.other", "--format", "json"]);
+    assert_eq!(done["dry-run"], false);
+    assert_eq!(done["upgraded"][0]["name"], "org.other:tool");
+    assert_eq!(done["upgraded"][0]["from"], "1.0.0");
+    assert_eq!(done["upgraded"][0]["to"], "1.1.0");
+    assert_eq!(done["upgraded"][0]["ecosystem"], "maven");
+    let text = p.read("kargo.toml");
+    assert!(text.contains("\"org.other:tool\" = \"1.1.0\"") && text.contains("\"com.acme:widget\" = \"1.0.0\""), "{text}");
+
+    assert_eq!(json(&["upgrade", "-g", "org.other", "--format", "json"])["upgraded"].as_array().unwrap().len(), 0);
+    p.kargo()
+        .args(["upgrade", "--group", "com.nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no dependency of group `com.nope`"));
+}
+
 fn osv_advisory(id: &str, alias: &str, package: &str, fixed: &str, severity: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -8217,6 +8278,35 @@ fn init_ci_writes_a_gitlab_pipeline() {
     assert!(!p.path().join(".github").exists(), "only the chosen system is written");
 
     p.kargo().args(["init-ci", "--system", "gitlab"]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn init_ci_writes_the_dependency_updates_workflow() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", ""));
+    p.kargo().args(["init-ci", "--updates"]).assert().success().stderr(predicate::str::contains("kargo-updates.yml"));
+    let workflow = p.read(".github/workflows/kargo-updates.yml");
+    assert!(workflow.contains("schedule:") && workflow.contains("setup-kargo@") && workflow.contains("peter-evans/create-pull-request"));
+    assert!(workflow.contains("for package in app; do") && workflow.contains("kargo upgrade -p \"$package\" --format json"));
+    assert!(
+        workflow.contains(
+            "kargo update
+"
+        ) && workflow.contains("kargo outdated -p \"$package\" --format json")
+    );
+    assert!(!p.path().join(".github/workflows/ci.yml").exists());
+
+    p.kargo().args(["init-ci", "--updates"]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));
+    p.kargo().args(["init-ci", "--updates", "--junit"]).assert().failure();
+    // The updates workflow is the GitHub one, so GitLab is not a system it can write.
+    p.kargo()
+        .args(["init-ci", "--updates", "--system", "gitlab"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("not available for `--system gitlab`"));
+    p.kargo().arg("init-ci").assert().success();
+    assert!(p.path().join(".github/workflows/ci.yml").exists());
 }
 
 /// `kargo` in `p` talking to the fake npm registry `registry`, whatever `.npmrc` the machine has.

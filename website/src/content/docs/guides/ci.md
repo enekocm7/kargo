@@ -21,6 +21,8 @@ It runs `fmt --check`, `lint`, `check --tests --locked`, `build --locked`, `test
 - An `ubuntu-latest`, `macos-latest` and `windows-latest` matrix when a package has a Kotlin/Native target.
 - `--junit` runs `kargo test --report junit` and publishes the reports (see [Test results](#test-results)).
 
+`kargo init-ci --updates` writes a second workflow instead, one that upgrades the dependencies on a schedule and opens a pull request (see [Automated dependency updates](../dependency-updates/)). It is a GitHub Actions workflow, so it is not available with `--system gitlab`.
+
 The command prints each step it left out and why. It refuses to replace an existing workflow unless you pass `--force`. `--system` picks the CI system: `github` (the default) or `gitlab` (see [GitLab CI](#gitlab-ci)).
 
 ### The setup-kargo action

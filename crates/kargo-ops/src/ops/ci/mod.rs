@@ -1,6 +1,7 @@
 //! `kargo init-ci`: writes a CI workflow for the project, with the steps of the CI guide and the
 //! setup that `kargo.toml` implies (a JDK unless `[toolchain] jdk` is set, Node for Wasm, an OS
-//! matrix for Kotlin/Native). [`CiPlan`] holds what the project needs; each CI system has a writer
+//! matrix for Kotlin/Native), or with `--updates` a scheduled workflow that opens a pull request with
+//! the dependency updates. [`CiPlan`] holds what the project needs; each CI system has a writer
 //! module that turns it into text.
 
 mod github;
@@ -28,6 +29,9 @@ const PACKAGE: &str = "package --release --locked";
 /// Where `kargo test --report junit` writes the reports, as a glob from the project root.
 const JUNIT_REPORTS: &str = "target/*/*/test-reports*/*.xml";
 
+/// Where the `--updates` workflow goes, relative to the project root.
+const UPDATES_PATH: &str = ".github/workflows/kargo-updates.yml";
+
 /// The CI systems `kargo init-ci` can write a workflow for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CiSystem {
@@ -45,6 +49,14 @@ impl CiSystem {
             CiSystem::Gitlab => ".gitlab-ci.yml",
         }
     }
+
+    /// The value of `--system` that picks this system.
+    pub fn name(self) -> &'static str {
+        match self {
+            CiSystem::Github => "github",
+            CiSystem::Gitlab => "gitlab",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +66,8 @@ pub struct CiOptions {
     pub force: bool,
     /// Publish the JUnit reports of the tests in the CI's test summary.
     pub junit: bool,
+    /// Write the scheduled dependency update workflow instead of the CI workflow.
+    pub updates: bool,
 }
 
 /// What `init_ci` wrote.
@@ -116,19 +130,32 @@ impl CiPlan {
 
 /// Writes the workflow for the project.
 pub fn init_ci(project: &Project, opts: &CiOptions) -> Result<CiReport> {
+    if opts.updates && opts.system != CiSystem::Github {
+        bail!(
+            "`--updates` writes a GitHub Actions workflow; it is not available for `--system {}`, so pass `--system github` (the default) instead",
+            opts.system.name()
+        );
+    }
     let plan = CiPlan::from_project(project, opts.junit);
-    let path: PathBuf = Path::new(project.root()).join(opts.system.path());
+    let relative = if opts.updates { UPDATES_PATH } else { opts.system.path() };
+    let path: PathBuf = Path::new(project.root()).join(relative);
     if path.exists() && !opts.force {
         bail!("`{}` already exists; pass `--force` to overwrite it", path.display());
     }
     let version = env!("CARGO_PKG_VERSION");
-    let text = match opts.system {
-        CiSystem::Github => github::workflow(&plan, version),
-        CiSystem::Gitlab => gitlab::pipeline(&plan, version),
+    let text = if opts.updates {
+        let packages: Vec<&str> = project.members().iter().map(|&i| project.package(i).manifest().package.name.as_str()).collect();
+        github::updates_workflow(version, &packages)
+    } else {
+        match opts.system {
+            CiSystem::Github => github::workflow(&plan, version),
+            CiSystem::Gitlab => gitlab::pipeline(&plan, version),
+        }
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     }
     std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(CiReport { path, left_out: plan.left_out(opts.system) })
+    let left_out = if opts.updates { Vec::new() } else { plan.left_out(opts.system) };
+    Ok(CiReport { path, left_out })
 }

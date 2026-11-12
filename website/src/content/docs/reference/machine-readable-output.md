@@ -16,6 +16,7 @@ Kargo's normal output is for people. Editors, scripts and CI systems can ask for
 | The resolved dependency graph | `kargo tree --format json` |
 | Why a module and its version are on the classpath | `kargo why <module> --format json` |
 | Per-test results for CI | `kargo test --report junit` |
+| The newer versions of the dependencies, and what `kargo upgrade` changed | `kargo outdated --format json`, `kargo upgrade --format json` |
 | The devices, emulators and virtual devices `kargo run -t android` can use | `kargo android devices --format json` |
 
 JSON goes to stdout. Kargo's status lines (`Compiling`, `Finished`, ...) stay on stderr, so you can pipe stdout straight into a JSON parser.
@@ -438,6 +439,10 @@ $ kargo why g:util --format json
 | `from.kind` | `project` (with `force`), `dependency`, `relocation`, `variant`, `constraint` (each with the `module` and `version` that asked), `platform` (also with the `platform` and `platform-version`), `bom` (the BOM's `module` and `version`) or `substitute` (the `module` that was replaced) |
 | `paths` | Each path from a dependency in `kargo.toml` to the module, as `group:artifact:version`: the shortest one, or all of them (at most 100) with `--all-paths` |
 | `truncated` | Whether there were more paths than were listed |
+
+## `kargo outdated --format json` and `kargo upgrade --format json`
+
+Both print one object with the `package` and a list: `outdated` (each entry with `name`, `module`, `ecosystem`, `section`, `current`, `compatible` and `latest`) or, for `kargo upgrade`, `dry-run` and `upgraded` (each entry with `name`, `module`, `ecosystem`, `section`, `from` and `to`). The fields and an example are in [Automated dependency updates](../../guides/dependency-updates/#machine-readable-output).
 
 ## `kargo android devices --format json`
 
