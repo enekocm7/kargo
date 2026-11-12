@@ -621,6 +621,19 @@ local = \"{}\"
         .stderr(predicate::str::contains("no dependency of group `com.nope`"));
 }
 
+#[test]
+fn upgrade_by_group_says_which_dependencies_it_cannot_change() {
+    let p = Project::new();
+    p.file("kargo.toml", "[workspace]\nmembers = [\"app\"]\n\n[workspace.dependencies]\n\"g:util\" = \"1.0\"\n")
+        .file("app/kargo.toml", &manifest("app", "[dependencies]\n\"g:util\" = { workspace = true }\n"));
+    // A group names dependencies the way a name does, so it gets the same notes about the ones it skips.
+    p.kargo()
+        .args(["upgrade", "-g", "g", "-p", "app"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("`g:util` is inherited from [workspace.dependencies]"));
+}
+
 fn osv_advisory(id: &str, alias: &str, package: &str, fixed: &str, severity: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -8288,12 +8301,8 @@ fn init_ci_writes_the_dependency_updates_workflow() {
     let workflow = p.read(".github/workflows/kargo-updates.yml");
     assert!(workflow.contains("schedule:") && workflow.contains("setup-kargo@") && workflow.contains("peter-evans/create-pull-request"));
     assert!(workflow.contains("for package in app; do") && workflow.contains("kargo upgrade -p \"$package\" --format json"));
-    assert!(
-        workflow.contains(
-            "kargo update
-"
-        ) && workflow.contains("kargo outdated -p \"$package\" --format json")
-    );
+    assert!(workflow.contains("\n          kargo update\n"), "the lockfile follows the upgrade: {workflow}");
+    assert!(workflow.contains("kargo outdated -p \"$package\" --format json"));
     assert!(!p.path().join(".github/workflows/ci.yml").exists());
 
     p.kargo().args(["init-ci", "--updates"]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));

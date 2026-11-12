@@ -271,9 +271,11 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
     let mut changed = Vec::new();
     let (maven, npm) = selected(ws.manifest(), &opts.names, &opts.groups)?;
     let named = |name: &str, module: &str| opts.names.iter().any(|n| n == name || n == module);
+    // The dependencies the user asked for, by name or by group: they get a note when they are skipped.
+    let asked = |dep: &Dependency| named(&dep.name, &dep.module.to_string()) || opts.groups.contains(&dep.module.group);
     for (section, dep) in maven {
         if editor.is_inherited(section, &dep.name) {
-            if named(&dep.name, &dep.module.to_string()) {
+            if asked(dep) {
                 config
                     .shell()
                     .note(format!("`{}` is inherited from [workspace.dependencies]; upgrade it in the workspace's kargo.toml", dep.name));
@@ -281,7 +283,7 @@ pub fn upgrade(config: &Config, ws: &Workspace, opts: &UpgradeOptions) -> Result
             continue;
         }
         let Some(o) = check(&client, Section::Maven(section), dep, opts.prerelease)? else {
-            if named(&dep.name, &dep.module.to_string()) {
+            if asked(dep) {
                 config.shell().note(format!("`{}` has no single version to upgrade (a range or a BOM-managed version)", dep.name));
             }
             continue;

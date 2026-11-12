@@ -924,7 +924,7 @@ impl OnePackageArg {
     }
 }
 
-/// Output format of `kargo info` and `kargo tree`.
+/// Output format of the commands that print a table: `text` for people, `json` for scripts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 enum FormatArg {
     #[default]

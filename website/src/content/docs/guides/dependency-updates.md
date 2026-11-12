@@ -15,10 +15,10 @@ kargo init-ci --updates
 
 Every Monday at 06:00 UTC, and when you start it by hand from the Actions tab, the workflow:
 
-1. runs `kargo upgrade --format json` for each package of the project, which raises the versions in `kargo.toml` to the newest compatible ones;
+1. runs `kargo upgrade -p <name> --format json` for each package of the project, which raises the versions in `kargo.toml` to the newest compatible ones;
 2. runs `kargo update`, so `kargo.lock` follows;
-3. runs `kargo outdated --format json`, which now lists only the newer versions that are not compatible;
-4. opens (or updates) the pull request `kargo/dependency-updates` with [peter-evans/create-pull-request](https://github.com/peter-evans/create-pull-request). Its description is a table of what moved, and a second table of the versions that need `kargo upgrade --incompatible`.
+3. runs `kargo outdated -p <name> --format json`, which lists the newer versions `kargo upgrade` left alone;
+4. opens (or updates) the pull request `kargo/dependency-updates` with [peter-evans/create-pull-request](https://github.com/peter-evans/create-pull-request). Its description is a table of what moved, and a second table of the newer versions `kargo upgrade` left alone: the incompatible ones, which `kargo upgrade --incompatible <name>` raises, and the dependencies inherited from `[workspace.dependencies]`, which are raised in the workspace manifest.
 
 When nothing changed, no pull request is opened. The workflow installs Kargo with the [`setup-kargo` action](../ci/#the-setup-kargo-action) and, like the CI workflow, pins the version of the Kargo that wrote it. Edit the `cron` line to change the schedule.
 
@@ -35,33 +35,39 @@ The command refuses to replace an existing workflow unless you pass `--force`. `
 ```console
 $ kargo outdated --format json
 {
-  "package": { "name": "app", "version": "1.0.0" },
   "outdated": [
     {
-      "name": "io.mockk:mockk",
-      "module": "io.mockk:mockk",
-      "ecosystem": "maven",
-      "section": "dev-dependencies",
-      "current": "1.13.0",
       "compatible": "1.14.11",
-      "latest": "1.14.11"
+      "current": "1.13.0",
+      "ecosystem": "maven",
+      "latest": "1.14.11",
+      "module": "io.mockk:mockk",
+      "name": "io.mockk:mockk",
+      "section": "dev-dependencies"
     }
-  ]
+  ],
+  "package": {
+    "name": "app",
+    "version": "1.0.0"
+  }
 }
 ```
 
 ```console
 $ kargo upgrade --format json
 {
-  "package": { "name": "app", "version": "1.0.0" },
   "dry-run": false,
+  "package": {
+    "name": "app",
+    "version": "1.0.0"
+  },
   "upgraded": [
     {
-      "name": "io.mockk:mockk",
-      "module": "io.mockk:mockk",
       "ecosystem": "maven",
-      "section": "dev-dependencies",
       "from": "1.13.0",
+      "module": "io.mockk:mockk",
+      "name": "io.mockk:mockk",
+      "section": "dev-dependencies",
       "to": "1.14.11"
     }
   ]
@@ -139,7 +145,7 @@ kargo upgrade -g io.ktor -g io.mockk --incompatible
 }
 ```
 
-The first manager reads the Maven forms of the [`[dependencies]`](../../reference/manifest/#dependencies-and-dev-dependencies) tables (and the per-target, `[dev-dependencies]`, `[workspace.dependencies]` and profile ones, since it does not care which table an entry is in):
+The first manager reads the Maven forms of the [`[dependencies]`](../../reference/manifest/#dependencies-and-dev-dependencies) tables — and of `[dev-dependencies]`, the per-target tables, `[workspace.dependencies]` and `[profile.<name>.dependencies]`, since it does not care which table an entry is in:
 
 ```toml
 "io.mockk:mockk" = "1.14.11"
