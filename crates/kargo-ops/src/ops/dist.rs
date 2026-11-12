@@ -322,6 +322,7 @@ pub fn dist(
         Runtime::Jlink(platforms) if !platforms.is_empty() => platforms.iter().copied().map(Some).collect(),
         _ => vec![None],
     };
+    let bundled = modules.is_some();
     let mut files = Vec::new();
     for platform in platforms {
         let top = match platform {
@@ -339,7 +340,6 @@ pub fn dist(
             for program in programs {
                 let app = App { name: &program.name, main_class: program.main_class.clone(), jvm, dir: out.clone() };
                 let jvm_args = app_jvm_args(ctx, &app, None)?;
-                let bundled = modules.is_some();
                 let script = bin.join(&program.name);
                 kargo_util::fs::write_string_atomic(&script, &unix_script(program, &jvm_args, &jars, bundled))?;
                 #[cfg(unix)]

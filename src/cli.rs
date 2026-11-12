@@ -1047,7 +1047,7 @@ struct BuildArgs {
     #[arg(long, value_enum, value_name = "SET", conflicts_with = "targets")]
     target_set: Option<TargetSetArg>,
     /// Only build for these OS/CPU platforms (repeatable, comma-separated): linux-x64, linux-arm64, windows-x64, windows-arm64, macos-x64, macos-arm64.
-    /// JVM bytecode is portable, so it builds the same classes; `kargo package --format jlink --platform` builds one runtime image per platform.
+    /// JVM bytecode is portable, so it builds the same classes; `kargo package --format jlink --platform` (or `--dist --bundle-runtime --platform`) builds one runtime image or distribution per platform.
     /// Wasm and JS ignore it (they are platform-independent) and Android takes none. Also `KARGO_PLATFORM` or `[build] platforms`
     #[arg(long, value_name = "OS-ARCH", value_delimiter = ',', env = "KARGO_PLATFORM")]
     platform: Vec<String>,

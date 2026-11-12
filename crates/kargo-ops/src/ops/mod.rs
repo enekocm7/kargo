@@ -684,7 +684,7 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
             "`--platform` builds runtime images for other OS/CPU platforms and does not combine with `--platforms`, which adds Skiko natives to a jar; use one of them"
         );
     }
-    if !opts.platform.is_empty() && format == PackageFormat::Jar && !opts.desktop {
+    if !opts.platform.is_empty() && format == PackageFormat::Jar && !opts.desktop && opts.dist.is_none() {
         bail!(
             "`--platform` cross-builds `--format jlink` runtime images and does not apply to `--format jar`; leave it out for a portable jar, or use `--format jlink --platform`"
         );

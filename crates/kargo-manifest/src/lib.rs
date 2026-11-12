@@ -1993,6 +1993,7 @@ pub enum DistRuntime {
 }
 
 impl DistRuntime {
+    /// Every runtime, in the order the error message lists them.
     pub const ALL: [DistRuntime; 1] = [DistRuntime::Jlink];
 
     /// The name written in `runtime`.
