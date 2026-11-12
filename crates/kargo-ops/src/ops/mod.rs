@@ -599,6 +599,8 @@ pub struct DistOptions {
     pub archives: Vec<dist::Archive>,
     /// Write `bin/` start scripts (`false` for `--no-scripts`).
     pub scripts: bool,
+    /// `--bundle-runtime`: put a `jlink` runtime in the distribution even when `[package.dist] runtime` is not set.
+    pub bundle_runtime: bool,
 }
 
 /// `kargo package`: builds a self-contained ("fat") jar for the JVM target, launching
@@ -608,7 +610,8 @@ pub struct DistOptions {
 /// a GraalVM native executable or a `jpackage` installer (see [`packaging`]). `desktop` packages a
 /// Compose Desktop application: an installer by default, or with `platforms` a jar that runs on
 /// each of them (see [`crate::compose`]). `platform` cross-builds `jlink` images (one per OS/CPU,
-/// each in its own directory, so they do not clobber each other); other formats build for the host.
+/// each in its own directory, so they do not clobber each other), as does `dist` with a bundled
+/// runtime; other formats build for the host.
 pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>> {
     let targets = &ctx.ws.manifest().targets;
     let target = match opts.target {
@@ -624,7 +627,7 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
             unreachable!("Android takes no --platform");
         }
     }
-    if opts.dist.is_some() {
+    if let Some(dist_opts) = &opts.dist {
         if let Some(format) = opts.format {
             bail!("`--dist` writes an application distribution and does not combine with `--format {}`", format.as_str());
         }
@@ -634,9 +637,9 @@ pub fn package(ctx: &BuildContext, opts: &PackageOptions) -> Result<Vec<PathBuf>
         if target != TargetKind::Jvm {
             bail!("`--dist` packages a JVM application and needs the jvm target, not {target}");
         }
-        if !opts.platform.is_empty() {
+        if !opts.platform.is_empty() && !bundles_runtime(ctx, dist_opts) {
             bail!(
-                "`--dist` writes a portable application distribution and takes no `--platform`; use `--format jlink --platform` for per-platform runtime images"
+                "`--platform` picks the Java runtime a distribution carries; add `--bundle-runtime` (or set `[package.dist] runtime = \"jlink\"`) for one distribution per platform, or leave it out for a portable one"
             );
         }
     }
@@ -759,7 +762,7 @@ fn package_jvm(
     };
     let package_main_class = bin_main.clone().or_else(|| jvm.main_class.clone());
     let mut files = match format {
-        _ if dist.is_some() => distribution(ctx, &jvm, bin, dist.expect("checked by the guard"))?,
+        _ if dist.is_some() => distribution(ctx, &jvm, bin, dist.expect("checked by the guard"), cross)?,
         PackageFormat::Jar if bin.is_none() && !fat && platforms.is_empty() && jvm.main_class.is_none() => {
             vec![publish::package_library(ctx, &jvm)?]
         }
@@ -790,8 +793,15 @@ fn package_jvm(
 }
 
 /// `--dist`: the start scripts are the `--bin` one, or every `[[bin]]` with a JVM main class plus the
-/// package's own main class (unless a bin has its package's name).
-fn distribution(ctx: &BuildContext, jvm: &build::JvmBuild, bin: Option<&str>, opts: &DistOptions) -> Result<Vec<PathBuf>> {
+/// package's own main class (unless a bin has its package's name). With a bundled runtime, `platforms`
+/// are the OS/CPU platforms to write a distribution for (the host's when empty).
+fn distribution(
+    ctx: &BuildContext,
+    jvm: &build::JvmBuild,
+    bin: Option<&str>,
+    opts: &DistOptions,
+    platforms: &[kargo_manifest::TargetPlatform],
+) -> Result<Vec<PathBuf>> {
     let manifest = ctx.ws.manifest();
     let own = manifest.package.name.as_str();
     let mut programs: Vec<dist::Program> = Vec::new();
@@ -817,7 +827,13 @@ fn distribution(ctx: &BuildContext, jvm: &build::JvmBuild, bin: Option<&str>, op
         );
     }
     let archives = if opts.archives.is_empty() { dist::Archive::DEFAULT.to_vec() } else { opts.archives.clone() };
-    dist::dist(ctx, jvm, &programs, &archives, opts.scripts)
+    let runtime = if bundles_runtime(ctx, opts) { dist::Runtime::Jlink(platforms) } else { dist::Runtime::System };
+    dist::dist(ctx, jvm, &programs, &archives, opts.scripts, runtime)
+}
+
+/// Whether `--dist` puts a Java runtime in the distribution: `--bundle-runtime` or `[package.dist] runtime`.
+fn bundles_runtime(ctx: &BuildContext, opts: &DistOptions) -> bool {
+    opts.bundle_runtime || ctx.ws.manifest().packaging.dist.runtime.is_some()
 }
 
 /// The self-contained `<name>-<version>-all.jar`. With `platforms` (`--desktop --platforms`), it

@@ -64,11 +64,13 @@ What `kargo package --dist` adds to the distribution archive. See [Distribution 
 ```toml
 [package.dist]
 include = ["conf", "docs/CHANGELOG.md"]
+runtime = "jlink"
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
 | `include` | `[]` | Files and directories of the project, copied into the archive at the same relative path. They must be inside the project and exist. The README, LICENSE and NOTICE files of the project root are always included |
+| `runtime` | none | `"jlink"`: put a Java runtime trimmed by `jlink` (as [`[package.jlink]`](#packagejlink) configures it) in `runtime/`, which the start scripts prefer over `JAVA_HOME` and the `PATH`. Without it the archive uses the installed Java; `--bundle-runtime` does the same for one run. See [Bundling a runtime](../../guides/distributing/#bundling-a-runtime) |
 
 ### `[package.shade]`
 

@@ -692,6 +692,7 @@ struct RawJlink {
 struct RawDist {
     #[serde(default)]
     include: Vec<PathBuf>,
+    runtime: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4457,7 +4458,17 @@ impl RawDist {
                 );
             }
         }
-        Ok(DistSettings { include: self.include })
+        let runtime = match self.runtime.as_deref() {
+            None => None,
+            Some(name) => match DistRuntime::ALL.into_iter().find(|r| r.as_str() == name) {
+                Some(runtime) => Some(runtime),
+                None => bail!(
+                    "[package.dist] `runtime` must be one of {}, got `{name}`; leave it out for a distribution that uses the installed Java",
+                    DistRuntime::ALL.map(DistRuntime::as_str).join(", ")
+                ),
+            },
+        };
+        Ok(DistSettings { include: self.include, runtime })
     }
 }
 

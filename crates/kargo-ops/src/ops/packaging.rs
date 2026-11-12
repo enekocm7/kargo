@@ -311,7 +311,7 @@ fn module_list(found: Vec<String>, extra: &[String]) -> Vec<String> {
 
 /// The JDK modules the program needs: what `jdeps` finds in its classes and dependencies, plus
 /// `[package.jlink] modules` and, for Compose, [`compose::RUNTIME_MODULES`].
-fn runtime_modules(ctx: &BuildContext, app: &App) -> Result<Vec<String>> {
+pub(super) fn runtime_modules(ctx: &BuildContext, app: &App) -> Result<Vec<String>> {
     let manifest = ctx.ws.manifest();
     let settings = &manifest.packaging.jlink;
     let mut extra = settings.modules.clone();
@@ -344,7 +344,7 @@ fn jlink_compress(jdk_version: u32) -> &'static str {
 /// Builds a Java runtime with only `modules` into `dest`. For `platform` (`None` is the host),
 /// the host's `jlink` runs with that platform's `jmods` on its module path, so the runtime holds
 /// the target's Java modules instead of the host's.
-fn jlink(ctx: &BuildContext, modules: &[String], dest: &Path, platform: Option<TargetPlatform>) -> Result<()> {
+pub(super) fn jlink(ctx: &BuildContext, modules: &[String], dest: &Path, platform: Option<TargetPlatform>) -> Result<()> {
     let jdk = ctx.jdk()?;
     remove_dir_all_if_exists(dest)?;
     let mut cmd = Command::new(jdk_tool(jdk, "jlink"));
