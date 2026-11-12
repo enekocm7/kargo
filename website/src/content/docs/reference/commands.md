@@ -180,7 +180,7 @@ The command refuses a directory that already has a `kargo.toml`, plans every mov
 Write a CI workflow for the project, from its `kargo.toml`.
 
 ```sh
-kargo init-ci [--system github] [--junit] [--force]
+kargo init-ci [--system github|gitlab] [--junit] [--force]
 ```
 
 ```console
@@ -192,11 +192,11 @@ $ kargo init-ci
 
 | Flag | Meaning |
 |---|---|
-| `--system <name>` | The CI system. Only `github` (GitHub Actions) for now, the default |
-| `--junit` | Run `kargo test --report junit` and publish the reports in the run summary |
+| `--system <name>` | The CI system: `github` (GitHub Actions, writes `.github/workflows/ci.yml`; the default) or `gitlab` (GitLab CI, writes `.gitlab-ci.yml`) |
+| `--junit` | Run `kargo test --report junit` and publish the reports: in the run summary on GitHub, as a JUnit report on GitLab |
 | `--force` | Replace the workflow if it exists. Without it, an existing file is an error |
 
-It prints what it wrote and each step it left out, with the reason. See [Continuous integration](../../guides/ci/#generating-a-workflow) for the workflow and the `setup-kargo` action it uses.
+It prints what it wrote and each step it left out, with the reason. See [Continuous integration](../../guides/ci/#generating-a-workflow) for the workflows, the `setup-kargo` action of the GitHub one and the GitLab pipeline.
 
 ## `kargo build` (`b`)
 

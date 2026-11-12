@@ -145,12 +145,14 @@ impl ColorArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CiSystemArg {
     Github,
+    Gitlab,
 }
 
 impl From<CiSystemArg> for ops::ci::CiSystem {
     fn from(system: CiSystemArg) -> Self {
         match system {
             CiSystemArg::Github => ops::ci::CiSystem::Github,
+            CiSystemArg::Gitlab => ops::ci::CiSystem::Gitlab,
         }
     }
 }
