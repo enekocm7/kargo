@@ -823,7 +823,7 @@ fn distribution(
     }
     if opts.scripts && programs.is_empty() {
         bail!(
-            "`--dist` writes a start script for each program, but the package has none: {}; declare a [[bin]] or a `main` function, or pass `--no-scripts` for a distribution of jars only",
+            "`--dist` writes a start script for each program, but the package has none: {}; declare a [[bin]] or a `main` function, or pass `--no-scripts` to `kargo package` for a distribution of jars only",
             jvm.main_class_error.as_deref().unwrap_or("it declares no [[bin]] with a main class")
         );
     }

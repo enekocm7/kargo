@@ -109,6 +109,8 @@ target/dist/hello-0.1.0-windows-x64.tar.gz
 
 Each platform gets its own directory and archives, named with the platform (`hello-0.1.0-linux-arm64/` is also the top-level directory inside), with that platform's runtime: as in [Cross-compilation](#cross-compilation), the host's `jlink` reads the `jmods` of a JDK for that platform (of the vendor `[toolchain] jdk` names), which Kargo downloads. `--platform`, `KARGO_PLATFORM` and `[build] platforms` apply to a distribution only when it bundles a runtime; for one without, `--platform` is an error.
 
+To ship the archives from a Maven repository, set `dist = true` in [`[publish]`](../../reference/manifest/#publish): `kargo publish` attaches them to the application's module with the classifier `dist`, signed and checksummed. See [Distribution archives](../publishing/#distribution-archives).
+
 ## Runtime images
 
 ```console

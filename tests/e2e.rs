@@ -3544,6 +3544,35 @@ fn publish_a_jvm_library_and_use_it() {
 }
 
 #[test]
+fn publish_an_application_with_its_distribution() {
+    require_e2e!();
+    let t = E2e::new();
+    let maven_local = t.dir.path().join("m2");
+    t.create(&["greeter"]);
+    std::fs::remove_file(t.dir.path().join("greeter/tests/GreetingTest.kt")).unwrap();
+    t.write("greeter/src/Main.kt", "package g\nfun main(args: Array<String>) = println(\"greeter \" + args.joinToString(\"|\"))\n");
+    let manifest = std::fs::read_to_string(t.dir.path().join("greeter/kargo.toml")).unwrap();
+    t.write("greeter/kargo.toml", &format!("{manifest}\n[publish]\njavadoc = \"empty\"\ndist = true\n"));
+
+    t.kargo("greeter").args(["publish", "--dry-run", "--local"]).env("KARGO_MAVEN_LOCAL", &maven_local).assert().success().stderr(
+        predicate::str::contains("greeter-0.1.0-dist.zip  sha256:").and(predicate::str::contains("greeter-0.1.0-dist.tar.gz  sha256:")),
+    );
+    t.kargo("greeter").args(["publish", "--local"]).env("KARGO_MAVEN_LOCAL", &maven_local).assert().success();
+
+    let dir = maven_local.join("com/example/greeter/0.1.0");
+    for file in ["greeter-0.1.0-dist.zip", "greeter-0.1.0-dist.zip.sha1", "greeter-0.1.0-dist.tar.gz", "greeter-0.1.0.module"] {
+        assert!(dir.join(file).is_file(), "{file} is published");
+    }
+    let names = zip_names(&dir.join("greeter-0.1.0-dist.zip"));
+    assert!(
+        names.iter().any(|n| n == "greeter-0.1.0/bin/greeter") && names.iter().any(|n| n == "greeter-0.1.0/lib/greeter-0.1.0.jar"),
+        "{names:?}"
+    );
+    let module = std::fs::read_to_string(dir.join("greeter-0.1.0.module")).unwrap();
+    assert!(module.contains("jvmDistributionElements-published") && module.contains("greeter-0.1.0-dist.zip"), "{module}");
+}
+
+#[test]
 fn publish_a_multiplatform_library_and_use_it() {
     require_e2e!();
     let t = E2e::new();

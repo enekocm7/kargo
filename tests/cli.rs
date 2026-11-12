@@ -5266,6 +5266,36 @@ fn publish_validates_boms_and_relocations() {
 }
 
 #[test]
+fn publish_dist_checks_what_it_attaches_before_building() {
+    let p = Project::new();
+    let kargo = || {
+        let mut cmd = p.kargo();
+        cmd.env("KARGO_MAVEN_LOCAL", p.path().join("m2"));
+        cmd
+    };
+    // A BOM has no distribution.
+    p.file("kargo.toml", &manifest("bom", "group = \"com.acme\"\n\n[publish]\nkind = \"bom\"\ndist = true\n"));
+    kargo()
+        .args(["publish", "--local"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("a BOM (`kind = \"bom\"`) does not have"));
+    // The distribution is the JVM target's.
+    p.file("kargo.toml", &manifest("web", "group = \"com.acme\"\n\n[target.wasm]\n\n[publish]\ndist = true\n"));
+    kargo()
+        .args(["publish", "--local"])
+        .assert()
+        .failure()
+        .code(101)
+        .stderr(predicate::str::contains("attaches the distribution of the jvm target"));
+    // The key is a boolean.
+    p.file("kargo.toml", &manifest("lib", "group = \"com.acme\"\n\n[publish]\ndist = \"zip\"\n"));
+    kargo().args(["publish", "--local"]).assert().failure().stderr(predicate::str::contains("dist"));
+    assert!(!p.path().join("m2").exists(), "nothing was published");
+}
+
+#[test]
 fn publish_takes_android_libraries_but_not_applications() {
     let p = Project::new();
     p.file("kargo.toml", &format!("{}\n[target.android]\n", manifest("droid", "group = \"com.acme\"\n")));

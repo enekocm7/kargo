@@ -130,6 +130,28 @@ repository = "https://github.com/example/mathlib"
 
 A package that is a program, with a `main` function or a `main-class`, also gets its main class in the POM as a `kargo.main-class` property. That is how `kargo install com.example:tool` knows what to run when the jar's manifest has no `Main-Class`; see [Installing command-line tools](../installing-tools/#from-maven).
 
+### Distribution archives
+
+An application that people download as a zip, for example a deploy tool that fetches `com.example:greeter:1.0.0:dist@zip`, can publish the archives of [`kargo package --dist`](../distributing/#distribution-archives) with its jars:
+
+```toml title="kargo.toml"
+[publish]
+dist = true
+```
+
+`kargo publish` then builds the distribution of the JVM target and adds the zip and the tar.gz to the module that holds the program's jar, with the classifier `dist`:
+
+```text
+com/example/greeter/1.0.0/
+├── greeter-1.0.0.jar
+├── greeter-1.0.0-dist.zip
+├── greeter-1.0.0-dist.tar.gz
+├── greeter-1.0.0.module           # lists the archives in a `distribution` variant
+└── greeter-1.0.0.pom
+```
+
+The archives are signed, checksummed, included in a Maven Central bundle and listed by `--dry-run` like every other file. Their contents are what `kargo package --dist` writes (`[package.dist]`, the start scripts of the main class and of each `[[bin]]`). In a [multiplatform library](#multiplatform-libraries) they belong to the `<name>-jvm` module. A plain JVM module gets Gradle module metadata when it has a distribution, because that is where a distribution is described. The archive is in a `distribution` variant, not a library one, so Gradle and Kargo consumers that depend on the program's jar never put it on a class path; they do read the metadata's library variants, which carry the JVM version the jar targets (`org.gradle.jvm.version`) as in a multiplatform library. The archive carries start scripts, so the package needs a main class or a `[[bin]]`. A BOM and a package without the JVM target cannot set `dist`.
+
 ### Multiplatform libraries
 
 With Wasm, JS or Native targets, or several targets, Kargo publishes the library the way the Kotlin Gradle Plugin does:

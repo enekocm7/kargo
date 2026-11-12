@@ -791,6 +791,8 @@ struct RawPublish {
     kind: Option<String>,
     #[serde(default)]
     relocations: Vec<String>,
+    #[serde(default)]
+    dist: bool,
     npm: Option<RawPublishNpm>,
 }
 
@@ -4428,6 +4430,7 @@ impl RawPublish {
             central_publishing,
             kind,
             relocations,
+            dist: self.dist,
             npm,
         })
     }
