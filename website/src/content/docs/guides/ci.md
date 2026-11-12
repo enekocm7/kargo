@@ -7,10 +7,11 @@ Kargo is a single binary, so CI is simple: install it, cache `~/.kargo`, and run
 
 ## Generating a workflow
 
-`kargo init-ci` writes `.github/workflows/ci.yml` for the project:
+`kargo init-ci` writes a workflow for the project, `.github/workflows/ci.yml` for GitHub Actions or, with `--system gitlab`, `.gitlab-ci.yml` for GitLab CI:
 
 ```sh
 kargo init-ci            # add --junit for the test report step
+kargo init-ci --system gitlab
 ```
 
 It runs `fmt --check`, `lint`, `check --tests --locked`, `build --locked`, `test --locked` and `package --release --locked`, and reads `kargo.toml` for the setup around them:
@@ -20,7 +21,7 @@ It runs `fmt --check`, `lint`, `check --tests --locked`, `build --locked`, `test
 - An `ubuntu-latest`, `macos-latest` and `windows-latest` matrix when a package has a Kotlin/Native target.
 - `--junit` runs `kargo test --report junit` and publishes the reports (see [Test results](#test-results)).
 
-The command prints each step it left out and why. It refuses to replace an existing workflow unless you pass `--force`; `--system` picks the CI system, and `github` is the only one so far.
+The command prints each step it left out and why. It refuses to replace an existing workflow unless you pass `--force`. `--system` picks the CI system: `github` (the default) or `gitlab` (see [GitLab CI](#gitlab-ci)).
 
 ### The setup-kargo action
 
@@ -96,7 +97,7 @@ The first build of the job starts a [compiler daemon](../build-performance/#the-
           report_paths: target/*/*/test-reports*/*.xml
 ```
 
-Each [test suite](../testing/#test-suites) writes its own `test-reports-<name>/`, so `test-reports*` picks up the unit tests and every suite. `if: always()` publishes the results when tests fail, which is when you need them. In GitLab, list the same paths under `artifacts: reports: junit:`; in Jenkins, pass them to the `junit` step.
+Each [test suite](../testing/#test-suites) writes its own `test-reports-<name>/`, so `test-reports*` picks up the unit tests and every suite. `if: always()` publishes the results when tests fail, which is when you need them. In GitLab, list the same paths under `artifacts: reports: junit:` (`kargo init-ci --system gitlab --junit` does); in Jenkins, pass them to the `junit` step.
 
 ### Code coverage
 
@@ -249,13 +250,85 @@ Without it, the build stops with a message that names this command. The SDK land
 
 `kargo publish` uploads a library from CI, with the Maven Central token and the signing key in secrets. Kargo signs with `KARGO_SIGNING_KEY` in memory, so the runner needs no GnuPG, and it takes the credentials of GitHub Packages, GitLab and CodeArtifact from `GITHUB_TOKEN`, `CI_JOB_TOKEN` and `CODEARTIFACT_AUTH_TOKEN` (see [Hosted repositories](../../reference/manifest/#hosted-repositories)). A re-run job doesn't fail on a release it already uploaded to such a repository: unchanged modules are skipped. See [Publishing from CI](../publishing/#publishing-from-ci) for a complete workflow. `kargo publish --npm` publishes a Wasm or Kotlin/JS library to npm with `NPM_TOKEN` in a secret; with `provenance = true` in [`[publish.npm]`](../../reference/manifest/#publishnpm), give the job `permissions: id-token: write`, and Kargo fails before building when it is missing. See [Publishing to npm](../publishing/#publishing-to-npm).
 
+## GitLab CI
+
+`kargo init-ci --system gitlab` writes `.gitlab-ci.yml`. For a JVM project that does not pin a JDK it looks like this:
+
+```yaml title=".gitlab-ci.yml"
+variables:
+  KARGO_HOME: $CI_PROJECT_DIR/.kargo
+
+.kargo:
+  cache:
+    key:
+      prefix: kargo-$CI_JOB_NAME
+      files:
+        - kargo.lock
+        - kargo.toml
+    paths:
+      - .kargo/
+  script:
+    - kargo fmt --check
+    - kargo lint
+    - kargo check --tests --locked
+    - kargo build --locked
+    - kargo test --locked
+    - kargo package --release --locked
+
+.unix:
+  before_script:
+    - curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.0 sh -s -- --no-modify-path
+    - export PATH="$KARGO_HOME/bin:$PATH"
+    - kargo toolchain install jdk 21
+  after_script:
+    - rm -rf "$KARGO_HOME/daemon"
+
+ci:
+  extends: [.kargo, .unix]
+  image: buildpack-deps:stable-curl
+```
+
+GitLab caches only paths inside the project directory, so the Kargo home is `$CI_PROJECT_DIR/.kargo`. The cache is keyed on the job and on the last commit that changed `kargo.lock` or `kargo.toml`, and `after_script` removes `daemon/` before the cache is saved, as the [setup-kargo action](#the-setup-kargo-action) does. Kargo is installed with `install.sh` at the version of the Kargo that wrote the file. There is no setup action for a JDK: when a package does not set `[toolchain] jdk`, the job runs `kargo toolchain install jdk 21` once, which the cache keeps (see [Without a JDK](../toolchains/#without-a-jdk)).
+
+The generated file adapts to `kargo.toml` like the GitHub workflow:
+
+- A Wasm or JS target runs the Linux job on the `node:22` image, so Node.js and npm are there.
+- A Kotlin/Native target replaces the `ci` job with `linux`, `macos` and `windows` jobs. The last two use the tags of GitLab.com's hosted runners (`saas-macos-medium-m1`, `saas-windows-medium-amd64`) and install Kargo with `install.ps1` on Windows; change the tags to match your own runners. Those runners need Node.js already installed if the project also has a Wasm or JS target.
+- `--junit` runs `kargo test --report junit` and adds `artifacts: reports: junit: target/*/*/test-reports*/*.xml` with `when: always`, so GitLab shows the failed tests in the merge request (see [Test results](#test-results)).
+
+Audit and coverage are not in the generated file, the same as for GitHub; add them as jobs of their own. `kargo audit` fails the job on a new advisory, and `kargo test --coverage` writes a Cobertura report that GitLab shows in the merge request:
+
+```yaml
+audit:
+  extends: .unix
+  image: buildpack-deps:stable-curl
+  script:
+    - kargo audit --locked --tooling
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "merge_request_event"
+
+coverage:
+  extends: [.kargo, .unix]
+  image: buildpack-deps:stable-curl
+  script:
+    - kargo test --locked --coverage
+  coverage: '/^coverage: (\d+(?:\.\d+)?)% lines/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: target/debug/jvm/coverage/cobertura.xml
+```
+
+The `coverage` pattern reads the `coverage: 87.5% lines (14/16), ...` line that `kargo test --coverage` prints, and the reports are listed under [Coverage](../testing/#coverage).
+
 ## Examples
 
 The repository's own [examples](../examples/) are built by a workflow you can copy: it installs Kargo, caches `~/.kargo` and runs `kargo build` and `kargo test` for each project in a matrix.
 
 ## Other CI systems
 
-The steps are the same everywhere:
+For CircleCI, Azure Pipelines, Bitbucket Pipelines and the like, the steps are the same everywhere:
 
 1. Install Kargo: `curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=<version> sh -s -- --no-modify-path`, then put `~/.kargo/bin` on `PATH` (on Windows, `$env:KARGO_VERSION = '<version>'; irm https://enekocm7.github.io/kargo/install.ps1 | iex`). Pin the version so a new release cannot change your build, and set `[toolchain] kargo = ">=<version>"` in `kargo.toml` so a developer's older Kargo says so.
 2. Provide a JDK, or pin one with `[toolchain] jdk`. Without either, Kargo downloads Temurin 21 itself, but not with `--locked` or `--offline`: there it stops and names the `kargo toolchain install jdk` command to run (see [Without a JDK](../toolchains/#without-a-jdk)).

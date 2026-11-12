@@ -7738,6 +7738,25 @@ fn init_ci_follows_the_manifest() {
     assert!(workflow.contains("os: [ubuntu-latest, macos-latest, windows-latest]"), "Native needs an OS matrix");
 }
 
+#[test]
+fn init_ci_writes_a_gitlab_pipeline() {
+    let p = Project::new();
+    p.file("kargo.toml", &manifest("app", "[target.native]\n"));
+    p.kargo()
+        .args(["init-ci", "--system", "gitlab", "--junit"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(".gitlab-ci.yml"))
+        .stderr(predicate::str::contains("the Node.js image: no Wasm or JS target"));
+    let pipeline = p.read(".gitlab-ci.yml");
+    assert!(pipeline.contains("install.sh | KARGO_VERSION=") && pipeline.contains("kargo toolchain install jdk"));
+    assert!(pipeline.contains("windows:\n  extends: [.kargo, .windows]"), "Native needs a job per OS: {pipeline}");
+    assert!(pipeline.contains("junit: target/*/*/test-reports*/*.xml"));
+    assert!(!p.path().join(".github").exists(), "only the chosen system is written");
+
+    p.kargo().args(["init-ci", "--system", "gitlab"]).assert().failure().code(101).stderr(predicate::str::contains("already exists"));
+}
+
 /// `kargo` in `p` talking to the fake npm registry `registry`, whatever `.npmrc` the machine has.
 fn kargo_npm(p: &Project, registry: &FakeRegistry) -> assert_cmd::Command {
     let mut cmd = p.kargo();
