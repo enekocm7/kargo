@@ -112,7 +112,12 @@ pub fn format_text(config: &Config, project: &Project, package: usize, file: &Pa
         return Ok(None);
     }
     let version = settings.ktlint_version.as_deref().unwrap_or(KTLINT_VERSION);
-    let jdk = kargo_toolchain::jdks::resolve_for(config, &ws.manifest().toolchain.jdk, jdk_needs(ws.manifest()))?;
+    let jdk = kargo_toolchain::jdks::resolve_for(
+        config,
+        &ws.manifest().toolchain.jdk,
+        ws.manifest().toolchain.jdk_vendor,
+        jdk_needs(ws.manifest()),
+    )?;
     jdk.require_version(MIN_JDK)?;
     let client = MavenClient::new(config, project.repositories());
     let jar = fat_jar(&client, KTLINT_GROUP, "ktlint-cli", version).with_context(|| format!("failed to fetch ktlint {version}"))?;

@@ -2531,6 +2531,43 @@ fn parse_script(what: &str, script: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(script))
 }
 
+/// `[toolchain] jdk`: a version (`"21"`, `21`, `"21.0.5+11"`, `"system"`) or a table with a `version` and a `vendor`.
+fn parse_jdk(value: Option<Value>) -> Result<(JdkRequest, JdkVendor)> {
+    let version = |value: Value| -> Result<JdkRequest> {
+        match value {
+            Value::String(s) => s.parse().context("invalid [toolchain] `jdk`"),
+            Value::Integer(i) => {
+                u32::try_from(i).ok().map(|m| m.to_string()).unwrap_or_default().parse().context("invalid [toolchain] `jdk`")
+            }
+            _ => bail!("[toolchain] `jdk` must be a version like \"21\" or \"system\""),
+        }
+    };
+    match value {
+        None => Ok((JdkRequest::System, JdkVendor::Temurin)),
+        Some(Value::Table(mut table)) => {
+            let request = match table.remove("version") {
+                Some(value) => version(value)?,
+                None => bail!("[toolchain] `jdk` needs a `version`, like `jdk = {{ version = \"21\", vendor = \"corretto\" }}`"),
+            };
+            let vendor = match table.remove("vendor") {
+                None => JdkVendor::Temurin,
+                Some(Value::String(s)) => s.parse().context("invalid [toolchain] `jdk` vendor")?,
+                Some(_) => bail!("the `vendor` of [toolchain] `jdk` must be a string like \"corretto\""),
+            };
+            if let Some(key) = table.keys().next() {
+                bail!("unknown key `{key}` in [toolchain] `jdk`; it takes `version` and `vendor`");
+            }
+            if request == JdkRequest::System && vendor != JdkVendor::Temurin {
+                bail!(
+                    "[toolchain] `jdk` with a `vendor` needs a version like \"21\": `system` is the JDK on JAVA_HOME or PATH, whatever its vendor"
+                );
+            }
+            Ok((request, vendor))
+        }
+        Some(value) => Ok((version(value)?, JdkVendor::Temurin)),
+    }
+}
+
 fn parse_tasks(table: &toml::Table) -> Result<BTreeMap<String, Task>> {
     let mut tasks = BTreeMap::new();
     for (name, value) in table {
@@ -3524,14 +3561,7 @@ impl RawManifest {
 
         let tasks = parse_tasks(&self.tasks)?;
 
-        let jdk = match self.toolchain.jdk {
-            None => JdkRequest::System,
-            Some(Value::String(s)) => s.parse().context("invalid [toolchain] `jdk`")?,
-            Some(Value::Integer(i)) => {
-                u32::try_from(i).ok().map(|m| m.to_string()).unwrap_or_default().parse().context("invalid [toolchain] `jdk`")?
-            }
-            Some(_) => bail!("[toolchain] `jdk` must be a version like \"21\" or \"system\""),
-        };
+        let (jdk, jdk_vendor) = parse_jdk(self.toolchain.jdk)?;
         let graalvm = match self.toolchain.graalvm {
             None => GraalvmRequest::System,
             Some(Value::String(s)) => s.parse().context("invalid [toolchain] `graalvm`")?,
@@ -3617,7 +3647,7 @@ impl RawManifest {
             publish,
             source_sets,
             layout,
-            toolchain: ToolchainSettings { jdk, graalvm, android_sdk, kargo, typescript },
+            toolchain: ToolchainSettings { jdk, jdk_vendor, graalvm, android_sdk, kargo, typescript },
             packaging,
             doc,
             fmt,

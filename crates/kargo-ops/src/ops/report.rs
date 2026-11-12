@@ -109,7 +109,7 @@ pub fn jdk_summary(config: &kargo_util::config::Config, manifest: Option<&Manife
             },
             Err(e) => format!("no usable JDK: {e}"),
         },
-        request => match jdks::find_installed(config, request) {
+        request => match jdks::find_installed(config, request, m.toolchain.jdk_vendor) {
             Ok(Some(managed)) => format!(
                 "JDK {} at {} (pinned `[toolchain] jdk = \"{request}\"`, downloaded)",
                 managed.jdk().version,

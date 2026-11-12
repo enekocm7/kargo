@@ -1349,6 +1349,23 @@ fn toolchain_jdk_requests() {
     assert!(parse_err(&with("jdk = true")).contains("jdk"));
     assert!(parse_err(&with("jdk = \"21 0\"")).contains("invalid JDK"));
     assert!(parse_err(&with("vendor = \"x\"")).contains("vendor"));
+
+    // The table form picks a vendor; the plain form is Temurin.
+    assert_eq!(parse(&with("jdk = \"21\"")).toolchain.jdk_vendor, JdkVendor::Temurin);
+    let corretto = parse(&with("jdk = { version = \"21\", vendor = \"corretto\" }")).toolchain;
+    assert_eq!((corretto.jdk, corretto.jdk_vendor), (JdkRequest::Major(21), JdkVendor::Corretto));
+    let zulu = parse(&with("jdk = { version = 17, vendor = \"Zulu\" }")).toolchain;
+    assert_eq!((zulu.jdk, zulu.jdk_vendor), (JdkRequest::Major(17), JdkVendor::Zulu));
+    assert_eq!(parse(&with("jdk = { version = \"21\" }")).toolchain.jdk_vendor, JdkVendor::Temurin);
+    assert_eq!(parse(&with("jdk = { version = \"21\", vendor = \"sap-machine\" }")).toolchain.jdk_vendor, JdkVendor::SapMachine);
+    let unknown = parse_err(&with("jdk = { version = \"21\", vendor = \"acme\" }"));
+    assert!(unknown.contains("unknown JDK vendor `acme`") && unknown.contains("corretto"), "{unknown}");
+    assert!(parse_err(&with("jdk = { vendor = \"zulu\" }")).contains("needs a `version`"));
+    assert!(parse_err(&with("jdk = { version = \"21\", flavor = \"x\" }")).contains("unknown key `flavor`"));
+    assert!(parse_err(&with("jdk = { version = \"system\", vendor = \"zulu\" }")).contains("JAVA_HOME"));
+    for vendor in JdkVendor::ALL {
+        assert_eq!(vendor.as_str().parse::<JdkVendor>().unwrap(), vendor);
+    }
     // jvm-target must not exceed the pinned JDK.
     let err = parse_err(&format!(
         "{MINIMAL}

@@ -7,6 +7,7 @@ pub mod archive;
 pub mod binaryen;
 pub mod browser;
 pub mod bun;
+pub mod disco;
 pub mod download;
 pub mod graalvm;
 pub mod gradle;

@@ -175,10 +175,30 @@
       "additionalProperties": false,
       "properties": {
         "jdk": {
-          "description": "\"system\" (JAVA_HOME or java on PATH), a major version such as \"21\", or an exact Temurin release such as \"21.0.5+11\".",
-          "type": ["string", "integer"],
+          "description": "\"system\" (JAVA_HOME or java on PATH), a major version such as \"21\", or an exact release such as \"21.0.5+11\". A table `{ version = \"21\", vendor = \"corretto\" }` downloads another vendor's JDK instead of Temurin.",
           "default": "system",
-          "examples": ["system", "21", "25"]
+          "examples": ["system", "21", "25", { "version": "21", "vendor": "corretto" }],
+          "oneOf": [
+            { "type": ["string", "integer"] },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["version"],
+              "properties": {
+                "version": {
+                  "description": "A major version such as \"21\", or an exact release such as \"21.0.5+11\".",
+                  "type": ["string", "integer"],
+                  "examples": ["21", "25"]
+                },
+                "vendor": {
+                  "description": "The JDK distribution Kargo downloads. Temurin comes from the Adoptium API, the others from the foojay Disco API.",
+                  "type": "string",
+                  "enum": ["temurin", "corretto", "zulu", "liberica", "semeru", "oracle", "microsoft", "sap-machine"],
+                  "default": "temurin"
+                }
+              }
+            }
+          ]
         },
         "graalvm": {
           "description": "The GraalVM of `kargo package --format native-image` and `kargo run --native-agent`: \"system\" (GRAALVM_HOME, then a JAVA_HOME or PATH with native-image), a Java version such as \"25\" for GraalVM Community Edition, or \"oracle-25\" for Oracle GraalVM.",

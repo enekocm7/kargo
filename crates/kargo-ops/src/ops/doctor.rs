@@ -325,7 +325,7 @@ fn jdk(config: &Config, manifest: Option<&Manifest>, out: &mut Vec<Check>) {
                 None
             }
         },
-        request => match jdks::find_installed(config, request) {
+        request => match jdks::find_installed(config, request, m.toolchain.jdk_vendor) {
             Ok(Some(managed)) => Some((managed.jdk(), format!("Kargo-managed {}", managed.release))),
             _ => {
                 out.push(Check::warning(

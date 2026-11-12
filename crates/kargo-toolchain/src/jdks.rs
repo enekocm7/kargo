@@ -1,13 +1,14 @@
-//! Kargo-managed JDKs: Temurin builds downloaded on demand into
-//! `~/.kargo/toolchains/jdk/<release>`, for a pinned `[toolchain] jdk` and for projects on the
-//! system JDK when the machine has none.
+//! Kargo-managed JDKs: builds downloaded on demand into `~/.kargo/toolchains/jdk/<release>`
+//! (Temurin) or `~/.kargo/toolchains/jdk/<vendor>-<release>` (the other vendors of
+//! [`JdkVendor`]), for a pinned `[toolchain] jdk` and for projects on the system JDK when the
+//! machine has none.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use kargo_manifest::{JdkRequest, release_major};
+use kargo_manifest::{JdkRequest, JdkVendor, release_major};
 use kargo_maven::Version;
 use kargo_util::config::Config;
 
@@ -89,13 +90,17 @@ fn release_version(release: &str) -> Version {
     Version::parse(release.trim_start_matches("jdk-").trim_start_matches("jdk"))
 }
 
-/// The installation directory of `release`, with a `--platform` suffix when `platform` is a
-/// foreign one (so a Linux/arm64 JDK does not clash with the host's release of the same name).
-fn install_dir_for(config: &Config, release: &str, platform: Option<kargo_manifest::TargetPlatform>) -> Result<PathBuf> {
+/// The installation directory of `release` of `vendor`, with a `--platform` suffix when `platform`
+/// is a foreign one (so a Linux/arm64 JDK does not clash with the host's release of the same name).
+/// A Temurin JDK keeps the historic `<release>`; another vendor's is `<vendor>-<release>`.
+fn install_dir_for(config: &Config, vendor: JdkVendor, release: &str, platform: Option<kargo_manifest::TargetPlatform>) -> Result<PathBuf> {
     if release.is_empty() || release.contains(['/', '\\', ':']) || release.starts_with('.') {
         bail!("invalid JDK release name `{release}`");
     }
-    let mut name = release.to_owned();
+    let mut name = match vendor {
+        JdkVendor::Temurin => release.to_owned(),
+        other => format!("{other}-{release}"),
+    };
     if let Some(platform) = platform
         && platform != kargo_manifest::TargetPlatform::host().unwrap_or(platform)
     {
@@ -146,10 +151,10 @@ fn is_foreign_dir(dir: &Path) -> bool {
     dir.file_name().is_some_and(|n| n.to_string_lossy().contains("--"))
 }
 
-/// The best installed JDK matching `request`, if any.
-pub fn find_installed(config: &Config, request: &JdkRequest) -> Result<Option<ManagedJdk>> {
+/// The best installed JDK of `vendor` matching `request`, if any.
+pub fn find_installed(config: &Config, request: &JdkRequest, vendor: JdkVendor) -> Result<Option<ManagedJdk>> {
     // The host's installs only; foreign ones live in `--platform` directories for cross `jlink`.
-    let all = installed(config)?.into_iter().filter(|j| !is_foreign_dir(&j.dir)).collect::<Vec<_>>();
+    let all = installed(config)?.into_iter().filter(|j| !is_foreign_dir(&j.dir) && j.vendor == vendor.as_str()).collect::<Vec<_>>();
     Ok(match request {
         JdkRequest::System => None,
         JdkRequest::Major(m) => all.into_iter().filter(|j| j.major == *m).max_by_key(ManagedJdk::sort_key),
@@ -157,21 +162,25 @@ pub fn find_installed(config: &Config, request: &JdkRequest) -> Result<Option<Ma
     })
 }
 
-/// The best installed JDK matching `request` for `platform`, if any. `None` is the host
+/// The best installed JDK of `vendor` matching `request` for `platform`, if any. `None` is the host
 /// ([`find_installed`]).
 pub fn find_installed_for(
     config: &Config,
     request: &JdkRequest,
+    vendor: JdkVendor,
     platform: Option<kargo_manifest::TargetPlatform>,
 ) -> Result<Option<ManagedJdk>> {
     let Some(target) = platform else {
-        return find_installed(config, request);
+        return find_installed(config, request, vendor);
     };
     if target.is_host() {
-        return find_installed(config, request);
+        return find_installed(config, request, vendor);
     }
     let suffix = format!("--{}", target.as_str());
-    let all = installed(config)?.into_iter().filter(|j| j.dir.to_string_lossy().ends_with(suffix.as_str())).collect::<Vec<_>>();
+    let all = installed(config)?
+        .into_iter()
+        .filter(|j| j.dir.to_string_lossy().ends_with(suffix.as_str()) && j.vendor == vendor.as_str())
+        .collect::<Vec<_>>();
     Ok(match request {
         JdkRequest::System => None,
         JdkRequest::Major(m) => all.into_iter().filter(|j| j.major == *m).max_by_key(ManagedJdk::sort_key),
@@ -189,11 +198,8 @@ pub fn install_package(config: &Config, package: &JdkPackage) -> Result<ManagedJ
 /// The binaries of a foreign JDK cannot run on this host; Kargo only reads its `jmods` (for
 /// cross-platform `jlink`) and never executes it.
 pub fn install_package_for(config: &Config, package: &JdkPackage, platform: Option<kargo_manifest::TargetPlatform>) -> Result<ManagedJdk> {
-    let dir = install_dir_for(config, &package.release, platform)?;
-    let lock_name = match platform {
-        Some(p) => format!("{}--{}", package.release, p.as_str()),
-        None => package.release.clone(),
-    };
+    let dir = install_dir_for(config, package.vendor, &package.release, platform)?;
+    let lock_name = dir_name(&dir, &package.release);
     let _lock = install_lock(config, &lock_name)?;
     if let Some(existing) = installed(config)?.into_iter().find(|j| j.dir == dir) {
         return Ok(existing);
@@ -204,14 +210,18 @@ pub fn install_package_for(config: &Config, package: &JdkPackage, platform: Opti
         None => String::new(),
     };
     // `release--platform.ext` for a foreign platform, so its archive does not clash either.
-    let archive_path = downloads.join(format!("{}{suffix}.{}", package.release.replace('+', "_"), package.archive.extension()));
+    let prefix = match package.vendor {
+        JdkVendor::Temurin => String::new(),
+        other => format!("{other}-"),
+    };
+    let archive_path = downloads.join(format!("{prefix}{}{suffix}.{}", package.release.replace('+', "_"), package.archive.extension()));
     let cached = archive_path.is_file() && crate::download::verify(&archive_path, &package.sha256).is_ok();
     if !cached {
         crate::download::download(config, &package.url, &archive_path, Some(&package.sha256))?;
     }
     let what = match platform {
-        Some(p) => format!("JDK {} for {p} (Temurin)", package.release),
-        None => format!("JDK {} (Temurin)", package.release),
+        Some(p) => format!("JDK {} for {p} ({})", package.release, package.vendor.title()),
+        None => format!("JDK {} ({})", package.release, package.vendor.title()),
     };
     config.shell().status("Installing", what);
     kargo_util::fs::remove_dir_all_if_exists(&dir)?;
@@ -220,19 +230,42 @@ pub fn install_package_for(config: &Config, package: &JdkPackage, platform: Opti
 
     let home = find_home_for(&dir, platform).with_context(|| format!("the downloaded JDK {} has no bin/java", package.release))?;
     let rel = home.strip_prefix(&dir).unwrap_or(Path::new("")).to_string_lossy().replace('\\', "/");
-    let meta = Metadata { release: package.release.clone(), major: package.major, vendor: "temurin".to_owned(), home: rel };
+    let meta = Metadata { release: package.release.clone(), major: package.major, vendor: package.vendor.as_str().to_owned(), home: rel };
     kargo_util::fs::write_string_atomic(&dir.join(METADATA_FILE), &serde_json::to_string_pretty(&meta)?)?;
     Ok(ManagedJdk { release: meta.release, major: meta.major, vendor: meta.vendor, dir, home })
 }
 
-/// Installs the JDK described by `request`. For a major version this is the
-/// newest available release, even if an older one is installed.
-pub fn install(config: &Config, request: &JdkRequest) -> Result<ManagedJdk> {
-    install_for(config, request, None)
+/// The name of an installation directory, which is also its install lock's.
+fn dir_name(dir: &Path, release: &str) -> String {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| release.to_owned())
 }
 
-/// Installs the JDK described by `request` for `platform` (`None` is the host).
-pub fn install_for(config: &Config, request: &JdkRequest, platform: Option<kargo_manifest::TargetPlatform>) -> Result<ManagedJdk> {
+/// Installs the JDK of `vendor` described by `request`. For a major version this is the
+/// newest available release, even if an older one is installed.
+pub fn install(config: &Config, request: &JdkRequest, vendor: JdkVendor) -> Result<ManagedJdk> {
+    install_for(config, request, vendor, None)
+}
+
+/// Installs the JDK of `vendor` described by `request` for `platform` (`None` is the host).
+/// Temurin builds come from the Adoptium API, the other vendors' from the foojay Disco API.
+pub fn install_for(
+    config: &Config,
+    request: &JdkRequest,
+    vendor: JdkVendor,
+    platform: Option<kargo_manifest::TargetPlatform>,
+) -> Result<ManagedJdk> {
+    if vendor != JdkVendor::Temurin && *request != JdkRequest::System {
+        let (os, arch) = match platform {
+            Some(p) => p.adoptium(),
+            None => adoptium::platform()?,
+        };
+        let package = match request {
+            JdkRequest::Major(m) => crate::disco::latest_for(config, vendor, *m, os, arch)?,
+            JdkRequest::Release(r) => crate::disco::release_for(config, vendor, r, os, arch)?,
+            JdkRequest::System => unreachable!("checked above"),
+        };
+        return install_package_for(config, &package, platform);
+    }
     let package = match request {
         JdkRequest::System => bail!("`system` refers to the JDK on JAVA_HOME/PATH and cannot be installed"),
         JdkRequest::Major(m) => match platform {
@@ -253,25 +286,43 @@ pub fn install_for(config: &Config, request: &JdkRequest, platform: Option<kargo
     install_package_for(config, &package, platform)
 }
 
-/// Returns the JDK to use for `request`, installing it if necessary (see [`resolve_for`]).
+/// Returns the Temurin JDK to use for `request`, installing it if necessary (see [`resolve_for`]).
 pub fn resolve(config: &Config, request: &JdkRequest) -> Result<Jdk> {
-    resolve_for(config, request, JdkNeeds::default())
+    resolve_for(config, request, JdkVendor::Temurin, JdkNeeds::default())
 }
 
-/// Returns the JDK to use for `request`, installing it if necessary. For `system`, that is the
-/// JDK on `JAVA_HOME` or `PATH`; without one, a managed JDK that fits `needs`, installed if
-/// there is none.
-pub fn resolve_for(config: &Config, request: &JdkRequest, needs: JdkNeeds) -> Result<Jdk> {
-    resolve_for_platform(config, request, needs, None)
+/// Returns the JDK of `vendor` to use for `request`, installing it if necessary. For `system`, that
+/// is the JDK on `JAVA_HOME` or `PATH`, whatever its vendor; without one, a managed JDK that fits
+/// `needs`, installed if there is none.
+pub fn resolve_for(config: &Config, request: &JdkRequest, vendor: JdkVendor, needs: JdkNeeds) -> Result<Jdk> {
+    resolve_for_platform(config, request, vendor, needs, None)
 }
 
-/// Returns the JDK to use for `request` on `platform` (`None` is the host), installing it if
-/// necessary. A foreign platform always uses a downloaded Temurin JDK: its binaries cannot run on
+/// `kargo toolchain install jdk <request>`, with `--vendor` for a vendor other than Temurin.
+pub fn install_command(request: &JdkRequest, vendor: JdkVendor) -> String {
+    match vendor {
+        JdkVendor::Temurin => format!("kargo toolchain install jdk {request}"),
+        other => format!("kargo toolchain install jdk {request} --vendor {other}"),
+    }
+}
+
+/// `JDK 21`, or `Corretto JDK 21` for a vendor other than Temurin, for messages.
+pub fn describe(request: &JdkRequest, vendor: JdkVendor) -> String {
+    match vendor {
+        JdkVendor::Temurin => format!("JDK {request}"),
+        other => format!("{} JDK {request}", other.title()),
+    }
+}
+
+/// Returns the JDK of `vendor` to use for `request` on `platform` (`None` is the host), installing
+/// it if necessary. A foreign platform always uses a downloaded JDK: its binaries cannot run on
 /// this host, but `jlink` reads its `jmods` to build a runtime image for it. For `system`, the
-/// foreign JDK matches the host JDK's major version (or a managed fallback when the host has none).
+/// foreign JDK is a Temurin JDK of the host JDK's major version (or a managed fallback when the
+/// host has none).
 pub fn resolve_for_platform(
     config: &Config,
     request: &JdkRequest,
+    vendor: JdkVendor,
     needs: JdkNeeds,
     platform: Option<kargo_manifest::TargetPlatform>,
 ) -> Result<Jdk> {
@@ -282,20 +333,21 @@ pub fn resolve_for_platform(
                 None => managed_fallback(config, needs),
             },
             other => {
-                if let Some(found) = find_installed(config, other)? {
+                if let Some(found) = find_installed(config, other, vendor)? {
                     return Ok(found.jdk());
                 }
-                let install_command = format!("kargo toolchain install jdk {other}");
+                let install_command = install_command(other, vendor);
+                let what = describe(other, vendor);
                 if config.offline() {
-                    bail!("JDK {other} is not installed and Kargo is offline; run `{install_command}` while online");
+                    bail!("{what} is not installed and Kargo is offline; run `{install_command}` while online");
                 }
-                ensure_auto_install(config, &format!("JDK {other}"), &install_command)?;
-                Ok(install(config, other)?.jdk())
+                ensure_auto_install(config, &what, &install_command)?;
+                Ok(install(config, other, vendor)?.jdk())
             }
         };
     };
     if target.is_host() {
-        return resolve_for_platform(config, request, needs, None);
+        return resolve_for_platform(config, request, vendor, needs, None);
     }
     // A foreign platform: a Temurin JDK of the requested (or host's) major version, in its own
     // directory. It is never executed, only its `jmods` are read.
@@ -306,15 +358,18 @@ pub fn resolve_for_platform(
         },
         other => other.clone(),
     };
-    if let Some(found) = find_installed_for(config, &request_for_target, Some(target))? {
+    // `system` has no vendor of its own, so a foreign JDK for it is Temurin's.
+    let vendor = if *request == JdkRequest::System { JdkVendor::Temurin } else { vendor };
+    if let Some(found) = find_installed_for(config, &request_for_target, vendor, Some(target))? {
         return Ok(found.jdk());
     }
-    let install_command = format!("kargo toolchain install jdk {request_for_target}");
+    let install_command = install_command(&request_for_target, vendor);
+    let what = describe(&request_for_target, vendor);
     if config.offline() {
-        bail!("JDK {request_for_target} for {target} is not installed and Kargo is offline; run `{install_command}` while online");
+        bail!("{what} for {target} is not installed and Kargo is offline; run `{install_command}` while online");
     }
-    ensure_auto_install(config, &format!("JDK {request_for_target} for {target}"), &install_command)?;
-    Ok(install_for(config, &request_for_target, Some(target))?.jdk())
+    ensure_auto_install(config, &format!("{what} for {target}"), &install_command)?;
+    Ok(install_for(config, &request_for_target, vendor, Some(target))?.jdk())
 }
 
 /// The installed managed JDK a project on the system JDK uses when the machine has none: the
@@ -349,7 +404,7 @@ fn managed_fallback(config: &Config, needs: JdkNeeds) -> Result<Jdk> {
     config
         .shell()
         .note(format!("no JDK on JAVA_HOME or PATH; installing Temurin JDK {major} for Kargo (KARGO_AUTO_INSTALL=0 turns this off)"));
-    Ok(install(config, &JdkRequest::Major(major))?.jdk())
+    Ok(install(config, &JdkRequest::Major(major), JdkVendor::Temurin)?.jdk())
 }
 
 /// Removes installed JDKs matching `selector` (a major version or release name).
@@ -367,7 +422,7 @@ pub fn remove(config: &Config, selector: &str) -> Result<Vec<ManagedJdk>> {
         bail!("no installed JDK matches `{selector}`; see `kargo toolchain list`");
     }
     for jdk in &matching {
-        let _lock = install_lock(config, &jdk.release)?;
+        let _lock = install_lock(config, &dir_name(&jdk.dir, &jdk.release))?;
         kargo_util::fs::remove_dir_all_if_exists(&jdk.dir)?;
     }
     Ok(matching)
@@ -417,19 +472,48 @@ mod tests {
         let all: Vec<String> = installed(&config).unwrap().into_iter().map(|j| j.release).collect();
         assert_eq!(all, ["jdk-17.0.9+9", "jdk-21.0.2+13", "jdk-21.0.10+7"]);
 
-        let newest = find_installed(&config, &JdkRequest::Major(21)).unwrap().unwrap();
+        let newest = find_installed(&config, &JdkRequest::Major(21), JdkVendor::Temurin).unwrap().unwrap();
         assert_eq!(newest.release, "jdk-21.0.10+7", "numeric, not lexical, ordering");
         assert!(newest.home.ends_with("Home"));
-        let exact = find_installed(&config, &"21.0.2+13".parse().unwrap()).unwrap().unwrap();
+        let exact = find_installed(&config, &"21.0.2+13".parse().unwrap(), JdkVendor::Temurin).unwrap().unwrap();
         assert_eq!(exact.release, "jdk-21.0.2+13");
-        assert!(find_installed(&config, &JdkRequest::Major(11)).unwrap().is_none());
-        assert!(find_installed(&config, &JdkRequest::System).unwrap().is_none());
+        assert!(find_installed(&config, &JdkRequest::Major(11), JdkVendor::Temurin).unwrap().is_none());
+        assert!(find_installed(&config, &JdkRequest::System, JdkVendor::Temurin).unwrap().is_none());
 
         // An installed JDK resolves without network access.
         let offline = config.clone().with_offline(true);
         assert_eq!(resolve(&offline, &JdkRequest::Major(17)).unwrap().version, 17);
         let err = resolve(&offline, &JdkRequest::Major(11)).unwrap_err().to_string();
         assert!(err.contains("offline"), "{err}");
+    }
+
+    #[test]
+    fn selects_jdks_by_vendor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path());
+        fake_install(&config, "jdk-21.0.2+13", 21, false);
+        let corretto = fake_install(&config, "corretto-jdk-21.0.5+11", 21, false);
+        let meta = Metadata { release: "jdk-21.0.5+11".into(), major: 21, vendor: "corretto".into(), home: String::new() };
+        std::fs::write(corretto.join(METADATA_FILE), serde_json::to_string(&meta).unwrap()).unwrap();
+
+        // Another vendor's JDK does not satisfy a request, even when it is newer.
+        let temurin = find_installed(&config, &JdkRequest::Major(21), JdkVendor::Temurin).unwrap().unwrap();
+        assert_eq!(temurin.release, "jdk-21.0.2+13");
+        let found = find_installed(&config, &JdkRequest::Major(21), JdkVendor::Corretto).unwrap().unwrap();
+        assert_eq!((found.vendor.as_str(), found.dir), ("corretto", corretto));
+        assert!(find_installed(&config, &JdkRequest::Major(21), JdkVendor::Zulu).unwrap().is_none());
+        let exact = find_installed(&config, &"21.0.5+11".parse().unwrap(), JdkVendor::Corretto).unwrap();
+        assert!(exact.is_some());
+
+        // Temurin keeps the historic directory; other vendors are prefixed.
+        let dir = |vendor| install_dir_for(&config, vendor, "jdk-21.0.5+11", None).unwrap();
+        assert!(dir(JdkVendor::Temurin).ends_with("jdk-21.0.5+11"));
+        assert!(dir(JdkVendor::SapMachine).ends_with("sap-machine-jdk-21.0.5+11"));
+
+        // Offline, a missing vendor's JDK names the command that installs it.
+        let err =
+            resolve_for(&config.with_offline(true), &JdkRequest::Major(17), JdkVendor::Zulu, JdkNeeds::default()).unwrap_err().to_string();
+        assert!(err.contains("Zulu JDK 17") && err.contains("kargo toolchain install jdk 17 --vendor zulu"), "{err}");
     }
 
     #[test]
@@ -493,9 +577,9 @@ mod tests {
     fn rejects_bad_release_names_and_system_installs() {
         let tmp = tempfile::tempdir().unwrap();
         let config = config(tmp.path());
-        assert!(install_dir_for(&config, "../evil", None).is_err());
-        assert!(install_dir_for(&config, "", None).is_err());
-        assert!(install(&config, &JdkRequest::System).is_err());
+        assert!(install_dir_for(&config, JdkVendor::Temurin, "../evil", None).is_err());
+        assert!(install_dir_for(&config, JdkVendor::Temurin, "", None).is_err());
+        assert!(install(&config, &JdkRequest::System, JdkVendor::Temurin).is_err());
         assert_eq!(major_of("jdk-25.0.1+8"), Some(25));
     }
 
@@ -513,6 +597,7 @@ mod tests {
         }
         let sha256 = kargo_util::hash::sha256_file(&archive_path).unwrap();
         JdkPackage {
+            vendor: JdkVendor::Temurin,
             release: release.into(),
             major,
             url: "https://example.invalid/jdk.zip".into(),
