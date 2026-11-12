@@ -31,7 +31,9 @@ const JUNIT_REPORTS: &str = "target/*/*/test-reports*/*.xml";
 /// The CI systems `kargo init-ci` can write a workflow for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CiSystem {
+    /// GitHub Actions: `.github/workflows/ci.yml`.
     Github,
+    /// GitLab CI: `.gitlab-ci.yml`.
     Gitlab,
 }
 
