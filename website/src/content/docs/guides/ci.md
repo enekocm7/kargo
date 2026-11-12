@@ -65,7 +65,7 @@ jobs:
 
       - name: Install Kargo
         run: |
-          curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.5 sh -s -- --no-modify-path
+          curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.6 sh -s -- --no-modify-path
           echo "$HOME/.kargo/bin" >> "$GITHUB_PATH"
 
       - run: kargo fmt --check
@@ -289,7 +289,7 @@ variables:
 
 .unix:
   before_script:
-    - curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.5 sh -s -- --no-modify-path
+    - curl -fsSL https://enekocm7.github.io/kargo/install.sh | KARGO_VERSION=0.1.6 sh -s -- --no-modify-path
     - export PATH="$KARGO_HOME/bin:$PATH"
     - kargo toolchain install jdk 21
   after_script:
