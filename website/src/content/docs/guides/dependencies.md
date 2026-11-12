@@ -375,6 +375,38 @@ public final class kotlin.Pair<A, B> implements java.io.Serializable {
 
 Without a class it lists the public classes of the jar, one per line. A class is named in full (`com.acme.Outer.Inner` or `com/acme/Outer$Inner`) or by the end of its name (`Inner`, `Outer.Inner`) when only one class of the jar matches. The module is looked up in the classpath a build uses, so the jar is the version in `kargo.lock`. `-c` picks the classpath, `--visibility` the members printed. The output is the JVM view of a class, so a Kotlin property shows as its getter and setter. See [`kargo inspect`](../../reference/commands/#kargo-inspect). The cache the jar lives in is described in [the lockfile reference](../../reference/lockfile/), and `kargo classpath` prints the paths of every jar.
 
+## Substituting a module
+
+`force = true` picks another version of the same module, and `exclude` has to be repeated on every dependency that brings a module in. To replace a module everywhere (a fork published under another group, `commons-logging` by `jcl-over-slf4j`, a library you patch locally), list it in `[substitute]`:
+
+```toml title="kargo.toml"
+[substitute]
+"commons-logging:commons-logging" = "org.slf4j:jcl-over-slf4j:2.0.16"
+"com.example:toolkit" = { path = "../toolkit" }
+```
+
+The resolver applies the table to every request for the module, whether your `kargo.toml` makes it or a dependency of a dependency does:
+
+- **Another module** (`"group:artifact:version"`). The requests go to the replacement, which is then resolved like any other module (the highest requested version wins, so you can still ask for a newer one, or pin it with `force = true`). What the replaced module depended on is no longer in the graph.
+- **A local package** (`{ path = "../toolkit" }`). The module leaves the graph, and the package is built from source and put on your classpaths like a [local package](#local-packages), with its own dependencies. A package that replaces a module it also is (`toolkit` in its own `kargo.toml`) is not a dependency of itself.
+
+`kargo why` says what replaced a module, and `kargo why` of the replacement lists the substitution among the requests:
+
+```console
+$ kargo why commons-logging:commons-logging
+commons-logging:commons-logging (jvm, runtime)
+  replaced by org.slf4j:jcl-over-slf4j:2.0.16 ([substitute] in kargo.toml)
+$ kargo why org.slf4j:jcl-over-slf4j
+org.slf4j:jcl-over-slf4j:2.0.16 (jvm, runtime)
+  selected 2.0.16, the only version requested
+  requested:
+    2.0.16  by [substitute] of commons-logging:commons-logging
+  path:
+    app v0.1.0 -> com.acme:legacy:1.4 -> org.slf4j:jcl-over-slf4j:2.0.16
+```
+
+A [workspace](../workspaces/) shares substitutions with `[workspace.substitute]`, which each member opts in to with `"commons-logging:commons-logging" = { workspace = true }`. A substitution applies to the package that declares it: a path dependency's own `[substitute]` is not applied to the packages that depend on it. The Android target gets the same rule in its generated Gradle project, as a `dependencySubstitution` (or an `exclude` for a local package). See [`[substitute]`](../../reference/manifest/#substitute).
+
 ## Dependencies of one profile
 
 A dependency that only some builds need goes in the profile table: an HTTP logger in debug builds, or a mock server in a staging build. It is added to the build of every target with that profile, and to no other profile:
@@ -515,7 +547,7 @@ Repositories often delete old snapshot builds. If a locked build is gone, the bu
 
 ## The lockfile
 
-`kargo.lock` records the exact version of every resolved module and the SHA-256 of every file it downloads. Kargo checks each file it uses against those checksums, cached copies included. Commit it, so everyone builds with the same dependencies.
+`kargo.lock` records the exact version of every resolved module and the SHA-256 of every file it downloads. Kargo checks each file it uses against those checksums, cached copies included. Commit it, so everyone builds with the same dependencies. Its inputs include your `[substitute]` entries, so changing one resolves again.
 
 ```sh
 kargo update        # re-resolve everything and rewrite kargo.lock

@@ -3135,3 +3135,64 @@ c = 3
         [("a".to_owned(), "1".to_owned()), ("b".to_owned(), "1".to_owned()), ("c".to_owned(), "3".to_owned())]
     );
 }
+
+#[test]
+fn substitute_section() {
+    assert!(parse(MINIMAL).substitutions.is_empty());
+    let m = parse(&format!(
+        "{MINIMAL}\n[substitute]\n\"commons-logging:commons-logging\" = \"org.slf4j:jcl-over-slf4j:2.0.16\"\n\"com.example:toolkit\" = {{ path = \"../toolkit\" }}\n"
+    ));
+    let with_module = Replacement::Module { module: "org.slf4j:jcl-over-slf4j".parse().unwrap(), version: "2.0.16".to_owned() };
+    let expected = [
+        Substitution { module: "commons-logging:commons-logging".parse().unwrap(), with: with_module },
+        Substitution { module: "com.example:toolkit".parse().unwrap(), with: Replacement::Package(PathBuf::from("../toolkit")) },
+    ];
+    assert_eq!(m.substitutions, expected);
+
+    let err = |entry: &str| parse_err(&format!("{MINIMAL}\n[substitute]\n{entry}\n"));
+    assert!(err("\"a:b\" = \"a:b:2.0\"").contains("cannot replace itself"));
+    assert!(err("\"a:b\" = \"c:d\"").contains("has no version"));
+    assert!(err("\"a:b\" = \"c:d:1.0:natives\"").contains("without a classifier or extension"));
+    assert!(err("\"a:b\" = \"c:d:[1.0,\"").contains("invalid version"));
+    assert!(err("\"a:b\" = \"nonsense\"").contains("invalid substitution `a:b`"));
+    assert!(err("ab = \"c:d:1.0\"").contains("write the key as `group:artifact`"));
+    assert!(err("\"a:b\" = 3").contains("expected \"group:artifact:version\""));
+    assert!(err("\"a:b\" = { path = \"\" }").contains("`path` must be the directory of a Kargo package"));
+    assert!(err("\"a:b\" = { version = \"1.0\" }").contains("unknown key `version`"));
+    let chained = err("\"a:b\" = \"c:d:1.0\"\n\"c:d\" = \"e:f:1.0\"");
+    assert!(chained.contains("`c:d` is replaced too (by e:f:1.0)") && chained.contains("do not chain"), "{chained}");
+}
+
+#[test]
+fn members_inherit_substitutions() {
+    let ws = WorkspaceManifest::parse(
+        "[workspace]
+members = [\"app\"]
+
+[workspace.substitute]
+\"commons-logging:commons-logging\" = \"org.slf4j:jcl-over-slf4j:2.0.16\"
+\"com.example:toolkit\" = { path = \"libs/toolkit\" }
+",
+        Path::new("/ws"),
+    )
+    .unwrap();
+    let member =
+        |substitute: &str| Manifest::parse_in(&format!("{MINIMAL}\n[substitute]\n{substitute}\n"), Some(&ws)).map_err(|e| format!("{e:#}"));
+    let m = member("\"com.example:toolkit\" = { workspace = true }\n\"x:y\" = \"z:w:1.0\"").unwrap();
+    // A workspace path is relative to the workspace, not to the member.
+    assert_eq!(m.substitutions[0].with, Replacement::Package(Path::new("/ws").join("libs/toolkit")));
+    assert_eq!(m.substitutions[1].module, "x:y".parse().unwrap());
+    let m = member("\"commons-logging:commons-logging\".workspace = true").unwrap();
+    assert!(matches!(&m.substitutions[0].with, Replacement::Module { version, .. } if version == "2.0.16"));
+    assert!(member("\"x:y\" = { workspace = true }").unwrap_err().contains("[workspace.substitute] has no `x:y`"));
+    assert!(member("\"x:y\" = { workspace = true, path = \"z\" }").unwrap_err().contains("and nothing else"));
+    let outside = Manifest::parse(&format!("{MINIMAL}\n[substitute]\n\"x:y\" = {{ workspace = true }}\n")).unwrap_err();
+    assert!(format!("{outside:#}").contains("needs a [workspace]"));
+
+    let ws_err = |text: &str| format!("{:#}", WorkspaceManifest::parse(text, Path::new("/ws")).unwrap_err());
+    assert!(
+        ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.substitute]\n\"x:y\" = { workspace = true }\n")
+            .contains("only valid in a member")
+    );
+    assert!(ws_err("[workspace]\nmembers = [\"a\"]\n[workspace.substitute]\n\"x:y\" = \"x:y:1.0\"\n").contains("cannot replace itself"));
+}

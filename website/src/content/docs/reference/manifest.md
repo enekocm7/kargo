@@ -1077,6 +1077,27 @@ A module can be declared several times with different `classifier` or `extension
 
 See [Managing dependencies](../../guides/dependencies/).
 
+## `[substitute]`
+
+Replaces a module wherever the dependency graph asks for it, directly or through another module, like Gradle's `dependencySubstitution` and Cargo's `[patch]`. The key is the module to replace.
+
+```toml
+[substitute]
+"commons-logging:commons-logging" = "org.slf4j:jcl-over-slf4j:2.0.16"   # another module
+"com.example:toolkit" = { path = "../toolkit" }                         # a Kargo package built from source
+"com.example:shared" = { workspace = true }                             # inherited from [workspace.substitute]
+```
+
+| Value | Meaning |
+|---|---|
+| `"group:artifact:version"` | Every request for the module becomes a request for this one, at this version. The replacement takes part in conflict resolution like any other module: if something else asks for a higher version, that one wins (declare it with `force = true` to pin it). The replaced module's own dependencies are left out |
+| `{ path = "../package" }` | The module leaves the graph, and the package at that directory (relative to this `kargo.toml`) is built from source and becomes a [`path` dependency](../../guides/workspaces/) of this package, with its own Maven dependencies |
+| `{ workspace = true }` | Inherits the entry of the same name from [`[workspace.substitute]`](#workspace), alone. A `path` there is relative to the workspace root |
+
+A module cannot replace itself, a replacement cannot be replaced too (substitutions do not chain), and the version of a replacement is a plain version or range, without a classifier. An `exclude` of the replaced module on a dependency still keeps it out. A substitution applies to the package that declares it, for every target, including the generated Gradle project of the Android target, and is part of what [`kargo.lock`](../../reference/lockfile/) records, so changing it re-resolves. [`kargo why`](../commands/#kargo-why) shows what replaced a module.
+
+See [Substituting a module](../../guides/dependencies/#substituting-a-module).
+
 ## `[repositories]`
 
 ```toml
@@ -1290,6 +1311,9 @@ core = { path = "libs/core" }        # paths are relative to the workspace root
 [workspace.frameworks]
 serialization = { formats = ["json"] }
 
+[workspace.substitute]
+"commons-logging:commons-logging" = "org.slf4j:jcl-over-slf4j:2.0.16"
+
 [workspace.plugins.notify]
 command = "tools/notify.sh"          # relative to the workspace root
 hooks = ["post-build"]
@@ -1310,6 +1334,7 @@ jobs = 2                             # members and targets built at the same tim
 | `[workspace.kotlin]` | `version`, `language-version`, `api-version`, `ksp`, `opt-in`, `compiler-args`, `warnings-as-errors` and `jvm-target` (the default `[target.jvm] jvm-target`) for every member. A member's own `opt-in` and `compiler-args` are added to these; its other `[kotlin]` keys take precedence, except `version`, which must match |
 | `[workspace.dependencies]` | Dependency entries members inherit with `name = { workspace = true }` |
 | `[workspace.frameworks]` | `[frameworks]` entries members inherit with `name = { workspace = true }` |
+| `[workspace.substitute]` | [`[substitute]`](#substitute) entries members inherit with `"group:artifact" = { workspace = true }`. A `path` is relative to the workspace root |
 | `[workspace.plugins]` | `[plugins]` entries members inherit with `name = { workspace = true }`. A relative `command` or `script` stays relative to the workspace root |
 | `[workspace.tasks]` | Tasks that run at the workspace root. Members inherit them with `name = { workspace = true }`, which runs them in the member's directory |
 | `[workspace.build]` | [`[build]`](#build) for the whole workspace: `jobs` and `default-targets` |

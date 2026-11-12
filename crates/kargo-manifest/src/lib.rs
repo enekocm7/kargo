@@ -33,7 +33,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use kargo_maven::repo::Credentials;
-use kargo_maven::{CoordSpec, ModuleId, Repository, VersionReq};
+use kargo_maven::{CoordSpec, ModuleId, Replacement, Repository, VersionReq};
 
 pub use raw::{
     AndroidConfig, AndroidFlavor, AndroidGradlePlugin, AndroidLint, AndroidNdk, AndroidSigning, BenchmarkConfig, BuildConfigValue,
@@ -482,6 +482,13 @@ impl PathDependency {
     pub fn applies_to(&self, target: TargetKind, dev: bool) -> bool {
         self.dev == dev && self.target.is_none_or(|t| t == target)
     }
+}
+
+/// A `[substitute]` entry: the resolver replaces `module` with `with` wherever the dependency graph asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Substitution {
+    pub module: ModuleId,
+    pub with: Replacement,
 }
 
 /// Kotlin compiler settings.
@@ -2979,6 +2986,8 @@ pub struct Manifest {
     pub dev_dependencies: Vec<Dependency>,
     /// `path` dependencies from every dependency table.
     pub path_dependencies: Vec<PathDependency>,
+    /// `[substitute]`: the modules the resolver replaces, in declaration order.
+    pub substitutions: Vec<Substitution>,
     pub repositories: Vec<Repository>,
     pub frameworks: Frameworks,
     pub compiler_plugins: Vec<CompilerPlugin>,
@@ -3055,7 +3064,7 @@ impl Manifest {
 
 /// A workspace's `kargo.toml`: `[workspace]` with its `members`, and what members share or
 /// inherit: `[workspace.package]`, `[workspace.kotlin]`, `[workspace.dependencies]`,
-/// `[workspace.frameworks]`, `[workspace.plugins]` and `[workspace.tasks]`.
+/// `[workspace.frameworks]`, `[workspace.substitute]`, `[workspace.plugins]` and `[workspace.tasks]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceManifest {
     /// The directory holding the workspace's `kargo.toml`.
@@ -3077,10 +3086,11 @@ pub struct WorkspaceManifest {
     pub build: BuildSettings,
     /// Raw `[workspace.dependencies]` entries, inherited with `{ workspace = true }`.
     dependencies: toml::Table,
-    /// Raw `[workspace.package]`, `[workspace.frameworks]`, `[workspace.plugins]` and
+    /// Raw `[workspace.package]`, `[workspace.frameworks]`, `[workspace.substitute]`, `[workspace.plugins]` and
     /// `[workspace.tasks]` entries, inherited with `{ workspace = true }`.
     package: toml::Table,
     frameworks: toml::Table,
+    substitute: toml::Table,
     plugins: toml::Table,
     raw_tasks: toml::Table,
 }

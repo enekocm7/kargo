@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 
-use kargo_maven::resolver::{Reason, RequestSource, VersionRequest};
+use kargo_maven::resolver::{Reason, Replacement, RequestSource, VersionRequest};
 use kargo_maven::{Explanation, ModuleId, Resolution};
 
 /// At most this many paths are listed with `--all-paths`.
@@ -98,6 +98,50 @@ pub fn answer(target: &str, resolution: &Resolution, explanation: &Explanation, 
         paths,
         truncated,
     })
+}
+
+/// A module that a `[substitute]` entry replaced in one resolution, so it is not there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    /// The resolution: `jvm`, `native-linux_x64`, ...
+    pub target: String,
+    pub module: ModuleId,
+    pub with: Replacement,
+}
+
+/// Answers `query` for one resolution when a substitution replaced the module, or `None` when none did.
+pub fn replaced(target: &str, explanation: &Explanation, query: &Query) -> Option<Replaced> {
+    let with = explanation.substituted.get(&query.module)?;
+    Some(Replaced { target: target.to_owned(), module: query.module.clone(), with: with.clone() })
+}
+
+/// What a replacement is shown as: `g:a:1.0`, or the package at `../toolkit`.
+fn replacement(with: &Replacement) -> String {
+    match with {
+        Replacement::Module { module, version } => format!("{module}:{version}"),
+        Replacement::Package(path) => format!("the package at {}", path.display()),
+    }
+}
+
+/// Renders a replaced module for the terminal.
+pub fn render_replaced(configuration: &str, replaced: &Replaced) -> String {
+    format!(
+        "{} ({}, {configuration})\n  replaced by {} ([substitute] in kargo.toml)\n",
+        replaced.module,
+        replaced.target,
+        replacement(&replaced.with)
+    )
+}
+
+/// Describes a replaced module for `kargo why --format json`.
+pub fn replaced_json(replaced: &Replaced) -> serde_json::Value {
+    let with = match &replaced.with {
+        Replacement::Module { module, version } => {
+            serde_json::json!({ "kind": "module", "module": module.to_string(), "version": version })
+        }
+        Replacement::Package(path) => serde_json::json!({ "kind": "package", "path": path.display().to_string() }),
+    };
+    serde_json::json!({ "target": replaced.target, "module": replaced.module.to_string(), "replaced-by": with })
 }
 
 /// The modules that depend on each module, with the version each asked for, in classpath order.
@@ -261,6 +305,7 @@ fn source(request: &RequestSource) -> String {
             format!("platform {platform}:{platform_version} of {module}:{version}")
         }
         RequestSource::Bom { bom, version } => format!("BOM {bom}:{version}"),
+        RequestSource::Substitute { module } => format!("[substitute] of {module}"),
     }
 }
 
@@ -367,6 +412,7 @@ fn source_json(request: &RequestSource) -> serde_json::Value {
             "version": version,
         }),
         RequestSource::Bom { bom, version } => serde_json::json!({ "kind": "bom", "module": bom.to_string(), "version": version }),
+        RequestSource::Substitute { module } => serde_json::json!({ "kind": "substitute", "module": module.to_string() }),
     }
 }
 
@@ -430,7 +476,7 @@ mod tests {
             VersionRequest { version: "2.0".into(), source: dependency("g:mid") },
         ];
         let shared = ModuleExplanation { version: version.into(), reason, requests };
-        Explanation { modules: HashMap::from([("g:shared".parse().unwrap(), shared)]) }
+        Explanation { modules: HashMap::from([("g:shared".parse().unwrap(), shared)]), ..Default::default() }
     }
 
     #[test]
@@ -506,6 +552,29 @@ g:shared:2.0 (jvm, runtime)
             serde_json::json!({"version": "1.0", "selected": false, "from": {"kind": "dependency", "module": "g:app", "version": "1"}})
         );
         assert_eq!(value["paths"], serde_json::json!([["g:app:1", "g:shared:2.0"]]));
+    }
+
+    #[test]
+    fn explains_a_substituted_module() {
+        let module = |m: &str| Replacement::Module { module: m.parse().unwrap(), version: "2.0".into() };
+        let mut explained = explanation("2.0", Reason::Highest);
+        explained.substituted.insert("g:old".parse().unwrap(), module("g:shared"));
+        explained.substituted.insert("g:local".parse().unwrap(), Replacement::Package("../local".into()));
+        let query = "g:old".parse().unwrap();
+        let old = replaced("jvm", &explained, &query).unwrap();
+        assert_eq!(render_replaced("runtime", &old), "g:old (jvm, runtime)\n  replaced by g:shared:2.0 ([substitute] in kargo.toml)\n");
+        assert_eq!(
+            replaced_json(&old),
+            serde_json::json!({"target": "jvm", "module": "g:old", "replaced-by": {"kind": "module", "module": "g:shared", "version": "2.0"}})
+        );
+        let local = replaced("jvm", &explained, &"g:local".parse().unwrap()).unwrap();
+        assert!(render_replaced("runtime", &local).contains("replaced by the package at ../local"));
+        assert_eq!(replaced_json(&local)["replaced-by"], serde_json::json!({"kind": "package", "path": "../local"}));
+        assert!(replaced("jvm", &explained, &"g:shared".parse().unwrap()).is_none());
+
+        let by = RequestSource::Substitute { module: "g:old".parse().unwrap() };
+        assert_eq!(source(&by), "[substitute] of g:old");
+        assert_eq!(source_json(&by), serde_json::json!({"kind": "substitute", "module": "g:old"}));
     }
 
     #[test]

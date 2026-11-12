@@ -39,7 +39,7 @@ If you are deciding whether to move off Gradle, the question is *what can't I do
 | Vulnerability scanning (Dependency-Check) | Supported | [`kargo audit`](../../reference/commands/#kargo-audit) |
 | Repository content filtering | Supported | `include-groups` and `exclude-groups`; see [Choosing which repository serves a library](../../guides/dependencies/#choosing-which-repository-serves-a-library) |
 | SNAPSHOT versions, `mavenLocal()` | Supported | [SNAPSHOT versions](../../guides/dependencies/#snapshot-versions) |
-| Dependency substitution (`substitute`, `dependencySubstitution`) | Gap | Use a path dependency or `force = true` on another version |
+| Dependency substitution (`substitute`, `dependencySubstitution`) | Supported | [`[substitute]`](../../guides/dependencies/#substituting-a-module) replaces a module with another module or a local package, in every target |
 | Capabilities and capability conflicts | Gap | |
 | Dependency exclusions | Supported | `exclude` on a dependency |
 | Custom configurations | Not planned | Kargo has fixed scopes (`compile`, `runtime`, `provided`, `processor`, `ksp`), because configurations are build-script code |

@@ -583,6 +583,10 @@ AndroidX and other Android libraries come from Google's Maven repository, which 
 "androidx.lifecycle:lifecycle-runtime-ktx" = "2.9.4"
 ```
 
+### Substituting a module
+
+[`[substitute]`](../../reference/manifest/#substitute) applies to the generated Gradle project too: a module replaced by another becomes `substitute(module("g:a")).using(module("g2:a2:1.0"))` in a `resolutionStrategy.dependencySubstitution` block of every configuration, and one replaced by a local package is excluded from them (the package comes along as a project or a jar, like any other [path dependency](../workspaces/)).
+
 ### Profile dependencies
 
 `[profile.dev.dependencies]` and `[profile.release.dependencies]` become `debugImplementation` and `releaseImplementation` in the generated Gradle project, so a debug-only library is in debug builds alone. A custom profile does not build for Android yet, and a processor or KSP dependency in a profile is not supported there: put it in `[dependencies]`.

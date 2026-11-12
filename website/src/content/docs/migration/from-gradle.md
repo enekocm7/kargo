@@ -194,6 +194,7 @@ Kargo resolves conflicts like Gradle (highest version wins), so the trees should
 | `exclude(group = "g", module = "m")` | `exclude = ["g:m"]` |
 | `isTransitive = false` | `transitive = false` |
 | `strictly(...)` / `force` | `force = true` |
+| `resolutionStrategy.dependencySubstitution { substitute(module("g:a")).using(module("g2:a2:1.0")) }` | `[substitute]`, `"g:a" = "g2:a2:1.0"` (`using(project(":a"))` is `{ path = "../a" }`; see [Substituting a module](../../guides/dependencies/#substituting-a-module)) |
 | `kotlin("plugin.serialization")` | `[frameworks] serialization = true` |
 | `org.jetbrains.kotlinx.benchmark` with `benchmark { targets { register("main") } }`, `me.champeau.jmh`, then `./gradlew benchmark` or `jmh` | `[frameworks] benchmark = true` and `kargo bench`; the configuration's `iterations`, `warmups`, `iterationTime`, `mode` and `outputTimeUnit` are `[bench] iterations`, `warmup`, `mode` and `time-unit` (see [Benchmarking](../../guides/benchmarking/)) |
 | `kotlin("plugin.spring")`, `org.springframework.boot` | `[frameworks] spring-boot = true` |

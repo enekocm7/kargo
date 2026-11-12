@@ -35,10 +35,10 @@ use kargo_compiler::diagnostics::Diagnostic;
 use kargo_compiler::testreport::{self, TestSummary};
 use kargo_manifest::{
     AndroidConfig, AndroidLint, AndroidNdk, AndroidSdkRequest, AndroidTarget, BuildConfigValue, Dependency, GeneratedKind, Manifest, Scope,
-    TargetKind,
+    Substitution, TargetKind,
 };
-use kargo_maven::Repository;
 use kargo_maven::repo::Content;
+use kargo_maven::{Replacement, Repository};
 use kargo_toolchain::android_sdk::{self, Licenses};
 use kargo_toolchain::gradle::{self as toolchain_gradle, AgpGradle};
 use kargo_toolchain::{GradleDistribution, Jdk};
@@ -624,6 +624,8 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
         );
     }
 
+    dependency_substitutions(&mut s, &manifest.substitutions);
+
     // Dependencies.
     let _ = writeln!(s, "dependencies {{");
     let mut seen = Vec::new();
@@ -699,6 +701,33 @@ pub fn build_gradle_with(ws: &Workspace, android: &AndroidTarget, module: &Gradl
     let _ = writeln!(s, "}}");
     s.push_str(&doc_classpath_task_kts(&variant_name(&default_flavors(cfg, &[])?, "debug")));
     Ok(s)
+}
+
+/// Renders the `[substitute]` entries: a module replaced by another is a Gradle `dependencySubstitution`, and one
+/// replaced by a package is excluded from every configuration, since the package comes along as a project or a jar.
+fn dependency_substitutions(s: &mut String, substitutions: &[Substitution]) {
+    if substitutions.is_empty() {
+        return;
+    }
+    let _ = writeln!(s, "configurations.all {{");
+    if substitutions.iter().any(|sub| matches!(sub.with, Replacement::Module { .. })) {
+        let _ = writeln!(s, "    resolutionStrategy.dependencySubstitution {{");
+        for sub in substitutions {
+            if let Replacement::Module { module, version } = &sub.with {
+                let _ = writeln!(
+                    s,
+                    "        substitute(module({})).using(module({}))",
+                    kts_string(&sub.module.to_string()),
+                    kts_string(&format!("{module}:{version}"))
+                );
+            }
+        }
+        let _ = writeln!(s, "    }}");
+    }
+    for sub in substitutions.iter().filter(|sub| matches!(sub.with, Replacement::Package(_))) {
+        let _ = writeln!(s, "    exclude(group = {}, module = {})", kts_string(&sub.module.group), kts_string(&sub.module.artifact));
+    }
+    let _ = writeln!(s, "}}\n");
 }
 
 /// Whether the Android build runs KSP: a `scope = "ksp"` dependency or dev-dependency.
@@ -2450,6 +2479,28 @@ x = { id = \"p.q\", files = [\"missing.json\"] }
         assert!(text.contains("tasks.register(\"kargoDocClasspath\")"), "the task `kargo doc` runs");
         let kotlin = &ws.manifest().kotlin.version;
         assert!(text.contains(&format!("id(\"org.jetbrains.kotlin.android\") version \"{kotlin}\" apply false")), "{text}");
+    }
+
+    #[test]
+    fn substitutions_become_gradle_substitutions() {
+        let (_d, ws) = workspace("");
+        let android = ws.manifest().targets.android.clone().unwrap();
+        assert!(!build_gradle(&ws, &android).unwrap().contains("dependencySubstitution"));
+
+        let (_d, ws) = workspace(
+            "[substitute]\n\"commons-logging:commons-logging\" = \"org.slf4j:jcl-over-slf4j:2.0.16\"\n\"com.example:toolkit\" = { path = \"../toolkit\" }\n",
+        );
+        let android = ws.manifest().targets.android.clone().unwrap();
+        let text = build_gradle(&ws, &android).unwrap();
+        let expected = "configurations.all {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module(\"commons-logging:commons-logging\")).using(module(\"org.slf4j:jcl-over-slf4j:2.0.16\"))
+    }
+    exclude(group = \"com.example\", module = \"toolkit\")
+}
+
+dependencies {";
+        assert!(text.contains(expected), "{text}");
     }
 
     #[test]

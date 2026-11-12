@@ -663,6 +663,7 @@
         ]
       }
     },
+    "substitute": { "$ref": "#/definitions/substitute" },
     "frameworks": { "$ref": "#/definitions/frameworks" },
     "plugins": { "$ref": "#/definitions/plugins" },
     "tasks": { "$ref": "#/definitions/tasks" },
@@ -914,6 +915,7 @@
         },
         "dependencies": { "$ref": "#/definitions/dependencies", "description": "Entries members inherit with `name = { workspace = true }`." },
         "frameworks": { "$ref": "#/definitions/frameworks", "description": "Entries members inherit with `name = { workspace = true }` in [frameworks]." },
+        "substitute": { "$ref": "#/definitions/substitute", "description": "Entries members inherit with `\"group:artifact\" = { workspace = true }` in [substitute]. A `path` is relative to the workspace." },
         "plugins": { "$ref": "#/definitions/plugins", "description": "Entries members inherit with `name = { workspace = true }` in [plugins]." },
         "tasks": { "$ref": "#/definitions/tasks", "description": "Tasks run at the workspace root with `kargo <task>`; members inherit them with `name = { workspace = true }` in [tasks]." },
         "build": { "$ref": "#/definitions/build", "description": "[build] for the whole workspace." }
@@ -1249,6 +1251,24 @@
         "key-alias": { "description": "The alias of the key in the keystore.", "type": "string", "examples": ["upload"] },
         "key-password-env": { "description": "Environment variable holding the key password. Default: `store-password-env`.", "type": "string", "examples": ["KEY_PASS"] },
         "store-type": { "description": "The keystore type. Default: detected.", "enum": ["jks", "pkcs12"] }
+      }
+    },
+    "substitute": {
+      "description": "Modules the resolver replaces wherever the dependency graph asks for them, directly or through another module. In a member, `\"group:artifact\" = { workspace = true }` inherits the entry of [workspace.substitute].",
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          { "description": "Another module, `group:artifact:version`, requested wherever the key was.", "type": "string", "examples": ["org.slf4j:jcl-over-slf4j:2.0.16"] },
+          {
+            "description": "A Kargo package built from source, which the project depends on in place of the module.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": { "description": "The package's directory, relative to this kargo.toml.", "type": "string", "examples": ["../toolkit"] }
+            }
+          },
+          { "$ref": "#/definitions/inherit" }
+        ]
       }
     },
     "dependencies": {

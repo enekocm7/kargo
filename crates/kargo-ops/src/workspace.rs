@@ -30,8 +30,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
-use kargo_manifest::{JdkRequest, LOCKFILE_NAME, MANIFEST_NAME, Manifest, PathDependency, Profile, TargetKind, WorkspaceManifest};
-use kargo_maven::Repository;
+use kargo_manifest::{JdkRequest, LOCKFILE_NAME, MANIFEST_NAME, Manifest, PathDependency, Profile, Scope, TargetKind, WorkspaceManifest};
+use kargo_maven::{Replacement, Repository};
 use kargo_util::flock::FileLock;
 pub use kargo_util::fs::dunce_canonicalize;
 use kargo_util::shell::Shell;
@@ -880,6 +880,20 @@ impl Loader {
         Ok(self.packages.len() - 1)
     }
 
+    /// Loads the package in `path` (relative to the directory of package `from`) and returns its index; `what` names
+    /// the reference in errors.
+    fn path_package(&mut self, from: usize, path: &Path, what: &str) -> Result<usize> {
+        let dir = dunce_canonicalize(&self.packages[from].root.join(path));
+        let manifest = dir.join(MANIFEST_NAME);
+        if !manifest.is_file() {
+            bail!("{what} has no {MANIFEST_NAME} (looked for {})", manifest.display());
+        }
+        if kargo_manifest::is_workspace_manifest(&manifest).with_context(|| what.to_owned())? {
+            bail!("{what} is a workspace, not a package; point it at one of the members");
+        }
+        self.package(&dir).with_context(|| what.to_owned())
+    }
+
     /// Loads every path dependency, checks the graph and returns the project.
     fn finish(mut self, members: Vec<usize>, current: Option<usize>) -> Result<Project> {
         let mut i = 0;
@@ -889,21 +903,41 @@ impl Loader {
             let declared = self.packages[i].manifest.path_dependencies.clone();
             let mut edges = Vec::new();
             for dep in declared {
-                let dir = dunce_canonicalize(&self.packages[i].root.join(&dep.path));
-                let path = dir.join(MANIFEST_NAME);
-                let ctx = || format!("path dependency `{}` of `{consumer}` ({})", dep.name, dep.path.display());
-                if !path.is_file() {
-                    bail!("{} has no {MANIFEST_NAME} (looked for {})", ctx(), path.display());
-                }
-                if kargo_manifest::is_workspace_manifest(&path).with_context(ctx)? {
-                    bail!("{} is a workspace, not a package; point it at one of the members", ctx());
-                }
-                let index = self.package(&dir).with_context(ctx)?;
+                let ctx = format!("path dependency `{}` of `{consumer}` ({})", dep.name, dep.path.display());
+                let index = self.path_package(i, &dep.path, &ctx)?;
                 let name = self.packages[index].name();
                 if name != dep.name {
-                    bail!("{} is the package `{name}`; rename the key to `{name}`", ctx());
+                    bail!("{ctx} is the package `{name}`; rename the key to `{name}`");
                 }
                 edges.push((dep, index));
+            }
+            // A package that replaces a module (`[substitute]`) is a dependency too, unless it is this package or
+            // the package already depends on it.
+            let substitutes: Vec<_> = self.packages[i]
+                .manifest
+                .substitutions
+                .iter()
+                .filter_map(|s| match &s.with {
+                    Replacement::Package(path) => Some((s.module.clone(), path.clone())),
+                    Replacement::Module { .. } => None,
+                })
+                .collect();
+            for (module, path) in substitutes {
+                let ctx = format!("the package that replaces `{module}` in [substitute] of `{consumer}` ({})", path.display());
+                let index = self.path_package(i, &path, &ctx)?;
+                if index != i && !edges.iter().any(|(d, e)| *e == index && !d.dev && d.target.is_none()) {
+                    let name = self.packages[index].name().to_owned();
+                    let dep = PathDependency {
+                        name,
+                        path,
+                        scope: Scope::Compile,
+                        dev: false,
+                        target: None,
+                        exported: false,
+                        test_fixtures: false,
+                    };
+                    edges.push((dep, index));
+                }
             }
             self.packages[i].path_deps = edges;
             i += 1;
@@ -1219,6 +1253,72 @@ calc = { path = \"../calc\" }
         assert_eq!(mathlib.lockfile_path(), root.join("calc/kargo.lock"));
         // The one explicit Kotlin version applies to both; a dev-dependency may point back.
         assert_eq!(calc.manifest().kotlin.version, "2.3.0");
+    }
+
+    #[test]
+    fn a_package_that_replaces_a_module_is_a_path_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce_canonicalize(dir.path());
+        write(
+            &root,
+            "toolkit/kargo.toml",
+            &package(
+                "toolkit",
+                "[substitute]
+\"com.example:toolkit\" = { path = \".\" }
+",
+            ),
+        );
+        write(
+            &root,
+            "app/kargo.toml",
+            &package(
+                "app",
+                "[substitute]
+\"com.example:toolkit\" = { path = \"../toolkit\" }
+",
+            ),
+        );
+
+        let project = Project::load(&root.join("app/kargo.toml")).unwrap();
+        let app = project.package(0);
+        let [(dep, index)] = app.path_dependencies() else { panic!("{:?}", app.path_dependencies()) };
+        assert_eq!((dep.name.as_str(), dep.scope, dep.dev), ("toolkit", Scope::Compile, false));
+        assert_eq!(project.package(*index).name(), "toolkit");
+        assert!(project.package(*index).path_dependencies().is_empty(), "a package does not depend on itself");
+
+        // Declaring the dependency too does not add it twice.
+        write(
+            &root,
+            "app/kargo.toml",
+            &package(
+                "app",
+                "[dependencies]
+toolkit = { path = \"../toolkit\", scope = \"runtime\" }
+[substitute]
+\"com.example:toolkit\" = { path = \"../toolkit\" }
+",
+            ),
+        );
+        let project = Project::load(&root.join("app/kargo.toml")).unwrap();
+        assert_eq!(project.package(0).path_dependencies().len(), 1);
+        assert_eq!(project.package(0).path_dependencies()[0].0.scope, Scope::Runtime);
+
+        write(
+            &root,
+            "app/kargo.toml",
+            &package(
+                "app",
+                "[substitute]
+\"com.example:toolkit\" = { path = \"../missing\" }
+",
+            ),
+        );
+        let err = load_err(&root.join("app/kargo.toml"));
+        assert!(
+            err.contains("the package that replaces `com.example:toolkit` in [substitute] of `app`") && err.contains("has no kargo.toml"),
+            "{err}"
+        );
     }
 
     #[test]

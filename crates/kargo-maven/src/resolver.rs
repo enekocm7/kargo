@@ -5,6 +5,9 @@
 //! libraries are resolved through Gradle module metadata so that each target
 //! platform receives the matching artifact (`.jar` or `.klib`).
 //!
+//! A module can be replaced everywhere in the graph ([`Resolver::substitute`]): by another module, which then
+//! receives every request for it, or by a Kargo package built from source, which leaves the Maven graph.
+//!
 //! The graph is made of modules (`group:artifact`), and every module has one version. What a
 //! module contributes to the classpath are artifacts: its default files, plus one file for each
 //! root that asks for a `classifier` or `extension` (native libraries are declared that way).
@@ -45,6 +48,16 @@ impl Exclusion {
     pub fn matches(&self, module: &ModuleId) -> bool {
         (self.group == "*" || self.group == module.group) && (self.artifact == "*" || self.artifact == module.artifact)
     }
+}
+
+/// What a `[substitute]` entry replaces a module with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replacement {
+    /// Another module, requested at `version` wherever the replaced one was.
+    Module { module: ModuleId, version: String },
+    /// A Kargo package on disk (its directory, as written), which the project builds from source. The module
+    /// leaves the Maven graph; the package comes along as a `path` dependency.
+    Package(PathBuf),
 }
 
 /// A dependency requested by the project (a resolution root).
@@ -119,6 +132,8 @@ type Constraints = Vec<(ModuleId, String)>;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Explanation {
     pub modules: HashMap<ModuleId, ModuleExplanation>,
+    /// The modules that something requested and a [substitution](Resolver::substitute) replaced, with what replaced them.
+    pub substituted: HashMap<ModuleId, Replacement>,
 }
 
 /// How one module's version was chosen.
@@ -168,6 +183,8 @@ pub enum RequestSource {
     Platform { platform: ModuleId, platform_version: String, module: ModuleId, version: String },
     /// A BOM the project imports.
     Bom { bom: ModuleId, version: String },
+    /// A `[substitute]` entry: the request was for this module, which the entry replaced with the requested one.
+    Substitute { module: ModuleId },
 }
 
 /// How a module that has no files of its own points at another one.
@@ -226,6 +243,8 @@ pub struct Resolver<'a> {
     /// Versions fixed by the caller (`kargo update` keeping locked versions), applied whenever
     /// the module is in the graph and overriding everything else.
     pins: HashMap<ModuleId, Version>,
+    /// Modules replaced wherever the graph asks for them (`[substitute]`).
+    substitutions: HashMap<ModuleId, Replacement>,
     infos: Mutex<HashMap<(ModuleId, String), NodeInfo>>,
     poms: Mutex<HashMap<(ModuleId, String), Pom>>,
     effective: Mutex<HashMap<(ModuleId, String), EffectivePom>>,
@@ -266,6 +285,8 @@ impl Requests {
 /// What one pass over the graph found.
 struct Traversal {
     order: Vec<ModuleId>,
+    /// The modules the edges asked for and a substitution replaced.
+    substituted: HashSet<ModuleId>,
     used: HashMap<ModuleId, Version>,
     requests: HashMap<ModuleId, Requests>,
     edges: HashMap<ModuleId, Vec<Edge>>,
@@ -281,6 +302,7 @@ impl<'a> Resolver<'a> {
             constraints: HashMap::new(),
             managed_by: HashMap::new(),
             pins: HashMap::new(),
+            substitutions: HashMap::new(),
             infos: Mutex::new(HashMap::new()),
             poms: Mutex::new(HashMap::new()),
             effective: Mutex::new(HashMap::new()),
@@ -310,6 +332,13 @@ impl<'a> Resolver<'a> {
     /// Fixes `module` at `version` if it appears in the graph, without adding it.
     pub fn pin(&mut self, module: ModuleId, version: &str) {
         self.pins.insert(module, Version::parse(version));
+    }
+
+    /// Replaces `module` with `with` wherever the graph asks for it, directly or through another module. A
+    /// replacement module takes the place of the requests (and their exclusions), and conflict resolution picks its
+    /// version like any other; a package takes the module out of the graph.
+    pub fn substitute(&mut self, module: ModuleId, with: Replacement) {
+        self.substitutions.insert(module, with);
     }
 
     /// Like [`Resolver::pin`] for a SNAPSHOT `version`, fixed at the build whose files are named
@@ -582,11 +611,35 @@ impl<'a> Resolver<'a> {
         self.run(roots, false)
     }
 
+    /// `roots` with the substitutions applied, each next to the module it replaced; the modules a package replaces
+    /// are left out. Also returns the modules that were replaced.
+    fn substitute_roots(&self, roots: &[DependencyRequest]) -> (Vec<(DependencyRequest, Option<ModuleId>)>, HashSet<ModuleId>) {
+        let mut replaced = HashSet::new();
+        let mut out = Vec::new();
+        for root in roots {
+            match self.substitutions.get(&root.module) {
+                None => out.push((root.clone(), None)),
+                Some(Replacement::Package(_)) => {
+                    replaced.insert(root.module.clone());
+                }
+                Some(Replacement::Module { module, version }) => {
+                    replaced.insert(root.module.clone());
+                    let request = DependencyRequest { module: module.clone(), version: Some(version.clone()), ..root.clone() };
+                    out.push((request, Some(root.module.clone())));
+                }
+            }
+        }
+        (out, replaced)
+    }
+
     fn run(&self, roots: &[DependencyRequest], download: bool) -> Result<(Resolution, Explanation)> {
-        let roots: Vec<&DependencyRequest> = roots.iter().filter(|r| !provided_by_toolchain(&self.platform, &r.module)).collect();
+        let (substituted_roots, mut substituted) = self.substitute_roots(roots);
+        let kept: Vec<&(DependencyRequest, Option<ModuleId>)> =
+            substituted_roots.iter().filter(|(r, _)| !provided_by_toolchain(&self.platform, &r.module)).collect();
+        let roots: Vec<&DependencyRequest> = kept.iter().map(|(r, _)| r).collect();
 
         let mut root_requests: HashMap<ModuleId, Requests> = HashMap::new();
-        for root in &roots {
+        for (root, replaced) in kept.iter().map(|(r, m)| (r, m.as_ref())) {
             let raw = match &root.version {
                 Some(v) => v.clone(),
                 None => self
@@ -597,7 +650,11 @@ impl<'a> Resolver<'a> {
             };
             let req: VersionReq = raw.parse().with_context(|| format!("invalid version for `{}`", root.module))?;
             let entry = root_requests.entry(root.module.clone()).or_default();
-            entry.record(&raw, RequestSource::Root { force: root.force });
+            let source = match replaced {
+                Some(module) => RequestSource::Substitute { module: module.clone() },
+                None => RequestSource::Root { force: root.force },
+            };
+            entry.record(&raw, source);
             if root.force {
                 let pinned = req.exact().cloned().with_context(|| format!("`force` requires an exact version for `{}`", root.module))?;
                 entry.forced = Some(pinned);
@@ -610,7 +667,7 @@ impl<'a> Resolver<'a> {
 
         let mut selected: HashMap<ModuleId, Version> = HashMap::new();
         for _ in 0..MAX_ITERATIONS {
-            let Traversal { order, used, requests, edges } = self.traverse(&roots, &root_requests, &selected)?;
+            let Traversal { order, substituted: replaced, used, requests, edges } = self.traverse(&roots, &root_requests, &selected)?;
             let mut next: HashMap<ModuleId, Version> = HashMap::new();
             for module in &order {
                 let chosen = self.choose(module, &requests[module])?;
@@ -618,7 +675,8 @@ impl<'a> Resolver<'a> {
             }
             let stable = order.iter().all(|m| next.get(m) == used.get(m));
             if stable {
-                let explanation = self.explanation(&order, &used, requests);
+                substituted.extend(replaced);
+                let explanation = self.explanation(&order, &used, requests, substituted);
                 return Ok((self.finish(&roots, order, &used, &edges, download)?, explanation));
             }
             selected.extend(next);
@@ -635,7 +693,13 @@ impl<'a> Resolver<'a> {
     }
 
     /// The [`Explanation`] of a converged traversal.
-    fn explanation(&self, order: &[ModuleId], used: &HashMap<ModuleId, Version>, mut requests: HashMap<ModuleId, Requests>) -> Explanation {
+    fn explanation(
+        &self,
+        order: &[ModuleId],
+        used: &HashMap<ModuleId, Version>,
+        mut requests: HashMap<ModuleId, Requests>,
+        substituted: HashSet<ModuleId>,
+    ) -> Explanation {
         let modules = order
             .iter()
             .map(|module| {
@@ -648,7 +712,14 @@ impl<'a> Resolver<'a> {
                 (module.clone(), explained)
             })
             .collect();
-        Explanation { modules }
+        let substituted = substituted
+            .into_iter()
+            .map(|module| {
+                let replacement = self.substitutions[&module].clone();
+                (module, replacement)
+            })
+            .collect();
+        Explanation { modules, substituted }
     }
 
     fn traverse(
@@ -662,6 +733,7 @@ impl<'a> Resolver<'a> {
         let mut used: HashMap<ModuleId, Version> = HashMap::new();
         let mut exclusions_seen: HashMap<ModuleId, BTreeSet<Exclusion>> = HashMap::new();
         let mut edges_by_module: HashMap<ModuleId, Vec<Edge>> = HashMap::new();
+        let mut substituted: HashSet<ModuleId> = HashSet::new();
         let mut queue: VecDeque<(ModuleId, BTreeSet<Exclusion>, bool)> = VecDeque::new();
 
         for root in roots {
@@ -740,7 +812,7 @@ impl<'a> Resolver<'a> {
             }
             let info = self.node_info(&module, version.as_str())?;
             let from = (module.clone(), version.to_string());
-            for constraint in &info.constraints {
+            for constraint in info.constraints.iter().filter(|c| !self.substitutions.contains_key(&c.module)) {
                 if let Ok(VersionReq::Soft(v)) = constraint.version.parse::<VersionReq>() {
                     let entry = requests.entry(constraint.module.clone()).or_default();
                     entry.soft.push(v);
@@ -757,18 +829,30 @@ impl<'a> Resolver<'a> {
                 }
             }
             let mut kept = Vec::new();
-            for edge in info.edges {
+            for mut edge in info.edges {
                 if excl.iter().any(|e| e.matches(&edge.module)) || provided_by_toolchain(&self.platform, &edge.module) {
                     continue;
+                }
+                let mut replaced = None;
+                if let Some(replacement) = self.substitutions.get(&edge.module) {
+                    substituted.insert(edge.module.clone());
+                    match replacement {
+                        Replacement::Package(_) => continue,
+                        Replacement::Module { module, version } => {
+                            replaced = Some(std::mem::replace(&mut edge.module, module.clone()));
+                            edge.version = Some(version.clone());
+                        }
+                    }
                 }
                 let edge_version = edge.version.clone().or_else(|| self.constraints.get(&edge.module).cloned());
                 let entry = requests.entry(edge.module.clone()).or_default();
                 if let Some(raw) = edge_version {
                     let (m, v) = from.clone();
-                    let source = match info.redirect {
-                        Some(Redirect::Relocation) => RequestSource::Relocation { module: m, version: v },
-                        Some(Redirect::Variant) => RequestSource::Variant { module: m, version: v },
-                        None => RequestSource::Dependency { module: m, version: v },
+                    let source = match (replaced, info.redirect) {
+                        (Some(module), _) => RequestSource::Substitute { module },
+                        (None, Some(Redirect::Relocation)) => RequestSource::Relocation { module: m, version: v },
+                        (None, Some(Redirect::Variant)) => RequestSource::Variant { module: m, version: v },
+                        (None, None) => RequestSource::Dependency { module: m, version: v },
                     };
                     entry.record(&raw, source);
                     let req: VersionReq =
@@ -785,7 +869,7 @@ impl<'a> Resolver<'a> {
             }
             edges_by_module.insert(module, kept);
         }
-        Ok(Traversal { order, used, requests, edges: edges_by_module })
+        Ok(Traversal { order, substituted, used, requests, edges: edges_by_module })
     }
 
     fn finish(
@@ -1534,6 +1618,105 @@ mod tests {
             sources(&why, "k:lib-jvm"),
             [("1.0".into(), RequestSource::Variant { module: "k:lib".parse().unwrap(), version: "1.0".into() })]
         );
+    }
+
+    fn substitution(module: &str, version: &str) -> Replacement {
+        Replacement::Module { module: module.parse().unwrap(), version: version.to_owned() }
+    }
+
+    /// `g:x` and `g:y` bring `commons-logging`, which has a dependency of its own.
+    fn publish_logging(repo: &TestRepo) {
+        repo.publish("g:x", "1.0", &[("c:logging", "1.2", "")]);
+        repo.publish("g:y", "1.0", &[("c:logging", "1.1", "")]);
+        repo.publish("c:logging", "1.1", &[]);
+        repo.publish("c:logging", "1.2", &[("g:log-only", "1.0", "")]);
+        repo.publish("g:log-only", "1.0", &[]);
+        repo.publish("s:bridge", "2.0", &[("g:bridge-dep", "1.0", "")]);
+        repo.publish("s:bridge", "3.0", &[]);
+        repo.publish("g:bridge-dep", "1.0", &[]);
+    }
+
+    #[test]
+    fn a_substituted_module_is_replaced_wherever_it_is_requested() {
+        let repo = TestRepo::new();
+        publish_logging(&repo);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        resolver.substitute("c:logging".parse().unwrap(), substitution("s:bridge", "2.0"));
+        let res = resolver.resolve(&[req("g:x", "1.0"), req("g:y", "1.0")]).unwrap();
+        assert_eq!(versions(&res), ["x:1.0", "y:1.0", "bridge:2.0", "bridge-dep:1.0"]);
+        assert_eq!(res.node(&"g:x".parse().unwrap()).unwrap().dependencies, [("s:bridge".parse().unwrap(), Some("2.0".to_owned()))]);
+
+        // A root is replaced too, and both requests for the replacement are kept.
+        let res = resolver.resolve(&[req("c:logging", "1.0"), req("g:x", "1.0")]).unwrap();
+        assert_eq!(res.roots, ["s:bridge".parse().unwrap(), "g:x".parse().unwrap()]);
+        assert_eq!(versions(&res), ["bridge:2.0", "x:1.0", "bridge-dep:1.0"]);
+    }
+
+    #[test]
+    fn the_replacement_takes_part_in_conflict_resolution() {
+        let repo = TestRepo::new();
+        publish_logging(&repo);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        resolver.substitute("c:logging".parse().unwrap(), substitution("s:bridge", "2.0"));
+        let res = resolver.resolve(&[req("g:x", "1.0"), req("s:bridge", "3.0")]).unwrap();
+        assert_eq!(res.node(&"s:bridge".parse().unwrap()).unwrap().version, "3.0");
+        assert!(res.node(&"g:bridge-dep".parse().unwrap()).is_none(), "the dependencies of the replaced version are dropped");
+    }
+
+    #[test]
+    fn explains_a_substitution() {
+        let repo = TestRepo::new();
+        publish_logging(&repo);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        resolver.substitute("c:logging".parse().unwrap(), substitution("s:bridge", "2.0"));
+        let (_, why) = resolver.explain(&[req("g:x", "1.0"), req("c:logging", "1.0")]).unwrap();
+        let replaced = RequestSource::Substitute { module: "c:logging".parse().unwrap() };
+        assert_eq!(sources(&why, "s:bridge"), [("2.0".into(), replaced.clone())], "both requests are one");
+        assert_eq!(why.substituted, HashMap::from([("c:logging".parse().unwrap(), substitution("s:bridge", "2.0"))]));
+        assert!(!why.modules.contains_key(&"c:logging".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_package_takes_the_module_out_of_the_graph() {
+        let repo = TestRepo::new();
+        publish_logging(&repo);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        let package = Replacement::Package("../logging".into());
+        resolver.substitute("c:logging".parse().unwrap(), package.clone());
+        let (res, why) = resolver.explain(&[req("g:x", "1.0"), req("c:logging", "1.0")]).unwrap();
+        assert_eq!(versions(&res), ["x:1.0"]);
+        assert_eq!(res.roots, ["g:x".parse().unwrap()]);
+        assert!(res.node(&"g:x".parse().unwrap()).unwrap().dependencies.is_empty());
+        assert_eq!(why.substituted, HashMap::from([("c:logging".parse().unwrap(), package)]));
+    }
+
+    #[test]
+    fn a_substitution_nothing_asks_for_is_not_explained() {
+        let repo = TestRepo::new();
+        publish_logging(&repo);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        resolver.substitute("other:module".parse().unwrap(), substitution("s:bridge", "2.0"));
+        let (res, why) = resolver.explain(&[req("g:y", "1.0")]).unwrap();
+        assert_eq!(versions(&res), ["y:1.0", "logging:1.1"]);
+        assert!(why.substituted.is_empty());
+    }
+
+    #[test]
+    fn an_exclusion_of_the_replaced_module_keeps_it_out() {
+        let repo = TestRepo::new();
+        publish_logging(&repo);
+        let client = repo.client();
+        let mut resolver = Resolver::new(&client, Platform::Jvm);
+        resolver.substitute("c:logging".parse().unwrap(), substitution("s:bridge", "2.0"));
+        let mut root = req("g:x", "1.0");
+        root.exclusions.push(Exclusion::new("c", "logging"));
+        let res = resolver.resolve(&[root]).unwrap();
+        assert_eq!(versions(&res), ["x:1.0"]);
     }
 
     #[test]

@@ -56,6 +56,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 | `[profile.release]` | `[profile.release]` |
 | `rust-toolchain.toml` | `[toolchain] jdk = "21"` and `[kotlin] version` |
 | `[features]` | no equivalent; `[frameworks]` are the closest thing |
+| `[patch]` | `[substitute]`: replaces a module with another module or a local package, even when a dependency brings it in ([Substituting a module](../../guides/dependencies/#substituting-a-module)) |
 | `build.rs` | a task with `hooks = ["pre-build"]`, or a [`[[generate]]` step](../../guides/code-generation/) when it writes sources |
 | `crates.io` | Maven Central |
 
@@ -65,7 +66,7 @@ If you know Cargo, you already know most of Kargo. The commands, output style, p
 - **Resolution.** When two dependencies need different versions, the highest one wins and only one copy is used. There's no equivalent of Cargo's multiple semver-incompatible copies.
 - **Targets are platforms.** `-t jvm` is closer to `--target x86_64-unknown-linux-gnu` than to Cargo's bin/lib targets.
 - **Packaging.** `kargo package` builds a fat jar you run with `java -jar`. For a native binary use the [Native target](../../guides/native/).
-- **Workspaces.** `[workspace]` with `members` (globs included), `exclude`, `default-members`, `[workspace.package]` and `[workspace.dependencies]` with `key.workspace = true`, `{ path = "..." }` dependencies, `-p`/`--workspace`/`--exclude` and `-j` work as in Cargo, and `kargo new` inside a workspace adds the member. Kargo adds `[workspace.kotlin]`, `[workspace.frameworks]`, `[workspace.plugins]` and `[workspace.tasks]`, and `exported = true` for dependencies that are part of a package's API. A workspace root can't also be a package. See [Workspaces and path dependencies](../../guides/workspaces/).
+- **Workspaces.** `[workspace]` with `members` (globs included), `exclude`, `default-members`, `[workspace.package]` and `[workspace.dependencies]` with `key.workspace = true`, `{ path = "..." }` dependencies, `-p`/`--workspace`/`--exclude` and `-j` work as in Cargo, and `kargo new` inside a workspace adds the member. Kargo adds `[workspace.kotlin]`, `[workspace.frameworks]`, `[workspace.substitute]`, `[workspace.plugins]` and `[workspace.tasks]`, and `exported = true` for dependencies that are part of a package's API. A workspace root can't also be a package. See [Workspaces and path dependencies](../../guides/workspaces/).
 
 ## Kotlin for Rustaceans
 

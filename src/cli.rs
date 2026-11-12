@@ -3733,25 +3733,31 @@ fn run_command(command: Command, global: &GlobalArgs, config: &Config, shell: &S
             let documents = for_each_package(config, &project, &packages.selection(), global, ProfileKind::Dev, |ctx| {
                 let pkg = &ctx.ws.manifest().package;
                 let mut answers = Vec::new();
+                let mut replaced = Vec::new();
                 for t in tree_targets(ctx, target) {
                     for (label, res, explanation) in ops::explanation_for(ctx, t, configuration)? {
                         if let Some(answer) = ops::why::answer(&label, &res, &explanation, &query, all_paths) {
                             answers.push(answer);
                         }
+                        replaced.extend(ops::why::replaced(&label, &explanation, &query));
                     }
                 }
                 if format != FormatArg::Json {
                     for answer in &answers {
                         print!("{}", ops::why::render(&format!("{} v{}", pkg.name, pkg.version), configuration_name, answer));
                     }
+                    for module in &replaced {
+                        print!("{}", ops::why::render_replaced(configuration_name, module));
+                    }
                 }
                 Ok((
-                    !answers.is_empty(),
+                    !(answers.is_empty() && replaced.is_empty()),
                     serde_json::json!({
                         "package": { "name": pkg.name, "version": pkg.version },
                         "configuration": configuration_name,
                         "module": query.module.to_string(),
                         "results": answers.iter().map(ops::why::json).collect::<Vec<_>>(),
+                        "replaced": replaced.iter().map(ops::why::replaced_json).collect::<Vec<_>>(),
                     }),
                 ))
             })?;
